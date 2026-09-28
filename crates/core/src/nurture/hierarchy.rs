@@ -1175,6 +1175,40 @@ impl<'a> HierarchyRun<'a> {
     /// 25-card run paged nothing at all: the counter was read before the first swipe, on
     /// the one surface where it is not there yet.
     async fn carousel_position(&self) -> Option<(u32, u32)> {
+        let request = crate::ui_automation::ObservationRequest {
+            query: Default::default(),
+            scope: Some(crate::ui_automation::ObservationScope {
+                package: Some(self.labels.package().into()),
+                root: None,
+            }),
+            fields: Default::default(),
+            remaining_ms: 4_000,
+        };
+        match self.session.observe(&request).await {
+            Ok(observation) => {
+                if observation.session_epoch != self.session.gui_session_epoch()
+                    || observation.app.package.as_deref() != Some(self.labels.package())
+                {
+                    return None;
+                }
+                let texts: Vec<_> = observation
+                    .matches
+                    .into_iter()
+                    .filter(|node| {
+                        node.class_name.as_deref() == Some("android.widget.TextView")
+                            && node.visible == Some(true)
+                            && node.password != Some(true)
+                    })
+                    .filter_map(|node| node.text)
+                    .collect();
+                return parse_carousel_counter(&texts);
+            }
+            Err(error)
+                if error
+                    .downcast_ref::<crate::driver::UnsupportedCapability>()
+                    .is_some() => {}
+            Err(_) => return None,
+        }
         let texts: Vec<String> = self
             .session
             .locate_all_described(ElementQuery::ClassName("android.widget.TextView"))

@@ -66,7 +66,7 @@ server.setRequestHandler(CallToolRequestSchema, async ({ params }) => {
   const semantic = params.name.startsWith('riviu_v2_');
   const operation = params.name.slice(semantic ? 9 : 6);
   const devices = operation === 'devices';
-  const timeoutMs = semantic ? (args.timeoutMs ?? 10000) : 10000;
+  const timeoutMs = semantic ? (args.timeoutMs ?? 10000) : 120000;
   if (!Number.isInteger(timeoutMs) || timeoutMs < 1 || timeoutMs > 120000) throw Error('timeoutMs must be 1..120000');
   try {
     const response = await fetch(url.origin + (devices ? '/v1/devices' : semantic ? '/v2/inspector' : '/v1/inspector/' + operation), {

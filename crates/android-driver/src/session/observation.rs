@@ -106,6 +106,10 @@ impl AndroidUiSession {
         // projection skips XML wrappers, so account explicitly for omitted elements.
         if let Some(count) = native_count {
             resolution.unknown_match_count += count.saturating_sub(nodes.len());
+            if request.query.id.is_some() {
+                resolution.unknown_match_count +=
+                    nodes.iter().filter(|node| node.id.is_none()).count();
+            }
             if request.fields.bounds {
                 for node in &mut resolution.matches {
                     node.bounds = node

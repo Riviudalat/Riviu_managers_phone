@@ -44,6 +44,56 @@ pub(super) fn from_snapshot(
 
 pub(super) async fn read(session: &dyn UiSession) -> anyhow::Result<Option<String>> {
     if session.supports_accessibility_readback() {
+        let request = crate::ui_automation::ObservationRequest {
+            query: Default::default(),
+            scope: None,
+            fields: Default::default(),
+            remaining_ms: READ_WINDOW.as_millis() as u64,
+        };
+        match session.observe(&request).await {
+            Ok(observation) => {
+                anyhow::ensure!(
+                    observation.session_epoch == session.gui_session_epoch()
+                        && matches!(
+                            observation.app.package.as_deref(),
+                            Some("com.ss.android.ugc.trill" | "com.zhiliaoapp.musically")
+                        ),
+                    "composer_snapshot_binding_changed"
+                );
+                let focused: Vec<_> = observation
+                    .matches
+                    .iter()
+                    .filter(|node| {
+                        node.class_name.as_deref() == Some(crate::tiktok_drawer::EDIT_TEXT)
+                            && node.package == observation.app.package
+                            && node.focused == Some(true)
+                            && node.enabled == Some(true)
+                            && node.visible == Some(true)
+                            && node.bounds.is_some()
+                    })
+                    .collect();
+                anyhow::ensure!(
+                    focused.len() <= 1,
+                    "composer_ambiguous: nhiều ô nhập đang có focus"
+                );
+                let Some(node) = focused.first() else {
+                    return Ok(None);
+                };
+                if node.password == Some(true) || node.showing_hint != Some(false) {
+                    return Ok(None);
+                }
+                return Ok(node
+                    .text
+                    .as_ref()
+                    .map(|s| s.trim().to_owned())
+                    .filter(|s| !s.is_empty()));
+            }
+            Err(error)
+                if error
+                    .downcast_ref::<crate::driver::UnsupportedCapability>()
+                    .is_some() => {}
+            Err(error) => return Err(error.context("composer_read_failed")),
+        }
         return from_snapshot(
             session
                 .hierarchy_source_snapshot()

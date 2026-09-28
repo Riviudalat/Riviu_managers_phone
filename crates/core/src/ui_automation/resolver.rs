@@ -19,6 +19,11 @@ pub fn compile_locator(locator: &super::SemanticLocator) -> CompiledSemanticLoca
 
 impl CompiledSemanticLocator<'_> {
     pub fn matches(&self, node: &super::SemanticNode) -> SemanticMatch {
+        // A node without an identifier cannot match a supplied exact identifier.
+        // Providers must separately count unreadable/malformed identity metadata.
+        if self.locator.id.is_some() && node.id.is_none() {
+            return SemanticMatch::NoMatch;
+        }
         let mut unknown = false;
         for (expected, actual) in [
             (&self.locator.role, &node.role),
@@ -115,9 +120,17 @@ pub fn semantic_nodes(tree: &Tree) -> Vec<super::SemanticNode> {
                 class_name: value("class"),
                 package,
                 role: semantic_role(node),
-                name: value("content-desc"),
+                name: value("content-desc")
+                    .filter(|name| !name.is_empty())
+                    .or_else(|| value("text")),
                 text: value("text"),
-                value: value("value"),
+                value: value("value").or_else(|| {
+                    (node.attr("class") == "android.widget.EditText"
+                        && boolean("showing-hint").or_else(|| boolean("showing-hint-text"))
+                            == Some(false))
+                    .then(|| value("text"))
+                    .flatten()
+                }),
                 password: boolean("password"),
                 showing_hint: boolean("showing-hint").or_else(|| boolean("showing-hint-text")),
                 checkable: boolean("checkable"),

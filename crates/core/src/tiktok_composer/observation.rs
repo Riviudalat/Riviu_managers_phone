@@ -199,6 +199,7 @@ pub(crate) async fn caption(
             package,
             SemanticLocator {
                 id: Some(id.clone()),
+                role: Some("textbox".into()),
                 ..Default::default()
             },
             deadline,
@@ -256,6 +257,7 @@ pub(super) async fn caption_cleared(
             package,
             SemanticLocator {
                 id: Some(id.clone()),
+                role: Some("textbox".into()),
                 ..Default::default()
             },
             deadline,

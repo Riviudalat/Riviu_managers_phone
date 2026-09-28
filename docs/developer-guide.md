@@ -17,6 +17,24 @@ sách output cũ có hash và bản thay thế đã kiểm. Không xóa toàn b�
 runtime đang chạy hay bộ evidence/rollback. Dựng dev để nghiệm thu; chỉ bundle
 installer khi có yêu cầu bàn giao bản cài.
 
+Semantic Inspector v2 dùng IPC `inspector_v2` hoặc Local API `POST /v2/inspector`.
+`begin` trả sessionToken gắn caller; `end` nhả phiên qua control plane hiện có.
+Phiên idle 60 giây hết hạn; tác vụ đã dispatch giữ lease tới khi drain. Ref thuộc
+một observation/device/app/session epoch và bị bỏ sau mutation hoặc observe mới.
+Legacy Inspector/recording giữ contract cũ. MCP bổ sung begin/end, type/swipe/press,
+wait_for/expect/screenshot qua cùng admission, không gọi ADB riêng.
+
+`UiSession::observe` giữ missing là unknown. Partial/Unknown không chứng minh
+phần tử vắng mặt. Positive readback chỉ nhận match quan sát duy nhất và thuộc tính
+có thật. Password được che khỏi semantic output. Chế độ
+`RIVIU_ANDROID_OBSERVATION_MODE=legacy|enriched` cố định lúc mở session; legacy
+mặc định cho đến khi phép đo cùng máy chứng minh enriched đạt.
+
+Account diagnostic lưu trong evidence hiện có, không migration mới.
+`RIVIU_TRILL_SECURITY_CLOSE_CANARY=1` chỉ bật thử Close của reminder Trill38.3.2/en;
+không dùng Continue hoặc tự đăng nhập. Phải nghiệm thu hình học và profile readback
+trước khi bật vận hành.
+
 Seeding dùng `ThreadCampaignRequest.seeding`, planner và ledger Tương tác hiện có;
 migration 46 thêm Share và khoảng ordinal cho lượt hành động độc lập bên cạnh tối
 đa 64 bình luận. Lịch cũ không có `seeding` giữ hành vi cũ. Bù Tim/Lưu phải claim

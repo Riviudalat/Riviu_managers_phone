@@ -1160,3 +1160,15 @@ tin USB. Số token và độ trễ TypeSafe được ghi riêng trong log backe
 gateway sinh nội dung chưa bao gồm TypeSafe. TypeSafe không chứng minh đã Gửi, đúng
 account hoặc đã ghi Sheet; các bằng chứng đó vẫn do controller và verifier hiện có
 kiểm tra.
+
+## Lỗi tài khoản và Inspector semantic
+
+Riviu tự đọc tài khoản đang mở; không cần nhập username thủ công khi hồ sơ có đủ
+bằng chứng. Thông báo phân biệt yêu cầu đăng nhập, lời nhắc che hồ sơ, tài khoản khác
+lượt đã gán và lỗi đọc/kết nối. Xử lý đúng màn trên máy rồi thử lại bài chưa Đăng;
+bài đã gửi chỉ kiểm link và Sheet, không gửi lại.
+
+Inspector semantic/MCP cần mở phiên riêng trước khi observe. Thiết bị đang bận bị
+từ chối, không tự giành từ tác vụ. Quan sát trả ref ngắn hạn; sau thay đổi màn hãy
+observe lại. Kết quả dispatched chỉ là gửi thao tác, không chứng minh nghiệp vụ đã
+thành công. Đóng phiên khi xong; phiên nhàn rỗi hết hạn sau 60 giây.

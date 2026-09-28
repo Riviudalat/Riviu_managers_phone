@@ -1,3 +1,5 @@
+#[path = "state_semantic.rs"]
+mod semantic_sessions;
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
@@ -386,6 +388,7 @@ pub struct AppState {
     /// Dropping a `UiSessionContext` releases the lease and the activity permit and nothing
     /// else, so "the last holder releases it" is already the semantics rather than a new one.
     overlay_sessions: AsyncMutex<HashMap<String, Arc<UiSessionContext>>>,
+    semantic_sessions: Arc<parking_lot::Mutex<HashMap<String, Arc<semantic_sessions::SemanticOwner>>>>,
     /// One gate per device, so opening an overlay serialises against itself and nothing else.
     ///
     /// Held only while a `begin` is in flight for that phone. The map of gates is locked just
@@ -880,6 +883,7 @@ impl AppState {
             orchestration: crate::orchestration_commands::OrchestrationChildRuntime::new(),
             flow_mutations: FlowMutationCoordinator::default(),
             overlay_sessions: AsyncMutex::new(HashMap::new()),
+            semantic_sessions: Arc::new(parking_lot::Mutex::new(HashMap::new())),
             overlay_gates: AsyncMutex::new(HashMap::new()),
             command_admission: Arc::new(CommandAdmissionState::new(false)),
             background_stop: Arc::new(AtomicBool::new(true)),
@@ -1304,6 +1308,7 @@ impl AppState {
             orchestration: crate::orchestration_commands::OrchestrationChildRuntime::new(),
             flow_mutations: FlowMutationCoordinator::default(),
             overlay_sessions: AsyncMutex::new(HashMap::new()),
+            semantic_sessions: Arc::new(parking_lot::Mutex::new(HashMap::new())),
             overlay_gates: AsyncMutex::new(HashMap::new()),
             command_admission,
             background_stop: Arc::new(AtomicBool::new(false)),
@@ -1378,6 +1383,7 @@ impl AppState {
             )
         };
         let _closing = gate.lock().await;
+        self.release_semantic_owner(udid);
 
         let context = {
             let mut sessions = self.overlay_sessions.lock().await;
@@ -1460,6 +1466,8 @@ impl AppState {
     /// Release every overlay lease before `shutdown_cleanup` waits for
     /// `lifecycle.outstanding() == 0`. A held ManualControl deadlocks that wait.
     pub async fn close_all_overlay_sessions(&self) {
+        let semantic_devices: Vec<_> = self.semantic_sessions.lock().keys().cloned().collect();
+        for udid in semantic_devices { self.release_semantic_owner(&udid); }
         let contexts: Vec<Arc<UiSessionContext>> = {
             let mut sessions = self.overlay_sessions.lock().await;
             sessions.drain().map(|(_, context)| context).collect()

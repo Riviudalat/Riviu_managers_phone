@@ -8,11 +8,11 @@ import type {PublishExcludeResult,PublishRecoveryCapability} from "../../types";
 
 const stepLabel:Record<string,string>={device:"Chuẩn bị máy",transfer:"Chuyển nội dung",media:"Chọn ảnh/video",sound:"Chọn nhạc",caption:"Nhập caption"};
 const accountGuidance: Record<string, string> = {
- account_login_required: "TikTok ?ang y?u c?u ??ng nh?p. M? ??ng t?i kho?n tr?n m?y r?i ki?m tra l?i; ch?a b?m ??ng.",
- account_security_prompt: "L?i nh?c b?o m?t ?ang che h? s?. X? l? tr?n ?i?n tho?i r?i ki?m tra l?i; ch?a b?m ??ng.",
- account_unreadable: "Ch?a ??c ?? th?ng tin h? s?. Ki?m tra m?n h?nh ?i?n tho?i r?i th? l?i; ch?a k?t lu?n t?i kho?n ?? ??i.",
- account_mismatch: "T?i kho?n ?ang m? kh?c t?i kho?n c?a l??t n?y. M? l?i ??ng t?i kho?n; kh?ng t? ??i t?i kho?n ?? g?n v?i b?i.",
- account_read_failed: "Kh?ng ??c ???c h? s? do k?t n?i ho?c phi?n ?i?u khi?n. Ki?m tra k?t n?i m?y r?i th? l?i.",
+ account_login_required: "TikTok đang yêu cầu đăng nhập. Mở đúng tài khoản trên máy rồi kiểm tra lại; chưa bấm Đăng.",
+ account_security_prompt: "Lời nhắc bảo mật đang che hồ sơ. Xử lý trên điện thoại rồi kiểm tra lại; chưa bấm Đăng.",
+ account_unreadable: "Chưa đọc đủ thông tin hồ sơ. Kiểm tra màn hình điện thoại rồi thử lại; chưa kết luận tài khoản đã đổi.",
+ account_mismatch: "Tài khoản đang mở khác tài khoản của lượt này. Mở lại đúng tài khoản; không tự đổi tài khoản đã gắn với bài.",
+ account_read_failed: "Không đọc được hồ sơ do kết nối hoặc phiên điều khiển. Kiểm tra kết nối máy rồi thử lại.",
 };
 function accountFailureCode(evidenceJson: string | null | undefined): string | null {
  try {

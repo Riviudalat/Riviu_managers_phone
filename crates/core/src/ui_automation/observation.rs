@@ -247,7 +247,8 @@ pub enum ExpectationVerdict {
     Ambiguous,
 }
 
-/// Unique cardinality is mandatory. Missing fields or incomplete reads cannot prove negatives.
+/// Unique observed cardinality is mandatory. Positive fields can be observed on a partial
+/// tree; missing fields remain unknown and absence requires complete query coverage.
 pub fn expect_observation(
     observation: &UiObservation,
     expected: &ObservationExpectation,
@@ -256,12 +257,13 @@ pub fn expect_observation(
     if observation.matches.len() > 1 {
         return Ambiguous;
     }
-    if observation.completeness != ObservationCompleteness::Complete
-        || observation.unknown_match_count > 0
-    {
+    if observation.unknown_match_count > 0 {
         return Unknown;
     }
     let Some(node) = observation.matches.first() else {
+        if observation.completeness != ObservationCompleteness::Complete {
+            return Unknown;
+        }
         return if *expected == ObservationExpectation::Absent {
             Satisfied
         } else {

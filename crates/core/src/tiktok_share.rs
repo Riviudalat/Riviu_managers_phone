@@ -553,8 +553,35 @@ pub async fn navigate_own_profile(
                 if let Some(close) =
                     crate::app_automation::dialogs::security_reminder_close(&tree, *labels)
                 {
+                    let epoch = session.gui_session_epoch();
+                    let fresh = crate::tiktok_account::account_snapshot(session, *labels).await?;
+                    let current =
+                        crate::app_automation::dialogs::security_reminder_close(&fresh, *labels);
+                    let same = current.as_ref().is_some_and(|target| {
+                        target.x == close.x
+                            && target.y == close.y
+                            && target.width == close.width
+                            && target.height == close.height
+                    });
+                    anyhow::ensure!(
+                        same && fresh.generation > tree.generation
+                            && session.gui_session_epoch() == epoch
+                            && session.active_app_bundle().await? == labels.package()
+                            && tokio::time::Instant::now() < deadline,
+                        "security_reminder_close_stale"
+                    );
+                    anyhow::ensure!(
+                        session
+                            .gui_scope()
+                            .and_then(|scope| scope.deadline_ms)
+                            .is_none_or(|end| chrono::Utc::now().timestamp_millis() < end),
+                        "security_reminder_close_deadline"
+                    );
                     security_close_used = true;
-                    session.tap(close.centre()).await?;
+                    let current = current
+                        .ok_or_else(|| anyhow::anyhow!("security_reminder_close_missing"))?;
+                    session.tap(current.centre()).await?;
+                    // A fresh read below must prove the sheet disappeared; no second Close.
                     continue;
                 }
             }

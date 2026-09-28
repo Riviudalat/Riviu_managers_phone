@@ -337,15 +337,16 @@ pub async fn observe_own_account(
     if !account_read_supported(labels) {
         return Ok(None);
     }
+    let epoch = session.gui_session_epoch();
+    let active = session
+        .active_app_bundle()
+        .await
+        .map_err(|e| AccountDiagnostic::read_failed(labels, &e).into_error())?;
+    if active != labels.package() {
+        return Ok(None);
+    }
     let mut previous: Option<(u64, String)> = None;
     for _ in 0..2 {
-        let active = session
-            .active_app_bundle()
-            .await
-            .map_err(|e| AccountDiagnostic::read_failed(labels, &e).into_error())?;
-        if active != labels.package() {
-            return Ok(None);
-        }
         let snapshot = session
             .hierarchy_source_snapshot()
             .await
@@ -362,6 +363,10 @@ pub async fn observe_own_account(
         if let Some(diagnostic) = blocker_diagnostic(&tree, labels) {
             return Err(diagnostic.into_error());
         }
+        anyhow::ensure!(
+            session.gui_session_epoch() == epoch,
+            "account_session_changed"
+        );
         let handle = if labels.package() == "com.zhiliaoapp.musically" && !labels.adaptive() {
             let id = global_username_id(labels.resource_version())
                 .ok_or_else(|| anyhow::anyhow!("unmeasured account build"))?;
@@ -387,6 +392,10 @@ pub async fn observe_own_account(
     {
         return Ok(None);
     }
+    anyhow::ensure!(
+        session.gui_session_epoch() == epoch,
+        "account_session_changed"
+    );
     let result = previous.map(|(generation, handle)| {
         let mut diagnostic = AccountDiagnostic::new(
             AccountState::Proved,
@@ -877,22 +886,24 @@ mod tests {
 
     #[tokio::test]
     async fn legacy_trill_keeps_its_measured_profile_locators() {
-        let session = ProfileSession::global(PROFILE, PROFILE);
+        let snapshot = PROFILE
+            .replace("com.zhiliaoapp.musically", "com.ss.android.ugc.trill")
+            .replace(":id/s0v", ":id/mjf");
+        let own = "<node package=\"com.ss.android.ugc.trill\" resource-id=\"com.ss.android.ugc.trill:id/dby\" class=\"android.widget.TextView\" text=\"Edit profile\" displayed=\"true\" enabled=\"true\" bounds=\"[1,1][20,20]\"/>";
+        let snapshot = snapshot.replace("</hierarchy>", &format!("{own}</hierarchy>"));
+        let session = ProfileSession::global(&snapshot, &snapshot);
         *session.packages.lock().unwrap() = VecDeque::from([
             "com.ss.android.ugc.trill".to_owned(),
             "com.ss.android.ugc.trill".to_owned(),
         ]);
-        assert_eq!(
-            observe_own_account(
-                &session,
-                controls_for("com.ss.android.ugc.trill", "en", "38.3.2").unwrap()
-            )
-            .await
-            .unwrap()
-            .as_deref(),
-            Some("legacy.account")
-        );
-        assert_eq!(session.snapshots.lock().unwrap().len(), 2);
+        let account = observe_own_account(
+            &session,
+            controls_for("com.ss.android.ugc.trill", "en", "38.3.2").unwrap(),
+        )
+        .await
+        .unwrap();
+        assert_eq!(account.as_deref(), Some("fixture.account"));
+        assert!(session.snapshots.lock().unwrap().is_empty());
     }
     fn node(text: &str) -> ElementBox {
         ElementBox {
