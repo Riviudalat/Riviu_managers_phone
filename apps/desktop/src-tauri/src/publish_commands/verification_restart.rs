@@ -402,10 +402,10 @@ fn warm_surface(
     None
 }
 
-/// Global 45.7.3/en own-post viewer measured in two fresh captures on 29/09.
+/// Global 45.7.3/en viewer and Home measured in saved phone captures on 29/09.
 /// Admission only: account, complete caption, submission time and canonical URL still
-/// belong to the existing verifier. No Global feed/profile or overlay is admitted here.
-fn global_warm_viewer(tree: &riviu_core::ui_automation::tree::Tree) -> Option<&'static str> {
+/// belong to the existing verifier. No Global profile or overlay is admitted here.
+fn global_warm_surface(tree: &riviu_core::ui_automation::tree::Tree) -> Option<&'static str> {
     use riviu_core::ElementQuery as Q;
     const PACKAGE: &str = "com.zhiliaoapp.musically";
     let labels = riviu_core::tiktok_labels::controls_for_runtime(PACKAGE, "en", "45.7.3")?;
@@ -447,6 +447,28 @@ fn global_warm_viewer(tree: &riviu_core::ui_automation::tree::Tree) -> Option<&'
         let node = &tree.nodes[*index];
         (node.visibility() == Some(true) && node.attr("enabled") == "true").then_some(node)
     };
+    // Measured global-ime-start: Home is only an entry for profile navigation,
+    // never evidence that the visible feed card belongs to this publication.
+    let home = one(":id/nr_");
+    let profile = one(":id/nrb");
+    let video = one(":id/long_press_layout");
+    let for_you = tree.matching(PACKAGE, Q::Text { value: "For You", exact: true });
+    if home.is_some_and(|node| node.attr("class") == "android.widget.FrameLayout"
+        && node.attr("content-desc") == "Home" && node.attr("selected") == "true"
+        && node.attr("clickable") == "true")
+        && profile.is_some_and(|node| node.attr("class") == "android.widget.FrameLayout"
+            && node.attr("content-desc") == "Profile" && node.attr("selected") == "false"
+            && node.attr("clickable") == "true")
+        && video.is_some_and(|node| node.attr("class") == "android.view.View"
+            && node.attr("content-desc") == "Video" && node.attr("clickable") == "true")
+        && matches!(for_you.as_slice(), [index] if tree.nodes[*index].visibility() == Some(true)
+            && tree.nodes[*index].attr("resource-id") == "android:id/text1"
+            && tree.nodes[*index].attr("class") == "android.widget.TextView"
+            && tree.nodes[*index].attr("selected") == "true"
+            && tree.nodes[*index].attr("enabled") == "true")
+    {
+        return Some("homeFeed");
+    }
     let back = one(":id/bj1")?;
     let caption = one(":id/desc")?;
     let time = one(":id/zwj")?;
@@ -495,7 +517,7 @@ pub(super) async fn admit_warm(
         let tree = riviu_core::ui_automation::tree::Tree::parse(snapshot)?;
         anyhow::ensure!(session.gui_session_epoch() == epoch, "warm session changed");
         let surface = if package == "com.zhiliaoapp.musically" {
-            global_warm_viewer(&tree)
+            global_warm_surface(&tree)
         } else {
             warm_surface(&tree, account)
         }.ok_or_else(|| {
