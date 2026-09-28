@@ -1409,7 +1409,7 @@ export function PublishPage({
             name={udid => { const device = devices.find(d => d.udid === udid); return device ? tileName(device, metas.get(udid)) : udid; }} />}
           preflightStage={preflightStage}
           preflight={currentPreflight}
-          preflightError={publishBlockingReason ?? preflightError}
+          preflightError={preflightError ?? (currentPreflight ? null : publishBlockingReason ?? null)}
           blockingReason={sheetBlockingReason}
           sound={currentSoundPolicy}
           runAt=""
