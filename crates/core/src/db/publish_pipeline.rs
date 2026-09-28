@@ -137,6 +137,10 @@ impl Database {
     ) -> anyhow::Result<bool> {
         let mut conn = self.conn()?;
         let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
+        // Read under the write lock: see `publish_shutdown` for why this is the exit barrier.
+        if self.publish_shutdown_started() {
+            return Ok(false);
+        }
         let changed=tx.execute("UPDATE publish_assignments SET state='posting',error_code=NULL,effect_intent=?1,evidence_json=?1,revision=revision+1,updated_at=?2
             WHERE id=?3 AND campaign_id=?4 AND revision=?5 AND state='imported' AND effect_intent IS NULL
             AND EXISTS(SELECT 1 FROM publish_pipeline_runs r JOIN publish_campaigns c ON c.id=r.campaign_id WHERE r.campaign_id=?4 AND r.token=?6 AND c.state='posting')",

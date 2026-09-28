@@ -1559,6 +1559,10 @@ impl AppState {
     }
 
     pub(crate) fn reject_new_work(&self) {
+        // First: a composer already past admission must not claim a Post while the drain waits.
+        if let Err(error) = self.db.begin_publish_shutdown() {
+            log::error!("publish shutdown fence: {error:#}");
+        }
         self.command_admission.reject_new_work();
         self.background_stop.store(true, Ordering::Release);
         if let Err(error) = self.db.pause_publish_dispatch() {

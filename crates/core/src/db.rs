@@ -68,6 +68,7 @@ pub use publish_start::{PublishExcludeReceipt, PublishStartError, PublishStartRe
 mod publish_report;
 mod publish_sheet;
 mod publish_sheet_delivery;
+mod publish_shutdown;
 mod publish_submission;
 mod publish_verification;
 
@@ -110,6 +111,8 @@ pub struct Database {
     path: PathBuf,
     secrets: Option<std::sync::Arc<dyn SecretStore>>,
     dispatch_connection: parking_lot::Mutex<Option<std::sync::Arc<parking_lot::Mutex<Connection>>>>,
+    /// Process-local exit fence read by both Post claims; see `publish_shutdown`.
+    publish_shutdown: std::sync::atomic::AtomicBool,
 }
 
 const NURTURE_SETTINGS_MIGRATION_V2: &str = "nurture.settings.migration.v2";
@@ -127,6 +130,7 @@ impl Database {
             path,
             secrets: None,
             dispatch_connection: parking_lot::Mutex::new(None),
+            publish_shutdown: std::sync::atomic::AtomicBool::new(false),
         };
         db.migrate()?;
         Ok(db)

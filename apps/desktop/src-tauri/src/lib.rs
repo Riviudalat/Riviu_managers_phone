@@ -12,6 +12,7 @@ mod commands;
 pub mod deployment_check;
 mod dev_acceptance;
 mod exit_coordinator;
+mod exit_tiktok;
 mod farm_commands;
 mod flow_commands;
 mod flow_connector_commands;
@@ -843,6 +844,11 @@ pub(crate) fn graceful_shutdown(handle: &tauri::AppHandle) {
         if let Err(error) = tauri::async_runtime::block_on(state.jobs.shutdown()) {
             log::error!("job queue shutdown failed: {error:#}");
         }
+        // Every owner has drained; the plane still accepts leases until `shutdown_cleanup`.
+        tauri::async_runtime::block_on(exit_tiktok::close_tiktok_on_exit(
+            control.clone(),
+            state.db.clone(),
+        ));
         if let Err(error) = tauri::async_runtime::block_on(control.shutdown_cleanup()) {
             log::error!("device cleanup shutdown failed: {error}");
         }

@@ -985,6 +985,10 @@ impl Database {
     ) -> anyhow::Result<bool> {
         let mut conn = self.conn()?;
         let transaction = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
+        // Read under the write lock: see `publish_shutdown` for why this is the exit barrier.
+        if self.publish_shutdown_started() {
+            return Ok(false);
+        }
         // **And the parent has to still be posting.** The campaign state and this claim used
         // to be two statements with a gap between them, and the gap is where a cancel lands: a
         // task read `Posting`, the operator cancelled, and the task then claimed its row and
