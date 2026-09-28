@@ -2107,17 +2107,41 @@ impl<'a, P: TapPlanner> Composer<'a, P> {
             if stop.load(Ordering::Relaxed) || Instant::now() >= deadline {
                 return Ok(None);
             }
-            if let Some(element) =
-                crate::tiktok_sound::read_sound(self.session.locate(query)).await?
-            {
+            // Bound only the observation, never a gesture. Outside a sound
+            // scope, read_sound alone has no deadline or stop flag to enforce.
+            let read = tokio::time::timeout_at(
+                deadline,
+                crate::tiktok_sound::read_sound(self.session.locate(query)),
+            );
+            tokio::pin!(read);
+            let observed = loop {
+                tokio::select! {
+                    result = &mut read => break result,
+                    _ = tokio::time::sleep(POLL) => {
+                        if stop.load(Ordering::Relaxed) {
+                            return Ok(None);
+                        }
+                    }
+                }
+            };
+            // A completed read can race cancellation or the deadline. Neither
+            // a ready element nor a read error may authorize a later tap then.
+            if stop.load(Ordering::Relaxed) || Instant::now() >= deadline {
+                return Ok(None);
+            }
+            let Ok(observed) = observed else {
+                return Ok(None);
+            };
+            if let Some(element) = observed? {
                 if ready(&element) {
                     return Ok(Some(element));
                 }
             }
-            if Instant::now() >= deadline {
-                return Ok(None);
-            }
-            sleep(POLL, stop).await;
+            sleep(
+                POLL.min(deadline.saturating_duration_since(Instant::now())),
+                stop,
+            )
+            .await;
         }
     }
 }
@@ -3678,6 +3702,7 @@ mod tests {
         /// before the Post tap, propagating is right — nothing has been published. After it,
         /// "I could not read the screen" and "the post did not go" are different facts.
         locate_fails_at: Option<usize>,
+        locate_delay: Duration,
         fail_first_read_after_tap: bool,
         post_read_failed: Mutex<bool>,
         locates: Mutex<usize>,
@@ -3931,6 +3956,9 @@ mod tests {
             self.tap(target.centre()).await
         }
         async fn locate(&self, query: ElementQuery<'_>) -> anyhow::Result<Option<ElementBox>> {
+            if !self.locate_delay.is_zero() {
+                tokio::time::sleep(self.locate_delay).await;
+            }
             if self.fail_first_read_after_tap && !self.taps.lock().is_empty() {
                 let mut failed = self.post_read_failed.lock();
                 if !*failed {
@@ -5241,18 +5269,27 @@ mod tests {
             .await
             .expect_err("a changed sound must fail closed");
 
-        assert!(format!("{error:#}").contains("selected sound was not confirmed"));
         assert_eq!(intent_calls.load(Ordering::Relaxed), 0);
         assert_eq!(
             post_button_taps(&session),
             0,
             "sound mismatch must be detected before the write-ahead boundary and Post gesture"
         );
+        assert_eq!(
+            crate::publish_recovery::describe(&error).code,
+            "sound_load_timeout",
+            "legacy mismatched title must exhaust proof without a public effect: {error:#}"
+        );
     }
 
     #[tokio::test(start_paused = true)]
     async fn partial_editor_tree_after_caption_back_gets_read_only_reproof() {
-        for (title, cancel) in [("Sound A", false), ("Sound B", false), ("Sound A", true)] {
+        for (title, cancel, first_read_ms) in [
+            ("Sound A", false, 250),
+            ("Sound B", false, 250),
+            ("Sound A", true, 250),
+            ("Sound A", false, 8075),
+        ] {
             let mut caption_page = post_screen();
             caption_page
                 .elements
@@ -5267,11 +5304,12 @@ mod tests {
             *session.typed.lock() = Some("caption".into());
             // Live 081: editor image with a partial caption-layout tree lacking
             // both eej and so9; a later observation restores the editor title.
-            // The original failing run also had an 8075 ms elements request.
+            // The saved 8075 ms request exceeds the final 8-second budget;
+            // it must refuse. Shorter transitions retain success/stop coverage.
             session
                 .sound_read_delays
                 .lock()
-                .extend([Duration::from_millis(8075), Duration::from_secs(1)]);
+                .extend([Duration::from_millis(first_read_ms), Duration::from_secs(1)]);
             let mut composer = Composer::new(&session, plan(), |e: &ElementBox| e.centre());
             composer.pending_sound_proof = Some((
                 SoundPickerPlan::resolve("com.ss.android.ugc.trill", "en", "38.3.2").unwrap(),
@@ -5288,29 +5326,29 @@ mod tests {
                 composer.post_with_effect_intent("caption", &stop, &mut before_post),
                 async {
                     if cancel {
-                        tokio::time::sleep(Duration::from_millis(8500)).await;
+                        tokio::time::sleep(Duration::from_millis(500)).await;
                         stop.store(true, Ordering::Relaxed);
                     }
                 },
             );
-            if cancel {
-                assert_eq!(result.unwrap(), ComposerVerdict::Stopped);
-                assert!(start.elapsed() < Duration::from_secs(10));
-            } else if title == "Sound A" {
-                assert!(result
-                    .expect("late exact editor proof must recover without Back")
-                    .is_submitted());
-            } else {
-                let error = format!("{:#}", result.unwrap_err());
-                assert!(
-                    error.contains("observed []"),
-                    "retain the original failed proof: {error}"
-                );
-                assert!(start.elapsed() < Duration::from_secs(18));
-            }
-            let posted = usize::from(!cancel && title == "Sound A");
+            let posted = usize::from(!cancel && title == "Sound A" && first_read_ms < 8000);
             assert_eq!(intents, posted);
             assert_eq!(post_button_taps(&session), posted);
+            assert!(start.elapsed() <= Duration::from_secs(8));
+            if cancel {
+                assert_eq!(result.unwrap(), ComposerVerdict::Stopped);
+            } else if posted == 1 {
+                assert!(result
+                    .expect("timely exact editor proof must recover")
+                    .is_submitted());
+            } else {
+                let error = result.expect_err("late or mismatched proof must refuse");
+                assert_eq!(
+                    crate::publish_recovery::describe(&error).code,
+                    "sound_load_timeout",
+                    "{error:#}"
+                );
+            }
             assert_eq!(
                 session.taps.lock().len(),
                 if posted == 1 { 3 } else { 1 },
@@ -5795,21 +5833,50 @@ mod tests {
     /// every test green.
     #[tokio::test(start_paused = true)]
     async fn a_stop_set_between_screens_does_not_advance_toward_the_post_screen() {
-        let session = FakeSession::with(vec![edit_step(), post_screen()]);
-        let mut composer = Composer::new(&session, plan(), |element: &ElementBox| element.centre());
-        let stop = AtomicBool::new(true);
+        for initially_stopped in [true, false] {
+            let session = FakeSession {
+                locate_delay: Duration::from_secs(1),
+                ..FakeSession::with(vec![edit_step(), post_screen()])
+            };
+            let mut composer =
+                Composer::new(&session, plan(), |element: &ElementBox| element.centre());
+            let stop = AtomicBool::new(initially_stopped);
+            let (result, ()) = tokio::join!(composer.advance_to_post_screen(&stop), async {
+                tokio::time::sleep(Duration::from_millis(100)).await;
+                stop.store(true, Ordering::Relaxed);
+            });
+            assert!(!result.expect("no error"), "a stopped run advanced");
+            assert!(session.taps.lock().is_empty(), "a stopped run tapped Next");
+            assert_eq!(session.on_screen(), 0, "the phone moved after a stop");
+        }
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn a_condition_read_cannot_outlive_its_window() {
+        let session = FakeSession {
+            locate_delay: COMPOSER_WINDOW + Duration::from_secs(1),
+            ..FakeSession::with(vec![edit_step()])
+        };
+        let composer = Composer::new(&session, plan(), |element: &ElementBox| element.centre());
+        let stop = AtomicBool::new(false);
+        let start = Instant::now();
+        let ready = composer
+            .await_condition(
+                COMPOSER_WINDOW,
+                plan().publish.unwrap().edit_next,
+                &stop,
+                |_| true,
+            )
+            .await
+            .expect("an exhausted wait returns no target");
         assert!(
-            !composer
-                .advance_to_post_screen(&stop)
-                .await
-                .expect("no error"),
-            "a stopped run advanced to the screen that has the Post button on it"
+            start.elapsed() <= COMPOSER_WINDOW,
+            "read exceeded the total wait window"
         );
         assert!(
-            session.taps.lock().is_empty(),
-            "a stopped run tapped the edit step's Next"
+            ready.is_none(),
+            "a late element must not authorize navigation"
         );
-        assert_eq!(session.on_screen(), 0, "the phone moved after a stop");
     }
 
     // ------------------------------------------------------------------- post

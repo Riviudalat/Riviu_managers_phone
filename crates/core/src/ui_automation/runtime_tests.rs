@@ -5,9 +5,18 @@ use std::{
     time::Duration,
 };
 
+#[derive(Default)]
 struct Session {
     reads: AtomicUsize,
     change: bool,
+    generations: Option<[u64; 2]>,
+    read_error: Option<ReadError>,
+}
+
+enum ReadError {
+    Immediate,
+    AfterDeadline,
+    AfterCancellation(tokio::sync::watch::Sender<bool>),
 }
 #[async_trait::async_trait]
 impl UiSession for Session {
@@ -39,7 +48,24 @@ impl UiSession for Session {
         } else {
             "About phone"
         };
-        Ok(crate::HierarchySourceSnapshot{generation:read as u64+1,xml:format!("<hierarchy><node package=\"com.android.settings\" text=\"Settings\" bounds=\"[0,0][400,50]\"/><node package=\"com.android.settings\" text=\"{text}\" bounds=\"[10,100][200,150]\" enabled=\"true\" clickable=\"true\"/></hierarchy>")})
+        let generation = self
+            .generations
+            .map_or(read as u64 + 1, |values| values[read]);
+        Ok(crate::HierarchySourceSnapshot{generation,xml:format!("<hierarchy><node package=\"com.android.settings\" text=\"Settings\" bounds=\"[0,0][400,50]\"/><node package=\"com.android.settings\" text=\"{text}\" bounds=\"[10,100][200,150]\" enabled=\"true\" clickable=\"true\"/></hierarchy>")})
+    }
+    async fn observe(
+        &self,
+        request: &super::ObservationRequest,
+    ) -> anyhow::Result<super::UiObservation> {
+        match self.read_error.as_ref().unwrap() {
+            ReadError::Immediate => {}
+            ReadError::AfterDeadline => {
+                // Model synchronous decoding finishing after the enclosing timer was polled.
+                std::thread::sleep(Duration::from_millis(request.remaining_ms + 5));
+            }
+            ReadError::AfterCancellation(sender) => sender.send(true).unwrap(),
+        }
+        anyhow::bail!("observation transport failed")
     }
     async fn tap(&self, _: TapPoint) -> anyhow::Result<()> {
         panic!("resolver must never tap")
@@ -62,17 +88,75 @@ impl UiSession for Session {
 }
 #[tokio::test]
 async fn target_is_reobserved_and_a_changed_target_is_rejected() {
-    for change in [false, true] {
+    for (change, generations, accepted) in [
+        (false, [2, 3], true),
+        (true, [2, 3], false),
+        (false, [2, 2], false),
+        (false, [2, 1], false),
+    ] {
         let session = Session {
-            reads: AtomicUsize::new(0),
             change,
+            generations: Some(generations),
+            ..Default::default()
         };
         let result = resolve_navigation(&session, "aboutDevice", Duration::from_secs(1))
             .await
             .unwrap();
-        assert_eq!(result.is_some(), !change);
+        assert_eq!(
+            result.is_some(),
+            accepted,
+            "change={change}, generations={generations:?}"
+        );
         assert_eq!(session.reads.load(Ordering::SeqCst), 2);
     }
+}
+
+#[tokio::test]
+async fn observation_read_errors_respect_completion_deadline_and_cancellation() {
+    use super::{
+        runtime::wait_for_observation, ObservationExpectation, ObservationRequest,
+        ObservationWaitStatus,
+    };
+    let mut outcomes = Vec::new();
+    for boundary in ["immediate", "deadline", "cancel"] {
+        let (sender, mut cancel) = tokio::sync::watch::channel(false);
+        let session = Session {
+            read_error: Some(match boundary {
+                "deadline" => ReadError::AfterDeadline,
+                "cancel" => ReadError::AfterCancellation(sender.clone()),
+                _ => ReadError::Immediate,
+            }),
+            ..Default::default()
+        };
+        let request = ObservationRequest {
+            query: Default::default(),
+            scope: None,
+            fields: Default::default(),
+            remaining_ms: if boundary == "deadline" { 20 } else { 1000 },
+        };
+        let result = wait_for_observation(
+            &session,
+            &request,
+            &ObservationExpectation::Exists,
+            tokio::time::Instant::now() + Duration::from_millis(request.remaining_ms),
+            &mut cancel,
+            Duration::from_millis(1),
+        )
+        .await;
+        outcomes.push(
+            result
+                .map(|result| result.status)
+                .map_err(|error| error.to_string()),
+        );
+    }
+    assert_eq!(
+        outcomes,
+        [
+            Err("observation transport failed".to_owned()),
+            Ok(ObservationWaitStatus::DeadlineExceeded),
+            Ok(ObservationWaitStatus::Cancelled),
+        ]
+    );
 }
 
 #[test]

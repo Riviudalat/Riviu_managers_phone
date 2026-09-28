@@ -53,6 +53,71 @@ fn malformed_or_oversized_tree_is_rejected() {
         .is_err());
     }
 }
+
+#[test]
+fn semantic_name_excludes_hierarchy_wrapper_but_preserves_unknown_and_ambiguity() {
+    use super::{
+        expect_observation, ExpectationVerdict, ObservationCompleteness, ObservationExpectation,
+        ObservationRequest, ObservationSource, SemanticLocator, UiObservation,
+    };
+
+    // Global45.7.3 /source emits class="hierarchy" on the XML wrapper.
+    let search = r#"<android.widget.ImageView class="android.widget.ImageView" content-desc="Search" text=""/>"#;
+    for (role, extra, unknown, verdict) in [
+        (None, "", 0, ExpectationVerdict::Satisfied),
+        (Some("image"), "", 0, ExpectationVerdict::Satisfied),
+        // A real element with the same class and missing semantics stays unknown.
+        (
+            None,
+            r#"<node class="hierarchy"/>"#,
+            1,
+            ExpectationVerdict::Unknown,
+        ),
+        (None, search, 0, ExpectationVerdict::Ambiguous),
+    ] {
+        let tree = Tree::parse(crate::HierarchySourceSnapshot {
+            generation: 7,
+            xml: format!(
+                r#"<hierarchy index="0" class="hierarchy" rotation="0" width="1080" height="2094">{search}{extra}</hierarchy>"#
+            ),
+        })
+        .unwrap();
+        let request = ObservationRequest {
+            query: SemanticLocator {
+                name: Some("Search".into()),
+                role: role.map(str::to_owned),
+                ..Default::default()
+            },
+            scope: None,
+            fields: Default::default(),
+            remaining_ms: 1000,
+        };
+        let result = resolver::resolve_observation(&tree, &request).unwrap();
+        assert_eq!(
+            result.unknown_match_count, unknown,
+            "role={role:?}, extra={extra}"
+        );
+        assert_eq!(result.matches[0].node_id, 1);
+        assert_eq!(result.matches[0].parent, Some(0));
+        let observation = UiObservation {
+            device_id: "fixture".into(),
+            app: Default::default(),
+            session_epoch: "fixture".into(),
+            observation_id: "fixture".into(),
+            generation: tree.generation,
+            started_at_ms: 0,
+            ended_at_ms: 1,
+            source: ObservationSource::AccessibilityHierarchy,
+            completeness: ObservationCompleteness::Unknown,
+            matches: result.matches,
+            unknown_match_count: result.unknown_match_count,
+        };
+        assert_eq!(
+            expect_observation(&observation, &ObservationExpectation::Exists),
+            verdict
+        );
+    }
+}
 #[test]
 fn compatibility_pack_rejects_unknown_code_and_duplicate_targets() {
     let mut pack = serde_json::to_value(SettingsAdapter.pack()).unwrap();

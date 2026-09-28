@@ -80,17 +80,19 @@ pub fn semantic_nodes(tree: &Tree) -> Vec<super::SemanticNode> {
         .iter()
         .enumerate()
         .filter_map(|(node_id, node)| {
-            // XML hierarchy wrappers carry rotation but are not accessibility elements.
-            if ![
-                "class",
-                "role",
-                "text",
-                "content-desc",
-                "resource-id",
-                "package",
-            ]
-            .iter()
-            .any(|key| node.attribute(key).is_some())
+            // UiAutomator may add class="hierarchy" to the document wrapper. Use
+            // XML provenance rather than class or missing fields to exclude it.
+            if node.is_hierarchy_wrapper
+                || ![
+                    "class",
+                    "role",
+                    "text",
+                    "content-desc",
+                    "resource-id",
+                    "package",
+                ]
+                .iter()
+                .any(|key| node.attribute(key).is_some())
             {
                 return None;
             }

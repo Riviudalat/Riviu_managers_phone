@@ -9,6 +9,7 @@ pub(super) struct SemanticOwner {
     context: Option<Arc<UiSessionContext>>,
     control: Arc<DeviceControlPlane>,
     activity: parking_lot::Mutex<(Instant, usize)>,
+    cancelled: tokio::sync::watch::Sender<bool>,
 }
 impl Drop for SemanticOwner {
     fn drop(&mut self) {
@@ -26,6 +27,9 @@ pub struct SemanticHold {
 impl SemanticHold {
     pub fn session(&self) -> Arc<dyn UiSession> {
         Arc::clone(&self.session)
+    }
+    pub fn cancellation(&self) -> tokio::sync::watch::Receiver<bool> {
+        self.owner.cancelled.subscribe()
     }
 }
 impl Drop for SemanticHold {
@@ -62,7 +66,12 @@ impl AppState {
         let deadline = tokio::time::Instant::now() + Duration::from_millis(timeout_ms);
         let opening = tokio::time::timeout_at(deadline, gate.clone().lock_owned())
             .await
-            .map_err(|_| denied())?;
+            .map_err(|_| {
+                CommandError::code(
+                    "InspectorAdmissionTimeout",
+                    "Hết thời gian chờ quyền mở phiên thiết bị; chưa mở phiên mới.",
+                )
+            })?;
         if self.overlay_sessions.lock().await.contains_key(udid)
             || self.semantic_sessions.lock().contains_key(udid)
         {
@@ -98,6 +107,7 @@ impl AppState {
                 context: Some(Arc::new(context)),
                 control: Arc::clone(&control),
                 activity: parking_lot::Mutex::new((Instant::now(), 0)),
+                cancelled: tokio::sync::watch::channel(false).0,
             });
             owners.lock().insert(udid.clone(), Arc::clone(&owner));
             if send.send(Ok(token.clone())).is_err() {
@@ -128,8 +138,8 @@ impl AppState {
         });
         tokio::time::timeout_at(deadline, receive)
             .await
-            .map_err(|_| denied())?
-            .map_err(|_| denied())?
+            .map_err(|_| CommandError::code("InspectorStartupTimeout", "Chuẩn bị thiết bị vượt thời gian chờ. Tiến trình mở phiên đang hoàn tất và thu hồi; hãy kiểm tra lại khi thiết bị sẵn sàng."))?
+            .map_err(|_| CommandError::code("InspectorStartupInterrupted", "Tiến trình chuẩn bị thiết bị bị gián đoạn; chưa xác nhận mở phiên thành công."))?
     }
     pub async fn hold_semantic_session(
         &self,
@@ -170,11 +180,14 @@ impl AppState {
         if owner.caller != caller || owner.token != token {
             return Err(denied());
         }
+        owner.cancelled.send_replace(true);
         map.remove(udid);
         Ok(())
     }
     pub(super) fn release_semantic_owner(&self, udid: &str) {
         // Existing borrowers keep their context/lease until the admitted operation drains.
-        self.semantic_sessions.lock().remove(udid);
+        if let Some(owner) = self.semantic_sessions.lock().remove(udid) {
+            owner.cancelled.send_replace(true);
+        }
     }
 }

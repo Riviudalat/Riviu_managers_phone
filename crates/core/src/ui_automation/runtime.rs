@@ -40,24 +40,17 @@ pub async fn wait_for_observation(
         }
         let mut current = request.clone();
         current.remaining_ms = remaining_ms;
-        let observation = tokio::select! {
+        let read = tokio::select! {
             biased;
             _ = observation_cancelled(cancel) => {
                 result.status = ObservationWaitStatus::Cancelled;
                 return Ok(result);
             }
             _ = tokio::time::sleep_until(deadline) => return Ok(result),
-            read = session.observe(&current) => match read {
-                Ok(observation) => observation,
-                Err(error) if error.downcast_ref::<crate::driver::UnsupportedCapability>().is_some() => {
-                    result.status = ObservationWaitStatus::Unsupported;
-                    result.verdict = ExpectationVerdict::Unknown;
-                    return Ok(result);
-                }
-                Err(error) => return Err(error),
-            },
+            read = session.observe(&current) => read,
         };
-        // A read completing at the boundary cannot turn an expired wait into success.
+        // Completion guards apply to errors too: a read may finish within one poll
+        // after cancellation or the deadline, before select can poll its timers again.
         if *cancel.borrow() || cancel.has_changed().is_err() {
             result.status = ObservationWaitStatus::Cancelled;
             return Ok(result);
@@ -65,6 +58,19 @@ pub async fn wait_for_observation(
         if tokio::time::Instant::now() >= deadline {
             return Ok(result);
         }
+        let observation = match read {
+            Ok(observation) => observation,
+            Err(error)
+                if error
+                    .downcast_ref::<crate::driver::UnsupportedCapability>()
+                    .is_some() =>
+            {
+                result.status = ObservationWaitStatus::Unsupported;
+                result.verdict = ExpectationVerdict::Unknown;
+                return Ok(result);
+            }
+            Err(error) => return Err(error),
+        };
         anyhow::ensure!(
             !observation.device_id.is_empty()
                 && !observation.session_epoch.is_empty()
@@ -242,7 +248,7 @@ async fn resolve_inner(
     }
     let fresh = Tree::parse(session.hierarchy_source_snapshot().await?)?;
     let fresh_screen = adapter.classify(&fresh, &app);
-    if fresh_screen != request.expected_screen {
+    if fresh.generation <= request.generation || fresh_screen != request.expected_screen {
         return Ok(None);
     }
     if session.gui_session_epoch() != epoch

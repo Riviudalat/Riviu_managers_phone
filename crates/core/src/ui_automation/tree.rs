@@ -6,6 +6,7 @@ use std::collections::HashMap;
 #[derive(Debug, Clone)]
 pub struct Node {
     attrs: HashMap<String, String>,
+    pub(crate) is_hierarchy_wrapper: bool,
     pub parent: Option<usize>,
 }
 
@@ -119,6 +120,9 @@ impl Tree {
                     );
                     let mut node = Node {
                         attrs: HashMap::new(),
+                        // Preserve XML provenance: a real node's class may also be "hierarchy".
+                        is_hierarchy_wrapper: parents.is_empty()
+                            && start.name().as_ref() == b"hierarchy",
                         parent: parents.last().copied(),
                     };
                     for attribute in start.attributes() {

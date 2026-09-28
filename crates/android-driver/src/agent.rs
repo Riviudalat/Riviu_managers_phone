@@ -443,9 +443,28 @@ impl AgentClient {
     pub const BLIND_QUERY_COST: Duration = Duration::from_secs(11);
 
     pub async fn is_alive(&self) -> bool {
-        self.find(&Locator::ClassName("android.widget.FrameLayout".into()))
-            .await
-            .is_ok()
+        // Readiness observes once; ensure_agent owns cold instrumentation recovery.
+        // Going through find/send here recycled a blind session and spent a second
+        // ~10 s root-node timeout before recovery could start (new-box fleet 2026-09-29).
+        let started = std::time::Instant::now();
+        let result = self
+            .send_once(
+                reqwest::Method::POST,
+                "/element",
+                Some(Locator::ClassName("android.widget.FrameLayout".into()).to_body()),
+            )
+            .await;
+        let alive = match &result {
+            Ok(_) => true,
+            Err(error) => {
+                let text = error.to_string();
+                text.contains("no such element") || text.contains("could not be located")
+            }
+        };
+        tracing::info!(serial = %self.serial, phase = "readiness", alive,
+            ms = started.elapsed().as_millis() as u64,
+            "Android session readiness probe finished");
+        alive
     }
 
     /// Is the agent **listening**? Cheap, and deliberately weaker than
@@ -1560,6 +1579,20 @@ mod tests {
             observation_mode: AndroidObservationMode::Legacy,
         };
         (client, routes, server)
+    }
+
+    #[tokio::test]
+    async fn readiness_reports_blind_session_without_spending_recovery_reads() {
+        let (client, routes, server) = session_replacement_fixture(true).await;
+        let alive = client.is_alive().await;
+        server.abort();
+        let _ = server.await;
+        assert!(!alive, "a blind tree must not be advertised as ready");
+        assert_eq!(
+            *routes.lock(),
+            vec!["POST /session/old/element HTTP/1.1"],
+            "readiness must return to driver recovery after one failed read"
+        );
     }
 
     #[tokio::test]

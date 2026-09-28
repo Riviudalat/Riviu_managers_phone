@@ -138,6 +138,7 @@ fn short_ellipsized_caption_requests_expansion_without_accepting_a_prefix() {
         plan: &plan,
         caption: CAPTION,
         identity: &identity,
+        other_publication_urls: &[],
         started: Instant::now(),
         caption_expanded: false,
         public_link: None,
@@ -279,6 +280,7 @@ async fn comments_recovery_observes_post_before_grid_and_never_backs_from_compos
             plan: &plan,
             caption: CAPTION,
             identity: &identity,
+            other_publication_urls: &[],
             started: Instant::now(),
             caption_expanded: false,
             public_link: None,
@@ -389,6 +391,7 @@ struct Session {
     stalled_profile: bool,
     snapshot_delay: Duration,
     multiple_matches: bool,
+    second_url: Option<&'static str>,
     other_caption_same_but_old: bool,
     rendered_caption: Option<String>,
     video_surface: bool,
@@ -423,6 +426,7 @@ impl Default for Session {
             stalled_profile: false,
             snapshot_delay: Duration::ZERO,
             multiple_matches: false,
+            second_url: None,
             other_caption_same_but_old: false,
             rendered_caption: None,
             video_surface: false,
@@ -641,7 +645,13 @@ impl UiSession for Session {
             {
                 let attempt = self.copies.fetch_add(1, Ordering::Relaxed) + 1;
                 if attempt > u64::from(self.copy_misses) {
-                    *self.clipboard.lock() = URL.as_bytes().to_vec();
+                    *self.clipboard.lock() = if *self.current_tile.lock() == 1 {
+                        self.second_url.unwrap_or(URL)
+                    } else {
+                        URL
+                    }
+                    .as_bytes()
+                    .to_vec();
                 }
                 "post"
             }
@@ -966,6 +976,42 @@ async fn two_current_matching_posts_cannot_select_the_first_link() {
     assert!(captured.outcome.link().is_none());
     assert_eq!(captured.diagnostic.candidates_visited, 2);
     assert_eq!(captured.diagnostic.copy_attempts, 1);
+
+    // Public metadata successes use this same production acceptance boundary.
+    let mut candidate = None;
+    remember_candidate(&mut candidate, (URL.into(), captured.diagnostic.clone())).unwrap();
+    assert_eq!(
+        remember_candidate(&mut candidate, (URL.into(), captured.diagnostic.clone())),
+        Err(VerificationReason::MultipleMatchingPosts)
+    );
+
+    // Same caption/time is insufficient: the first URL already belongs to a
+    // prior assignment. The second tile still needs its own complete proof.
+    const NEW_URL: &str = "https://www.tiktok.com/@fixture.account/photo/987654321";
+    for (excluded, expected) in [
+        (vec![URL.to_owned()], Some(NEW_URL)),
+        (vec![NEW_URL.to_owned()], Some(URL)),
+        (vec![URL.to_owned(), NEW_URL.to_owned()], None),
+        (
+            vec!["https://www.tiktok.com/@fixture.account/photo/555555555".to_owned()],
+            None,
+        ),
+    ] {
+        let session = Session {
+            multiple_matches: true,
+            second_url: Some(NEW_URL),
+            ..Default::default()
+        };
+        let captured =
+            capture_submission_link_excluding(&session, &plan(), CAPTION, &identity(), &excluded)
+                .await;
+        assert_eq!(captured.outcome.link(), expected, "excluded={excluded:?}");
+        assert!(captured.diagnostic.candidates_visited <= MAX_CANDIDATES);
+        if expected.is_some() {
+            assert_eq!(captured.diagnostic.candidates_visited, 2);
+            assert_eq!(captured.diagnostic.copy_attempts, 2);
+        }
+    }
 }
 
 #[tokio::test(start_paused = true)]
@@ -1420,6 +1466,7 @@ fn a_changed_post_snapshot_cannot_combine_prior_caption_with_new_time() {
         plan: &plan,
         caption: CAPTION,
         identity: &identity,
+        other_publication_urls: &[],
         started: Instant::now(),
         caption_expanded: false,
         public_link: None,

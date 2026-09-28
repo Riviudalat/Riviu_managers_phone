@@ -1391,6 +1391,7 @@ mod tests {
             E::OrchestrationUpdated { .. } => "orchestrationUpdated",
             E::InteractionUpdated { .. } => "interactionUpdated",
             E::PublishUpdated { .. } => "publishUpdated",
+            E::PublishPreflightProgress { .. } => "publishPreflightProgress",
             E::WdaExpiryWarning { .. } => "wdaExpiryWarning",
             E::NurtureStatus { .. } => "nurtureStatus",
         }
@@ -1402,7 +1403,7 @@ mod tests {
     /// the compiler already made someone write next to the variant, and
     /// `the_tag_names_are_the_ones_serde_writes` checks the naming convention against real
     /// serialised output rather than against this list.
-    const EVERY_EVENT_TAG: [&str; 10] = [
+    const EVERY_EVENT_TAG: [&str; 11] = [
         "devicesUpdated",
         "deviceUpdated",
         "jobUpdated",
@@ -1411,6 +1412,7 @@ mod tests {
         "orchestrationUpdated",
         "interactionUpdated",
         "publishUpdated",
+        "publishPreflightProgress",
         "wdaExpiryWarning",
         "nurtureStatus",
     ];

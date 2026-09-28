@@ -51,8 +51,8 @@ pub use processing::ProcessingNotice;
 mod verification;
 pub use photo_proof::{capture_expanded_photo_link, capture_visible_video_link};
 pub use verification::{
-    capture_submission_link, probe_clipboard_restore, PublishVerificationPlan, VerificationCapture,
-    VerificationDiagnostic, VerificationReason,
+    capture_submission_link, capture_submission_link_excluding, probe_clipboard_restore,
+    PublishVerificationPlan, VerificationCapture, VerificationDiagnostic, VerificationReason,
 };
 
 /// How long the share sheet may take to come up.

@@ -179,6 +179,7 @@ pub enum VerificationReason {
     ClipboardNotPostLink,
     RedirectFailed,
     MultipleMatchingPosts,
+    OtherPublication,
 }
 
 impl VerificationReason {
@@ -222,11 +223,13 @@ impl VerificationReason {
             Self::ClipboardNotPostLink => "clipboardNotPostLink",
             Self::RedirectFailed => "redirectFailed",
             Self::MultipleMatchingPosts => "multipleMatchingPosts",
+            Self::OtherPublication => "otherPublication",
         }
     }
 
     pub fn message(&self) -> &'static str {
         match self {
+            Self::OtherPublication => "Liên kết đã thuộc lượt đăng khác; chưa xác minh được bài mới trong giới hạn tìm kiếm.",
             Self::Verified => "Đã xác minh tài khoản, nội dung, thời gian và liên kết bài đăng.",
             Self::IdentityMissing => "Thiếu bằng chứng tài khoản hoặc thời điểm trước Đăng; chưa xác minh liên kết.",
             Self::WrongApp => "Ứng dụng đang mở khác bản TikTok của lượt đăng; chưa điều hướng để lấy liên kết.",
@@ -636,11 +639,25 @@ fn submission_identity_valid(identity: &SubmissionIdentity) -> bool {
         && chrono::DateTime::parse_from_rfc3339(&identity.submitted_at).is_ok()
 }
 
+/// Every successful grid proof, including public photo/video metadata, shares
+/// this ambiguity boundary. A second candidate cannot silently replace the first.
+fn remember_candidate(
+    candidate: &mut Option<(String, VerificationDiagnostic)>,
+    proof: (String, VerificationDiagnostic),
+) -> Result<(), VerificationReason> {
+    if candidate.is_some() {
+        return Err(VerificationReason::MultipleMatchingPosts);
+    }
+    *candidate = Some(proof);
+    Ok(())
+}
+
 struct Capture<'a> {
     session: &'a dyn UiSession,
     plan: &'a PublishVerificationPlan,
     caption: &'a str,
     identity: &'a SubmissionIdentity,
+    other_publication_urls: &'a [String],
     started: Instant,
     diagnostic: VerificationDiagnostic,
     caption_expanded: bool,
@@ -668,6 +685,9 @@ impl Capture<'_> {
     }
 
     fn matched_photo_failure(&mut self, error: &anyhow::Error) -> Option<VerificationReason> {
+        if error.is::<super::photo_proof::OtherPublication>() {
+            return Some(VerificationReason::OtherPublication);
+        }
         self.diagnostic.expanded_photo_error = Some(error.to_string());
         let failure = error.downcast_ref::<super::photo_proof::MatchedPhotoCopyFailure>()?;
         Some(match &failure.0 {
@@ -1145,6 +1165,9 @@ impl Capture<'_> {
                     if !canonical_account_matches(&canonical, &self.identity.account) {
                         return Err(VerificationReason::AccountMismatch);
                     }
+                    if self.other_publication_urls.contains(&canonical) {
+                        return Err(VerificationReason::OtherPublication);
+                    }
                     return Ok((canonical, winning_proof));
                 }
             }
@@ -1169,6 +1192,7 @@ impl Capture<'_> {
             self.caption,
             self.identity,
             &mut self.diagnostic.copy_attempts,
+            self.other_publication_urls,
         )
         .await;
         if self.expired() {
@@ -1190,8 +1214,10 @@ impl Capture<'_> {
     }
 
     async fn capture(&mut self) -> Result<String, VerificationReason> {
-        if let Some(link) = self.visible_video().await? {
-            return Ok(link);
+        match self.visible_video().await {
+            Ok(Some(link)) => return Ok(link),
+            Ok(None) | Err(VerificationReason::OtherPublication) => {}
+            Err(reason) => return Err(reason),
         }
         match super::photo_proof::capture_expanded_photo_link_counted(
             self.session,
@@ -1199,6 +1225,7 @@ impl Capture<'_> {
             self.caption,
             self.identity,
             &mut self.diagnostic.copy_attempts,
+            self.other_publication_urls,
         )
         .await
         {
@@ -1208,7 +1235,9 @@ impl Capture<'_> {
             }
             Err(error) => {
                 if let Some(reason) = self.matched_photo_failure(&error) {
-                    return Err(reason);
+                    if reason != VerificationReason::OtherPublication {
+                        return Err(reason);
+                    }
                 }
             }
         }
@@ -1300,108 +1329,150 @@ impl Capture<'_> {
                 // A video caption opens Comments on measured Trill builds. Copy
                 // the visible video only through exact public metadata proof,
                 // before any caption expansion hides its Share control.
-                match self.visible_video().await {
-                    Ok(Some(link)) => {
-                        self.mark_candidate(VerificationReason::Verified);
-                        return Ok(link);
-                    }
-                    Ok(None) => {}
-                    Err(reason) => {
-                        self.mark_candidate(reason);
-                        return Err(reason);
-                    }
-                }
-                match self.prove_post().await {
-                    Ok(mut post) => {
-                        if let Some(link) = self.public_link.take() {
+                'candidate_proof: {
+                    match self.visible_video().await {
+                        Ok(Some(link)) => {
                             self.mark_candidate(VerificationReason::Verified);
-                            self.diagnostic.stage = "videoPublicProof";
-                            return Ok(link);
+                            remember_candidate(&mut candidate, (link, self.diagnostic.clone()))?;
+                            break 'candidate_proof;
                         }
-                        if candidate.is_some() {
-                            return Err(VerificationReason::MultipleMatchingPosts);
+                        Ok(None) => {}
+                        Err(VerificationReason::OtherPublication) => {
+                            self.mark_candidate(VerificationReason::OtherPublication);
+                            last_reason = VerificationReason::OtherPublication;
+                            break 'candidate_proof;
                         }
-                        self.diagnostic.stage = "copy";
-                        for attempt in 0..2 {
-                            let copied = self.copy_once(post).await;
-                            let closed = self.close_share().await;
-                            match copied {
-                                Ok(link) => {
-                                    closed?;
-                                    self.mark_candidate(VerificationReason::Verified);
-                                    candidate = Some(link);
-                                    break;
-                                }
-                                Err(VerificationReason::ClipboardUnchanged) if attempt == 0 => {
-                                    closed?;
-                                    post = self.prove_post().await?;
-                                    if let Some(link) = self.public_link.take() {
-                                        self.diagnostic.stage = "videoPublicProof";
-                                        return Ok(link);
-                                    }
-                                }
-                                Err(reason) => {
-                                    self.mark_candidate(reason);
-                                    return Err(reason);
-                                }
-                            }
-                        }
-                    }
-                    Err(reason) => {
-                        self.mark_candidate(reason);
-                        // The delayed-viewer path may already have attempted
-                        // Copy through public video proof. Preserve that exact
-                        // failure instead of searching older tiles and replacing
-                        // its diagnosis with a caption/navigation mismatch.
-                        if matches!(
-                            reason,
-                            VerificationReason::Processing
-                                | VerificationReason::ClipboardUnchanged
-                                | VerificationReason::ClipboardUnreadable
-                                | VerificationReason::ClipboardUnwritable
-                                | VerificationReason::ClipboardNotPostLink
-                                | VerificationReason::CopyUnavailable
-                                | VerificationReason::CopyAmbiguous
-                                | VerificationReason::ShareUnavailable
-                                | VerificationReason::ReadFailed
-                        ) {
+                        Err(reason) => {
+                            self.mark_candidate(reason);
                             return Err(reason);
                         }
-                        if matches!(
-                            reason,
-                            VerificationReason::CaptionMissing
-                                | VerificationReason::TimestampMissing
-                                | VerificationReason::CaptionTruncated
-                        ) {
-                            match super::photo_proof::capture_expanded_photo_link_counted(
-                                self.session,
-                                self.plan.labels.package(),
-                                self.caption,
-                                self.identity,
-                                &mut self.diagnostic.copy_attempts,
-                            )
-                            .await
-                            {
-                                Ok(link) => {
-                                    self.mark_candidate(VerificationReason::Verified);
-                                    self.diagnostic.stage = "expandedPhotoPublicProof";
-                                    return Ok(link);
-                                }
-                                Err(error) => {
-                                    if let Some(reason) = self.matched_photo_failure(&error) {
+                    }
+                    match self.prove_post().await {
+                        Ok(mut post) => {
+                            if let Some(link) = self.public_link.take() {
+                                self.mark_candidate(VerificationReason::Verified);
+                                self.diagnostic.stage = "videoPublicProof";
+                                remember_candidate(
+                                    &mut candidate,
+                                    (link, self.diagnostic.clone()),
+                                )?;
+                                break 'candidate_proof;
+                            }
+                            if candidate.is_some() && self.other_publication_urls.is_empty() {
+                                return Err(VerificationReason::MultipleMatchingPosts);
+                            }
+                            self.diagnostic.stage = "copy";
+                            for attempt in 0..2 {
+                                let copied = self.copy_once(post).await;
+                                let closed = self.close_share().await;
+                                match copied {
+                                    Ok(link) => {
+                                        closed?;
+                                        self.mark_candidate(VerificationReason::Verified);
+                                        remember_candidate(&mut candidate, link)?;
+                                        break;
+                                    }
+                                    Err(VerificationReason::OtherPublication) => {
+                                        closed?;
+                                        self.mark_candidate(VerificationReason::OtherPublication);
+                                        last_reason = VerificationReason::OtherPublication;
+                                        break;
+                                    }
+                                    Err(VerificationReason::ClipboardUnchanged) if attempt == 0 => {
+                                        closed?;
+                                        post = match self.prove_post().await {
+                                            Err(VerificationReason::OtherPublication) => {
+                                                self.mark_candidate(
+                                                    VerificationReason::OtherPublication,
+                                                );
+                                                last_reason = VerificationReason::OtherPublication;
+                                                break;
+                                            }
+                                            result => result?,
+                                        };
+                                        if let Some(link) = self.public_link.take() {
+                                            self.diagnostic.stage = "videoPublicProof";
+                                            remember_candidate(
+                                                &mut candidate,
+                                                (link, self.diagnostic.clone()),
+                                            )?;
+                                            break 'candidate_proof;
+                                        }
+                                    }
+                                    Err(reason) => {
+                                        self.mark_candidate(reason);
                                         return Err(reason);
                                     }
                                 }
                             }
                         }
-                        if !matches!(
-                            reason,
-                            VerificationReason::CaptionMismatch
-                                | VerificationReason::SubmissionTooOld
-                        ) {
-                            unresolved_candidate = Some(reason);
+                        Err(reason) => {
+                            self.mark_candidate(reason);
+                            // The delayed-viewer path may already have attempted
+                            // Copy through public video proof. Preserve that exact
+                            // failure instead of searching older tiles and replacing
+                            // its diagnosis with a caption/navigation mismatch.
+                            if matches!(
+                                reason,
+                                VerificationReason::Processing
+                                    | VerificationReason::ClipboardUnchanged
+                                    | VerificationReason::ClipboardUnreadable
+                                    | VerificationReason::ClipboardUnwritable
+                                    | VerificationReason::ClipboardNotPostLink
+                                    | VerificationReason::CopyUnavailable
+                                    | VerificationReason::CopyAmbiguous
+                                    | VerificationReason::ShareUnavailable
+                                    | VerificationReason::ReadFailed
+                            ) {
+                                return Err(reason);
+                            }
+                            let mut reason = reason;
+                            if matches!(
+                                reason,
+                                VerificationReason::CaptionMissing
+                                    | VerificationReason::TimestampMissing
+                                    | VerificationReason::CaptionTruncated
+                            ) {
+                                match super::photo_proof::capture_expanded_photo_link_counted(
+                                    self.session,
+                                    self.plan.labels.package(),
+                                    self.caption,
+                                    self.identity,
+                                    &mut self.diagnostic.copy_attempts,
+                                    self.other_publication_urls,
+                                )
+                                .await
+                                {
+                                    Ok(link) => {
+                                        self.mark_candidate(VerificationReason::Verified);
+                                        self.diagnostic.stage = "expandedPhotoPublicProof";
+                                        remember_candidate(
+                                            &mut candidate,
+                                            (link, self.diagnostic.clone()),
+                                        )?;
+                                        break 'candidate_proof;
+                                    }
+                                    Err(error) => {
+                                        if let Some(failure) = self.matched_photo_failure(&error) {
+                                            if failure != VerificationReason::OtherPublication {
+                                                return Err(failure);
+                                            }
+                                            reason = failure;
+                                            self.mark_candidate(reason);
+                                        }
+                                    }
+                                }
+                            }
+                            if !matches!(
+                                reason,
+                                VerificationReason::CaptionMismatch
+                                    | VerificationReason::SubmissionTooOld
+                                    | VerificationReason::OtherPublication
+                            ) {
+                                unresolved_candidate = Some(reason);
+                            }
+                            last_reason = unresolved_candidate.unwrap_or(reason);
                         }
-                        last_reason = unresolved_candidate.unwrap_or(reason);
                     }
                 }
                 self.diagnostic.stage = "restoreProfile";
@@ -1461,19 +1532,32 @@ impl Capture<'_> {
 #[cfg(test)]
 mod tests;
 
-/// No future is force-cancelled while it may own an IME transition. Budgets
-/// prevent the next action; an in-flight primitive completes its own restore.
+/// Compatibility entry for callers without a persisted assignment owner.
 pub async fn capture_submission_link(
     session: &dyn UiSession,
     plan: &PublishVerificationPlan,
     caption: &str,
     identity: &SubmissionIdentity,
 ) -> VerificationCapture {
+    capture_submission_link_excluding(session, plan, caption, identity, &[]).await
+}
+
+/// Exclude durable other-assignment links while retaining all identity proofs.
+/// No future is force-cancelled while it may own an IME transition. Budgets
+/// prevent the next action; an in-flight primitive completes its own restore.
+pub async fn capture_submission_link_excluding(
+    session: &dyn UiSession,
+    plan: &PublishVerificationPlan,
+    caption: &str,
+    identity: &SubmissionIdentity,
+    other_publication_urls: &[String],
+) -> VerificationCapture {
     let mut capture = Capture {
         session,
         plan,
         caption,
         identity,
+        other_publication_urls,
         started: Instant::now(),
         caption_expanded: false,
         public_link: None,

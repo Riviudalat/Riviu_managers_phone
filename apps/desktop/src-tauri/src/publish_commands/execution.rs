@@ -2182,11 +2182,13 @@ pub(super) async fn capture_confirmed_assignment_link(
                 )?;
             }
         }
-        let capture = riviu_core::tiktok_share::capture_submission_link(
+        let other_publication_urls = db.other_publish_post_urls(&assignment.id)?;
+        let capture = riviu_core::tiktok_share::capture_submission_link_excluding(
             session,
             &plan,
             &bundle.caption,
             &identity,
+            &other_publication_urls,
         )
         .await;
         guarded.check()?;
@@ -3982,11 +3984,21 @@ pub(super) async fn post_through_the_composer(
                 .await;
             }
             progress(PublishProgress::CapturingLink);
-            let capture = riviu_core::tiktok_share::capture_submission_link(
+            let other_publication_urls = match db.other_publish_post_urls(assignment_id) {
+                Ok(urls) => urls,
+                Err(error) => {
+                    evidence["linkCaptureReason"] = serde_json::json!(format!(
+                        "Chưa đọc được liên kết của lượt đăng khác: {error}"
+                    ));
+                    return PostOutcome::Submitted(evidence);
+                }
+            };
+            let capture = riviu_core::tiktok_share::capture_submission_link_excluding(
                 session,
                 &verification_plan,
                 &bundle.caption,
                 &identity,
+                &other_publication_urls,
             )
             .await;
             evidence["verificationDiagnostic"] =

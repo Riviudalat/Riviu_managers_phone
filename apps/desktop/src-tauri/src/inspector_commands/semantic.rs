@@ -175,6 +175,13 @@ pub async fn execute(
         .get(token)
         .cloned()
         .ok_or_else(|| error("InspectorSessionExpired"))?;
+    if matches!(request.operation, Operation::End) {
+        // Revoke through the caller-bound owner before waiting on a read's lock.
+        // Its borrowers retain the lease until any dispatched primitive drains.
+        state
+            .end_semantic_session(&request.udid, caller, token)
+            .await?;
+    }
     let mut refs = tokio::time::timeout_at(deadline, slot.lock())
         .await
         .map_err(|_| error("InspectorDeadlineExceeded"))?;
@@ -184,9 +191,6 @@ pub async fn execute(
     if matches!(request.operation, Operation::End) {
         refs.entries.clear();
         drop(refs);
-        state
-            .end_semantic_session(&request.udid, caller, token)
-            .await?;
         REFERENCES.lock().await.remove(token);
         return Ok(json!({"status":"ended"}));
     }
@@ -198,9 +202,10 @@ pub async fn execute(
         .hold_semantic_session(&request.udid, caller, token)
         .await?;
     let session = hold.session();
+    let mut cancel = hold.cancellation();
     // Never cancel a dispatched effect and release its lease while the backend still acts.
     // Only reads are deadline-cancelled; transport timeout is an uncertain action outcome.
-    let result = run(session.as_ref(), &request, &mut refs, deadline).await;
+    let result = run(session.as_ref(), &request, &mut refs, deadline, &mut cancel).await;
     refs.last_used = Instant::now();
     if result.is_err() {
         refs.entries.clear();
@@ -294,10 +299,11 @@ async fn fresh_target(
     session: &dyn UiSession,
     reference: &Reference,
     deadline: tokio::time::Instant,
+    cancel: &mut tokio::sync::watch::Receiver<bool>,
 ) -> Result<(UiObservation, SemanticNode), CommandError> {
     let mut request = reference.request.clone();
     request.remaining_ms = remaining(deadline);
-    let observation = read_observation(session, &request, deadline).await?;
+    let observation = read_observation(session, &request, deadline, cancel).await?;
     validate_binding(&observation, &reference.observation.device_id, session)?;
     if observation.session_epoch != reference.observation.session_epoch
         || observation.app.package != reference.observation.app.package
@@ -344,12 +350,13 @@ async fn run(
     request: &SemanticRequest,
     refs: &mut References,
     deadline: tokio::time::Instant,
+    cancel: &mut tokio::sync::watch::Receiver<bool>,
 ) -> Result<Value, CommandError> {
     let read = observation_request(request, deadline);
     match request.operation {
         Operation::Observe => {
             refs.entries.clear();
-            let observation = read_observation(session, &read, deadline).await?;
+            let observation = read_observation(session, &read, deadline, cancel).await?;
             validate_binding(&observation, &request.udid, session)?;
             Ok(store_observation(refs, observation, &read, &request.fields))
         }
@@ -360,7 +367,7 @@ async fn run(
                 .as_ref()
                 .ok_or_else(|| error("InvalidArgument"))?;
             if matches!(request.operation, Operation::Expect) {
-                let observation = read_observation(session, &read, deadline).await?;
+                let observation = read_observation(session, &read, deadline, cancel).await?;
                 validate_binding(&observation, &request.udid, session)?;
                 let verdict = expect_observation(&observation, expected);
                 let mut result = store_observation(refs, observation, &read, &request.fields);
@@ -368,13 +375,12 @@ async fn run(
                 result["verdict"] = json!(verdict);
                 return Ok(result);
             }
-            let (_cancel_owner, mut cancel) = tokio::sync::watch::channel(false);
             let result = wait_for_observation(
                 session,
                 &read,
                 expected,
                 deadline,
-                &mut cancel,
+                cancel,
                 Duration::from_millis(150),
             )
             .await
@@ -393,16 +399,10 @@ async fn run(
         }
         Operation::Screenshot => {
             refs.entries.clear();
-            let before = read_observation(session, &read, deadline).await?;
+            let before = read_observation(session, &read, deadline, cancel).await?;
             validate_binding(&before, &request.udid, session)?;
-            let png = tokio::time::timeout_at(deadline, session.screenshot_png())
-                .await
-                .map_err(|_| error("InspectorDeadlineExceeded"))?
-                .map_err(driver_error)?;
-            if tokio::time::timeout_at(deadline, session.active_app_bundle())
-                .await
-                .map_err(|_| error("InspectorDeadlineExceeded"))?
-                .map_err(driver_error)?
+            let png = cancellable_read(session.screenshot_png(), deadline, cancel).await?;
+            if cancellable_read(session.active_app_bundle(), deadline, cancel).await?
                 != before.app.package.clone().unwrap_or_default()
                 || session.gui_session_epoch() != before.session_epoch
             {
@@ -416,7 +416,7 @@ async fn run(
         }
         Operation::Press => {
             refs.entries.clear();
-            ensure_time(deadline)?;
+            ensure_active(deadline, cancel)?;
             let key = match request.key.ok_or_else(|| error("InvalidArgument"))? {
                 PressKey::Back => HardwareKey::Back,
                 PressKey::Home => HardwareKey::Home,
@@ -439,7 +439,7 @@ async fn run(
                 .ok_or_else(|| error("InspectorStaleRef"))?;
             // Invalidate before dispatch, including uncertain and timeout outcomes.
             refs.entries.clear();
-            let (observation, node) = fresh_target(session, &reference, deadline).await?;
+            let (observation, node) = fresh_target(session, &reference, deadline, cancel).await?;
             let bounds = actionable(&observation, &node)?;
             match request.operation {
                 Operation::Tap => {
@@ -460,12 +460,12 @@ async fn run(
                     .ok_or_else(|| error("InspectorEngineRequired"))?;
                     let mut latest = reference.clone();
                     latest.observation = observation;
-                    let (fresh, node) = fresh_target(session, &latest, deadline).await?;
+                    let (fresh, node) = fresh_target(session, &latest, deadline, cancel).await?;
                     let bounds = actionable(&fresh, &node)?;
                     if node.clickable != Some(true) || bounds != Rect::from(&approved) {
                         return Err(error("InspectorStaleRef"));
                     }
-                    ensure_time(deadline)?;
+                    ensure_active(deadline, cancel)?;
                     session
                         .tap(approved.centre())
                         .await
@@ -496,7 +496,7 @@ async fn run(
                     };
                     readback.remaining_ms = remaining(deadline);
                     // Prove the stable post-type locator is unique before changing any text.
-                    let focused = read_observation(session, &readback, deadline).await?;
+                    let focused = read_observation(session, &readback, deadline, cancel).await?;
                     validate_binding(&focused, &request.udid, session)?;
                     if focused.session_epoch != observation.session_epoch
                         || focused.app.package != observation.app.package
@@ -510,13 +510,12 @@ async fn run(
                         return Err(error("InspectorExactFocusRequired"));
                     }
                     actionable(&focused, &focused.matches[0])?;
-                    ensure_time(deadline)?;
+                    ensure_active(deadline, cancel)?;
                     session
                         .type_text(text)
                         .await
                         .map_err(|_| error("InspectorActionUncertain"))?;
                     readback.remaining_ms = remaining(deadline);
-                    let (_cancel_owner, mut cancel) = tokio::sync::watch::channel(false);
                     let result = wait_for_observation(
                         session,
                         &readback,
@@ -525,7 +524,7 @@ async fn run(
                             exact: true,
                         },
                         deadline,
-                        &mut cancel,
+                        cancel,
                         Duration::from_millis(150),
                     )
                     .await
@@ -566,7 +565,7 @@ async fn run(
                         Direction::Left => (point(0.75, 0.5), point(0.25, 0.5)),
                         Direction::Right => (point(0.25, 0.5), point(0.75, 0.5)),
                     };
-                    ensure_time(deadline)?;
+                    ensure_active(deadline, cancel)?;
                     session
                         .swipe(SwipeGesture {
                             from,
@@ -592,14 +591,180 @@ fn ensure_time(deadline: tokio::time::Instant) -> Result<(), CommandError> {
     }
 }
 
+fn ensure_active(
+    deadline: tokio::time::Instant,
+    cancel: &tokio::sync::watch::Receiver<bool>,
+) -> Result<(), CommandError> {
+    if *cancel.borrow() || cancel.has_changed().is_err() {
+        return Err(error("InspectorCancelled"));
+    }
+    ensure_time(deadline)
+}
+
 async fn read_observation(
     session: &dyn UiSession,
     request: &ObservationRequest,
     deadline: tokio::time::Instant,
+    cancel: &mut tokio::sync::watch::Receiver<bool>,
 ) -> Result<UiObservation, CommandError> {
-    ensure_time(deadline)?;
-    tokio::time::timeout_at(deadline, session.observe(request))
+    cancellable_read(session.observe(request), deadline, cancel).await
+}
+
+/// Read-only futures may be dropped on revocation; device effects must drain instead.
+async fn cancellable_read<T>(
+    read: impl std::future::Future<Output = anyhow::Result<T>>,
+    deadline: tokio::time::Instant,
+    cancel: &mut tokio::sync::watch::Receiver<bool>,
+) -> Result<T, CommandError> {
+    ensure_active(deadline, cancel)?;
+    tokio::select! {
+        biased;
+        _ = async {
+            while !*cancel.borrow_and_update() {
+                if cancel.changed().await.is_err() { break; }
+            }
+        } => Err(error("InspectorCancelled")),
+        result = tokio::time::timeout_at(deadline, read) => {
+            // A ready future can win the timeout poll after a synchronous parse.
+            ensure_active(deadline, cancel)?;
+            result.map_err(|_| error("InspectorDeadlineExceeded"))?.map_err(driver_error)
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    #[derive(Default)]
+    struct Phone {
+        reading: tokio::sync::Notify,
+        pressed: tokio::sync::Notify,
+        release: tokio::sync::Notify,
+        presses: AtomicUsize,
+    }
+
+    #[async_trait::async_trait]
+    impl UiSession for Phone {
+        async fn observe(&self, _: &ObservationRequest) -> anyhow::Result<UiObservation> {
+            self.reading.notify_one();
+            std::future::pending().await
+        }
+        async fn press_hardware_key(&self, _: HardwareKey) -> anyhow::Result<()> {
+            self.presses.fetch_add(1, Ordering::SeqCst);
+            self.pressed.notify_one();
+            self.release.notified().await;
+            Ok(())
+        }
+        async fn tap(&self, _: TapPoint) -> anyhow::Result<()> {
+            panic!("unexpected tap")
+        }
+        async fn swipe(&self, _: SwipeGesture) -> anyhow::Result<()> {
+            panic!("unexpected swipe")
+        }
+        async fn type_text(&self, _: &str) -> anyhow::Result<()> {
+            panic!("unexpected type")
+        }
+        async fn home(&self) -> anyhow::Result<()> {
+            panic!("unexpected home")
+        }
+        async fn find_and_tap(&self, _: &str) -> anyhow::Result<()> {
+            panic!("unexpected input")
+        }
+        async fn assert_visible(&self, _: &str) -> anyhow::Result<()> {
+            panic!("unexpected assertion")
+        }
+        fn stream_url(&self) -> Option<String> {
+            None
+        }
+    }
+
+    #[tokio::test]
+    async fn owner_cancellation_stops_wait_but_drains_dispatched_input() {
+        let phone = Phone::default();
+        let mut refs = References {
+            udid: "fixture".into(),
+            caller: "fixture".into(),
+            expires: Instant::now() + TTL,
+            last_used: Instant::now(),
+            entries: HashMap::new(),
+        };
+        let request: SemanticRequest = serde_json::from_value(json!({
+            "operation":"wait_for", "udid":"fixture", "expected":{"kind":"exists"}
+        }))
+        .unwrap();
+        let (owner, mut cancel) = tokio::sync::watch::channel(false);
+        let wait = run(
+            &phone,
+            &request,
+            &mut refs,
+            tokio::time::Instant::now() + Duration::from_secs(10),
+            &mut cancel,
+        );
+        let revoke = async {
+            phone.reading.notified().await;
+            owner.send_replace(true);
+        };
+        let result = tokio::time::timeout(Duration::from_secs(1), async {
+            tokio::join!(wait, revoke).0
+        })
         .await
-        .map_err(|_| error("InspectorDeadlineExceeded"))?
-        .map_err(driver_error)
+        .expect("owner revocation must interrupt the read, not wait for its deadline")
+        .unwrap();
+        assert_eq!(result["status"], "cancelled");
+
+        let (owner, mut cancel) = tokio::sync::watch::channel(false);
+        let request: SemanticRequest = serde_json::from_value(json!({
+            "operation":"observe", "udid":"fixture"
+        }))
+        .unwrap();
+        let read = run(
+            &phone,
+            &request,
+            &mut refs,
+            tokio::time::Instant::now() + Duration::from_secs(10),
+            &mut cancel,
+        );
+        let revoke = async {
+            phone.reading.notified().await;
+            owner.send_replace(true);
+        };
+        let result = tokio::time::timeout(Duration::from_secs(1), async {
+            tokio::join!(read, revoke).0
+        })
+        .await
+        .expect("owner revocation must interrupt a one-shot read");
+        assert_eq!(result.unwrap_err().code, "InspectorCancelled");
+
+        let request: SemanticRequest = serde_json::from_value(json!({
+            "operation":"press", "udid":"fixture", "key":"back"
+        }))
+        .unwrap();
+        let deadline = tokio::time::Instant::now() + Duration::from_secs(10);
+        assert_eq!(
+            run(&phone, &request, &mut refs, deadline, &mut cancel)
+                .await
+                .unwrap_err()
+                .code,
+            "InspectorCancelled"
+        );
+        assert_eq!(phone.presses.load(Ordering::SeqCst), 0);
+
+        let (owner, mut cancel) = tokio::sync::watch::channel(false);
+        let input = run(&phone, &request, &mut refs, deadline, &mut cancel);
+        let revoke_in_flight = async {
+            phone.pressed.notified().await;
+            owner.send_replace(true);
+            phone.release.notify_one();
+        };
+        let result = tokio::time::timeout(Duration::from_secs(1), async {
+            tokio::join!(input, revoke_in_flight).0
+        })
+        .await
+        .unwrap()
+        .unwrap();
+        assert_eq!(result["status"], "dispatched");
+        assert_eq!(phone.presses.load(Ordering::SeqCst), 1);
+    }
 }

@@ -24,6 +24,19 @@ fn require_assigned_account(
 }
 
 impl Database {
+    /// Canonical URLs already owned by a different publication assignment.
+    /// This snapshot helps search; the transactional unique claim remains authoritative.
+    pub fn other_publish_post_urls(&self, assignment: &str) -> anyhow::Result<Vec<String>> {
+        let conn = self.conn()?;
+        let mut statement = conn.prepare(
+            "SELECT post_url FROM publish_post_identities WHERE assignment_id<>?1 ORDER BY post_url",
+        )?;
+        let urls = statement
+            .query_map([assignment], |row| row.get(0))?
+            .collect::<rusqlite::Result<Vec<String>>>()?;
+        Ok(urls)
+    }
+
     pub fn publish_campaign_has_account_reservation(&self, campaign: &str) -> anyhow::Result<bool> {
         Ok(self.conn()?.query_row("SELECT EXISTS(SELECT 1 FROM publish_account_reservations r JOIN publish_assignments a ON a.id=r.assignment_id WHERE a.campaign_id=?1)", [campaign], |r| r.get(0))?)
     }
@@ -465,6 +478,14 @@ mod tests {
                 &[]
             )
             .unwrap());
+        assert!(db
+            .other_publish_post_urls(&assignments[0].id)
+            .unwrap()
+            .is_empty());
+        assert_eq!(
+            db.other_publish_post_urls(&assignments[1].id).unwrap(),
+            vec![link]
+        );
         db.update_publish_campaign_state(&campaign, S::Posting, None)
             .unwrap();
         db.reserve_publish_account(&assignments[1].id, &proof.expected_account)

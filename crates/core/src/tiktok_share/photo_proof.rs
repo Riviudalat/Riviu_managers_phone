@@ -16,6 +16,21 @@ impl std::fmt::Display for MatchedPhotoCopyFailure {
 }
 impl std::error::Error for MatchedPhotoCopyFailure {}
 
+/// A durable other-assignment claim is negative evidence, never proof of a new post.
+#[derive(Debug, thiserror::Error)]
+#[error("canonical link belongs to another publication")]
+pub(super) struct OtherPublication;
+
+fn exclude_other_publication(
+    canonical: &str,
+    other_publication_urls: &[String],
+) -> anyhow::Result<()> {
+    if other_publication_urls.iter().any(|url| url == canonical) {
+        return Err(OtherPublication.into());
+    }
+    Ok(())
+}
+
 fn validate_photo_identity(
     canonical: &str,
     identity: &SubmissionIdentity,
@@ -137,7 +152,7 @@ pub async fn capture_expanded_photo_link(
     caption: &str,
     identity: &SubmissionIdentity,
 ) -> anyhow::Result<String> {
-    capture_expanded_photo_link_counted(session, package, caption, identity, &mut 0).await
+    capture_expanded_photo_link_counted(session, package, caption, identity, &mut 0, &[]).await
 }
 
 pub(super) async fn capture_expanded_photo_link_counted(
@@ -146,6 +161,7 @@ pub(super) async fn capture_expanded_photo_link_counted(
     caption: &str,
     identity: &SubmissionIdentity,
     copy_attempts: &mut u32,
+    other_publication_urls: &[String],
 ) -> anyhow::Result<String> {
     let tree = Tree::parse(session.hierarchy_source_snapshot().await?)?;
     anyhow::ensure!(
@@ -226,6 +242,7 @@ pub(super) async fn capture_expanded_photo_link_counted(
     let canonical =
         resolve_canonical_post_link(link.link().context("expanded viewer did not return link")?)
             .await?;
+    exclude_other_publication(&canonical, other_publication_urls)?;
     validate_photo_identity(&canonical, identity)?;
     validate_public_link(&canonical, caption, identity)
         .await
@@ -281,7 +298,7 @@ pub async fn capture_visible_video_link(
     caption: &str,
     identity: &SubmissionIdentity,
 ) -> anyhow::Result<String> {
-    capture_visible_video_link_counted(session, package, caption, identity, &mut 0).await
+    capture_visible_video_link_counted(session, package, caption, identity, &mut 0, &[]).await
 }
 
 pub(super) async fn capture_visible_video_link_counted(
@@ -290,6 +307,7 @@ pub(super) async fn capture_visible_video_link_counted(
     caption: &str,
     identity: &SubmissionIdentity,
     copy_attempts: &mut u32,
+    other_publication_urls: &[String],
 ) -> anyhow::Result<String> {
     let observed_at = std::time::Instant::now();
     anyhow::ensure!(
@@ -332,6 +350,7 @@ pub(super) async fn capture_visible_video_link_counted(
         viewer_kind_matches_link(&canonical, photo_counter)?,
         "copied content kind does not match measured viewer"
     );
+    exclude_other_publication(&canonical, other_publication_urls)?;
     validate_photo_identity(&canonical, identity)?;
     validate_public_link(&canonical, caption, identity)
         .await
