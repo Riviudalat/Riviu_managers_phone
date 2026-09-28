@@ -211,12 +211,36 @@ pub(super) async fn confirm_editor(
     plan: SoundPickerPlan,
     expected: &str,
 ) -> anyhow::Result<()> {
+    confirm_editor_observed(session, plan, expected, None).await
+}
+
+pub(super) async fn confirm_editor_in_epoch(
+    session: &dyn UiSession,
+    plan: SoundPickerPlan,
+    expected: &str,
+    epoch: &str,
+) -> anyhow::Result<()> {
+    confirm_editor_observed(session, plan, expected, Some(epoch)).await
+}
+
+async fn confirm_editor_observed(
+    session: &dyn UiSession,
+    plan: SoundPickerPlan,
+    expected: &str,
+    pinned_epoch: Option<&str>,
+) -> anyhow::Result<()> {
     let deadline =
         phase_deadline(Duration::from_secs(30)).min(Instant::now() + Duration::from_secs(30));
     let mut previous: Option<(String, u64)> = None;
     while Instant::now() < deadline {
         check_wait()?;
         let epoch = session.gui_session_epoch();
+        if let Some(pinned) = pinned_epoch {
+            anyhow::ensure!(
+                epoch == pinned && read_sound(session.active_app_bundle()).await? == plan.package,
+                "sound recovery app/session changed again"
+            );
+        }
         let source = match bounded(deadline, session.hierarchy_source_snapshot()).await {
             Ok(source) => source,
             Err(error) if transient_sound_read(&error) => {
@@ -241,8 +265,15 @@ pub(super) async fn confirm_editor(
             !tree
                 .matching(plan.package, ElementQuery::ResourceIdSuffix(layout.tab_id))
                 .is_empty()
-        });
-        if valid && !sheet {
+        }) || (recent::measured(plan)
+            && [":id/q_g", plan.row_id].iter().any(|id| {
+                !tree
+                    .matching(plan.package, ElementQuery::ResourceIdSuffix(id))
+                    .is_empty()
+            }));
+        let editor_next = !recent::measured(plan)
+            || matches!(tree.matching(plan.package,ElementQuery::ResourceIdSuffix(":id/kl_")).as_slice(),[i] if tree.nodes[*i].attr("text")=="Next");
+        if valid && !sheet && editor_next {
             if previous
                 .as_ref()
                 .is_some_and(|(p, g)| p == &epoch && tree.generation > *g)
@@ -252,6 +283,10 @@ pub(super) async fn confirm_editor(
                     "sound recovery app changed"
                 );
                 check_wait()?;
+                anyhow::ensure!(
+                    session.gui_session_epoch() == epoch,
+                    "sound recovery session changed after editor proof"
+                );
                 return Ok(());
             }
             previous = Some((epoch, tree.generation));

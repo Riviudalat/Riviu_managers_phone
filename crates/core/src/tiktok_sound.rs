@@ -17,6 +17,7 @@ use tokio::time::Instant;
 use crate::driver::{ElementBox, ElementQuery, UiSession};
 use crate::publish::SoundCandidate;
 
+mod recent;
 mod selection_recovery;
 #[cfg(test)]
 mod selection_recovery_tests;
@@ -504,6 +505,24 @@ pub async fn open_and_observe_sounds_armed(
     if plan.dynamic {
         return open_dynamic_sounds(session, plan, maximum_visible, before_open).await;
     }
+    if plan.package == "com.ss.android.ugc.trill"
+        && plan.entry_id == ":id/c_4"
+        && !session.gui_session_epoch().is_empty()
+    {
+        // Trill 38.3.2, ce031713dd735a1103, 28/09/2026: entry discovery
+        // stalled in serial /elements + /rect before any sound tap. Read the
+        // measured entry and its actual enabled/clickable flags in fresh XML.
+        let epoch = session.gui_session_epoch();
+        let entry = tokio::time::timeout(
+            Duration::from_secs(30),
+            prove_sound_entry_xml(session, plan, &epoch),
+        )
+        .await
+        .context("sound entry XML proof timed out")??;
+        check_wait()?;
+        sound_tap_armed(session, entry.centre(), before_open).await?;
+        return observe_sound_pool(session, plan, maximum_visible).await;
+    }
     match visual::open_loading_entry(session, plan, before_open).await {
         Ok(true) => return observe_measured_sound_pool(session, plan, maximum_visible).await,
         Err(error)
@@ -563,6 +582,23 @@ async fn open_sound_without_image(
 ) -> anyhow::Result<ObservedSoundPool> {
     let epoch = session.gui_session_epoch();
     anyhow::ensure!(!epoch.is_empty(), "sound sheet session missing");
+    let entry = prove_sound_entry_xml(session, plan, &epoch).await?;
+    sound_tap_armed(session, entry.centre(), before_open).await?;
+    // With no screenshot, only an already-selected Hot tab in two fresh XML
+    // pools can authorize a row. Do not enter the image-based tab recovery.
+    let pool = async {
+        snapshot::select_section_tab_xml_only(session, plan).await?;
+        snapshot::observe_xml_only(session, plan, maximum_visible).await
+    }
+    .await;
+    checked_measured_sound_observation(session, plan, &epoch, pool).await
+}
+
+async fn prove_sound_entry_xml(
+    session: &dyn UiSession,
+    plan: SoundPickerPlan,
+    epoch: &str,
+) -> anyhow::Result<ElementBox> {
     let deadline = phase_deadline(SOUND_WINDOW);
     let mut previous: Option<(u64, ElementBox)> = None;
     let (generation, entry) = loop {
@@ -610,15 +646,7 @@ async fn open_sound_without_image(
             && unique_sound_entry(&tree, plan.package, &[plan.entry_id]).as_ref() == Some(&entry),
         "sound entry changed before tap; no Post was sent"
     );
-    sound_tap_armed(session, entry.centre(), before_open).await?;
-    // With no screenshot, only an already-selected Hot tab in two fresh XML
-    // pools can authorize a row. Do not enter the image-based tab recovery.
-    let pool = async {
-        snapshot::select_section_tab_xml_only(session, plan).await?;
-        snapshot::observe_xml_only(session, plan, maximum_visible).await
-    }
-    .await;
-    checked_measured_sound_observation(session, plan, &epoch, pool).await
+    Ok(entry)
 }
 
 /// Observe a sheet that this attempt may already have opened. This path never
@@ -646,6 +674,19 @@ pub async fn resume_open_sounds(
         return observe_sound_pool(session, plan, maximum).await;
     }
     anyhow::bail!("sound sheet is not proven open; refusing to replay its editor entry")
+}
+
+pub(crate) async fn recover_frozen_sound_pool(
+    session: &dyn UiSession,
+    plan: SoundPickerPlan,
+    selection: &crate::SoundSelectionEvidence,
+) -> anyhow::Result<ObservedSoundPool> {
+    tokio::time::timeout(
+        Duration::from_secs(60),
+        recent::recover(session, plan, selection),
+    )
+    .await
+    .context("frozen sound Recent recovery timed out")?
 }
 
 async fn observe_measured_sound_pool(
@@ -737,6 +778,44 @@ pub async fn recover_sound_selection(
     pool: &ObservedSoundPool,
     index: usize,
 ) -> anyhow::Result<()> {
+    let plan = pool.effective_plan(plan);
+    if recent::measured(plan) && plan.section_label == "Recent" {
+        // The exact row was just proved on Recent; an editor read while that
+        // sheet is open would consume the whole budget before selection.
+        return match choose_and_confirm_sound(session, plan, pool, index).await {
+            Err(error) if error.is::<recent::SessionChanged>() => {
+                let changed = error
+                    .downcast_ref::<recent::SessionChanged>()
+                    .expect("typed epoch change");
+                let expected = &pool
+                    .candidates
+                    .get(index)
+                    .context("sound selection index missing")?
+                    .title;
+                if changed.previous.is_empty()
+                    || changed.current.is_empty()
+                    || changed.previous == changed.current
+                    || session.gui_session_epoch() != changed.current
+                {
+                    return Err(error);
+                }
+                tracing::warn!(old_epoch=%changed.previous,new_epoch=%changed.current,"Recent session replaced; observing editor without replaying selection");
+                match selection_recovery::confirm_editor_in_epoch(
+                    session,
+                    plan,
+                    expected,
+                    &changed.current,
+                )
+                .await
+                {
+                    Ok(()) => Ok(()),
+                    Err(stopped) if stopped.is::<SoundStopped>() => Err(stopped),
+                    Err(_) => Err(error),
+                }
+            }
+            result => result,
+        };
+    }
     if pool.visual {
         return visual::recover(session, plan, pool, index).await;
     }
@@ -861,6 +940,11 @@ async fn observe_sound_pool(
     plan: SoundPickerPlan,
     maximum_visible: usize,
 ) -> anyhow::Result<ObservedSoundPool> {
+    if recent::measured(plan) && plan.section_label == "Recent" {
+        return tokio::time::timeout(Duration::from_secs(30), recent::observe(session, plan))
+            .await
+            .context("Recent sound rows timed out")?;
+    }
     if plan.snapshot_layout().is_some() {
         return snapshot::observe(session, plan, maximum_visible).await;
     }
@@ -1022,6 +1106,32 @@ fn reproof_target<'a>(
         .context("sound selection target is missing")?;
     anyhow::ensure!(target.enabled, "sound selection control disabled");
     Ok(target)
+}
+
+/// Re-read the editor chip. The exact title and exactly one node are both required.
+/// One additional observation-only window after an unreadable navigation transition.
+/// Bound the request itself as well as polling, and honor Stop during slow reads.
+pub(crate) async fn confirm_sound_after_transition(
+    session: &dyn UiSession,
+    plan: SoundPickerPlan,
+    expected_title: &str,
+    stop: &AtomicBool,
+) -> anyhow::Result<()> {
+    let proof = tokio::time::timeout(
+        READBACK_WINDOW,
+        confirm_sound(session, plan, expected_title),
+    );
+    tokio::pin!(proof);
+    let mut poll = tokio::time::interval(POLL);
+    loop {
+        if stop.load(Ordering::Relaxed) {
+            return Err(SoundStopped.into());
+        }
+        tokio::select! {
+            result = &mut proof => return result.context("sound transition readback timed out")?,
+            _ = poll.tick() => {},
+        }
+    }
 }
 
 /// Re-read the editor chip. The exact title and exactly one node are both required.
@@ -1237,12 +1347,17 @@ mod tests {
     struct OpeningSession {
         entry_ready: bool,
         taps: AtomicUsize,
+        slow_trill: Option<&'static str>,
+        snapshots: AtomicUsize,
     }
 
     #[async_trait::async_trait]
     impl UiSession for OpeningSession {
         async fn tap(&self, _: crate::TapPoint) -> anyhow::Result<()> {
             self.taps.fetch_add(1, Ordering::Relaxed);
+            if self.slow_trill == Some("pool") {
+                return Ok(());
+            }
             anyhow::bail!("fixture loses the open acknowledgement")
         }
         async fn swipe(&self, _: crate::SwipeGesture) -> anyhow::Result<()> {
@@ -1266,7 +1381,69 @@ mod tests {
         fn stream_url(&self) -> Option<String> {
             None
         }
+        fn gui_session_epoch(&self) -> String {
+            if self.slow_trill == Some("changed-session")
+                && self.snapshots.load(Ordering::Relaxed) >= 4
+            {
+                return "replacement-session".into();
+            }
+            "opening-session".into()
+        }
+        async fn active_app_bundle(&self) -> anyhow::Result<String> {
+            Ok(if self.slow_trill == Some("changed-app") {
+                "other.app"
+            } else {
+                "com.ss.android.ugc.trill"
+            }
+            .into())
+        }
+        async fn hierarchy_source_snapshot(
+            &self,
+        ) -> anyhow::Result<crate::HierarchySourceSnapshot> {
+            let n = self.snapshots.fetch_add(1, Ordering::Relaxed) + 1;
+            if self.slow_trill == Some("stop") {
+                tokio::time::sleep(Duration::from_secs(10)).await;
+            }
+            let xml = if n == 1 {
+                "<hierarchy/>".into()
+            } else {
+                let bounds = if self.slow_trill == Some("changed-entry") && n >= 4 {
+                    "[700,100][900,216]"
+                } else {
+                    "[350,100][720,216]"
+                };
+                format!(
+                    r#"<hierarchy><node package="com.ss.android.ugc.trill" resource-id="com.ss.android.ugc.trill:id/c_4" bounds="{bounds}" enabled="true" clickable="true" displayed="true"/></hierarchy>"#
+                )
+            };
+            let xml = if self.slow_trill == Some("ambiguous") {
+                xml.replace("</hierarchy>", r#"<node package="com.ss.android.ugc.trill" resource-id="com.ss.android.ugc.trill:id/c_4" bounds="[700,100][900,216]" enabled="true" clickable="true" displayed="true"/></hierarchy>"#)
+            } else {
+                xml
+            };
+            Ok(crate::HierarchySourceSnapshot {
+                generation: if self.slow_trill == Some("stale") {
+                    1
+                } else {
+                    n as u64
+                },
+                xml,
+            })
+        }
         async fn locate_all(&self, query: ElementQuery<'_>) -> anyhow::Result<Vec<ElementBox>> {
+            if self.slow_trill == Some("pool") && self.taps.load(Ordering::Relaxed) == 1 {
+                return Ok(if query == ElementQuery::ResourceIdSuffix(":id/ta8") {
+                    vec![ElementBox {
+                        height: 200.0,
+                        ..element(100.0, None)
+                    }]
+                } else {
+                    vec![]
+                });
+            }
+            if self.slow_trill.is_some() {
+                std::future::pending::<()>().await;
+            }
             if !self.entry_ready {
                 anyhow::bail!("fixture read failed before the open tap")
             }
@@ -1283,6 +1460,23 @@ mod tests {
                 _ => vec![],
             })
         }
+        async fn locate_all_described(
+            &self,
+            query: ElementQuery<'_>,
+        ) -> anyhow::Result<Vec<ElementBox>> {
+            assert_eq!(self.taps.load(Ordering::Relaxed), 1);
+            Ok(match query {
+                ElementQuery::Text {
+                    value: "Recommended",
+                    ..
+                } => vec![element(0.0, Some("Recommended"))],
+                ElementQuery::ResourceIdSuffix(":id/title") => {
+                    vec![element(120.0, Some("Tung Zin Zin"))]
+                }
+                ElementQuery::ResourceIdSuffix(":id/rr5") => vec![element(180.0, Some("Artist"))],
+                _ => vec![],
+            })
+        }
     }
 
     #[tokio::test]
@@ -1293,6 +1487,8 @@ mod tests {
             let session = OpeningSession {
                 entry_ready,
                 taps: AtomicUsize::new(0),
+                slow_trill: None,
+                snapshots: AtomicUsize::new(0),
             };
             let armed = AtomicBool::new(false);
             let result = open_and_observe_sounds_armed(&session, plan, 5, &mut || {
@@ -1313,6 +1509,8 @@ mod tests {
         let session = OpeningSession {
             entry_ready: true,
             taps: AtomicUsize::new(0),
+            slow_trill: None,
+            snapshots: AtomicUsize::new(0),
         };
         let armed = AtomicBool::new(false);
         let budget = SoundBudget {
@@ -1331,6 +1529,76 @@ mod tests {
         assert!(result.is_err());
         assert!(!armed.load(Ordering::Relaxed));
         assert_eq!(session.taps.load(Ordering::Relaxed), 0);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn slow_trill_entry_lookup_uses_fresh_xml_before_first_tap() {
+        for mode in [
+            "ready",
+            "pool",
+            "changed-app",
+            "stale",
+            "changed-entry",
+            "changed-session",
+            "ambiguous",
+            "stop",
+        ] {
+            let session = OpeningSession {
+                entry_ready: true,
+                taps: AtomicUsize::new(0),
+                slow_trill: Some(mode),
+                snapshots: AtomicUsize::new(0),
+            };
+            let stop = AtomicBool::new(false);
+            let armed = AtomicBool::new(false);
+            let mut arm = || armed.store(true, Ordering::Relaxed);
+            let start = Instant::now();
+            let (result, ()) = tokio::join!(
+                with_sound_budget(
+                    &stop,
+                    open_and_observe_sounds_armed(
+                        &session,
+                        SoundPickerPlan::resolve("com.ss.android.ugc.trill", "en", "38.3.2")
+                            .unwrap(),
+                        1,
+                        &mut arm,
+                    )
+                ),
+                async {
+                    if mode == "stop" {
+                        tokio::time::sleep(Duration::from_secs(2)).await;
+                        stop.store(true, Ordering::Relaxed);
+                    }
+                },
+            );
+            if mode == "pool" {
+                let pool = result.expect("Trill Recommended pool after first XML-proven entry tap");
+                assert_eq!(pool.candidates.len(), 1);
+                assert_eq!(pool.candidates[0].title, "Tung Zin Zin");
+                assert_eq!(session.taps.load(Ordering::Relaxed), 1);
+                assert!(armed.load(Ordering::Relaxed));
+                continue;
+            }
+            let error = result.unwrap_err();
+            if mode == "ready" {
+                assert!(
+                    format!("{error:#}").contains("fixture loses the open acknowledgement"),
+                    "fresh XML must reach exactly one opening tap: {error:#}"
+                );
+            }
+            assert_eq!(
+                session.taps.load(Ordering::Relaxed),
+                usize::from(mode == "ready")
+            );
+            assert_eq!(armed.load(Ordering::Relaxed), mode == "ready");
+            assert!(
+                start.elapsed() < Duration::from_secs(40),
+                "entry lookup must leave budget for pool proof"
+            );
+            if mode == "stop" {
+                assert!(error.is::<SoundStopped>());
+            }
+        }
     }
 
     struct InlineSession {

@@ -229,6 +229,19 @@ impl Database {
         if s.sound.is_none() {
             s.sound = selection.cloned();
             write(&tx, id, token, &s)?;
+        } else if let (Some(bound), Some(proof)) = (s.sound.as_mut(), selection) {
+            // Re-observation may reorder the pool. Keep its original provenance
+            // and promote only proof of the already bound identity, never a
+            // different choice or a downgrade after a later unreadable frame.
+            if !bound.confirmed
+                && proof.confirmed
+                && bound.section == proof.section
+                && bound.title == proof.title
+                && bound.artist == proof.artist
+            {
+                bound.confirmed = true;
+                write(&tx, id, token, &s)?;
+            }
         };
         tx.commit()?;
         Ok(s.sound)
@@ -469,7 +482,36 @@ mod tests {
         assert_eq!(observed, Some(expected.clone()));
         assert_eq!(
             db.publish_recovery_state(&id).unwrap().unwrap().sound,
-            Some(expected)
+            Some(expected.clone())
+        );
+
+        // A fresh proof may promote only the bound identity, not replace its
+        // original pool provenance or erase an earlier confirmation.
+        let mut confirmed = expected.clone();
+        confirmed.confirmed = true;
+        let mut other = confirmed.clone();
+        other.title = "Another sound".into();
+        assert_eq!(
+            db.bind_publish_recovery_sound(&id, &run.token, Some(&other))
+                .unwrap(),
+            Some(expected.clone())
+        );
+        let mut refreshed = confirmed.clone();
+        refreshed.index = 2;
+        refreshed.candidates_digest = "new-pool".into();
+        assert_eq!(
+            db.bind_publish_recovery_sound(&id, &run.token, Some(&refreshed))
+                .unwrap(),
+            Some(confirmed.clone())
+        );
+        assert_eq!(
+            db.bind_publish_recovery_sound(&id, &run.token, Some(&expected))
+                .unwrap(),
+            Some(confirmed.clone())
+        );
+        assert_eq!(
+            db.publish_recovery_state(&id).unwrap().unwrap().sound,
+            Some(confirmed)
         );
     }
     #[test]

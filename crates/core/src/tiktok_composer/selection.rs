@@ -272,7 +272,7 @@ fn snapshot_has_album(
     controls: PickerControls,
     query: ElementQuery<'_>,
     album: &str,
-) -> anyhow::Result<bool> {
+) -> anyhow::Result<Option<bool>> {
     let tree = crate::ui_automation::tree::Tree::parse(crate::HierarchySourceSnapshot {
         generation: 1,
         xml: xml.into(),
@@ -291,7 +291,8 @@ fn snapshot_has_album(
             .map(|(i, _)| i)
             .collect()
     };
-    Ok(matched.len() == 1 && tree.nodes[matched[0]].attr("text").trim() == album)
+    Ok((!matched.is_empty())
+        .then(|| matched.len() == 1 && tree.nodes[matched[0]].attr("text").trim() == album))
 }
 
 /// How far an extrapolated row may sit from `previous row + pitch` and still be the grid.
@@ -658,11 +659,11 @@ impl PickerTrace {
         self.diagnostic.next_bounds = parsed.1.iter().take(3).map(SelectionBounds::from).collect();
         self.diagnostic.next_count = explicit_count(&parsed.1);
         let matched = snapshot_has_album(&snapshot.xml, controls, album_query, album)?;
-        self.diagnostic.album_matches = Some(matched);
-        if !matched {
+        self.diagnostic.album_matches = matched;
+        if matched != Some(true) {
             self.reason(SelectionReason::AlbumMismatch);
         }
-        Ok(matched.then_some(parsed))
+        Ok((matched == Some(true)).then_some(parsed))
     }
 
     fn verified(&mut self, count: usize) {
@@ -808,21 +809,63 @@ impl<P: TapPlanner> Composer<'_, P> {
                 trace.reason(SelectionReason::TapFailed);
                 self.tap_inside(row).await?;
                 let expected = count + 1;
-                let deadline = Instant::now() + ARM_WINDOW;
+                let mut deadline = Instant::now() + ARM_WINDOW;
+                // Trill 38.3.2, ce031713dd735a1103, 28/09/2026: after
+                // four verified selections, a 5151ms read had no album or
+                // controls. Missing evidence permits one observation window,
+                // never another tap; explicit album contradictions still stop.
+                let hard_deadline = deadline + Duration::from_secs(8);
+                let mut recovering_partial = false;
                 current = loop {
                     if stop.load(Ordering::Relaxed) {
                         trace.reason(SelectionReason::Stopped);
                         return Ok(Selection::Stopped);
                     }
-                    let Some((rows, next)) =
-                        trace.read(session, controls, album_query, album).await?
-                    else {
-                        return Ok(Selection::NotEnoughSelected);
+                    let observed = {
+                        let read = tokio::time::timeout_at(
+                            hard_deadline,
+                            trace.read(session, controls, album_query, album),
+                        );
+                        tokio::pin!(read);
+                        loop {
+                            tokio::select! {
+                                result = &mut read => break result.ok(),
+                                _ = tokio::time::sleep(POLL) => {
+                                    if stop.load(Ordering::Relaxed) {
+                                        break None;
+                                    }
+                                }
+                            }
+                        }
                     };
-                    if let Some(observed) =
-                        visible_selection(rows, &next, screen, &mut grid, expected)
-                    {
-                        break observed;
+                    let observed = match observed {
+                        Some(result) => result?,
+                        None => None,
+                    };
+                    if stop.load(Ordering::Relaxed) {
+                        trace.reason(SelectionReason::Stopped);
+                        return Ok(Selection::Stopped);
+                    }
+                    if Instant::now() >= hard_deadline {
+                        trace.reason(SelectionReason::SelectionReadbackUnproven);
+                        return Ok(Selection::NotEnoughSelected);
+                    }
+                    if trace.diagnostic.album_matches == Some(false) {
+                        return Ok(Selection::NotEnoughSelected);
+                    }
+                    let partial = observed
+                        .as_ref()
+                        .is_none_or(|(rows, next)| rows.is_empty() || next.is_empty());
+                    if partial && !recovering_partial {
+                        recovering_partial = true;
+                        deadline = hard_deadline;
+                    }
+                    if let Some((rows, next)) = observed {
+                        if let Some(proved) =
+                            visible_selection(rows, &next, screen, &mut grid, expected)
+                        {
+                            break proved;
+                        }
                     }
                     if Instant::now() >= deadline {
                         trace.reason(SelectionReason::SelectionReadbackUnproven);
@@ -1070,6 +1113,9 @@ mod tests {
         corrupt_scrolled_row: Option<&'static str>,
         fail_swipe: bool,
         fail_read_after: Option<usize>,
+        partial_after_fifth: Mutex<Option<Duration>>,
+        partial_forever: bool,
+        wrong_after_fifth: bool,
         swipes: Mutex<usize>,
     }
     impl Picker {
@@ -1088,6 +1134,9 @@ mod tests {
                 corrupt_scrolled_row: None,
                 fail_swipe: false,
                 fail_read_after: None,
+                partial_after_fifth: Mutex::new(None),
+                partial_forever: false,
+                wrong_after_fifth: false,
                 swipes: Mutex::new(0),
             }
         }
@@ -1205,12 +1254,30 @@ mod tests {
             }
             let rows = self.rows();
             let count = *self.selected.lock();
-            let album =
-                if self.wrong_album || (self.corrupt_after_ten == Some("album") && count >= 10) {
-                    "Other"
-                } else {
-                    "album"
-                };
+            if self.taps.lock().len() == 5 {
+                let delay = self.partial_after_fifth.lock().take();
+                if let Some(delay) = delay {
+                    tokio::time::sleep(delay).await;
+                    return Ok(crate::HierarchySourceSnapshot {
+                        generation: reads as u64 + 1,
+                        xml: "<hierarchy/>".into(),
+                    });
+                }
+                if self.partial_forever {
+                    return Ok(crate::HierarchySourceSnapshot {
+                        generation: reads as u64 + 1,
+                        xml: "<hierarchy/>".into(),
+                    });
+                }
+            }
+            let album = if self.wrong_album
+                || (self.wrong_after_fifth && self.taps.lock().len() >= 5)
+                || (self.corrupt_after_ten == Some("album") && count >= 10)
+            {
+                "Other"
+            } else {
+                "album"
+            };
             let cells=rows.iter().map(|r|format!(r#"<node package="fixture" class="android.widget.Button" resource-id="fixture:id/h4b" text="{}" bounds="[{},{}][{},{}]" displayed="true" enabled="true" clickable="true"/>"#,r.description.as_deref().unwrap_or(""),r.x,r.y,r.x+r.width,r.y+r.height)).collect::<String>();
             Ok(crate::driver::HierarchySourceSnapshot {
                 generation: 1,
@@ -1848,6 +1915,91 @@ mod tests {
         ));
         assert_eq!(session.taps.lock().len(), 6);
     }
+    #[tokio::test(start_paused = true)]
+    async fn partial_tree_after_fifth_tap_recovers_only_exact_order_without_replaying_tap() {
+        for mode in [
+            "recovers",
+            "wrong-album",
+            "dropped-tap",
+            "never-recovers",
+            "stopped",
+        ] {
+            let mut session = Picker::new((mode == "dropped-tap").then_some(4));
+            session.total = 8;
+            *session.partial_after_fifth.lock() = Some(Duration::from_millis(5151));
+            session.wrong_after_fifth = mode == "wrong-album";
+            session.partial_forever = mode == "never-recovers";
+            let start = Instant::now();
+            let stop = AtomicBool::new(false);
+            let plan =
+                ComposerPlan::resolve(&crate::tiktok_labels::every_publish_control_measured())
+                    .unwrap();
+            let mut composer = Composer::new(&session, plan, |r: &ElementBox| r.centre());
+            let (result, ()) = tokio::join!(
+                composer.select_verified(
+                    PickerControls {
+                        package: "fixture",
+                        selector: ElementQuery::ResourceIdSuffix(":id/h4b"),
+                        next: ElementQuery::ResourceIdSuffix(":id/q4g")
+                    },
+                    Screen::new(1080.0, 2220.0).unwrap(),
+                    8,
+                    "album",
+                    &stop,
+                ),
+                async {
+                    if mode == "stopped" {
+                        tokio::time::sleep(Duration::from_secs(1)).await;
+                        stop.store(true, Ordering::Relaxed);
+                    }
+                },
+            );
+            let result = result.unwrap();
+            if mode == "recovers" {
+                assert!(
+                    matches!(
+                        result,
+                        Selection::Armed {
+                            counted: Some(8),
+                            ..
+                        }
+                    ),
+                    "partial tree must be observed again: {result:?}"
+                );
+                assert_eq!(session.taps.lock().len(), 8);
+            } else {
+                assert_eq!(
+                    result,
+                    if mode == "stopped" {
+                        Selection::Stopped
+                    } else {
+                        Selection::NotEnoughSelected
+                    }
+                );
+                if mode == "stopped" {
+                    assert!(start.elapsed() < Duration::from_secs(2));
+                }
+                assert_eq!(
+                    composer
+                        .last_selection_diagnostic()
+                        .unwrap()
+                        .last_verified_count,
+                    4
+                );
+                assert_eq!(
+                    session.taps.lock().len(),
+                    5,
+                    "never replay the uncertain fifth tap"
+                );
+            }
+            assert_eq!(*session.swipes.lock(), 0);
+            assert!(
+                start.elapsed() < Duration::from_secs(14),
+                "partial-tree recovery must be bounded"
+            );
+        }
+    }
+
     #[tokio::test(start_paused = true)]
     async fn dropped_selection_stops_without_retry_or_remaining_taps() {
         let session = Picker::new(Some(2));

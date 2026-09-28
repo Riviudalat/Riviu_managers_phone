@@ -2078,24 +2078,36 @@ pub(super) async fn capture_confirmed_assignment_link(
             anyhow::ensure!(chrono::DateTime::parse_from_rfc3339(&identity.submitted_at).is_ok()
                 && !identity.account.trim().is_empty(), "Thiếu định danh bài đã gửi");
         }
-        let restart_proof = super::verification_restart::foreground(control, &context, &package, restart, || {
-            super::verification_restart::authorize(db, assignment, observer)
+        let shared_debt = super::verification_restart::shared_debt(db, assignment)?;
+        let authorize = || {
+            if shared_debt {
+                super::verification_restart::authorize(db, assignment, observer)
+            } else {
+                super::verification_restart::authorize_restart(db, assignment, observer)
+            }
+        };
+        let guarded = super::verification_session::VerificationSession::new(session.as_ref(), &authorize);
+        guarded.check()?;
+        let restart_proof = if shared_debt {
+            Some(super::verification_restart::admit_warm(&guarded, &package, &language, &version, &identity.account).await?)
+        } else { super::verification_restart::foreground(control, &context, &package, restart, || {
+            super::verification_restart::authorize_restart(db, assignment, observer)
         }).await.map_err(|error| anyhow::Error::new(super::verification::VerificationObservation {
             code: "readFailed",
             reason: format!("Chưa mở lại TikTok để lấy link: {error}; thử lại sau 5 phút"),
             diagnostic: Some(serde_json::json!({"appRestart":{"state":"failed","package":package,"error":error.to_string()}})),
-        }))?;
+        }))? };
         if let Some(proof) = &restart_proof {
             log::info!("publish verification restart assignment={} proof={}", assignment.id, proof);
         }
-        if let Err(error) = control.request_app_completion(&assignment.udid, &package) {
-            log::warn!("publication completion intent {}: {error}", assignment.id);
+        if !shared_debt {
+            if let Err(error) = control.request_app_completion(&assignment.udid, &package) {
+                log::warn!("publication completion intent {}: {error}", assignment.id);
+            }
         }
         let plan = riviu_core::tiktok_share::PublishVerificationPlan::for_runtime(
             &package, &language, &version,
         )?;
-        let authorize = || super::verification_restart::authorize(db, assignment, observer);
-        let guarded = super::verification_session::VerificationSession::new(session.as_ref(), &authorize);
         guarded.check()?;
         let session: &dyn riviu_core::UiSession = &guarded;
         let labels = riviu_core::tiktok_labels::controls_for_runtime(&package, &language, &version)

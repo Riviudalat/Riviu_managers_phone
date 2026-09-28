@@ -1660,18 +1660,35 @@ impl<'a, P: TapPlanner> Composer<'a, P> {
                         return Ok(ComposerVerdict::Stopped);
                     }
                     if self.require_caption_unchanged(caption).await.is_err() {
-                        return Err(first_error.context("final sound editor reproof"));
+                        // Trill 38.3.2, ce031713dd735a1103, 28/09/2026:
+                        // Back can expose a partial caption-layout tree while the
+                        // editor is already visible; a later read restores so9.
+                        // Unknown UI authorizes observations, never another Back.
+                        let proof = crate::tiktok_sound::confirm_sound_after_transition(
+                            self.session,
+                            sound_plan,
+                            &expected_title,
+                            stop,
+                        )
+                        .await;
+                        if stop.load(Ordering::Relaxed) {
+                            return Ok(ComposerVerdict::Stopped);
+                        }
+                        if proof.is_err() {
+                            return Err(first_error.context("final sound editor reproof"));
+                        }
+                    } else {
+                        let fresh_back = self.session.locate_all(back_query).await?;
+                        let [fresh_back] = fresh_back.as_slice() else {
+                            return Err(
+                                first_error.context("sound reproof: caption Back retry ambiguous")
+                            );
+                        };
+                        self.tap_inside(fresh_back).await?;
+                        confirm_sound(self.session, sound_plan, &expected_title)
+                            .await
+                            .context("final sound editor reproof after caption Back retry")?;
                     }
-                    let fresh_back = self.session.locate_all(back_query).await?;
-                    let [fresh_back] = fresh_back.as_slice() else {
-                        return Err(
-                            first_error.context("sound reproof: caption Back retry ambiguous")
-                        );
-                    };
-                    self.tap_inside(fresh_back).await?;
-                    confirm_sound(self.session, sound_plan, &expected_title)
-                        .await
-                        .context("final sound editor reproof after caption Back retry")?;
                 }
                 anyhow::ensure!(
                     self.advance_to_post_screen(stop).await?,
@@ -1817,18 +1834,77 @@ impl<'a, P: TapPlanner> Composer<'a, P> {
 
     async fn require_caption_unchanged(&self, caption: &str) -> anyhow::Result<()> {
         let query = self.plan.publish.context("caption plan missing")?.caption;
-        let rows = self.session.locate_all_described(query).await?;
+        let observed = self.session.locate_all_described(query).await;
         #[cfg(debug_assertions)]
-        if !matches!(rows.as_slice(), [only] if only.description.as_deref().is_some_and(|value| caption_readback_matches(value, caption)))
+        if !matches!(&observed, Ok(rows) if matches!(rows.as_slice(), [only] if only.description.as_deref().is_some_and(|value| caption_readback_matches(value, caption))))
         {
+            // Keep the actual failed read separately: the following hierarchy
+            // snapshot is a later observation and may already have changed.
+            self.trace_caption_readback(query, caption, &observed);
             self.trace_missing_post_button("caption-reproof-mismatch", caption)
                 .await;
         }
+        let rows = observed?;
         anyhow::ensure!(
             matches!(rows.as_slice(), [only] if only.description.as_deref().is_some_and(|value| caption_readback_matches(value, caption))),
             "sound reproof: caption changed or unreadable"
         );
         Ok(())
+    }
+
+    #[cfg(debug_assertions)]
+    fn trace_caption_readback(
+        &self,
+        query: ElementQuery<'_>,
+        caption: &str,
+        observed: &anyhow::Result<Vec<ElementBox>>,
+    ) {
+        let Some(folder) = std::env::var_os("RIVIU_PUBLISH_PICKER_TRACE") else {
+            return;
+        };
+        let result = (|| {
+            use sha2::{Digest, Sha256};
+            let folder = std::path::PathBuf::from(folder);
+            anyhow::ensure!(
+                folder.is_absolute(),
+                "Caption trace directory must be absolute"
+            );
+            let scope = self.session.gui_scope();
+            let device = scope
+                .as_ref()
+                .map(|scope| scope.device_id.as_str())
+                .unwrap_or("unscoped");
+            let rows = observed.as_ref().ok().map(|rows| {
+                rows.iter()
+                    .map(|row| {
+                        serde_json::json!({
+                            "text":row.description,
+                            "x":row.x,"y":row.y,"width":row.width,"height":row.height,
+                            "enabled":row.enabled,"clickable":row.clickable,
+                        })
+                    })
+                    .collect::<Vec<_>>()
+            });
+            let metadata = serde_json::json!({
+                "stage":"caption-reproof-mismatch",
+                "scope":scope,
+                "sessionEpoch":self.session.gui_session_epoch(),
+                "captionQuery":format!("{query:?}"),
+                "captionSha256":format!("{:x}",Sha256::digest(caption.as_bytes())),
+                "observedRows":rows,
+                "readError":observed.as_ref().err().map(|error| format!("{error:#}")),
+            });
+            let name = format!(
+                "caption-readback-{:x}.json",
+                Sha256::digest(device.as_bytes())
+            );
+            std::fs::create_dir_all(&folder)?;
+            std::fs::write(folder.join(name), serde_json::to_vec_pretty(&metadata)?)?;
+            Ok::<_, anyhow::Error>(())
+        })();
+        if let Err(error) = result {
+            tracing::warn!(%error, "could not capture failed caption readback");
+        }
     }
 
     /// Back out until the bottom tab bar is visible again.
@@ -2439,6 +2515,21 @@ where
                         );
                     }
                 }
+                if let Some(selection) = selected.as_ref() {
+                    let pool = observed.as_ref().context("sound pool missing")?;
+                    if !pool.candidates.iter().any(|candidate| {
+                        candidate.title == selection.title && candidate.artist == selection.artist
+                    }) {
+                        observed = Some(
+                            crate::tiktok_sound::recover_frozen_sound_pool(
+                                session,
+                                pool.effective_plan(sound_plan),
+                                selection,
+                            )
+                            .await?,
+                        );
+                    }
+                }
                 let pool = observed.as_ref().context("sound pool missing")?;
                 let sound_plan = pool.effective_plan(sound_plan);
                 if selected.is_none() {
@@ -2503,6 +2594,9 @@ where
             title: selection.title.clone(),
         });
         selection.confirmed = true;
+        // Persist the proof before caption/navigation can fail. The original
+        // intent alone must not make a confirmed sound look unselected on retry.
+        crate::publish_recovery::bind_sound(&selection)?;
         crate::publish_recovery::step("caption", Some("soundConfirmed"))?;
         composer.pending_sound_proof = Some((sound_plan, selection.title.clone()));
         let mut record_selected_sound = || before_post(&selection);
@@ -3484,6 +3578,7 @@ mod tests {
         stale_list_geometry: bool,
         post_reproof_gaps: Mutex<std::collections::VecDeque<bool>>,
         change_caption_during_post_gap: bool,
+        sound_read_delays: Mutex<std::collections::VecDeque<Duration>>,
         screens: Vec<Scene>,
         at: Mutex<usize>,
         taps: Mutex<Vec<TapPoint>>,
@@ -3803,6 +3898,13 @@ mod tests {
             &self,
             query: ElementQuery<'_>,
         ) -> anyhow::Result<Vec<ElementBox>> {
+            if query == ElementQuery::ResourceIdSuffix(":id/so9") {
+                let delay = self.sound_read_delays.lock().pop_front();
+                if let Some(delay) = delay {
+                    tokio::time::sleep(delay).await;
+                    return Ok(Vec::new());
+                }
+            }
             let wanted = match query {
                 ElementQuery::Description { value, .. }
                 | ElementQuery::Text { value, .. }
@@ -4073,6 +4175,99 @@ mod tests {
         assert_eq!(saved.lock()[0].last_verified_count, 0);
         assert_eq!(saved.lock()[0].expected_count, 14);
         assert!(session.typed.lock().is_none());
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn confirmed_sound_is_journaled_before_caption_can_fail() {
+        #[derive(Default)]
+        struct Journal(Mutex<Vec<SoundSelectionEvidence>>);
+        impl crate::publish_recovery::RecoveryJournal for Journal {
+            fn step(&self, step: &str, _: Option<&str>) -> anyhow::Result<()> {
+                anyhow::ensure!(step != "caption", "fixture caption unavailable");
+                Ok(())
+            }
+            fn retry(
+                &self,
+                _: &crate::publish_recovery::RecoveryFailure,
+            ) -> anyhow::Result<Option<Duration>> {
+                Ok(None)
+            }
+            fn sound(
+                &self,
+                selection: Option<&SoundSelectionEvidence>,
+            ) -> anyhow::Result<Option<SoundSelectionEvidence>> {
+                if let Some(selection) = selection {
+                    self.0.lock().push(selection.clone());
+                }
+                Ok(self.0.lock().last().cloned())
+            }
+        }
+
+        // Reuse the measured inline-sheet shape: already selected marker, then
+        // Back closes the sheet onto the editor with the exact selected title.
+        let mut session = FakeSession::full_walk("album");
+        let mut editor = sound_edit_step("Sound A");
+        editor
+            .elements
+            .insert(":id/c_4".into(), box_at(100.0, 100.0));
+        editor.exit = Some(":id/c_4".into());
+        let sheet = scene(
+            vec![
+                ("Recommended", box_at(0.0, 0.0)),
+                (":id/ta8", labelled("", 0.0, 100.0, 800.0, 200.0)),
+                (":id/title", box_at(100.0, 120.0)),
+                (":id/rr5", box_at(100.0, 200.0)),
+                (":id/dfu", box_at(500.0, 120.0)),
+            ],
+            None,
+        )
+        .texted("Recommended", "Recommended")
+        .texted(":id/title", "Sound A")
+        .texted(":id/rr5", "Artist A");
+        session.screens.truncate(7);
+        session.screens.extend([editor, sheet]);
+        let journal = std::sync::Arc::new(Journal::default());
+        let result = crate::publish_recovery::scope(
+            journal.clone(),
+            publish_selected_media_with_sound_effect_intent(
+                &session,
+                plan(),
+                SoundPickerPlan::resolve("com.ss.android.ugc.trill", "en", "38.3.2").unwrap(),
+                &PublishSoundPolicy::TrendingAny {
+                    pool_size: 1,
+                    seed: 1,
+                },
+                |element: &ElementBox| element.centre(),
+                PickerSelection {
+                    album: "album",
+                    count: 1,
+                    screen: screen(),
+                    video: true,
+                },
+                "caption",
+                &AtomicBool::new(false),
+                |_| panic!("caption failure must precede Post intent"),
+                &|_| {},
+                &|_| {},
+            ),
+        )
+        .await;
+        assert!(format!("{:#}", result.unwrap_err()).contains("fixture caption unavailable"));
+        let writes = journal.0.lock();
+        assert_eq!(
+            writes.len(),
+            2,
+            "intent and confirmed evidence must both reach the journal"
+        );
+        assert!(!writes[0].confirmed);
+        let mut expected = writes[0].clone();
+        expected.confirmed = true;
+        assert_eq!(
+            writes[1], expected,
+            "confirmation must preserve the frozen identity"
+        );
+        assert!(session.typed.lock().is_none());
+        assert_eq!(post_button_taps(&session), 0);
     }
 
     #[tokio::test(start_paused = true)]
@@ -4992,6 +5187,77 @@ mod tests {
             0,
             "sound mismatch must be detected before the write-ahead boundary and Post gesture"
         );
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn partial_editor_tree_after_caption_back_gets_read_only_reproof() {
+        for (title, cancel) in [("Sound A", false), ("Sound B", false), ("Sound A", true)] {
+            let mut caption_page = post_screen();
+            caption_page
+                .elements
+                .insert(":id/aun".into(), box_at(20.0, 70.0));
+            caption_page.exit = Some(":id/aun".into());
+            let session = FakeSession::with(vec![
+                caption_page,
+                sound_edit_step(title),
+                post_screen(),
+                feed(),
+            ]);
+            *session.typed.lock() = Some("caption".into());
+            // Live 081: editor image with a partial caption-layout tree lacking
+            // both eej and so9; a later observation restores the editor title.
+            // The original failing run also had an 8075 ms elements request.
+            session
+                .sound_read_delays
+                .lock()
+                .extend([Duration::from_millis(8075), Duration::from_secs(1)]);
+            let mut composer = Composer::new(&session, plan(), |e: &ElementBox| e.centre());
+            composer.pending_sound_proof = Some((
+                SoundPickerPlan::resolve("com.ss.android.ugc.trill", "en", "38.3.2").unwrap(),
+                "Sound A".into(),
+            ));
+            let stop = AtomicBool::new(false);
+            let mut intents = 0;
+            let mut before_post = || {
+                intents += 1;
+                Ok(())
+            };
+            let start = Instant::now();
+            let (result, ()) = tokio::join!(
+                composer.post_with_effect_intent("caption", &stop, &mut before_post),
+                async {
+                    if cancel {
+                        tokio::time::sleep(Duration::from_millis(8500)).await;
+                        stop.store(true, Ordering::Relaxed);
+                    }
+                },
+            );
+            if cancel {
+                assert_eq!(result.unwrap(), ComposerVerdict::Stopped);
+                assert!(start.elapsed() < Duration::from_secs(10));
+            } else if title == "Sound A" {
+                assert!(result
+                    .expect("late exact editor proof must recover without Back")
+                    .is_submitted());
+            } else {
+                let error = format!("{:#}", result.unwrap_err());
+                assert!(
+                    error.contains("observed []"),
+                    "retain the original failed proof: {error}"
+                );
+                assert!(start.elapsed() < Duration::from_secs(18));
+            }
+            let posted = usize::from(!cancel && title == "Sound A");
+            assert_eq!(intents, posted);
+            assert_eq!(post_button_taps(&session), posted);
+            assert_eq!(
+                session.taps.lock().len(),
+                if posted == 1 { 3 } else { 1 },
+                "unknown tree must never authorize another Back"
+            );
+            assert_eq!(*session.backs.lock(), 0);
+            assert_eq!(session.typed.lock().as_deref(), Some("caption"));
+        }
     }
 
     #[tokio::test(start_paused = true)]

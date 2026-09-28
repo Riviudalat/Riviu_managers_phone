@@ -123,7 +123,7 @@ pub(super) fn requested(assignment: &PublishAssignmentRecord, package: &str) -> 
         && post["postUrl"].as_str().is_none_or(str::is_empty)
 }
 
-pub(super) fn authorize(
+fn authorize_current(
     db: &Database,
     assignment: &PublishAssignmentRecord,
     observer: Option<&riviu_core::db::PendingPublishVerification>,
@@ -152,6 +152,27 @@ pub(super) fn authorize(
             "Lượt xác minh đã thay đổi hoặc đã dừng"
         );
     }
+    Ok(())
+}
+
+pub(super) fn shared_debt(
+    db: &Database,
+    assignment: &PublishAssignmentRecord,
+) -> anyhow::Result<bool> {
+    Ok(db
+        .publish_device_guard(&assignment.udid)?
+        .blocking
+        .iter()
+        .any(|hold| hold.assignment_id != assignment.id))
+}
+
+/// Destructive restart retains the original device-wide upload exclusion.
+pub(super) fn authorize_restart(
+    db: &Database,
+    assignment: &PublishAssignmentRecord,
+    observer: Option<&riviu_core::db::PendingPublishVerification>,
+) -> anyhow::Result<()> {
+    authorize_current(db, assignment, observer)?;
     let guard = db.publish_device_guard(&assignment.udid)?;
     anyhow::ensure!(
         guard
@@ -161,6 +182,229 @@ pub(super) fn authorize(
         "Máy còn bài khác chưa xác minh; chưa khởi động lại TikTok"
     );
     Ok(())
+}
+
+/// Only used by a warm verifier after measured surface admission. The caller
+/// holds the existing per-device verify permit and exclusive control lease.
+pub(super) fn authorize(
+    db: &Database,
+    assignment: &PublishAssignmentRecord,
+    observer: Option<&riviu_core::db::PendingPublishVerification>,
+) -> anyhow::Result<()> {
+    authorize_current(db, assignment, observer)?;
+    let identity: serde_json::Value = serde_json::from_str(
+        assignment
+            .effect_intent
+            .as_deref()
+            .ok_or_else(|| anyhow::anyhow!("submission identity missing"))?,
+    )?;
+    let package = identity["package"].as_str().unwrap_or_default();
+    let account = identity["expectedAccount"].as_str().unwrap_or_default();
+    anyhow::ensure!(
+        !package.is_empty() && !account.trim().is_empty(),
+        "submission identity missing"
+    );
+    let mut holds = db.publish_device_guard(&assignment.udid)?.blocking;
+    // Also check this receipt even if its earlier stop-release has parked it.
+    holds.push(riviu_core::db::PublishDeviceHold {
+        assignment_id: assignment.id.clone(),
+        campaign_id: assignment.campaign_id.clone(),
+        updated_at: String::new(),
+        reason: String::new(),
+    });
+    for hold in holds {
+        anyhow::ensure!(
+            !db.has_active_publish_pipeline(&hold.campaign_id)?,
+            "active publish pipeline; keep app unchanged"
+        );
+        let row = db
+            .get_publish_assignment_detail(&hold.campaign_id, &hold.assignment_id)?
+            .and_then(|detail| {
+                detail
+                    .assignments
+                    .into_iter()
+                    .find(|row| row.id == hold.assignment_id)
+            })
+            .ok_or_else(|| anyhow::anyhow!("publication missing"))?;
+        let intent: serde_json::Value = serde_json::from_str(
+            row.effect_intent
+                .as_deref()
+                .ok_or_else(|| anyhow::anyhow!("peer submission identity missing"))?,
+        )?;
+        let evidence: serde_json::Value = serde_json::from_str(
+            row.evidence_json
+                .as_deref()
+                .ok_or_else(|| anyhow::anyhow!("peer submission receipt missing"))?,
+        )?;
+        anyhow::ensure!(
+            matches!(
+                row.state,
+                riviu_core::PublishCampaignState::Verifying
+                    | riviu_core::PublishCampaignState::Uncertain
+            ) && row.udid == assignment.udid
+                && row
+                    .dispatch
+                    .as_ref()
+                    .is_none_or(|job| job["state"] == "finished")
+                && matches!(
+                    intent["effectIntent"].as_str(),
+                    Some("post" | "post_carousel")
+                )
+                && intent["package"].as_str() == Some(package)
+                && intent["expectedAccount"].as_str().is_some_and(|a| a
+                    .trim_start_matches('@')
+                    .eq_ignore_ascii_case(account.trim_start_matches('@')))
+                && intent["submittedAt"]
+                    .as_str()
+                    .is_some_and(|t| chrono::DateTime::parse_from_rfc3339(t).is_ok())
+                && matches!(
+                    evidence["post"]["state"].as_str(),
+                    Some("submitted" | "posted")
+                ),
+            "other publication may still be composing or uploading; keep app unchanged"
+        );
+    }
+    Ok(())
+}
+
+fn warm_surface(
+    tree: &riviu_core::ui_automation::tree::Tree,
+    account: &str,
+) -> Option<&'static str> {
+    use riviu_core::ElementQuery as Q;
+    const PACKAGE: &str = "com.ss.android.ugc.trill";
+    let labels = riviu_core::tiktok_labels::controls_for_runtime(PACKAGE, "en", "38.3.2")?;
+    for control in [
+        riviu_core::tiktok_labels::TikTokControl::ComposerCaption,
+        riviu_core::tiktok_labels::TikTokControl::PostButton,
+        riviu_core::tiktok_labels::TikTokControl::ComposerShutter,
+    ] {
+        if labels
+            .label(control)
+            .is_some_and(|label| !tree.matching(PACKAGE, label.to_query()).is_empty())
+        {
+            return None;
+        }
+    }
+    for (i, node) in tree.nodes.iter().enumerate() {
+        if node.visibility() == Some(false) || !tree.ancestors_visible(i) {
+            continue;
+        }
+        if !node.attr("package").is_empty() && node.attr("package") != PACKAGE {
+            return None;
+        }
+        if matches!(
+            node.attr("class"),
+            "android.widget.EditText" | "android.widget.ProgressBar"
+        ) {
+            return None;
+        }
+        let text = format!("{} {}", node.attr("text"), node.attr("content-desc")).to_lowercase();
+        if [
+            "uploading",
+            "processing",
+            "posting",
+            "đang tải",
+            "đang đăng",
+            "đang xử lý",
+        ]
+        .iter()
+        .any(|s| text.contains(s))
+        {
+            return None;
+        }
+    }
+    let one = |query| {
+        let indices = tree.matching(PACKAGE, query);
+        let [index] = indices.as_slice() else {
+            return None;
+        };
+        let node = &tree.nodes[*index];
+        (node.visibility() == Some(true) && node.attr("enabled") == "true").then_some(node)
+    };
+    let back = one(Q::ResourceIdSuffix(":id/aur"));
+    let caption = one(Q::ResourceIdSuffix(":id/dmk"));
+    let time = one(Q::ResourceIdSuffix(":id/qrp"));
+    let privacy = one(Q::ResourceIdSuffix(":id/ma9"));
+    let shares = tree.matching(
+        PACKAGE,
+        Q::Description {
+            value: "Share video.",
+            exact: false,
+        },
+    );
+    if back.is_some_and(|n| n.attr("content-desc") == "Back" && n.attr("clickable") == "true")
+        && caption.is_some_and(|n| {
+            n.attr("class") == "android.widget.TextView" && !n.attr("text").trim().is_empty()
+        })
+        && time.is_some_and(|n| !n.attr("text").trim().is_empty())
+        && privacy
+            .is_some_and(|n| n.attr("text") == "Privacy settings" && n.attr("clickable") == "true")
+        && matches!(shares.as_slice(), [i] if tree.nodes[*i].visibility() == Some(true) && tree.nodes[*i].rect().is_some_and(|r| r.enabled && r.clickable))
+    {
+        return Some("ownPostViewer");
+    }
+    let profile = one(Q::Text {
+        value: "Edit profile",
+        exact: true,
+    });
+    let username = one(Q::ResourceIdSuffix(":id/mjf"));
+    if profile.is_some()
+        && username.is_some_and(|n| {
+            n.attr("text")
+                .trim()
+                .trim_start_matches('@')
+                .eq_ignore_ascii_case(account.trim_start_matches('@'))
+        })
+    {
+        return Some("ownProfile");
+    }
+    None
+}
+
+/// Read-only admission, not proof that either pending publication succeeded.
+pub(super) async fn admit_warm(
+    session: &dyn riviu_core::UiSession,
+    package: &str,
+    locale: &str,
+    version: &str,
+    account: &str,
+) -> anyhow::Result<serde_json::Value> {
+    anyhow::ensure!(
+        (package, locale, version) == ("com.ss.android.ugc.trill", "en", "38.3.2"),
+        "shared-debt warm surface not measured for this build"
+    );
+    let epoch = session.gui_session_epoch();
+    anyhow::ensure!(!epoch.is_empty(), "warm session epoch missing");
+    let mut previous = None;
+    for _ in 0..2 {
+        anyhow::ensure!(session.gui_session_epoch() == epoch, "warm session changed");
+        anyhow::ensure!(
+            session.active_app_bundle().await? == package,
+            "foreign foreground app; keep unchanged"
+        );
+        let snapshot = session.hierarchy_source_snapshot().await?;
+        let tree = riviu_core::ui_automation::tree::Tree::parse(snapshot)?;
+        anyhow::ensure!(session.gui_session_epoch() == epoch, "warm session changed");
+        let surface = warm_surface(&tree, account).ok_or_else(|| {
+            anyhow::anyhow!("composer/upload or unmeasured warm screen; keep unchanged")
+        })?;
+        if let Some((generation, before)) = previous {
+            anyhow::ensure!(
+                tree.generation > generation && surface == before,
+                "warm screen changed or stale"
+            );
+        }
+        previous = Some((tree.generation, surface));
+    }
+    anyhow::ensure!(
+        session.active_app_bundle().await? == package,
+        "foreground changed; keep unchanged"
+    );
+    anyhow::ensure!(session.gui_session_epoch() == epoch, "warm session changed");
+    Ok(
+        serde_json::json!({"state":"keptRunning","reason":"sharedPublicationDebt","surface":previous.map(|(_, s)| s),"package":package}),
+    )
 }
 
 pub(super) async fn foreground(
@@ -224,7 +468,192 @@ pub(super) async fn foreground(
 
 #[cfg(test)]
 mod tests {
+    use super::*;
     use riviu_core::{ui_automation::tree::Tree, HierarchySourceSnapshot};
+
+    const WARM_VIEWER: &str = r#"<hierarchy><android.widget.FrameLayout package="com.ss.android.ugc.trill" displayed="true" bounds="[0,0][1080,2220]">
+          <node package="com.ss.android.ugc.trill" displayed="true" enabled="true" clickable="true" resource-id="com.ss.android.ugc.trill:id/aur" content-desc="Back" bounds="[0,0][100,100]"/>
+          <node package="com.ss.android.ugc.trill" displayed="true" enabled="true" class="android.widget.TextView" resource-id="com.ss.android.ugc.trill:id/dmk" text="Fixture caption" bounds="[0,200][100,250]"/>
+          <node package="com.ss.android.ugc.trill" displayed="true" enabled="true" resource-id="com.ss.android.ugc.trill:id/qrp" text="27s ago" bounds="[0,300][100,350]"/>
+          <node package="com.ss.android.ugc.trill" displayed="true" enabled="true" clickable="true" resource-id="com.ss.android.ugc.trill:id/ma9" text="Privacy settings" bounds="[0,400][100,450]"/>
+          <node package="com.ss.android.ugc.trill" displayed="true" enabled="true" clickable="true" content-desc="Share video.  shares" bounds="[0,500][100,550]"/>
+        </android.widget.FrameLayout></hierarchy>"#;
+
+    #[test]
+    fn verification_warm_surface_accepts_measured_viewer_and_refuses_upload_overlay() {
+        // Minimal controls from mutual-guard-screen-170, Trill38.3.2/en.
+        // Surface proof permits navigation only, never publication success.
+        let xml = WARM_VIEWER;
+        assert_eq!(
+            warm_surface(&parsed(xml.into()), "fixture.account"),
+            Some("ownPostViewer")
+        );
+        for overlay in [
+            r#"<node package="com.ss.android.ugc.trill" displayed="true" class="android.widget.ProgressBar"/>"#,
+            r#"<node package="com.ss.android.ugc.trill" displayed="true" class="android.widget.EditText"/>"#,
+            r#"<node package="com.ss.android.ugc.trill" displayed="true" text="Uploading 50%"/>"#,
+            r#"<node package="com.other.app" displayed="true"/>"#,
+        ] {
+            assert!(warm_surface(
+                &parsed(xml.replace("</hierarchy>", &format!("{overlay}</hierarchy>"))),
+                "fixture.account"
+            )
+            .is_none());
+        }
+        assert!(warm_surface(
+            &parsed(xml.replace("Privacy settings", "Other settings")),
+            "fixture.account"
+        )
+        .is_none());
+    }
+
+    struct WarmPhone {
+        reads: std::sync::atomic::AtomicU64,
+        fault: &'static str,
+    }
+    #[async_trait::async_trait]
+    impl riviu_core::UiSession for WarmPhone {
+        async fn active_app_bundle(&self) -> anyhow::Result<String> {
+            Ok(if self.fault == "foreign" {
+                "other.app"
+            } else {
+                "com.ss.android.ugc.trill"
+            }
+            .into())
+        }
+        async fn hierarchy_source_snapshot(&self) -> anyhow::Result<HierarchySourceSnapshot> {
+            let generation = self.reads.fetch_add(1, std::sync::atomic::Ordering::SeqCst) + 1;
+            Ok(HierarchySourceSnapshot {
+                generation: if self.fault == "stale" { 1 } else { generation },
+                xml: WARM_VIEWER.into(),
+            })
+        }
+        fn gui_session_epoch(&self) -> String {
+            if self.fault == "epoch" && self.reads.load(std::sync::atomic::Ordering::SeqCst) > 0 {
+                "replaced"
+            } else {
+                "original"
+            }
+            .into()
+        }
+        async fn tap(&self, _: riviu_core::TapPoint) -> anyhow::Result<()> {
+            panic!("warm admission cannot tap")
+        }
+        async fn swipe(&self, _: riviu_core::SwipeGesture) -> anyhow::Result<()> {
+            panic!("warm admission cannot swipe")
+        }
+        async fn type_text(&self, _: &str) -> anyhow::Result<()> {
+            panic!("warm admission cannot type")
+        }
+        async fn home(&self) -> anyhow::Result<()> {
+            panic!("warm admission cannot leave app")
+        }
+        async fn find_and_tap(&self, _: &str) -> anyhow::Result<()> {
+            panic!("warm admission cannot tap")
+        }
+        async fn assert_visible(&self, _: &str) -> anyhow::Result<()> {
+            panic!("unexpected locator")
+        }
+        fn stream_url(&self) -> Option<String> {
+            None
+        }
+    }
+
+    #[tokio::test]
+    async fn verification_warm_admission_is_read_only_and_requires_fresh_same_epoch_app() {
+        for fault in ["none", "foreign", "epoch", "stale"] {
+            let phone = WarmPhone {
+                reads: std::sync::atomic::AtomicU64::new(0),
+                fault,
+            };
+            let proof = admit_warm(
+                &phone,
+                "com.ss.android.ugc.trill",
+                "en",
+                "38.3.2",
+                "fixture.account",
+            )
+            .await;
+            assert_eq!(proof.is_ok(), fault == "none", "{fault}");
+            if let Ok(proof) = proof {
+                assert_eq!(proof["state"], "keptRunning");
+            }
+        }
+    }
+
+    #[test]
+    fn verification_observation_allows_two_submitted_debts_but_not_active_work_or_stop() {
+        let path =
+            std::env::temp_dir().join(format!("warm-verification-{}.db", uuid::Uuid::new_v4()));
+        let db = Database::open(&path).unwrap();
+        let raw = rusqlite::Connection::open(&path).unwrap();
+        let request = serde_json::json!({
+            "requestId":"fixture", "sourceRoot":"fixture", "bundleIds":[], "udids":["phone"],
+            "visibility":"public", "cleanupPolicy":"keepImportedAssets", "soundPolicy":{"kind":"default"},
+            "sheetEnabled":false, "executionConfirmed":true
+        }).to_string();
+        for id in ["old", "new"] {
+            raw.execute("INSERT INTO publish_campaigns(id,request_id,source_root,request_json,state,created_at,updated_at) VALUES(?1,?1,'fixture',?2,'verifying','now','now')", rusqlite::params![id, request]).unwrap();
+            raw.execute("INSERT INTO publish_bundles(id,campaign_id,ordinal,name,source_path,caption,caption_sha256,manifest_json,created_at) VALUES(?1,?1,0,'fixture','fixture','caption',?2,'{}','now')", rusqlite::params![id, "a".repeat(64)]).unwrap();
+            let intent = serde_json::json!({"effectIntent":"post", "package":"com.ss.android.ugc.trill", "expectedAccount":"fixture.account", "submittedAt":chrono::Utc::now().to_rfc3339()}).to_string();
+            raw.execute("INSERT INTO publish_assignments(id,campaign_id,bundle_id,ordinal,udid,state,effect_intent,evidence_json,created_at,updated_at) VALUES(?1,?1,?1,0,'phone','verifying',?2,?3,'now','now')", rusqlite::params![id, intent, r#"{"post":{"state":"submitted","publicationVerified":false},"verificationStatus":{"state":"pending"}}"#]).unwrap();
+        }
+        let bundle = serde_json::json!({"id":"old","sourcePath":"fixture","name":"fixture","mediaKind":"image","images":[],"captionPath":"fixture","caption":"caption","captionSha256":"a".repeat(64),"totalBytes":0,"partners":[]}).to_string();
+        raw.execute("UPDATE publish_bundles SET manifest_json=?1", [&bundle])
+            .unwrap();
+        let row = db
+            .get_publish_assignment_detail("old", "old")
+            .unwrap()
+            .unwrap()
+            .assignments
+            .remove(0);
+        assert_eq!(db.publish_device_guard("phone").unwrap().blocking.len(), 2);
+        let _lease = db
+            .try_publish_work("phone", "verify", "old")
+            .unwrap()
+            .unwrap();
+        assert!(db
+            .try_publish_work("phone", "compose", "new")
+            .unwrap()
+            .is_none());
+        assert!(
+            authorize(&db, &row, None).is_ok(),
+            "settled submissions must allow observational verification under the exclusive lease"
+        );
+        assert!(
+            authorize_restart(&db, &row, None).is_err(),
+            "shared debt never grants destructive restart"
+        );
+        raw.execute("INSERT INTO publish_pipeline_runs(campaign_id,token,created_at) VALUES('new','active','now')", []).unwrap();
+        assert!(
+            authorize(&db, &row, None).is_err(),
+            "a competing active pipeline must remain protected"
+        );
+        raw.execute(
+            "DELETE FROM publish_pipeline_runs WHERE campaign_id='new'",
+            [],
+        )
+        .unwrap();
+        raw.execute(
+            "UPDATE publish_assignments SET state='posting' WHERE id='new'",
+            [],
+        )
+        .unwrap();
+        assert!(
+            authorize(&db, &row, None).is_err(),
+            "unknown in-flight Post cannot become link debt"
+        );
+        raw.execute(
+            "UPDATE publish_assignments SET state='verifying' WHERE id='new'",
+            [],
+        )
+        .unwrap();
+        db.begin_publish_operation_stop("old").unwrap();
+        assert!(
+            authorize(&db, &row, None).is_err(),
+            "Stop must revoke the existing observer"
+        );
+    }
 
     fn empty_picker() -> String {
         r#"<hierarchy>

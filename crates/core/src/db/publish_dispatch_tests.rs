@@ -168,11 +168,15 @@ fn explicit_retry_restores_three_sound_retries_without_reopening_post() {
 
 #[test]
 fn checked_pre_post_retry_rebinds_only_unconfirmed_random_sound_and_audits_prior_choice() {
-    for (confirmed, step, reset) in [
-        (false, "sound", true),
-        (false, "prePost", true),
-        (true, "sound", false),
-        (false, "caption", false),
+    for (confirmed, step, checkpoint, pre_post_retries, reset) in [
+        (false, "sound", "mediaSelected", 0, true),
+        (false, "prePost", "approved", 0, true),
+        (true, "sound", "mediaSelected", 0, false),
+        (false, "caption", "mediaSelected", 0, false),
+        (false, "sound", "soundConfirmed", 0, false),
+        (false, "prePost", "captionEntered", 0, false),
+        (false, "prePost", "captionConfirmed", 0, false),
+        (false, "sound", "mediaSelected", 1, false),
     ] {
         let (db, _, campaign, assignments) = fixture();
         let run = db.claim_publish_pipeline(&campaign).unwrap().unwrap();
@@ -190,8 +194,14 @@ fn checked_pre_post_retry_rebinds_only_unconfirmed_random_sound_and_audits_prior
         };
         db.bind_publish_recovery_sound(&job.assignment_id, &run.token, Some(&sound))
             .unwrap();
-        db.update_publish_recovery_step(&job.assignment_id, &run.token, step, None)
+        db.update_publish_recovery_step(&job.assignment_id, &run.token, step, Some(checkpoint))
             .unwrap();
+        if pre_post_retries > 0 {
+            db.conn().unwrap().execute(
+                "UPDATE publish_recovery_state SET payload=json_set(payload,'$.counts.prePost',?2) WHERE assignment_id=?1",
+                params![job.assignment_id, pre_post_retries],
+            ).unwrap();
+        }
         assert!(db
             .finish_publish_dispatch(&job, Some("sound identity changed"))
             .unwrap());
@@ -205,7 +215,15 @@ fn checked_pre_post_retry_rebinds_only_unconfirmed_random_sound_and_audits_prior
             .publish_recovery_state(&job.assignment_id)
             .unwrap()
             .unwrap();
-        assert_eq!(recovery.sound, (!reset).then_some(sound.clone()));
+        let mut preserved = sound.clone();
+        if matches!(
+            checkpoint,
+            "soundConfirmed" | "captionEntered" | "captionConfirmed"
+        ) || pre_post_retries > 0
+        {
+            preserved.confirmed = true;
+        }
+        assert_eq!(recovery.sound, (!reset).then_some(preserved));
         let conn = db.conn().unwrap();
         let archived: Option<String> = conn.query_row(
             "SELECT detail FROM operation_device_events WHERE source_kind='publish' AND source_id=?1 AND action='publishSoundRebind' ORDER BY rowid DESC LIMIT 1",

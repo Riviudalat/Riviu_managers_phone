@@ -207,6 +207,22 @@ impl Database {
             recovery.expected_account == current_account,
             "Tài khoản đã đổi; không thử lại bài cũ"
         );
+        // Older composers persisted the binding before confirmation but only
+        // advanced the checkpoint after proving it. Preserve that historical
+        // proof before resetting counters or later overwriting the checkpoint.
+        // This never substitutes for the fresh editor reproof before Post.
+        if matches!(
+            recovery.checkpoint.as_str(),
+            "soundConfirmed" | "captionEntered" | "captionConfirmed"
+        ) || recovery
+            .counts
+            .get("prePost")
+            .is_some_and(|count| *count > 0)
+        {
+            if let Some(sound) = recovery.sound.as_mut() {
+                sound.confirmed = true;
+            }
+        }
         if let Some((_, request_id)) = request {
             if matches!(recovery.step.as_str(), "sound" | "prePost")
                 && recovery
