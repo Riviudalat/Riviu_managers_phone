@@ -459,6 +459,30 @@ pub async fn observe_publish_account(
     session: &dyn UiSession,
     labels: &TikTokControls,
 ) -> anyhow::Result<String> {
+    let result = observe_publish_account_inner(session, labels).await;
+    result.map_err(|error| {
+        if error.is::<crate::tiktok_account::AccountDiagnostic>() {
+            return error;
+        }
+        let kind = crate::publish_recovery::describe(&error).kind;
+        if kind != crate::publish_recovery::FailureKind::Terminal {
+            return crate::tiktok_account::AccountDiagnostic::read_failed(*labels, &error)
+                .into_error();
+        }
+        crate::tiktok_account::AccountDiagnostic::new(
+            crate::tiktok_account::AccountState::Unreadable,
+            *labels,
+            None,
+            format!("{error:#}"),
+        )
+        .into_error()
+    })
+}
+
+async fn observe_publish_account_inner(
+    session: &dyn UiSession,
+    labels: &TikTokControls,
+) -> anyhow::Result<String> {
     navigate_own_profile(session, labels).await?;
     let deadline = tokio::time::Instant::now() + PROFILE_WINDOW;
     let account = loop {
@@ -467,10 +491,15 @@ pub async fn observe_publish_account(
         {
             break account;
         }
-        anyhow::ensure!(
-            tokio::time::Instant::now() < deadline,
-            "own account was not proven before Post"
-        );
+        if tokio::time::Instant::now() >= deadline {
+            return Err(crate::tiktok_account::AccountDiagnostic::new(
+                crate::tiktok_account::AccountState::Unreadable,
+                *labels,
+                None,
+                "Chưa chứng minh được tài khoản sở hữu trước Đăng.",
+            )
+            .into_error());
+        }
         tokio::time::sleep(POLL).await;
     };
     let home = labels
@@ -481,6 +510,18 @@ pub async fn observe_publish_account(
         .await?
         .ok_or_else(|| anyhow::anyhow!("Home tab absent"))?;
     session.tap(tab.centre()).await?;
+    if crate::tiktok_account::current_account_diagnostic().is_none() {
+        // The existing measured selected-account sheet also uses two fresh
+        // generations; do not invent a profile-snapshot generation for it.
+        let mut diagnostic = crate::tiktok_account::AccountDiagnostic::new(
+            crate::tiktok_account::AccountState::Proved,
+            *labels,
+            None,
+            "Đã xác minh tài khoản đang được chọn.",
+        );
+        diagnostic.observed_account = Some(account.clone());
+        diagnostic.record();
+    }
     Ok(account)
 }
 
@@ -497,11 +538,28 @@ pub async fn navigate_own_profile(
     let mut spend = crate::feed_ladder::LadderSpend::new(2);
     spend.allow_back = true;
     let deadline = tokio::time::Instant::now() + Duration::from_secs(15);
+    let mut security_close_used = false;
     let tab = loop {
         anyhow::ensure!(
             session.active_app_bundle().await? == labels.package(),
             "account navigation left TikTok"
         );
+        let tree = crate::tiktok_account::account_snapshot(session, *labels).await?;
+        if let Some(diagnostic) = crate::tiktok_account::blocker_diagnostic(&tree, *labels) {
+            if diagnostic.state == crate::tiktok_account::AccountState::SecurityPrompt
+                && !security_close_used
+                && std::env::var("RIVIU_TRILL_SECURITY_CLOSE_CANARY").as_deref() == Ok("1")
+            {
+                if let Some(close) =
+                    crate::app_automation::dialogs::security_reminder_close(&tree, *labels)
+                {
+                    security_close_used = true;
+                    session.tap(close.centre()).await?;
+                    continue;
+                }
+            }
+            return Err(diagnostic.into_error());
+        }
         if let Some(tab) = session.locate(profile.to_query()).await? {
             break tab;
         }

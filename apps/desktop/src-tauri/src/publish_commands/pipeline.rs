@@ -214,6 +214,7 @@ impl Runtime {
         {
             Ok(()) => Ok(()),
             Err(PhoneFailure::NoBundle) => anyhow::bail!("bundle missing"),
+            Err(PhoneFailure::AccountProof(diagnostic)) => Err(diagnostic.into()),
             Err(PhoneFailure::NothingPublished(reason) | PhoneFailure::MayBeLive(reason)) => {
                 anyhow::bail!("{reason}")
             }
@@ -279,11 +280,11 @@ pub(crate) async fn run_dispatcher(
             _ = interval.tick() => {},
             Some(result) = tasks.join_next_with_id(), if !tasks.is_empty() => {
                 let (id, error) = match result {
-                    Ok((id, result)) => (id, result.err().map(|e: anyhow::Error| format!("{e:#}"))),
-                    Err(e) => (e.id(), Some(e.to_string())),
+                    Ok((id, result)) => (id, result.err()),
+                    Err(e) => (e.id(), Some(anyhow::Error::new(e))),
                 };
                 if let Some(job) = owned.remove(&id) {
-                    if let Err(e) = db.finish_publish_dispatch(&job,error.as_deref()) {
+                    if let Err(e) = db.finish_publish_dispatch_error(&job,error.as_ref()) {
                         log::error!("publish dispatch settlement: {e:#}");
                     }
                 }
@@ -292,11 +293,11 @@ pub(crate) async fn run_dispatcher(
         if stop.load(std::sync::atomic::Ordering::Acquire) {
             while let Some(result) = tasks.join_next_with_id().await {
                 let (id, error) = match result {
-                    Ok((id, r)) => (id, r.err().map(|e| e.to_string())),
-                    Err(e) => (e.id(), Some(e.to_string())),
+                    Ok((id, r)) => (id, r.err()),
+                    Err(e) => (e.id(), Some(anyhow::Error::new(e))),
                 };
                 if let Some(job) = owned.remove(&id) {
-                    let _ = db.finish_publish_dispatch(&job, error.as_deref());
+                    let _ = db.finish_publish_dispatch_error(&job, error.as_ref());
                 }
             }
             break;

@@ -18,6 +18,7 @@ type BeforePublish<'a> = dyn FnMut(
 pub(super) enum PhoneFailure {
     /// This campaign holds no bundle for this assignment. Nothing was opened.
     NoBundle,
+    AccountProof(riviu_core::tiktok_account::AccountDiagnostic),
     /// The run stopped and **nothing reached TikTok**.
     NothingPublished(String),
     /// A tap may have gone out and the result is unknown.
@@ -103,13 +104,23 @@ pub(super) async fn post_one_phone(
             Some(reason.clone()),
             serde_json::json!({
                 "message": reason,
-                "effectIntent":"post_carousel",
+                "effectIntent": if matches!(outcome, PostOutcome::Unknown(_)) { Some("post_carousel") } else { None },
                 "priorEvidenceJson": assignment.evidence_json,
             })
             .to_string(),
         ),
     };
     evidence = attach_selection_diagnostic(&evidence, attempt.selection_diagnostic.as_ref());
+    if let Ok(mut value) = serde_json::from_str::<serde_json::Value>(&evidence) {
+        if let Some(diagnostic) = &attempt.account_diagnostic {
+            value["accountDiagnostic"] = serde_json::json!(diagnostic);
+        }
+        if let Some(failure) = &attempt.recovery_failure {
+            value["recoveryFailure"] = serde_json::json!(failure);
+            code = Some(failure.code.as_str());
+        }
+        evidence = value.to_string();
+    }
     if matches!(outcome, PostOutcome::Submitted(_) | PostOutcome::Unknown(_)) {
         evidence = db
             .with_initial_scheduled_verification(&campaign_id, &assignment.id, &evidence)
@@ -209,6 +220,11 @@ pub(super) async fn post_one_phone(
         },
     );
     announce(&events, &db, &campaign_id);
+    if matches!(&outcome, PostOutcome::NothingPublished(_)) {
+        if let Some(diagnostic) = attempt.account_diagnostic.filter(|d| d.failure().is_some()) {
+            return Err(PhoneFailure::AccountProof(diagnostic));
+        }
+    }
     match (message, &outcome) {
         (None, _) => Ok(()),
         // The attempt completed; the database keeps Verifying and the recovery worker owns
@@ -2371,6 +2387,7 @@ pub(crate) async fn post_publish_campaign_inner(
                 failures.push(format!("bundle {} missing", assignment.bundle_id))
             }
             Ok(Err(PhoneFailure::NothingPublished(reason))) => failures.push(reason),
+            Ok(Err(PhoneFailure::AccountProof(diagnostic))) => failures.push(diagnostic.message),
             Ok(Err(PhoneFailure::MayBeLive(reason))) => {
                 may_be_live = true;
                 failures.push(reason);
@@ -2459,6 +2476,8 @@ pub(super) struct AssignmentPostAttempt {
     claim_refused: bool,
     final_revision: Option<i64>,
     selection_diagnostic: Option<serde_json::Value>,
+    account_diagnostic: Option<riviu_core::tiktok_account::AccountDiagnostic>,
+    recovery_failure: Option<riviu_core::publish_recovery::RecoveryFailure>,
 }
 
 #[cfg(any(test, feature = "diagnostics"))]
@@ -2513,6 +2532,8 @@ async fn post_one_assignment_owned(
                     claim_refused: true,
                     final_revision: None,
                     selection_diagnostic: None,
+                    account_diagnostic: None,
+                    recovery_failure: None,
                 }
             }
         },
@@ -2523,6 +2544,8 @@ async fn post_one_assignment_owned(
         claim_refused: false,
         final_revision: initial_revision,
         selection_diagnostic: None,
+        account_diagnostic: None,
+        recovery_failure: None,
     };
     let request = match db.publish_campaign_request(campaign_id) {
         Ok(Some(request))
@@ -2662,7 +2685,7 @@ async fn post_one_assignment_owned(
     let mut effect_claimed = false;
     let mut claim_refused = false;
     let mut submitted_at = None;
-    let action_result = {
+    let (action_result, mut account_diagnostic) = riviu_core::tiktok_account::with_account_diagnostic(async {
         let mut before_post = |sound_selection: Option<&riviu_core::SoundSelectionEvidence>,
                                identity: Option<
             &riviu_core::publish_submission::PublishSubmissionProof,
@@ -2764,7 +2787,14 @@ async fn post_one_assignment_owned(
             )
             .await
         }
-    };
+    }).await;
+    if let Some(diagnostic) = account_diagnostic.as_mut() {
+        diagnostic.expected_account = db
+            .publish_recovery_state(&assignment.id)
+            .ok()
+            .flatten()
+            .map(|s| s.observed_account.unwrap_or(s.expected_account));
+    }
     let mut action_result =
         if effect_claimed && matches!(action_result, PostOutcome::NothingPublished(_)) {
             PostOutcome::Unknown(
@@ -2815,6 +2845,12 @@ async fn post_one_assignment_owned(
         claim_refused,
         final_revision: initial_revision.map(|r| r + i64::from(effect_claimed)),
         selection_diagnostic: selection_diagnostic.into_inner(),
+        recovery_failure: if effect_claimed {
+            None
+        } else {
+            account_diagnostic.as_ref().and_then(|d| d.failure())
+        },
+        account_diagnostic,
     }
 }
 
@@ -3720,7 +3756,36 @@ pub(super) async fn post_through_the_composer(
             Err(error) => return refuse(format!("chưa xác minh tài khoản trước Đăng ({error})")),
         };
 
+    if let Some(mut diagnostic) = riviu_core::tiktok_account::current_account_diagnostic() {
+        diagnostic.expected_account = db
+            .publish_recovery_state(assignment_id)
+            .ok()
+            .flatten()
+            .map(|s| s.observed_account.unwrap_or(s.expected_account));
+        diagnostic.record();
+    }
     if let Err(error) = db.verify_publish_recovery_account(assignment_id, &expected_account) {
+        if let Some(mut diagnostic) = riviu_core::tiktok_account::current_account_diagnostic() {
+            let binding_changed = error.to_string() == "Tài khoản đã đổi; không tiếp tục bài cũ";
+            if binding_changed
+                || db
+                    .publish_recovery_state(assignment_id)
+                    .ok()
+                    .flatten()
+                    .is_some_and(|s| {
+                        let expected = s.observed_account.as_deref().unwrap_or(&s.expected_account);
+                        !expected.is_empty()
+                            && !expected
+                                .trim()
+                                .trim_start_matches('@')
+                                .eq_ignore_ascii_case(&expected_account)
+                    })
+            {
+                diagnostic.state = riviu_core::tiktok_account::AccountState::Mismatch;
+                diagnostic.message = error.to_string();
+                diagnostic.record();
+            }
+        }
         return refuse(error.to_string());
     }
 

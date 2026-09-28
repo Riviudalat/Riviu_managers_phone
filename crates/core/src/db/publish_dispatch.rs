@@ -469,8 +469,39 @@ impl Database {
         job: &PublishDispatchJob,
         error: Option<&str>,
     ) -> anyhow::Result<bool> {
+        let failure = error.map(crate::publish_recovery::RecoveryFailure::legacy);
+        self.finish_publish_dispatch_inner(job, error, failure.as_ref())
+    }
+
+    /// The dispatcher must not flatten typed account refusals before settlement.
+    pub fn finish_publish_dispatch_error(
+        &self,
+        job: &PublishDispatchJob,
+        error: Option<&anyhow::Error>,
+    ) -> anyhow::Result<bool> {
+        let failure = error.map(crate::publish_recovery::describe);
+        self.finish_publish_dispatch_inner(
+            job,
+            failure.as_ref().map(|f| f.message.as_str()),
+            failure.as_ref(),
+        )
+    }
+
+    fn finish_publish_dispatch_inner(
+        &self,
+        job: &PublishDispatchJob,
+        error: Option<&str>,
+        failure: Option<&crate::publish_recovery::RecoveryFailure>,
+    ) -> anyhow::Result<bool> {
         if let Some(error) = error {
-            if self.requeue_publish_recovery(job, error)? {
+            if failure.is_some_and(|f| f.kind != crate::publish_recovery::FailureKind::Terminal)
+                && self.requeue_publish_recovery(job, error)?
+            {
+                if let Some(failure) = failure.filter(|f| f.code.starts_with("account_")) {
+                    let conn = self.conn()?;
+                    conn.execute("UPDATE publish_recovery_state SET payload=json_set(payload,'$.lastError',?2,'$.lastErrorCode',?3,'$.lastErrorKind',?4) WHERE assignment_id=?1 AND run_token=?5",
+                        params![job.assignment_id,failure.message,failure.code,failure.kind.as_str(),job.run.token])?;
+                }
                 return Ok(true);
             }
         }
@@ -488,11 +519,15 @@ impl Database {
             params![job.assignment_id,job.attempt_id,job.revision+1,if to_compose {"queued"} else {"finished"},
                 if to_compose {"compose"} else {&job.phase},error,if to_compose {None} else {Some(Utc::now().timestamp_millis())}])?;
         if changed == 1 && !to_compose {
+            if let Some(failure) = failure {
+                tx.execute("UPDATE publish_recovery_state SET payload=json_set(payload,'$.lastError',?2,'$.lastErrorCode',?3,'$.lastErrorKind',?4) WHERE assignment_id=?1 AND run_token=?5",
+                    params![job.assignment_id,failure.message,failure.code,failure.kind.as_str(),job.run.token])?;
+            }
             tx.execute("UPDATE publish_recovery_state SET payload=json_set(payload,'$.state',CASE WHEN json_extract(payload,'$.state') IN ('exhausted','stopped') THEN json_extract(payload,'$.state') ELSE ?2 END,'$.nextRetryAt',NULL,'$.reconnectDeadline',NULL) WHERE assignment_id=?1",params![job.assignment_id,if error.is_some(){"failed"}else{"finished"}])?;
             if let Some(error) = error {
                 tx.execute("UPDATE publish_assignments SET state='failed_before_dispatch',error_code=?2,revision=revision+1,updated_at=?3
                     WHERE id=?1 AND effect_intent IS NULL AND state IN ('queued','scheduled','ready','transferring','imported')",
-                    params![job.assignment_id,error,Utc::now().to_rfc3339()])?;
+                    params![job.assignment_id,failure.filter(|f| f.code.starts_with("account_")).map(|f| f.code.as_str()).unwrap_or(error),Utc::now().to_rfc3339()])?;
             }
             tx.execute("UPDATE publish_attempts SET finished_at_ms=?2,result=?3,evidence_json=(SELECT evidence_json FROM publish_assignments WHERE id=?4) WHERE attempt_id=?1",
                 params![job.attempt_id,Utc::now().timestamp_millis(),error.unwrap_or("submitted_or_settled"),job.assignment_id])?;

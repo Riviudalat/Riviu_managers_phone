@@ -61,7 +61,8 @@ impl Default for PublishRecoveryState {
     }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub enum FailureKind {
     Disconnected,
     Retryable,
@@ -78,7 +79,7 @@ impl FailureKind {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct RecoveryFailure {
     pub code: String,
     pub kind: FailureKind,
@@ -161,6 +162,11 @@ pub fn retryable_error(code: &'static str, message: impl Into<String>) -> anyhow
 }
 
 pub fn describe(error: &anyhow::Error) -> RecoveryFailure {
+    if let Some(diagnostic) = error.downcast_ref::<crate::tiktok_account::AccountDiagnostic>() {
+        if let Some(failure) = diagnostic.failure() {
+            return failure;
+        }
+    }
     if let Some(classified) = error.downcast_ref::<ClassifiedRecoveryError>() {
         return classified.0.clone();
     }

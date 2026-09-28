@@ -150,6 +150,8 @@ pub enum VerificationReason {
     NavigationBudgetExhausted,
     ComposerOrUpload,
     LoginRequired,
+    SecurityPrompt,
+    UnrecognizedDialog,
     UnknownScreen,
     AccountMismatch,
     AccountUnreadable,
@@ -191,6 +193,8 @@ impl VerificationReason {
             Self::NavigationBudgetExhausted => "navigationBudgetExhausted",
             Self::ComposerOrUpload => "composerOrUpload",
             Self::LoginRequired => "loginRequired",
+            Self::SecurityPrompt => "securityPrompt",
+            Self::UnrecognizedDialog => "unrecognizedDialog",
             Self::UnknownScreen => "unknownScreen",
             Self::AccountMismatch => "accountMismatch",
             Self::AccountUnreadable => "accountUnreadable",
@@ -232,6 +236,8 @@ impl VerificationReason {
             Self::NavigationBudgetExhausted => "Đã dùng hết ba bước phục hồi màn hình; chưa đến được hồ sơ để lấy liên kết.",
             Self::ComposerOrUpload => "TikTok đang ở màn soạn bài hoặc gửi nội dung; giữ nguyên màn hình và chờ kiểm tra lại.",
             Self::LoginRequired => "TikTok đang yêu cầu đăng nhập; cần mở lại đúng tài khoản trước khi kiểm tra liên kết.",
+            Self::SecurityPrompt => "TikTok đang hiện nhắc bảo mật; chưa xác minh tài khoản và không bấm Tiếp tục.",
+            Self::UnrecognizedDialog => "Hộp thoại chưa được nhận diện; chưa thao tác hoặc xác minh tài khoản.",
             Self::UnknownScreen => "Màn hình hiện tại chưa được nhận diện; chưa điều hướng hoặc bấm Back.",
             Self::AccountMismatch => "Tài khoản trên hồ sơ hoặc trong liên kết chưa khớp tài khoản ghi nhận trước Đăng.",
             Self::AccountUnreadable => "Chưa đọc được tên tài khoản trên đầu trang Hồ sơ; chưa kết luận tài khoản bị đổi.",
@@ -429,6 +435,8 @@ enum Screen {
     Dialog,
     Composer,
     Login,
+    SecurityPrompt,
+    UnrecognizedDialog,
     Unknown,
 }
 
@@ -444,6 +452,20 @@ fn classify(tree: &Tree, plan: &PublishVerificationPlan) -> Screen {
                 query => !tree.matching(package, query).is_empty(),
             })
     };
+    if let Some(blocker) = crate::app_automation::dialogs::account_blocker(tree, plan.labels) {
+        use crate::app_automation::dialogs::AccountBlocker;
+        match blocker {
+            AccountBlocker::LoginRequired => return Screen::Login,
+            AccountBlocker::SecurityPrompt => return Screen::SecurityPrompt,
+            AccountBlocker::UnrecognizedDialog
+                if decline_facebook_permission(tree, plan).is_none()
+                    && tree.copy_control(package).ok().flatten().is_none() =>
+            {
+                return Screen::UnrecognizedDialog
+            }
+            AccountBlocker::UnrecognizedDialog => {}
+        }
+    }
     if has(TikTokControl::ComposerCaption)
         || has(TikTokControl::PostButton)
         || (has(TikTokControl::ComposerShutter)
@@ -451,12 +473,6 @@ fn classify(tree: &Tree, plan: &PublishVerificationPlan) -> Screen {
             && !has(TikTokControl::FeedTab))
     {
         return Screen::Composer;
-    }
-    if tree.nodes.iter().any(|node| {
-        node.visible(package)
-            && ["Log in", "Sign up for TikTok", "Đăng nhập"].contains(&node.attr("text"))
-    }) {
-        return Screen::Login;
     }
     if has(TikTokControl::DialogDismiss)
         || decline_facebook_permission(tree, plan).is_some()
@@ -606,36 +622,7 @@ fn classify(tree: &Tree, plan: &PublishVerificationPlan) -> Screen {
 }
 
 fn decline_facebook_permission(tree: &Tree, plan: &PublishVerificationPlan) -> Option<ElementBox> {
-    let package = plan.labels.package();
-    if package != "com.ss.android.ugc.trill" || plan.labels.resource_version() != Some("38.3.2") {
-        return None;
-    }
-    let prompt = tree.matching(package, ElementQuery::ResourceIdSuffix(":id/d2o"));
-    let [index] = prompt.as_slice() else {
-        return None;
-    };
-    if !tree.nodes[*index]
-        .attr("text")
-        .contains("Give TikTok access to your Facebook friends list and email?")
-    {
-        return None;
-    }
-    let controls = tree.matching(
-        package,
-        ElementQuery::Text {
-            value: "Don’t allow",
-            exact: true,
-        },
-    );
-    let [index] = controls.as_slice() else {
-        return None;
-    };
-    if tree.nodes[*index].attr("class") != "android.widget.Button" {
-        return None;
-    }
-    tree.nodes[*index]
-        .rect()
-        .filter(|r| r.enabled && r.clickable)
+    crate::app_automation::dialogs::decline_facebook_permission(tree, plan.labels)
 }
 
 fn submission_identity_valid(identity: &SubmissionIdentity) -> bool {
@@ -733,7 +720,16 @@ impl Capture<'_> {
         } else {
             crate::tiktok_account::restore_own_profile_header(self.session, self.plan.labels).await
         }
-        .map_err(|_| VerificationReason::ReadFailed)?;
+        .map_err(|error| {
+            use crate::tiktok_account::{AccountDiagnostic, AccountState};
+            match error.downcast_ref::<AccountDiagnostic>().map(|d| d.state) {
+                Some(AccountState::LoginRequired) => VerificationReason::LoginRequired,
+                Some(AccountState::SecurityPrompt) => VerificationReason::SecurityPrompt,
+                Some(AccountState::UnrecognizedDialog) => VerificationReason::UnrecognizedDialog,
+                Some(AccountState::Unreadable) => VerificationReason::AccountUnreadable,
+                _ => VerificationReason::ReadFailed,
+            }
+        })?;
         // Initial header proof is mandatory. Later grid scrolls may hide that
         // header; preserve their position. Canonical URL still must match account.
         if observed.is_none() && restoring {
@@ -776,6 +772,12 @@ impl Capture<'_> {
             }
             if screen == Screen::Login {
                 return Err(VerificationReason::LoginRequired);
+            }
+            if screen == Screen::SecurityPrompt {
+                return Err(VerificationReason::SecurityPrompt);
+            }
+            if screen == Screen::UnrecognizedDialog {
+                return Err(VerificationReason::UnrecognizedDialog);
             }
             if start.elapsed() >= RECOVERY_WINDOW {
                 return Err(if restoring {

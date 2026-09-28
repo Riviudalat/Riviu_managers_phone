@@ -51,6 +51,180 @@ pub fn decline_contacts(tree: &Tree, labels: TikTokControls) -> Option<ElementBo
     node.rect().filter(|r| r.enabled && r.clickable)
 }
 
+pub fn decline_facebook_permission(tree: &Tree, labels: TikTokControls) -> Option<ElementBox> {
+    let package = labels.package();
+    if package != "com.ss.android.ugc.trill" || labels.resource_version() != Some("38.3.2") {
+        return None;
+    }
+    let prompt = tree.matching(package, ElementQuery::ResourceIdSuffix(":id/d2o"));
+    let [index] = prompt.as_slice() else {
+        return None;
+    };
+    if !tree.nodes[*index]
+        .attr("text")
+        .contains("Give TikTok access to your Facebook friends list and email?")
+    {
+        return None;
+    }
+    let controls = tree.matching(
+        package,
+        ElementQuery::Text {
+            value: "Don’t allow",
+            exact: true,
+        },
+    );
+    let [index] = controls.as_slice() else {
+        return None;
+    };
+    if tree.nodes[*index].attr("class") != "android.widget.Button" {
+        return None;
+    }
+    tree.nodes[*index]
+        .rect()
+        .filter(|r| r.enabled && r.clickable)
+}
+
+/// Positive blockers shared by pre-Post account proof and post-link verification.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum AccountBlocker {
+    LoginRequired,
+    SecurityPrompt,
+    UnrecognizedDialog,
+}
+
+fn exact_node(tree: &Tree, package: &str, id: &str, text: &str) -> Option<usize> {
+    let matches = tree.matching(package, ElementQuery::ResourceIdSuffix(id));
+    let [index] = matches.as_slice() else {
+        return None;
+    };
+    let node = &tree.nodes[*index];
+    (node.attr("text") == text && node.rect().is_some()).then_some(*index)
+}
+
+fn security_sheet(tree: &Tree, labels: TikTokControls) -> Option<usize> {
+    if (
+        labels.package(),
+        labels.resource_version(),
+        labels.language(),
+    ) != ("com.ss.android.ugc.trill", Some("38.3.2"), "en")
+    {
+        return None;
+    }
+    let package = labels.package();
+    let sheet = exact_node(tree, package, ":id/dox", "")?;
+    if tree.nodes[sheet].attr("content-desc") != "Bottom sheet" {
+        return None;
+    }
+    let heading = exact_node(
+        tree,
+        package,
+        ":id/qwh",
+        "Let's do a quick security checkup",
+    )?;
+    let body = exact_node(
+        tree,
+        package,
+        ":id/doq",
+        "Complete a few personalized security tips to strengthen the safety of your account.",
+    )?;
+    let next = exact_node(tree, package, ":id/jmt", "Continue")?;
+    (tree.nodes[heading].attr("class") == "android.widget.TextView"
+        && tree.nodes[body].attr("class") == "android.widget.TextView"
+        && tree.nodes[next].attr("class") == "android.widget.Button"
+        && [heading, body, next]
+            .iter()
+            .all(|index| tree.inside(*index, sheet)))
+    .then_some(sheet)
+}
+
+/// Saved machine 12, Trill 38.3.2/en: the unlabeled Close is a unique Button
+/// under ke4 inside the otb/ke7 header of dox. Never infer image coordinates.
+pub fn security_reminder_close(tree: &Tree, labels: TikTokControls) -> Option<ElementBox> {
+    let sheet = security_sheet(tree, labels)?;
+    let package = labels.package();
+    let header = exact_node(tree, package, ":id/otb", "")?;
+    let group = exact_node(tree, package, ":id/ke7", "")?;
+    let close_parent = exact_node(tree, package, ":id/ke4", "")?;
+    if !tree.inside(header, sheet)
+        || !tree.inside(group, header)
+        || !tree.inside(close_parent, group)
+    {
+        return None;
+    }
+    let candidates: Vec<_> = tree
+        .matching(package, ElementQuery::ClassName("android.widget.Button"))
+        .into_iter()
+        .filter(|index| {
+            let node = &tree.nodes[*index];
+            node.parent == Some(close_parent)
+                && node.attr("text").is_empty()
+                && node.attr("content-desc").is_empty()
+                && node.attr("resource-id").is_empty()
+        })
+        .collect();
+    let [index] = candidates.as_slice() else {
+        return None;
+    };
+    tree.nodes[*index]
+        .rect()
+        .filter(|rect| rect.enabled && rect.clickable)
+}
+
+pub fn account_blocker(tree: &Tree, labels: TikTokControls) -> Option<AccountBlocker> {
+    let package = labels.package();
+    // Exact heading + separate login-method Button: a caption mentioning login
+    // (including the complete heading) is not a login screen.
+    let heading = tree.matching(
+        package,
+        ElementQuery::Text {
+            value: "Log in to TikTok",
+            exact: true,
+        },
+    );
+    let login_heading = matches!(heading.as_slice(), [index] if
+        tree.nodes[*index].attr("class") == "android.widget.TextView"
+        && tree.nodes[*index].attr("resource-id").ends_with(":id/title")
+        && tree.nodes[*index].rect().is_some());
+    let login_method = tree
+        .matching(package, ElementQuery::ClassName("android.widget.Button"))
+        .into_iter()
+        .any(|index| {
+            let node = &tree.nodes[index];
+            matches!(
+                node.attr("content-desc"),
+                "Use phone / email / username" | "Continue with Facebook" | "Continue with Google"
+            ) && node.rect().is_some_and(|r| r.enabled && r.clickable)
+        });
+    if login_heading && login_method {
+        return Some(AccountBlocker::LoginRequired);
+    }
+    if security_sheet(tree, labels).is_some() {
+        return Some(AccountBlocker::SecurityPrompt);
+    }
+    // Preserve the existing measured negative-popup handlers.
+    if decline_contacts(tree, labels).is_some()
+        || decline_facebook_permission(tree, labels).is_some()
+        || tree
+            .control(
+                package,
+                labels.label(crate::tiktok_labels::TikTokControl::DialogDismiss),
+            )
+            .is_some()
+    {
+        return None;
+    }
+    tree.nodes
+        .iter()
+        .enumerate()
+        .any(|(i, node)| {
+            node.visible(package)
+                && tree.ancestors_visible(i)
+                && node.rect().is_some()
+                && matches!(node.attr("content-desc"), "Dialog" | "Bottom sheet")
+        })
+        .then_some(AccountBlocker::UnrecognizedDialog)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

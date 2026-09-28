@@ -1,6 +1,173 @@
 //! Read-only account proof for a measured own-profile screen. Never changes the login.
-use crate::tiktok_labels::{LabelMatch, TikTokControls};
+use crate::tiktok_labels::TikTokControls;
 use crate::{ElementBox, ElementQuery, UiSession};
+
+use crate::ui_automation::tree::Tree;
+use serde::{Deserialize, Serialize};
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub enum AccountState {
+    Proved,
+    LoginRequired,
+    SecurityPrompt,
+    UnrecognizedDialog,
+    Unreadable,
+    Mismatch,
+    TransportReadFailed,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AccountDiagnostic {
+    pub state: AccountState,
+    pub expected_account: Option<String>,
+    pub observed_account: Option<String>,
+    pub package: String,
+    pub generation: Option<u64>,
+    pub message: String,
+    #[serde(skip)]
+    transport_failure: Option<crate::publish_recovery::RecoveryFailure>,
+}
+impl std::fmt::Display for AccountDiagnostic {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(&self.message)
+    }
+}
+impl std::error::Error for AccountDiagnostic {}
+impl AccountDiagnostic {
+    pub fn new(
+        state: AccountState,
+        labels: TikTokControls,
+        generation: Option<u64>,
+        message: impl Into<String>,
+    ) -> Self {
+        Self {
+            state,
+            expected_account: None,
+            observed_account: None,
+            package: labels.package().into(),
+            generation,
+            message: message.into(),
+            transport_failure: None,
+        }
+    }
+    pub fn failure(&self) -> Option<crate::publish_recovery::RecoveryFailure> {
+        use crate::publish_recovery::{FailureKind, RecoveryFailure};
+        let code = match self.state {
+            AccountState::Proved => return None,
+            AccountState::LoginRequired => "account_login_required",
+            AccountState::SecurityPrompt => "account_security_prompt",
+            AccountState::Mismatch => "account_mismatch",
+            AccountState::TransportReadFailed => "account_read_failed",
+            AccountState::UnrecognizedDialog | AccountState::Unreadable => "account_unreadable",
+        };
+        let kind = self
+            .transport_failure
+            .as_ref()
+            .map(|failure| failure.kind)
+            .filter(|_| self.state == AccountState::TransportReadFailed)
+            .unwrap_or(FailureKind::Terminal);
+        Some(RecoveryFailure::new(code, kind, self.message.clone()))
+    }
+    pub fn read_failed(labels: TikTokControls, error: &anyhow::Error) -> Self {
+        let failure = crate::publish_recovery::describe(error);
+        let mut diagnostic = Self::new(
+            AccountState::TransportReadFailed,
+            labels,
+            None,
+            format!("{error:#}"),
+        );
+        diagnostic.transport_failure = Some(failure);
+        diagnostic
+    }
+    pub fn record(&self) {
+        let _ = ACCOUNT_DIAGNOSTIC.try_with(|slot| *slot.borrow_mut() = Some(self.clone()));
+    }
+    pub fn into_error(self) -> anyhow::Error {
+        self.record();
+        self.into()
+    }
+}
+
+tokio::task_local! { static ACCOUNT_DIAGNOSTIC: std::cell::RefCell<Option<AccountDiagnostic>>; }
+pub fn current_account_diagnostic() -> Option<AccountDiagnostic> {
+    ACCOUNT_DIAGNOSTIC
+        .try_with(|slot| slot.borrow().clone())
+        .ok()
+        .flatten()
+}
+
+/// Keep structured evidence through legacy composer outcomes without changing
+/// their effect-boundary contract. Each assignment has its own async task scope.
+pub async fn with_account_diagnostic<T>(
+    future: impl std::future::Future<Output = T>,
+) -> (T, Option<AccountDiagnostic>) {
+    ACCOUNT_DIAGNOSTIC
+        .scope(std::cell::RefCell::new(None), async {
+            let result = future.await;
+            (
+                result,
+                ACCOUNT_DIAGNOSTIC.with(|slot| slot.borrow().clone()),
+            )
+        })
+        .await
+}
+
+pub fn blocker_diagnostic(tree: &Tree, labels: TikTokControls) -> Option<AccountDiagnostic> {
+    use crate::app_automation::dialogs::{account_blocker, AccountBlocker};
+    let (state, message) = match account_blocker(tree, labels)? {
+        AccountBlocker::LoginRequired => (
+            AccountState::LoginRequired,
+            "TikTok yêu cầu đăng nhập; chưa xác minh tài khoản, không Đăng.",
+        ),
+        AccountBlocker::SecurityPrompt => (
+            AccountState::SecurityPrompt,
+            "TikTok đang hiện nhắc bảo mật; chưa xác minh tài khoản, không Đăng.",
+        ),
+        AccountBlocker::UnrecognizedDialog => (
+            AccountState::UnrecognizedDialog,
+            "Hộp thoại chưa được nhận diện; không tự đóng hoặc Đăng.",
+        ),
+    };
+    Some(AccountDiagnostic::new(
+        state,
+        labels,
+        Some(tree.generation),
+        message,
+    ))
+}
+
+pub async fn account_snapshot(
+    session: &dyn UiSession,
+    labels: TikTokControls,
+) -> anyhow::Result<Tree> {
+    let snapshot = session
+        .hierarchy_source_snapshot()
+        .await
+        .map_err(|error| AccountDiagnostic::read_failed(labels, &error).into_error())?;
+    let generation = snapshot.generation;
+    Tree::parse(snapshot).map_err(|error| {
+        AccountDiagnostic::new(
+            AccountState::Unreadable,
+            labels,
+            Some(generation),
+            format!("Cây giao diện tài khoản không đọc được: {error:#}"),
+        )
+        .into_error()
+    })
+}
+
+pub async fn refuse_account_blocker(
+    session: &dyn UiSession,
+    labels: TikTokControls,
+) -> anyhow::Result<()> {
+    let tree = account_snapshot(session, labels).await?;
+    if let Some(diagnostic) = blocker_diagnostic(&tree, labels) {
+        return Err(diagnostic.into_error());
+    }
+    Ok(())
+}
 
 fn single_username(elements: &[ElementBox]) -> Option<String> {
     let [element] = elements else {
@@ -117,59 +284,50 @@ fn global_profile_from_snapshot_with_id(
         .flatten())
 }
 
-async fn read_once(
-    session: &dyn UiSession,
-    labels: TikTokControls,
-) -> anyhow::Result<Option<String>> {
-    if labels.adaptive() {
-        let tree =
-            crate::ui_automation::tree::Tree::parse(session.hierarchy_source_snapshot().await?)?;
-        let mut headers = Vec::new();
-        let mut own = false;
-        let mut menu = false;
-        for (i, node) in tree.nodes.iter().enumerate() {
-            if !node.visible(labels.package()) || !tree.ancestors_visible(i) {
-                continue;
-            }
-            own |= matches!(node.attr("text"), "Edit" | "Edit profile" | "Sửa hồ sơ");
+fn profile_from_tree(tree: &Tree, labels: TikTokControls) -> Option<String> {
+    let mut own = 0;
+    let mut menu = false;
+    let mut usernames = Vec::new();
+    for (index, node) in tree.nodes.iter().enumerate() {
+        if !node.visible(labels.package())
+            || !tree.ancestors_visible(index)
+            || node.attr("enabled") != "true"
+            || node.rect().is_none()
+        {
+            continue;
+        }
+        if labels.adaptive() {
+            own += usize::from(matches!(
+                node.attr("text"),
+                "Edit" | "Edit profile" | "Sửa hồ sơ"
+            ));
             menu |= matches!(node.attr("content-desc"), "Profile menu" | "Menu hồ sơ");
             if node.attr("text").starts_with('@') && node.attr("class") == "android.widget.Button" {
                 if let Some(rect) = node.rect() {
-                    headers.push(rect);
+                    usernames.push(rect);
+                }
+            }
+        } else {
+            // Trill own marker and mjf username must be in THIS snapshot.
+            own += usize::from(
+                node.attr("resource-id") == "com.ss.android.ugc.trill:id/dby"
+                    && node.attr("class") == "android.widget.TextView"
+                    && node.attr("text") == "Edit profile",
+            );
+            if node.attr("resource-id") == "com.ss.android.ugc.trill:id/mjf"
+                && node.attr("class") == "android.widget.Button"
+            {
+                if let Some(rect) = node.rect() {
+                    usernames.push(rect);
                 }
             }
         }
-        return Ok(if own && menu {
-            single_username(&headers)
-        } else {
-            None
-        });
     }
-    if labels.package() == "com.zhiliaoapp.musically" {
-        let id = global_username_id(labels.resource_version())
-            .ok_or_else(|| anyhow::anyhow!("unmeasured account build"))?;
-        return global_profile_from_snapshot_with_id(
-            &session.hierarchy_source_snapshot().await?.xml,
-            id,
-        );
+    if own == 1 && (!labels.adaptive() || menu) {
+        single_username(&usernames)
+    } else {
+        None
     }
-    // Machine 2, 06/09/2026: own profile mjf Button contains @username; dby TextView
-    // contains Edit profile. Neither arbitrary bio @mentions nor another user's profile qualifies.
-    if session
-        .locate_all_described(ElementQuery::Text {
-            value: "Edit profile",
-            exact: true,
-        })
-        .await?
-        .len()
-        != 1
-    {
-        return Ok(None);
-    }
-    let nodes = session
-        .locate_all_described(LabelMatch::ResourceId(":id/mjf").to_query())
-        .await?;
-    Ok(single_username(&nodes))
 }
 
 pub async fn observe_own_account(
@@ -179,15 +337,68 @@ pub async fn observe_own_account(
     if !account_read_supported(labels) {
         return Ok(None);
     }
-    if session.active_app_bundle().await? != labels.package() {
+    let mut previous: Option<(u64, String)> = None;
+    for _ in 0..2 {
+        let active = session
+            .active_app_bundle()
+            .await
+            .map_err(|e| AccountDiagnostic::read_failed(labels, &e).into_error())?;
+        if active != labels.package() {
+            return Ok(None);
+        }
+        let snapshot = session
+            .hierarchy_source_snapshot()
+            .await
+            .map_err(|e| AccountDiagnostic::read_failed(labels, &e).into_error())?;
+        let tree = Tree::parse(snapshot.clone()).map_err(|e| {
+            AccountDiagnostic::new(
+                AccountState::Unreadable,
+                labels,
+                Some(snapshot.generation),
+                e.to_string(),
+            )
+            .into_error()
+        })?;
+        if let Some(diagnostic) = blocker_diagnostic(&tree, labels) {
+            return Err(diagnostic.into_error());
+        }
+        let handle = if labels.package() == "com.zhiliaoapp.musically" && !labels.adaptive() {
+            let id = global_username_id(labels.resource_version())
+                .ok_or_else(|| anyhow::anyhow!("unmeasured account build"))?;
+            global_profile_from_snapshot_with_id(&snapshot.xml, id)?
+        } else {
+            profile_from_tree(&tree, labels)
+        };
+        let Some(handle) = handle else {
+            return Ok(None);
+        };
+        if let Some((generation, before)) = &previous {
+            if tree.generation <= *generation || handle != *before {
+                return Ok(None);
+            }
+        }
+        previous = Some((tree.generation, handle));
+    }
+    if session
+        .active_app_bundle()
+        .await
+        .map_err(|e| AccountDiagnostic::read_failed(labels, &e).into_error())?
+        != labels.package()
+    {
         return Ok(None);
     }
-    let before = read_once(session, labels).await?;
-    let after = read_once(session, labels).await?;
-    if session.active_app_bundle().await? != labels.package() {
-        return Ok(None);
-    }
-    Ok(before.filter(|handle| Some(handle) == after.as_ref()))
+    let result = previous.map(|(generation, handle)| {
+        let mut diagnostic = AccountDiagnostic::new(
+            AccountState::Proved,
+            labels,
+            Some(generation),
+            "Đã xác minh tài khoản từ hai snapshot mới.",
+        );
+        diagnostic.observed_account = Some(handle.clone());
+        diagnostic.record();
+        handle
+    });
+    Ok(result)
 }
 
 /// Read the own header, recovering a collapsed profile only inside its observed
@@ -198,6 +409,7 @@ pub async fn restore_own_profile_header(
     labels: TikTokControls,
 ) -> anyhow::Result<Option<String>> {
     for attempt in 0..=3 {
+        refuse_account_blocker(session, labels).await?;
         if let Some(dismiss) = labels.label(crate::tiktok_labels::TikTokControl::DialogDismiss) {
             let tree = crate::ui_automation::tree::Tree::parse(
                 session.hierarchy_source_snapshot().await?,
