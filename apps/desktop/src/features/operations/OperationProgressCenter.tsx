@@ -10,7 +10,7 @@ import { describeError } from "../../describeError";
 import { dismissMonitorRecords, monitorRecordKey, readDismissedRecords, visibleMonitorRuns, writeDismissedRecords, type DismissedRecord } from "./monitorRecords";
 import { useFloatingMonitor } from "./useFloatingMonitor";
 import { MonitorReadError, OperationRunDevices } from "./OperationRunDevices";
-import { acknowledgePublishStart, publishStageLabel, PUBLISH_START_PENDING, PUBLISH_START_ACKNOWLEDGED, readPendingPublishStart, retirePublishStart, type PendingPublishStart } from "./publishStartBridge";
+import { acknowledgePublishStart, publishStageLabel, PUBLISH_START_PENDING, PUBLISH_START_ACKNOWLEDGED, PUBLISH_START_RETIRED, readPendingPublishStart, retirePublishStart, type PendingPublishStart } from "./publishStartBridge";
 import "../../styles/operation-progress.css";
 
 /** Monitor plus an explicit stop. Dismissing a record still leaves its source audit intact. */
@@ -56,11 +56,20 @@ export function OperationProgressCenter({ deviceLabels }: { deviceLabels: Readon
       if (event.type === PUBLISH_START_ACKNOWLEDGED) setExpanded(true);
       setStartReadError(null);
     };
+    // A durable pre-accept rejection retires the marker; the monitor must forget it too,
+    // or it keeps reporting a start that the backend says never began.
+    const retired = (event: Event) => {
+      const requestId = (event as CustomEvent<string>).detail;
+      setPendingStart(current => current?.requestId === requestId ? null : current);
+      setStartReadError(null);
+    };
     window.addEventListener(PUBLISH_START_ACKNOWLEDGED, receive);
     window.addEventListener(PUBLISH_START_PENDING, receive);
+    window.addEventListener(PUBLISH_START_RETIRED, retired);
     return () => {
       window.removeEventListener(PUBLISH_START_ACKNOWLEDGED, receive);
       window.removeEventListener(PUBLISH_START_PENDING, receive);
+      window.removeEventListener(PUBLISH_START_RETIRED, retired);
     };
   }, []);
   const pendingRequestId = pendingStart?.requestId;
@@ -76,6 +85,12 @@ export function OperationProgressCenter({ deviceLabels }: { deviceLabels: Readon
         if (!live) return;
         if (!status) { setStartReadError("Chưa tìm thấy xác nhận cho yêu cầu đã gửi. Trở lại Đăng bài để đối chiếu cùng lượt; không tạo lượt mới."); return; }
         if (status.requestId !== pendingRequestId) throw new Error("Phản hồi không khớp yêu cầu đang theo dõi.");
+        if (status.state === "failed" && !status.campaignId) {
+          // Durable pre-accept rejection: retire everywhere, keep the reason visible.
+          retirePublishStart(pendingRequestId);
+          setStartReadError(status.error?.message ?? "Lượt đăng bị từ chối trước khi bắt đầu; kiểm tra lại để tạo lượt mới.");
+          return;
+        }
         if (!acknowledged && status.state !== "failed") {
           acknowledged = true;
           const saved = readPendingPublishStart();

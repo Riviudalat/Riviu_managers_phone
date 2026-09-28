@@ -35,7 +35,7 @@ import {
   type PublishLimits,
 } from "../api";
 import { PublishPreparationProgress } from "../components/publish/PublishPreparationProgress";
-import { acknowledgePublishStart, observePendingPublishStart, readPendingPublishStart, savePendingPublishStart, retirePublishStart } from "../features/operations/publishStartBridge";
+import { acknowledgePublishStart, observePendingPublishStart, readPendingPublishStart, savePendingPublishStart, retirePublishStart, PUBLISH_START_RETIRED } from "../features/operations/publishStartBridge";
 import { useWorkspaceDraft } from "../workspaceDraft";
 import { writeFormDraft } from "../formDraftStorage";
 import { readPublishForm } from "../components/publish/publishDraftStorage";
@@ -760,6 +760,23 @@ export function PublishPage({
   const latestInputKey = useRef(inputKey);
   latestInputKey.current = inputKey;
   const preflightTicket = useRef(0);
+  // One intended start ID per exact input, shared by preflight and Start.
+  const intendedStart = useRef<{ inputKey: string; requestId: string } | null>(null);
+  useEffect(() => {
+    // Retirement from any view (monitor poll included) means that ID is a terminal failed
+    // receipt; the next preflight must mint a fresh one.
+    const retired = (event: Event) => {
+      if (intendedStart.current?.requestId !== (event as CustomEvent<string>).detail) return;
+      intendedStart.current = null;
+      // The report was checked for that ID; drop it so the setup offers Kiểm tra lại.
+      preflightTicket.current += 1;
+      setPreflightSnapshot(null);
+      setPreflightState("idle");
+      setPreflightStage(null);
+    };
+    window.addEventListener(PUBLISH_START_RETIRED, retired);
+    return () => window.removeEventListener(PUBLISH_START_RETIRED, retired);
+  }, []);
   useEffect(() => {
     preflightTicket.current += 1;
     setPreflightState("idle");
@@ -1002,7 +1019,16 @@ export function PublishPage({
     setPreflightError(null);
     const ticket = ++preflightTicket.current;
     const requestKey = inputKey;
-    const requestId = crypto.randomUUID();
+    // Preflight and Start share one intended start ID, so the acceptance answer shown
+    // here is the one Start gives. A pending start for this exact input keeps its ID.
+    const createKey = JSON.stringify(preflightRequest);
+    let savedStart: ReturnType<typeof readPendingPublishStart> = null;
+    try { savedStart = readPendingPublishStart(); } catch { savedStart = null; }
+    // A retired (terminally failed) ID is cleared by the PUBLISH_START_RETIRED listener.
+    const intended = savedStart?.inputKey === createKey ? savedStart.requestId
+      : intendedStart.current?.inputKey === createKey ? intendedStart.current.requestId : crypto.randomUUID();
+    intendedStart.current = { inputKey: createKey, requestId: intended };
+    const requestId = intended;
     let unlisten: UnlistenFn | undefined;
     try {
       unlisten = await listenRiviuEvents(event => {
@@ -1051,13 +1077,27 @@ export function PublishPage({
     try {
       // The review dialog is the sole public-post confirmation boundary.
       const createKey = JSON.stringify(preflightRequest);
+      if (currentPreflight.expiresAt && Date.parse(currentPreflight.expiresAt) <= Date.now()) {
+        // Drop the stale report so the setup shows Kiểm tra lại instead of a dead Start.
+        invalidatePreflight();
+        throw new Error("Kết quả kiểm tra đã hết hạn. Bấm Kiểm tra lại trước khi đăng.");
+      }
+      if (currentPreflight.startBlock) throw new Error(currentPreflight.startBlock);
       let pending = readPendingPublishStart();
       if (pending && pending.inputKey !== createKey) {
         const prior = await publishStartStatus(pending.requestId);
-        if (prior) acknowledgePublishStart(pending, prior);
-        throw new Error("Lượt đăng trước đang chờ đối chiếu. Xem tiến trình của lượt đó trước khi bắt đầu lượt khác.");
+        if (prior?.state === "failed" && !prior.campaignId) {
+          // Only a durable pre-accept rejection frees the marker; unknown or accepted never does.
+          retirePublishStart(pending.requestId);
+          pending = null;
+        } else {
+          if (prior) acknowledgePublishStart(pending, prior);
+          throw new Error("Lượt đăng trước đang chờ đối chiếu. Xem tiến trình của lượt đó trước khi bắt đầu lượt khác.");
+        }
       }
-      pending ??= { inputKey: createKey, requestId: crypto.randomUUID(), requestedAt: new Date().toISOString() };
+      const intendedId = intendedStart.current?.inputKey === createKey ? intendedStart.current.requestId : null;
+      if (!pending && !intendedId) throw new Error("Thiết lập đã đổi sau khi kiểm tra. Kiểm tra lại trước khi đăng.");
+      pending ??= { inputKey: createKey, requestId: intendedId!, requestedAt: new Date().toISOString() };
       // Storage must succeed before any public-effect IPC; an unknown ACK never retires this ID.
       savePendingPublishStart(pending);
       observePendingPublishStart(pending);
@@ -1073,7 +1113,10 @@ export function PublishPage({
       if (status.requestId !== pending.requestId) throw new Error("Phản hồi không khớp lượt đăng đã gửi; giữ yêu cầu để đối chiếu.");
       if (status.state === "failed" && !status.campaignId) {
         // A recorded terminal rejection may be corrected and reviewed as a new request.
+        // The failed receipt is terminal: the next preflight must mint a fresh ID.
         retirePublishStart(pending.requestId);
+        if (intendedStart.current?.requestId === pending.requestId) intendedStart.current = null;
+        invalidatePreflight();
         throw new Error(status.error?.message ?? "Lượt đăng bị từ chối trước khi bắt đầu.");
       }
       setBaseline(draftSnapshot);

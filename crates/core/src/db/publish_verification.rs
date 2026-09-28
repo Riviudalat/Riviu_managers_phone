@@ -1090,7 +1090,8 @@ impl Database {
                             .map(str::to_owned)
                     })
                     .unwrap_or_else(|| "Bài đang tải hoặc chưa xác định được kết quả Đăng".into());
-                let mut completed = completed_upload_with_link_debt(
+                let handoff_released = super::publish_start::handoff_release_current(conn, &assignment_id)?;
+                let mut completed = handoff_released || completed_upload_with_link_debt(
                     &state,
                     evidence.as_deref(),
                     &updated_at,

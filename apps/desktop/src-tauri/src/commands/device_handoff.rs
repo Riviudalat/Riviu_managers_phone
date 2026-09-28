@@ -18,6 +18,9 @@ struct HandoffStops {
     operations: Vec<String>,
     operation_devices: std::collections::HashMap<String, HashSet<String>>,
     publish_markers: std::collections::HashMap<String, String>,
+    // assignment -> (device, exclusion request); never authorizes sibling assignments.
+    assignments: std::collections::HashMap<String, (String, String)>,
+    scoped: bool,
 }
 
 fn intersects(selected: &HashSet<String>, source: &[String]) -> bool {
@@ -41,6 +44,159 @@ fn selected_operation_scope(
         .into_iter()
         .flat_map(|source| selected.intersection(source).cloned())
         .collect()
+}
+
+/// A selected device another owner still holds, observed without stopping anything.
+#[derive(serde::Serialize, Clone, Debug)]
+#[serde(rename_all = "camelCase")]
+pub struct NeedsRelease {
+    pub udid: String,
+    pub owner: String,
+    pub title: String,
+    /// False when releasing this device would stop devices outside the selection, or
+    /// when an old post may already be public and needs review instead of a stop.
+    pub releasable: bool,
+    pub message: String,
+}
+
+/// Read-only: what a confirmed handoff would have to release for exactly `udids`.
+/// Publish runs split per assignment and Nurture per device; any other run is
+/// releasable only when all of its devices are inside the selection.
+pub(crate) fn observe_release_needs(
+    state: &AppState,
+    udids: &[String],
+) -> Result<Vec<NeedsRelease>, CommandError> {
+    let selected: HashSet<_> = udids.iter().cloned().collect();
+    let mut needs = Vec::new();
+    let mut covered = HashSet::new();
+    let mut ids: HashSet<String> = state
+        .db
+        .active_operation_source_ids()
+        .map_err(CommandError::operation)?
+        .into_iter()
+        .collect();
+    for run in state
+        .nurture
+        .list_status()
+        .into_iter()
+        .filter(|s| s.running)
+    {
+        ids.insert(format!("nurture:{}", riviu_core::nurture_source_id(&run)));
+    }
+    let mut ids: Vec<_> = ids.into_iter().collect();
+    ids.sort();
+    for id in ids {
+        let Some(detail) = super::jobs::read_operation_run(state, &id)? else {
+            continue;
+        };
+        if detail.summary.state.is_terminal() {
+            continue;
+        }
+        if detail.summary.kind == riviu_core::OperationRunKind::Publish
+            && state
+                .db
+                .publish_campaign_state(&detail.summary.source_id)
+                .map_err(CommandError::operation)?
+                == Some(riviu_core::PublishCampaignState::Scheduled)
+        {
+            continue;
+        }
+        let devices = super::operation_stop::source_devices(&state.db, &detail)
+            .map_err(CommandError::operation)?;
+        if !intersects(&selected, &devices) {
+            continue;
+        }
+        let outside = devices.iter().filter(|d| !selected.contains(*d)).count();
+        let splittable = matches!(
+            detail.summary.kind,
+            riviu_core::OperationRunKind::Publish | riviu_core::OperationRunKind::Nurture
+        );
+        let releasable = splittable || outside == 0;
+        // Keyed per (device, owner): a publish run matches its own guard hold only.
+        let key = if detail.summary.kind == riviu_core::OperationRunKind::Publish {
+            format!("publish:{}", detail.summary.source_id)
+        } else {
+            detail.summary.kind.as_key().to_owned()
+        };
+        for udid in devices.iter().filter(|d| selected.contains(*d)) {
+            covered.insert((udid.clone(), key.clone()));
+            needs.push(NeedsRelease {
+                udid: udid.clone(),
+                owner: detail.summary.kind.as_key().into(),
+                title: detail.summary.title.clone(),
+                releasable,
+                message: if releasable {
+                    "Xác nhận sẽ chỉ dừng tác vụ cũ trên máy này".into()
+                } else {
+                    format!(
+                        "Tác vụ này còn chạy trên {outside} máy ngoài lựa chọn; dừng nó ở Theo dõi hoặc chọn thêm các máy đó"
+                    )
+                },
+            });
+        }
+    }
+    // Every independent blocker gets its own row; one covering operation never hides a
+    // second publication or owner on the same phone. Consumers treat any false row as
+    // blocking the whole device.
+    for udid in udids {
+        for hold in state
+            .db
+            .publish_device_guard(udid)
+            .map_err(CommandError::operation)?
+            .blocking
+        {
+            if !covered.insert((udid.clone(), format!("publish:{}", hold.campaign_id))) {
+                continue;
+            }
+            // A new post may interrupt link verification: confirmation excludes only this
+            // assignment (stopping its verifier) and closes the phone. A possibly public
+            // post becomes needsReview, so the verification debt is kept, not cleared.
+            needs.push(NeedsRelease {
+                udid: udid.clone(),
+                owner: "publish".into(),
+                title: hold.campaign_id.clone(),
+                releasable: true,
+                message: format!(
+                    "Lượt {} còn giữ máy ({}). Xác nhận sẽ dừng xác minh trên máy này và giữ việc kiểm tra link trong Theo dõi",
+                    hold.campaign_id, hold.reason
+                ),
+            });
+        }
+        if let Some(owner) = state.control.current_work_owner(udid) {
+            let owner_kinds: &[&str] = match owner {
+                DeviceWorkOwner::Nurture => &["nurture"],
+                DeviceWorkOwner::Interaction => &["interaction"],
+                DeviceWorkOwner::Script => &["script", "flow", "orchestration"],
+                _ => &[],
+            };
+            // The owner of an operation already listed is released by stopping it.
+            if owner_kinds
+                .iter()
+                .any(|kind| covered.contains(&(udid.clone(), (*kind).to_owned())))
+                || (owner == DeviceWorkOwner::Script
+                    && covered.iter().any(|(device, kind)| device == udid && kind.starts_with("publish:")))
+            {
+                continue;
+            }
+            let releasable = matches!(
+                owner,
+                DeviceWorkOwner::ManualControl | DeviceWorkOwner::IdleSweep | DeviceWorkOwner::Nurture
+            );
+            needs.push(NeedsRelease {
+                udid: udid.clone(),
+                owner: format!("{owner:?}"),
+                title: String::new(),
+                releasable,
+                message: if releasable {
+                    "Xác nhận sẽ nhả phiên đang giữ máy này".into()
+                } else {
+                    "Máy đang có tác vụ khác giữ quyền điều khiển; chờ tác vụ đó xong".into()
+                },
+            });
+        }
+    }
+    needs.sort_by(|a, b| a.udid.cmp(&b.udid));
+    Ok(needs)
 }
 
 #[tauri::command]
@@ -296,6 +452,117 @@ pub(crate) async fn prepare_manual_devices(
     })
 }
 
+/// Replacement after confirmation. Publish excludes selected assignments, Nurture stops
+/// selected devices; an indivisible operation is refused before any revocation if it
+/// includes a device outside the selection.
+pub(crate) async fn prepare_publish_devices(
+    app: &tauri::AppHandle,
+    state: &AppState,
+    udids: Vec<String>,
+    _handoff: &tokio::sync::MutexGuard<'static, ()>,
+) -> Result<OperationStopResult, CommandError> {
+    let timing = StopTiming::new("publishHandoff");
+    if udids.is_empty() || udids.len() > 500 {
+        return Err(CommandError::invalid_argument("Chọn từ 1 đến 500 thiết bị"));
+    }
+    let selected: HashSet<_> = udids.into_iter().collect();
+    let mut devices: Vec<_> = selected.iter().cloned().collect();
+    devices.sort();
+    let needs = observe_release_needs(state, &devices)?;
+    if let Some(blocked) = needs.iter().find(|row| !row.releasable) {
+        return Err(CommandError::operation(format!("{}: {}", blocked.udid, blocked.message)));
+    }
+    let mut stopped = HandoffStops { scoped: true, ..Default::default() };
+    // Complete the scope check before stopping even one operation.
+    for id in state.db.active_operation_source_ids().map_err(CommandError::operation)? {
+        let Some(detail) = super::jobs::read_operation_run(state, &id)? else { continue };
+        if detail.summary.state.is_terminal()
+            || matches!(detail.summary.kind, riviu_core::OperationRunKind::Publish | riviu_core::OperationRunKind::Nurture) {
+            continue;
+        }
+        let scope = super::operation_stop::source_devices(&state.db, &detail).map_err(CommandError::operation)?;
+        if !intersects(&selected, &scope) { continue; }
+        if scope.iter().any(|id| !selected.contains(id)) {
+            return Err(CommandError::operation("Tác vụ không thể tách còn giữ máy ngoài lựa chọn; dừng ở Theo dõi hoặc chọn đủ máy"));
+        }
+        stopped.operation_devices.insert(id.clone(), scope.into_iter().collect());
+        stopped.operations.push(id);
+    }
+    for udid in &devices {
+        let mut assignments = state.db.publish_handoff_assignments(udid).map_err(CommandError::operation)?;
+        // Guard holds include succeeded rows whose link is still being recovered.
+        for hold in state.db.publish_device_guard(udid).map_err(CommandError::operation)?.blocking {
+            if !assignments.iter().any(|(id, _)| id == &hold.assignment_id) {
+                let campaign = state.db.get_publish_campaign(&hold.campaign_id).map_err(CommandError::operation)?
+                    .ok_or_else(|| CommandError::operation("Không tìm thấy lượt đang giữ máy"))?;
+                let assignment = campaign.assignments.iter().find(|a| a.id == hold.assignment_id)
+                    .ok_or_else(|| CommandError::operation("Không tìm thấy bài đang giữ máy"))?;
+                assignments.push((assignment.id.clone(), assignment.revision));
+            }
+        }
+        for (assignment, revision) in assignments {
+            let request = uuid::Uuid::new_v4().to_string();
+            // This inserts the exclusion used by observer_authorized, fencing the selected
+            // verifier as well as the composer. No campaign-wide stop marker is written.
+            state.db.request_publish_handoff_exclusion(&assignment, revision, &request)
+                .map_err(CommandError::operation)?;
+            stopped.assignments.insert(assignment, (udid.clone(), request));
+        }
+    }
+    for id in &stopped.operations {
+        super::operation_stop(app.clone(), app.state(), id.clone()).await?;
+    }
+    for udid in &devices {
+        state.nurture.stop(udid);
+        state.end_overlay_session(udid).await?;
+    }
+    let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(125);
+    let mut waiting = HashSet::new();
+    loop {
+        waiting.clear();
+        for (assignment, (udid, _)) in &stopped.assignments {
+            if state.db.publish_handoff_worker_running(assignment).map_err(CommandError::operation)? {
+                waiting.insert(udid.clone());
+            }
+        }
+        for id in &stopped.operations {
+            if super::operation_stop_status(app.state(), id.clone())?.is_none_or(|r| r.state == "stopping") {
+                waiting.extend(selected_operation_scope(&selected, stopped.operation_devices.get(id)));
+            }
+        }
+        for udid in &devices {
+            if state.control.current_work_owner(udid).is_some()
+                || state.nurture.list_status().iter().any(|s| s.udid == *udid && s.running) {
+                waiting.insert(udid.clone());
+            }
+        }
+        if waiting.is_empty() || tokio::time::Instant::now() >= deadline { break; }
+        tokio::time::sleep(std::time::Duration::from_millis(250)).await;
+    }
+    let mut closes = futures_util::stream::iter(devices.into_iter().enumerate().map(|(slot, udid)| {
+        let stopped = &stopped;
+        let waiting = &waiting;
+        let timing = timing.phase("total", Some(slot));
+        async move {
+            let result = if waiting.contains(&udid) {
+                Err(CommandError::operation("Tác vụ cũ chưa nhả thiết bị; chưa bắt đầu lượt mới"))
+            } else {
+                close_handoff_device(state, &udid, stopped, deadline, timing).await
+            };
+            StopDeviceResult { udid, closed: result.is_ok(), message: match result {
+                Ok(()) => "Đã nhả tác vụ cũ trên máy được chọn".into(),
+                Err(error) => error.message.to_string(),
+            }}
+        }
+    })).buffer_unordered(2);
+    let mut devices = Vec::new();
+    while let Some(result) = closes.next().await { devices.push(result); }
+    devices.sort_by(|a, b| a.udid.cmp(&b.udid));
+    Ok(OperationStopResult { operation_id: format!("handoff:{}", uuid::Uuid::new_v4()),
+        state: if devices.iter().all(|r| r.closed) { "closed" } else { "needsAttention" }.into(),
+        devices, stop_marker: None })
+}
+
 async fn close_handoff_device(
     state: &AppState,
     udid: &str,
@@ -346,6 +613,17 @@ async fn close_handoff_device(
                 {
                     continue;
                 }
+                if authorized.scoped && other.summary.kind == riviu_core::OperationRunKind::Nurture {
+                    // The aggregate run may still own unselected siblings. The selected
+                    // device's running flag was checked above and its lease is ours.
+                    continue;
+                }
+                if authorized.scoped && other.summary.kind == riviu_core::OperationRunKind::Publish {
+                    let rows = state.db.publish_handoff_assignments(udid).map_err(CommandError::operation)?;
+                    if rows.iter().all(|(id, _)| authorized.assignments.contains_key(id)) {
+                        continue;
+                    }
+                }
                 if !other.summary.state.is_terminal()
                     && super::operation_stop::source_devices(&state.db, &other)
                         .map_err(CommandError::operation)?
@@ -360,6 +638,13 @@ async fn close_handoff_device(
         }
         drop(scan_timing);
         drop(source_timing);
+        let mut assignment_proofs = Vec::new();
+        for (assignment, (device, request)) in &authorized.assignments {
+            if device == udid {
+                let fence = state.db.publish_handoff_fence(assignment, request).map_err(CommandError::operation)?;
+                assignment_proofs.push((assignment.clone(), request.clone(), fence));
+            }
+        }
         let mut proofs = Vec::new();
         for hold in state
             .db
@@ -367,6 +652,9 @@ async fn close_handoff_device(
             .map_err(CommandError::operation)?
             .blocking
         {
+            if authorized.scoped && assignment_proofs.iter().any(|(id, _, _)| id == &hold.assignment_id) {
+                continue;
+            }
             let id = format!("publish:{}", hold.campaign_id);
             if !authorized.operations.contains(&id) {
                 return Err(CommandError::operation(
@@ -446,14 +734,19 @@ async fn close_handoff_device(
                 return Err(CommandError::operation("Chưa xác nhận về màn hình chính"));
             }
         }
-        Ok(proofs)
+        Ok((proofs, assignment_proofs))
     }
     .await;
     state
         .control
         .close_exclusive_context(context)
         .map_err(CommandError::from)?;
-    for (campaign, marker) in result? {
+    let (proofs, assignment_proofs) = result?;
+    for (assignment, request, fence) in assignment_proofs {
+        state.db.record_publish_handoff_release(&assignment, &request, &fence)
+            .map_err(CommandError::operation)?;
+    }
+    for (campaign, marker) in proofs {
         if !state
             .db
             .record_publish_stopped_device_release(&campaign, udid, &marker)

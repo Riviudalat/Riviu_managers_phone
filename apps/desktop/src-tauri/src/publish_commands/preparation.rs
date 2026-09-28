@@ -117,15 +117,20 @@ pub(super) async fn guard_fingerprint(
             .collect::<Vec<_>>();
         let groups = db.list_groups()?;
         let mut bindings = Vec::with_capacity(udids.len());
+        let mut holds = Vec::new();
         for udid in &udids {
-            anyhow::ensure!(
-                db.publish_device_guard(udid)?.blocking.is_empty(),
-                "Máy còn lượt giữ quyền đăng; kiểm tra lại"
+            // Preflight is read-only now: a hold is part of the fingerprint instead of an
+            // error, so releasing it after confirmation invalidates any cached preparation.
+            holds.extend(
+                db.publish_device_guard(udid)?
+                    .blocking
+                    .into_iter()
+                    .map(|hold| (hold.assignment_id, hold.updated_at)),
             );
             bindings.push(db.device_app_binding(udid, "tiktok")?);
         }
         Ok(execution::frame_sha256(&serde_json::to_vec(
-            &serde_json::json!({"metas":metas,"groups":groups,"bindings":bindings}),
+            &serde_json::json!({"metas":metas,"groups":groups,"bindings":bindings,"holds":holds}),
         )?))
     })
     .await

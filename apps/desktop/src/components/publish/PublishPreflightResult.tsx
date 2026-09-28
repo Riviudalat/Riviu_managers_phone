@@ -56,6 +56,25 @@ export function PublishPreflightResult({
           ? "Đầu vào đã đạt kiểm tra. Chưa đăng bài."
           : "Chưa thể đăng. Xử lý điều kiện chưa đạt bên dưới rồi kiểm tra lại."}
       </p>
+      {report.acceptanceMode && (
+        <p className="pw-error" role="status">
+          Chế độ nghiệm thu đang bật: chỉ lượt và máy đã được cấp quyền mới được đăng.
+        </p>
+      )}
+      {report.startBlock && <p className="pw-error" role="alert">{report.startBlock}</p>}
+      {!!report.needsRelease?.length && (
+        <div className="pw-preflight-global" role="region" aria-label="Máy cần nhả trước khi đăng">
+          <strong>Kiểm tra không dừng tác vụ nào. Khi xác nhận đăng, chỉ các máy sau được nhả:</strong>
+          <ul>
+            {report.needsRelease.map((row) => (
+              <li key={`${row.udid}:${row.owner}:${row.title}`}>
+                {machineName(row.udid)}{row.title ? ` · ${row.title}` : ""}: {row.message}
+                {!row.releasable && " (không thể tự nhả)"}
+              </li>
+            ))}
+          </ul>
+        </div>
+      )}
       <div className="pw-preflight-overview" role="group" aria-label="Lọc kết quả kiểm tra">
         <span>{globalIssues.length ? `${globalIssues.length} điều kiện chung · ` : ""}{blocked.length} máy cần xử lý · {passed.length} máy đạt</span>
         <div className="pw-preflight-views">

@@ -603,9 +603,24 @@ export interface PublishSheetDeliveryProgress {
   updatedAt: string;
 }
 
+export interface PublishNeedsRelease {
+  udid: string;
+  owner: string;
+  title: string;
+  /** False: releasing would stop devices outside the selection, or an old post needs review. */
+  releasable: boolean;
+  message: string;
+}
+
 export interface PublishPreflightReport {
   preparationId?: string;
   expiresAt?: string;
+  /** Debug acceptance mode is on for this app run. */
+  acceptanceMode?: boolean;
+  /** Why Start with the same request ID would be refused before acceptance. */
+  startBlock?: string;
+  /** Read-only: devices confirmation would release. Preflight stopped nothing. */
+  needsRelease?: PublishNeedsRelease[];
   sheetDelivery?: SheetDeliveryTarget;
   sheetEnabled?: boolean;
   inputDigest: string;

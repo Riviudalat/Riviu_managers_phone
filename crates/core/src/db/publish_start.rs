@@ -71,6 +71,48 @@ fn exclusion_on(conn: &Connection, request: &str) -> anyhow::Result<Option<Publi
 }
 
 impl Database {
+    /// Exact device scope for replacement; scheduled work is not today's owner.
+    pub fn publish_handoff_assignments(&self, udid: &str) -> anyhow::Result<Vec<(String, i64)>> {
+        let conn = self.conn()?;
+        let mut query = conn.prepare("SELECT a.id,a.revision FROM publish_assignments a
+            JOIN publish_campaigns c ON c.id=a.campaign_id WHERE a.udid=?1 AND c.state<>'scheduled'
+            AND (a.state IN ('queued','preparing','ready','transferring','imported','posting','verifying','uncertain')
+                OR EXISTS(SELECT 1 FROM publish_account_reservations r WHERE r.assignment_id=a.id)
+                OR EXISTS(SELECT 1 FROM settings WHERE key='publish.handoff-pending.' || a.id))
+            ORDER BY a.id")?;
+        let rows = query.query_map([udid], |r| Ok((r.get(0)?, r.get(1)?)))?
+            .collect::<rusqlite::Result<_>>()?;
+        Ok(rows)
+    }
+
+    pub fn publish_handoff_worker_running(&self, assignment: &str) -> anyhow::Result<bool> {
+        Ok(self.conn()?.query_row("SELECT EXISTS(SELECT 1 FROM publish_dispatch_jobs WHERE assignment_id=?1 AND state='running') OR EXISTS(SELECT 1 FROM publish_work_claims WHERE owner=?1)",
+            [assignment], |r| r.get(0))?)
+    }
+
+    /// Snapshot after the old worker drained, checked again after physical closure.
+    pub fn publish_handoff_fence(&self, assignment: &str, request: &str) -> anyhow::Result<String> {
+        handoff_fence(&self.conn()?, assignment, request)
+    }
+
+    /// Caller holds the handoff lock and has closed and dropped this device's exclusive
+    /// context. Only this assignment's reservation is released; its Post evidence remains.
+    pub fn record_publish_handoff_release(&self, assignment: &str, request: &str, expected: &str) -> anyhow::Result<()> {
+        let mut conn = self.conn()?;
+        let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
+        anyhow::ensure!(handoff_fence(&tx, assignment, request)? == expected,
+            "Bài cũ thay đổi trong lúc đóng máy; chưa ghi nhận nhả máy");
+        let proof = serde_json::json!({"requestId":request,"fence":expected});
+        tx.execute("INSERT INTO settings(key,value) VALUES(?1,?2) ON CONFLICT(key) DO UPDATE SET value=excluded.value",
+            params![format!("publish.handoff-release.{assignment}"),proof.to_string()])?;
+        tx.execute("DELETE FROM publish_account_reservations WHERE assignment_id=?1", [assignment])?;
+        tx.execute("DELETE FROM settings WHERE key=?1 AND value=?2",
+            params![format!("publish.handoff-pending.{assignment}"),request])?;
+        settle_exclusion_after_release(&tx, assignment)?;
+        tx.commit()?;
+        Ok(())
+    }
+
     pub fn pending_publish_exclusion_releases(
         &self,
     ) -> anyhow::Result<Vec<(String, String, String)>> {
@@ -155,6 +197,52 @@ impl Database {
         Ok((receipt, is_new))
     }
 
+    /// Record a pre-acceptance refusal for exactly this request ID, so the frontend can
+    /// retire its pending marker from a durable fact instead of guessing from an error code.
+    /// An existing receipt is returned unchanged only when it binds the exact same input
+    /// (digest and fingerprint); a refusal never overwrites a request that may own a campaign,
+    /// and never silently answers for a different body reusing the ID.
+    pub fn reject_publish_start(
+        &self,
+        request: &str,
+        digest: &str,
+        fingerprint: &str,
+        error: &PublishStartError,
+    ) -> anyhow::Result<PublishStartReceipt> {
+        Uuid::parse_str(request)?;
+        anyhow::ensure!(
+            digest.len() == 64 && digest.bytes().all(|b| b.is_ascii_hexdigit()),
+            "Invalid input digest"
+        );
+        anyhow::ensure!(fingerprint.len() == 64, "Invalid request fingerprint");
+        let mut conn = self.conn()?;
+        let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
+        if let Some(receipt) = start_on(&tx, request)? {
+            let prior: String = tx.query_row(
+                "SELECT request_fingerprint FROM publish_start_requests WHERE request_id=?1",
+                [request],
+                |r| r.get(0),
+            )?;
+            anyhow::ensure!(
+                prior == fingerprint && receipt.input_digest == digest,
+                "requestId đã dùng cho nội dung khác; tạo lượt mới để thay đổi nội dung"
+            );
+            return Ok(receipt);
+        }
+        let legacy: bool = tx.query_row(
+            "SELECT EXISTS(SELECT 1 FROM publish_create_requests WHERE request_id=?1)",
+            [request],
+            |r| r.get(0),
+        )?;
+        anyhow::ensure!(!legacy, "requestId đã có lượt tạo cũ; kiểm tra lượt đó trước");
+        tx.execute("INSERT INTO publish_start_requests(request_id,input_digest,request_fingerprint,preparation_id,campaign_id,state,stage,error_json,updated_at)
+            VALUES(?1,?2,?3,?4,NULL,'failed','rejected',?5,?6)",
+            params![request, digest, fingerprint, request, serde_json::to_string(error)?, Utc::now().to_rfc3339()])?;
+        let receipt = start_on(&tx, request)?.context("start receipt missing")?;
+        tx.commit()?;
+        Ok(receipt)
+    }
+
     /// Expected state fences late preparation completion after shutdown/recovery.
     pub fn advance_publish_start(
         &self,
@@ -194,6 +282,26 @@ impl Database {
         revision: i64,
         request: &str,
     ) -> anyhow::Result<PublishExcludeReceipt> {
+        self.request_publish_exclusion_inner(assignment, revision, request, false)
+    }
+
+    /// Confirmation of a replacement keeps the account reserved until physical close.
+    pub fn request_publish_handoff_exclusion(
+        &self,
+        assignment: &str,
+        revision: i64,
+        request: &str,
+    ) -> anyhow::Result<PublishExcludeReceipt> {
+        self.request_publish_exclusion_inner(assignment, revision, request, true)
+    }
+
+    fn request_publish_exclusion_inner(
+        &self,
+        assignment: &str,
+        revision: i64,
+        request: &str,
+        handoff: bool,
+    ) -> anyhow::Result<PublishExcludeReceipt> {
         Uuid::parse_str(request)?;
         let mut conn = self.conn()?;
         let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
@@ -228,6 +336,10 @@ impl Database {
         };
         tx.execute("INSERT INTO publish_exclude_requests(request_id,assignment_id,expected_revision,state,reason,updated_at)
             VALUES(?1,?2,?3,?4,?5,?6)", params![request,assignment,revision,next,reason,Utc::now().to_rfc3339()])?;
+        if handoff {
+            tx.execute("INSERT INTO settings(key,value) VALUES(?1,?2) ON CONFLICT(key) DO UPDATE SET value=excluded.value",
+                params![format!("publish.handoff-pending.{assignment}"),request])?;
+        }
         // A cancelled child fences transfer/composer CAS; Post-intent rows keep their exact state.
         tx.execute(
             "UPDATE publish_assignments SET state='cancelled',
@@ -243,6 +355,37 @@ impl Database {
     }
 }
 
+fn handoff_fence(conn: &Connection, assignment: &str, request: &str) -> anyhow::Result<String> {
+    use sha2::Digest;
+    let row: (String, String, i64, Option<String>, Option<String>) = conn.query_row(
+        "SELECT udid,state,revision,effect_intent,evidence_json FROM publish_assignments WHERE id=?1",
+        [assignment], |r| Ok((r.get(0)?,r.get(1)?,r.get(2)?,r.get(3)?,r.get(4)?)))?;
+    let excluded: bool = conn.query_row("SELECT EXISTS(SELECT 1 FROM publish_exclude_requests WHERE assignment_id=?1 AND request_id=?2 AND rowid=(SELECT MAX(rowid) FROM publish_exclude_requests WHERE assignment_id=?1))",
+        params![assignment,request], |r| r.get(0))?;
+    let running: bool = conn.query_row("SELECT EXISTS(SELECT 1 FROM publish_dispatch_jobs WHERE assignment_id=?1 AND state='running') OR EXISTS(SELECT 1 FROM publish_work_claims WHERE owner=?1)",
+        [assignment], |r| r.get(0))?;
+    anyhow::ensure!(excluded && !running, "Lượt cũ chưa nhả worker của máy");
+    let excluded_at: String = conn.query_row("SELECT updated_at FROM publish_exclude_requests WHERE request_id=?1",
+        [request], |r| r.get(0))?;
+    let resumed_at = row.4.as_deref().and_then(|raw| serde_json::from_str::<serde_json::Value>(raw).ok())
+        .and_then(|e| e["verificationResume"]["requestedAt"].as_str().map(str::to_owned));
+    if let Some(resumed) = resumed_at {
+        anyhow::ensure!(chrono::DateTime::parse_from_rfc3339(&resumed)? <= chrono::DateTime::parse_from_rfc3339(&excluded_at)?,
+            "Bài cũ đã được tiếp tục xác minh; kiểm tra lại trước khi nhả máy");
+    }
+    Ok(format!("{:x}", sha2::Sha256::digest(serde_json::to_vec(&(assignment,request,row))?)))
+}
+
+pub(super) fn handoff_release_current(conn: &Connection, assignment: &str) -> anyhow::Result<bool> {
+    let raw: Option<String> = conn.query_row("SELECT value FROM settings WHERE key=?1",
+        [format!("publish.handoff-release.{assignment}")], |r| r.get(0)).optional()?;
+    let Some(raw) = raw else { return Ok(false) };
+    let proof: serde_json::Value = serde_json::from_str(&raw)?;
+    let Some(request) = proof["requestId"].as_str() else { return Ok(false) };
+    // A newly running worker, changed evidence, revision or explicit resume invalidates proof.
+    Ok(handoff_fence(conn, assignment, request).is_ok_and(|fence| proof["fence"] == fence))
+}
+
 /// Called only after the dispatcher joined the exact worker (its work permit and UI lease dropped).
 pub(super) fn settle_exclusion_after_release(
     conn: &Connection,
@@ -253,6 +396,7 @@ pub(super) fn settle_exclusion_after_release(
         ELSE 'excluded' END,revision=revision+1,updated_at=?2 WHERE assignment_id=?1 AND state='stopping'",
         params![assignment,Utc::now().to_rfc3339()])?;
     conn.execute("DELETE FROM publish_account_reservations WHERE assignment_id=?1
+        AND NOT EXISTS(SELECT 1 FROM settings WHERE key='publish.handoff-pending.' || ?1)
         AND EXISTS(SELECT 1 FROM publish_exclude_requests WHERE assignment_id=?1 AND state='excluded')
         AND EXISTS(SELECT 1 FROM publish_assignments WHERE id=?1 AND effect_intent IS NULL)",[assignment])?;
     Ok(())

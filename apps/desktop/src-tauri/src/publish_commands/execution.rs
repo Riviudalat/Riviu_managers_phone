@@ -351,6 +351,7 @@ pub async fn publish_create_campaign(
         .await
         .map_err(err)?;
     let needs_handoff = held
+        || !crate::commands::observe_release_needs(&state, &udids)?.is_empty()
         || udids
             .iter()
             .any(|udid| state.control.current_work_owner(udid).is_some());
@@ -359,7 +360,7 @@ pub async fn publish_create_campaign(
             preparation::progress(udid, "preparingDevices", "running", 0, None);
         }
         let result =
-            crate::commands::prepare_manual_devices(&app, &state, udids.clone(), handoff).await?;
+            crate::commands::prepare_publish_devices(&app, &state, udids.clone(), handoff).await?;
         require_released_publish_devices(&udids, &result).map_err(err)?;
     }
     preparation::stage(&state.db, "checkingDevices")

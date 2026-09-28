@@ -311,11 +311,21 @@ pub struct PublishPreparedResponse {
     pub report: riviu_core::PublishPreflightReport,
     pub preparation_id: String,
     pub expires_at: String,
+    /// Debug acceptance mode is on; the UI shows it instead of letting Start fail late.
+    pub acceptance_mode: bool,
+    /// Why `publish_start` with THIS request ID would refuse before acceptance.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub start_block: Option<String>,
+    /// Selected devices another owner still holds. Read-only observation: confirmation
+    /// authorizes releasing exactly these devices, nothing was stopped by preflight.
+    pub needs_release: Vec<NeedsRelease>,
 }
+
+pub use crate::commands::NeedsRelease;
 
 #[tauri::command]
 pub async fn publish_preflight(
-    app: tauri::AppHandle,
+    _app: tauri::AppHandle,
     state: State<'_, AppState>,
     mut request: riviu_core::PublishPreflightRequest,
     request_id: Option<String>,
@@ -331,8 +341,27 @@ pub async fn publish_preflight(
     if let Some(run_at) = request.run_at.as_deref() {
         parse_run_at(run_at).map_err(err)?;
     }
+    // The frontend passes its stable pending start ID, so the acceptance answer here is
+    // exactly the one `publish_start` will give for the same request.
     let request_id = request_id.unwrap_or_else(|| Uuid::new_v4().to_string());
     Uuid::parse_str(&request_id).map_err(err)?;
+    let acceptance_mode = state.dev_acceptance.active();
+    let start_block = (acceptance_mode
+        && request.udids.iter().any(|udid| {
+            !state
+                .dev_acceptance
+                .allows_publish_dispatch(&request_id, udid)
+        }))
+    .then(|| {
+        "Chế độ nghiệm thu đang bật và lượt này hoặc máy đã chọn chưa được cấp quyền đăng; Bắt đầu sẽ bị từ chối".to_owned()
+    });
+    // Read-only: preflight never stops, closes or hands off a device. Confirmation
+    // authorizes releasing exactly the rows listed here.
+    let needs_release = if request.run_at.is_none() {
+        crate::commands::observe_release_needs(&state, &request.udids)?
+    } else {
+        Vec::new()
+    };
     let preparation_id = Uuid::new_v4().to_string();
     preparation::initialize(&state.db, &state.events, &state.registry);
     let context = preparation::PreparationContext::new(
@@ -341,23 +370,8 @@ pub async fn publish_preflight(
         preparation_id.clone(),
         false,
     );
-    let prepared = preparation::CONTEXT
+    let mut prepared = preparation::CONTEXT
         .scope(context, async {
-            if request.run_at.is_none() {
-                for udid in &request.udids {
-                    preparation::progress(udid, "preparingDevices", "running", 0, None);
-                }
-                let handoff = crate::commands::lock_manual_handoff()?;
-                let result = crate::commands::prepare_manual_devices(
-                    &app,
-                    &state,
-                    request.udids.clone(),
-                    &handoff,
-                )
-                .await?;
-                execution::require_released_publish_devices(&request.udids, &result)
-                    .map_err(err)?;
-            }
             let guard_before = preparation::guard_fingerprint(&state.db, &request)
                 .await
                 .map_err(err)?;
@@ -375,10 +389,41 @@ pub async fn publish_preflight(
             Ok::<_, CommandError>(prepared)
         })
         .await?;
+    // A releasable publish hold is not a blocker: confirmation releases that device
+    // (B milestone) and the execution path re-runs this preflight after release.
+    // Any non-releasable row blocks the whole device, whatever other rows say.
+    let stuck: std::collections::HashSet<&str> = needs_release
+        .iter()
+        .filter(|row| !row.releasable)
+        .map(|row| row.udid.as_str())
+        .collect();
+    let releasable: std::collections::HashSet<&str> = needs_release
+        .iter()
+        .map(|row| row.udid.as_str())
+        .filter(|udid| !stuck.contains(udid))
+        .collect();
+    let owed = |issue: &riviu_core::PublishExecutionIssue| {
+        issue.code == "post_verification_pending"
+            && issue
+                .udid
+                .as_deref()
+                .is_some_and(|udid| releasable.contains(udid))
+    };
+    prepared.report.issues.retain(|issue| !owed(issue));
+    for row in &mut prepared.report.assignments {
+        row.issues.retain(|issue| !owed(issue));
+    }
+    // Backend verdict, not a UI hint: a refused start or an unreleasable owner means
+    // this preparation cannot execute.
+    prepared.report.can_execute =
+        prepared.report.issues.is_empty() && start_block.is_none() && stuck.is_empty();
     Ok(PublishPreparedResponse {
         report: prepared.report,
         preparation_id,
         expires_at: (chrono::Utc::now() + chrono::Duration::seconds(30)).to_rfc3339(),
+        acceptance_mode,
+        start_block,
+        needs_release,
     })
 }
 

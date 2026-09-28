@@ -39,8 +39,15 @@ export function acknowledgePublishStart(pending: PendingPublishStart, status: Pu
   }
 }
 
+export const PUBLISH_START_RETIRED = "riviu:publish-start-retired";
+
+/** Only for a request the backend durably refused (failed receipt, no campaign). The event
+ * clears monitor memory too, so a retired marker cannot keep blocking from another view. */
 export function retirePublishStart(requestId: string) {
+  // Broadcast only after the marker is really gone; a failed removal throws and keeps
+  // every view blocked on the still-stored marker instead of hiding it.
   if (readPendingPublishStart()?.requestId === requestId) localStorage.removeItem(STORAGE_KEY);
+  window.dispatchEvent(new CustomEvent<string>(PUBLISH_START_RETIRED, { detail: requestId }));
 }
 
 export function publishStageLabel(stage: string): string {

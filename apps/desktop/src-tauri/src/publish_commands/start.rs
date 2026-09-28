@@ -35,6 +35,11 @@ pub async fn publish_start(
     Uuid::parse_str(&request_id).map_err(preflight::err)?;
     request.source_root = request.source_root.trim().to_owned();
     request.run_at = request.run_at.map(|at| at.trim().to_owned());
+    // Computed before the acceptance gate so a refusal is bound to this exact body too.
+    let fingerprint = execution::frame_sha256(
+        &serde_json::to_vec(&serde_json::json!({"request":request,"confirmed":confirmed}))
+            .map_err(preflight::err)?,
+    );
     if state.dev_acceptance.active()
         && request.udids.iter().any(|udid| {
             !state
@@ -42,15 +47,34 @@ pub async fn publish_start(
                 .allows_publish_dispatch(&request_id, udid)
         })
     {
-        return Err(CommandError::code(
-            "AcceptanceScopeDenied",
-            "Lượt bắt đầu hoặc máy chưa được cấp quyền trong phạm vi nghiệm thu",
-        ));
+        // Durable, request-bound refusal: the frontend retires its pending marker only from
+        // a failed receipt without campaign, never from this error code alone.
+        let error = PublishStartError {
+            code: "AcceptanceScopeDenied".into(),
+            message: "Lượt bắt đầu hoặc máy chưa được cấp quyền trong phạm vi nghiệm thu".into(),
+        };
+        let (id, digest, bound, recorded) = (
+            request_id.clone(),
+            approved_input_digest.clone(),
+            fingerprint.clone(),
+            error.clone(),
+        );
+        // A failed write surfaces as a plain storage error without attemptId: the frontend
+        // must keep the pending marker, because nothing durable says this ID was refused.
+        let receipt = state
+            .db
+            .storage_write(move |db| db.reject_publish_start(&id, &digest, &bound, &recorded))
+            .await
+            .map_err(preflight::err)?;
+        if receipt.state != "failed" || receipt.campaign_id.is_some() {
+            // An earlier acceptance of this exact ID wins; report it, never refuse over it.
+            return Ok(receipt);
+        }
+        return Err(CommandError {
+            attempt_id: Some(request_id.into_boxed_str()),
+            ..CommandError::code(error.code, error.message)
+        });
     }
-    let fingerprint = execution::frame_sha256(
-        &serde_json::to_vec(&serde_json::json!({"request":request,"confirmed":confirmed}))
-            .map_err(preflight::err)?,
-    );
     let preparation_id = preparation_id.unwrap_or_else(|| Uuid::new_v4().to_string());
     Uuid::parse_str(&preparation_id).map_err(preflight::err)?;
     let (id, digest, preparation) = (
