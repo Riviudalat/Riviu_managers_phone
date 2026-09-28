@@ -674,6 +674,17 @@ pub struct HierarchySourceSnapshot {
 
 #[async_trait]
 pub trait UiSession: Send + Sync {
+    /// Read-only semantic observation within the caller's remaining deadline.
+    /// Implementations must preserve unknown fields and bind fresh reads to this session.
+    /// This capability never activates applications, dismisses UI, or dispatches actions.
+    /// Legacy sessions (including iOS) remain unsupported unless explicitly implemented.
+    async fn observe(
+        &self,
+        _request: &crate::ui_automation::ObservationRequest,
+    ) -> anyhow::Result<crate::ui_automation::UiObservation> {
+        unsupported("ui_observation")
+    }
+
     fn set_gui_scope(&self, _scope: crate::ui_automation::GuiScope) {}
     fn gui_scope(&self) -> Option<crate::ui_automation::GuiScope> {
         None

@@ -10,6 +10,15 @@ pub struct Node {
 }
 
 impl Node {
+    /// Missing attributes stay distinct from observed empty strings.
+    pub fn attribute(&self, key: &str) -> Option<&str> {
+        self.attrs.get(key).map(String::as_str)
+    }
+
+    pub fn attributes(&self) -> &HashMap<String, String> {
+        &self.attrs
+    }
+
     pub fn attr(&self, key: &str) -> &str {
         self.attrs.get(key).map(String::as_str).unwrap_or_default()
     }

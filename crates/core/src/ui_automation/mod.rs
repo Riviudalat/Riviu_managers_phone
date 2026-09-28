@@ -2,6 +2,7 @@
 pub mod checks;
 pub mod inspector;
 pub mod model;
+pub mod observation;
 pub mod ocr;
 pub mod profile;
 pub mod resolver;
@@ -9,6 +10,7 @@ pub mod runtime;
 pub mod trace;
 pub mod tree;
 pub use model::*;
+pub use observation::*;
 pub use ocr::*;
 #[cfg(test)]
 mod runtime_tests;

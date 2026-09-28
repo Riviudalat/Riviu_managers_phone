@@ -5,6 +5,119 @@ use base64::Engine;
 use sha2::{Digest, Sha256};
 use std::time::{Duration, Instant};
 
+/// Wait using only `UiSession::observe`, one monotonic total deadline and cancellation.
+/// Unknown and ambiguous observations never satisfy an expectation. Closed cancellation
+/// channels cancel too. Transport failures propagate without recovery or public actions.
+pub async fn wait_for_observation(
+    session: &dyn crate::UiSession,
+    request: &super::ObservationRequest,
+    expected: &super::ObservationExpectation,
+    deadline: tokio::time::Instant,
+    cancel: &mut tokio::sync::watch::Receiver<bool>,
+    poll_interval: Duration,
+) -> anyhow::Result<super::ObservationWaitResult> {
+    use super::{ExpectationVerdict, ObservationWaitResult, ObservationWaitStatus};
+    request.validate()?;
+    // The explicit deadline may shorten, but never extend, the request's remaining budget.
+    let request_deadline = tokio::time::Instant::now()
+        .checked_add(Duration::from_millis(request.remaining_ms))
+        .unwrap_or(deadline);
+    let deadline = deadline.min(request_deadline);
+    let mut result = ObservationWaitResult {
+        status: ObservationWaitStatus::DeadlineExceeded,
+        verdict: ExpectationVerdict::Unknown,
+        observation: None,
+    };
+    loop {
+        if *cancel.borrow() || cancel.has_changed().is_err() {
+            result.status = ObservationWaitStatus::Cancelled;
+            return Ok(result);
+        }
+        let remaining = deadline.saturating_duration_since(tokio::time::Instant::now());
+        let remaining_ms = remaining.as_millis().min(u128::from(u64::MAX)) as u64;
+        if remaining_ms == 0 {
+            return Ok(result);
+        }
+        let mut current = request.clone();
+        current.remaining_ms = remaining_ms;
+        let observation = tokio::select! {
+            biased;
+            _ = observation_cancelled(cancel) => {
+                result.status = ObservationWaitStatus::Cancelled;
+                return Ok(result);
+            }
+            _ = tokio::time::sleep_until(deadline) => return Ok(result),
+            read = session.observe(&current) => match read {
+                Ok(observation) => observation,
+                Err(error) if error.downcast_ref::<crate::driver::UnsupportedCapability>().is_some() => {
+                    result.status = ObservationWaitStatus::Unsupported;
+                    result.verdict = ExpectationVerdict::Unknown;
+                    return Ok(result);
+                }
+                Err(error) => return Err(error),
+            },
+        };
+        // A read completing at the boundary cannot turn an expired wait into success.
+        if *cancel.borrow() || cancel.has_changed().is_err() {
+            result.status = ObservationWaitStatus::Cancelled;
+            return Ok(result);
+        }
+        if tokio::time::Instant::now() >= deadline {
+            return Ok(result);
+        }
+        anyhow::ensure!(
+            !observation.device_id.is_empty()
+                && !observation.session_epoch.is_empty()
+                && !observation.observation_id.is_empty()
+                && observation.generation > 0
+                && observation.ended_at_ms >= observation.started_at_ms,
+            "observation_binding_invalid"
+        );
+        if let Some(package) = request.scope.as_ref().and_then(|s| s.package.as_ref()) {
+            anyhow::ensure!(
+                observation.app.package.as_ref() == Some(package),
+                "observation_app_changed"
+            );
+        }
+        if let Some(previous) = &result.observation {
+            anyhow::ensure!(
+                previous.device_id == observation.device_id
+                    && previous.session_epoch == observation.session_epoch
+                    && previous.app.package == observation.app.package
+                    && observation.generation > previous.generation
+                    && observation.observation_id != previous.observation_id,
+                "observation_binding_changed_or_stale"
+            );
+        }
+        result.verdict = super::expect_observation(&observation, expected);
+        result.observation = Some(observation);
+        if result.verdict == ExpectationVerdict::Satisfied {
+            result.status = ObservationWaitStatus::Satisfied;
+            return Ok(result);
+        }
+        let delay = poll_interval
+            .max(Duration::from_millis(1))
+            .min(deadline.saturating_duration_since(tokio::time::Instant::now()));
+        tokio::select! {
+            biased;
+            _ = observation_cancelled(cancel) => {
+                result.status = ObservationWaitStatus::Cancelled;
+                return Ok(result);
+            }
+            _ = tokio::time::sleep(delay) => {}
+        }
+    }
+}
+
+async fn observation_cancelled(cancel: &mut tokio::sync::watch::Receiver<bool>) {
+    loop {
+        let cancelled = *cancel.borrow_and_update();
+        if cancelled || cancel.changed().await.is_err() {
+            return;
+        }
+    }
+}
+
 pub async fn resolve_navigation(
     session: &dyn crate::UiSession,
     target: &str,
