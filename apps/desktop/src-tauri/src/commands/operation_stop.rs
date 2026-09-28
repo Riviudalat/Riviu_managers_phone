@@ -7,6 +7,26 @@ static ACTIVE_STOPS: std::sync::LazyLock<parking_lot::Mutex<HashSet<String>>> =
 // do not consume slots, so a busy device cannot block independent closures.
 pub(super) static PHYSICAL_CLOSES: tokio::sync::Semaphore = tokio::sync::Semaphore::const_new(2);
 
+pub(super) async fn acquire_physical_close(
+    deadline: tokio::time::Instant,
+) -> Result<tokio::sync::SemaphorePermit<'static>, String> {
+    let expired = || "Hết thời gian chờ đóng ứng dụng; chưa nhả thiết bị".to_owned();
+    if tokio::time::Instant::now() >= deadline {
+        return Err(expired());
+    }
+    // Only capacity waiting is cancellable. Never timeout an in-flight device
+    // request: its driver owns the deadline and must finish before release.
+    let permit = tokio::time::timeout_at(deadline, PHYSICAL_CLOSES.acquire())
+        .await
+        .map_err(|_| expired())?
+        .map_err(|e| e.to_string())?;
+    // A ready permit can win the timeout poll even after the deadline elapsed.
+    if tokio::time::Instant::now() >= deadline {
+        return Err(expired());
+    }
+    Ok(permit)
+}
+
 /// Correlate phases using a fresh trace ID and request-local device ordinal only.
 /// Never log serials, operation payloads, stop generations or error text here.
 pub(super) struct StopTiming {
@@ -640,7 +660,7 @@ async fn close_stopped_device(
     let result: Result<(), String> = async {
         let wait_timing = timing.phase("wait", None);
         let publish_marker = expected_publish_marker;
-        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(120);
+        let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(120);
         loop {
             match control
                 .try_acquire_exclusive_keeping_stream(udid, DeviceWorkOwner::ManualControl)
@@ -650,7 +670,7 @@ async fn close_stopped_device(
                     drop(wait_timing);
                     let closed: Result<(), String> = async {
                         let queue_timing = timing.phase("closeQueue", None);
-                        let _permit = PHYSICAL_CLOSES.acquire().await.map_err(|e| e.to_string())?;
+                        let _permit = acquire_physical_close(deadline).await?;
                         drop(queue_timing);
                         let _close_timing = timing.phase("close", None);
                         // Revalidate after waiting for capacity while retaining the
@@ -765,7 +785,7 @@ async fn close_stopped_device(
                     return Ok(());
                 }
                 Err(riviu_core::DeviceControlError::Busy(_))
-                    if std::time::Instant::now() < deadline =>
+                    if tokio::time::Instant::now() < deadline =>
                 {
                     tokio::time::sleep(std::time::Duration::from_millis(500)).await
                 }

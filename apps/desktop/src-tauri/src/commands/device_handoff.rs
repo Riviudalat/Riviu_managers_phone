@@ -234,18 +234,26 @@ pub(crate) async fn prepare_manual_devices(
     let close_timing = timing.phase("close", None);
     // Only settled devices enter this stream. A unique device has one closer,
     // and all results are drained before handing any device to new work.
-    let mut ready: Vec<_> = active.difference(&not_released).collect();
-    ready.sort();
-    let mut pending =
-        futures_util::stream::iter(ready.into_iter().enumerate().map(|(slot, id)| {
-            let stopped = &stopped;
-            let device_timing = timing.phase("total", Some(slot));
-            async move {
-                let result = close_handoff_device(state, id, stopped, device_timing).await;
-                (id.clone(), result)
-            }
-        }))
-        .buffer_unordered(2);
+    // Ordinals index the full sorted, deduplicated request, including blocked
+    // and disconnected devices, so filtering readiness never renumbers them.
+    let mut device_order: Vec<_> = selected.iter().collect();
+    device_order.sort();
+    let mut pending = futures_util::stream::iter(
+        device_order
+            .into_iter()
+            .enumerate()
+            .filter(|(_, id)| active.contains(*id) && !not_released.contains(*id))
+            .map(|(slot, id)| {
+                let stopped = &stopped;
+                let device_timing = timing.phase("total", Some(slot));
+                async move {
+                    let result =
+                        close_handoff_device(state, id, stopped, deadline, device_timing).await;
+                    (id.clone(), result)
+                }
+            }),
+    )
+    .buffer_unordered(2);
     let mut close_results = std::collections::HashMap::new();
     while let Some((id, result)) = pending.next().await {
         close_results.insert(id, result);
@@ -294,6 +302,7 @@ async fn close_handoff_device(
     state: &AppState,
     udid: &str,
     authorized: &HandoffStops,
+    deadline: tokio::time::Instant,
     timing: StopTiming,
 ) -> Result<(), CommandError> {
     let wait_timing = timing.phase("wait", None);
@@ -305,8 +314,7 @@ async fn close_handoff_device(
     drop(wait_timing);
     let result = async {
         let queue_timing = timing.phase("closeQueue", None);
-        let _permit = super::operation_stop::PHYSICAL_CLOSES
-            .acquire()
+        let _permit = super::operation_stop::acquire_physical_close(deadline)
             .await
             .map_err(CommandError::operation)?;
         drop(queue_timing);
