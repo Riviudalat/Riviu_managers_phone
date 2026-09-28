@@ -317,7 +317,45 @@ const MIGRATIONS: &[Migration] = &[
         apply: apply_migration_47,
         rebuilds_tables: false,
     },
+    Migration {
+        version: 48,
+        name: "publish-start-and-exclusion-receipts",
+        apply: apply_migration_48,
+        rebuilds_tables: false,
+    },
 ];
+
+fn apply_migration_48(tx: &Transaction<'_>) -> anyhow::Result<()> {
+    tx.execute_batch(
+        "CREATE TABLE publish_start_requests (
+            request_id TEXT PRIMARY KEY,
+            input_digest TEXT NOT NULL,
+            request_fingerprint TEXT NOT NULL,
+            preparation_id TEXT NOT NULL,
+            campaign_id TEXT REFERENCES publish_campaigns(id),
+            state TEXT NOT NULL CHECK(state IN ('accepted','preparing','queued','running','failed','uncertain')),
+            stage TEXT NOT NULL,
+            error_json TEXT,
+            revision INTEGER NOT NULL DEFAULT 1,
+            updated_at TEXT NOT NULL
+        );
+        CREATE TABLE publish_exclude_requests (
+            request_id TEXT PRIMARY KEY,
+            assignment_id TEXT NOT NULL REFERENCES publish_assignments(id),
+            expected_revision INTEGER NOT NULL,
+            state TEXT NOT NULL CHECK(state IN ('stopping','excluded','needsReview')),
+            reason TEXT,
+            revision INTEGER NOT NULL DEFAULT 1,
+            updated_at TEXT NOT NULL
+        );
+        CREATE INDEX publish_exclude_assignment ON publish_exclude_requests(assignment_id);
+        CREATE TRIGGER publish_exclude_fences_post BEFORE UPDATE OF effect_intent ON publish_assignments
+        WHEN NEW.effect_intent IS NOT NULL AND OLD.effect_intent IS NULL
+         AND EXISTS(SELECT 1 FROM publish_exclude_requests WHERE assignment_id=OLD.id)
+        BEGIN SELECT RAISE(ABORT,'publish assignment excluded'); END;",
+    )?;
+    Ok(())
+}
 
 fn apply_migration_47(tx: &Transaction<'_>) -> anyhow::Result<()> {
     tx.execute_batch(

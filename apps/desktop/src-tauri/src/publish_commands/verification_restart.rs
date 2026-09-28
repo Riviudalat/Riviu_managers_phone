@@ -143,7 +143,8 @@ fn authorize_current(
                     .find(|row| row.id == assignment.id)
             });
         anyhow::ensure!(
-            !db.publish_operation_stopped(&assignment.campaign_id)?
+            !db.publish_assignment_excluded(&assignment.id)?
+                && !db.publish_operation_stopped(&assignment.campaign_id)?
                 && current
                     .as_ref()
                     .is_some_and(|row| row.state == assignment.state

@@ -2,6 +2,51 @@ import { deviceProgress } from "../../nurtureProgress";
 import type { NurtureSessionStatus, OperationDeviceLogEntry, OperationRunItem, OperationRunState, OperationRunSummary } from "../../types";
 import { ACTION_PRESENTATION } from "../../components/flow/actionPresentation";
 import type { ActionKind } from "../../types";
+import type { PublishAssignmentRecord } from "../../types";
+
+const PUBLISH_STAGES = ["Chuẩn bị", "Chuyển nội dung", "Chọn ảnh/video", "Nhạc", "Caption", "Đăng", "Liên kết", "Sheet"];
+const PUBLISH_STEP_COMPLETED: Record<string, number> = {
+  waiting_transfer: 0, checking_device: 0, device_ready: 1, transferring_media: 1,
+  media_transferred: 2, waiting_control: 2, opening_app: 2, app_ready: 2,
+  opening_composer: 2, opening_gallery: 2, selecting_album: 2, selecting_media: 2,
+  media_selected: 3, opening_editor: 3, opening_sounds: 3, selecting_sound: 3,
+  sound_confirmed: 4, opening_caption: 4, entering_caption: 4, caption_confirmed: 5,
+  checking_before_post: 5, submitting_post: 5, awaiting_post: 5, post_submitted: 5,
+  post_confirmed: 6, capturing_link: 6, link_captured: 7,
+};
+
+/** Semantic milestones, never elapsed-time estimates or terminal-state-as-success. */
+export function publishDeviceProgress(assignment: PublishAssignmentRecord, entries: OperationDeviceLogEntry[], options: {
+  sheetRequired?: boolean;
+  publicationVerified?: boolean;
+  exclusionState?: string;
+  recoveryStep?: string;
+} = {}) {
+  let proof: Record<string, unknown> = {};
+  try {
+    const parsed: unknown = JSON.parse(assignment.evidenceJson ?? "{}");
+    if (parsed && typeof parsed === "object" && !Array.isArray(parsed)) proof = parsed as Record<string, unknown>;
+  } catch { /* Missing evidence cannot establish publication. */ }
+  const post = proof.post && typeof proof.post === "object" ? proof.post as Record<string, unknown> : proof;
+  const verified = options.publicationVerified === true || post.publicationVerified === true;
+  const sheetDone = options.sheetRequired === false || assignment.sheetDelivery?.state === "sent";
+  const stopped = ["failedBeforeDispatch", "cancelled", "missed"].includes(assignment.state) || !!options.exclusionState;
+  let completed = assignment.state === "transferring" ? 1 : assignment.state === "imported" ? 2 : 0;
+  // The latest known phase wins; a retry returning to an earlier phase must move the bar back.
+  for (const entry of entries) {
+    if (entry.action === "publishStep" && PUBLISH_STEP_COMPLETED[entry.state] !== undefined) completed = PUBLISH_STEP_COMPLETED[entry.state];
+  }
+  const recoveryCompleted: Record<string, number> = { device: 0, transfer: 1, media: 2, sound: 3, caption: 4, prePost: 5 };
+  if (!verified && options.recoveryStep && recoveryCompleted[options.recoveryStep] !== undefined)
+    completed = Math.min(completed, recoveryCompleted[options.recoveryStep]);
+  if (verified) completed = sheetDone ? 8 : 7;
+  if (stopped) completed = Math.min(7, completed);
+  const uncertain = !verified && (!!assignment.effectIntent || ["posting", "verifying", "uncertain"].includes(assignment.state));
+  // The current backend emits stage observations, not measured transfer bytes.
+  const fraction = uncertain ? null : Math.min(stopped ? .875 : 1, completed / 8);
+  return { fraction, completed, total: 8, stage: completed === 8 ? "Hoàn tất" : PUBLISH_STAGES[completed],
+    verified, done: completed === 8 && !stopped, stopped, uncertain };
+}
 
 export const RUN_STATE_LABEL: Record<OperationRunState, string> = {
   queued: "Đang chờ", running: "Đang chạy", succeeded: "Hoàn tất", partial: "Hoàn tất một phần",
@@ -13,6 +58,7 @@ export const progressLabel = (fraction: number | null) => fraction === null ? "C
 
 export function runProgress(run: OperationRunSummary, sessions: NurtureSessionStatus[], now = Date.now()): number | null {
   if (run.kind === "publish" && (run.state === "partial" || run.state === "uncertain") && run.retryScope === "linkAndSheet") return null;
+  if (run.kind === "publish" && !activeRun(run)) return run.state === "succeeded" ? 1 : null;
   if (!activeRun(run)) return 1;
   if (run.kind === "nurture") {
     const rows = sessions.filter((row) => row.runId === run.sourceId);
@@ -42,7 +88,7 @@ export function deviceRows(items: OperationRunItem[]) {
       : states.size > 1 ? "partial" : work[0]?.state ?? "queued";
     const pendingPublish = work.some((item) => item.errorCode === "post_verification_pending");
     const reviewPublish = work.some((item) => item.errorCode === "post_verification_needs_review");
-    return { udid, entries, state, pendingPublish, reviewPublish, fraction: pendingPublish || reviewPublish ? null : work.length ? work.filter((item) => !activeRun(item)).length / work.length : null };
+    return { udid, entries, state: pendingPublish || reviewPublish ? "uncertain" as const : state, pendingPublish, reviewPublish, fraction: pendingPublish || reviewPublish ? null : work.length ? work.filter((item) => !activeRun(item)).length / work.length : null };
   });
 }
 

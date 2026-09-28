@@ -9,6 +9,7 @@ import { activeRun, compactLogEntries, deviceRows, deviceStateCounts, issueState
 import { useMonitorRead } from "./useMonitorRead";
 import { deviceProgress } from "../../nurtureProgress";
 import { useMediaQuery } from "../../useMediaQuery";
+import { PublishPager } from "../../components/publish/PublishPager";
 import { PublishDeviceRecovery } from "./PublishDeviceRecovery";
 
 export function MonitorReadError({ message, retry }: { message: string; retry: () => void }) {
@@ -66,6 +67,7 @@ export function OperationRunDevices({ run, labels, sessions, compact = false }: 
   const [tab, setTab] = useState("log");
   const [search, setSearch] = useState("");
   const [filter, setFilter] = useState("all");
+  const [page, setPage] = useState(0);
   const narrow = useMediaQuery("(max-width: 600px)");
   const singlePane = compact || narrow;
   const deviceListRef = useRef<HTMLDivElement>(null);
@@ -82,6 +84,7 @@ export function OperationRunDevices({ run, labels, sessions, compact = false }: 
   }), [state.value, labels]);
   const shown = rows.filter((row) => row.label.toLocaleLowerCase("vi-VN").includes(search.trim().toLocaleLowerCase("vi-VN"))
     && (filter === "all" || (filter === "issues" ? issueState(row.state) : activeRun(row))));
+  const currentPage = Math.min(page, Math.max(0, Math.ceil(shown.length / 8) - 1));
   const selectedRow = shown.find((row) => row.udid === selected);
   const visibleSelectedId = selectedRow?.udid;
   useEffect(() => {
@@ -91,7 +94,8 @@ export function OperationRunDevices({ run, labels, sessions, compact = false }: 
   if (state.error) return <MonitorReadError message={state.error} retry={state.retry} />;
   if (!state.value) return <p className="run-monitor-empty" role="status">Đang đọc tiến độ từng máy…</p>;
   const summary = state.value.summary;
-  const fraction = runProgress(summary, sessions);
+  const pendingPublication = run.kind === "publish" && rows.some(row => row.pendingPublish || row.reviewPublish);
+  const fraction = pendingPublication ? null : runProgress(summary, sessions);
   const counts = deviceStateCounts(rows);
   const showDevices = () => {
     setSelected(null);
@@ -99,8 +103,8 @@ export function OperationRunDevices({ run, labels, sessions, compact = false }: 
   };
   return <>
     <div className="run-monitor-summary">
-      <div className="run-monitor-result"><StatusChip tone={issueState(summary.state) ? "warning" : activeRun(summary) ? "info" : summary.state === "succeeded" ? "success" : "neutral"}>{RUN_STATE_LABEL[summary.state]}</StatusChip>
-        <span className="run-processed-count" title={`${summary.completedItems}/${summary.totalItems} mục đã xử lý`}>{summary.completedItems}/{summary.totalItems}</span>
+      <div className="run-monitor-result"><StatusChip tone={pendingPublication || issueState(summary.state) ? "warning" : activeRun(summary) ? "info" : summary.state === "succeeded" ? "success" : "neutral"}>{pendingPublication ? "Chờ xác minh bài đăng" : RUN_STATE_LABEL[summary.state]}</StatusChip>
+        <span className="run-processed-count" title={`${summary.completedItems}/${summary.totalItems} mục đã xử lý`}>{summary.completedItems}/{summary.totalItems} đã xử lý</span>
         <strong className="run-percent">{progressLabel(fraction)}</strong>
       </div>
       <ProgressBar fraction={fraction} label="Tiến độ công việc" tone={activeRun(summary) ? "run" : "idle"} />
@@ -114,24 +118,25 @@ export function OperationRunDevices({ run, labels, sessions, compact = false }: 
     <div className="run-monitor-detail">
       <aside className="run-monitor-device-pane" aria-label="Tiến độ từng máy" hidden={singlePane && !!selectedRow}>
         <div className="run-device-filters">
-          <label className="run-device-search"><Search size={14} aria-hidden="true" /><input name="monitor-device-search" autoComplete="off" type="search" aria-label="Tìm máy trong tác vụ" placeholder="Tìm máy…" value={search} onChange={(event) => setSearch(event.target.value)} /></label>
-          <select aria-label="Lọc trạng thái máy" value={filter} onChange={(event) => setFilter(event.target.value)}><option value="all">{counts.total === rows.length ? `Tất cả máy (${counts.total})` : `Tất cả mục (${rows.length})`}</option><option value="issues">Cần kiểm tra</option><option value="active">Đang chờ/chạy</option></select>
+          <label className="run-device-search"><Search size={14} aria-hidden="true" /><input name="monitor-device-search" autoComplete="off" type="search" aria-label="Tìm máy trong tác vụ" placeholder="Tìm máy…" value={search} onChange={(event) => { setSearch(event.target.value); setPage(0); }} /></label>
+          <select aria-label="Lọc trạng thái máy" value={filter} onChange={(event) => { setFilter(event.target.value); setPage(0); }}><option value="all">{counts.total === rows.length ? `Tất cả máy (${counts.total})` : `Tất cả mục (${rows.length})`}</option><option value="issues">Cần kiểm tra</option><option value="active">Đang chờ/chạy</option></select>
         </div>
         <div ref={deviceListRef} className="run-monitor-devices">
           {!shown.length && <p className="run-monitor-empty">Không có máy phù hợp.</p>}
-          {shown.map((row) => {
+          {shown.slice(currentPage * 8, (currentPage + 1) * 8).map((row) => {
             const status = sessions.find((session) => session.runId === run.sourceId && session.udid === row.udid);
             const fraction = status && activeRun(row) ? Math.min(.99, deviceProgress(status) ?? 0) : row.fraction;
-            const Icon = row.state === "succeeded" ? CheckCircle2 : issueState(row.state) ? CircleAlert : Clock3;
+            const Icon = row.state === "succeeded" && !row.pendingPublish && !row.reviewPublish ? CheckCircle2 : issueState(row.state) ? CircleAlert : Clock3;
             return <div key={row.udid}><button type="button" className="run-device-row" aria-pressed={selected === row.udid} title={row.label} onClick={() => {
               if (selected !== row.udid) { setSelected(row.udid); setTab("log"); }
             }}>
               <Icon size={16} className={row.state === "succeeded" ? "run-success" : issueState(row.state) ? "run-attention" : "run-state"} aria-hidden="true" />
               <span className="run-device-copy"><strong>{row.name}</strong><small>{row.reviewPublish ? "Cần kiểm tra bài đăng" : row.pendingPublish ? "Chờ xác minh bài đăng" : RUN_STATE_LABEL[row.state]}</small></span>
-              {activeRun(row) && <span className="run-percent">{progressLabel(fraction)}</span>}
+              {run.kind!=="publish"&&activeRun(row) && <span className="run-percent">{progressLabel(fraction)}</span>}
             </button>{run.kind==="publish"&&row.udid&&<PublishDeviceRecovery campaignId={run.sourceId} udid={row.udid}/>}</div>;
           })}
         </div>
+        <PublishPager label="Máy trong tác vụ" page={currentPage} size={8} total={shown.length} onPage={setPage} />
       </aside>
       <section className="run-monitor-log" aria-label="Chi tiết máy" hidden={singlePane && !selectedRow}>
         {!selectedRow ? <div className="run-monitor-placeholder"><List size={24} /><strong>Chọn máy để xem nhật ký</strong></div> : <>

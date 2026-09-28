@@ -1035,8 +1035,8 @@ export async function publishImagePreview(bundleRoot: string, imagePath: string,
 }
 
 /** Read-only validation of the exact input that will be allowed to create a campaign. */
-export async function publishPreflight(request: PublishPreflightRequest) {
-  return invoke<PublishPreflightReport>("publish_preflight", { request });
+export async function publishPreflight(request: PublishPreflightRequest, requestId?: string) {
+  return invoke<PublishPreflightReport>("publish_preflight", { request, requestId: requestId ?? null });
 }
 
 export async function publishSchedulePreflight(request: import("./types").PublishScheduleRequest) {
@@ -1791,4 +1791,26 @@ export function typesafeUpdateCredential(apiKey: string) {
 }
 export function typesafeCheckComment(candidate: string, caption: string | null, transcript: string | null = null) {
   return invoke<TypeSafeVerdict>("typesafe_check_comment", { candidate, caption, transcript });
+}
+
+
+/** ACK only: background preparation/execution is observed through status and operations. */
+export async function publishStart(request: PublishPreflightRequest, requestId: string, approvedInputDigest: string, preparationId?: string) {
+  let timeout: ReturnType<typeof setTimeout> | undefined;
+  try {
+    return await Promise.race([
+      invoke<import("./types").PublishStartStatus>("publish_start", { request, requestId, approvedInputDigest, confirmed: true, preparationId: preparationId ?? null }),
+      new Promise<never>((_, reject) => { timeout = setTimeout(() => reject(new Error("Chưa nhận xác nhận bắt đầu. Đang đối chiếu yêu cầu đã gửi.")), 15000); }),
+    ]);
+  } finally { clearTimeout(timeout); }
+}
+export function publishStartStatus(requestId: string) {
+  return invoke<import("./types").PublishStartStatus | null>("publish_start_status", { requestId });
+}
+export function publishExcludeAssignment(assignmentId: string, expectedRevision: number, requestId: string) {
+  return invoke<import("./types").PublishExcludeResult>("publish_exclude_assignment", { assignmentId, expectedRevision, requestId });
+}
+
+export function googleSheetsVerifyReadonly(sheetUrl: string) {
+  return invoke<import("./types").GoogleSheetsReadonlyVerification>("google_sheets_verify_readonly", { sheetUrl });
 }

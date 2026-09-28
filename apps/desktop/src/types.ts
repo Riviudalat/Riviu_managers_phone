@@ -604,6 +604,8 @@ export interface PublishSheetDeliveryProgress {
 }
 
 export interface PublishPreflightReport {
+  preparationId?: string;
+  expiresAt?: string;
   sheetDelivery?: SheetDeliveryTarget;
   sheetEnabled?: boolean;
   inputDigest: string;
@@ -2480,6 +2482,8 @@ export interface PublishLinkCheckResult {
 }
 
 export interface GoogleSheetsStatus {
+  reportingEpoch?: string | null;
+  authorizationGeneration?: number;
   configured: boolean;
   hasSheetsScope?: boolean;
   connected: boolean;
@@ -2542,6 +2546,7 @@ export interface ClipboardRead {
  * own `as` cast, and three of them were narrowing to field names the wire never sent.
  */
 export type AppEvent =
+  | ({ type: "publishPreflightProgress" } & PublishPreflightProgress)
   | { type: "devicesUpdated"; devices: DeviceInfo[] }
   | { type: "deviceUpdated"; device: DeviceInfo }
   | { type: "jobUpdated"; job: JobRecord }
@@ -2570,6 +2575,7 @@ export function asAppEvent(payload: unknown): AppEvent | null {
 
 /** The tag of every `AppEvent`. Exported so the Rust-side pin can read it. */
 export const APP_EVENT_TYPES = [
+  "publishPreflightProgress",
   "devicesUpdated",
   "deviceUpdated",
   "jobUpdated",
@@ -2581,3 +2587,52 @@ export const APP_EVENT_TYPES = [
   "wdaExpiryWarning",
   "nurtureStatus",
 ] as const;
+
+
+export interface PublishStartStatus {
+  requestId: string;
+  operationId: string;
+  campaignId: string | null;
+  state: "accepted" | "preparing" | "queued" | "running" | "failed" | "uncertain";
+  stage: string;
+  error: { code: string; message: string } | null;
+  revision: number;
+  updatedAt: string;
+}
+export interface PublishPreflightProgress {
+  preparationId?: string;
+  requestId: string;
+  udid: string;
+  stage: string;
+  state: "queued" | "running" | "passed" | "failed";
+  completedChecks: number;
+  totalChecks: number;
+  elapsedMs: number;
+  error: string | null;
+  revision: number;
+}
+export interface PublishExcludeResult {
+  assignmentId: string;
+  state: "stopping" | "excluded" | "needsReview";
+  revision: number;
+  reason: string | null;
+}
+
+export interface GoogleSheetVerification {
+  readyRead: boolean;
+  result: PublishSheetCheckResult;
+  binding: {
+    clientId: string;
+    accountId: string;
+    spreadsheetId: string;
+    sheetGid: number;
+    writerId: string | null;
+    reportingEpoch: string | null;
+    authorizationGeneration: number;
+  };
+  verifiedAt: number;
+  expiresAt: number;
+  writePermission: "verified" | "unknown" | "denied";
+}
+
+export type GoogleSheetsReadonlyVerification = GoogleSheetVerification;

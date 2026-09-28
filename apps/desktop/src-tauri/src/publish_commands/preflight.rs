@@ -6,7 +6,8 @@ use futures_util::stream::{self, StreamExt};
 // Stay below the host ADB admission cap while probing different phones together.
 const PUBLISH_PREFLIGHT_DEVICE_LIMIT: usize = 4;
 
-struct PreflightDeviceObservation {
+#[derive(Clone)]
+pub(super) struct PreflightDeviceObservation {
     exists: bool,
     android: bool,
     transport_error: Option<String>,
@@ -15,28 +16,50 @@ struct PreflightDeviceObservation {
     tiktok_build: Result<(String, String, String), String>,
 }
 
-async fn collect_bounded_device_observations<Fut>(
+async fn collect_bounded_device_observations<'a, Fut>(
     observations: impl IntoIterator<Item = Fut>,
 ) -> Vec<Fut::Output>
 where
-    Fut: std::future::Future,
+    Fut: std::future::Future + Send + 'a,
+    Fut::Output: Send + 'a,
 {
-    stream::iter(observations)
-        .buffered(PUBLISH_PREFLIGHT_DEVICE_LIMIT)
+    use futures_util::FutureExt;
+    let futures: Vec<futures_util::future::BoxFuture<'a, (usize, Fut::Output)>> = observations
+        .into_iter()
+        .enumerate()
+        .map(|(index, future)| async move { (index, future.await) }.boxed())
+        .collect();
+    let mut completed = stream::iter(futures)
+        .buffer_unordered(PUBLISH_PREFLIGHT_DEVICE_LIMIT)
+        .collect::<Vec<_>>()
+        .await;
+    completed.sort_by_key(|(index, _)| *index);
+    completed
+        .into_iter()
+        .map(|(_, observation)| observation)
         .collect()
-        .await
 }
 
 async fn observe_preflight_device(
     control: &DeviceControlPlane,
     registry: &riviu_core::DeviceRegistry,
+    db: &Arc<Database>,
+    input_key: &str,
     udid: &str,
 ) -> PreflightDeviceObservation {
+    preparation::progress(udid, "checkingDevices", "running", 0, None);
     let device = registry.get(udid);
     let android = device
         .as_ref()
         .is_some_and(|device| matches!(device.platform, riviu_core::DevicePlatform::Android));
     if !android {
+        preparation::progress(
+            udid,
+            "checkingDevices",
+            "failed",
+            4,
+            Some("Android required".into()),
+        );
         return PreflightDeviceObservation {
             exists: device.is_some(),
             android,
@@ -46,35 +69,132 @@ async fn observe_preflight_device(
             tiktok_build: Err("Android required".into()),
         };
     }
-    PreflightDeviceObservation {
+    let binding_udid = udid.to_owned();
+    let binding = db
+        .storage_read(move |db| db.device_app_binding(&binding_udid, "tiktok"))
+        .await;
+    let key = format!(
+        "{input_key}/{:?}/{:?}/{:?}",
+        device,
+        binding.as_ref().ok(),
+        control.current_work_owner(udid)
+    );
+    let (generation, cached) = preparation::device(db, udid, &key);
+    let fresh = preparation::CONTEXT
+        .try_with(|context| context.fresh)
+        .unwrap_or(true);
+    if !fresh && binding.is_ok() {
+        if let Some(entry) = cached
+            .as_ref()
+            .filter(|entry| entry.readiness_at.elapsed() < preparation::READINESS_TTL)
+        {
+            preparation::progress(udid, "checkingDevices", "running", 4, None);
+            return entry.observation.clone();
+        }
+    }
+    let transport_error = control
+        .verify_automation_transport(udid)
+        .await
+        .err()
+        .map(|e| e.to_string());
+    preparation::progress(
+        udid,
+        "checkingDevices",
+        "running",
+        1,
+        transport_error.clone(),
+    );
+    let storage = Some(
+        control
+            .available_storage_bytes(udid)
+            .await
+            .map_err(|e| e.to_string()),
+    );
+    preparation::progress(
+        udid,
+        "checkingDevices",
+        "running",
+        2,
+        storage.as_ref().and_then(|s| s.as_ref().err()).cloned(),
+    );
+    let readiness_error = control
+        .verify_automation_readiness(udid)
+        .await
+        .err()
+        .map(|e| e.to_string());
+    preparation::progress(
+        udid,
+        "checkingDevices",
+        "running",
+        3,
+        readiness_error.clone(),
+    );
+    // A creation boundary always re-proves the installed package/build/locale. UI readiness
+    // may reuse stable metadata for five minutes, fenced by input, binding and reconnect.
+    let (tiktok_build, build_at) = if !fresh {
+        match cached.as_ref() {
+            Some(entry) => (Ok(entry.build.clone()), entry.build_at),
+            None => (
+                control.tiktok_build(udid).await.map_err(|e| e.to_string()),
+                Instant::now(),
+            ),
+        }
+    } else {
+        (
+            control.tiktok_build(udid).await.map_err(|e| e.to_string()),
+            Instant::now(),
+        )
+    };
+    let binding_error = binding.err().map(|e| e.to_string());
+    let observation = PreflightDeviceObservation {
         exists: true,
         android,
-        transport_error: control
-            .verify_automation_transport(udid)
-            .await
-            .err()
-            .map(|error| error.to_string()),
-        storage: Some(
-            control
-                .available_storage_bytes(udid)
-                .await
-                .map_err(|error| error.to_string()),
-        ),
-        readiness_error: control
-            .verify_automation_readiness(udid)
-            .await
-            .err()
-            .map(|error| error.to_string()),
-        tiktok_build: control
-            .tiktok_build(udid)
-            .await
-            .map_err(|error| error.to_string()),
+        transport_error: transport_error.or(binding_error),
+        storage,
+        readiness_error,
+        tiktok_build,
+    };
+    let error = observation
+        .transport_error
+        .clone()
+        .or(observation.readiness_error.clone())
+        .or_else(|| {
+            observation
+                .storage
+                .as_ref()
+                .and_then(|s| s.as_ref().err())
+                .cloned()
+        })
+        .or_else(|| observation.tiktok_build.as_ref().err().cloned());
+    if error.is_none() {
+        if let Ok(build) = &observation.tiktok_build {
+            preparation::remember_device(
+                db,
+                udid,
+                generation,
+                preparation::DeviceEvidence {
+                    key,
+                    build: build.clone(),
+                    build_at,
+                    observation: observation.clone(),
+                    readiness_at: Instant::now(),
+                },
+            );
+        }
     }
+    preparation::progress(
+        udid,
+        "checkingDevices",
+        if error.is_some() { "failed" } else { "running" },
+        4,
+        error,
+    );
+    observation
 }
 
 // A scan reads and hashes every bundle. Limit simultaneous scans without occupying
 // async runtime threads needed by device I/O and background workers.
-static PUBLISH_SCAN_SLOTS: std::sync::LazyLock<Arc<tokio::sync::Semaphore>> =
+pub(super) static PUBLISH_SCAN_SLOTS: std::sync::LazyLock<Arc<tokio::sync::Semaphore>> =
     std::sync::LazyLock::new(|| Arc::new(tokio::sync::Semaphore::new(2)));
 
 pub(super) async fn bounded_publish_scan<T, F>(
@@ -111,6 +231,7 @@ pub async fn publish_scan_folder(
     .map_err(err)
 }
 
+#[derive(Clone)]
 pub(crate) struct PreparedPublishPreflight {
     pub(crate) report: riviu_core::PublishPreflightReport,
     pub(crate) bundles: Vec<riviu_core::PublishBundle>,
@@ -183,18 +304,82 @@ pub(super) fn resolve_preflight_target(
     Ok(snapshot)
 }
 
+#[derive(serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PublishPreparedResponse {
+    #[serde(flatten)]
+    pub report: riviu_core::PublishPreflightReport,
+    pub preparation_id: String,
+    pub expires_at: String,
+}
+
 #[tauri::command]
 pub async fn publish_preflight(
+    app: tauri::AppHandle,
     state: State<'_, AppState>,
-    request: riviu_core::PublishPreflightRequest,
-) -> Result<riviu_core::PublishPreflightReport, CommandError> {
+    mut request: riviu_core::PublishPreflightRequest,
+    request_id: Option<String>,
+) -> Result<PublishPreparedResponse, CommandError> {
     let _admission = state.ensure_accepting_work()?;
+    request.source_root = request.source_root.trim().to_owned();
+    request.run_at = request.run_at.map(|at| at.trim().to_owned());
     require_new_publish_delivery(request.sheet_enabled, request.delete_after_publish)
         .map_err(err)?;
-    build_publish_preflight(&state.control, &state.registry, &state.db, request)
-        .await
-        .map(|prepared| prepared.report)
-        .map_err(err)
+    riviu_core::publish::validate_publish_mapping(&request.bundle_ids, &request.udids)
+        .map_err(err)?;
+    request.sound_policy.pool_size().map_err(err)?;
+    if let Some(run_at) = request.run_at.as_deref() {
+        parse_run_at(run_at).map_err(err)?;
+    }
+    let request_id = request_id.unwrap_or_else(|| Uuid::new_v4().to_string());
+    Uuid::parse_str(&request_id).map_err(err)?;
+    let preparation_id = Uuid::new_v4().to_string();
+    preparation::initialize(&state.db, &state.events, &state.registry);
+    let context = preparation::PreparationContext::new(
+        state.events.clone(),
+        request_id,
+        preparation_id.clone(),
+        false,
+    );
+    let prepared = preparation::CONTEXT
+        .scope(context, async {
+            if request.run_at.is_none() {
+                for udid in &request.udids {
+                    preparation::progress(udid, "preparingDevices", "running", 0, None);
+                }
+                let handoff = crate::commands::lock_manual_handoff()?;
+                let result = crate::commands::prepare_manual_devices(
+                    &app,
+                    &state,
+                    request.udids.clone(),
+                    &handoff,
+                )
+                .await?;
+                execution::require_released_publish_devices(&request.udids, &result)
+                    .map_err(err)?;
+            }
+            let guard_before = preparation::guard_fingerprint(&state.db, &request)
+                .await
+                .map_err(err)?;
+            let prepared = build_publish_preflight(
+                &state.control,
+                &state.registry,
+                &state.db,
+                request.clone(),
+            )
+            .await
+            .map_err(err)?;
+            preparation::remember_prepared(&state.db, request, &prepared, &guard_before)
+                .await
+                .map_err(err)?;
+            Ok::<_, CommandError>(prepared)
+        })
+        .await?;
+    Ok(PublishPreparedResponse {
+        report: prepared.report,
+        preparation_id,
+        expires_at: (chrono::Utc::now() + chrono::Duration::seconds(30)).to_rfc3339(),
+    })
 }
 
 pub(super) async fn build_publish_preflight(
@@ -214,6 +399,11 @@ pub(super) async fn build_publish_preflight(
         .map_err(anyhow::Error::new)?;
 
     let manifest = scan_preflight_source(&request.source_root).await?;
+    if let Some(prepared) =
+        preparation::reuse_prepared(control, registry, db, &request, &manifest).await?
+    {
+        return Ok(prepared);
+    }
     build_publish_preflight_from_manifest(control, registry, db, request, &manifest).await
 }
 
@@ -222,7 +412,7 @@ pub(super) async fn scan_preflight_source(
 ) -> anyhow::Result<PublishFolderManifest> {
     let source_root = source_root.trim().to_string();
     bounded_publish_scan(Arc::clone(&PUBLISH_SCAN_SLOTS), move || {
-        scan_publish_folder(source_root, PublishScanOptions::default()).map_err(anyhow::Error::from)
+        preparation::scan_source(source_root)
     })
     .await
 }
@@ -234,7 +424,9 @@ pub(crate) async fn build_publish_preflight_from_manifest(
     request: riviu_core::PublishPreflightRequest,
     manifest: &PublishFolderManifest,
 ) -> anyhow::Result<PreparedPublishPreflight> {
+    preparation::stage(db, "checkingSheet").await?;
     let sheet_choice = verify_sheet_delivery_choice(db, request.sheet_enabled).await;
+    preparation::stage(db, "checkingDevices").await?;
     build_publish_preflight_from_manifest_with_sheet(
         control,
         registry,
@@ -258,6 +450,7 @@ pub(super) async fn verify_sheet_delivery_choice(
     if !enabled {
         return Ok(None);
     }
+    preparation::progress("", "checkingSheet", "running", 0, None);
     let checked = async {
         let config = db.publish_sheet_delivery_settings()?;
         let url = db
@@ -286,6 +479,13 @@ pub(super) async fn verify_sheet_delivery_choice(
         })
     }
     .await;
+    preparation::progress(
+        "",
+        "checkingSheet",
+        if checked.is_ok() { "passed" } else { "failed" },
+        4,
+        checked.as_ref().err().map(|e| e.to_string()),
+    );
     checked.map(Some).map_err(|error| error.to_string())
 }
 
@@ -343,271 +543,48 @@ pub(super) async fn build_publish_preflight_from_manifest_with_sheet(
         .map(|device| device.udid)
         .collect::<Vec<_>>();
     let target_snapshot = resolve_preflight_target(&request, &fleet_order, &metas, &groups)?;
-    let device_observations =
-        collect_bounded_device_observations(
-            request.udids.clone().into_iter().map(|udid| async move {
-                observe_preflight_device(control, registry, &udid).await
-            }),
-        )
+    for udid in &request.udids {
+        preparation::progress(udid, "checkingDevices", "queued", 0, None);
+    }
+    let rows =
+        collect_bounded_device_observations(request.udids.clone().into_iter().enumerate().map(
+            |(ordinal, udid)| {
+                let bundle = &bundles[ordinal];
+                let guard = guards.get(&udid);
+                let meta = metas.iter().find(|meta| meta.udid == udid);
+                let sound = &request.sound_policy;
+                let run_at = &request.run_at;
+                let sheet_enabled = request.sheet_enabled;
+                let delete_after_publish = request.delete_after_publish;
+                async move {
+                    let input_key = frame_sha256(&serde_json::to_vec(&serde_json::json!({
+                        "bundle":bundle,"udid":udid,"sound":sound,"sheetEnabled":sheet_enabled,
+                        "deleteAfterPublish":delete_after_publish,"runAt":run_at
+                    }))?);
+                    let observed =
+                        observe_preflight_device(control, registry, db, &input_key, &udid).await;
+                    evaluate_device_observation(
+                        control,
+                        bundle,
+                        &udid,
+                        ordinal,
+                        observed,
+                        guard.with_context(|| format!("thiếu snapshot guard cho máy {udid}"))?,
+                        meta,
+                    )
+                }
+            },
+        ))
         .await;
     let mut assignments = Vec::with_capacity(bundles.len());
     let mut observations = Vec::with_capacity(bundles.len());
     let mut issues = Vec::new();
-    for (ordinal, ((bundle, udid), observed)) in bundles
-        .iter()
-        .zip(&request.udids)
-        .zip(device_observations)
-        .enumerate()
-    {
-        let mut row_issues = Vec::new();
-        let guard = guards
-            .get(udid)
-            .with_context(|| format!("thiếu snapshot guard cho máy {udid}"))?;
-        if let Some(hold) = guard.blocking.first() {
-            row_issues.push(preflight_issue(
-                "post_verification_pending",
-                udid,
-                &bundle.id,
-                &format!("Lượt {} còn giữ máy (cập nhật {}): {}. Mở Theo dõi của lượt này để kiểm tra liên kết", hold.campaign_id, hold.updated_at, hold.reason),
-            ));
-        }
-        // Android keeps the managed import and a MediaStore copy during composition. Reserve
-        // both plus fixed working headroom, rather than discovering a full phone after transfer.
-        let required_bytes = bundle
-            .total_bytes
-            .saturating_mul(2)
-            .saturating_add(64 * 1024 * 1024);
-        let route = route_of(control, udid);
-        let media_ok =
-            bundle_media_shape_is_ready(bundle, route) && !bundle.caption.trim().is_empty();
-        if !media_ok {
-            let message = if bundle.caption.trim().is_empty() {
-                "caption rỗng nên không thể khóa đúng bài khi lấy link".to_string()
-            } else if matches!(bundle.media_kind, riviu_core::PublishMediaKind::Video) {
-                "bundle video phải có đúng một MP4 đã preflight và không được trộn ảnh".to_string()
-            } else {
-                // Name the two numbers: the operator saw "không nằm trong giới hạn" and went
-                // looking for a fault in the phone, when the fault was one more photo than
-                // the composer on that route can select.
-                format!(
-                    "bài có {} ảnh; composer trên máy này chọn được tối đa {} ảnh",
-                    bundle.images.len(),
-                    max_images_for(route)
-                )
-            };
-            row_issues.push(preflight_issue("media_unready", udid, &bundle.id, &message));
-        }
-
-        if !observed.exists {
-            row_issues.push(preflight_issue(
-                "device_missing",
-                udid,
-                &bundle.id,
-                "máy không còn trong roster hiện tại",
-            ));
-        }
-        let android = observed.android;
-        if !android {
-            row_issues.push(preflight_issue(
-                "android_required",
-                udid,
-                &bundle.id,
-                "đợt đăng có chọn nhạc này chỉ chứng nhận trên Android",
-            ));
-        }
-        if let Some(error) = observed.transport_error {
-            row_issues.push(preflight_issue(
-                "automation_transport_conflict",
-                udid,
-                &bundle.id,
-                &error,
-            ));
-        }
-        if !control.supports_push_media(udid) {
-            row_issues.push(preflight_issue(
-                "push_media_unavailable",
-                udid,
-                &bundle.id,
-                "Riviu helper trên máy chưa quảng bá khả năng chuyển media",
-            ));
-        }
-
-        let available_bytes = if let Some(storage) = observed.storage {
-            match storage {
-                Ok(available) => {
-                    if available < required_bytes {
-                        row_issues.push(preflight_issue(
-                            "storage_insufficient",
-                            udid,
-                            &bundle.id,
-                            &format!(
-                                "máy còn {available} byte nhưng lượt đăng cần tối thiểu {required_bytes} byte"
-                            ),
-                        ));
-                    }
-                    Some(available)
-                }
-                Err(error) => {
-                    row_issues.push(preflight_issue(
-                        "storage_unreadable",
-                        udid,
-                        &bundle.id,
-                        &format!("không đọc được dung lượng trống của máy: {error}"),
-                    ));
-                    None
-                }
-            }
-        } else {
-            None
-        };
-
-        let (package_name, version, locale, composer_ok, sound_picker_ok) = if android {
-            if let Some(error) = observed.readiness_error {
-                row_issues.push(preflight_issue(
-                    "device_not_ready",
-                    udid,
-                    &bundle.id,
-                    &error,
-                ));
-            }
-            match observed.tiktok_build {
-                Ok((package, version, locale)) => {
-                    let capabilities = riviu_core::app_automation::action_capabilities(
-                        udid, &package, &version, &locale, true,
-                    );
-                    let media_action =
-                        if matches!(bundle.media_kind, riviu_core::PublishMediaKind::Video) {
-                            "video"
-                        } else {
-                            "photo"
-                        };
-                    if let Err(error) = riviu_core::app_automation::require_actions(
-                        &capabilities,
-                        &[media_action, "sound"],
-                    ) {
-                        row_issues.push(preflight_issue(
-                            "action_unavailable",
-                            udid,
-                            &bundle.id,
-                            &error.to_string(),
-                        ));
-                    }
-                    let base_composer_ok = matches!(
-                        readiness_of_build(&package, &locale, &version),
-                        PublishReadiness::HierarchyReady | PublishReadiness::HierarchyAdaptive
-                    );
-                    let video_picker_ok =
-                        !matches!(bundle.media_kind, riviu_core::PublishMediaKind::Video)
-                            || (matches!(route, PublishRoute::Hierarchy)
-                                && video_plan_for_build(&package, &locale, &version).is_ok());
-                    let composer_ok = base_composer_ok && video_picker_ok;
-                    let sound_picker_ok = sound_plan_for_build(&package, &locale, &version).is_ok();
-                    let links_ready =
-                        riviu_core::tiktok_share::PublishVerificationPlan::for_runtime(
-                            &package, &locale, &version,
-                        )
-                        .is_ok();
-                    if !links_ready {
-                        row_issues.push(preflight_issue(
-                            "link_verification_unmeasured", udid, &bundle.id,
-                            "Phiên bản này chưa đủ nhận diện hồ sơ/bài để xác minh đăng thành công; cần đo bổ sung trước khi đăng",
-                        ));
-                    }
-                    if !composer_ok {
-                        row_issues.push(preflight_issue(
-                            if base_composer_ok {
-                                "video_composer_unmeasured"
-                            } else {
-                                "composer_unmeasured"
-                            },
-                            udid,
-                            &bundle.id,
-                            if base_composer_ok {
-                                "video picker chưa được đo tới editor cho đúng package/build/locale này"
-                            } else {
-                                "composer chưa đủ locator cho đúng package/build/locale này"
-                            },
-                        ));
-                    }
-                    if !sound_picker_ok {
-                        row_issues.push(preflight_issue(
-                            "sound_picker_unmeasured",
-                            udid,
-                            &bundle.id,
-                            "sound picker chưa được đo cho đúng package/build/locale này",
-                        ));
-                    }
-                    (
-                        Some(package),
-                        Some(version),
-                        Some(locale),
-                        composer_ok,
-                        sound_picker_ok,
-                    )
-                }
-                Err(error) => {
-                    row_issues.push(preflight_issue(
-                        "tiktok_build_unreadable",
-                        udid,
-                        &bundle.id,
-                        &format!("không đọc được package/build/locale TikTok: {error}"),
-                    ));
-                    (None, None, None, false, false)
-                }
-            }
-        } else {
-            (None, None, None, false, false)
-        };
-
-        let meta = metas.iter().find(|meta| meta.udid == *udid);
-        let storage_ok = available_bytes.is_some_and(|available| available >= required_bytes);
-        observations.push(serde_json::json!({
-            "ordinal": ordinal,
-            "udid": udid,
-            "number": meta.and_then(|meta| meta.number),
-            "alias": meta.map(|meta| meta.alias.trim()).unwrap_or_default(),
-            "packageName": package_name,
-            "version": version,
-            "locale": locale,
-            "requiredBytes": required_bytes,
-            "storage": if storage_ok { "pass" } else { "fail" },
-            "availableBytes": available_bytes,
-        }));
-        issues.extend(row_issues.iter().cloned());
-        assignments.push(riviu_core::PublishPreflightAssignmentReport {
-            checks: Vec::new(),
-            ordinal: u32::try_from(ordinal)?,
-            bundle_id: bundle.id.clone(),
-            udid: udid.clone(),
-            package_name,
-            version,
-            locale,
-            media: if media_ok {
-                riviu_core::PublishPreflightCheck::Pass
-            } else {
-                riviu_core::PublishPreflightCheck::Fail
-            },
-            composer: if composer_ok {
-                riviu_core::PublishPreflightCheck::Pass
-            } else {
-                riviu_core::PublishPreflightCheck::Fail
-            },
-            sound_picker: if sound_picker_ok {
-                riviu_core::PublishPreflightCheck::Pass
-            } else {
-                riviu_core::PublishPreflightCheck::Fail
-            },
-            storage: if storage_ok {
-                riviu_core::PublishPreflightCheck::Pass
-            } else {
-                riviu_core::PublishPreflightCheck::Fail
-            },
-            required_bytes,
-            available_bytes,
-            issues: row_issues,
-        });
+    for row in rows {
+        let (assignment, observation) = row?;
+        issues.extend(assignment.issues.iter().cloned());
+        assignments.push(assignment);
+        observations.push(observation);
     }
-
     for row in &mut assignments {
         row.checks = riviu_core::ui_automation::checks::publish_checks(row);
         let guard = guards
@@ -654,6 +631,283 @@ pub(super) async fn build_publish_preflight_from_manifest_with_sheet(
         sheet_configured,
     };
     Ok(PreparedPublishPreflight { report, bundles })
+}
+
+#[allow(clippy::too_many_arguments)] // Explicit inputs keep the per-device evidence owner visible.
+fn evaluate_device_observation(
+    control: &DeviceControlPlane,
+    bundle: &riviu_core::PublishBundle,
+    udid: &String,
+    ordinal: usize,
+    observed: PreflightDeviceObservation,
+    guard: &riviu_core::db::PublishDeviceGuard,
+    meta: Option<&riviu_core::types::DeviceMeta>,
+) -> anyhow::Result<(
+    riviu_core::PublishPreflightAssignmentReport,
+    serde_json::Value,
+)> {
+    let mut row_issues = Vec::new();
+    if let Some(hold) = guard.blocking.first() {
+        row_issues.push(preflight_issue(
+                "post_verification_pending",
+                udid,
+                &bundle.id,
+                &format!("Lượt {} còn giữ máy (cập nhật {}): {}. Mở Theo dõi của lượt này để kiểm tra liên kết", hold.campaign_id, hold.updated_at, hold.reason),
+            ));
+    }
+    // Android keeps the managed import and a MediaStore copy during composition. Reserve
+    // both plus fixed working headroom, rather than discovering a full phone after transfer.
+    let required_bytes = bundle
+        .total_bytes
+        .saturating_mul(2)
+        .saturating_add(64 * 1024 * 1024);
+    let route = route_of(control, udid);
+    let media_ok = bundle_media_shape_is_ready(bundle, route) && !bundle.caption.trim().is_empty();
+    if !media_ok {
+        let message = if bundle.caption.trim().is_empty() {
+            "caption rỗng nên không thể khóa đúng bài khi lấy link".to_string()
+        } else if matches!(bundle.media_kind, riviu_core::PublishMediaKind::Video) {
+            "bundle video phải có đúng một MP4 đã preflight và không được trộn ảnh".to_string()
+        } else {
+            // Name the two numbers: the operator saw "không nằm trong giới hạn" and went
+            // looking for a fault in the phone, when the fault was one more photo than
+            // the composer on that route can select.
+            format!(
+                "bài có {} ảnh; composer trên máy này chọn được tối đa {} ảnh",
+                bundle.images.len(),
+                max_images_for(route)
+            )
+        };
+        row_issues.push(preflight_issue("media_unready", udid, &bundle.id, &message));
+    }
+
+    if !observed.exists {
+        row_issues.push(preflight_issue(
+            "device_missing",
+            udid,
+            &bundle.id,
+            "máy không còn trong roster hiện tại",
+        ));
+    }
+    let android = observed.android;
+    if !android {
+        row_issues.push(preflight_issue(
+            "android_required",
+            udid,
+            &bundle.id,
+            "đợt đăng có chọn nhạc này chỉ chứng nhận trên Android",
+        ));
+    }
+    if let Some(error) = observed.transport_error {
+        row_issues.push(preflight_issue(
+            "automation_transport_conflict",
+            udid,
+            &bundle.id,
+            &error,
+        ));
+    }
+    if !control.supports_push_media(udid) {
+        row_issues.push(preflight_issue(
+            "push_media_unavailable",
+            udid,
+            &bundle.id,
+            "Riviu helper trên máy chưa quảng bá khả năng chuyển media",
+        ));
+    }
+
+    let available_bytes = if let Some(storage) = observed.storage {
+        match storage {
+            Ok(available) => {
+                if available < required_bytes {
+                    row_issues.push(preflight_issue(
+                            "storage_insufficient",
+                            udid,
+                            &bundle.id,
+                            &format!(
+                                "máy còn {available} byte nhưng lượt đăng cần tối thiểu {required_bytes} byte"
+                            ),
+                        ));
+                }
+                Some(available)
+            }
+            Err(error) => {
+                row_issues.push(preflight_issue(
+                    "storage_unreadable",
+                    udid,
+                    &bundle.id,
+                    &format!("không đọc được dung lượng trống của máy: {error}"),
+                ));
+                None
+            }
+        }
+    } else {
+        None
+    };
+
+    let (package_name, version, locale, composer_ok, sound_picker_ok) = if android {
+        if let Some(error) = observed.readiness_error {
+            row_issues.push(preflight_issue(
+                "device_not_ready",
+                udid,
+                &bundle.id,
+                &error,
+            ));
+        }
+        match observed.tiktok_build {
+            Ok((package, version, locale)) => {
+                let capabilities = riviu_core::app_automation::action_capabilities(
+                    udid, &package, &version, &locale, true,
+                );
+                let media_action =
+                    if matches!(bundle.media_kind, riviu_core::PublishMediaKind::Video) {
+                        "video"
+                    } else {
+                        "photo"
+                    };
+                if let Err(error) = riviu_core::app_automation::require_actions(
+                    &capabilities,
+                    &[media_action, "sound"],
+                ) {
+                    row_issues.push(preflight_issue(
+                        "action_unavailable",
+                        udid,
+                        &bundle.id,
+                        &error.to_string(),
+                    ));
+                }
+                let base_composer_ok = matches!(
+                    readiness_of_build(&package, &locale, &version),
+                    PublishReadiness::HierarchyReady | PublishReadiness::HierarchyAdaptive
+                );
+                let video_picker_ok =
+                    !matches!(bundle.media_kind, riviu_core::PublishMediaKind::Video)
+                        || (matches!(route, PublishRoute::Hierarchy)
+                            && video_plan_for_build(&package, &locale, &version).is_ok());
+                let composer_ok = base_composer_ok && video_picker_ok;
+                let sound_picker_ok = sound_plan_for_build(&package, &locale, &version).is_ok();
+                let links_ready = riviu_core::tiktok_share::PublishVerificationPlan::for_runtime(
+                    &package, &locale, &version,
+                )
+                .is_ok();
+                if !links_ready {
+                    row_issues.push(preflight_issue(
+                            "link_verification_unmeasured", udid, &bundle.id,
+                            "Phiên bản này chưa đủ nhận diện hồ sơ/bài để xác minh đăng thành công; cần đo bổ sung trước khi đăng",
+                        ));
+                }
+                if !composer_ok {
+                    row_issues.push(preflight_issue(
+                        if base_composer_ok {
+                            "video_composer_unmeasured"
+                        } else {
+                            "composer_unmeasured"
+                        },
+                        udid,
+                        &bundle.id,
+                        if base_composer_ok {
+                            "video picker chưa được đo tới editor cho đúng package/build/locale này"
+                        } else {
+                            "composer chưa đủ locator cho đúng package/build/locale này"
+                        },
+                    ));
+                }
+                if !sound_picker_ok {
+                    row_issues.push(preflight_issue(
+                        "sound_picker_unmeasured",
+                        udid,
+                        &bundle.id,
+                        "sound picker chưa được đo cho đúng package/build/locale này",
+                    ));
+                }
+                (
+                    Some(package),
+                    Some(version),
+                    Some(locale),
+                    composer_ok,
+                    sound_picker_ok,
+                )
+            }
+            Err(error) => {
+                row_issues.push(preflight_issue(
+                    "tiktok_build_unreadable",
+                    udid,
+                    &bundle.id,
+                    &format!("không đọc được package/build/locale TikTok: {error}"),
+                ));
+                (None, None, None, false, false)
+            }
+        }
+    } else {
+        (None, None, None, false, false)
+    };
+
+    let storage_ok = available_bytes.is_some_and(|available| available >= required_bytes);
+    let observation = serde_json::json!({
+        "ordinal": ordinal,
+        "udid": udid,
+        "number": meta.and_then(|meta| meta.number),
+        "alias": meta.map(|meta| meta.alias.trim()).unwrap_or_default(),
+        "packageName": package_name,
+        "version": version,
+        "locale": locale,
+        "requiredBytes": required_bytes,
+        "storage": if storage_ok { "pass" } else { "fail" },
+        "availableBytes": available_bytes,
+    });
+    preparation::progress(
+        udid,
+        "checkingDevices",
+        if row_issues.is_empty() {
+            "passed"
+        } else {
+            "failed"
+        },
+        4,
+        if row_issues.is_empty() {
+            None
+        } else {
+            Some(
+                row_issues
+                    .iter()
+                    .map(|issue| issue.message.as_str())
+                    .collect::<Vec<_>>()
+                    .join("; "),
+            )
+        },
+    );
+    let row = riviu_core::PublishPreflightAssignmentReport {
+        checks: Vec::new(),
+        ordinal: u32::try_from(ordinal)?,
+        bundle_id: bundle.id.clone(),
+        udid: udid.clone(),
+        package_name,
+        version,
+        locale,
+        media: if media_ok {
+            riviu_core::PublishPreflightCheck::Pass
+        } else {
+            riviu_core::PublishPreflightCheck::Fail
+        },
+        composer: if composer_ok {
+            riviu_core::PublishPreflightCheck::Pass
+        } else {
+            riviu_core::PublishPreflightCheck::Fail
+        },
+        sound_picker: if sound_picker_ok {
+            riviu_core::PublishPreflightCheck::Pass
+        } else {
+            riviu_core::PublishPreflightCheck::Fail
+        },
+        storage: if storage_ok {
+            riviu_core::PublishPreflightCheck::Pass
+        } else {
+            riviu_core::PublishPreflightCheck::Fail
+        },
+        required_bytes,
+        available_bytes,
+        issues: row_issues,
+    };
+    Ok((row, observation))
 }
 
 #[cfg(test)]

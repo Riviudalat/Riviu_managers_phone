@@ -228,10 +228,25 @@ impl Database {
 
     /// Filter in SQL before hydrating heterogeneous sources. Refuse an oversized result,
     /// rather than displaying partial counts as complete. No source has its own hidden cap.
+    /// Stop/handoff needs active sources only. Callers separately include live nurture
+    /// sessions and unresolved publish holds, whose history must remain protected.
+    pub fn active_operation_source_ids(&self) -> anyhow::Result<Vec<String>> {
+        self.operation_source_ids_filtered(None, None, true)
+    }
+
     pub fn operation_source_ids(
         &self,
         since: Option<&str>,
         kind: Option<OperationRunKind>,
+    ) -> anyhow::Result<Vec<String>> {
+        self.operation_source_ids_filtered(since, kind, false)
+    }
+
+    fn operation_source_ids_filtered(
+        &self,
+        since: Option<&str>,
+        kind: Option<OperationRunKind>,
+        active_only: bool,
     ) -> anyhow::Result<Vec<String>> {
         let conn = self.conn()?;
         let mut stmt = conn.prepare("SELECT operation_id FROM (
@@ -242,12 +257,13 @@ impl Database {
             SELECT 'interaction:' || id,updated_at,'interaction',state IN ('queued','running') FROM interaction_campaigns UNION ALL
             SELECT 'publish:' || id,updated_at,'publish',state IN ('queued','scheduled','preparing','ready','transferring','imported','posting','verifying') FROM publish_campaigns UNION ALL
             SELECT kind || ':' || id,updated_at,kind,EXISTS(SELECT 1 FROM library_batch_items i WHERE i.batch_id=library_batches.id AND i.state IN ('queued','running')) FROM library_batches
-        ) WHERE (?1 IS NULL OR active OR julianday(updated_at)>=julianday(?1)) AND (?2 IS NULL OR kind=?2)
+        ) WHERE (?1 IS NULL OR active OR julianday(updated_at)>=julianday(?1)) AND (?2 IS NULL OR kind=?2) AND (?3=0 OR active)
         ORDER BY updated_at DESC,operation_id LIMIT 10001")?;
         let ids = stmt
-            .query_map(params![since, kind.map(OperationRunKind::as_key)], |row| {
-                row.get::<_, String>(0)
-            })?
+            .query_map(
+                params![since, kind.map(OperationRunKind::as_key), active_only],
+                |row| row.get::<_, String>(0),
+            )?
             .collect::<rusqlite::Result<Vec<_>>>()?;
         anyhow::ensure!(
             ids.len() <= 10000,

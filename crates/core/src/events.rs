@@ -63,6 +63,19 @@ pub enum AppEvent {
         campaign_id: String,
         revision: u64,
     },
+    /// Progress is scoped to the exact UI request and preparation attempt.
+    PublishPreflightProgress {
+        request_id: String,
+        preparation_id: String,
+        udid: String,
+        stage: String,
+        state: String,
+        completed_checks: u32,
+        total_checks: u32,
+        elapsed_ms: u64,
+        error: Option<String>,
+        revision: u64,
+    },
     WdaExpiryWarning {
         udid: String,
         days_remaining: i64,

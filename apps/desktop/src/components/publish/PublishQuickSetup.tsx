@@ -304,14 +304,16 @@ export function PublishQuickSetup(p: QuickProps) {
         {duplicateCaptions > 0 && <p className="pq-hint">{duplicateCaptions} bài đã chọn có caption trùng; nội dung giữ nguyên, không tự sửa.</p>}
       </div></div>
     </PublishDialog>}
-    {dialog === "check" && <PublishDialog title="Kiểm tra đợt đăng" wide onClose={() => setDialog(null)} actions={<><button type="button" onClick={() => setDialog(null)}>Quay lại</button>{(p.preflightError || (p.preflight && !p.preflight.canExecute)) && !p.preflightLoading && <button type="button" disabled={locked} onClick={() => { setReportPage(0); void p.onPreflight(); }}>Kiểm tra lại</button>}<button type="button" className="primary" disabled={locked || !p.preflight?.canExecute || !complete} onClick={() => void p.onExecute()}><Check size={16}/> Xác nhận đăng {selected.length} bài</button></>}>
-      {p.preflightLoading ? <div className="pw-preflight-pending">
+    {dialog === "check" && <PublishDialog title="Xem lại và xác nhận đăng công khai" wide onClose={() => { if (!p.starting) setDialog(null); }} actions={<><button type="button" disabled={p.starting} onClick={() => setDialog(null)}>Quay lại</button>{(p.preflightError || !p.preflight || !p.preflight.canExecute) && !p.preflightLoading && <button type="button" disabled={locked} onClick={() => { setReportPage(0); void p.onPreflight(); }}>Kiểm tra lại</button>}<button type="button" className="primary" disabled={locked || !p.preflight?.canExecute || !complete} onClick={() => void p.onExecute()}><Check size={16}/> {p.starting ? "Đang bắt đầu…" : `Xác nhận đăng công khai ${selected.length} bài`}</button></>}>
+      <p>{selected.length} bài sẽ đăng công khai trên {mapped} máy. Nút xác nhận bên dưới cho phép bắt đầu lượt đăng này.</p>
+      {p.starting && <p role="status" className="pw-start-status">Đang gửi yêu cầu… Giữ nguyên lượt đăng trong khi chờ xác nhận.</p>}
+      {p.startError && <p role="alert" className="pw-error">{p.startError}</p>}
+      {p.preflightLoading ? p.preflightProgress ?? <div className="pw-preflight-pending">
         <div className="pw-preflight-phase" role="status"><LoaderCircle size={18} aria-hidden="true"/><div><strong>{p.preflightStage === "preparing" ? "Đang chuẩn bị thiết bị…" : "Đang kiểm tra từng máy…"}</strong><span>{selected.length} bài · {mapped} máy đã ghép · Chưa đăng bài</span></div></div>
         <div className="pw-preflight-pending-list" role="region" aria-label="Máy đang chờ kết quả kiểm tra" tabIndex={0}>
           {selected.map(bundle => { const udid = p.assignments[bundle.id]; return <div key={bundle.id}><strong>{udid ? label(udid) : "Chưa ghép máy"}</strong><span>{bundle.name}</span><small>Chờ kết quả</small></div>; })}
         </div>
-      </div> : p.preflightError ? <p role="alert">{p.preflightError}</p> : p.preflight ? <PublishPreflightResult report={p.preflight} machineName={label} bundleName={id => bundles.find(bundle => bundle.id === id)?.name ?? id} page={reportPage} onPage={setReportPage} onRetry={() => void p.onPreflight()} busy={locked} hideRetry/> : <p>Chưa có kết quả kiểm tra.</p>}
-      <p className="pq-hint">Nhạc được chọn sau khi mở TikTok. Link được ghi Sheet sau khi xác nhận bài đăng thành công.</p>
+      </div> : p.preflightError ? <p role="alert">{p.preflightError}</p> : p.preflight ? <PublishPreflightResult onExclude={p.onExclude} report={p.preflight} machineName={label} bundleName={id => bundles.find(bundle => bundle.id === id)?.name ?? id} page={reportPage} onPage={setReportPage} onRetry={() => void p.onPreflight()} busy={locked} hideRetry/> : <p>Chưa có kết quả kiểm tra.</p>}
     </PublishDialog>}
   </div>;
 }

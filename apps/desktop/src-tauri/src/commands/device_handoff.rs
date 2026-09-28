@@ -79,9 +79,10 @@ pub(crate) async fn prepare_manual_devices(
         .cloned()
         .collect();
     let active: HashSet<_> = selected.difference(&disconnected).cloned().collect();
+    let sources_started = std::time::Instant::now();
     let mut ids: HashSet<String> = state
         .db
-        .operation_source_ids(None, None)
+        .active_operation_source_ids()
         .map_err(CommandError::operation)?
         .into_iter()
         .collect();
@@ -112,7 +113,10 @@ pub(crate) async fn prepare_manual_devices(
             held.insert(format!("publish:{}", hold.campaign_id));
         }
     }
+    let active_source_count = ids.len();
+    let held_count = held.len();
     ids.extend(held.iter().cloned());
+    let candidate_count = ids.len();
     let mut operations = Vec::new();
     let mut operation_devices = std::collections::HashMap::new();
     for id in ids {
@@ -137,6 +141,7 @@ pub(crate) async fn prepare_manual_devices(
             operation_devices.insert(id, devices.into_iter().collect());
         }
     }
+    log::info!("handoff source scan: active_sources={} held_publish={} candidates={} selected_operations={} elapsed_ms={}", active_source_count, held_count, candidate_count, operations.len(), sources_started.elapsed().as_millis());
     operations.sort();
     // Request every relevant cancellation before waiting for any closer. Runs
     // with interdependent steps are cancelled as a unit by their original owner.
@@ -272,11 +277,23 @@ async fn close_handoff_device(
         .await
         .map_err(CommandError::from)?;
     let result = async {
-        for id in state
-            .db
-            .operation_source_ids(None, None)
-            .map_err(CommandError::operation)?
+        if state
+            .nurture
+            .list_status()
+            .iter()
+            .any(|run| run.udid == udid && run.running)
         {
+            return Err(CommandError::operation(
+                "Có phiên nuôi mới xuất hiện trong lúc nhả máy",
+            ));
+        }
+        let source_ids = state
+            .db
+            .active_operation_source_ids()
+            .map_err(CommandError::operation)?;
+        let scan_timing =
+            super::operation_stop::SourceScanTiming::new("handoffClose", source_ids.len());
+        for id in source_ids {
             if let Some(other) = super::jobs::read_operation_run(state, &id)? {
                 if other.summary.kind == riviu_core::OperationRunKind::Publish
                     && state
@@ -299,6 +316,7 @@ async fn close_handoff_device(
                 }
             }
         }
+        drop(scan_timing);
         let mut proofs = Vec::new();
         for hold in state
             .db

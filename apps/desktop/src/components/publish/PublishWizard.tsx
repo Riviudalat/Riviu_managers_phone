@@ -41,6 +41,10 @@ export interface PublishWizardProps {
   preflightLoading: boolean;
   preflight: PublishPreflightReport | null;
   preflightError: string | null;
+  starting?: boolean;
+  startError?: string | null;
+  preflightProgress?: ReactNode;
+  onExclude?: (bundleId: string) => void;
   sound: PublishSoundPolicy;
   runAt: string;
   onSource: (path: string) => void;
@@ -143,6 +147,7 @@ export function PublishWizard(p: PublishWizardProps) {
     setDialog("caption");
   };
   const closeDialog = () => {
+    if (p.starting) return;
     if (
       dialog === "caption" &&
       active &&
@@ -746,7 +751,7 @@ export function PublishWizard(p: PublishWizardProps) {
                 disabled={!p.preflight?.canExecute || locked}
                 onClick={() => void p.onExecute()}
               >
-                {p.runAt
+                {p.starting ? "Đang bắt đầu…" : p.runAt
                   ? "Xác nhận lịch đăng"
                   : `Xác nhận đăng ${selected.length} bài`}
               </button>
@@ -757,6 +762,8 @@ export function PublishWizard(p: PublishWizardProps) {
             {selected.length} bài sẽ đăng công khai trên {mapped} máy. Nhạc được
             chọn sau khi mở TikTok.
           </p>
+          {p.starting && <p role="status">Đang gửi yêu cầu đăng công khai…</p>}
+          {p.startError && <p role="alert" className="pw-error">{p.startError}</p>}
           {p.preflightLoading ? (
             <p role="status">
               Đang kiểm tra nội dung, kết nối và phiên bản TikTok…
@@ -770,6 +777,7 @@ export function PublishWizard(p: PublishWizardProps) {
             </div>
           ) : p.preflight ? (
             <PublishPreflightResult
+              onExclude={p.onExclude}
               report={p.preflight}
               machineName={(udid) => machineName(udid, p.devices, p.metas)}
               page={checkPage}
@@ -785,9 +793,6 @@ export function PublishWizard(p: PublishWizardProps) {
               </button>
             </p>
           )}
-          <p className="pw-run-order">
-            Mở TikTok → Chọn nội dung → Chọn nhạc → Đăng → Lấy liên kết → Sheet
-          </p>
           <p>Xóa bản chuyển sau khi xác minh bài đăng thành công.</p>
         </PublishDialog>
       )}
@@ -846,9 +851,6 @@ function ReviewList({
         total={bundles.length}
         onPage={setPage}
       />
-      <p className="pw-muted">
-        Nhạc cụ thể được chọn trong TikTok khi lượt chạy bắt đầu.
-      </p>
     </div>
   );
 }

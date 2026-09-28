@@ -437,6 +437,7 @@ pub fn run() {
             agent_commands::agent_bulk_repair,
             commands::list_devices,
             google_sheet_commands::google_sheets_status,
+            google_sheet_commands::google_sheets_verify_readonly,
             google_sheet_commands::google_sheets_configure,
             google_sheet_commands::google_sheets_login,
             google_sheet_commands::google_sheets_cancel,
@@ -687,6 +688,9 @@ pub fn run() {
             publish_commands::publish_list,
             publish_commands::publish_device_guards,
             publish_commands::publish_get,
+            publish_commands::publish_start,
+            publish_commands::publish_start_status,
+            publish_commands::publish_exclude_assignment,
             publish_commands::publish_reconcile,
             publish_commands::publish_check_links,
             publish_commands::publish_recovery_capabilities,
@@ -1294,6 +1298,7 @@ mod tests {
     /// down. That is the inversion — see the test below for why the previous shape could not
     /// work.
     const ADMISSION_EXEMPT: &[(&str, &str)] = &[
+        ("publish_start_status", "reads durable start receipt; no device or execution changes"),
         ("gui_service_status", "reads perception configuration and process status; no device or configuration changes"),
         // Reads. They answer from the DB, from memory, or from a frame already captured, and
         // touch no device — so refusing them during shutdown drain would blank the UI for no

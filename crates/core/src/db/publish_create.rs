@@ -61,11 +61,34 @@ impl Database {
         if let Some(prior) = replay_on(&tx, &request.request_id, fingerprint)? {
             return Ok((prior, false));
         }
-        let id = Uuid::new_v4().to_string();
+        let start: Option<(String, String)> = tx
+            .query_row(
+                "SELECT request_fingerprint,state FROM publish_start_requests WHERE request_id=?1",
+                [&request.request_id],
+                |r| Ok((r.get(0)?, r.get(1)?)),
+            )
+            .optional()?;
+        let id = if let Some((prior, state)) = start {
+            anyhow::ensure!(
+                prior == fingerprint && state == "preparing",
+                "Start receipt changed or interrupted"
+            );
+            // The reserved ID can be authorized before a dev-acceptance activation. A primary
+            // key collision fails closed; only replay_on above may adopt an existing campaign.
+            request.request_id.clone()
+        } else {
+            Uuid::new_v4().to_string()
+        };
         Self::insert_publish_campaign(&tx, &id, request, bundles, Some(snapshot))?;
         tx.execute(
             "INSERT INTO publish_create_requests VALUES(?1,?2,?3,?4)",
             params![request.request_id, id, fingerprint, Utc::now().to_rfc3339()],
+        )?;
+        // Campaign linkage survives a crash between create and enqueue. It is not a dispatch.
+        tx.execute(
+            "UPDATE publish_start_requests SET campaign_id=?2,revision=revision+1,updated_at=?3
+            WHERE request_id=?1 AND state='preparing'",
+            params![request.request_id, id, Utc::now().to_rfc3339()],
         )?;
         let record = Self::get_publish_campaign_from_connection(&tx, &id)?
             .context("created campaign missing")?

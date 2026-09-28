@@ -620,15 +620,15 @@
   font-size: var(--text-base);
 }
 .pw-check-results {
-  max-height: 48dvh;
-  overflow: auto;
+  max-height: none;
+  overflow: visible;
 }
 .pw-preflight-pending { display: grid; gap: var(--space-3); }
 .pw-preflight-phase { display: flex; align-items: center; gap: var(--space-3); color: var(--primary); }
 .pw-preflight-phase svg { flex: none; animation: pw-preflight-spin 1.5s linear infinite; }
 .pw-preflight-phase strong,.pw-preflight-phase span { display: block; }
 .pw-preflight-phase span { color: var(--text-2); font-size: var(--text-sm); }
-.pw-preflight-pending-list { max-height: 40dvh; overflow: auto; border-block: 1px solid var(--line); }
+.pw-preflight-pending-list { max-height: none; overflow: visible; border-block: 1px solid var(--line); }
 .pw-preflight-pending-list > div { display: grid; grid-template-columns: minmax(0,1fr) minmax(0,1fr) auto; align-items: center; gap: var(--space-2); min-width: 0; padding: var(--space-2) 0; border-bottom: 1px solid var(--line); font-size: var(--text-sm); }
 .pw-preflight-pending-list > div:last-child { border-bottom: 0; }
 .pw-preflight-pending-list strong,.pw-preflight-pending-list span { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
@@ -1327,3 +1327,8 @@
 .pw-machine-tools .machine-scope-select { width: 100px; flex: 1; }
 .pw-machine-tools > span { flex-basis: 100%; text-align: right; }
 @media (max-width: 1100px) { .pw-board-columns { grid-template-columns: minmax(0, 1fr) 310px; } }
+
+.pw-preflight-device { padding: 10px 12px; }
+.pw-preflight-device > p { margin: 3px 0; }
+.pw-preflight-expanded > summary { cursor: pointer; color: var(--primary); font-size: var(--text-sm); }
+.pw-start-status { border-left: 3px solid var(--primary); padding: 8px 12px; background: var(--primary-soft); }

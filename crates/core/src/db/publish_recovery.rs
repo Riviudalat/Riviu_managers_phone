@@ -33,7 +33,7 @@ fn write(conn: &Connection, id: &str, token: &str, s: &PublishRecoveryState) -> 
     Ok(())
 }
 fn current(conn: &Connection, id: &str, token: &str) -> anyhow::Result<bool> {
-    Ok(conn.query_row("SELECT EXISTS(SELECT 1 FROM publish_assignments a JOIN publish_pipeline_runs r ON r.campaign_id=a.campaign_id JOIN publish_campaigns c ON c.id=a.campaign_id WHERE a.id=?1 AND r.token=?2 AND c.state='posting' AND a.effect_intent IS NULL AND a.state NOT IN ('cancelled','missed','uncertain','succeeded','verifying'))",params![id,token],|r|r.get(0))?)
+    Ok(conn.query_row("SELECT EXISTS(SELECT 1 FROM publish_assignments a JOIN publish_pipeline_runs r ON r.campaign_id=a.campaign_id JOIN publish_campaigns c ON c.id=a.campaign_id WHERE a.id=?1 AND r.token=?2 AND c.state='posting' AND a.effect_intent IS NULL AND a.state NOT IN ('cancelled','missed','uncertain','succeeded','verifying') AND NOT EXISTS(SELECT 1 FROM publish_exclude_requests e WHERE e.assignment_id=a.id))",params![id,token],|r|r.get(0))?)
 }
 fn record_failure(s: &mut PublishRecoveryState, failure: &RecoveryFailure) {
     s.last_error = Some(failure.message.clone());

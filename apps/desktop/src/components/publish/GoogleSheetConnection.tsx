@@ -1,20 +1,20 @@
 import { useEffect, useRef, useState } from "react";
 import { LoaderCircle } from "lucide-react";
 import { googleSheetsCancel, googleSheetsConfigure, googleSheetsConnect, googleSheetsLogin,
-  googleSheetsStatus, publishSheetCheck, publishSheetGetConfig } from "../../api";
+  googleSheetsStatus, googleSheetsVerifyReadonly, publishSheetCheck, publishSheetGetConfig } from "../../api";
 import { describeError } from "../../describeError";
 import { parseGoogleSheetUrl, type GoogleSheetTarget } from "./googleSheetUrl";
 import type { GoogleSheetsConfiguration, GoogleSheetsStatus, PublishSheetCheckResult } from "../../types";
 import { GoogleAppSetup } from "./GoogleAppSetup";
 import { requestConfirm } from "../../confirmStore";
-import { getSheetVerificationSession, invalidateSheetVerificationSession, isSheetVerificationInvalidated, setSheetVerificationSession, type CheckedSheet } from "./sheetVerificationSession";
+import { getSheetPreflightBinding, getSheetVerificationSession, invalidateSheetVerificationSession, isSheetVerificationInvalidated, setSheetVerificationSession, sheetAccountKey, sheetVerificationKey, verifySheetSingleFlight, type CheckedSheet } from "./sheetVerificationSession";
 
 type Target = GoogleSheetTarget;
 type Action = "loading" | "login" | "check" | "picking" | "cancel" | "configure" | null;
-type Props = { onReadyChange?: (ready: boolean) => void };
+export type SheetReadyChange = (ready: boolean, identityKey: string | null) => void;
+type Props = { onReadyChange?: SheetReadyChange };
 const sameTarget = (a: Target | null, b: Target | null) => !!a && !!b && a.spreadsheetId === b.spreadsheetId && a.sheetId === b.sheetId;
-const accountKey = (s: GoogleSheetsStatus) => JSON.stringify([s.clientId, s.accountId, s.connected, s.active, s.writerId, s.hasSheetsScope,
-  s.active ? parseGoogleSheetUrl(s.sheetUrl || "")?.url ?? s.sheetUrl : null]);
+const accountKey = sheetAccountKey;
 
 function boundedRead<T>(promise: Promise<T>, milliseconds = 15_000): Promise<T> {
   return new Promise((resolve, reject) => {
@@ -31,6 +31,8 @@ export function GoogleSheetConnection({ onReadyChange }: Props) {
   const [error, setError] = useState<string | null>(null);
   const [setupOpen, setSetupOpen] = useState(false);
   const [result, setResult] = useState<CheckedSheet | null>(null);
+  const [autoChecking, setAutoChecking] = useState(false);
+  const [refreshSequence, setRefreshSequence] = useState(0);
   const mounted = useRef(true), edited = useRef(false);
   const generation = useRef(0), flight = useRef<number | null>(null);
   const browserInvoked = useRef(false);
@@ -55,7 +57,8 @@ export function GoogleSheetConnection({ onReadyChange }: Props) {
   const verifiedResult = (value: PublishSheetCheckResult, target: Target, next: GoogleSheetsStatus, ticket: number, revision: number) => {
     if (!valid(ticket) || urlRevision.current !== revision) return;
     if (value.spreadsheetId !== target.spreadsheetId || value.sheetGid !== target.sheetId) throw Error("Kết quả không khớp bảng và tab trong link đã nhập.");
-    const checked = { account: accountKey(next), target, ready: value.connectionVerified && value.reportingReady === true, message: value.message };
+    const verifiedAt = Date.now();
+    const checked = { account: accountKey(next), target, ready: value.connectionVerified && value.reportingReady === true, message: value.message, verifiedAt, expiresAt: verifiedAt + 300_000 };
     if (checked.ready) setSheetVerificationSession(checked);
     else invalidateSheetVerificationSession();
     setResult(checked);
@@ -87,8 +90,8 @@ export function GoogleSheetConnection({ onReadyChange }: Props) {
         && verifiedSession?.account === accountKey(next) && sameTarget(target, verifiedSession.target)) {
         setResult({ ...verifiedSession, message: "Đã kiểm tra trong phiên này; sẽ đối chiếu lại trước khi đăng." });
       }
-      // Reuse only local proof; publish preflight still checks the remote target.
-      // Loading the page must not acquire a shared writer lock.
+      // The debounced effect below reads remote evidence or reuses unexpired proof.
+      // It never invokes connect or the mutating final writer check.
     })().catch(e => { if (valid(ticket)) { invalidateSheetVerificationSession(); setError(describeError(e)); } }).finally(() => finish(ticket));
     const onFocus = () => refreshFocus.current(); window.addEventListener("focus", onFocus);
     return () => { mounted.current = false; generation.current += 1; flight.current = null; stopWait(); window.removeEventListener("focus", onFocus); };
@@ -98,7 +101,7 @@ export function GoogleSheetConnection({ onReadyChange }: Props) {
       if (flight.current !== null) return;
       const ticket = generation.current;
       void readGoogleStatus().then(next => {
-        if (valid(ticket) && flight.current === null) { applyStatus(next); if (next.error) setError(next.error); }
+        if (valid(ticket) && flight.current === null) { applyStatus(next); if (next.error) setError(next.error); setRefreshSequence(value => value + 1); }
       }).catch(e => { if (valid(ticket) && flight.current === null) { invalidateSheetVerificationSession(); setResult(null); setError(describeError(e)); } });
     };
   });
@@ -145,8 +148,8 @@ export function GoogleSheetConnection({ onReadyChange }: Props) {
       browserInvoked.current = true;
       const loggedIn = await awaitBrowser(current.phase !== "idle" ? current : await googleSheetsLogin(), ticket);
       if (!loggedIn || !valid(ticket) || urlRevision.current !== revision) return;
-      const target = parseGoogleSheetUrl(urlRef.current);
-      if (target) await connectTarget(target, ticket, revision);
+      // Login completion only schedules the read-only effect. Linking a new
+      // account/target or upgrading schema still requires the explicit button.
     } catch (e) { if (valid(ticket)) setError(describeError(e)); }
     finally { finish(ticket); }
   };
@@ -197,15 +200,70 @@ export function GoogleSheetConnection({ onReadyChange }: Props) {
     finally { finish(ticket); }
   };
   const target = parseGoogleSheetUrl(url);
+  const automaticKey = status?.connected && status.phase === "idle" && target
+    ? sheetVerificationKey(accountKey(status), target) : null;
+  useEffect(() => {
+    if (!automaticKey || action !== null) { setAutoChecking(false); return; }
+    let cancelled = false;
+    const ticket = generation.current, revision = urlRevision.current;
+    const expectedStatus = statusRef.current;
+    const expectedTarget = parseGoogleSheetUrl(urlRef.current);
+    if (!expectedStatus || !expectedTarget) return;
+    const expectedAccount = accountKey(expectedStatus);
+    const cached = getSheetVerificationSession();
+    if (cached?.account === expectedAccount && sameTarget(cached.target, expectedTarget)) {
+      setResult(cached); setAutoChecking(false); return;
+    }
+    setAutoChecking(true);
+    const debounce = setTimeout(() => {
+      void verifySheetSingleFlight(automaticKey, () => googleSheetsVerifyReadonly(expectedTarget.url)).then(proof => {
+        if (cancelled || !valid(ticket) || urlRevision.current !== revision
+          || !statusRef.current || accountKey(statusRef.current) !== expectedAccount) return;
+        const binding = proof.binding;
+        if (binding.clientId !== expectedStatus.clientId || binding.accountId !== expectedStatus.accountId
+          || binding.authorizationGeneration !== (expectedStatus.authorizationGeneration ?? 0)
+          || binding.spreadsheetId !== expectedTarget.spreadsheetId || binding.sheetGid !== expectedTarget.sheetId
+          || proof.result.spreadsheetId !== expectedTarget.spreadsheetId || proof.result.sheetGid !== expectedTarget.sheetId) {
+          throw Error("Kết quả xác minh không khớp tài khoản, bảng hoặc tab hiện tại.");
+        }
+        const bound = expectedStatus.active && !!binding.writerId && binding.writerId === expectedStatus.writerId
+          && sameTarget(expectedTarget, parseGoogleSheetUrl(expectedStatus.sheetUrl || ""))
+          && binding.reportingEpoch === (expectedStatus.reportingEpoch ?? null);
+        const checked: CheckedSheet = {
+          account: expectedAccount, target: expectedTarget,
+          ready: bound && proof.readyRead && proof.result.reportingReady === true && proof.writePermission !== "denied",
+          message: proof.result.message, verifiedAt: proof.verifiedAt, expiresAt: proof.expiresAt,
+        };
+        setSheetVerificationSession(checked); setResult(checked); setError(null);
+      }).catch(cause => {
+        if (cancelled || !valid(ticket) || urlRevision.current !== revision) return;
+        invalidateSheetVerificationSession(); setResult(null); setError(describeError(cause));
+      }).finally(() => { if (!cancelled && valid(ticket)) setAutoChecking(false); });
+    }, 600);
+    return () => { cancelled = true; clearTimeout(debounce); };
+  }, [automaticKey, action, refreshSequence]);
+  useEffect(() => {
+    if (!result?.expiresAt) return;
+    const expiry = setTimeout(() => { setResult(null); setRefreshSequence(value => value + 1); }, Math.max(0, result.expiresAt - Date.now()));
+    return () => clearTimeout(expiry);
+  }, [result?.expiresAt]);
   const verified = action === null && !error && status?.connected === true && status.active && status.phase === "idle" && result?.account === accountKey(status)
-    && result.ready && sameTarget(target, result.target);
+    && result.ready && !!result.expiresAt && result.expiresAt > Date.now() && sameTarget(target, result.target);
   const savedBinding = action === null && !error && status?.connected === true && status.active && status.phase === "idle"
     && status.hasSheetsScope === true && !!status.writerId && sameTarget(target, parseGoogleSheetUrl(status.sheetUrl || ""));
-  const canPreflight = verified || (result === null && savedBinding && !isSheetVerificationInvalidated());
-  useEffect(() => { onReadyChange?.(canPreflight === true); }, [canPreflight, onReadyChange]);
+  const identityKey = status && target ? sheetVerificationKey(accountKey(status), target) : null;
+  // TTL expiry removes visual proof, not the identity admitted to preflight.
+  // Errors, identity edits and negative reads revoke this session binding.
+  const canPreflight = !!savedBinding && !!identityKey && getSheetPreflightBinding() === identityKey
+    && !isSheetVerificationInvalidated();
+  useEffect(() => {
+    // Empty state during tab remount is not an observed disconnection.
+    if (action === "loading") return;
+    onReadyChange?.(canPreflight, identityKey);
+  }, [canPreflight, identityKey, action, onReadyChange]);
   const canCancel = action === "login" || action === "picking";
   const message = error || (action === "picking" ? "Chọn đúng bảng trong cửa sổ Google để cấp quyền." : action === "login" ? "Hoàn tất đăng nhập trong trình duyệt Google."
-    : action === "loading" ? "Đang đọc kết nối Google…" : action ? "Đang kiểm tra kết nối…" : verified ? "Kết nối đã xác minh."
+    : action === "loading" ? "Đang đọc kết nối Google…" : action || autoChecking ? "Đang kiểm tra kết nối…" : verified ? result.message
       : result?.message || (savedBinding && !isSheetVerificationInvalidated() ? "Đã liên kết Google Sheet; sẽ kiểm tra quyền ghi trước khi đăng."
         : status && !status.configured ? "Bản app chưa có cấu hình Google. Mở Thiết lập Google để bổ sung."
         : status?.connected ? "Chưa xác minh kết nối bảng." : "Chưa đăng nhập Google."));
@@ -218,7 +276,7 @@ export function GoogleSheetConnection({ onReadyChange }: Props) {
       <button type="button" disabled={!canCancel && action !== null} title={status?.email || "Đăng nhập Google"} onClick={() => void (canCancel ? cancel() : login())}>{canCancel ? "Hủy đăng nhập" : "Đăng nhập Google"}</button>
       <button type="button" disabled={action !== null || !url.trim()} onClick={() => void check()}>{(action === "check" || action === "picking") && <LoaderCircle className="publish-check-spinner" size={14} aria-hidden="true" />}Kiểm tra kết nối</button>
     </div>
-    <p tabIndex={0} role={error ? "alert" : "status"} className={`publish-sheet-result ${verified ? "is-verified" : savedBinding && result === null && !isSheetVerificationInvalidated() ? "is-linked" : "needs-attention"}`}>{status?.email ? `${status.email} · ` : ""}{message}</p>
+    <p tabIndex={0} role={error ? "alert" : "status"} className={`publish-sheet-result ${verified ? "is-verified" : savedBinding && result === null && !isSheetVerificationInvalidated() ? "is-linked" : "needs-attention"}`}>{status?.email ? `${status.email} · ` : ""}{message}{result?.verifiedAt && !autoChecking && action === null ? ` · Xác minh lúc ${new Date(result.verifiedAt).toLocaleTimeString("vi-VN")}` : ""}</p>
     {status && !status.configured && <GoogleAppSetup key={status.clientId} clientId={status.clientId}
       busy={action !== null || status.phase !== "idle"} open={setupOpen} onOpenChange={setSetupOpen} onSave={configure} />}
   </div>;

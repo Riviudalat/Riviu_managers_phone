@@ -29,6 +29,7 @@ import { pushToast, toastError } from "./toastStore";
 import { ConfirmHost } from "./components/ConfirmHost";
 import { ActivityCenter } from "./components/ActivityCenter";
 import { OperationSourceDetail } from "./components/OperationSourceDetail";
+import { PUBLISH_START_ACKNOWLEDGED } from "./features/operations/publishStartBridge";
 import { OperationProgressCenter } from "./features/operations/OperationProgressCenter";
 import { DeviceTile } from "./components/DeviceTile";
 import { FilterToolbar, type ViewMode } from "./components/FilterToolbar";
@@ -130,6 +131,11 @@ type PendingNavigation = NavigationIntent & { settle: (activated: boolean) => vo
 function App() {
   const [page, setPage] = useState<PageId>("control");
   const [operationSource, setOperationSource] = useState<OperationSourceRef>();
+  useEffect(() => {
+    const showAcceptedPublish = () => { setPage("control"); setOperationSource(undefined); };
+    window.addEventListener(PUBLISH_START_ACKNOWLEDGED, showAcceptedPublish);
+    return () => window.removeEventListener(PUBLISH_START_ACKNOWLEDGED, showAcceptedPublish);
+  }, []);
   const pageRef = useRef(page);
   pageRef.current = page;
   const activeAutomation = isDeviceAutomation(page) ? page : null;

@@ -1,4 +1,4 @@
-﻿import { GoogleSheetConnection } from "./GoogleSheetConnection";
-export function PublishSheetConnection({ onReadyChange }: { onReadyChange?: (ready: boolean) => void }) {
+import { GoogleSheetConnection, type SheetReadyChange } from "./GoogleSheetConnection";
+export function PublishSheetConnection({ onReadyChange }: { onReadyChange?: SheetReadyChange }) {
   return <GoogleSheetConnection onReadyChange={onReadyChange} />;
 }

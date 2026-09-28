@@ -132,6 +132,7 @@ impl Database {
             "SELECT a.campaign_id,a.publication_id,a.udid FROM publish_assignments a
              JOIN publish_campaigns c ON c.id=a.campaign_id
              WHERE a.id=?1 AND a.state='failed_before_dispatch' AND a.effect_intent IS NULL
+             AND NOT EXISTS(SELECT 1 FROM publish_exclude_requests e WHERE e.assignment_id=a.id)
              AND (c.state IN ('failed_before_dispatch','verifying','uncertain') OR (?2=1 AND c.state='posting'))
              AND (?2=1 OR NOT EXISTS(SELECT 1 FROM publish_pipeline_runs r WHERE r.campaign_id=c.id))
              AND NOT EXISTS(SELECT 1 FROM publish_dispatch_jobs j WHERE j.assignment_id=a.id AND j.state IN ('queued','running','paused'))",
@@ -446,6 +447,7 @@ impl Database {
         let changed = tx.execute("UPDATE publish_dispatch_jobs SET state='running',owner=?3,reason=NULL,
             started_at_ms=COALESCE(started_at_ms,?4),revision=revision+1
             WHERE assignment_id=?1 AND revision=?2 AND state='queued'
+            AND NOT EXISTS(SELECT 1 FROM publish_exclude_requests e WHERE e.assignment_id=publish_dispatch_jobs.assignment_id)
             AND (started_at_ms IS NOT NULL OR deadline_ms IS NULL OR deadline_ms>=?5)
             AND NOT EXISTS(SELECT 1 FROM publish_dispatch_jobs busy
                 WHERE busy.udid=publish_dispatch_jobs.udid AND busy.assignment_id<>publish_dispatch_jobs.assignment_id
@@ -455,6 +457,8 @@ impl Database {
             params![job.assignment_id,job.revision,job.attempt_id,Utc::now().timestamp_millis(),local_now_ms])?;
         if changed == 1 {
             Self::publish_dispatch_turn(&tx, &job.udid)?;
+            tx.execute("UPDATE publish_start_requests SET state='running',stage='running',revision=revision+1,updated_at=?2
+                WHERE campaign_id=?1 AND state='queued'",params![job.run.campaign_id,Utc::now().to_rfc3339()])?;
         }
         tx.commit()?;
         Ok(changed == 1)
@@ -473,7 +477,12 @@ impl Database {
         let connection = self.dispatch_conn()?;
         let mut conn = connection.lock();
         let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
-        let to_compose = error.is_none() && job.phase == "transfer";
+        let excluded: bool = tx.query_row(
+            "SELECT EXISTS(SELECT 1 FROM publish_exclude_requests WHERE assignment_id=?1)",
+            [&job.assignment_id],
+            |r| r.get(0),
+        )?;
+        let to_compose = !excluded && error.is_none() && job.phase == "transfer";
         let changed = tx.execute("UPDATE publish_dispatch_jobs SET state=?4,phase=?5,owner=NULL,reason=?6,
             finished_at_ms=?7,revision=revision+1 WHERE assignment_id=?1 AND attempt_id=?2 AND revision=?3 AND state='running'",
             params![job.assignment_id,job.attempt_id,job.revision+1,if to_compose {"queued"} else {"finished"},

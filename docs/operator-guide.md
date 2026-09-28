@@ -43,6 +43,17 @@ Yêu cầu đóng được lưu qua restart, chỉ ghi đã đóng khi thiết b
 TikTok không còn chạy. Lỗi đóng không đổi kết quả đăng hoặc tự đăng lại bài.
 
 Trong Đăng bài, thẻ máy hiện ngay bài còn chờ lấy link và nút **Xem bài đang chờ**.
+Kết nối Sheet được tự kiểm khi mở trang hoặc đổi tài khoản/bảng. Kết quả đọc và
+header còn hiệu lực được dùng chung trong năm phút; quyền ghi chưa chứng minh
+được sẽ được ghi rõ và kiểm tại bước chuẩn bị ghi, không tự nâng cấp tab.
+Màn kiểm tra trả tiến độ từng máy và phân trang tám máy. Nút **Đăng N bài công khai**
+là xác nhận cuối cùng, không mở thêm popup xác nhận. Khi backend nhận yêu cầu,
+ứng dụng chuyển về Control Center và ghim đúng lượt đang chuẩn bị. Lỗi nhận yêu
+cầu hiện ngay tại cửa sổ; mất phản hồi được đối soát bằng cùng mã yêu cầu.
+Trong bảng theo dõi, mỗi máy có tiến độ theo bước, thời gian và nút phục hồi phù
+hợp. **Loại khỏi đợt** chỉ dừng phần việc của assignment đó và chờ nhả máy; bài
+đã gửi vẫn giữ lịch sử, intent và nghĩa vụ lấy link/Sheet. Pending không được
+tính là đã hoàn tất, và thử lại sau Post không tạo thêm Post.
 Khi bấm **Kiểm tra & đăng**, Riviu dừng các tác vụ cũ liên quan trên máy được chọn,
 chờ nhả phiên rồi mới kiểm tra lượt mới. Tác vụ có các bước phụ thuộc nhau được
 dừng theo cả lượt; lịch hẹn chưa chạy không bị hủy. Nuôi/Tương tác thực hiện bước

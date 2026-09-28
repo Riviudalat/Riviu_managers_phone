@@ -39,6 +39,9 @@ pub struct PublishRecoveryCapabilities {
     pub retry_before_post: PublishRecoveryCapability,
     pub verification_resumed: bool,
     pub recovery: Option<crate::publish_recovery::PublishRecoveryState>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub exclusion: Option<PublishExcludeReceipt>,
+    pub sheet_required: bool,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize)]
@@ -250,6 +253,29 @@ fn observer_authorized(
     conn: &Connection,
     candidate: &PendingPublishVerification,
 ) -> anyhow::Result<bool> {
+    let excluded: Option<String> = conn.query_row(
+        "SELECT MAX(updated_at) FROM publish_exclude_requests WHERE assignment_id=?1",
+        [&candidate.assignment_id],
+        |r| r.get(0),
+    )?;
+    if let Some(excluded) = excluded {
+        let resumed_at = candidate
+            .evidence_json
+            .as_deref()
+            .and_then(|raw| serde_json::from_str::<serde_json::Value>(raw).ok())
+            .and_then(|e| {
+                e["verificationResume"]["requestedAt"]
+                    .as_str()
+                    .map(str::to_owned)
+            })
+            .and_then(|at| DateTime::parse_from_rfc3339(&at).ok());
+        let excluded_at = DateTime::parse_from_rfc3339(&excluded)?;
+        if !explicitly_resumed_verification(candidate)
+            || resumed_at.is_none_or(|at| at <= excluded_at)
+        {
+            return Ok(false);
+        }
+    }
     let marker = stop_marker(conn, &candidate.campaign_id)?;
     Ok(marker == candidate.stop_marker
         && (marker.is_none()
@@ -382,7 +408,7 @@ fn already_pending(
     conn: &Connection,
     candidate: &PendingPublishVerification,
 ) -> anyhow::Result<bool> {
-    if needs_review(candidate.evidence_json.as_deref()) {
+    if needs_review(candidate.evidence_json.as_deref()) || !observer_authorized(conn, candidate)? {
         return Ok(false);
     }
     let current: bool = conn.query_row("SELECT COALESCE(json_extract(request_json,'$.verificationContractVersion')=1,0) FROM publish_campaigns WHERE id=?1",[&candidate.campaign_id],|r|r.get(0))?;
@@ -535,7 +561,9 @@ impl Database {
                 && !evidence_has_post_link(candidate.evidence_json.as_deref());
             let check_reason = if evidence_has_post_link(candidate.evidence_json.as_deref()) {
                 Some("alreadyVerified")
-            } else if candidate.stop_marker.is_some() && !resumed {
+            } else if (candidate.stop_marker.is_some() && !resumed)
+                || !observer_authorized(&tx, &candidate)?
+            {
                 Some("operatorStopped")
             } else if !may_verify(
                 &state,
@@ -550,7 +578,7 @@ impl Database {
             };
             // Exact claim_publish_assignment_retry predicate, including the live parent
             // and assignment job guard; do not make retry look safer than its DB claim.
-            let retry: bool = tx.query_row("SELECT EXISTS(SELECT 1 FROM publish_assignments a JOIN publish_campaigns c ON c.id=a.campaign_id WHERE a.id=?1 AND a.state='failed_before_dispatch' AND a.effect_intent IS NULL AND c.state IN ('failed_before_dispatch','verifying','uncertain','posting') AND NOT EXISTS(SELECT 1 FROM publish_dispatch_jobs j WHERE j.assignment_id=a.id AND j.state IN ('queued','running','paused')))",[&id],|r|r.get(0))?;
+            let retry: bool = tx.query_row("SELECT EXISTS(SELECT 1 FROM publish_assignments a JOIN publish_campaigns c ON c.id=a.campaign_id WHERE a.id=?1 AND a.state='failed_before_dispatch' AND a.effect_intent IS NULL AND c.state IN ('failed_before_dispatch','verifying','uncertain','posting') AND NOT EXISTS(SELECT 1 FROM publish_dispatch_jobs j WHERE j.assignment_id=a.id AND j.state IN ('queued','running','paused')) AND NOT EXISTS(SELECT 1 FROM publish_exclude_requests e WHERE e.assignment_id=a.id))",[&id],|r|r.get(0))?;
             let capability = |reason: Option<&str>| PublishRecoveryCapability {
                 allowed: reason.is_none(),
                 reason: reason.map(str::to_owned),
@@ -565,6 +593,13 @@ impl Database {
                 resume_refusal(&candidate, &state, active_pipeline)
             };
             capabilities.push(PublishRecoveryCapabilities {
+                sheet_required: tx.query_row("SELECT request_json FROM publish_campaigns WHERE id=?1", [campaign_id], |r| r.get::<_,String>(0))
+                    .map_err(anyhow::Error::from).and_then(|raw| Ok(serde_json::from_str::<crate::PublishCampaignRequest>(&raw)?.sheet_enabled))?,
+                exclusion: tx.query_row("SELECT e.assignment_id,e.state,a.revision,e.reason
+                    FROM publish_exclude_requests e JOIN publish_assignments a ON a.id=e.assignment_id
+                    WHERE e.assignment_id=?1 ORDER BY e.updated_at DESC LIMIT 1", [&id], |r| Ok(PublishExcludeReceipt {
+                        assignment_id:r.get(0)?,state:r.get(1)?,revision:r.get(2)?,reason:r.get(3)?,
+                    })).optional()?,
                 recovery: tx
                     .query_row(
                         "SELECT payload FROM publish_recovery_state WHERE assignment_id=?1",
@@ -589,6 +624,63 @@ impl Database {
             });
         }
         Ok(capabilities)
+    }
+
+    /// Cancel a queue-only campaign without pretending to have closed an app. The
+    /// immediate transaction fences a concurrent dispatcher claim before classifying it.
+    pub fn stop_unstarted_publish_operation(
+        &self,
+        campaign_id: &str,
+    ) -> anyhow::Result<Option<crate::ipc_contract::OperationStopResult>> {
+        let mut conn = self.conn()?;
+        let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
+        let pristine: bool = tx.query_row(
+            "SELECT EXISTS(SELECT 1 FROM publish_campaigns c WHERE c.id=?1
+             AND c.state IN ('queued','scheduled')
+             AND EXISTS(SELECT 1 FROM publish_assignments a WHERE a.campaign_id=c.id)
+             AND NOT EXISTS(SELECT 1 FROM publish_assignments a WHERE a.campaign_id=c.id
+                 AND (a.state NOT IN ('queued','scheduled') OR a.effect_intent IS NOT NULL OR a.evidence_json IS NOT NULL))
+             AND NOT EXISTS(SELECT 1 FROM publish_pipeline_runs r WHERE r.campaign_id=c.id)
+             AND NOT EXISTS(SELECT 1 FROM publish_attempts p WHERE p.campaign_id=c.id)
+             AND NOT EXISTS(SELECT 1 FROM publish_dispatch_jobs j WHERE j.campaign_id=c.id
+                 AND (j.started_at_ms IS NOT NULL OR j.state NOT IN ('queued','paused')))
+             AND NOT EXISTS(SELECT 1 FROM publish_account_reservations r JOIN publish_assignments a ON a.id=r.assignment_id WHERE a.campaign_id=c.id)
+             AND NOT EXISTS(SELECT 1 FROM publish_recovery_state r JOIN publish_assignments a ON a.id=r.assignment_id WHERE a.campaign_id=c.id))",
+            [campaign_id], |r| r.get(0),
+        )?;
+        if !pristine {
+            return Ok(None);
+        }
+        let devices = tx
+            .prepare(
+                "SELECT DISTINCT udid FROM publish_assignments WHERE campaign_id=?1 ORDER BY udid",
+            )?
+            .query_map([campaign_id], |r| r.get::<_, String>(0))?
+            .collect::<rusqlite::Result<Vec<_>>>()?;
+        let now = Utc::now().to_rfc3339();
+        tx.execute("UPDATE publish_campaigns SET state='cancelled',revision=revision+1,updated_at=?2 WHERE id=?1",params![campaign_id,now])?;
+        tx.execute("UPDATE publish_assignments SET state='cancelled',revision=revision+1,updated_at=?2 WHERE campaign_id=?1",params![campaign_id,now])?;
+        tx.execute("UPDATE publish_dispatch_jobs SET state='cancelled',reason='cancelled_before_start',revision=revision+1,finished_at_ms=?2 WHERE campaign_id=?1",params![campaign_id,Utc::now().timestamp_millis()])?;
+        let marker = serde_json::json!({"version":2,"requestedAt":now,"generation":Uuid::new_v4().to_string(),"closePending":false,"neverStarted":true}).to_string();
+        let result = crate::ipc_contract::OperationStopResult {
+            operation_id: format!("publish:{campaign_id}"),
+            state: "closed".into(),
+            stop_marker: Some(marker.clone()),
+            devices: devices
+                .into_iter()
+                .map(|udid| crate::ipc_contract::StopDeviceResult {
+                    udid,
+                    closed: true,
+                    message: "Đã hủy lượt chưa bắt đầu; không có phiên thiết bị cần đóng".into(),
+                })
+                .collect(),
+        };
+        tx.execute("INSERT INTO settings(key,value) VALUES(?1,?2) ON CONFLICT(key) DO UPDATE SET value=excluded.value",params![format!("operation.stop.publish:{campaign_id}"),marker])?;
+        tx.execute("INSERT INTO settings(key,value) VALUES(?1,?2) ON CONFLICT(key) DO UPDATE SET value=excluded.value",params![format!("operation.stop.result:publish:{campaign_id}"),serde_json::to_string(&result)?])?;
+        tx.execute("INSERT INTO publish_events(campaign_id,revision,kind,payload_json,created_at) SELECT id,revision,'state',?2,?3 FROM publish_campaigns WHERE id=?1",
+            params![campaign_id,serde_json::json!({"state":"cancelled","source":"stopBeforeStart"}).to_string(),now])?;
+        tx.commit()?;
+        Ok(Some(result))
     }
 
     /// Arms the durable close barrier in the SAME transaction as observer revocation.
@@ -897,6 +989,9 @@ impl Database {
         let mut later = Vec::new();
         for row in rows {
             let (candidate, state, current_contract) = row?;
+            if !observer_authorized(&conn, &candidate)? {
+                continue;
+            }
             if candidate.stop_marker.is_some()
                 && (stop_generation(candidate.stop_marker.as_deref()).is_none()
                     || !explicitly_resumed_verification(&candidate))

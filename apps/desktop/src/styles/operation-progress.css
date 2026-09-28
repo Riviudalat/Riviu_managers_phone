@@ -150,3 +150,14 @@
 .run-device-recovery > div { display:flex; flex-wrap:wrap; gap:6px; align-items:center; }
 .run-device-recovery small { overflow-wrap:anywhere; }
 .run-device-recovery button { min-height:30px; }
+
+/* One outer scroll area; paginated device rows do not trap wheel/keyboard scroll. */
+.run-monitor-body { overflow: auto; }
+.run-monitor-detail { flex: 0 0 auto; min-height: 220px; }
+.run-monitor-devices, .run-log-scroll, .run-evidence-scroll { overflow: visible; flex: 0 0 auto; }
+.run-monitor-device-pane .publish-pager { padding: 6px 10px; font-size: var(--text-sm); }
+.run-device-recovery { display: grid; gap: 5px; padding: 4px 12px 8px; }
+.run-device-recovery small { display: block; overflow-wrap: anywhere; }
+.run-device-recovery button { margin: 3px 4px 0 0; font-size: var(--text-sm); }
+
+.run-start-bridge { display: grid; gap: 6px; padding: 12px 14px; border-left: 3px solid var(--primary); background: var(--primary-soft); overflow-wrap: anywhere; }

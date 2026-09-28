@@ -737,6 +737,13 @@ impl Database {
         let mut conn = self.conn()?;
         let transaction = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
         let now = Utc::now().to_rfc3339();
+        // Acceptance is durable but preparation is not replayable. Even without a campaign,
+        // an interrupted start requires an explicit new decision, never an automatic Post.
+        transaction.execute("UPDATE publish_start_requests SET state='uncertain',stage='interrupted',
+            error_json=?1,revision=revision+1,updated_at=?2
+            WHERE state IN ('accepted','preparing','running') OR (state='queued' AND NOT EXISTS
+                (SELECT 1 FROM publish_campaigns c WHERE c.id=campaign_id AND c.run_at IS NOT NULL AND c.state='scheduled'))", params![
+            serde_json::json!({"code":"PublishStartInterrupted","message":"Ứng dụng đã đóng khi lượt bắt đầu chưa kết thúc; kiểm tra lượt cũ, không tự đăng lại"}).to_string(),now])?;
         let stranded: Vec<String> = transaction
             .prepare(
                 "SELECT id FROM publish_campaigns
@@ -857,9 +864,13 @@ impl Database {
         }
         // New recovery-aware attempts require explicit operator continuation after
         // process restart. Preserve counters and never resume a cached UI checkpoint.
-        transaction.execute("UPDATE publish_assignments SET state='failed_before_dispatch',error_code='retry_interrupted',revision=revision+1 WHERE effect_intent IS NULL AND id IN(SELECT j.assignment_id FROM publish_dispatch_jobs j JOIN publish_recovery_state r ON r.assignment_id=j.assignment_id WHERE j.state IN ('queued','running','paused'))",[])?;
+        transaction.execute("UPDATE publish_assignments SET state='failed_before_dispatch',error_code='retry_interrupted',revision=revision+1 WHERE effect_intent IS NULL AND NOT EXISTS(SELECT 1 FROM publish_exclude_requests e WHERE e.assignment_id=publish_assignments.id) AND id IN(SELECT j.assignment_id FROM publish_dispatch_jobs j JOIN publish_recovery_state r ON r.assignment_id=j.assignment_id WHERE j.state IN ('queued','running','paused'))",[])?;
         transaction.execute("UPDATE publish_dispatch_jobs SET state='finished',owner=NULL,reason='retry_interrupted',revision=revision+1 WHERE state IN ('queued','running','paused') AND assignment_id IN(SELECT assignment_id FROM publish_recovery_state) AND EXISTS(SELECT 1 FROM publish_assignments a WHERE a.id=assignment_id AND a.effect_intent IS NULL)",[])?;
         transaction.execute("UPDATE publish_recovery_state SET payload=json_set(payload,'$.state','interrupted','$.nextRetryAt',NULL) WHERE assignment_id IN(SELECT assignment_id FROM publish_dispatch_jobs WHERE reason='retry_interrupted')",[])?;
+        transaction.execute("UPDATE publish_dispatch_jobs SET state='finished',owner=NULL,reason='start_interrupted',revision=revision+1
+            WHERE state IN ('queued','running','paused') AND EXISTS(SELECT 1 FROM publish_start_requests s WHERE s.campaign_id=publish_dispatch_jobs.campaign_id AND s.state='uncertain')",[])?;
+        transaction.execute("UPDATE publish_dispatch_jobs SET state='cancelled',owner=NULL,reason='assignment_excluded',revision=revision+1
+            WHERE state IN ('queued','running','paused') AND EXISTS(SELECT 1 FROM publish_exclude_requests e WHERE e.assignment_id=publish_dispatch_jobs.assignment_id)",[])?;
         transaction.execute("UPDATE publish_dispatch_jobs SET state='queued',reason=NULL,revision=revision+1 WHERE state='paused'",[])?;
         // Retain unstarted immediate jobs across restart; effects are never replayed.
         transaction.execute("DELETE FROM publish_work_claims", [])?;

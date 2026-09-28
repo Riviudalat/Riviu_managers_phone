@@ -31,6 +31,7 @@ impl Database {
         let token = Uuid::new_v4().to_string();
         let changed=tx.execute("UPDATE publish_campaigns SET state='posting',error_code=NULL,revision=revision+1,updated_at=?2
             WHERE id=?1 AND state IN ('queued','scheduled','ready','imported','failed_before_dispatch','verifying')
+            AND NOT EXISTS(SELECT 1 FROM publish_start_requests s WHERE s.campaign_id=?1 AND s.state='uncertain')
             AND (run_at IS NULL OR datetime(run_at)<=datetime(?3))
             AND (run_at IS NULL OR datetime(?3)<=datetime(run_at,'+30 seconds')
                 OR EXISTS(SELECT 1 FROM publish_dispatch_jobs j WHERE j.campaign_id=?1 AND j.started_at_ms IS NOT NULL))
@@ -53,6 +54,8 @@ impl Database {
             },
             Utc::now().timestamp_millis(),
         )?;
+        tx.execute("UPDATE publish_start_requests SET state='queued',stage='queued',revision=revision+1,updated_at=?2
+            WHERE campaign_id=?1 AND state='preparing'",params![campaign_id,now])?;
         pipeline_event(&tx, campaign_id, &now)?;
         tx.commit()?;
         Ok(Some(PublishPipelineRun {

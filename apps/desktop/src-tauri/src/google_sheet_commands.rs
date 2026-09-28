@@ -20,6 +20,9 @@ static TOKEN_LOCK: Mutex<()> = Mutex::const_new(());
 static CONNECTION_LOCK: Mutex<()> = Mutex::const_new(());
 #[path = "google_sheet_app_config.rs"]
 mod app_config;
+#[path = "google_sheet_verification.rs"]
+mod verification;
+pub use verification::GoogleSheetVerification;
 #[cfg(test)]
 #[path = "google_sheet_commands_tests.rs"]
 mod tests;
@@ -172,6 +175,8 @@ pub struct GoogleSheetsStatus {
     selected_file_name: Option<String>,
     sheet_url: Option<String>,
     writer_id: Option<String>,
+    reporting_epoch: Option<String>,
+    authorization_generation: u64,
     phase: String,
     error: Option<String>,
 }
@@ -215,7 +220,11 @@ async fn status(db: &Database) -> anyhow::Result<GoogleSheetsStatus> {
                     )
                 })
             }),
+        reporting_epoch: connection
+            .as_ref()
+            .and_then(|c| c.target.reporting_epoch.clone()),
         writer_id: connection.map(|c| c.writer_id),
+        authorization_generation: session.generation,
         phase: session.phase.into(),
         error: session.error.clone(),
     })
@@ -286,6 +295,25 @@ pub async fn google_sheets_status(
 ) -> Result<GoogleSheetsStatus, CommandError> {
     let _a = state.ensure_accepting_work()?;
     status(&state.db).await.map_err(err)
+}
+
+/// Read current identity, headers and available rights without acquiring a
+/// remote writer, changing schema, or connecting a new target.
+#[tauri::command]
+pub async fn google_sheets_verify_readonly(
+    state: State<'_, AppState>,
+    sheet_url: String,
+) -> Result<GoogleSheetVerification, CommandError> {
+    let _admission = state.ensure_accepting_work()?;
+    tokio::time::timeout(
+        std::time::Duration::from_secs(45),
+        verification::verify(&state.db, &sheet_url),
+    )
+    .await
+    .map_err(|_| {
+        err("Đã hết thời gian xác minh chỉ đọc Google Sheet; kết nối đã lưu được giữ nguyên")
+    })?
+    .map_err(connection_error)
 }
 #[tauri::command]
 pub async fn google_sheets_configure(

@@ -1,7 +1,7 @@
 import { Activity, useCallback, useEffect, useId, useRef, useState } from "react";
 import { createPortal } from "react-dom";
 import { Clock3, Maximize2, Minimize2, Minus, MoreHorizontal, Trash2, TriangleAlert, Undo2, Square } from "lucide-react";
-import { nurtureSessionStatus, operationQueryRuns, operationStop, operationStopStatus, type OperationStopResult } from "../../api";
+import { operationGetRun, publishStartStatus, nurtureSessionStatus, operationQueryRuns, operationStop, operationStopStatus, type OperationStopResult } from "../../api";
 import { ProgressBar } from "../../components/ProgressBar";
 import type { OperationRunSummary } from "../../types";
 import { activeRun, issueState, progressLabel, runOptionLabel, runProgress } from "./operationProgress";
@@ -10,11 +10,19 @@ import { describeError } from "../../describeError";
 import { dismissMonitorRecords, monitorRecordKey, readDismissedRecords, visibleMonitorRuns, writeDismissedRecords, type DismissedRecord } from "./monitorRecords";
 import { useFloatingMonitor } from "./useFloatingMonitor";
 import { MonitorReadError, OperationRunDevices } from "./OperationRunDevices";
+import { acknowledgePublishStart, publishStageLabel, PUBLISH_START_PENDING, PUBLISH_START_ACKNOWLEDGED, readPendingPublishStart, retirePublishStart, type PendingPublishStart } from "./publishStartBridge";
 import "../../styles/operation-progress.css";
 
 /** Monitor plus an explicit stop. Dismissing a record still leaves its source audit intact. */
 export function OperationProgressCenter({ deviceLabels }: { deviceLabels: ReadonlyMap<string, string> }) {
-  const [expanded, setExpanded] = useState(false);
+  const [initialStart] = useState(() => {
+    try { return { pending: readPendingPublishStart(), error: null as string | null }; }
+    catch (error) { return { pending: null, error: describeError(error) }; }
+  });
+  const [pendingStart, setPendingStart] = useState(initialStart.pending);
+  const [startReadError, setStartReadError] = useState(initialStart.error);
+  const [pinnedRun, setPinnedRun] = useState<OperationRunSummary | null>(null);
+  const [expanded, setExpanded] = useState(!!initialStart.pending || !!initialStart.error);
   const [maximized, setMaximized] = useState(false);
   const [selectedId, setSelectedId] = useState<string | null>(null);
   const [stopResult,setStopResult]=useState<OperationStopResult|null>(null);
@@ -37,8 +45,57 @@ export function OperationProgressCenter({ deviceLabels }: { deviceLabels: Readon
     return { page, sessions };
   }, []);
   const state = useMonitorRead(read, 2000, ["runs", "last24h", 200, 0]);
-  const runs = visibleMonitorRuns(state.value?.page.runs ?? [], dismissal.records);
-  const selectedRun = runs.find((run) => run.id === selectedId) ?? runs[0] ?? null;
+  const listedRuns = state.value?.page.runs ?? [];
+  const runs = visibleMonitorRuns(pinnedRun && !listedRuns.some(run => run.id === pinnedRun.id)
+    ? [pinnedRun, ...listedRuns] : listedRuns, dismissal.records);
+  const selectedRun = pendingStart ? null : runs.find((run) => run.id === selectedId) ?? pinnedRun ?? runs[0] ?? null;
+  useEffect(() => {
+    const receive = (event: Event) => {
+      const next = (event as CustomEvent<PendingPublishStart>).detail;
+      setPendingStart(next); setSelectedId(next.status?.operationId ?? null);
+      if (event.type === PUBLISH_START_ACKNOWLEDGED) setExpanded(true);
+      setStartReadError(null);
+    };
+    window.addEventListener(PUBLISH_START_ACKNOWLEDGED, receive);
+    window.addEventListener(PUBLISH_START_PENDING, receive);
+    return () => {
+      window.removeEventListener(PUBLISH_START_ACKNOWLEDGED, receive);
+      window.removeEventListener(PUBLISH_START_PENDING, receive);
+    };
+  }, []);
+  const pendingRequestId = pendingStart?.requestId;
+  useEffect(() => {
+    if (!pendingRequestId) return;
+    let live = true, reading = false;
+    let acknowledged = false;
+    const readStart = async () => {
+      if (reading) return;
+      reading = true;
+      try {
+        const status = await publishStartStatus(pendingRequestId);
+        if (!live) return;
+        if (!status) { setStartReadError("Chưa tìm thấy xác nhận cho yêu cầu đã gửi. Trở lại Đăng bài để đối chiếu cùng lượt; không tạo lượt mới."); return; }
+        if (status.requestId !== pendingRequestId) throw new Error("Phản hồi không khớp yêu cầu đang theo dõi.");
+        if (!acknowledged && status.state !== "failed") {
+          acknowledged = true;
+          const saved = readPendingPublishStart();
+          if (saved?.requestId === pendingRequestId) acknowledgePublishStart(saved, status);
+        }
+        setStartReadError(null);
+        setPendingStart(current => current?.requestId === pendingRequestId && (current.status?.revision ?? -1) <= status.revision ? { ...current, status } : current);
+        if (status.campaignId) {
+          const run = await operationGetRun(`publish:${status.campaignId}`);
+          if (!live || !run) return;
+          setPinnedRun(run.summary); setSelectedId(run.summary.id); setPendingStart(null);
+          retirePublishStart(pendingRequestId);
+        }
+      } catch (error) { if (live) setStartReadError(describeError(error)); }
+      finally { reading = false; }
+    };
+    void readStart();
+    const timer = window.setInterval(() => void readStart(), 1000);
+    return () => { live = false; clearInterval(timer); };
+  }, [pendingRequestId]);
   const resolvedSelectedId = selectedRun?.id;
   const selectedStop=stopResult?.operationId===resolvedSelectedId?stopResult:null;
   const canPausePublish=selectedRun?.kind==="publish" && selectedRun.state!=="succeeded"
@@ -116,9 +173,9 @@ export function OperationProgressCenter({ deviceLabels }: { deviceLabels: Readon
   const active = runs.filter(activeRun);
   const shown = active.length ? active : runs.slice(0, 1);
   const progress = shown.map((run) => runProgress(run, state.value?.sessions ?? []));
-  const fraction = progress.length && progress.every((value) => value !== null)
+  const fraction = !pendingStart && progress.length && progress.every((value) => value !== null)
     ? progress.reduce((sum, value) => sum + value!, 0) / progress.length : null;
-  if (!runs.length && !state.error && !dismissal.error && (!expanded || !undoKeys.length)) return null;
+  if (!pendingStart && !startReadError && !runs.length && !state.error && !dismissal.error && (!expanded || !undoKeys.length)) return null;
   const minimize = () => { setExpanded(false); toggleRef.current?.focus(); };
   return createPortal(<section ref={floating.ref} style={floating.style}
     className={`run-monitor is-floating${expanded ? " is-expanded" : " is-minimized"}${expanded && maximized ? " is-maximized" : " is-compact"}`}
@@ -132,7 +189,7 @@ export function OperationProgressCenter({ deviceLabels }: { deviceLabels: Readon
     <header className="run-monitor-titlebar" {...floating.handle}>
       <button ref={toggleRef} type="button" className="run-monitor-toggle" aria-label="Tiến trình công việc"
         aria-expanded={expanded} aria-controls={bodyId} onClick={() => setExpanded((value) => !value)}>
-        <Clock3 size={16} aria-hidden="true" /><strong>{expanded ? "Theo dõi tác vụ" : state.error ? "Chưa đọc được tiến trình" : active.length ? `${active.length} tác vụ đang xử lý / chờ` : runs.length ? `${runs.length} tác vụ đã kết thúc` : "Không còn bản ghi"}</strong>
+        <Clock3 size={16} aria-hidden="true" /><strong>{expanded ? "Theo dõi tác vụ" : state.error ? "Chưa đọc được tiến trình" : pendingStart ? "Lượt đăng đang chuẩn bị" : active.length ? `${active.length} tác vụ đang xử lý / chờ` : runs.length ? `${runs.length} tác vụ đã kết thúc` : "Không còn bản ghi"}</strong>
       </button>
       {expanded && <span className="run-monitor-total">{runs.length} bản ghi</span>}
       {!expanded && <span className="run-percent">{!runs.length && !state.error ? "—" : state.error ? "?" : progressLabel(fraction)}</span>}
@@ -151,8 +208,9 @@ export function OperationProgressCenter({ deviceLabels }: { deviceLabels: Readon
     <Activity mode={expanded ? "visible" : "hidden"}><div className="run-monitor-body" id={bodyId}>
       <div className="run-monitor-tools">
         <label className="run-selector-label" htmlFor={`${bodyId}-run`}>Phiên chạy</label>
-        <select id={`${bodyId}-run`} aria-label="Chọn tác vụ theo dõi" title={selectedRun ? runOptionLabel(selectedRun) : undefined} value={selectedRun?.id ?? ""} onChange={(event) => setSelectedId(event.target.value)} disabled={!runs.length}>
-          {!runs.length && <option value="">Không còn bản ghi</option>}
+        <select id={`${bodyId}-run`} aria-label="Chọn tác vụ theo dõi" title={selectedRun ? runOptionLabel(selectedRun) : undefined} value={pendingStart ? pendingStart.status?.operationId ?? pendingStart.requestId : selectedRun?.id ?? ""} onChange={(event) => setSelectedId(event.target.value)} disabled={!!pendingStart || !runs.length}>
+          {pendingStart && <option value={pendingStart.status?.operationId ?? pendingStart.requestId}>Lượt đăng đang bắt đầu</option>}
+          {!runs.length && !pendingStart && <option value="">Không còn bản ghi</option>}
           {runs.map((run) => <option key={run.id} value={run.id}>{runOptionLabel(run)}</option>)}
         </select>
         {selectedRun&&(activeRun(selectedRun)||canPausePublish||selectedStop?.state==="needsAttention"||selectedStop?.state==="failed")&&<button type="button" className="run-monitor-stop" title="Dừng toàn bộ máy của tác vụ đang chọn và đóng TikTok" aria-label="Dừng tác vụ và về màn hình chính" disabled={stopping||selectedStop?.state==="stopping"||!!state.error} onClick={()=>void stopSelected()}><Square size={14}/>{stopping||selectedStop?.state==="stopping"?"Đang dừng và nhả máy…":selectedRun.kind==="publish"?"Tạm dừng":"Dừng"}</button>}
@@ -162,6 +220,13 @@ export function OperationProgressCenter({ deviceLabels }: { deviceLabels: Readon
           <div><button type="button" disabled={!!state.error || !runs.some((run) => !activeRun(run))} onClick={() => dismiss(runs)}>Xoá các bản ghi đã kết thúc</button></div>
         </details>
       </div>
+      {pendingStart && <div className="run-start-bridge" role="status">
+        <strong>{pendingStart.status?.state === "failed" ? "Không thể bắt đầu" : pendingStart.status?.state === "uncertain" ? "Đang đối chiếu yêu cầu" : "Đang chuẩn bị lượt đăng"}</strong>
+        <span>{pendingStart.status ? publishStageLabel(pendingStart.status.stage) : "Chờ xác nhận từ ứng dụng"}</span>
+        <small>Tác vụ: {pendingStart.status?.operationId ?? `publish-start:${pendingStart.requestId}`}</small>
+        {pendingStart.status?.error && <p role="alert">{pendingStart.status.error.message}</p>}
+      </div>}
+      {startReadError && <p role="alert" className="run-stop-feedback is-error">{startReadError}</p>}
       {stopError&&<p className="run-stop-feedback is-error" role="alert">{stopError}</p>}
       {stopResult&&stopResult.operationId===selectedRun?.id&&<div className="run-stop-feedback" role="status">
         <strong>{stopResult.state==="stopping"?"Đang dừng và nhả máy…":stopResult.state==="closed"?`Đã dừng · TikTok đã tắt trên ${stopResult.devices.length} máy`:"Đã yêu cầu dừng · Có máy cần kiểm tra"}</strong>
@@ -174,7 +239,7 @@ export function OperationProgressCenter({ deviceLabels }: { deviceLabels: Readon
       }} />}
       {state.error ? <MonitorReadError message={state.error} retry={state.retry} /> : selectedRun
         ? <OperationRunDevices key={selectedRun.id} run={selectedRun} labels={deviceLabels} sessions={state.value?.sessions ?? []} compact={!maximized} />
-        : <p className="run-monitor-empty">Không còn bản ghi trong cửa sổ này.</p>}
+        : pendingStart ? null : <p className="run-monitor-empty">Không còn bản ghi trong cửa sổ này.</p>}
       <p className="run-monitor-history-note">24 giờ gần nhất · Tối đa 200 bản ghi. {state.value?.page.hasMore ? "Các tác vụ khác nằm trong trang Tác vụ." : "Xem lịch sử đầy đủ tại trang Tác vụ."}</p>
     </div></Activity>
   </section>, document.body);

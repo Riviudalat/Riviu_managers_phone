@@ -294,11 +294,6 @@ pub async fn publish_create_campaign(
     // happened minutes ago and a link verifier can have acquired the phone since.
     // Scheduled creation must not interrupt today's work. Hold this lock through
     // receipt persistence, and replay an existing receipt without stopping itself.
-    let handoff = if confirmed && run_at.is_none() {
-        Some(crate::commands::lock_manual_handoff()?)
-    } else {
-        None
-    };
     if let Some(prior) = state
         .db
         .replay_publish_create(&request_id, &request_fingerprint)
@@ -306,16 +301,54 @@ pub async fn publish_create_campaign(
     {
         return Ok(prior);
     }
+    let handoff = if confirmed && run_at.is_none() {
+        Some(crate::commands::lock_manual_handoff()?)
+    } else {
+        None
+    };
     preflight::require_new_publish_delivery(
         preflight_request.sheet_enabled,
         preflight_request.delete_after_publish,
     )
     .map_err(err)?;
-    if let Some(handoff) = handoff.as_ref() {
+    preparation::initialize(&state.db, &state.events, &state.registry);
+    preparation::stage(&state.db, "preparingDevices")
+        .await
+        .map_err(err)?;
+    let guard_udids = udids.clone();
+    let held = state
+        .db
+        .storage_read(move |db| {
+            for udid in guard_udids {
+                let guard = db.publish_device_guard(&udid)?;
+                if !guard.blocking.is_empty() {
+                    return Ok(true);
+                }
+                for review in guard.link_review {
+                    if db.publish_campaign_has_account_reservation(&review.campaign_id)? {
+                        return Ok(true);
+                    }
+                }
+            }
+            Ok(false)
+        })
+        .await
+        .map_err(err)?;
+    let needs_handoff = held
+        || udids
+            .iter()
+            .any(|udid| state.control.current_work_owner(udid).is_some());
+    if let Some(handoff) = handoff.as_ref().filter(|_| needs_handoff) {
+        for udid in &udids {
+            preparation::progress(udid, "preparingDevices", "running", 0, None);
+        }
         let result =
             crate::commands::prepare_manual_devices(&app, &state, udids.clone(), handoff).await?;
         require_released_publish_devices(&udids, &result).map_err(err)?;
     }
+    preparation::stage(&state.db, "checkingDevices")
+        .await
+        .map_err(err)?;
     let prepared = build_publish_preflight(
         &state.control,
         &state.registry,
@@ -340,29 +373,36 @@ pub async fn publish_create_campaign(
     let selected = prepared.bundles;
     // Concurrent copies belong to separate preparation attempts. Only the
     // winner's managed media is committed; cleanup never deletes another caller's copy.
+    preparation::stage(&state.db, "staging")
+        .await
+        .map_err(err)?;
+    preparation::progress("", "staging", "running", 0, None);
     let staging_root = state
         .artifacts_dir
         .join("publish")
         .join(Uuid::new_v4().to_string());
-    let mut managed = Vec::with_capacity(selected.len());
-    for bundle in selected {
-        let source_bundle_id = bundle.id.clone();
-        let destination = staging_root.join(&source_bundle_id);
-        match copy_bundle_to_managed(&bundle, &destination) {
-            Ok(mut bundle) => {
-                // The scanner's stable id (for example, `bundle-1`) is useful
-                // in the preview but the database keeps bundle ids globally
-                // unique. Namespace the staged record by this campaign so a
-                // later run of the same folder is independent of old runs.
-                bundle.id = format!("{request_id}:{source_bundle_id}");
-                managed.push(bundle);
-            }
-            Err(error) => {
-                let _ = fs::remove_dir_all(&staging_root);
-                return Err(err(error));
+    let copy_root = staging_root.clone();
+    let copy_request = request_id.clone();
+    let managed = bounded_publish_scan(Arc::clone(&preflight::PUBLISH_SCAN_SLOTS), move || {
+        let mut managed = Vec::with_capacity(selected.len());
+        for bundle in selected {
+            let source_bundle_id = bundle.id.clone();
+            let destination = copy_root.join(&source_bundle_id);
+            match copy_bundle_to_managed(&bundle, &destination) {
+                Ok(mut bundle) => {
+                    bundle.id = format!("{copy_request}:{source_bundle_id}");
+                    managed.push(bundle);
+                }
+                Err(error) => {
+                    let _ = fs::remove_dir_all(&copy_root);
+                    return Err(error.into());
+                }
             }
         }
-    }
+        Ok(managed)
+    })
+    .await
+    .map_err(err)?;
     let managed_bundle_ids = managed.iter().map(|bundle| bundle.id.clone()).collect();
     let request = PublishCampaignRequest {
         sheet_delivery: prepared.report.sheet_delivery.clone(),
@@ -416,7 +456,7 @@ pub async fn publish_create_campaign(
     }
 }
 
-fn require_released_publish_devices(
+pub(super) fn require_released_publish_devices(
     udids: &[String],
     result: &riviu_core::ipc_contract::OperationStopResult,
 ) -> anyhow::Result<()> {
@@ -3789,7 +3829,8 @@ pub(super) async fn post_through_the_composer(
             tokio::select! {
                 result = &mut work => break result,
                 _ = cancellation_poll.tick() => {
-                    let stopped = db.publish_operation_stopped(campaign_id).unwrap_or(true)
+                    let stopped = db.publish_assignment_excluded(assignment_id).unwrap_or(true)
+                    || db.publish_operation_stopped(campaign_id).unwrap_or(true)
                     || db.publish_campaign_state(campaign_id).ok().flatten()
                         .is_none_or(|state|state == riviu_core::PublishCampaignState::Cancelled);
                     if stopped { stop.store(true, std::sync::atomic::Ordering::Relaxed); }

@@ -135,7 +135,8 @@ impl Runtime {
             tokio::task::spawn_blocking(move || execution::stage_one_bundle(&owned, ordinal))
                 .await??;
         anyhow::ensure!(
-            self.db.publish_pipeline_current(&self.run)?,
+            self.db.publish_pipeline_current(&self.run)?
+                && !self.db.publish_assignment_excluded(&a.id)?,
             "pipeline stopped before device transfer"
         );
         self.progress(a, progress::PublishProgress::CheckingDevice);
@@ -145,16 +146,16 @@ impl Runtime {
             .await?;
         // The transfer lease is dropped before waiting on a composer permit.
         let result=async {
-            anyhow::ensure!(self.db.publish_pipeline_current(&self.run)?,"pipeline stopped before device transfer");
+            anyhow::ensure!(self.db.publish_pipeline_current(&self.run)? && !self.db.publish_assignment_excluded(&a.id)?,"pipeline stopped before device transfer");
             self.progress(a,progress::PublishProgress::DeviceReady);
             self.progress(a,progress::PublishProgress::TransferringMedia{count:if bundle.video.is_some(){1}else{bundle.images.len()},video:bundle.video.is_some()});
             let id=execution::device_campaign_id(&self.run.campaign_id,a.ordinal);
             let stage=self.control.stage_publish_media(&context,&self.agent,&id,staged.path()).await?;
-            anyhow::ensure!(self.db.publish_pipeline_current(&self.run)?,"pipeline stopped after stage");
+            anyhow::ensure!(self.db.publish_pipeline_current(&self.run)? && !self.db.publish_assignment_excluded(&a.id)?,"pipeline stopped after stage");
             let evidence=if self.control.supports_push_media(&a.udid){
                 let hash=stage["manifestSha256"].as_str().context("manifest hash missing")?;
                 let prepare=self.control.prepare_publish_media(&context,&id,hash).await?;
-                anyhow::ensure!(self.db.publish_pipeline_current(&self.run)?,"pipeline stopped before import");
+                anyhow::ensure!(self.db.publish_pipeline_current(&self.run)? && !self.db.publish_assignment_excluded(&a.id)?,"pipeline stopped before import");
                 let import=self.control.import_publish_media(&context,&id,hash).await?;
                 serde_json::json!({"mediaStage":stage,"nativePrepare":prepare,"nativeImport":import})
             }else{stage};
@@ -170,7 +171,8 @@ impl Runtime {
         self.progress(&a, progress::PublishProgress::WaitingControl);
 
         anyhow::ensure!(
-            self.db.publish_pipeline_current(&self.run)?,
+            self.db.publish_pipeline_current(&self.run)?
+                && !self.db.publish_assignment_excluded(&a.id)?,
             "pipeline stopped before composer"
         );
         let detail = self
@@ -300,6 +302,13 @@ pub(crate) async fn run_dispatcher(
             break;
         }
         let result = async {
+            // Only this dispatcher observes joined workers and their released device owners.
+            for (assignment, udid, campaign) in db.pending_publish_exclusion_releases()? {
+                if control.current_work_owner(&udid).is_none() {
+                    db.finish_publish_exclusion_after_release(&assignment)?;
+                    execution::announce(&events, &db, &campaign);
+                }
+            }
             let now = chrono::Local::now()
                 .naive_local()
                 .and_utc()

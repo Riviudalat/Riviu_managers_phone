@@ -3,6 +3,20 @@
 Stack giữ nguyên: Rust workspace, Tauri 2, React/TypeScript/Vite. `src/api.ts` là biên
 IPC frontend. Không thêm một control plane riêng để đi vòng ownership/admission hiện có.
 
+Đăng bài dùng `publish_start` để lưu receipt trước chuẩn bị chậm và trả ACK;
+`publish_start_status` đối soát cùng request ID sau mất phản hồi. Migration 48
+giữ receipt khởi chạy và yêu cầu loại assignment. Restart không tự phát lại
+Post cho receipt chưa rõ kết quả. Preflight phát `publishPreflightProgress`
+theo từng máy, tối đa bốn probe đồng thời; bản chuẩn bị tối đa 30 giây chỉ được
+tái dùng sau kiểm source, owner, transport, readiness và binding hiện hành.
+
+`scripts/dev_compile_cache.ps1 -Action plan` chỉ ra một Cargo target chuẩn của
+checkout chính cho mọi worktree. Lệnh Cargo dùng cache chung phải chạy tuần tự;
+compiler cache phụ có giới hạn 8 GiB. Cleanup mặc định dry-run, chỉ nhận danh
+sách output cũ có hash và bản thay thế đã kiểm. Không xóa toàn bộ `target`, DB,
+runtime đang chạy hay bộ evidence/rollback. Dựng dev để nghiệm thu; chỉ bundle
+installer khi có yêu cầu bàn giao bản cài.
+
 Seeding dùng `ThreadCampaignRequest.seeding`, planner và ledger Tương tác hiện có;
 migration 46 thêm Share và khoảng ordinal cho lượt hành động độc lập bên cạnh tối
 đa 64 bình luận. Lịch cũ không có `seeding` giữ hành vi cũ. Bù Tim/Lưu phải claim

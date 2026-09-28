@@ -63,6 +63,8 @@ pub use publish_dispatch::{PublishDispatchJob, PublishLimits, PublishWorkPermit}
 pub use publish_pipeline::PublishPipelineRun;
 mod publish_cleanup;
 mod publish_create;
+mod publish_start;
+pub use publish_start::{PublishExcludeReceipt, PublishStartError, PublishStartReceipt};
 mod publish_report;
 mod publish_sheet;
 mod publish_sheet_delivery;

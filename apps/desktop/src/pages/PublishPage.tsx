@@ -21,19 +21,21 @@ import {
   publishRecoveryCapabilities,
   publishResumeVerification,
   operationStop,
-  publishCreateCampaign,
+  publishStart,
+  publishStartStatus,
   publishExecute,
   publishGet,
   publishGetLimits,
   publishList,
   publishPreflight,
-  operationPrepareDevices,
   publishReconcile,
   publishRetryAssignment,
   publishScanFolder,
   publishSetLimits,
   type PublishLimits,
 } from "../api";
+import { PublishPreparationProgress } from "../components/publish/PublishPreparationProgress";
+import { acknowledgePublishStart, observePendingPublishStart, readPendingPublishStart, savePendingPublishStart, retirePublishStart } from "../features/operations/publishStartBridge";
 import { useWorkspaceDraft } from "../workspaceDraft";
 import { writeFormDraft } from "../formDraftStorage";
 import { readPublishForm } from "../components/publish/publishDraftStorage";
@@ -66,6 +68,7 @@ import type {
   PublishFolderManifest,
   PublishExecutionSnapshot,
   PublishPreflightReport,
+  PublishPreflightProgress,
   PublishPreflightRequest,
   OperationRunSummary,
   PublishSoundPolicy,
@@ -529,9 +532,13 @@ export function PublishPage({
   // Setup always posts immediately; daily schedules own a separate draft.
   const [sheetConnectionReady, setSheetConnectionReady] = useState(false);
   const [sheetConnectionRevision, setSheetConnectionRevision] = useState(0);
-  const updateSheetConnection = useCallback((ready: boolean) => {
+  const sheetIdentityRef = useRef<string | null>(null);
+  const updateSheetConnection = useCallback((ready: boolean, identityKey: string | null = null) => {
     setSheetConnectionReady(ready);
-    setSheetConnectionRevision(revision => revision + 1);
+    if (sheetIdentityRef.current !== identityKey) {
+      sheetIdentityRef.current = identityKey;
+      setSheetConnectionRevision(revision => revision + 1);
+    }
   }, []);
   const [createdCampaignId, setCreatedCampaignId] = useState<string>();
   const [soundPolicyOverride, setSoundPolicyOverride] =
@@ -549,6 +556,8 @@ export function PublishPage({
   );
   const [operationBusy, setBusy] = useState(false);
   const publishInFlight = useRef(false);
+  const [starting, setStarting] = useState(false);
+  const [startError, setStartError] = useState<string | null>(null);
   const [limitsRevision, setLimitsRevision] = useState(0);
   const [scanning, setScanning] = useState(false);
   const busy = operationBusy || scanning;
@@ -646,6 +655,8 @@ export function PublishPage({
   }, []);
   const [preflightState, setPreflightState] = useState<AsyncState>("idle");
   const [preflightStage, setPreflightStage] = useState<"preparing" | "checking" | null>(null);
+  const [preparationProgress, setPreparationProgress] = useState<Record<string, PublishPreflightProgress>>({});
+  const [preparationStartedAt, setPreparationStartedAt] = useState(0);
   const [preflightError, setPreflightError] = useState<string | null>(null);
   const [preflightSnapshot, setPreflightSnapshot] = useState<{
     inputKey: string;
@@ -984,17 +995,26 @@ export function PublishPage({
       return;
     }
     setPreflightState("loading");
+    setStartError(null);
+    setPreparationProgress({});
+    setPreparationStartedAt(Date.now());
     setPreflightStage("preparing");
     setPreflightError(null);
     const ticket = ++preflightTicket.current;
     const requestKey = inputKey;
+    const requestId = crypto.randomUUID();
+    let unlisten: UnlistenFn | undefined;
     try {
+      unlisten = await listenRiviuEvents(event => {
+        if (event.type !== "publishPreflightProgress" || event.requestId !== requestId
+          || !mounted.current || ticket !== preflightTicket.current || latestInputKey.current !== requestKey) return;
+        setPreparationProgress(current => (current[event.udid]?.revision ?? -1) >= event.revision
+          ? current : { ...current, [event.udid]: event });
+      });
       const request = preflightRequest;
-      await operationPrepareDevices(targets);
-      await refreshDeviceGuards();
       if (!mounted.current || ticket !== preflightTicket.current || latestInputKey.current !== requestKey) return;
       setPreflightStage("checking");
-      const report = await publishPreflight(request);
+      const report = await publishPreflight(request, requestId);
       if (
         !mounted.current ||
         ticket !== preflightTicket.current ||
@@ -1015,92 +1035,57 @@ export function PublishPage({
       setPreflightError(describeError(error));
       setPreflightState("error");
       setPreflightStage(null);
-    }
+    } finally { unlisten?.(); }
   };
 
   const executeNewCampaign = async () => {
-    if (publishInFlight.current || operationBusy || !currentPreflight?.canExecute || sheetBlocked) return;
+    const reason = publishInFlight.current || operationBusy ? "Một yêu cầu đang được xử lý; chờ kết quả của lượt hiện tại."
+      : sheetBlocked ? "Kết nối Sheet chưa sẵn sàng. Kiểm tra lại kết nối trước khi đăng."
+      : !currentPreflight?.canExecute ? "Kết quả kiểm tra chưa đạt hoặc thiết lập đã đổi. Kiểm tra lại trước khi đăng." : null;
+    if (reason || !currentPreflight) { setStartError(reason ?? "Chưa có kết quả kiểm tra."); return; }
     publishInFlight.current = true;
     setBusy(true);
+    setStarting(true);
+    setStartError(null);
     setNotice(null);
     try {
-      const approvedDraftKey = latestDraftKey.current;
-      const confirmed = await requestConfirm({
-        title: "Xác nhận đăng công khai?",
-        message: `${selectedBundles.length} bài sẽ được đăng công khai trên ${targets.length} máy. Nhạc sẽ được chọn sau khi mở TikTok và xác nhận lại trước Đăng.`,
-        confirmLabel: "Đăng bài",
-        cancelLabel: "Huỷ",
-        danger: true,
-      });
-      if (!confirmed) return;
-      if (
-        latestDraftKey.current !== approvedDraftKey ||
-        latestInputKey.current !== inputKey
-      ) {
-        setNotice({
-          tone: "warning",
-          text: "Thiết lập đã đổi trong lúc xác nhận. Kiểm tra lại trước khi đăng.",
-        });
-        return;
-      }
-        // Persist before the IPC call; an ACK can be lost after campaign creation.
-      // Only an acknowledged create retires this identity, so restart and retry
-      // return the same campaign rather than preparing a second publication.
+      // The review dialog is the sole public-post confirmation boundary.
       const createKey = JSON.stringify(preflightRequest);
-      const storageKey = "riviu.publish.pending-create.v1";
-      let pending: { key: string; requestId: string } | null = null;
-      const stored = localStorage.getItem(storageKey);
-      if (stored) {
-        try { pending = JSON.parse(stored); } catch { /* Replace malformed local draft metadata. */ }
+      let pending = readPendingPublishStart();
+      if (pending && pending.inputKey !== createKey) {
+        const prior = await publishStartStatus(pending.requestId);
+        if (prior) acknowledgePublishStart(pending, prior);
+        throw new Error("Lượt đăng trước đang chờ đối chiếu. Xem tiến trình của lượt đó trước khi bắt đầu lượt khác.");
       }
-      const requestId = pending?.key === createKey && typeof pending.requestId === "string"
-        ? pending.requestId : crypto.randomUUID();
-      localStorage.setItem(storageKey, JSON.stringify({ key: createKey, requestId }));
-      const campaign = await publishCreateCampaign(
-        sourceRoot.trim(),
-        orderedBundleIds,
-        targets,
-        null,
-        currentCaptionOverrides,
-        currentSoundPolicy,
-        effectiveTargetRef,
-        true,
-        currentPreflight.inputDigest,
-        sheetEnabled,
-        deleteAfterPublish,
-        requestId,
-      );
-      localStorage.removeItem(storageKey);
+      pending ??= { inputKey: createKey, requestId: crypto.randomUUID(), requestedAt: new Date().toISOString() };
+      // Storage must succeed before any public-effect IPC; an unknown ACK never retires this ID.
+      savePendingPublishStart(pending);
+      observePendingPublishStart(pending);
+      let status = await publishStartStatus(pending.requestId);
+      if (!status) {
+        try {
+          status = await publishStart(preflightRequest, pending.requestId, currentPreflight.inputDigest, currentPreflight.preparationId);
+        } catch (error) {
+          status = await publishStartStatus(pending.requestId);
+          if (!status) throw error;
+        }
+      }
+      if (status.requestId !== pending.requestId) throw new Error("Phản hồi không khớp lượt đăng đã gửi; giữ yêu cầu để đối chiếu.");
+      if (status.state === "failed" && !status.campaignId) {
+        // A recorded terminal rejection may be corrected and reviewed as a new request.
+        retirePublishStart(pending.requestId);
+        throw new Error(status.error?.message ?? "Lượt đăng bị từ chối trước khi bắt đầu.");
+      }
       setBaseline(draftSnapshot);
       setBaselineManifest(manifest);
-      setCreatedCampaignId(campaign.id);
-      setWorkspaceTab("monitor");
-      {
-        const result = await publishExecute(campaign.id, true);
-        setDetails((current) => ({ ...current, [campaign.id]: result.detail }));
-        setNotice({
-          tone:
-            result.status === "complete"
-              ? "success"
-              : result.status === "uncertain"
-                ? "warning"
-                : "info",
-          text:
-            pendingPublicationMessage(result.detail, sheetEnabled) ?? (result.status === "complete"
-              ? sheetEnabled
-                ? "Đã đăng, lấy liên kết và ghi Sheet."
-                : "Đã đăng và lấy liên kết. Không ghi Sheet."
-              : result.status === "uncertain"
-                ? "Có máy chưa xác định được kết quả sau thao tác Đăng. Quy trình đã dừng."
-                : "Bài đã xử lý nhưng còn bước cần hoàn tất. Mở chi tiết để xem bước còn thiếu."),
-        });
-      }
-      await reload();
+      if (status.campaignId) setCreatedCampaignId(status.campaignId);
+      acknowledgePublishStart(pending, status);
     } catch (error) {
-      setNotice({ tone: "error", text: describeError(error) });
+      setStartError(describeError(error));
     } finally {
       publishInFlight.current = false;
       setBusy(false);
+      setStarting(false);
     }
   };
 
@@ -1368,7 +1353,17 @@ export function PublishPage({
           deviceGuards={deviceGuards} onPendingPublication={openPendingPublication}
           busy={operationBusy}
           scanning={scanning || restoringForm}
+          starting={starting}
+          startError={startError}
+          onExclude={bundleId => {
+            setBundleIds(ids => ids.filter(id => id !== bundleId));
+            setAssignments(current => { const next = { ...current }; delete next[bundleId]; return next; });
+            setPreflightSnapshot(null);
+            setPreflightError("Đã loại bài khỏi lượt này. Kiểm tra lại các máy còn lại trước khi xác nhận.");
+          }}
           preflightLoading={preflightState === "loading"}
+          preflightProgress={<PublishPreparationProgress udids={targets} progress={preparationProgress} startedAt={preparationStartedAt}
+            name={udid => { const device = devices.find(d => d.udid === udid); return device ? tileName(device, metas.get(udid)) : udid; }} />}
           preflightStage={preflightStage}
           preflight={currentPreflight}
           preflightError={publishBlockingReason ?? preflightError}

@@ -16,6 +16,32 @@ fn key(id: &str) -> String {
     format!("operation.stop.result:{id}")
 }
 
+/// Counts and elapsed time only: no device IDs, account data or source payloads.
+pub(super) struct SourceScanTiming {
+    stage: &'static str,
+    candidates: usize,
+    started: std::time::Instant,
+}
+impl SourceScanTiming {
+    pub(super) fn new(stage: &'static str, candidates: usize) -> Self {
+        Self {
+            stage,
+            candidates,
+            started: std::time::Instant::now(),
+        }
+    }
+}
+impl Drop for SourceScanTiming {
+    fn drop(&mut self) {
+        log::info!(
+            "stop source scan: stage={} candidates={} elapsed_ms={}",
+            self.stage,
+            self.candidates,
+            self.started.elapsed().as_millis()
+        );
+    }
+}
+
 /// Stop can close both installed Android TikTok variants without selecting an
 /// account or granting either package permission to publish. Launch still needs
 /// an explicit binding when the foreground app cannot resolve the ambiguity.
@@ -120,6 +146,14 @@ fn claim_stop_result(
             .transpose()?
             .unwrap_or(initial);
         return Ok((current, false));
+    }
+    // A queued, untouched campaign has no phone session to close. Classify and
+    // cancel atomically before spawning any closer; active/effectful work still
+    // follows the existing stop generation and physical release proof below.
+    if kind == riviu_core::OperationRunKind::Publish {
+        if let Some(cancelled) = db.stop_unstarted_publish_operation(source)? {
+            return Ok((cancelled, false));
+        }
     }
     let cached: Option<OperationStopResult> = db
         .get_setting(&key(&initial.operation_id))?
@@ -554,6 +588,14 @@ async fn close_stopped_device(
             {
                 Ok(context) => {
                     let closed: Result<(), String> = async {
+                        if state
+                            .nurture
+                            .list_status()
+                            .iter()
+                            .any(|run| run.udid == udid && run.running)
+                        {
+                            return Err("Phiên nuôi vẫn đang chạy; chưa đóng ứng dụng".into());
+                        }
                         if let Some(campaign) = operation_id.strip_prefix("publish:") {
                             if publish_marker.is_none()
                                 || db
@@ -570,10 +612,11 @@ async fn close_stopped_device(
                         }
                         // A queued or newly started operation after cancellation still owns
                         // its target scope even during a gap between device leases.
-                        for id in db
-                            .operation_source_ids(None, None)
-                            .map_err(|e| e.to_string())?
-                        {
+                        let source_ids = db
+                            .active_operation_source_ids()
+                            .map_err(|e| e.to_string())?;
+                        let scan_timing = SourceScanTiming::new("operationStop", source_ids.len());
+                        for id in source_ids {
                             if id == operation_id {
                                 continue;
                             }
@@ -593,6 +636,7 @@ async fn close_stopped_device(
                                 }
                             }
                         }
+                        drop(scan_timing);
                         // Other campaigns' unresolved uploads are never part of this cancellation.
                         let guard = db.publish_device_guard(udid).map_err(|e| e.to_string())?;
                         let own = operation_id.strip_prefix("publish:");

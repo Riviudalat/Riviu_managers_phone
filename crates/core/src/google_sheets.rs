@@ -8,6 +8,8 @@ use sha2::{Digest, Sha256};
 use std::{collections::BTreeSet, time::Duration};
 
 mod planner;
+mod readonly;
+pub use readonly::SheetWritePermission;
 mod reset;
 mod shared_writer;
 #[cfg(test)]

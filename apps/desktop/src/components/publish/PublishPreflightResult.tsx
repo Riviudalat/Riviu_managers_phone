@@ -19,6 +19,7 @@ export function PublishPreflightResult({
   onRetry,
   busy,
   hideRetry = false,
+  onExclude,
 }: {
   report: PublishPreflightReport;
   machineName: (udid: string) => string;
@@ -28,6 +29,7 @@ export function PublishPreflightResult({
   onRetry: () => void;
   busy: boolean;
   hideRetry?: boolean;
+  onExclude?: (bundleId: string) => void;
 }) {
   const [view, setView] = useState<"blocked" | "passed" | "all">("blocked");
   const blocked = report.assignments.filter((row) => !publishPreflightRowPassed(row));
@@ -103,6 +105,8 @@ export function PublishPreflightResult({
                 </span>
               </header>
               <p>{bundleName?.(row.bundleId) ?? `Bài ${row.ordinal + 1}`}</p>
+              {onExclude && <button type="button" className="ghost" disabled={busy} onClick={() => onExclude(row.bundleId)}>Loại khỏi lượt này</button>}
+              <details className="pw-preflight-expanded"><summary>Chi tiết kiểm tra</summary>
               <p className="pw-preflight-build">
                 {publishTikTokBuildLabel(row)}
               </p>
@@ -169,6 +173,7 @@ export function PublishPreflightResult({
                     <code>{issue.code}</code>: {issue.message}
                   </p>
                 ))}
+              </details>
               </details>
             </article>
           ))}
