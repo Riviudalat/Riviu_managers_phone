@@ -692,6 +692,7 @@ pub fn run() {
             publish_commands::publish_get,
             publish_commands::publish_start,
             publish_commands::publish_start_status,
+            publish_commands::publish_cancel_unaccepted_start,
             publish_commands::publish_exclude_assignment,
             publish_commands::publish_reconcile,
             publish_commands::publish_check_links,

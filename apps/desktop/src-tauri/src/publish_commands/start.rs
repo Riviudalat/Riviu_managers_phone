@@ -17,6 +17,16 @@ pub async fn publish_start_status(
 }
 
 #[tauri::command]
+pub async fn publish_cancel_unaccepted_start(
+    state: State<'_, AppState>,
+    request_id: String,
+) -> Result<PublishStartReceipt, CommandError> {
+    let _admission = state.ensure_accepting_work()?;
+    state.db.storage_write(move |db| db.cancel_unaccepted_publish_start(&request_id))
+        .await.map_err(preflight::err)
+}
+
+#[tauri::command]
 pub async fn publish_start(
     app: tauri::AppHandle,
     state: State<'_, AppState>,

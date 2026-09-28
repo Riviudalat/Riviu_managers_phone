@@ -336,6 +336,9 @@ pub async fn publish_create_campaign(
         .db
         .storage_read(move |db| {
             for udid in guard_udids {
+                if !db.publish_handoff_assignments(&udid)?.is_empty() {
+                    return Ok(true);
+                }
                 let guard = db.publish_device_guard(&udid)?;
                 if !guard.blocking.is_empty() {
                     return Ok(true);
@@ -3897,7 +3900,8 @@ pub(super) async fn post_through_the_composer(
             tokio::select! {
                 result = &mut work => break result,
                 _ = cancellation_poll.tick() => {
-                    let stopped = db.publish_assignment_excluded(assignment_id).unwrap_or(true)
+                    let stopped = db.publish_shutdown_started()
+                    || db.publish_assignment_excluded(assignment_id).unwrap_or(true)
                     || db.publish_operation_stopped(campaign_id).unwrap_or(true)
                     || db.publish_campaign_state(campaign_id).ok().flatten()
                         .is_none_or(|state|state == riviu_core::PublishCampaignState::Cancelled);

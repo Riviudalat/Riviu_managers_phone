@@ -9,6 +9,10 @@ fn replay_on(
     let found:Option<(String,String)>=conn.query_row("SELECT campaign_id,request_fingerprint FROM publish_create_requests WHERE request_id=?1",
         [request_id],|r|Ok((r.get(0)?,r.get(1)?))).optional()?;
     let Some((id, prior)) = found else {
+        let cancelled: bool = conn.query_row(
+            "SELECT EXISTS(SELECT 1 FROM publish_start_requests WHERE request_id=?1 AND stage='cancelledBeforeAcceptance' AND state='failed')",
+            [request_id], |r| r.get(0))?;
+        anyhow::ensure!(!cancelled, "Mã yêu cầu đã được hủy; kiểm tra lại để tạo lượt mới");
         return Ok(None);
     };
     anyhow::ensure!(

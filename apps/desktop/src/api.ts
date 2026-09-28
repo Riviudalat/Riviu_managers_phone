@@ -1811,6 +1811,9 @@ export async function publishStart(request: PublishPreflightRequest, requestId: 
 export function publishStartStatus(requestId: string) {
   return invoke<import("./types").PublishStartStatus | null>("publish_start_status", { requestId });
 }
+export function publishCancelUnacceptedStart(requestId: string) {
+  return invoke<import("./types").PublishStartStatus>("publish_cancel_unaccepted_start", { requestId });
+}
 export function publishExcludeAssignment(assignmentId: string, expectedRevision: number, requestId: string) {
   return invoke<import("./types").PublishExcludeResult>("publish_exclude_assignment", { assignmentId, expectedRevision, requestId });
 }

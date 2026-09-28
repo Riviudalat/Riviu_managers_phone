@@ -1,7 +1,7 @@
 import { Activity, useCallback, useEffect, useId, useRef, useState } from "react";
 import { createPortal } from "react-dom";
 import { Clock3, Maximize2, Minimize2, Minus, MoreHorizontal, Trash2, TriangleAlert, Undo2, Square } from "lucide-react";
-import { operationGetRun, publishStartStatus, nurtureSessionStatus, operationQueryRuns, operationStop, operationStopStatus, type OperationStopResult } from "../../api";
+import { operationGetRun, publishStartStatus, publishCancelUnacceptedStart, nurtureSessionStatus, operationQueryRuns, operationStop, operationStopStatus, type OperationStopResult } from "../../api";
 import { ProgressBar } from "../../components/ProgressBar";
 import type { OperationRunSummary } from "../../types";
 import { activeRun, issueState, progressLabel, runOptionLabel, runProgress } from "./operationProgress";
@@ -21,6 +21,26 @@ export function OperationProgressCenter({ deviceLabels }: { deviceLabels: Readon
   });
   const [pendingStart, setPendingStart] = useState(initialStart.pending);
   const [startReadError, setStartReadError] = useState(initialStart.error);
+  const [cancellingStart, setCancellingStart] = useState(false);
+  const cancelStartInFlight = useRef(false);
+  const cancelUnacceptedStart = async () => {
+    if (!pendingStart || cancelStartInFlight.current) return;
+    const pending = pendingStart;
+    cancelStartInFlight.current = true;
+    setCancellingStart(true);
+    try {
+      const status = await publishCancelUnacceptedStart(pending.requestId);
+      if (status.requestId !== pending.requestId) throw new Error("Phản hồi không khớp yêu cầu cần hủy; giữ bản ghi để đối chiếu.");
+      if (status.state === "failed" && !status.campaignId) {
+        retirePublishStart(pending.requestId);
+        setStartReadError(status.error?.message ?? "Yêu cầu chưa bắt đầu đã được hủy. Kiểm tra lại để tạo lượt mới.");
+      } else {
+        acknowledgePublishStart(pending, status);
+        setStartReadError("Yêu cầu đã được tiếp nhận hoặc có thể đã bắt đầu; không hủy mã. Theo dõi lượt hiện tại trước khi tạo lượt mới.");
+      }
+    } catch (error) { setStartReadError(describeError(error)); }
+    finally { cancelStartInFlight.current = false; setCancellingStart(false); }
+  };
   const [pinnedRun, setPinnedRun] = useState<OperationRunSummary | null>(null);
   const [expanded, setExpanded] = useState(!!initialStart.pending || !!initialStart.error);
   const [maximized, setMaximized] = useState(false);
@@ -82,7 +102,7 @@ export function OperationProgressCenter({ deviceLabels }: { deviceLabels: Readon
       reading = true;
       try {
         const status = await publishStartStatus(pendingRequestId);
-        if (!live) return;
+        if (!live || cancelStartInFlight.current) return;
         if (!status) { setStartReadError("Chưa tìm thấy xác nhận cho yêu cầu đã gửi. Trở lại Đăng bài để đối chiếu cùng lượt; không tạo lượt mới."); return; }
         if (status.requestId !== pendingRequestId) throw new Error("Phản hồi không khớp yêu cầu đang theo dõi.");
         if (status.state === "failed" && !status.campaignId) {
@@ -240,6 +260,12 @@ export function OperationProgressCenter({ deviceLabels }: { deviceLabels: Readon
         <span>{pendingStart.status ? publishStageLabel(pendingStart.status.stage) : "Chờ xác nhận từ ứng dụng"}</span>
         <small>Tác vụ: {pendingStart.status?.operationId ?? `publish-start:${pendingStart.requestId}`}</small>
         {pendingStart.status?.error && <p role="alert">{pendingStart.status.error.message}</p>}
+        {!pendingStart.status && <div>
+          <p>Chỉ hủy mã nếu ứng dụng chưa tiếp nhận yêu cầu. Nếu lượt đã bắt đầu, ứng dụng giữ nguyên để đối chiếu. Mã đã hủy không thể dùng lại.</p>
+          <button type="button" disabled={cancellingStart} onClick={() => void cancelUnacceptedStart()}>
+            {cancellingStart ? "Đang đối chiếu và hủy…" : "Hủy yêu cầu chưa được tiếp nhận"}
+          </button>
+        </div>}
       </div>}
       {startReadError && <p role="alert" className="run-stop-feedback is-error">{startReadError}</p>}
       {stopError&&<p className="run-stop-feedback is-error" role="alert">{stopError}</p>}

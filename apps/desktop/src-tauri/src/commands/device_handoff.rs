@@ -489,17 +489,7 @@ pub(crate) async fn prepare_publish_devices(
         stopped.operations.push(id);
     }
     for udid in &devices {
-        let mut assignments = state.db.publish_handoff_assignments(udid).map_err(CommandError::operation)?;
-        // Guard holds include succeeded rows whose link is still being recovered.
-        for hold in state.db.publish_device_guard(udid).map_err(CommandError::operation)?.blocking {
-            if !assignments.iter().any(|(id, _)| id == &hold.assignment_id) {
-                let campaign = state.db.get_publish_campaign(&hold.campaign_id).map_err(CommandError::operation)?
-                    .ok_or_else(|| CommandError::operation("Không tìm thấy lượt đang giữ máy"))?;
-                let assignment = campaign.assignments.iter().find(|a| a.id == hold.assignment_id)
-                    .ok_or_else(|| CommandError::operation("Không tìm thấy bài đang giữ máy"))?;
-                assignments.push((assignment.id.clone(), assignment.revision));
-            }
-        }
+        let assignments = state.db.publish_handoff_assignments(udid).map_err(CommandError::operation)?;
         for (assignment, revision) in assignments {
             let request = uuid::Uuid::new_v4().to_string();
             // This inserts the exclusion used by observer_authorized, fencing the selected

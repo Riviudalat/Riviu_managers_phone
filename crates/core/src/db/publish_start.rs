@@ -80,8 +80,15 @@ impl Database {
                 OR EXISTS(SELECT 1 FROM publish_account_reservations r WHERE r.assignment_id=a.id)
                 OR EXISTS(SELECT 1 FROM settings WHERE key='publish.handoff-pending.' || a.id))
             ORDER BY a.id")?;
-        let rows = query.query_map([udid], |r| Ok((r.get(0)?, r.get(1)?)))?
+        let mut rows: Vec<(String, i64)> = query.query_map([udid], |r| Ok((r.get(0)?, r.get(1)?)))?
             .collect::<rusqlite::Result<_>>()?;
+        for hold in Self::publish_device_guard_from_connection(&conn, udid)?.blocking {
+            if !rows.iter().any(|(id, _)| id == &hold.assignment_id) {
+                let revision = conn.query_row("SELECT revision FROM publish_assignments WHERE id=?1",
+                    [&hold.assignment_id], |r| r.get(0))?;
+                rows.push((hold.assignment_id, revision));
+            }
+        }
         Ok(rows)
     }
 
@@ -136,6 +143,36 @@ impl Database {
         tx.commit()?;
         Ok(())
     }
+    /// Explicitly retire an unacknowledged ID, not an inference that a null read failed.
+    /// The IMMEDIATE transaction races acceptance/create: either their receipt wins, or
+    /// this terminal tombstone wins and every later use of the ID is refused.
+    pub fn cancel_unaccepted_publish_start(&self, request: &str) -> anyhow::Result<PublishStartReceipt> {
+        Uuid::parse_str(request)?;
+        let mut conn = self.conn()?;
+        let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
+        if let Some(receipt) = start_on(&tx, request)? { return Ok(receipt); }
+        let legacy: Option<(String, String)> = tx.query_row(
+            "SELECT campaign_id,request_fingerprint FROM publish_create_requests WHERE request_id=?1",
+            [request], |r| Ok((r.get(0)?,r.get(1)?))).optional()?;
+        if let Some((campaign, fingerprint)) = legacy {
+            // Adopt the authoritative create receipt without dispatching or cancelling it.
+            tx.execute("INSERT INTO publish_start_requests(request_id,input_digest,request_fingerprint,preparation_id,campaign_id,state,stage,updated_at)
+                VALUES(?1,?2,?3,?1,?4,'uncertain','existingCampaign',?5)",
+                params![request,"0".repeat(64),fingerprint,campaign,Utc::now().to_rfc3339()])?;
+        } else {
+            let error = PublishStartError { code:"PublishStartCancelled".into(),
+                message:"Đã hủy mã yêu cầu chưa được tiếp nhận; mã này không thể dùng lại. Kiểm tra lại để tạo lượt mới.".into() };
+            // Sentinel fingerprint deliberately does not assert knowledge of a lost body.
+            // accept/reject validate body fingerprints, legacy create requires preparing.
+            tx.execute("INSERT INTO publish_start_requests(request_id,input_digest,request_fingerprint,preparation_id,state,stage,error_json,updated_at)
+                VALUES(?1,?2,'cancelled-without-body',?1,'failed','cancelledBeforeAcceptance',?3,?4)",
+                params![request,"0".repeat(64),serde_json::to_string(&error)?,Utc::now().to_rfc3339()])?;
+        }
+        let receipt = start_on(&tx, request)?.context("start cancellation receipt missing")?;
+        tx.commit()?;
+        Ok(receipt)
+    }
+
     pub fn publish_start_status(
         &self,
         request: &str,

@@ -411,7 +411,13 @@ pub async fn publish_preflight(
     };
     prepared.report.issues.retain(|issue| !owed(issue));
     for row in &mut prepared.report.assignments {
+        let releasing = row.issues.iter().any(owed);
         row.issues.retain(|issue| !owed(issue));
+        if releasing {
+            let old_link = row.checks.iter().find(|check| check.id == "oldPostLink").cloned();
+            row.checks = riviu_core::ui_automation::checks::publish_checks(row);
+            if let Some(old_link) = old_link { row.checks.push(old_link); }
+        }
     }
     // Backend verdict, not a UI hint: a refused start or an unreleasable owner means
     // this preparation cannot execute.
