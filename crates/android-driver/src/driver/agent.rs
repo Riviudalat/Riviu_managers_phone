@@ -674,10 +674,9 @@ impl AndroidDriver {
             if agent.is_alive().await {
                 return Ok(agent);
             }
-            // Dead, and still registered on the device. Ask the server to forget it
-            // before opening another, or the leak this cache exists to stop happens
-            // one session at a time anyway.
-            let _ = agent.close().await;
+            // Evict the blind client before replacing it. POST /session replaces the
+            // upstream singleton; DELETE schedules asynchronous instrumentation shutdown
+            // and can kill the replacement (see AgentClient::recreate_session).
             self.agents.lock().remove(serial);
         }
 
