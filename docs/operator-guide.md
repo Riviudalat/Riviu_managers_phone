@@ -99,6 +99,9 @@ bảng chưa ghim. Dấu **+** cạnh **Nhóm thiết bị** mở quản lý đ�
 Khi mất kết nối stream hoặc bộ giải mã dừng, ảnh cũ không còn được tính là live;
 khung xem được dựng lại và chỉ báo live khi có frame mới. Bản cài dùng tài nguyên
 Android đi kèm; biến môi trường trỏ APK/scrcpy của bản dev không thay tài nguyên bản cài.
+Đóng cửa sổ điều khiển giữ chất lượng cao thêm tối đa hai giây trước khi hạ về
+chất lượng lưới; mở lại trong khoảng này tránh khởi động lại stream. Khi thiết bị
+báo mất kết nối, thao tác bị khóa và phiên cũ được nhả trước khi mở lại sau kết nối.
 Bấm tên nhóm để lọc lưới và bung/thu các số máy thuộc nhóm; số bên phải là đã chọn/tổng.
 Bộ lọc Tất cả/USB/WIFI hiển thị số máy của nhóm đang chọn, kể cả khi nhóm trống;
 đổi bộ lọc không tự chọn hoặc điều khiển máy.
