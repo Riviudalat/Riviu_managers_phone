@@ -236,7 +236,9 @@ pub(super) async fn capture_expanded_photo_link_counted(
             LinkCapture::ShareUnmeasured
         }
     };
-    if matched_caption && link.link().is_none() {
+    if (matched_caption && link.link().is_none())
+        || matches!(link, LinkCapture::CopyBudgetExhausted)
+    {
         return Err(MatchedPhotoCopyFailure(link).into());
     }
     let canonical =

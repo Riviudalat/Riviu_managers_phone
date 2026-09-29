@@ -84,7 +84,7 @@ const PUBLISH_STATE_LABELS: Record<PublishCampaignRecord["state"], string> = {
   transferring: "Đang chuyển nội dung",
   imported: "Đã nhập nội dung",
   posting: "Đang đăng",
-  verifying: "Đã bấm Đăng · chờ xác minh",
+  verifying: "Kiểm tra thao tác Đăng đã có · chờ xác minh",
   succeeded: "Đã đăng",
   failedBeforeDispatch: "Dừng trước khi đăng",
   uncertain: "Chưa chắc chắn",
@@ -144,13 +144,16 @@ function verificationDetail(evidenceJson?: string | null): string | null {
       && !/tự kiểm tra đã dừng/i.test(reason)
       ? "Tự kiểm tra đã dừng · chọn Kiểm tra liên kết"
       : null;
+    const recoveryBudget = value?.verificationBudget;
     const budget = status?.checkIntervalSeconds === 300
-      ? "Tự kiểm tra mỗi 5 phút đến khi có link"
-      : typeof status?.reviewAfterMinutes === "number"
-      ? `Ngân sách tự kiểm: ${status.reviewAfterMinutes} phút`
+      ? `Kiểm tra mỗi 5 phút; dừng sau 3 lượt liên tiếp không có bằng chứng mới${recoveryBudget?.version === 1 && typeof recoveryBudget.noProgressObservations === "number" ? ` (${recoveryBudget.noProgressObservations}/3)` : ""}`
       : null;
+    const reasonCode = typeof status?.reasonCode === "string" ? status.reasonCode : null;
+    const attempts = typeof status?.attempts === "number" ? `Đã kiểm: ${status.attempts} lượt` : null;
     return [
       reason,
+      reasonCode && `Lý do: ${reasonCode}`,
+      attempts,
       stopped,
       checked && `Kiểm tra gần nhất: ${checked}`,
       next && status?.state === "pending" && `Kiểm tra tiếp: ${next}`,

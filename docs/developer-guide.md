@@ -582,8 +582,15 @@ Cleanup media chạy worker riêng; một máy đọc chậm không chặn dispa
 Candidates được phân trang hữu hạn, ưu tiên bài tới hạn và luân phiên giữa các máy.
 Nhãn thời gian own-post chấp nhận EN và VI (`N phút trước` / `vừa xong`).
 `evidence.verificationStatus` giữ reasonCode, attempts, readFailures, checkedAt và
-nextCheckAt. Mọi bài đã gửi còn thiếu link được kiểm sau300giây tính từ cuối lượt
-trước; không đặt tổng hạn chờ. Stop chờ task đã được cấp quyền hoàn tất.
+nextCheckAt. Bài còn thiếu link được kiểm sau300giây tính từ cuối lượt trước khi còn
+ngân sách. `verificationBudget` version1 lưu fingerprint gắn immutable intent,
+publicationStage, observations và noProgressObservations trong cùng CAS với kết quả.
+Sau3lượt liên tiếp không có bằng chứng mới của đúng bài, lưu needsReview với cause
+`verificationNoProgress`, nextCheckAt=null và giữ intent/media/khoản thiếu Sheet.
+Lỗi đọc/transport, processing và tìm kiếm đều tiêu ngân sách hữu hạn này; offline/busy
+chưa được quan sát không tính là một lượt. Lượt cũ chưa có budget bắt đầu từ lần quan
+sát đầu của contract mới, không lấy attempts lịch sử làm số lượt không tiến triển.
+Stop chờ primitive đã được cấp quyền hoàn tất, không huỷ giữa khôi phục IME.
 AccessibilityReadUnavailable chỉ dành read-only sau Android recovery; sound observer
 cho một lần đọc bổ sung/phase trong ngân sách và xóa snapshot cũ trước readback.
 
@@ -610,8 +617,16 @@ kiểm các ô còn lại trong viewport không có bài thứ hai cùng khớp.
 60 giây/tối đa ba điều hướng; một lượt tìm tối đa 12 ô qua ba viewport, ngân sách
 180 giây, không phát thao tác mới khi hết hạn. Primitive đang chạy được hoàn tất
 để giữ khôi phục IME. Cuộn dùng container scrollable chứa ô bài từ snapshot;
-Copy dùng hitbox cùng cây và tối đa hai sentinel độc lập. Diagnostic lưu tuple,
-generation, reason và chi phí; snapshot thành công thuộc đúng bài được nhận.
+Copy dùng hitbox cùng cây; đường direct thử tối đa hai sentinel độc lập trước khi
+trả lỗi. Đây không phải định danh/chống Copy lại cùng bài qua mọi fallback. Các
+đường photo/video/direct cùng dùng tối đa24Copy trong một lượt (ngân sách bằng
+12ứng viên x2, vẫn giữ ngân sách thời gian và ambiguity scan).
+Hết Copy budget là chưa xác minh, không biến thành mismatch hoặc bỏ qua ambiguity.
+Diagnostic lưu tuple, generation, reason, chi phí và `publicationEvidence`: caption
+đầy đủ khớp, rồi caption+thời gian của cùng snapshot/ứng viên khớp. Hai mức proof mới
+chỉ reset bộ đếm một lần mỗi mức, không chốt bài; fingerprint không dùng generation,
+clock, Copy count hoặc caption của bài bị loại. Thay nhãn thời gian/lý do không reset.
+Snapshot thành công thuộc đúng bài được nhận; timeout không trả ứng viên còn mơ hồ.
 
 Nhãn thời gian own-post Global45.4.3/en dùng `:id/zj1`, đo trên hai máy và bài mới
 trong §9.209. Global45.7.3/en dùng `:id/zwj`, đã đối chiếu bốn bài thật;
@@ -635,9 +650,12 @@ và bật dọn bản chuyển; UI không nhận lựa chọn tắt hai nghĩa v
 Sheet/dọn media của chiến dịch cũ bất biến theo snapshot đã lưu, không áp mặc định
 mới hồi tố. Không xóa tệp nguồn trên desktop; lỗi dọn được thử lại độc lập qua
 restart, không phát lại Post.
-Worker lưu `nextCheckAt` bằng thời điểm kết thúc quan sát cộng 300 giây cho mọi bài
-đã gửi còn thiếu link, kể cả lỗi đọc. Không đặt tổng hạn chờ liên kết; mỗi lần quan
-sát vẫn có deadline và lease riêng. Restart giữ nguyên mốc gửi và lần kiểm tiếp.
+Worker lưu `nextCheckAt` bằng thời điểm kết thúc quan sát cộng 300 giây cho bài
+còn ngân sách, kể cả lỗi đọc. Mỗi lần quan sát có deadline và lease riêng. Restart
+giữ mốc gửi, lần kiểm tiếp, fingerprint và số lượt không tiến triển; needsReview
+không được background tự mở lại. Nhật ký verifying chỉ nói kiểm thao tác Đăng đã có;
+`checking_existing_post_link` ghi lần kiểmN, `link_pending` hiện lý do thiếu link,
+`link_needs_review` nói tự kiểm đã dừng. Không suy submitted/công khai từ thiếu link.
 Android ở trạng thái Connected sau restart vẫn được kiểm khi agent đã sẵn sàng;
 worker mở session qua control plane, không đòi mở điều khiển bằng tay để đổi
 trạng thái thành Ready. Máy Busy/Preparing/Error/offline vẫn chờ; iOS giữ điều kiện Ready.
@@ -715,9 +733,13 @@ vẫn kiểm quyền tại transaction; capability chỉ hướng dẫn UI, khô
 vượt điều kiện khi trạng thái đã đổi.
 
 Resume giữ campaign cancelled, publication/effect intent, jobs và đích Sheet/epoch
-ban đầu. Bài còn thiếu link dùng worker hiện có, `nextCheckAt = checkedAt + 300 giây`,
-không có tổng hạn buộc bỏ bài pending; từng observation vẫn hữu hạn. Gọi lặp không
-reset lịch hoặc gửi lại bài. **Kiểm tra liên kết** gọi `publish_check_links`, không
+ban đầu. Cause `verificationNoProgress` cũng cho phép resume rõ ràng; các review
+khác không được nới. Transaction lưu status/budget/review-before-stop cũ trong
+`verificationBeforeResume` rồi mở budget mới; gọi lặp/ACK replay không reset.
+Worker hiện có dùng `nextCheckAt = checkedAt + 300 giây` khi còn ngân sách; ba lượt
+không tiến triển liên tiếp lại needsReview. **Kiểm tra liên kết** một lần có thể
+chốt canonical nhưng thất bại không reset budget hoặc mở lại review đã dừng.
+**Kiểm tra liên kết** gọi `publish_check_links`, không
 `publish_execute`; phản hồi pending/busy/stopped/stale/noCandidate không được coi là
 verified. **Dừng kiểm tra lại** gọi `operation_stop` theo `publish:<campaignId>` để
 dừng quyền quan sát đã tiếp tục trong cả campaign, không chỉ dòng đang xem; các

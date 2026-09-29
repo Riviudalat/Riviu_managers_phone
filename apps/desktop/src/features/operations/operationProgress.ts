@@ -136,7 +136,7 @@ export function logMessage(row: OperationDeviceLogEntry): string {
       transferring: "Đang tải ảnh/video vào điện thoại",
       imported: "Đã tải ảnh/video vào thư viện điện thoại",
       posting: "Bắt đầu thao tác Đăng và chờ xác nhận",
-      verifying: "Đã bấm Đăng — chờ TikTok hoàn tất và xác minh liên kết bài",
+      verifying: "Đang kiểm tra kết quả thao tác Đăng đã có — không bấm Đăng lại",
       succeeded: "Thành công — đã xác nhận bài đăng",
       failed_before_dispatch: "Dừng trước khi đăng — xem chi tiết lỗi",
       uncertain: "Chưa xác nhận bài đã lên — cần kiểm tra trên TikTok",

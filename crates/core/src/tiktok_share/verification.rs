@@ -172,6 +172,7 @@ pub enum VerificationReason {
     ShareUnavailable,
     CopyUnavailable,
     CopyAmbiguous,
+    CopyBudgetExhausted,
     ClipboardUnwritable,
     ClipboardUnreadable,
     ClipboardUnchanged,
@@ -216,6 +217,7 @@ impl VerificationReason {
             Self::ShareUnavailable => "shareUnavailable",
             Self::CopyUnavailable => "copyUnavailable",
             Self::CopyAmbiguous => "copyAmbiguous",
+            Self::CopyBudgetExhausted => "copyBudgetExhausted",
             Self::ClipboardUnwritable => "clipboardUnwritable",
             Self::ClipboardUnreadable => "clipboardUnreadable",
             Self::ClipboardUnchanged => "clipboardUnchanged",
@@ -261,6 +263,7 @@ impl VerificationReason {
             Self::ShareUnavailable => "Bài đã mở nhưng không có nút Chia sẻ khả dụng đúng nhận diện.",
             Self::CopyUnavailable => "Bảng Chia sẻ chưa có nút Sao chép liên kết khả dụng.",
             Self::CopyAmbiguous => "Có nhiều nút Sao chép liên kết cùng khớp; chưa chọn nút để tránh lấy nhầm liên kết.",
+            Self::CopyBudgetExhausted => "Đã dùng hết ngân sách sao chép của lượt kiểm tra; chưa xác minh liên kết, không sao chép thêm trong lượt này.",
             Self::ClipboardUnwritable => "Chưa ghi và đọc lại được giá trị kiểm chứng clipboard; chưa bấm Sao chép liên kết.",
             Self::ClipboardUnreadable => "Không đọc được clipboard sau thao tác; chưa xác nhận đã sao chép liên kết.",
             Self::ClipboardUnchanged => "Đã mở đúng nội dung và bấm Sao chép liên kết nhưng TikTok chưa trả link; tự kiểm tra lại sau 5 phút.",
@@ -272,9 +275,19 @@ impl VerificationReason {
     }
 }
 
+/// Partial target evidence, never sufficient to settle publication or select a link.
+#[derive(Debug, Clone, Default, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct VerificationPublicationEvidence {
+    pub caption_matched: bool,
+    pub submission_time_matched: bool,
+}
+
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct VerificationDiagnostic {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub publication_evidence: Option<VerificationPublicationEvidence>,
     pub contract_version: u32,
     pub package: String,
     pub locale: String,
@@ -692,6 +705,7 @@ impl Capture<'_> {
         let failure = error.downcast_ref::<super::photo_proof::MatchedPhotoCopyFailure>()?;
         Some(match &failure.0 {
             LinkCapture::Processing(_) => VerificationReason::Processing,
+            LinkCapture::CopyBudgetExhausted => VerificationReason::CopyBudgetExhausted,
             LinkCapture::CopyDidNotLand => VerificationReason::ClipboardUnchanged,
             LinkCapture::NoCopyRow => VerificationReason::CopyUnavailable,
             LinkCapture::AmbiguousCopyRow => VerificationReason::CopyAmbiguous,
@@ -985,6 +999,10 @@ impl Capture<'_> {
                 },
             );
         }
+        self.diagnostic
+            .publication_evidence
+            .get_or_insert_with(Default::default)
+            .caption_matched = true;
         let [time] = times.as_slice() else {
             return Err(if times.is_empty() {
                 VerificationReason::TimestampMissing
@@ -996,6 +1014,10 @@ impl Capture<'_> {
         self.diagnostic.time_label = Some(text.chars().take(80).collect());
         let now = chrono::Utc::now();
         if relative_post_time_matches(text, &self.identity.submitted_at, now) {
+            self.diagnostic
+                .publication_evidence
+                .get_or_insert_with(Default::default)
+                .submission_time_matched = true;
             return Ok(());
         }
         if relative_post_age(text).is_none() {
@@ -1104,6 +1126,12 @@ impl Capture<'_> {
         &mut self,
         _post: Tree,
     ) -> Result<(String, VerificationDiagnostic), VerificationReason> {
+        if self.expired() {
+            return Err(VerificationReason::SearchBudgetExhausted);
+        }
+        if self.diagnostic.copy_attempts >= MAX_COPY_ATTEMPTS {
+            return Err(VerificationReason::CopyBudgetExhausted);
+        }
         let mark = sentinel();
         self.session
             .set_clipboard("plaintext", mark.as_bytes())
@@ -1421,6 +1449,7 @@ impl Capture<'_> {
                                     | VerificationReason::ClipboardNotPostLink
                                     | VerificationReason::CopyUnavailable
                                     | VerificationReason::CopyAmbiguous
+                                    | VerificationReason::CopyBudgetExhausted
                                     | VerificationReason::ShareUnavailable
                                     | VerificationReason::ReadFailed
                             ) {
@@ -1563,6 +1592,7 @@ pub async fn capture_submission_link_excluding(
         public_link: None,
         trace_nonce: *uuid::Uuid::new_v4().as_bytes(),
         diagnostic: VerificationDiagnostic {
+            publication_evidence: None,
             contract_version: CONTRACT_VERSION,
             package: plan.labels.package().into(),
             locale: plan.labels.language().into(),

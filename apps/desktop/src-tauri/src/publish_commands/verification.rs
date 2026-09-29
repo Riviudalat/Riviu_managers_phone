@@ -374,6 +374,19 @@ async fn verify_pending_assignment_inner(
     if !db.publish_verification_is_current(candidate)? {
         return Ok((CheckStatus::Stale, None));
     }
+    let attempt = candidate
+        .evidence_json
+        .as_deref()
+        .and_then(|raw| serde_json::from_str::<serde_json::Value>(raw).ok())
+        .and_then(|value| value["verificationStatus"]["attempts"].as_u64())
+        .unwrap_or(0)
+        .saturating_add(1);
+    progress::record_progress(
+        db,
+        &candidate.campaign_id,
+        &candidate.assignment_id,
+        progress::PublishProgress::CheckingExistingPostLink { attempt },
+    );
     let capture = execution::capture_confirmed_assignment_link(
         db,
         control,
@@ -463,12 +476,31 @@ async fn verify_pending_assignment_inner(
                     .and_then(|observation| observation.diagnostic.as_ref()),
             )? {
                 let outcome = committed_observation_outcome(db, candidate)?;
-                if outcome.0 == CheckStatus::Pending {
+                let post_unknown = candidate
+                    .evidence_json
+                    .as_deref()
+                    .and_then(|raw| serde_json::from_str::<serde_json::Value>(raw).ok())
+                    .is_none_or(|value| {
+                        let post = value.get("post").unwrap_or(&value);
+                        !matches!(post["state"].as_str(), Some("submitted" | "posted"))
+                    });
+                let step = if outcome.0 == CheckStatus::Pending && post_unknown {
+                    Some(progress::PublishProgress::PostUncertain { reason })
+                } else if outcome.0 == CheckStatus::Pending {
+                    Some(progress::PublishProgress::LinkPending { reason })
+                } else if outcome.0 == CheckStatus::Ineligible {
+                    Some(progress::PublishProgress::LinkNeedsReview {
+                        reason: outcome.1.clone().unwrap_or(reason),
+                    })
+                } else {
+                    None
+                };
+                if let Some(step) = step {
                     progress::record_progress(
                         db,
                         &candidate.campaign_id,
                         &candidate.assignment_id,
-                        progress::PublishProgress::LinkPending { reason },
+                        step,
                     );
                 }
                 execution::announce(events, db, &candidate.campaign_id);

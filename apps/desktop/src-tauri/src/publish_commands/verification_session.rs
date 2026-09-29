@@ -41,11 +41,13 @@ impl<'a> VerificationSession<'a> {
 impl UiSession for VerificationSession<'_> {
     async fn tap(&self, point: TapPoint) -> anyhow::Result<()> {
         self.check()?;
-        self.inner.tap(point).await
+        self.inner.tap(point).await?;
+        self.check()
     }
     async fn activate_element(&self, query: ElementQuery<'_>) -> anyhow::Result<()> {
         self.check()?;
-        self.inner.activate_element(query).await
+        self.inner.activate_element(query).await?;
+        self.check()
     }
     async fn swipe(&self, gesture: SwipeGesture) -> anyhow::Result<()> {
         self.check()?;
@@ -95,11 +97,14 @@ impl UiSession for VerificationSession<'_> {
     }
     async fn set_clipboard(&self, kind: &str, bytes: &[u8]) -> anyhow::Result<()> {
         self.check()?;
-        self.inner.set_clipboard(kind, bytes).await
+        self.inner.set_clipboard(kind, bytes).await?;
+        self.check()
     }
     async fn get_clipboard(&self, limit: usize) -> anyhow::Result<(String, Vec<u8>)> {
         self.check()?;
-        self.inner.get_clipboard(limit).await
+        let clipboard = self.inner.get_clipboard(limit).await?;
+        self.check()?;
+        Ok(clipboard)
     }
     async fn window_size(&self) -> anyhow::Result<(f64, f64)> {
         self.check()?;

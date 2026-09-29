@@ -62,6 +62,8 @@ pub const CLIPBOARD_WINDOW: Duration = Duration::from_millis(4_000);
 pub const POLL: Duration = Duration::from_millis(300);
 /// Clipboard reads are capped; a TikTok link is far under this.
 const CLIPBOARD_LIMIT: usize = 4_096;
+/// Shared by all photo/video/direct Copy paths in one publication observation.
+const MAX_COPY_ATTEMPTS: u32 = 24;
 
 /// The strings the copy row carries, lower-cased, across the builds seen so far.
 ///
@@ -115,6 +117,8 @@ pub enum LinkCapture {
     CopyDidNotLand,
     /// Fresh processing message observed immediately after Copy, bound to before/after images.
     Processing(ProcessingNotice),
+    /// No more Share/Copy dispatches are permitted in this observation.
+    CopyBudgetExhausted,
     /// The clipboard changed into something that is not a link to a post.
     NotAPostLink(String),
     /// A tap or a hierarchy read failed. The post is unaffected.
@@ -150,6 +154,9 @@ impl LinkCapture {
             Self::Processing(_) => {
                 "TikTok báo bài đang được xử lý; chưa trả liên kết. Tự kiểm tra lại sau 5 phút."
                     .into()
+            }
+            Self::CopyBudgetExhausted => {
+                "Đã hết ngân sách sao chép của lượt kiểm tra; chưa xác minh liên kết".into()
             }
             Self::NotAPostLink(value) => {
                 format!("clipboard đổi nhưng không phải link bài: {value:.80}")
@@ -879,6 +886,9 @@ async fn read_through_sheet_counted(
     opened: &mut bool,
     copy_attempts: &mut u32,
 ) -> LinkCapture {
+    if *copy_attempts >= MAX_COPY_ATTEMPTS {
+        return LinkCapture::CopyBudgetExhausted;
+    }
     let control = match session.locate(share).await {
         Ok(Some(control)) => control,
         Ok(None) => match crate::ui_automation::runtime::resolve_navigation(

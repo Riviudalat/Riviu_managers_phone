@@ -170,10 +170,71 @@ fn may_verify(state: &str, intent: Option<&str>, evidence: Option<&str>) -> bool
     }
 }
 
-// Upload-idle proof has a separate age threshold; link polling has no total deadline.
+// Upload-idle proof is independent of the bounded missing-link observation budget.
 const UPLOAD_IDLE_AFTER_MINUTES: i64 = 240;
 const SCHEDULED_FIRST_CHECK_SECONDS: i64 = 120;
 const VERIFICATION_CHECK_SECONDS: i64 = 300;
+const VERIFICATION_NO_PROGRESS_LIMIT: u64 = 3;
+const VERIFICATION_NO_PROGRESS_CAUSE: &str = "verificationNoProgress";
+
+fn new_verification_budget(intent: Option<&str>) -> serde_json::Value {
+    use sha2::Digest;
+    serde_json::json!({
+        "version":1,"intentSha256":intent.map(|raw|format!("{:x}",sha2::Sha256::digest(raw.as_bytes()))),
+        "publicationStage":0,"noProgressObservations":0,"observations":0,
+        "limit":VERIFICATION_NO_PROGRESS_LIMIT,
+    })
+}
+
+/// Only first-time target-caption/time proof advances this finite frontier. Rejected
+/// captions, changing timestamps, snapshot generations and Copy counts are not progress.
+fn advance_verification_budget(
+    evidence: &serde_json::Value,
+    intent: Option<&str>,
+    diagnostic: Option<&serde_json::Value>,
+) -> serde_json::Value {
+    use sha2::Digest;
+    let initial = new_verification_budget(intent);
+    let prior = &evidence["verificationBudget"];
+    let prior = if prior["version"] == 1 && prior["intentSha256"] == initial["intentSha256"] {
+        prior
+    } else {
+        &initial
+    };
+    let previous_stage = prior["publicationStage"].as_u64().unwrap_or(0).min(2);
+    let proof = diagnostic.map(|value| &value["publicationEvidence"]);
+    let observed_stage = match proof {
+        Some(proof)
+            if proof["captionMatched"] == true && proof["submissionTimeMatched"] == true =>
+        {
+            2
+        }
+        Some(proof) if proof["captionMatched"] == true => 1,
+        _ => 0,
+    };
+    let stage = previous_stage.max(observed_stage);
+    let no_progress = if stage > previous_stage {
+        0
+    } else {
+        prior["noProgressObservations"]
+            .as_u64()
+            .unwrap_or(0)
+            .saturating_add(1)
+    };
+    // The fingerprint describes the durable proof frontier, not the latest screen.
+    let frontier =
+        serde_json::json!({"intentSha256":initial["intentSha256"],"publicationStage":stage});
+    let fingerprint = format!(
+        "{:x}",
+        sha2::Sha256::digest(frontier.to_string().as_bytes())
+    );
+    serde_json::json!({
+        "version":1,"intentSha256":initial["intentSha256"],"publicationStage":stage,
+        "fingerprint":fingerprint,"noProgressObservations":no_progress,
+        "observations":prior["observations"].as_u64().unwrap_or(0).saturating_add(1),
+        "limit":VERIFICATION_NO_PROGRESS_LIMIT,
+    })
+}
 
 pub(super) fn needs_review(evidence: Option<&str>) -> bool {
     evidence
@@ -290,8 +351,10 @@ fn explicit_non_stop_review(evidence: Option<&str>) -> bool {
             let review = &v["verificationStatus"];
             (review["state"] == "needsReview"
                 && review["cause"] != "operatorStopped"
-                && review["cause"] != "verificationDeadline")
-                || v.get("verificationReviewBeforeStop").is_some()
+                && review["cause"] != "verificationDeadline"
+                && review["cause"] != VERIFICATION_NO_PROGRESS_CAUSE)
+                || v.get("verificationReviewBeforeStop")
+                    .is_some_and(|prior| prior["cause"] != VERIFICATION_NO_PROGRESS_CAUSE)
         })
 }
 
@@ -524,6 +587,17 @@ impl Database {
             .and_then(|s| serde_json::from_str::<serde_json::Value>(s).ok())
             .filter(serde_json::Value::is_object)
             .unwrap_or_else(|| serde_json::json!({}));
+        // Only this confirmed revision resets the automatic budget. Preserve the
+        // parked reason/budget for audit, including a review followed by Stop.
+        evidence["verificationBeforeResume"] = serde_json::json!({
+            "status":evidence["verificationStatus"],"budget":evidence["verificationBudget"],
+            "reviewBeforeStop":evidence["verificationReviewBeforeStop"],"resumedAt":now,
+        });
+        evidence["verificationBudget"] =
+            new_verification_budget(candidate.effect_intent.as_deref());
+        if let Some(object) = evidence.as_object_mut() {
+            object.remove("verificationReviewBeforeStop");
+        }
         evidence["verificationResume"] = serde_json::json!({"version":2,"assignmentId":assignment_id,"campaignId":candidate.campaign_id,
             "intentSha256":format!("{:x}",sha2::Sha256::digest(candidate.effect_intent.as_deref().unwrap_or_default().as_bytes())),
             "stopGeneration":stop_generation(candidate.stop_marker.as_deref()),"authorizationId":Uuid::new_v4().to_string(),"requestedAt":now,"expectedRevision":expected_revision});
@@ -1324,10 +1398,18 @@ impl Database {
                 reason_code,
                 "draftsObserved" | "composerOrUpload" | "submissionIdentityMissing"
             );
-        let review = identity_missing
-            || legacy_review
-            || (needs_review(prior.as_deref())
-                && !obsolete_deadline_review(intent.as_deref(), prior.as_deref()));
+        let prior_review = needs_review(prior.as_deref())
+            && !obsolete_deadline_review(intent.as_deref(), prior.as_deref());
+        let budget = if prior_review {
+            // A one-shot manual check can settle proof, but cannot renew automatic work.
+            evidence["verificationBudget"].clone()
+        } else {
+            advance_verification_budget(&evidence, intent.as_deref(), diagnostic)
+        };
+        let budget_exhausted = budget["noProgressObservations"].as_u64().unwrap_or(0)
+            >= VERIFICATION_NO_PROGRESS_LIMIT;
+        evidence["verificationBudget"] = budget;
+        let review = identity_missing || legacy_review || prior_review || budget_exhausted;
         if manual
             && legacy
             && !review
@@ -1355,6 +1437,8 @@ impl Database {
                 })
                 .filter(|text| !text.trim().is_empty())
                 .unwrap_or(observation_reason.clone())
+        } else if budget_exhausted && !legacy_review {
+            format!("Tự kiểm tra đã dừng sau {VERIFICATION_NO_PROGRESS_LIMIT} lượt liên tiếp không có bằng chứng mới của đúng bài ({reason_code}). {observation_reason} Cần kiểm tra; xác nhận Tiếp tục xác minh bài đã gửi để mở ngân sách mới, không đăng lại.")
         } else {
             observation_reason.clone()
         };
@@ -1381,10 +1465,14 @@ impl Database {
         });
         let cause = if identity_missing {
             "submissionIdentityMissing"
-        } else if review {
+        } else if prior_review {
             evidence["verificationStatus"]["cause"]
                 .as_str()
                 .unwrap_or("explicitReview")
+        } else if legacy_review {
+            reason_code
+        } else if budget_exhausted {
+            VERIFICATION_NO_PROGRESS_CAUSE
         } else {
             reason_code
         }

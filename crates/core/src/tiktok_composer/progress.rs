@@ -52,6 +52,12 @@ pub enum PublishProgress {
     LinkPending {
         reason: String,
     },
+    CheckingExistingPostLink {
+        attempt: u64,
+    },
+    LinkNeedsReview {
+        reason: String,
+    },
     Finishing,
     ReleasingPendingUpload,
     Finished,
@@ -98,6 +104,8 @@ impl PublishProgress {
             Self::CapturingLink => "capturing_link",
             Self::LinkCaptured => "link_captured",
             Self::LinkPending { .. } => "link_pending",
+            Self::CheckingExistingPostLink { .. } => "checking_existing_post_link",
+            Self::LinkNeedsReview { .. } => "link_needs_review",
             Self::Finishing => "finishing",
             Self::ReleasingPendingUpload => "releasing_pending_upload",
             Self::Finished => "finished",
@@ -157,8 +165,16 @@ impl PublishProgress {
             }
             Self::CapturingLink => "Đang lấy liên kết của bài vừa đăng".into(),
             Self::LinkCaptured => "Đã lấy liên kết bài đăng".into(),
-            Self::LinkPending { .. } => {
-                "Đã gửi bài; hệ thống sẽ kiểm tra liên kết định kỳ, xem chi tiết".into()
+            Self::LinkPending { reason } => {
+                format!("Chưa xác minh được liên kết; kiểm tra thao tác Đăng đã có, không bấm Đăng lại · {reason}")
+            }
+            Self::CheckingExistingPostLink { attempt } => {
+                format!(
+                    "Kiểm tra liên kết lần {attempt} của thao tác Đăng đã có — không bấm Đăng lại"
+                )
+            }
+            Self::LinkNeedsReview { reason } => {
+                format!("Cần kiểm tra liên kết — tự kiểm tra đã dừng · {reason}")
             }
             Self::Finishing => "Đang kết thúc phiên và xử lý nội dung tạm".into(),
             Self::ReleasingPendingUpload => {
@@ -178,6 +194,7 @@ impl PublishProgress {
         match self {
             Self::RetryWaiting { reason, .. } => Some(reason),
             Self::LinkPending { reason }
+            | Self::LinkNeedsReview { reason }
             | Self::FailedBeforePost { reason }
             | Self::PostUncertain { reason } => Some(reason),
             _ => None,
