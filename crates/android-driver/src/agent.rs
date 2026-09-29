@@ -33,9 +33,51 @@ const W3C_ELEMENT_KEY: &str = "element-6066-11e4-a52e-4f735466cecf";
 ///
 /// Thirty rather than `adb.rs`'s sixty because this is one HTTP call to a server already
 /// running on the phone, not a command that may have to start one. A request still pending
-/// after this is not slow, it is a server that stopped answering, and waiting longer only
-/// delays the restart that fixes it.
+/// after this has exceeded the read/control budget. A timeout alone does not identify
+/// whether the agent, accessibility tree, or transport stalled, and does not permit replay.
 pub const DEFAULT_TIMEOUT: Duration = Duration::from_secs(30);
+
+/// Transport failure with the phone and request phase retained across anyhow boundaries.
+/// Timeout is not an absent element, nor proof that an effectful request did not execute.
+#[derive(Debug)]
+struct AgentRequestFailure {
+    serial: String,
+    method: reqwest::Method,
+    route: String,
+    phase: &'static str,
+    elapsed: Duration,
+    timeout: Duration,
+    read_only: bool,
+    source: reqwest::Error,
+}
+
+impl std::fmt::Display for AgentRequestFailure {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let kind = if self.source.is_timeout() {
+            "agent_request_timeout"
+        } else {
+            "agent_transport_error"
+        };
+        write!(
+            f,
+            "{kind}: device={}, {} {}, phase={}, elapsed_ms={}, timeout_ms={}, read_only={}: {}",
+            self.serial,
+            self.method,
+            self.route,
+            self.phase,
+            self.elapsed.as_millis(),
+            self.timeout.as_millis(),
+            self.read_only,
+            self.source
+        )
+    }
+}
+
+impl std::error::Error for AgentRequestFailure {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        Some(&self.source)
+    }
+}
 
 /// Selected once when connecting; changing observation mode requires a new client.
 /// Legacy remains the default until paired live evidence approves enriched reads.
@@ -343,7 +385,7 @@ impl AgentClient {
         // minutes, which is how a probe run got killed at its 600 s cap on 12/08/2026.
         // A timeout is only useful if it fires before the operator gives up.
         let http = reqwest::Client::builder()
-            .timeout(Duration::from_secs(30))
+            .timeout(DEFAULT_TIMEOUT)
             .build()
             .context("dựng HTTP client cho agent Android")?;
         let response: Value = http
@@ -663,7 +705,7 @@ impl AgentClient {
         request_timeout: Option<Duration>,
     ) -> anyhow::Result<Value> {
         let url = self.url(suffix);
-        let mut request = self.http.request(method, &url);
+        let mut request = self.http.request(method.clone(), &url);
         if let Some(request_timeout) = request_timeout {
             anyhow::ensure!(!request_timeout.is_zero(), "text read deadline elapsed");
             request = request.timeout(request_timeout);
@@ -677,10 +719,45 @@ impl AgentClient {
         // so anything past half a second is the thing the operator is complaining about and
         // it should be in the log with the device and the route on it.
         let started = std::time::Instant::now();
+        let request_failure = |phase, source: reqwest::Error| {
+            let failure = AgentRequestFailure {
+                serial: self.serial.clone(),
+                method: method.clone(),
+                route: suffix.to_owned(),
+                phase,
+                elapsed: started.elapsed(),
+                timeout: request_timeout.unwrap_or(DEFAULT_TIMEOUT),
+                read_only: stale_tree_retry_is_safe(&method, suffix),
+                source,
+            };
+            // Failed sends used to return before the slow-call log, hiding precisely
+            // the timeouts needed to distinguish tree latency from transport failures.
+            tracing::warn!(
+                serial = %failure.serial,
+                method = %failure.method,
+                route = %failure.route,
+                phase = failure.phase,
+                ms = failure.elapsed.as_millis() as u64,
+                timeout_ms = failure.timeout.as_millis() as u64,
+                timed_out = failure.source.is_timeout(),
+                read_only = failure.read_only,
+                error = %failure.source,
+                "agent request failed; not replayed"
+            );
+            anyhow::Error::new(failure)
+        };
         let response = request
             .send()
             .await
-            .with_context(|| format!("gọi agent {suffix}"))?;
+            .map_err(|error| request_failure("response_headers", error))?;
+        let status = response.status();
+        // Read as bytes and decode UTF-8 ourselves. The server answers without a
+        // charset for some routes. Include body reception in the latency measurement:
+        // headers alone do not mean the accessibility result has reached the caller.
+        let bytes = response
+            .bytes()
+            .await
+            .map_err(|error| request_failure("response_body", error))?;
         let elapsed = started.elapsed();
         if cfg!(debug_assertions) && std::env::var("RIVIU_PUBLISH_REHEARSAL").as_deref() == Ok("1")
         {
@@ -694,14 +771,6 @@ impl AgentClient {
                 "agent call was slow"
             );
         }
-        let status = response.status();
-        // Read as bytes and decode UTF-8 ourselves. The server answers without a
-        // charset for some routes, and letting a client guess is exactly how
-        // Vietnamese turns into `Xin chÃ o`.
-        let bytes = response
-            .bytes()
-            .await
-            .with_context(|| format!("đọc phản hồi agent {suffix}"))?;
         let text = String::from_utf8_lossy(&bytes);
         let value: Value = serde_json::from_str(&text)
             .with_context(|| format!("agent {suffix} trả về không phải JSON: {text}"))?;
