@@ -204,9 +204,13 @@ pub async fn operation_prepare_devices(
     app: tauri::AppHandle,
     state: State<'_, AppState>,
     udids: Vec<String>,
+    selected_only: Option<bool>,
 ) -> Result<OperationStopResult, CommandError> {
     let _admission = state.ensure_accepting_work()?;
     let handoff = lock_manual_handoff()?;
+    if selected_only.unwrap_or(false) {
+        return prepare_publish_devices(&app, &state, udids, &handoff).await;
+    }
     prepare_manual_devices(&app, &state, udids, &handoff).await
 }
 

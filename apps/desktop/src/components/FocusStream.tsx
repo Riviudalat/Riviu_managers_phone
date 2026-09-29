@@ -15,6 +15,7 @@ import {
   viewRequestKeyframe,
   viewSetPreset,
   setScreenRotation,
+  operationPrepareDevices,
 } from "../api";
 import { Smartphone, Pin, PinOff, GripVertical, ArrowLeftRight, Volume2, Volume1, Image, Power, PackagePlus, ImageUp, FolderDown, TerminalSquare, TextCursorInput, Keyboard, Bell, RotateCcw, ScanLine } from "lucide-react";
 import { describeError } from "../describeError";
@@ -68,14 +69,19 @@ function controlBusyOwner(reason: string): string | undefined {
   return /DeviceBusy:.*? is busy with ([A-Za-z]+);/.exec(reason)?.[1];
 }
 
+function canHandoffControl(reason: string): boolean {
+  return ["Script", "Nurture", "Interaction"].includes(controlBusyOwner(reason) ?? "");
+}
+
 function controlFailureMessage(udid: string, reason: string): string {
   const owner = controlBusyOwner(reason);
   if (owner === "Script") {
-    return `Máy ${udid} đang được tác vụ tự động giữ quyền điều khiển (Script). Vào Theo dõi tác vụ, dừng đúng máy này và chờ tác vụ nhả máy rồi kiểm tra lại. Thử lại điều khiển không tự dừng tác vụ.`;
+    return `Máy ${udid} đang được tác vụ tự động giữ quyền điều khiển. Bấm Dừng tác vụ cũ và điều khiển để nhả máy; kết quả đã đăng được giữ lại.`;
   }
-  if (owner) {
-    return `Máy ${udid} đang được ${owner} giữ quyền điều khiển. Kết thúc phiên đang giữ máy rồi kiểm tra lại.`;
+  if (owner && canHandoffControl(reason)) {
+    return `Máy ${udid} đang được ${owner} giữ quyền điều khiển. Có thể dừng tác vụ cũ trên máy bị lỗi rồi mở điều khiển.`;
   }
+  if (owner) return `Máy ${udid} đang được ${owner} giữ quyền điều khiển. Đóng phiên điều khiển cũ hoặc chờ máy được nhả rồi thử lại.`;
   if (/\/elements\b/.test(reason) && /timed out|timeout/i.test(reason)) {
     return `Máy ${udid}: hết thời gian chờ agent đọc giao diện. Chưa xác định được trạng thái màn hình; đây không phải thông báo máy đang bị tác vụ khác giữ quyền. Chi tiết: ${reason}`;
   }
@@ -221,7 +227,7 @@ export function FocusStream({
     [actionFailures, controlErrors],
   );
   const failureCount = Object.keys(failures).length;
-  const hasBusyOwner = Object.values(failures).some(reason => controlBusyOwner(reason) !== undefined);
+  const hasBusyOwner = Object.values(failures).some(canHandoffControl);
   const sessionReady =
     controlState.key === targetKey &&
     controlState.ready.length === targets.length &&
@@ -370,9 +376,23 @@ export function FocusStream({
     });
   }, [activeSync, controlState.ready, device.udid, failureCount, failures, onReadinessChange, targets]);
 
-  const retryControl = () => {
-    setActionFailures({});
-    setControlRetry((value) => value + 1);
+  const retryControl = async () => {
+    if (inFlight.current || pointerBusyRef.current) return;
+    const busyUdids = Object.entries(failures)
+      .filter(([, reason]) => canHandoffControl(reason))
+      .map(([udid]) => udid);
+    inFlight.current = true;
+    setActionPending(true);
+    try {
+      if (busyUdids.length) await operationPrepareDevices(busyUdids, true);
+      setActionFailures({});
+      setControlRetry((value) => value + 1);
+    } catch (error) {
+      toastError("Chưa nhả được thiết bị", error);
+    } finally {
+      inFlight.current = false;
+      setActionPending(false);
+    }
   };
 
   const runExclusive = async (work: () => Promise<void>, allowPointer = false) => {
@@ -1187,8 +1207,8 @@ export function FocusStream({
                 </ul>
               )}
               {failureCount > 0 && (
-                <button type="button" onClick={retryControl}>
-                  {hasBusyOwner ? "Đã kết thúc phiên giữ máy — kiểm tra lại" : "Thử lại điều khiển"}
+                <button type="button" disabled={actionPending || pointerBusy} onClick={() => void retryControl()}>
+                  {actionPending ? "Đang nhả máy…" : hasBusyOwner ? "Dừng tác vụ cũ và điều khiển" : "Thử lại điều khiển"}
                 </button>
               )}
             </div>

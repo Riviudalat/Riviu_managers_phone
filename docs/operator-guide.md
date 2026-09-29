@@ -147,6 +147,10 @@ Thanh công cụ đặt **Mở máy**, **Đồng bộ**, **Nhóm** và **Công c
 vi được khóa cho lượt đó: đổi lựa chọn, máy chính hoặc roster sẽ tắt đồng bộ, giữ cửa
 sổ máy chính ở chế độ một máy và yêu cầu kiểm tra rồi bật lại. Lỗi một máy chuyển nhóm
 sang **Cần xử lý**; **Thử lại điều khiển** chỉ mở lại phiên, không phát lại thao tác cũ.
+Nếu máy báo đang bận, bấm **Dừng tác vụ cũ và điều khiển** để dừng tác vụ giữ
+máy bị lỗi, chờ nhả quyền rồi mở điều khiển. Bài đã đăng và nghĩa vụ kiểm tra link
+được giữ lại. Tác vụ không thể tách còn chạy trên máy ngoài lựa chọn sẽ bị từ chối;
+hãy dừng tác vụ đó trong Theo dõi trước.
 Mục **Độ trễ và độ lệch thao tác** dùng chung cấu hình trong Cài đặt; bấm Áp dụng để
 lưu. Máy chính luôn nhận ngay tại đúng tọa độ; độ trễ và độ lệch chỉ áp cho máy nhận.
 Mở hoặc đóng bảng không tự bật đồng bộ.

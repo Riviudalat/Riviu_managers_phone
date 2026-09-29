@@ -1107,8 +1107,12 @@ export async function operationStop(operationId:string) {
   return result;
 }
 /** Explicit new-run preparation: stop previous owners, preserve their effects, wait for release. */
-export async function operationPrepareDevices(udids:string[]) {
-  const result = await invoke<OperationStopResult>("operation_prepare_devices",{udids});
+export async function operationPrepareDevices(udids:string[], selectedOnly = false) {
+  const result = await invoke<OperationStopResult>("operation_prepare_devices",{udids, selectedOnly});
+  if (!result.devices.length) throw new Error("Chưa xác nhận tác vụ cũ đã nhả thiết bị.");
+  if (selectedOnly && (result.state !== "closed" || udids.some(udid => !result.devices.some(device => device.udid === udid && device.closed)))) {
+    throw new Error(result.devices.filter(device => !device.closed).map(device => `${device.udid}: ${device.message}`).join("\n") || "Chưa xác nhận tất cả máy được chọn đã nhả quyền điều khiển.");
+  }
   const refused = result.devices.filter(device => !device.closed);
   if (refused.length) {
     throw new Error(refused.map(device => `${device.udid}: ${device.message}`).join("\n"));
