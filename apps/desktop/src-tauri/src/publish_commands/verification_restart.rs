@@ -402,6 +402,53 @@ fn warm_surface(
     None
 }
 
+/// Two production captures (final-global-observation/global-expanded-second, 29/09)
+/// show this expanded photo with an idle comment hint. Return only that input's index;
+/// it is the sole EditText exemption and never a publication identity or tap authority.
+fn global_expanded_photo_input(tree: &riviu_core::ui_automation::tree::Tree) -> Option<usize> {
+    const PACKAGE: &str = "com.zhiliaoapp.musically";
+    let one = |suffix, class| {
+        let indices = tree.matching(PACKAGE, riviu_core::ElementQuery::ResourceIdSuffix(suffix));
+        let [index] = indices.as_slice() else { return None };
+        let node = &tree.nodes[*index];
+        (node.visibility() == Some(true) && node.attr("enabled") == "true"
+            && node.attr("class") == class).then_some(*index)
+    };
+    let pager = one(":id/view_pager", "X.18gp")?;
+    let header = one(":id/s94", "android.view.ViewGroup")?;
+    let back = one(":id/bjb", "android.widget.ImageView")?;
+    let author = one(":id/jf_", "android.widget.Button")?;
+    let photos = one(":id/q_g", "X.18gp")?;
+    let image = one(":id/vgh", "android.widget.ImageView")?;
+    let caption = one(":id/rey", "android.widget.TextView")?;
+    let footer = one(":id/c8n", "android.widget.LinearLayout")?;
+    let input = one(":id/re7", "android.widget.EditText")?;
+    let share = one(":id/red", "android.widget.ImageView")?;
+    let comments = one(":id/rdz", "android.widget.ImageView")?;
+    if ![header, photos, caption, footer].iter().all(|index| tree.inside(*index, pager))
+        || ![back, author].iter().all(|index| tree.inside(*index, header))
+        || !tree.inside(image, photos)
+        || ![input, share, comments].iter().all(|index| tree.inside(*index, footer))
+    {
+        return None;
+    }
+    let field = &tree.nodes[input];
+    (tree.nodes[back].attr("clickable") == "true"
+        && tree.nodes[author].attr("clickable") == "true"
+        && !tree.nodes[author].attr("text").trim().is_empty()
+        && tree.nodes[caption].attr("clickable") == "true"
+        && !tree.nodes[caption].attr("text").trim().is_empty()
+        && tree.nodes[share].attr("content-desc") == "Share"
+        && tree.nodes[share].attr("clickable") == "true"
+        && tree.nodes[comments].attr("content-desc") == "Comments"
+        && tree.nodes[comments].attr("clickable") == "true"
+        && field.attr("focused") == "false" && field.attr("a11y-focused") == "false"
+        && field.attr("password") == "false" && field.attr("showing-hint") == "true"
+        && field.attr("hint") == "Add comment..." && field.attr("text") == "Add comment..."
+        && field.attr("clickable") == "true")
+        .then_some(input)
+}
+
 /// Global 45.7.3/en viewer and Home measured in saved phone captures on 29/09.
 /// Admission only: account, complete caption, submission time and canonical URL still
 /// belong to the existing verifier. No Global profile or overlay is admitted here.
@@ -409,6 +456,7 @@ fn global_warm_surface(tree: &riviu_core::ui_automation::tree::Tree) -> Option<&
     use riviu_core::ElementQuery as Q;
     const PACKAGE: &str = "com.zhiliaoapp.musically";
     let labels = riviu_core::tiktok_labels::controls_for_runtime(PACKAGE, "en", "45.7.3")?;
+    let expanded_input = global_expanded_photo_input(tree);
     for control in [
         riviu_core::tiktok_labels::TikTokControl::ComposerCaption,
         riviu_core::tiktok_labels::TikTokControl::PostButton,
@@ -430,7 +478,8 @@ fn global_warm_surface(tree: &riviu_core::ui_automation::tree::Tree) -> Option<&
             continue;
         }
         if node.visibility() != Some(true) || node.attr("package") != PACKAGE
-            || matches!(node.attr("class"), "android.widget.EditText" | "android.widget.ProgressBar")
+            || node.attr("class") == "android.widget.ProgressBar"
+            || (node.attr("class") == "android.widget.EditText" && expanded_input != Some(index))
         {
             return None;
         }
@@ -447,6 +496,9 @@ fn global_warm_surface(tree: &riviu_core::ui_automation::tree::Tree) -> Option<&
         let node = &tree.nodes[*index];
         (node.visibility() == Some(true) && node.attr("enabled") == "true").then_some(node)
     };
+    if expanded_input.is_some() {
+        return Some("expandedPhotoViewer");
+    }
     // Measured global-ime-start: Home is only an entry for profile navigation,
     // never evidence that the visible feed card belongs to this publication.
     let home = one(":id/nr_");
