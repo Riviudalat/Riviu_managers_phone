@@ -101,7 +101,24 @@ export function viewDecodeFailed(udid: string): boolean {
 /// One udid's most recent worker beat: how many envelopes arrived and how many frames were
 /// drawn, as of `at`.
 export interface ViewDiag {
+  /** Compatibility alias of workerReceiveToOutputP95Ms, not pure decoder time. */
   decodeLatencyP95Ms?: number | null;
+  /** Latest 120 samples in this generation, on the worker performance.now() clock.
+   * Excludes device/USB/socket and final paint; cached bootstrap waiting is included. */
+  workerReceiveToOutputP95Ms?: number | null;
+  workerReceiveToSubmitP95Ms?: number | null;
+  decodeSubmitToOutputP95Ms?: number | null;
+  completedTimingSamples?: number;
+  submittedTimingSamples?: number;
+  timingSampleLimit?: number;
+  inputQueueDepth?: number;
+  decoderQueueDepth?: number | null;
+  /** Decoder configuration hint; does not prove hardware or software was actually used. */
+  requestedDecoderAcceleration?: string | null;
+  /** High-water/discard counters span this canvas slot, including producer changes. */
+  inputQueueHighWater?: number;
+  decoderQueueHighWater?: number;
+  inputQueueDiscarded?: number;
   fed: number;
   output: number;
   closes: number;
@@ -215,6 +232,22 @@ let exportId = 1;
 let reconnectTimer: ReturnType<typeof setTimeout> | null = null;
 let reconnectDelayMs = VIEW_RECONNECT_MIN_MS;
 let connecting = false;
+const clientStartedAt = performance.now();
+let socketOpenedAt: number | null = null;
+let lastSocketMessageAt: number | null = null;
+const clientCounters = {
+  connectionAttempts: 0,
+  connectionFailures: 0,
+  socketOpens: 0,
+  socketCloses: 0,
+  socketErrors: 0,
+  reconnectSchedules: 0,
+  receivedPackets: 0,
+  receivedBytes: 0,
+  workerStarts: 0,
+  workerErrors: 0,
+  workerRetirements: 0,
+};
 
 function emit(udid: string) {
   const set = listeners.get(udid);
@@ -225,6 +258,7 @@ function emit(udid: string) {
 function retireWorker(reason: string) {
   const previous = worker;
   worker = null;
+  if (previous) clientCounters.workerRetirements += 1;
   previous?.terminate();
   failPendingExports(reason);
   const affected = new Set([...sizes.keys(), ...live, ...decodeFailed]);
@@ -256,6 +290,7 @@ function ensureWorker(): Worker | null {
   if (typeof Worker === "undefined") return null;
   try {
     worker = new Worker(new URL("./viewDecode.worker.ts", import.meta.url), { type: "module" });
+    clientCounters.workerStarts += 1;
   } catch {
     return null;
   }
@@ -270,6 +305,7 @@ function ensureWorker(): Worker | null {
   // handed back the corpse, and each new request joined the ones already stranded.
   worker.onerror = (event) => {
     if (worker !== currentWorker) return;
+    clientCounters.workerErrors += 1;
     const detail = event instanceof ErrorEvent ? event.message : "lỗi không rõ";
     console.error(`viewStore: decode worker died — ${detail}`);
     retireWorker(`worker died: ${detail}`);
@@ -362,6 +398,7 @@ function scheduleReconnect() {
   // Test mode stays a single attempt so Vitest does not leak open timers.
   if (import.meta.env.MODE === "test") return;
   if (reconnectTimer != null) return;
+  clientCounters.reconnectSchedules += 1;
   const delay = reconnectDelayMs;
   reconnectDelayMs = nextViewReconnectDelay(reconnectDelayMs);
   reconnectTimer = setTimeout(() => {
@@ -373,14 +410,17 @@ function scheduleReconnect() {
 async function connectViewSocket() {
   if (connecting) return;
   connecting = true;
+  clientCounters.connectionAttempts += 1;
   try {
     const url = await viewEndpoint();
     if (!url) {
+      clientCounters.connectionFailures += 1;
       scheduleReconnect();
       return;
     }
     connectSocket(url);
   } catch {
+    clientCounters.connectionFailures += 1;
     scheduleReconnect();
   } finally {
     connecting = false;
@@ -393,15 +433,25 @@ function connectSocket(url: string) {
   next.binaryType = "arraybuffer";
   next.onopen = () => {
     if (socket !== next) return;
+    clientCounters.socketOpens += 1;
+    socketOpenedAt = performance.now();
     reconnectDelayMs = VIEW_RECONNECT_MIN_MS;
   };
   next.onmessage = (event) => {
     if (socket !== next) return;
     if (!(event.data instanceof ArrayBuffer)) return;
+    clientCounters.receivedPackets += 1;
+    clientCounters.receivedBytes += event.data.byteLength;
+    lastSocketMessageAt = performance.now();
     ensureWorker()?.postMessage({ type: "packet", buffer: event.data }, [event.data]);
+  };
+  next.onerror = () => {
+    if (socket === next) clientCounters.socketErrors += 1;
   };
   next.onclose = () => {
     if (socket === next) {
+      clientCounters.socketCloses += 1;
+      socketOpenedAt = null;
       socket = null;
       // A cached frame is not evidence of a connected stream. Retire the
       // decoder too so cached bootstrap/frames cannot restore false liveness.
@@ -640,7 +690,40 @@ export function useViewClient() {
   }, []);
 }
 
-/** Local diagnostics for the dev harness; never changes devices or the view lifecycle. */
-export function viewDiagnostics() {
-  return Object.fromEntries([...latestBeat].map(([udid, beat]) => [udid, { ...beat }]));
+export interface ViewDiagnosticsSnapshot {
+  schemaVersion: 1;
+  capturedAtUnixMs: number;
+  client: typeof clientCounters & {
+    uptimeMs: number;
+    workerEpoch: number;
+    socketState: number | null;
+    connectedForMs: number | null;
+    sinceLastSocketMessageMs: number | null;
+  };
+  devices: Record<string, ViewBeat>;
+}
+
+/** Local read-only counters. No endpoint URLs, credentials or device-clock arithmetic. */
+export function viewDiagnostics(): Record<string, ViewBeat>;
+export function viewDiagnostics(options: { includeClient: true }): ViewDiagnosticsSnapshot;
+export function viewDiagnostics(options?: { includeClient: true }): Record<string, ViewBeat> | ViewDiagnosticsSnapshot {
+  const devices = Object.fromEntries([...latestBeat].map(([udid, beat]) => [udid, {
+    ...beat,
+    diag: beat.diag ? { ...beat.diag } : undefined,
+  }]));
+  if (!options?.includeClient) return devices;
+  const now = performance.now();
+  return {
+    schemaVersion: 1,
+    capturedAtUnixMs: Date.now(),
+    client: {
+      ...clientCounters,
+      uptimeMs: Math.max(0, now - clientStartedAt),
+      workerEpoch,
+      socketState: socket?.readyState ?? null,
+      connectedForMs: socketOpenedAt === null ? null : Math.max(0, now - socketOpenedAt),
+      sinceLastSocketMessageMs: lastSocketMessageAt === null ? null : Math.max(0, now - lastSocketMessageAt),
+    },
+    devices,
+  };
 }

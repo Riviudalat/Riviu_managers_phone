@@ -113,12 +113,29 @@ interface Slot {
   resyncRequests: number;
   lastFrame: VideoFrame | ImageBitmap | null;
   paintTimer: ReturnType<typeof setTimeout> | null;
-  frameTimes: Map<number, number>;
+  frameTimes: Map<number, { receivedAt: number; submittedAt: number }>;
   latencies: number[];
+  submitWaits: number[];
+  decodeDurations: number[];
+  inputQueueHighWater: number;
+  decoderQueueHighWater: number;
+  inputQueueDiscarded: number;
 }
 
 /// How often the worker reports what it received versus what it drew.
 const PAINT_BEAT_MS = 1000;
+const TIMING_SAMPLE_LIMIT = 120;
+
+function recordTiming(samples: number[], duration: number) {
+  samples.push(Math.max(0, duration));
+  if (samples.length > TIMING_SAMPLE_LIMIT) samples.shift();
+}
+
+function timingP95(samples: number[] | undefined): number | null {
+  if (!samples?.length) return null;
+  const sorted = samples.slice().sort((a, b) => a - b);
+  return sorted[Math.ceil(sorted.length * 0.95) - 1];
+}
 
 /// Envelopes accepted off the socket per udid, painted frames aside.
 ///
@@ -284,6 +301,7 @@ function closeDecoder(slot: Slot) {
   slot.decoderConfiguredAt = 0;
   slot.feedsSinceConfigure = 0;
   slot.outputsSinceConfigure = 0;
+  slot.frameTimes.clear();
 }
 
 function advanceDecoderAttempt(slot: Slot) {
@@ -310,6 +328,8 @@ function beatPainted(slot: Slot) {
 /// paint path by definition is not running then.
 function emitBeat(udid: string, generation: number, frames: number) {
   const d = DIAG ? diagFor(udid) : undefined;
+  const slot = slots.get(udid);
+  const receiveToOutputP95Ms = timingP95(slot?.latencies);
   postMessage({
     type: "paintBeat",
     udid,
@@ -333,7 +353,20 @@ function emitBeat(udid: string, generation: number, frames: number) {
           genChanges: d.genChanges,
           lastCodec: d.lastCodec,
           lastCandidates: d.lastCandidates,
-          decodeLatencyP95Ms: (() => { const values = slots.get(udid)?.latencies.slice().sort((a, b) => a - b) ?? []; return values.length ? values[Math.ceil(values.length * 0.95) - 1] : null; })(),
+          // Compatibility alias; this includes waiting before decode submission.
+          decodeLatencyP95Ms: receiveToOutputP95Ms,
+          workerReceiveToOutputP95Ms: receiveToOutputP95Ms,
+          workerReceiveToSubmitP95Ms: timingP95(slot?.submitWaits),
+          decodeSubmitToOutputP95Ms: timingP95(slot?.decodeDurations),
+          completedTimingSamples: slot?.latencies.length ?? 0,
+          submittedTimingSamples: slot?.submitWaits.length ?? 0,
+          timingSampleLimit: TIMING_SAMPLE_LIMIT,
+          inputQueueDepth: queued.get(udid)?.length ?? 0,
+          inputQueueHighWater: slot?.inputQueueHighWater ?? 0,
+          decoderQueueDepth: slot?.decoder?.decodeQueueSize ?? null,
+          requestedDecoderAcceleration: slot?.decoder ? ACCELS[slot.accelIndex] : null,
+          decoderQueueHighWater: slot?.decoderQueueHighWater ?? 0,
+          inputQueueDiscarded: slot?.inputQueueDiscarded ?? 0,
         }
       : undefined,
   });
@@ -383,11 +416,12 @@ async function configureDecoder(slot: Slot, codec: string): Promise<VideoDecoder
   const output = (frame: VideoFrame) => {
     if (slots.get(slot.udid) !== slot || slot.generation !== generation) { frame.close(); return; }
     {
-      const receivedAt = slot.frameTimes.get(frame.timestamp);
+      const timing = slot.frameTimes.get(frame.timestamp);
       slot.frameTimes.delete(frame.timestamp);
-      if (receivedAt !== undefined) {
-        slot.latencies.push(performance.now() - receivedAt);
-        if (slot.latencies.length > 120) slot.latencies.shift();
+      if (timing !== undefined) {
+        const now = performance.now();
+        recordTiming(slot.latencies, now - timing.receivedAt);
+        recordTiming(slot.decodeDurations, now - timing.submittedAt);
       }
       const width = frame.displayWidth || frame.codedWidth;
       const height = frame.displayHeight || frame.codedHeight;
@@ -471,7 +505,11 @@ async function handleH264(slot: Slot, envelope: ViewEnvelope) {
     slot.codecCandidates = [];
     slot.needsSync = false;
     slot.resyncRequests = 0;
+    slot.latencies.length = 0;
+    slot.submitWaits.length = 0;
+    slot.decodeDurations.length = 0;
   }
+  slot.decoderQueueHighWater = Math.max(slot.decoderQueueHighWater, slot.decoder?.decodeQueueSize ?? 0);
   paintSize(slot, envelope.width, envelope.height);
   const isSync = annexBIsSyncSample(envelope.payload, envelope.key);
   if (DIAG) {
@@ -615,15 +653,18 @@ async function handleH264(slot: Slot, envelope: ViewEnvelope) {
     prefixed.set(payload, config.length);
     payload = prefixed;
   }
-  slot.frameTimes.set(slot.timestamp, arrivalTimes.get(envelope) ?? performance.now());
+  const chunk = new Chunk({
+    type: isSync ? "key" : "delta",
+    timestamp: slot.timestamp,
+    data: jpegCopy(payload),
+  });
+  const submittedAt = performance.now();
+  const receivedAt = arrivalTimes.get(envelope) ?? submittedAt;
+  recordTiming(slot.submitWaits, submittedAt - receivedAt);
+  slot.frameTimes.set(slot.timestamp, { receivedAt, submittedAt });
   if (slot.frameTimes.size > 64) slot.frameTimes.delete(slot.frameTimes.keys().next().value!);
-  slot.decoder.decode(
-    new Chunk({
-      type: isSync ? "key" : "delta",
-      timestamp: slot.timestamp,
-      data: jpegCopy(payload),
-    }),
-  );
+  slot.decoder.decode(chunk);
+  slot.decoderQueueHighWater = Math.max(slot.decoderQueueHighWater, slot.decoder.decodeQueueSize);
 }
 
 async function handleJpeg(udid: string, slot: Slot, envelope: NonNullable<ReturnType<typeof decodeViewEnvelope>>) {
@@ -667,6 +708,11 @@ self.onmessage = (event: MessageEvent<InMessage>) => {
       paintTimer: null,
       frameTimes: new Map(),
       latencies: [],
+      submitWaits: [],
+      decodeDurations: [],
+      inputQueueHighWater: 0,
+      decoderQueueHighWater: 0,
+      inputQueueDiscarded: 0,
       lastNotifiedW: 0,
       lastNotifiedH: 0,
       lastNotifiedGen: -1,
@@ -775,10 +821,12 @@ self.onmessage = (event: MessageEvent<InMessage>) => {
 function pumpH264(slot: Slot, envelope: ViewEnvelope) {
   const waiting = queued.get(slot.udid) ?? [];
   if (waiting.length >= 16) {
+    slot.inputQueueDiscarded += waiting.length;
     waiting.length = 0;
     requestResync(slot);
   }
   waiting.push(envelope);
+  slot.inputQueueHighWater = Math.max(slot.inputQueueHighWater, waiting.length);
   queued.set(slot.udid, waiting);
   if (decoding.has(slot.udid)) return;
   decoding.add(slot.udid);
