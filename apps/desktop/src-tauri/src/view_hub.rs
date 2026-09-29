@@ -16,7 +16,7 @@ use std::sync::atomic::{AtomicU16, Ordering};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
-use futures_util::SinkExt;
+use futures_util::{SinkExt, StreamExt};
 use parking_lot::Mutex;
 use riviu_android_driver::{ViewKind, ViewPacket, ViewSink};
 use tokio::net::TcpListener;
@@ -616,6 +616,21 @@ async fn serve_client(hub: Arc<ViewHub>, stream: tokio::net::TcpStream) -> anyho
     loop {
         let first = tokio::select! {
             biased;
+            incoming = ws.next() => {
+                match incoming {
+                    Some(Ok(Message::Close(_))) => {
+                        // Reading Close queues its reply; flush it before dropping
+                        // forwarders so the client can reconnect immediately.
+                        ws.flush().await?;
+                        break;
+                    }
+                    Some(Ok(Message::Ping(_))) => ws.flush().await?,
+                    Some(Ok(_)) => {}
+                    Some(Err(error)) => return Err(error.into()),
+                    None => break,
+                }
+                continue;
+            }
             event = rx.recv() => match event {
                 Some(event) => event,
                 // Every forwarder is gone and so is the last sender clone; nothing else can
