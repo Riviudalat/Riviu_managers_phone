@@ -158,6 +158,7 @@ export function collectStalledViews(
     // Never drawn, or no beat at all: starting up, not stalled. Restarting a producer the
     // instant its device appears is how the previous rule made the outage it was reporting.
     if (painted === undefined || now_ === undefined) continue;
+    if (painted.generation !== now_.generation) continue;
     if (now - painted.at <= stallMs) continue;
     // The whole point: only a stream whose packets kept coming is broken. A static screen
     // stops producing packets too, and restarting it fixes nothing while costing ~45 s.
@@ -182,7 +183,8 @@ export function collectPaintReports(
 ): ViewPaintReport[] {
   const reports: ViewPaintReport[] = [];
   for (const [udid, beat] of latest) {
-    const painted = lastPaint.get(udid);
+    const recorded = lastPaint.get(udid);
+    const painted = recorded?.generation === beat.generation ? recorded : undefined;
     reports.push({
       udid,
       generation: beat.generation,
@@ -205,6 +207,8 @@ export function nextViewReconnectDelay(currentMs: number): number {
 }
 
 let worker: Worker | null = null;
+let workerEpoch = 0;
+const workerListeners = new Set<Listener>();
 let socket: WebSocket | null = null;
 let started = false;
 let exportId = 1;
@@ -218,6 +222,35 @@ function emit(udid: string) {
   for (const listener of set) listener();
 }
 
+function retireWorker(reason: string) {
+  const previous = worker;
+  worker = null;
+  previous?.terminate();
+  failPendingExports(reason);
+  const affected = new Set([...sizes.keys(), ...live, ...decodeFailed]);
+  sizes.clear();
+  live.clear();
+  decodeFailed.clear();
+  lastPaintBeat.clear();
+  latestBeat.clear();
+  for (const udid of affected) emit(udid);
+  // Transferred canvases cannot be transferred again. Mounted surfaces must
+  // create fresh canvases for the replacement worker.
+  workerEpoch++;
+  for (const listener of workerListeners) listener();
+}
+
+export function useViewWorkerEpoch(): number {
+  return useSyncExternalStore(
+    (listener) => {
+      workerListeners.add(listener);
+      return () => { workerListeners.delete(listener); };
+    },
+    () => workerEpoch,
+    () => 0,
+  );
+}
+
 function ensureWorker(): Worker | null {
   if (worker) return worker;
   if (typeof Worker === "undefined") return null;
@@ -226,6 +259,7 @@ function ensureWorker(): Worker | null {
   } catch {
     return null;
   }
+  const currentWorker = worker;
   // The worker's own `import.meta.env.DEV` came back false under this build, so its
   // diagnostics never printed. Read the flag here, where it demonstrably works, and tell the
   // worker.
@@ -235,17 +269,18 @@ function ensureWorker(): Worker | null {
   // there was no `onerror` at all, so the worker stayed assigned, every later `ensureWorker`
   // handed back the corpse, and each new request joined the ones already stranded.
   worker.onerror = (event) => {
+    if (worker !== currentWorker) return;
     const detail = event instanceof ErrorEvent ? event.message : "lỗi không rõ";
     console.error(`viewStore: decode worker died — ${detail}`);
-    failPendingExports(`worker died: ${detail}`);
-    // Drop it so the next call builds a fresh one instead of posting into the corpse.
-    worker = null;
+    retireWorker(`worker died: ${detail}`);
   };
   worker.onmessageerror = () => {
+    if (worker !== currentWorker) return;
     failPendingExports("worker sent a message that could not be deserialised");
   };
   worker.postMessage({ type: "diag", enabled: true });
   worker.onmessage = (event: MessageEvent<{ type: string; udid?: string; width?: number; height?: number; generation?: number; requestId?: number; bytes?: Uint8Array | null; frames?: number; received?: number; diag?: ViewDiag; codecs?: string[]; codec?: string; accel?: number; candidate?: number; errorMessage?: string }>) => {
+    if (worker !== currentWorker) return;
     const message = event.data;
     if (message.type === "requestKeyframe" && message.udid) {
       void viewRequestKeyframe(message.udid).catch(error => console.warn("view resync request failed", error));
@@ -279,7 +314,12 @@ function ensureWorker(): Worker | null {
       };
       const previous = lastPaintBeat.get(message.udid);
       latestBeat.set(message.udid, beat);
-      if (previous === undefined || beat.frames > previous.frames) {
+      if (previous && previous.generation !== beat.generation && beat.frames <= previous.frames) {
+        const hadSize = sizes.delete(message.udid);
+        const wasLive = live.delete(message.udid);
+        if (hadSize || wasLive) emit(message.udid);
+      }
+      if (beat.frames > (previous?.frames ?? 0)) {
         // A frame was genuinely drawn since the last check.
         lastPaintBeat.set(message.udid, beat);
         // Painting again is what makes a view live again. Only the `painted` message used to
@@ -352,15 +392,20 @@ function connectSocket(url: string) {
   const next = new WebSocket(url);
   next.binaryType = "arraybuffer";
   next.onopen = () => {
+    if (socket !== next) return;
     reconnectDelayMs = VIEW_RECONNECT_MIN_MS;
   };
   next.onmessage = (event) => {
+    if (socket !== next) return;
     if (!(event.data instanceof ArrayBuffer)) return;
     ensureWorker()?.postMessage({ type: "packet", buffer: event.data }, [event.data]);
   };
   next.onclose = () => {
     if (socket === next) {
       socket = null;
+      // A cached frame is not evidence of a connected stream. Retire the
+      // decoder too so cached bootstrap/frames cannot restore false liveness.
+      retireWorker("view socket disconnected");
       scheduleReconnect();
     }
   };

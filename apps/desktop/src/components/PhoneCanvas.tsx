@@ -1,5 +1,5 @@
 import { useEffect, useRef } from "react";
-import { attachViewCanvas, detachViewCanvas } from "../viewStore";
+import { attachViewCanvas, detachViewCanvas, useViewWorkerEpoch } from "../viewStore";
 
 interface Props {
   udid: string;
@@ -29,6 +29,7 @@ function canvasClassName(fill: boolean | undefined, className: string | undefine
  * rather than rebuilt with it.
  */
 export function PhoneCanvas({ udid, surfaceId, className, fill }: Props) {
+  const workerEpoch = useViewWorkerEpoch();
   const hostRef = useRef<HTMLDivElement>(null);
   const canvasRef = useRef<HTMLCanvasElement | null>(null);
   // The current appearance, readable from the identity effect without becoming one of its
@@ -65,9 +66,9 @@ export function PhoneCanvas({ udid, surfaceId, className, fill }: Props) {
       detachViewCanvas(udid, surfaceId);
       forget();
     };
-    // Identity only. A canvas belongs to one device and one surface; everything else about
-    // it is appearance, and appearance is not a reason to throw a decoder away.
-  }, [surfaceId, udid]);
+    // Device/surface identity and worker replacement require a new transferable canvas.
+    // Appearance changes still leave the decoder and canvas intact.
+  }, [surfaceId, udid, workerEpoch]);
 
   // Runs on mount too, so the canvas is never briefly unstyled.
   useEffect(() => {

@@ -925,7 +925,7 @@ impl AppState {
         let artifacts_dir = data.join("artifacts");
         std::fs::create_dir_all(&artifacts_dir)?;
 
-        let (sidecar_root, sidecar_origin) = resolve_sidecar_root(resource_dir.as_deref());
+        let (sidecar_root, sidecar_origin) = resolve_sidecar_root(resource_dir.as_deref())?;
         let credentials = CredentialStore::system()?;
         // The database gets somewhere to put secrets that is not the SQLite file. Opened after
         // the credential store precisely so it can be handed one: the AI API key used to sit in
@@ -2859,13 +2859,21 @@ fn set_stream_state(
     }
 }
 
-fn resolve_sidecar_root(resource_dir: Option<&Path>) -> (PathBuf, SidecarOrigin) {
+fn resolve_sidecar_root(resource_dir: Option<&Path>) -> anyhow::Result<(PathBuf, SidecarOrigin)> {
+    if !cfg!(debug_assertions) {
+        let resource_dir = resource_dir.context(
+            "Không xác định được thư mục tài nguyên của bản cài. Cài lại Riviu Manager.",
+        )?;
+        // Missing resources remain an installed-bundle fault. Never fall back to
+        // the build machine's checkout or an inherited developer override.
+        return Ok((resource_dir.join("sidecars"), SidecarOrigin::Packaged));
+    }
     let configured = std::env::var_os("RIVIU_SIDECAR_ROOT").map(PathBuf::from);
-    resolve_sidecar_root_from(
+    Ok(resolve_sidecar_root_from(
         configured,
         resource_dir,
         Path::new(env!("CARGO_MANIFEST_DIR")),
-    )
+    ))
 }
 
 /// Where the sidecars are, **and which of the three worlds we are in.**

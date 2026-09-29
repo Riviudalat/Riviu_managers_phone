@@ -1247,8 +1247,8 @@ impl AndroidDriver {
     /// *exists* — so a broken adb earlier in the order would win over the working one
     /// the probe just found.
     fn with_adb(adb: AdbProgram, adb_origin: adb::AdbOrigin, config: &AndroidDriverConfig) -> Self {
-        // config -> env -> bundled. The bundled path is last so neither override is
-        // taken away by the act of shipping a copy; see `AndroidDriverConfig`.
+        // Development keeps config -> env -> bundled. Release selects only the
+        // manifest-verified bundled paths below, matching the ADB trust policy.
         let minicap_apk = config
             .minicap_apk
             .clone()
@@ -1289,6 +1289,19 @@ impl AndroidDriver {
             std::env::var("RIVIU_AGENT_TEST_APK").ok(),
             config.bundled_agent_test_apk.clone(),
         ));
+        let (minicap_apk, scrcpy_server, riviu_agent_apk, agent_apks) = if cfg!(debug_assertions) {
+            (minicap_apk, scrcpy_server, riviu_agent_apk, agent_apks)
+        } else {
+            (
+                config.bundled_minicap_apk.clone(),
+                config.bundled_scrcpy_server.clone(),
+                config.bundled_riviu_agent_apk.clone(),
+                config
+                    .bundled_agent_server_apk
+                    .clone()
+                    .zip(config.bundled_agent_test_apk.clone()),
+            )
+        };
         Self {
             adb,
             adb_origin,
