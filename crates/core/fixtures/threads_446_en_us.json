@@ -1,0 +1,24 @@
+{
+  "package": "com.instagram.barcelona",
+  "version": "446.0.0.32.78",
+  "locale": "en-US",
+  "deviceClass": "Android 9, 1080x2220",
+  "states": {
+    "home": ["barcelona_tab_create", "barcelona_tab_main_feed"],
+    "composer": ["navigation_bar_back_button", "new_thread_screen_gallery_button", "new_thread_screen_post_button"],
+    "galleryLoaded": ["com.instagram.barcelona:id/gallery_picker_grid_item_container", "Photo thumbnail", "Done"],
+    "importAlbum": ["Select album", "riviu-<import-id>", "Photo thumbnail"],
+    "selected": ["1 of 0 selected. Photo thumbnail", "Done"],
+    "beforeSend": ["android.widget.EditText", "new_thread_screen_post_button"],
+    "ownProfile": ["feed_post_ufi_share_button", "barcelona_tab_create"],
+    "shareSheet": ["post_share_sheet_copy_link_button", "Link"]
+  },
+  "observed": {
+    "importAlbumPhotoCount": 1,
+    "selectedPhotoCount": 1,
+    "clipboardLinkForm": "https://www.threads.com/share/<share-id>/",
+    "redirectForm": "https://www.threads.com/@<account>/post/<post-id>?<tracking>",
+    "afterNewSendMeasured": false,
+    "publicPostDispatched": false
+  }
+}
