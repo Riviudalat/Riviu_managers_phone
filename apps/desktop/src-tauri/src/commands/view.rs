@@ -3,6 +3,68 @@
 
 use super::*;
 
+// A short grace avoids replacing an overlay encoder merely because its window
+// was closed and immediately reopened. Two seconds is a bounded tuning choice,
+// not a measured optimum; no grace is applied to opening the overlay.
+const VIEW_DOWNSHIFT_GRACE: std::time::Duration = std::time::Duration::from_secs(2);
+static PRESET_REQUESTS: std::sync::LazyLock<
+    parking_lot::Mutex<std::collections::HashMap<String, std::sync::Arc<()>>>,
+> = std::sync::LazyLock::new(|| parking_lot::Mutex::new(std::collections::HashMap::new()));
+
+struct PresetRequest {
+    udid: String,
+    token: std::sync::Arc<()>,
+}
+
+impl PresetRequest {
+    fn new(udid: &str) -> Self {
+        let token = std::sync::Arc::new(());
+        PRESET_REQUESTS
+            .lock()
+            .insert(udid.to_owned(), token.clone());
+        Self {
+            udid: udid.to_owned(),
+            token,
+        }
+    }
+
+    fn current(&self) -> bool {
+        PRESET_REQUESTS
+            .lock()
+            .get(&self.udid)
+            .is_some_and(|token| std::sync::Arc::ptr_eq(token, &self.token))
+    }
+
+    fn publish(
+        &self,
+        android: &riviu_android_driver::AndroidDriver,
+        preset: riviu_android_driver::ViewPreset,
+    ) -> bool {
+        let requests = PRESET_REQUESTS.lock();
+        if !requests
+            .get(&self.udid)
+            .is_some_and(|token| std::sync::Arc::ptr_eq(token, &self.token))
+        {
+            return false;
+        }
+        // Publish under the request lock, but never hold that lock over await.
+        android.request_view_preset(&self.udid, preset);
+        true
+    }
+}
+
+impl Drop for PresetRequest {
+    fn drop(&mut self) {
+        let mut requests = PRESET_REQUESTS.lock();
+        if requests
+            .get(&self.udid)
+            .is_some_and(|token| std::sync::Arc::ptr_eq(token, &self.token))
+        {
+            requests.remove(&self.udid);
+        }
+    }
+}
+
 #[tauri::command]
 pub fn get_stream_settings(state: State<'_, AppState>) -> StreamSettings {
     state.stream_settings.read().clone()
@@ -372,6 +434,20 @@ pub async fn view_set_preset(
         "overlay" => riviu_android_driver::ViewPreset::Overlay,
         _ => riviu_android_driver::ViewPreset::Tile,
     };
+    let request = PresetRequest::new(&udid);
+    if preset == riviu_android_driver::ViewPreset::Tile
+        && android.desired_view_preset(&udid) == riviu_android_driver::ViewPreset::Overlay
+    {
+        // Keep desired Overlay during the grace so the existing keeper cannot
+        // bypass it. The command owns this bounded wait; no detached task survives.
+        tokio::time::sleep(VIEW_DOWNSHIFT_GRACE).await;
+        if !request.current() {
+            return Ok(());
+        }
+    }
+    // Shutdown may have begun while downshift was waiting. Never start a late
+    // retune after admission has closed.
+    let _retune_admission = state.ensure_accepting_work()?;
     // A retune restarts the same producer, so it costs the adb server exactly what a
     // recovery costs and it belongs under the same ceiling. It uses the operator lane
     // because it *is* an operator action — opening or closing an overlay — and that lane has
@@ -381,16 +457,19 @@ pub async fn view_set_preset(
     // A refusal here is not the end of it. The keeper reconciles toward
     // `desired_view_preset` on its own tick, which is what makes this safe to refuse at all;
     // `set_view_preset` records the desire before it does any work.
-    android.request_view_preset(&udid, preset);
+    if !request.publish(android, preset) {
+        return Ok(());
+    }
     let frames = state
         .view_paint
         .sample(&udid)
         .map(|report| report.frames)
         .unwrap_or(0);
     let permit = state.view_recovery.admit_operator(&udid, frames).await?;
-    if android.desired_view_preset(&udid) != preset {
+    if !request.current() || android.desired_view_preset(&udid) != preset {
         return Ok(()); // A newer open/close/switch won while this call waited for a permit.
     }
+    let _start_admission = state.ensure_accepting_work()?;
     let outcome = android
         .set_view_preset(&udid, preset)
         .await
