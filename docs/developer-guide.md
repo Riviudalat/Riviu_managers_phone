@@ -634,6 +634,10 @@ các đường còn lại giữ `:id/tv_post_time`. Caption đúng và nhãn ph�
 chờ ngay trên bài tối đa65giây tới cửa sổ phân biệt được thời điểm; đọc lại cả
 caption/thời gian sau chờ, không nới điều kiện interval-after-submission. Phép đọc phải có đúng một nhãn thời gian
 và caption hợp lệ; đổi ID không nới khoảng thời gian hoặc nhận caption của bài cũ.
+Global45.7.3/en có caption rút gọn kết thúc bằng ellipsis rồi U+2060 (WORD JOINER).
+Verifier chỉ bỏ đúng một U+2060 cuối sau `…` khi xét prefix để mở rộng caption;
+không bỏ ký tự trong caption đầy đủ, không dùng prefix làm proof và không áp sang
+build khác. Sau mở rộng vẫn đọc caption đầy đủ và giữ proof tài khoản/thời gian/link.
 Hồ sơ Global46.2.1/en dùng chung `:id/cover` cho bài đăng và bản nháp. Khi lấy link,
 đọc badge nháp `:id/zq_`, loại cover chứa badge trước khi chọn ứng viên. Lỗi đọc
 badge phải dừng trước tap cover; mở nháp rồi Back không bảo đảm quay về lưới hồ sơ.

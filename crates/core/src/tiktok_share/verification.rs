@@ -983,7 +983,19 @@ impl Capture<'_> {
             // A short ellipsized prefix authorizes ONLY opening the caption.
             // Trill S8 38.3.2 (14/09) truncates at ~55 chars, below the legacy
             // 64-char matching threshold. Full text equality is still required.
-            let expansion_prefix = normalize(visible);
+            // Global45.7.3/en, measured own-photo desc: TikTok places one
+            // WORD JOINER after the ellipsis. Remove it only for expansion
+            // admission; full caption equality above retains every character.
+            let expansion_visible = if self.plan.labels.package() == "com.zhiliaoapp.musically"
+                && self.plan.labels.resource_version() == Some("45.7.3")
+                && self.plan.labels.language() == "en"
+                && visible.ends_with("…\u{2060}")
+            {
+                visible.strip_suffix('\u{2060}').unwrap_or(visible)
+            } else {
+                visible
+            };
+            let expansion_prefix = normalize(expansion_visible);
             let short_prefix = ["...", "…"]
                 .iter()
                 .find_map(|suffix| expansion_prefix.strip_suffix(suffix))
@@ -992,7 +1004,7 @@ impl Capture<'_> {
                     prefix.chars().count() >= 20 && normalize(self.caption).starts_with(prefix)
                 });
             return Err(
-                if visible_caption_matches(visible, self.caption) || short_prefix {
+                if visible_caption_matches(expansion_visible, self.caption) || short_prefix {
                     VerificationReason::CaptionTruncated
                 } else {
                     VerificationReason::CaptionMismatch
