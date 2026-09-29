@@ -110,6 +110,42 @@ impl Database {
     }
 }
 
+#[cfg(test)]
+mod threads_canary_tests {
+    use super::*;
+
+    #[test]
+    fn post_claim_survives_restart_and_cannot_be_replayed() {
+        let path = std::env::temp_dir().join(format!("threads-canary-{}.db", Uuid::new_v4()));
+        let key = "threads.canary.intent.phone.bundle";
+        let intent = serde_json::json!({"state":"unknown","bundleId":"bundle"}).to_string();
+        let db = Database::open(&path).unwrap();
+        assert!(db.claim_threads_canary_post(key, &intent).unwrap());
+        assert!(!db.claim_threads_canary_post(key, &intent).unwrap());
+        drop(db);
+        let reopened = Database::open(&path).unwrap();
+        assert!(!reopened.claim_threads_canary_post(key, &intent).unwrap());
+        assert!(reopened
+            .verify_threads_canary_post(key, "https://www.threads.com/@example/post/Abc12345678")
+            .unwrap());
+        assert!(reopened
+            .verify_threads_canary_post(key, "https://www.threads.com/@example/post/Abc12345678")
+            .unwrap());
+        assert!(!reopened
+            .verify_threads_canary_post(key, "https://www.threads.com/@example/post/Other123456")
+            .unwrap());
+        let saved: serde_json::Value =
+            serde_json::from_str(&reopened.get_setting(key).unwrap().unwrap()).unwrap();
+        assert_eq!(saved["state"], "verified");
+        assert_eq!(
+            saved["permalink"],
+            "https://www.threads.com/@example/post/Abc12345678"
+        );
+        drop(reopened);
+        let _ = std::fs::remove_file(path);
+    }
+}
+
 fn save_job_on(conn: &Connection, job: &JobRecord) -> anyhow::Result<()> {
     conn.execute(
             r#"
@@ -236,6 +272,46 @@ impl Database {
         } else {
             Ok(None)
         }
+    }
+
+    /// A canary's public Post can be claimed once, including across process restarts.
+    /// A failed or timed-out tap remains claimed until a human reconciles the post.
+    pub fn claim_threads_canary_post(&self, key: &str, intent_json: &str) -> anyhow::Result<bool> {
+        anyhow::ensure!(
+            key.starts_with("threads.canary.intent."),
+            "invalid Threads canary key"
+        );
+        let conn = self.conn()?;
+        Ok(conn.execute(
+            "INSERT OR IGNORE INTO settings (key, value) VALUES (?1, ?2)",
+            params![key, intent_json],
+        )? == 1)
+    }
+
+    pub fn verify_threads_canary_post(&self, key: &str, permalink: &str) -> anyhow::Result<bool> {
+        anyhow::ensure!(
+            key.starts_with("threads.canary.intent."),
+            "invalid Threads canary key"
+        );
+        let conn = self.conn()?;
+        if conn.execute(
+            "UPDATE settings SET value=json_set(value, '$.state', 'verified', '$.permalink', ?2)
+             WHERE key=?1 AND json_extract(value, '$.state')='unknown'",
+            params![key, permalink],
+        )? == 1
+        {
+            return Ok(true);
+        }
+        let saved: Option<String> = conn
+            .query_row(
+                "SELECT value FROM settings WHERE key=?1",
+                params![key],
+                |row| row.get(0),
+            )
+            .optional()?;
+        Ok(saved
+            .and_then(|value| serde_json::from_str::<serde_json::Value>(&value).ok())
+            .is_some_and(|value| value["state"] == "verified" && value["permalink"] == permalink))
     }
     pub fn log_op(&self, action: &str, detail: &str) -> anyhow::Result<()> {
         let conn = self.conn()?;

@@ -338,6 +338,299 @@ pub async fn import_media(
     import_one_media(&state, &udid, &path).await
 }
 
+/// Import exactly one scanned post bundle into one device album for Threads calibration.
+/// The production publish transfer uses the same stage/prepare/import control plane.
+#[tauri::command]
+pub async fn import_publish_bundle(
+    state: State<'_, AppState>,
+    udid: String,
+    source_root: String,
+    bundle_id: String,
+) -> Result<serde_json::Value, CommandError> {
+    let _admission = state.ensure_accepting_work()?;
+    let manifest = riviu_core::scan_publish_folder(
+        PathBuf::from(&source_root),
+        riviu_core::PublishScanOptions::default(),
+    )
+    .map_err(CommandError::operation)?;
+    let bundle = manifest
+        .bundles
+        .iter()
+        .find(|bundle| bundle.id == bundle_id)
+        .ok_or_else(|| CommandError::invalid_argument("bundle khong co trong thu muc nguon"))?;
+    if bundle.media_kind != riviu_core::PublishMediaKind::Image || bundle.images.is_empty() {
+        return Err(CommandError::invalid_argument("bundle Threads can anh"));
+    }
+    riviu_core::threads_publish::validate_caption(&bundle.caption)
+        .map_err(CommandError::operation)?;
+
+    let campaign_id = uuid::Uuid::new_v4().to_string();
+    let staged = state
+        .artifacts_dir
+        .join("import-staging")
+        .join(&udid)
+        .join(&campaign_id);
+    riviu_core::copy_bundle_to_managed(bundle, &staged.join(&bundle.id))
+        .map_err(CommandError::operation)?;
+    let context = state
+        .device_lease(&udid, DeviceWorkOwner::ManualControl, LeaseStream::Keep)
+        .await?;
+    let stage = state
+        .control
+        .stage_publish_media(
+            &context,
+            &state.active_agent_bundle_id,
+            &campaign_id,
+            &staged,
+        )
+        .await
+        .map_err(CommandError::from)?;
+    let manifest_sha256 = stage
+        .get("manifestSha256")
+        .and_then(serde_json::Value::as_str)
+        .ok_or_else(|| CommandError::operation("media stage thieu manifestSha256"))?;
+    let prepared = state
+        .control
+        .prepare_publish_media(&context, &campaign_id, manifest_sha256)
+        .await
+        .map_err(CommandError::from)?;
+    let imported = state
+        .control
+        .import_publish_media(&context, &campaign_id, manifest_sha256)
+        .await
+        .map_err(CommandError::from)?;
+    let _ = std::fs::remove_dir_all(staged);
+    Ok(serde_json::json!({
+        "udid": udid,
+        "bundleId": bundle.id,
+        "imageSha256": bundle.images.iter().map(|image| image.sha256.as_str()).collect::<Vec<_>>(),
+        "mediaStage": stage,
+        "nativePrepare": prepared,
+        "nativeImport": imported,
+    }))
+}
+
+/// Development canary for one already prepared Threads composer. A durable claim is
+/// written before Post; an ambiguous result can only be reconciled, never replayed.
+#[cfg(debug_assertions)]
+#[tauri::command]
+pub async fn threads_submit_prepared_canary(
+    state: State<'_, AppState>,
+    udid: String,
+    source_root: String,
+    bundle_id: String,
+    expected_account: String,
+    selected_photo_count: usize,
+) -> Result<serde_json::Value, CommandError> {
+    let _admission = state.ensure_accepting_work()?;
+    let expected = riviu_core::threads_publish::normalize_threads_account(&expected_account)
+        .map_err(CommandError::operation)?;
+    let manifest = riviu_core::scan_publish_folder(
+        PathBuf::from(source_root),
+        riviu_core::PublishScanOptions::default(),
+    )
+    .map_err(CommandError::operation)?;
+    let bundle = manifest
+        .bundles
+        .iter()
+        .find(|bundle| bundle.id == bundle_id)
+        .ok_or_else(|| CommandError::invalid_argument("bundle Threads khong ton tai"))?;
+    riviu_core::threads_publish::validate_caption(&bundle.caption)
+        .map_err(CommandError::operation)?;
+    if bundle.images.len() != selected_photo_count || bundle.video.is_some() {
+        return Err(CommandError::invalid_argument(
+            "so anh da chon khong khop bundle",
+        ));
+    }
+    let (package, version, locale) = state
+        .control
+        .threads_build(&udid)
+        .await
+        .map_err(CommandError::from)?;
+    if package != riviu_core::threads_publish::ANDROID_PACKAGE
+        || version != "446.0.0.32.78"
+        || !matches!(locale.as_str(), "en" | "en-US")
+    {
+        return Err(CommandError::invalid_argument(
+            "Threads build/locale chua duoc do",
+        ));
+    }
+    let key = format!("threads.canary.intent.{udid}.{bundle_id}");
+    let db = state.db.clone();
+    let canary_udid = udid.clone();
+    let caption = bundle.caption.clone();
+    let caption_sha256 = bundle.caption_sha256.clone();
+    let result = with_manual_session(&state, &udid, DeviceWorkOwner::ManualControl, move |session| async move {
+        anyhow::ensure!(session.active_app_bundle().await? == package, "Threads is not foreground");
+        let snapshot = session.hierarchy_source_snapshot().await?;
+        let tree = riviu_core::ui_automation::tree::Tree::parse(snapshot)?;
+        let caption_fields = tree.nodes.iter().filter(|node| node.attr("resource-id") == "new_thread_screen_composer" && node.attr("class") == "android.widget.EditText").collect::<Vec<_>>();
+        anyhow::ensure!(caption_fields.len() == 1 && caption_fields[0].attr("text") == caption, "Threads caption readback differs");
+        let account_label = format!("{expected} ");
+        anyhow::ensure!(tree.nodes.iter().any(|node| node.attr("content-desc") == account_label), "Threads composer account differs");
+        let post_buttons = tree.nodes.iter().filter(|node| node.attr("resource-id") == "new_thread_screen_post_button" && node.attr("enabled") == "true").collect::<Vec<_>>();
+        anyhow::ensure!(post_buttons.len() == 1, "Threads Post is not uniquely armed");
+        let rect = post_buttons[0].rect().ok_or_else(|| anyhow::anyhow!("Threads Post has no bounds"))?;
+        let intent = serde_json::json!({
+            "network":"threads", "udid":canary_udid, "bundleId":bundle_id,
+            "expectedAccount":expected, "captionSha256":caption_sha256,
+            "selectedPhotoCount":selected_photo_count, "package":package,
+            "version":version, "locale":locale,
+            "claimedAt":chrono::Utc::now().to_rfc3339(), "state":"unknown"
+        });
+        anyhow::ensure!(db.claim_threads_canary_post(&key, &intent.to_string())?, "Threads canary already claimed; reconcile before any retry");
+        session.tap(rect.centre()).await?;
+        tokio::time::sleep(std::time::Duration::from_secs(3)).await;
+        let after = session.hierarchy_source_snapshot().await?;
+        let after_tree = riviu_core::ui_automation::tree::Tree::parse(after)?;
+        let composer_still_open = after_tree.nodes.iter().any(|node| node.attr("resource-id") == "new_thread_screen_post_button");
+        Ok(serde_json::json!({"state":"unknown","intentKey":key,"composerStillOpen":composer_still_open}))
+    }).await?;
+    Ok(result)
+}
+
+#[cfg(debug_assertions)]
+#[tauri::command]
+pub async fn threads_reconcile_canary(
+    state: State<'_, AppState>,
+    udid: String,
+    source_root: String,
+    bundle_id: String,
+    expected_account: String,
+    share_url: String,
+) -> Result<serde_json::Value, CommandError> {
+    let _admission = state.ensure_accepting_work()?;
+    let expected = riviu_core::threads_publish::normalize_threads_account(&expected_account)
+        .map_err(CommandError::operation)?;
+    let key = format!("threads.canary.intent.{udid}.{bundle_id}");
+    let raw_intent = state
+        .db
+        .get_setting(&key)
+        .map_err(CommandError::operation)?
+        .ok_or_else(|| CommandError::invalid_argument("Threads canary intent khong ton tai"))?;
+    let intent: serde_json::Value =
+        serde_json::from_str(&raw_intent).map_err(CommandError::operation)?;
+    if intent["expectedAccount"] != expected || intent["bundleId"] != bundle_id {
+        return Err(CommandError::invalid_argument(
+            "Threads canary identity differs",
+        ));
+    }
+    let manifest = riviu_core::scan_publish_folder(
+        PathBuf::from(source_root),
+        riviu_core::PublishScanOptions::default(),
+    )
+    .map_err(CommandError::operation)?;
+    let bundle = manifest
+        .bundles
+        .iter()
+        .find(|bundle| bundle.id == bundle_id)
+        .ok_or_else(|| CommandError::invalid_argument("bundle Threads khong ton tai"))?;
+    if intent["captionSha256"] != bundle.caption_sha256 {
+        return Err(CommandError::invalid_argument(
+            "Threads caption changed after Post",
+        ));
+    }
+    let normalized_caption = bundle
+        .caption
+        .split_whitespace()
+        .collect::<Vec<_>>()
+        .join(" ");
+    let profile_account = expected.clone();
+    with_manual_session(
+        &state,
+        &udid,
+        DeviceWorkOwner::ManualControl,
+        move |session| async move {
+            anyhow::ensure!(
+                session.active_app_bundle().await? == riviu_core::threads_publish::ANDROID_PACKAGE,
+                "Threads is not foreground"
+            );
+            let tree = riviu_core::ui_automation::tree::Tree::parse(
+                session.hierarchy_source_snapshot().await?,
+            )?;
+            anyhow::ensure!(
+                tree.nodes
+                    .iter()
+                    .any(|node| node.attr("resource-id") == "barcelona_tab_profile"
+                        && node.attr("selected") == "true"),
+                "Threads own profile tab not selected"
+            );
+            anyhow::ensure!(
+                tree.nodes
+                    .iter()
+                    .any(|node| node.attr("content-desc") == format!("{profile_account} posted")),
+                "Threads new post author differs"
+            );
+            anyhow::ensure!(
+                tree.nodes.iter().any(|node| node
+                    .attr("text")
+                    .split_whitespace()
+                    .collect::<Vec<_>>()
+                    .join(" ")
+                    == normalized_caption),
+                "Threads new post caption differs"
+            );
+            Ok(())
+        },
+    )
+    .await?;
+    let parsed = reqwest::Url::parse(&share_url).map_err(CommandError::operation)?;
+    let permalink = if !parsed.path().starts_with("/share/") {
+        riviu_core::threads_publish::canonical_post_permalink(parsed.as_str(), &expected)
+            .map_err(CommandError::operation)?
+    } else {
+        if parsed.scheme() != "https"
+            || parsed.host_str() != Some("www.threads.com")
+            || !parsed.path().starts_with("/share/")
+        {
+            return Err(CommandError::invalid_argument("Threads share URL invalid"));
+        }
+        let client = reqwest::Client::builder()
+            .redirect(reqwest::redirect::Policy::none())
+            .build()
+            .map_err(CommandError::operation)?;
+        let response = client
+            .head(parsed)
+            .send()
+            .await
+            .map_err(CommandError::operation)?;
+        if !response.status().is_redirection() {
+            return Err(CommandError::operation(format!(
+                "Threads share expected a redirect: {}",
+                response.status()
+            )));
+        }
+        let location = response
+            .headers()
+            .get(reqwest::header::LOCATION)
+            .ok_or_else(|| {
+                CommandError::invalid_argument("Threads share redirect has no location")
+            })?
+            .to_str()
+            .map_err(CommandError::operation)?;
+        let redirected = response
+            .url()
+            .join(location)
+            .map_err(CommandError::operation)?;
+        let permalink =
+            riviu_core::threads_publish::canonical_post_permalink(redirected.as_str(), &expected)
+                .map_err(CommandError::operation)?;
+        permalink
+    };
+    if !state
+        .db
+        .verify_threads_canary_post(&key, &permalink)
+        .map_err(CommandError::operation)?
+    {
+        return Err(CommandError::invalid_argument(
+            "Threads canary already reconciled",
+        ));
+    }
+    Ok(
+        serde_json::json!({"state":"verified","permalink":permalink,"bundleId":bundle_id,"udid":udid}),
+    )
+}
+
 /// Push a *different* file into each selected phone's gallery (xiaowei "File Distribution").
 /// Same per-device batch shape as `group_input`/`distribute_text`: a phone that fails is
 /// recorded and the run carries on, never aborting the batch.
