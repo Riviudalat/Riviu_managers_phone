@@ -976,24 +976,20 @@ impl UiSession for AndroidUiSession {
         let ids = self.agent.find_all(&locator).await?;
         let mut found = Vec::with_capacity(ids.len());
         for id in ids {
-            // One stale element in a scrolling list must not lose the others: the
-            // list can move between the find and the rect read.
-            match self.agent.rect(&id).await {
-                Ok(rect) => found.push(riviu_core::ElementBox {
-                    x: rect.x,
-                    y: rect.y,
-                    width: rect.width,
-                    height: rect.height,
-                    description: None,
-                    enabled: true,
-                    // Constant, like `enabled` above, and for the same reason: this
-                    // path reads no attributes. `false` is the refusing direction.
-                    clickable: false,
-                }),
-                Err(error) => {
-                    tracing::debug!(%error, "skipping an element whose rect could not be read")
-                }
-            }
+            // This result has no partial marker. A failed read (including a stale
+            // reference) cannot silently remove a row and prove it absent.
+            let rect = self.agent.rect(&id).await?;
+            found.push(riviu_core::ElementBox {
+                x: rect.x,
+                y: rect.y,
+                width: rect.width,
+                height: rect.height,
+                description: None,
+                enabled: true,
+                // Constant, like `enabled` above, and for the same reason: this
+                // path reads no attributes. `false` is the refusing direction.
+                clickable: false,
+            });
         }
         Ok(found)
     }
@@ -1010,10 +1006,10 @@ impl UiSession for AndroidUiSession {
     /// rectangles alone was 684 ms for 4 elements and 1172 ms for 13; this roughly
     /// doubles that. Acceptable once per send, never in a poll loop.
     ///
-    /// An element whose text cannot be read is kept with `description: None` rather
-    /// than dropped — losing a row silently would turn "the author is unreadable" into
-    /// "this comment is not on screen", and the second one makes a reply land somewhere
-    /// else.
+    /// A successful missing/empty text attribute is represented by `description: None`.
+    /// Read failures invalidate the whole result; this API cannot distinguish a partial
+    /// list from a complete one. Keep the original error so bounded caller recovery can
+    /// distinguish a timeout from a readable screen with no matching comments.
     async fn locate_all_described(
         &self,
         query: riviu_core::ElementQuery<'_>,
@@ -1025,17 +1021,11 @@ impl UiSession for AndroidUiSession {
         let ids = self.agent.find_all(&locator).await?;
         let mut found = Vec::with_capacity(ids.len());
         for id in ids {
-            // Same reasoning as `locate_all`: one stale element in a scrolling list
-            // must not lose the others.
-            let Ok(rect) = self.agent.rect(&id).await else {
-                continue;
-            };
+            let rect = self.agent.rect(&id).await?;
             let description = self
                 .agent
                 .attribute(&id, "text")
-                .await
-                .ok()
-                .flatten()
+                .await?
                 .filter(|value| !value.is_empty());
             found.push(riviu_core::ElementBox {
                 x: rect.x,
