@@ -111,8 +111,13 @@ async fn capture(
     let digest = format!("{:x}", Sha256::digest(source.xml.as_bytes()));
     let hierarchy_xml = source.xml.clone();
     let tree = Tree::parse(source)?;
-    let (width, height) = session.window_size().await?;
     let png = session.screenshot_png().await?;
+    // Geometry belongs to this captured image, not a cached pre-rotation window.
+    let (width, height) = image::ImageReader::with_format(
+        std::io::Cursor::new(&png),
+        image::ImageFormat::Png,
+    )
+    .into_dimensions()?;
     anyhow::ensure!(
         package == session.active_app_bundle().await?,
         "inspector_app_changed"
@@ -126,8 +131,8 @@ async fn capture(
         version: session.app_version(&package).await.unwrap_or_default(),
         locale: session.ui_language().await.unwrap_or_default(),
         package,
-        width,
-        height,
+        width: f64::from(width),
+        height: f64::from(height),
         png_base64: STANDARD.encode(png),
         tree_sha256: digest,
         hierarchy_xml,
