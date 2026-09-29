@@ -64,6 +64,24 @@ import { FocusTextInput } from "./focus/FocusTextInput";
 import { focusLayout } from "./focus/focusLayout";
 import { acquireControlSession } from "./focus/controlSessions";
 
+function controlBusyOwner(reason: string): string | undefined {
+  return /DeviceBusy:.*? is busy with ([A-Za-z]+);/.exec(reason)?.[1];
+}
+
+function controlFailureMessage(udid: string, reason: string): string {
+  const owner = controlBusyOwner(reason);
+  if (owner === "Script") {
+    return `Máy ${udid} đang được tác vụ tự động giữ quyền điều khiển (Script). Vào Theo dõi tác vụ, dừng đúng máy này và chờ tác vụ nhả máy rồi kiểm tra lại. Thử lại điều khiển không tự dừng tác vụ.`;
+  }
+  if (owner) {
+    return `Máy ${udid} đang được ${owner} giữ quyền điều khiển. Kết thúc phiên đang giữ máy rồi kiểm tra lại.`;
+  }
+  if (/\/elements\b/.test(reason) && /timed out|timeout/i.test(reason)) {
+    return `Máy ${udid}: hết thời gian chờ agent đọc giao diện. Chưa xác định được trạng thái màn hình; đây không phải thông báo máy đang bị tác vụ khác giữ quyền. Chi tiết: ${reason}`;
+  }
+  return reason;
+}
+
 interface Props {
   active?: boolean;
   windowOrder?: number;
@@ -203,6 +221,7 @@ export function FocusStream({
     [actionFailures, controlErrors],
   );
   const failureCount = Object.keys(failures).length;
+  const hasBusyOwner = Object.values(failures).some(reason => controlBusyOwner(reason) !== undefined);
   const sessionReady =
     controlState.key === targetKey &&
     controlState.ready.length === targets.length &&
@@ -1162,13 +1181,15 @@ export function FocusStream({
                   {Object.entries(failures).map(([udid, reason]) => (
                     <li key={udid}>
                       <strong>{devices.find((candidate) => candidate.udid === udid)?.name ?? udid}</strong>
-                      <span>{reason}</span>
+                      <span>{controlFailureMessage(udid, reason)}</span>
                     </li>
                   ))}
                 </ul>
               )}
               {failureCount > 0 && (
-                <button type="button" onClick={retryControl}>Thử lại điều khiển</button>
+                <button type="button" onClick={retryControl}>
+                  {hasBusyOwner ? "Đã kết thúc phiên giữ máy — kiểm tra lại" : "Thử lại điều khiển"}
+                </button>
               )}
             </div>
           )}
