@@ -365,16 +365,38 @@ pub async fn forward(adb: &AdbProgram, serial: &str, socket: &str) -> anyhow::Re
     })
 }
 
-/// Drop a forward we created. Best-effort: leaving one behind wastes a port, so
-/// callers log rather than abort when this fails.
+/// Drop a forward we created. An already absent listener meets the cleanup goal;
+/// transport failures do not prove absence and must still reach the caller.
 pub async fn remove_forward(adb: &AdbProgram, serial: &str, port: u16) -> anyhow::Result<()> {
-    adb.device(
-        serial,
-        &["forward", "--remove", &format!("tcp:{port}")],
-        Duration::from_secs(30),
-    )
-    .await
-    .map(|_| ())
+    let result = adb
+        .device(
+            serial,
+            &["forward", "--remove", &format!("tcp:{port}")],
+            Duration::from_secs(30),
+        )
+        .await;
+    match result {
+        Ok(_) => Ok(()),
+        Err(error) => {
+            // Observed on Windows during helper shutdown after the listener was
+            // already removed. Match the whole command failure and exact port:
+            // a missing device, offline transport, or extra diagnostic is not success.
+            let prefix = format!("adb -s {serial} forward --remove tcp:{port} failed: ");
+            let missing = format!("error: listener 'tcp:{port}' not found");
+            let message = error.to_string();
+            let absent = message.strip_prefix(&prefix).is_some_and(|detail| {
+                ["adb.exe: ", "adb: ", ""]
+                    .iter()
+                    .any(|program| detail.strip_prefix(program) == Some(missing.as_str()))
+            });
+            if absent {
+                tracing::debug!(serial, port, "owned adb forward was already absent");
+                Ok(())
+            } else {
+                Err(error)
+            }
+        }
+    }
 }
 
 /// The command that runs minicap without installing it.
