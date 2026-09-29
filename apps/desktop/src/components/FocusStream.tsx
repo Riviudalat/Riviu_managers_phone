@@ -63,7 +63,7 @@ import { withoutMenuIds, type DeviceMenuNode } from "../deviceMenu";
 import { DeviceFunctionList } from "./DeviceFunctionList";
 import { FocusTextInput } from "./focus/FocusTextInput";
 import { focusLayout } from "./focus/focusLayout";
-import { acquireControlSession } from "./focus/controlSessions";
+import { acquireControlSession, invalidateDisconnectedControlSession } from "./focus/controlSessions";
 
 function controlBusyOwner(reason: string): string | undefined {
   return /DeviceBusy:.*? is busy with ([A-Za-z]+);/.exec(reason)?.[1];
@@ -218,9 +218,15 @@ export function FocusStream({
     [activeSync, device.udid],
   );
   const targetKey = targets.join("\0");
+  // Only a real roster disconnect invalidates control. Stream restarts and preset
+  // generation changes are independent of the Android accessibility session.
+  const disconnectedKey = targets.filter(udid =>
+    (udid === device.udid ? device : devices.find(item => item.udid === udid))?.status === "disconnected",
+  ).join("\0");
+  const controlKey = JSON.stringify([targetKey, disconnectedKey]);
   const controlErrors = useMemo(
-    () => controlState.key === targetKey ? controlState.errors : {},
-    [controlState.errors, controlState.key, targetKey],
+    () => controlState.key === controlKey ? controlState.errors : {},
+    [controlState.errors, controlState.key, controlKey],
   );
   const failures = useMemo(
     () => ({ ...controlErrors, ...actionFailures }),
@@ -229,7 +235,7 @@ export function FocusStream({
   const failureCount = Object.keys(failures).length;
   const hasBusyOwner = Object.values(failures).some(canHandoffControl);
   const sessionReady =
-    controlState.key === targetKey &&
+    !disconnectedKey && controlState.key === controlKey &&
     controlState.ready.length === targets.length &&
     failureCount === 0;
   const keyDisabled = busy || actionPending || pointerBusy || !sessionReady;
@@ -284,7 +290,8 @@ export function FocusStream({
     viewSize?.height && viewSize.height > 0 ? viewSize.height : 0;
   const layout = focusLayout(encodedW, encodedH, frameWidth, viewport.width, viewport.height);
   useEffect(() => () => {
-    // Never finish a gesture using coordinates from a newer orientation/generation.
+    // Never finish a gesture using coordinates from a newer orientation/generation
+    // or carry a held pointer across a confirmed device disconnect.
     const held = drag.current;
     drag.current = null;
     const last = held?.steps.at(-1) ?? held?.start;
@@ -296,7 +303,7 @@ export function FocusStream({
       pointerBusyRef.current = false;
       setPointerBusy(false);
     }
-  }, [device.udid, encodedW, encodedH, viewSize?.generation]);
+  }, [device.udid, encodedW, encodedH, viewSize?.generation, disconnectedKey]);
   const decodeFailed = useViewDecodeFailed(device.udid);
   const placeholder = streamPlaceholder({
     hasView,
@@ -324,11 +331,15 @@ export function FocusStream({
   /// it, which is why it could not be dismissed as unlikely.
   useEffect(() => {
     const udids = targetKey.split("\0").filter(Boolean);
+    const disconnected = new Set(disconnectedKey.split("\0").filter(Boolean));
     let cancelled = false;
     // Control is reopening for a new target set; nothing is ready until each begin lands.
     controlReady.current = new Set();
     setActionFailures({});
-    setControlState({ key: targetKey, ready: [], errors: {} });
+    setControlState({ key: controlKey, ready: [], errors: Object.fromEntries(
+      [...disconnected].map(udid => [udid, "Thiết bị đã ngắt kết nối; chờ kết nối lại để mở phiên điều khiển mới."]),
+    ) });
+    for (const udid of disconnected) invalidateDisconnectedControlSession(udid);
     // One promise per device, kept so the cleanup queues behind the right one rather than
     // behind all of them: a slow phone must not delay releasing a fast one.
     const previous = controlHandoff.current;
@@ -336,7 +347,9 @@ export function FocusStream({
     const start = async () => {
     if (previous) await previous;
     if (cancelled) return;
-    for (const udid of udids) opening.set(udid, acquireControlSession(udid));
+    for (const udid of udids) {
+      if (!disconnected.has(udid)) opening.set(udid, acquireControlSession(udid));
+    }
     for (const [udid, session] of opening) {
       void session.ready
         .then(() => {
@@ -360,7 +373,7 @@ export function FocusStream({
         await Promise.all([...opening.values()].map(session => session.release()));
       });
     };
-  }, [targetKey, controlRetry]);
+  }, [targetKey, disconnectedKey, controlKey, controlRetry]);
 
   useEffect(() => {
     if (!activeSync || activeSync.masterUdid !== device.udid) return;

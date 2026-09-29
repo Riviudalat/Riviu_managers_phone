@@ -66,3 +66,12 @@ export function acquireControlSession(udid: string) {
     },
   };
 }
+
+// A confirmed roster disconnect retires the shared generation even while another
+// overlay subscribes. Its old releases must never close the replacement session.
+export function invalidateDisconnectedControlSession(udid: string) {
+  const entry = sessions.get(udid);
+  if (!entry) return;
+  sessions.delete(udid);
+  return closeControlSession(udid, entry.ready);
+}
