@@ -96,6 +96,9 @@ Nuôi, Tương tác, Đăng bài hay lịch đã lưu. Rê chuột vào thẻ **
 nổi, đưa chuột ra ngoài để tự ẩn. Bấm **Ghim bảng Hiển thị** để giữ bảng
 cạnh lưới; bỏ ghim để trở lại hover. Bàn phím mở bảng bằng Tab/Enter, Escape đóng
 bảng chưa ghim. Dấu **+** cạnh **Nhóm thiết bị** mở quản lý để tạo và phân máy vào nhóm.
+Khi mất kết nối stream hoặc bộ giải mã dừng, ảnh cũ không còn được tính là live;
+khung xem được dựng lại và chỉ báo live khi có frame mới. Bản cài dùng tài nguyên
+Android đi kèm; biến môi trường trỏ APK/scrcpy của bản dev không thay tài nguyên bản cài.
 Bấm tên nhóm để lọc lưới và bung/thu các số máy thuộc nhóm; số bên phải là đã chọn/tổng.
 Bộ lọc Tất cả/USB/WIFI hiển thị số máy của nhóm đang chọn, kể cả khi nhóm trống;
 đổi bộ lọc không tự chọn hoặc điều khiển máy.
