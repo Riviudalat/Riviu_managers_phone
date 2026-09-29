@@ -38,6 +38,8 @@ export interface LiveDrag {
   begin(x: number, y: number): void;
   move(x: number, y: number): void;
   end(x: number, y: number, moveBeforeUp?: boolean, minHoldMs?: number): Promise<DragOutcome>;
+  /** Discard unsent input, drain dispatched input, then attempt release only. */
+  cancel(): Promise<void>;
 }
 
 /// Told once per drag when the live path gives up, and why.
@@ -114,6 +116,9 @@ export function createLiveDrag(send: SendTouch, onFallback?: OnFallback): LiveDr
   let mayHaveLanded = false;
   let downAcknowledgedAt = 0;
   let told = false;
+  let cancelled = false;
+  let cancellation: Promise<void> | undefined;
+  let lastDispatched: { x: number; y: number } | undefined;
 
   const giveUp = (reason: string) => {
     live = false;
@@ -124,8 +129,9 @@ export function createLiveDrag(send: SendTouch, onFallback?: OnFallback): LiveDr
 
   const step = (action: TouchAction, x: number, y: number) => {
     chain = chain.then(async () => {
-      if (!live) return;
+      if (!live || cancelled) return;
       try {
+        lastDispatched = { x, y };
         if (action === "down") mayHaveLanded = true;
         // `false` is the phone saying it has no producer to touch -- a fallback, not a
         // failure. A throw is a real one. Both end the live path the same way.
@@ -148,10 +154,11 @@ export function createLiveDrag(send: SendTouch, onFallback?: OnFallback): LiveDr
     if (flushing) return;
     flushing = true;
     chain = chain.then(async () => {
-      while (pending && live) {
+      while (pending && live && !cancelled) {
         const next = pending;
         pending = null;
         try {
+          lastDispatched = next;
           if (!(await send("move", next.x, next.y))) giveUp("move refused: no producer");
         } catch (error) {
           giveUp(`move threw: ${describeError(error)}`);
@@ -163,16 +170,17 @@ export function createLiveDrag(send: SendTouch, onFallback?: OnFallback): LiveDr
 
   return {
     begin(x, y) {
-      if (began) return;
+      if (began || cancelled) return;
       began = true;
       step("down", x, y);
     },
     move(x, y) {
-      if (!began || !live) return;
+      if (!began || !live || cancelled) return;
       pending = { x, y };
       flush();
     },
     async end(x, y, moveBeforeUp = true, minHoldMs = 0) {
+      if (cancelled) { await cancellation; return "uncertain"; }
       if (!began) return "fallback";
       // Drain rather than discard. If the pointer's last sample is still waiting behind the
       // DOWN, dropping it would collapse the whole gesture into a single jump to the release
@@ -184,13 +192,14 @@ export function createLiveDrag(send: SendTouch, onFallback?: OnFallback): LiveDr
       if (moveBeforeUp) step("move", x, y);
       if (minHoldMs > 0) {
         chain = chain.then(async () => {
-          if (!live || !downAcknowledgedAt) return;
+          if (!live || cancelled || !downAcknowledgedAt) return;
           const remaining = minHoldMs - (performance.now() - downAcknowledgedAt);
           if (remaining > 0) await new Promise(resolve => setTimeout(resolve, remaining));
         });
       }
       step("up", x, y);
       await chain;
+      if (cancelled) { await cancellation; return "uncertain"; }
       // A drag that died halfway has already put a finger on the phone and moved it. Lifting
       // it is not optional -- without this the phone keeps a pointer down forever and every
       // later gesture joins the abandoned one.
@@ -205,6 +214,18 @@ export function createLiveDrag(send: SendTouch, onFallback?: OnFallback): LiveDr
         return mayHaveLanded ? "uncertain" : "fallback";
       }
       return "live";
+    },
+    cancel() {
+      if (cancellation) return cancellation;
+      cancelled = true;
+      pending = null;
+      cancellation = chain.then(async () => {
+        if (!mayHaveLanded || !lastDispatched) return;
+        try {
+          await send("up", lastDispatched.x, lastDispatched.y);
+        } catch { /* The old producer may already be gone; never replay the gesture. */ }
+      });
+      return cancellation;
     },
   };
 }
@@ -230,6 +251,7 @@ export interface LiveDragGroup {
   begin(x: number, y: number): void;
   move(x: number, y: number): void;
   end(x: number, y: number, moveBeforeUp?: boolean, minHoldMs?: number): Promise<LiveDragSplit>;
+  cancel(): Promise<void>;
 }
 
 /// Drive one live drag per phone off a single pointer stream.
@@ -264,6 +286,9 @@ export function createLiveDragGroup(
     },
     move(x, y) {
       for (const { drag } of drags) drag.move(x, y);
+    },
+    async cancel() {
+      await Promise.all(drags.map(({ drag }) => drag.cancel()));
     },
     async end(x, y, moveBeforeUp = true, minHoldMs = 0) {
       const outcomes = await Promise.all(

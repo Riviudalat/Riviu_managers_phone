@@ -294,8 +294,7 @@ export function FocusStream({
     // or carry a held pointer across a confirmed device disconnect.
     const held = drag.current;
     drag.current = null;
-    const last = held?.steps.at(-1) ?? held?.start;
-    if (held?.live && last) void held.live.end(last.x, last.y, held.steps.length > 0).finally(() => {
+    if (held?.live) void held.live.cancel().finally(() => {
       pointerBusyRef.current = false;
       setPointerBusy(false);
     });
@@ -1115,8 +1114,7 @@ export function FocusStream({
             drag.current = null;
             // A cancelled drag has a finger on the phone that nothing else will lift, and a
             // pointer left down joins itself to whatever the operator does next.
-            const last = held?.steps.at(-1) ?? held?.start;
-            if (held?.live && last) void held.live.end(last.x, last.y, held.steps.length > 0).finally(finishPointer);
+            if (held?.live) void held.live.cancel().finally(finishPointer);
             else finishPointer();
           }}
         >
