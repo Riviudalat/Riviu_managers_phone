@@ -1826,25 +1826,41 @@ impl<'a, P: TapPlanner> Composer<'a, P> {
         // A lost response does not prove Next failed. Observe the destination
         // before the caller can admit another navigation attempt.
         if tap_error.is_some() && observation::android(self.plan.package) {
-            match crate::ui_automation::runtime::read_before_deadline(
+            let package = crate::ui_automation::runtime::read_before_deadline(
                 self.session.active_app_bundle(),
                 arrival_deadline,
                 stop,
             )
-            .await?
-            {
-                crate::ui_automation::runtime::ReadWaitResult::Ready(package) => {
+            .await;
+            if stop.load(Ordering::Relaxed) {
+                return Ok(false);
+            }
+            match package {
+                Ok(crate::ui_automation::runtime::ReadWaitResult::Ready(package)) => {
                     anyhow::ensure!(
                         package == self.plan.package && self.session.gui_session_epoch() == epoch,
                         "caption arrival app/session changed"
                     );
                 }
-                _ => return Ok(false),
+                Ok(_) => {
+                    return match tap_error {
+                        Some(error) => Err(error),
+                        None => Ok(false),
+                    }
+                }
+                Err(error) => return Err(tap_error.unwrap_or(error)),
             }
         }
         let arrived = self
             .await_condition_until(arrival_deadline, post, stop, |_| true)
-            .await?;
+            .await;
+        if stop.load(Ordering::Relaxed) {
+            return Ok(false);
+        }
+        let arrived = match arrived {
+            Ok(arrived) => arrived,
+            Err(error) => return Err(tap_error.unwrap_or(error)),
+        };
         anyhow::ensure!(
             self.session.gui_session_epoch() == epoch,
             "caption arrival session changed"
@@ -4524,6 +4540,7 @@ mod tests {
         caption_has_a_twin: bool,
         caption_unknown_reads: Mutex<usize>,
         lose_next_ack: bool,
+        arrival_read_failure: bool,
         repair_on_locate: bool,
         repaired: AtomicBool,
         sound_entry_failures: Mutex<std::collections::VecDeque<Duration>>,
@@ -4829,6 +4846,14 @@ mod tests {
             self.tap(target.centre()).await
         }
         async fn locate(&self, query: ElementQuery<'_>) -> anyhow::Result<Option<ElementBox>> {
+            if self.arrival_read_failure && *self.at.lock() == 1 {
+                return Err(crate::driver::UiError::new(
+                    crate::driver::UiErrorKind::Transport,
+                    "locate",
+                    "arrival tree unavailable",
+                )
+                .into());
+            }
             if self.repair_on_locate && !self.repaired.swap(true, Ordering::Relaxed) {
                 use crate::ui_automation::{
                     ObservationCompleteness, ObservationSource, ObservedAppContext, UiObservation,
@@ -6285,14 +6310,23 @@ mod tests {
         assert_eq!(*session.at.lock(), 1);
         // The same lost ACK with an unreadable destination never permits
         // another Next or any public effect.
-        let mut unknown = FakeSession::with(vec![edit_step(), scene(vec![], None)]);
-        unknown.lose_next_ack = true;
-        let mut composer = Composer::new(&unknown, plan(), |e: &ElementBox| e.centre());
-        assert!(composer
-            .advance_to_post_screen(&AtomicBool::new(false))
-            .await
-            .is_err());
-        assert_eq!(unknown.taps.lock().len(), 1);
+        for read_failure in [false, true] {
+            let mut unknown = FakeSession::with(vec![edit_step(), scene(vec![], None)]);
+            unknown.lose_next_ack = true;
+            unknown.arrival_read_failure = read_failure;
+            let mut composer = Composer::new(&unknown, plan(), |e: &ElementBox| e.centre());
+            let error = composer
+                .advance_to_post_screen(&AtomicBool::new(false))
+                .await
+                .expect_err("unproved arrival must retain gesture uncertainty");
+            let error = error.downcast_ref::<crate::driver::UiError>().unwrap();
+            assert_eq!(
+                error.op, "tap",
+                "arrival read must not replace the original tap failure"
+            );
+            assert!(matches!(error.kind, crate::driver::UiErrorKind::Timeout));
+            assert_eq!(unknown.taps.lock().len(), 1);
+        }
     }
 
     #[tokio::test(start_paused = true)]
