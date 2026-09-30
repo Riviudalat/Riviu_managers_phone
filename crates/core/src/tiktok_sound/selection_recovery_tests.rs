@@ -571,7 +571,9 @@ impl GuiReasoner for AccentLossOcr {
         .ocr(request)
         .await?;
         for line in &mut result.lines {
-            if line.text.starts_with("Th") {
+            // Only the first measured row has this OCR corruption. Replacing
+            // every title starting with Th would fabricate duplicate songs.
+            if line.bounds.y == 1384 {
                 line.text = "Thuong Nhau Dén Thé Ma".into();
             }
         }
@@ -602,6 +604,8 @@ async fn visual_ocr_title_never_becomes_frozen_identity_before_fresh_xml() {
                 .to_vec();
         session.ocr = Arc::new(AccentLossOcr);
         let result = resume_open_sounds(&session, plan(), 5).await;
+        assert_eq!(session.frames.load(Ordering::Relaxed), 2,
+            "two stable visual frames must reach the canonical XML branch, not its timeout fallback");
         if xml_available {
             let pool = result.expect("fresh stable XML must own title and artist before binding");
             assert!(!pool.visual);
