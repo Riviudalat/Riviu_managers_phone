@@ -15,6 +15,7 @@ struct EditorSession {
     ocr: Option<crate::ui_automation::SharedReasoner>,
     element_delay: Duration,
     snapshot_delay: Duration,
+    screenshot_unavailable: bool,
 }
 
 fn editor_xml(duplicate: bool, loading: bool) -> String {
@@ -48,6 +49,7 @@ impl EditorSession {
             ocr: None,
             element_delay: Duration::ZERO,
             snapshot_delay: Duration::ZERO,
+            screenshot_unavailable: false,
         }
     }
 }
@@ -62,6 +64,9 @@ impl UiSession for EditorSession {
     }
     async fn screenshot_png(&self) -> anyhow::Result<Vec<u8>> {
         self.frames.fetch_add(1, Ordering::Relaxed);
+        if self.screenshot_unavailable {
+            return Err(crate::driver::ScreenshotReadUnavailable { bytes: 0 }.into());
+        }
         let mut b = std::io::Cursor::new(Vec::new());
         image::DynamicImage::new_rgb8(1080, 2220).write_to(&mut b, image::ImageFormat::Png)?;
         Ok(b.into_inner())
@@ -100,7 +105,7 @@ impl UiSession for EditorSession {
     }
     async fn locate(&self, _: ElementQuery<'_>) -> anyhow::Result<Option<ElementBox>> {
         tokio::time::sleep(self.element_delay).await;
-        if self.ocr.is_some() {
+        if self.ocr.is_some() && !self.screenshot_unavailable {
             anyhow::ensure!(
                 self.frames.load(Ordering::Relaxed) >= 4,
                 "queried accessibility while editor still loading"
@@ -114,7 +119,7 @@ impl UiSession for EditorSession {
     }
     async fn hierarchy_source_snapshot(&self) -> anyhow::Result<crate::HierarchySourceSnapshot> {
         tokio::time::sleep(self.snapshot_delay).await;
-        if self.ocr.is_some() {
+        if self.ocr.is_some() && !self.screenshot_unavailable {
             anyhow::ensure!(
                 self.frames.load(Ordering::Relaxed) >= 4,
                 "queried accessibility while editor still loading"
@@ -241,6 +246,22 @@ fn picker_next() -> ElementBox {
         enabled: true,
         clickable: true,
     }
+}
+
+#[tokio::test(start_paused = true)]
+async fn unavailable_editor_image_uses_measured_xml_without_another_next_tap() {
+    let mut session = EditorSession::ready();
+    session.ocr = Some(std::sync::Arc::new(EditorOcr {
+        calls: AtomicUsize::new(0),
+    }));
+    session.screenshot_unavailable = true;
+    let mut composer = Composer::new(&session, plan(), |e: &ElementBox| e.centre());
+    assert!(composer
+        .advance_to_edit_step(&picker_next(), &AtomicBool::new(false))
+        .await
+        .expect("image unavailable still has measured XML proof"));
+    assert_eq!(session.reads.load(Ordering::Relaxed), 2);
+    assert_eq!(session.taps.load(Ordering::Relaxed), 1);
 }
 
 #[tokio::test(start_paused = true)]

@@ -772,7 +772,26 @@ impl<P: TapPlanner> Composer<'_, P> {
             )
             .await
             {
-                Ok(ReadWaitResult::Ready(initial)) => break initial,
+                Ok(ReadWaitResult::Ready(initial)) => {
+                    if session.gui_session_epoch() != epoch
+                        || trace.diagnostic.album_matches == Some(false)
+                    {
+                        return Ok(Selection::NotEnoughSelected);
+                    }
+                    if initial
+                        .as_ref()
+                        .is_some_and(|(rows, next)| !rows.is_empty() && !next.is_empty())
+                    {
+                        break initial;
+                    }
+                    // A partial tree is not a changed album or an empty grid.
+                    // Keep the untouched picker and spend only its original window.
+                    sleep(
+                        POLL.min(initial_deadline.saturating_duration_since(Instant::now())),
+                        stop,
+                    )
+                    .await;
+                }
                 Ok(ReadWaitResult::Cancelled) => {
                     trace.reason(SelectionReason::Stopped);
                     return Ok(Selection::Stopped);
@@ -1000,7 +1019,9 @@ impl<P: TapPlanner> Composer<'_, P> {
                     if trace.diagnostic.album_matches == Some(false) {
                         return Ok(Selection::NotEnoughSelected);
                     }
-                    if let Some((rows, next)) = read {
+                    if let Some((rows, next)) =
+                        read.filter(|(rows, next)| !rows.is_empty() && !next.is_empty())
+                    {
                         let Some(observed) =
                             visible_selection(rows, &next, screen, &mut grid, count)
                         else {
@@ -1203,6 +1224,8 @@ mod tests {
         partial_after_fifth: Mutex<Option<Duration>>,
         partial_forever: bool,
         initial_read_delay: Duration,
+        partial_initial: bool,
+        partial_after_scroll: Mutex<bool>,
         wrong_after_fifth: bool,
         swipes: Mutex<usize>,
     }
@@ -1225,6 +1248,8 @@ mod tests {
                 partial_after_fifth: Mutex::new(None),
                 partial_forever: false,
                 initial_read_delay: Duration::ZERO,
+                partial_initial: false,
+                partial_after_scroll: Mutex::new(false),
                 wrong_after_fifth: false,
                 swipes: Mutex::new(0),
             }
@@ -1343,6 +1368,15 @@ mod tests {
             }
             if self.fail_read_after.is_some_and(|limit| reads >= limit) {
                 anyhow::bail!("fixture hierarchy offline");
+            }
+            if (reads == 0 && self.partial_initial)
+                || (*self.swipes.lock() > 0
+                    && std::mem::take(&mut *self.partial_after_scroll.lock()))
+            {
+                return Ok(crate::HierarchySourceSnapshot {
+                    generation: reads as u64 + 1,
+                    xml: r#"<hierarchy><node package="fixture" class="android.widget.TextView" resource-id="fixture:fixture-album-menu" text="album" displayed="true"/></hierarchy>"#.into(),
+                });
             }
             let rows = self.rows();
             let count = *self.selected.lock();
@@ -1994,6 +2028,27 @@ mod tests {
             cell.y += 5.0;
         }
         assert!(KnownGrid::from_initial(uneven, 11).is_none());
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn partial_initial_and_scroll_snapshots_recover_without_replaying_selection() {
+        for initial in [true, false] {
+            let mut session = Picker::with_tray(13);
+            session.partial_initial = initial;
+            *session.partial_after_scroll.lock() = !initial;
+            assert!(
+                matches!(
+                    run_picker(&session).await,
+                    Selection::Armed {
+                        counted: Some(13),
+                        ..
+                    }
+                ),
+                "initial={initial}: exact album with missing controls must be observed again"
+            );
+            assert_eq!(session.taps.lock().len(), 13);
+            assert_eq!(*session.swipes.lock(), 1);
+        }
     }
 
     #[tokio::test(start_paused = true)]

@@ -412,6 +412,25 @@ async fn measured_hot_xml_precedes_unavailable_ocr_and_keeps_duplicate_rows_unse
 }
 
 #[tokio::test(start_paused = true)]
+async fn unavailable_ocr_after_partial_direct_xml_uses_fresh_measured_pool() {
+    let mut session = Session::new();
+    session.xml_override = Some(
+        include_str!(
+            "../../fixtures/tiktok-publish/musically-45.7.3-en/hot-machine10-redacted.txt"
+        )
+        .into(),
+    );
+    session.incomplete_direct_reads = true;
+    session.ocr = Arc::new(Ocr429);
+    let pool = resume_open_sounds(&session, plan(), 5)
+        .await
+        .expect("OCR unavailable does not remove the independent measured XML route");
+    assert_eq!(pool.candidates[0].title, "Song One");
+    assert!(!pool.visual);
+    assert_eq!(session.taps.load(Ordering::Relaxed), 0);
+}
+
+#[tokio::test(start_paused = true)]
 async fn direct_sound_xml_refuses_stale_or_unselected_hot_before_ocr_fallback() {
     let measured = include_str!(
         "../../fixtures/tiktok-publish/musically-45.7.3-en/hot-machine10-redacted.txt"

@@ -67,7 +67,10 @@ pub(super) async fn wait_rendered(
                 languages: vec!["en".into()],
                 min_confidence: 0.9,
             };
-            let mut response = reasoner.ocr(request.clone()).await?;
+            let mut response = reasoner
+                .ocr(request.clone())
+                .await
+                .map_err(crate::tiktok_sound::OcrReadUnavailable)?;
             response.validate_binding(&request)?;
             // Global45.7.3/en machine29, 2026-09-29T21:39:16Z, 1080x2220:
             // gesture navigation puts Next at y2078 (bottom2109), below the
@@ -84,7 +87,10 @@ pub(super) async fn wait_rendered(
                     }),
                     ..request.clone()
                 };
-                let lower = reasoner.ocr(lower_request.clone()).await?;
+                let lower = reasoner
+                    .ocr(lower_request.clone())
+                    .await
+                    .map_err(crate::tiktok_sound::OcrReadUnavailable)?;
                 lower.validate_binding(&lower_request)?;
                 response.lines.extend(lower.lines);
             }
@@ -101,7 +107,10 @@ pub(super) async fn wait_rendered(
                     }),
                     ..request
                 };
-                let story = reasoner.ocr(story_request.clone()).await?;
+                let story = reasoner
+                    .ocr(story_request.clone())
+                    .await
+                    .map_err(crate::tiktok_sound::OcrReadUnavailable)?;
                 story.validate_binding(&story_request)?;
                 response.lines.extend(story.lines);
             }

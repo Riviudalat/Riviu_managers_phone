@@ -1632,6 +1632,7 @@ impl<'a, P: TapPlanner> Composer<'a, P> {
         self.tap_inside(next).await?;
         if self.plan.wait_rendered_editor && self.session.gui_reasoner().is_some() {
             let deadline = crate::tiktok_sound::phase_deadline(Duration::from_secs(60));
+            let epoch = self.session.gui_session_epoch();
             let result = editor_recovery::wait_rendered(self.session, deadline, stop).await;
             crate::publish_recovery::note_read(
                 "editor",
@@ -1648,7 +1649,47 @@ impl<'a, P: TapPlanner> Composer<'a, P> {
                     .map(|error| error.to_string())
                     .as_deref(),
             );
-            return result;
+            match result {
+                Err(error)
+                    if error.is::<crate::driver::ScreenshotReadUnavailable>()
+                        || error.is::<crate::tiktok_sound::OcrReadUnavailable>() =>
+                {
+                    if stop.load(Ordering::Relaxed) || Instant::now() >= deadline {
+                        return Ok(false);
+                    }
+                    if self.session.gui_session_epoch() != epoch {
+                        return Err(error);
+                    }
+                    let (Some(controls), Some(marker)) =
+                        (self.plan.selection_controls, self.plan.edit_step_marker)
+                    else {
+                        return Err(error);
+                    };
+                    // The measured XML route has independent app/session and
+                    // two-generation proof; no OCR geometry or tap is reused.
+                    let recovered = editor_recovery::observe(
+                        self.session,
+                        controls.package,
+                        marker,
+                        deadline,
+                        stop,
+                    )
+                    .await;
+                    crate::publish_recovery::note_read(
+                        "editor",
+                        "measuredXmlAfterImageUnavailable",
+                        1,
+                        if matches!(recovered, Ok(true)) {
+                            "ready"
+                        } else {
+                            "unavailable"
+                        },
+                        Some(&error.to_string()),
+                    );
+                    return recovered;
+                }
+                other => return other,
+            }
         }
         // The existing measured XML recovery window includes the first read,
         // rather than starting another thirty seconds after that read fails.
@@ -1759,11 +1800,62 @@ impl<'a, P: TapPlanner> Composer<'a, P> {
         else {
             return Ok(false);
         };
-        self.tap_inside(&next).await?;
-        Ok(self
-            .await_condition(COMPOSER_WINDOW, post, stop, |_| true)
+        let epoch = self.session.gui_session_epoch();
+        let tap_error = self.tap_inside(&next).await.err();
+        let arrival_deadline = crate::tiktok_sound::phase_deadline(COMPOSER_WINDOW);
+        let tap_error = match tap_error {
+            Some(error)
+                if self.session.gui_session_epoch() != epoch
+                    || !(error
+                        .downcast_ref::<crate::driver::UiError>()
+                        .is_some_and(|error| {
+                            error.op == "tap"
+                                && matches!(
+                                    error.kind,
+                                    crate::driver::UiErrorKind::Transport
+                                        | crate::driver::UiErrorKind::Timeout
+                                )
+                        })
+                        || crate::publish_recovery::describe(&error).kind
+                            == crate::publish_recovery::FailureKind::Retryable) =>
+            {
+                return Err(error)
+            }
+            other => other,
+        };
+        // A lost response does not prove Next failed. Observe the destination
+        // before the caller can admit another navigation attempt.
+        if tap_error.is_some() && observation::android(self.plan.package) {
+            match crate::ui_automation::runtime::read_before_deadline(
+                self.session.active_app_bundle(),
+                arrival_deadline,
+                stop,
+            )
             .await?
-            .is_some())
+            {
+                crate::ui_automation::runtime::ReadWaitResult::Ready(package) => {
+                    anyhow::ensure!(
+                        package == self.plan.package && self.session.gui_session_epoch() == epoch,
+                        "caption arrival app/session changed"
+                    );
+                }
+                _ => return Ok(false),
+            }
+        }
+        let arrived = self
+            .await_condition_until(arrival_deadline, post, stop, |_| true)
+            .await?;
+        anyhow::ensure!(
+            self.session.gui_session_epoch() == epoch,
+            "caption arrival session changed"
+        );
+        if arrived.is_some() {
+            return Ok(true);
+        }
+        match tap_error {
+            Some(error) => Err(error),
+            None => Ok(false),
+        }
     }
 
     /// Type the caption into the post screen's field, and read it back.
@@ -2246,9 +2338,24 @@ impl<'a, P: TapPlanner> Composer<'a, P> {
                         // Retain the measured conditional retry: unknown alone never authorizes Back.
                         let still_caption = match caption_unchanged {
                             Some(proved) => proved,
-                            None => Box::pin(self.require_caption_unchanged(caption, stop))
-                                .await
-                                .is_ok(),
+                            None => {
+                                // This is only the conditional Back predicate.
+                                // Unknown must leave time for editor readback,
+                                // not consume the whole phase waiting for caption.
+                                let state = observation::caption_state(
+                                    self.session,
+                                    self.plan.package,
+                                    caption_query,
+                                    caption,
+                                    crate::tiktok_sound::phase_deadline(Duration::from_secs(8)),
+                                    stop,
+                                    &mut observation::Cursor::default(),
+                                )
+                                .await?;
+                                matches!(state, observation::CaptionState::Confirmed)
+                                    || (caption.trim().is_empty()
+                                        && state == observation::CaptionState::Cleared)
+                            }
                         };
                         if still_caption {
                             phase = "locateCaptionBackRetry";
@@ -2345,30 +2452,18 @@ impl<'a, P: TapPlanner> Composer<'a, P> {
         caption: &str,
         stop: &AtomicBool,
     ) -> anyhow::Result<CaptionOutcome> {
-        // Both successful branches already perform an exact readback. Return that proof
-        // explicitly instead of spending the final sound budget reading it a second time.
-        if Box::pin(self.require_caption_unchanged(caption, stop))
-            .await
-            .is_ok()
-        {
-            return Ok(CaptionOutcome::Typed);
+        use observation::CaptionState;
+        match Box::pin(self.await_caption_state(caption, stop)).await? {
+            CaptionState::Confirmed => return Ok(CaptionOutcome::Typed),
+            CaptionState::Cleared if caption.trim().is_empty() => return Ok(CaptionOutcome::Typed),
+            CaptionState::Cleared => {}
+            CaptionState::Mismatch => anyhow::bail!("sound reproof: caption changed"),
+            CaptionState::Unknown => anyhow::bail!("caption readback unavailable"),
         }
-        anyhow::ensure!(
-            !stop.load(Ordering::Relaxed),
-            "Đã dừng; không nhập lại caption"
-        );
-        let query = self.plan.publish.context("caption plan missing")?.caption;
-        anyhow::ensure!(
-            observation::caption_cleared(
-                self.session,
-                self.plan.package,
-                query,
-                crate::tiktok_sound::phase_deadline(Duration::from_secs(8)),
-                stop
-            )
-            .await?,
-            "sound reproof: caption changed or unreadable"
-        );
+        observation::check(
+            crate::tiktok_sound::phase_deadline(Duration::from_secs(8)),
+            Some(stop),
+        )?;
         // Only the previously approved caption may be restored, before the
         // effect boundary, after the editor cleared an otherwise proved draft.
         anyhow::ensure!(
@@ -2386,22 +2481,45 @@ impl<'a, P: TapPlanner> Composer<'a, P> {
         caption: &str,
         stop: &AtomicBool,
     ) -> anyhow::Result<()> {
-        let query = self.plan.publish.context("caption plan missing")?.caption;
-        let deadline = crate::tiktok_sound::phase_deadline(Duration::from_secs(8));
-        let values = observation::caption(
-            self.session,
-            self.plan.package,
-            query,
-            deadline,
-            stop,
-            &mut observation::Cursor::default(),
-        )
-        .await?;
+        let state = Box::pin(self.await_caption_state(caption, stop)).await?;
         anyhow::ensure!(
-            matches!(values.as_deref(), Some([only]) if caption_readback_matches(only, caption)),
-            "sound reproof: caption changed, ambiguous or unreadable"
+            state == observation::CaptionState::Confirmed
+                || (caption.trim().is_empty() && state == observation::CaptionState::Cleared),
+            "sound reproof: caption changed"
         );
         Ok(())
+    }
+
+    /// Unknown is a read state, never permission to rewrite a caption or navigate.
+    async fn await_caption_state(
+        &self,
+        caption: &str,
+        stop: &AtomicBool,
+    ) -> anyhow::Result<observation::CaptionState> {
+        let query = self.plan.publish.context("caption plan missing")?.caption;
+        let deadline = crate::tiktok_sound::phase_deadline(Duration::from_secs(8));
+        let mut cursor = observation::Cursor::default();
+        loop {
+            observation::check(deadline, Some(stop))?;
+            let state = observation::caption_state(
+                self.session,
+                self.plan.package,
+                query,
+                caption,
+                deadline,
+                stop,
+                &mut cursor,
+            )
+            .await?;
+            if state != observation::CaptionState::Unknown {
+                return Ok(state);
+            }
+            sleep(
+                POLL.min(deadline.saturating_duration_since(Instant::now())),
+                stop,
+            )
+            .await;
+        }
     }
 
     /// Back out until the bottom tab bar is visible again.
@@ -2667,6 +2785,17 @@ impl<'a, P: TapPlanner> Composer<'a, P> {
                 stop,
             )
             .await;
+            if stop.load(Ordering::Relaxed) {
+                return Ok(None);
+            }
+            if observed
+                .as_ref()
+                .is_err_and(|error| error.is::<crate::driver::SessionEpochChanged>())
+            {
+                // Forward the driver's proved repair so only the dispatcher may
+                // restart account binding; never reuse this read's old target.
+                return observed.map(|_| None);
+            }
             if matches!(observed, Ok(ReadWaitResult::Ready(_)) | Err(_)) {
                 anyhow::ensure!(
                     self.session.gui_session_epoch() == epoch,
@@ -3121,112 +3250,149 @@ where
         let mut selection_may_have_landed = selected.is_some();
         let mut sound_sheet_may_be_open = false;
         let mut reopen_network_sheet = false;
-        let chosen = loop {
-            let attempt = crate::tiktok_sound::with_sound_budget(stop, async {
-                if reopen_network_sheet {
-                    sound_sheet_may_be_open =
-                        crate::tiktok_sound::reopen_failed_sound_sheet(session, sound_plan).await?;
-                    reopen_network_sheet = false;
-                    observed = None;
-                }
-                if observed.is_none() {
-                    if sound_sheet_may_be_open {
-                        observed = Some(
-                            crate::tiktok_sound::resume_open_sounds(
-                                session,
-                                sound_plan,
-                                visible_pool,
-                            )
-                            .await?,
-                        );
-                    } else {
-                        let mut before_open = || sound_sheet_may_be_open = true;
-                        observed = Some(
-                            crate::tiktok_sound::open_and_observe_sounds_armed(
-                                session,
-                                sound_plan,
-                                visible_pool,
-                                &mut before_open,
-                            )
-                            .await?,
-                        );
+        let sound_deadline = crate::tiktok_sound::phase_deadline(Duration::from_secs(180));
+        let sound_epoch = session.gui_session_epoch();
+        let chosen = crate::tiktok_sound::with_deadline_budget(stop, sound_deadline, async {
+            let deadline = sound_deadline;
+            let epoch = session.gui_session_epoch();
+            loop {
+                crate::tiktok_sound::check_wait()?;
+                let attempt = async {
+                    if reopen_network_sheet {
+                        sound_sheet_may_be_open =
+                            crate::tiktok_sound::reopen_failed_sound_sheet(session, sound_plan)
+                                .await?;
+                        reopen_network_sheet = false;
+                        observed = None;
                     }
-                }
-                if let Some(selection) = selected.as_ref() {
+                    if observed.is_none() {
+                        if sound_sheet_may_be_open {
+                            observed = Some(
+                                crate::tiktok_sound::resume_open_sounds(
+                                    session,
+                                    sound_plan,
+                                    visible_pool,
+                                )
+                                .await?,
+                            );
+                        } else {
+                            let mut before_open = || sound_sheet_may_be_open = true;
+                            observed = Some(
+                                crate::tiktok_sound::open_and_observe_sounds_armed(
+                                    session,
+                                    sound_plan,
+                                    visible_pool,
+                                    &mut before_open,
+                                )
+                                .await?,
+                            );
+                        }
+                    }
+                    if let Some(selection) = selected.as_ref() {
+                        let pool = observed.as_ref().context("sound pool missing")?;
+                        if !pool.candidates.iter().any(|candidate| {
+                            candidate.title == selection.title
+                                && candidate.artist == selection.artist
+                        }) {
+                            observed = Some(
+                                crate::tiktok_sound::recover_frozen_sound_pool(
+                                    session,
+                                    pool.effective_plan(sound_plan),
+                                    selection,
+                                )
+                                .await?,
+                            );
+                        }
+                    }
                     let pool = observed.as_ref().context("sound pool missing")?;
-                    if !pool.candidates.iter().any(|candidate| {
-                        candidate.title == selection.title && candidate.artist == selection.artist
-                    }) {
-                        observed = Some(
-                            crate::tiktok_sound::recover_frozen_sound_pool(
-                                session,
-                                pool.effective_plan(sound_plan),
-                                selection,
-                            )
-                            .await?,
-                        );
+                    let sound_plan = pool.effective_plan(sound_plan);
+                    if selected.is_none() {
+                        // This is the first observed pool, before our first row tap.
+                        // TikTok may have auto-selected a row on editor entry. Bind
+                        // the policy's exact title/artist first; choose/recover then
+                        // re-proves that identity and the final editor chip.
+                        let proposed = select_sound_candidate(sound_policy, &pool.candidates)?;
+                        selected = Some(crate::publish_recovery::bind_sound(&proposed)?);
                     }
-                }
-                let pool = observed.as_ref().context("sound pool missing")?;
-                let sound_plan = pool.effective_plan(sound_plan);
-                if selected.is_none() {
-                    // This is the first observed pool, before our first row tap.
-                    // TikTok may have auto-selected a row on editor entry. Bind
-                    // the policy's exact title/artist first; choose/recover then
-                    // re-proves that identity and the final editor chip.
-                    let proposed = select_sound_candidate(sound_policy, &pool.candidates)?;
-                    selected = Some(crate::publish_recovery::bind_sound(&proposed)?);
-                }
-                let selection = selected.clone().context("sound selection missing")?;
-                let current_index = current_sound_target_index(&selection, &pool.candidates)?;
-                let recovering = enter_sound_selection_attempt(&mut selection_may_have_landed);
-                progress(PublishProgress::SelectingSound {
-                    title: selection.title.clone(),
-                });
-                if recovering {
-                    crate::tiktok_sound::recover_sound_selection(
-                        session,
-                        sound_plan,
-                        pool,
-                        current_index,
-                    )
-                    .await?;
-                } else {
-                    Box::pin(choose_and_confirm_sound(
-                        session,
-                        sound_plan,
-                        pool,
-                        current_index,
-                    ))
-                    .await?;
-                }
-                Ok((sound_plan, selection))
-            })
-            .await;
-            match attempt {
-                Err(error) if format!("{error:#}").contains("composer state lost") => {
-                    break Err(error)
-                }
-                Err(error) => {
-                    if session
-                        .active_app_bundle()
-                        .await
-                        .is_ok_and(|bundle| bundle != sound_plan.package())
-                    {
-                        break Err(error.context(
-                            "composer state lost; reconstruct approved media before retry",
-                        ));
+                    let selection = selected.clone().context("sound selection missing")?;
+                    let current_index = current_sound_target_index(&selection, &pool.candidates)?;
+                    let recovering = enter_sound_selection_attempt(&mut selection_may_have_landed);
+                    progress(PublishProgress::SelectingSound {
+                        title: selection.title.clone(),
+                    });
+                    if recovering {
+                        crate::tiktok_sound::recover_sound_selection(
+                            session,
+                            sound_plan,
+                            pool,
+                            current_index,
+                        )
+                        .await?;
+                    } else {
+                        Box::pin(choose_and_confirm_sound(
+                            session,
+                            sound_plan,
+                            pool,
+                            current_index,
+                        ))
+                        .await?;
                     }
-                    if crate::publish_recovery::retry(&error, stop).await? {
-                        reopen_network_sheet =
-                            error.is::<crate::tiktok_sound::SoundNetworkUnavailable>();
-                        continue;
-                    }
-                    break Err(error);
+                    Ok((sound_plan, selection))
                 }
-                result => break result,
+                .await;
+                match attempt {
+                    Err(error) if format!("{error:#}").contains("composer state lost") => {
+                        break Err(error)
+                    }
+                    Err(error) => {
+                        if crate::publish_recovery::describe(&error).kind
+                            != crate::publish_recovery::FailureKind::Retryable
+                        {
+                            break Err(error);
+                        }
+                        // A driver repair invalidates every pool/target and requires
+                        // the dispatcher's account-bound restart, not an inline retry.
+                        if session.gui_session_epoch() != epoch {
+                            break Err(error);
+                        }
+                        crate::tiktok_sound::check_wait()?;
+                        let active_package =
+                            crate::tiktok_sound::read_sound(session.active_app_bundle()).await?;
+                        if active_package != sound_plan.package() {
+                            break Err(error.context(
+                                "composer state lost; reconstruct approved media before retry",
+                            ));
+                        }
+                        if session.gui_session_epoch() != epoch {
+                            break Err(error);
+                        }
+                        if crate::publish_recovery::retry_until(&error, stop, deadline).await? {
+                            reopen_network_sheet =
+                                error.is::<crate::tiktok_sound::SoundNetworkUnavailable>();
+                            continue;
+                        }
+                        break Err(error);
+                    }
+                    result => break result,
+                }
             }
-        };
+        })
+        .await;
+        let chosen = chosen.map_err(|error| {
+            if !stop.load(Ordering::Relaxed)
+                && Instant::now() >= sound_deadline
+                && session.gui_session_epoch() == sound_epoch
+                && !error.is::<crate::driver::SessionEpochChanged>()
+                && crate::publish_recovery::describe(&error).kind
+                    == crate::publish_recovery::FailureKind::Retryable
+            {
+                crate::publish_recovery::RecoveryFailure::new(
+                    "publish_sound_budget_exhausted",
+                    crate::publish_recovery::FailureKind::Terminal,
+                    "Đã hết thời gian tải và xác nhận nhạc; chưa bấm Đăng. Có thể chọn Thử lại để bắt đầu lượt mới.",
+                ).into()
+            } else { error }
+        });
         let (sound_plan, mut selection) = match chosen {
             Err(error) if error.is::<crate::tiktok_sound::SoundStopped>() => {
                 return Ok((ComposerVerdict::Stopped, None))
@@ -3366,39 +3532,81 @@ where
     }
     crate::publish_recovery::step("caption", None)?;
     (composer.progress)(PublishProgress::OpeningCaption);
-    loop {
-        // A lost Next ACK may already have reached the caption page.
-        let arrived = if let Some(tail) = composer
-            .plan
-            .publish
-            .filter(|_| crate::publish_recovery::active())
-        {
-            match read_before_deadline(
-                composer.session.locate_all(tail.post_button),
-                crate::tiktok_sound::phase_deadline(COMPOSER_WINDOW),
-                stop,
-            )
-            .await?
-            {
-                ReadWaitResult::Ready(found) => found.len() == 1,
-                ReadWaitResult::Cancelled => return Ok(ComposerVerdict::Stopped),
-                ReadWaitResult::DeadlineExceeded => {
-                    return Ok(ComposerVerdict::PostScreenDidNotOpen)
+    let navigation_epoch = composer.session.gui_session_epoch();
+    // Retain the previous attempt's three read windows (arrival probe,
+    // editor Next, destination), shared by all retries and their backoff.
+    let navigation_deadline = crate::tiktok_sound::phase_deadline(COMPOSER_WINDOW * 3);
+    let navigation = crate::tiktok_sound::with_deadline_budget(stop, navigation_deadline, async {
+        loop {
+            let attempt = async {
+                let arrived = if let Some(tail) = composer
+                    .plan
+                    .publish
+                    .filter(|_| crate::publish_recovery::active())
+                {
+                    match read_before_deadline(
+                        composer.session.locate_all(tail.post_button),
+                        crate::tiktok_sound::phase_deadline(COMPOSER_WINDOW),
+                        stop,
+                    )
+                    .await?
+                    {
+                        ReadWaitResult::Ready(found) => found.len() == 1,
+                        ReadWaitResult::Cancelled => return Ok(false),
+                        ReadWaitResult::DeadlineExceeded => {
+                            return Err(crate::publish_recovery::retryable_error(
+                                "caption_arrival_read_timeout",
+                                "caption arrival read timeout before Post",
+                            ))
+                        }
+                    }
+                } else {
+                    false
+                };
+                anyhow::ensure!(
+                    composer.session.gui_session_epoch() == navigation_epoch,
+                    "caption navigation session changed"
+                );
+                if stop.load(Ordering::Relaxed) {
+                    return Ok(false);
                 }
+                // On retry, this resolves a fresh positive editor Next. The
+                // preceding attempt's target never authorizes another tap.
+                Ok::<_, anyhow::Error>(arrived || composer.advance_to_post_screen(stop).await?)
             }
-        } else {
-            false
-        };
-        if arrived || composer.advance_to_post_screen(stop).await? {
-            break;
+            .await;
+            if stop.load(Ordering::Relaxed) {
+                return Ok(false);
+            }
+            let failed_read_or_gesture = attempt.is_err();
+            let error = match attempt {
+                Ok(true) => break Ok(true),
+                Ok(false) => crate::publish_recovery::retryable_error(
+                    "caption_navigation_timeout",
+                    "caption navigation timeout before Post",
+                ),
+                Err(error) => {
+                    if composer.session.gui_session_epoch() != navigation_epoch {
+                        return Err(error);
+                    }
+                    error
+                }
+            };
+            if !crate::publish_recovery::retry_until(&error, stop, navigation_deadline).await? {
+                return if failed_read_or_gesture {
+                    Err(error)
+                } else {
+                    Ok(false)
+                };
+            }
         }
-        let error = crate::publish_recovery::retryable_error(
-            "caption_navigation_timeout",
-            "caption navigation timeout before Post",
-        );
-        if !crate::publish_recovery::retry(&error, stop).await? {
-            return Ok(ComposerVerdict::PostScreenDidNotOpen);
-        }
+    })
+    .await;
+    if stop.load(Ordering::Relaxed) {
+        return Ok(ComposerVerdict::Stopped);
+    }
+    if !navigation? {
+        return Ok(ComposerVerdict::PostScreenDidNotOpen);
     }
     if !caption.trim().is_empty() {
         (composer.progress)(PublishProgress::EnteringCaption);
@@ -3410,13 +3618,37 @@ where
             .is_some_and(|tail| matches!(tail.caption, ElementQuery::ResourceIdSuffix(_)));
     let caption_work = async {
         loop {
-            if crate::publish_recovery::active()
-                && composer
-                    .require_caption_unchanged(caption, stop)
-                    .await
-                    .is_ok()
-            {
-                break;
+            if crate::publish_recovery::active() && bounded_caption && !caption.trim().is_empty() {
+                match composer.await_caption_state(caption, stop).await? {
+                    observation::CaptionState::Confirmed => break,
+                    observation::CaptionState::Cleared => {}
+                    observation::CaptionState::Mismatch => {
+                        anyhow::bail!("caption changed before typing")
+                    }
+                    observation::CaptionState::Unknown => {
+                        anyhow::bail!("caption readback unavailable")
+                    }
+                }
+            }
+            // Preserve the legacy/WDA one-read resume check. Its typing path
+            // is not covered by Android's semantic empty/hint contract.
+            if crate::publish_recovery::active() && !bounded_caption {
+                if let Some(tail) = composer.plan.publish {
+                    let values = observation::caption(
+                        composer.session,
+                        composer.plan.package,
+                        tail.caption,
+                        crate::tiktok_sound::phase_deadline(COMPOSER_WINDOW),
+                        stop,
+                        &mut observation::Cursor::default(),
+                    )
+                    .await;
+                    if matches!(values, Ok(Some(ref values)) if matches!(values.as_slice(), [value]
+                        if caption_readback_matches(value, caption)))
+                    {
+                        break;
+                    }
+                }
             }
             match composer.type_caption(caption, stop).await {
                 Err(error) if crate::publish_recovery::retry(&error, stop).await? => continue,
@@ -4278,6 +4510,11 @@ mod tests {
         /// A locator that is not unique can focus one node and confirm another; only a fixture
         /// with two matches can tell "read back the field" from "read back something".
         caption_has_a_twin: bool,
+        caption_unknown_reads: Mutex<usize>,
+        lose_next_ack: bool,
+        repair_on_locate: bool,
+        repaired: AtomicBool,
+        sound_entry_failures: Mutex<std::collections::VecDeque<Duration>>,
         /// Fail every tap from this one onward. Counting rather than a flag because the
         /// interesting failure is **mid-flow**: a run that dies before its first tap never
         /// opened anything, so it proves nothing about closing what it opened.
@@ -4393,6 +4630,21 @@ mod tests {
 
     #[async_trait::async_trait]
     impl UiSession for FakeSession {
+        fn gui_session_epoch(&self) -> String {
+            if self.repair_on_locate {
+                if self.repaired.load(Ordering::Relaxed) {
+                    "repaired"
+                } else {
+                    "before-repair"
+                }
+                .into()
+            } else {
+                String::new()
+            }
+        }
+        async fn active_app_bundle(&self) -> anyhow::Result<String> {
+            Ok("com.ss.android.ugc.trill".into())
+        }
         async fn hierarchy_source_snapshot(
             &self,
         ) -> anyhow::Result<crate::driver::HierarchySourceSnapshot> {
@@ -4432,6 +4684,16 @@ mod tests {
             })
         }
         async fn locate_all(&self, query: ElementQuery<'_>) -> anyhow::Result<Vec<ElementBox>> {
+            if query == ElementQuery::ResourceIdSuffix(":id/c_4") {
+                let delay = self.sound_entry_failures.lock().pop_front();
+                if let Some(delay) = delay {
+                    tokio::time::sleep(delay).await;
+                    return Err(crate::publish_recovery::retryable_error(
+                        "fixture_sound_load",
+                        "sound entry read temporarily unavailable",
+                    ));
+                }
+            }
             if *self.at.lock() == 2
                 && query
                     == (ElementQuery::Description {
@@ -4504,6 +4766,14 @@ mod tests {
                     .stuck_at
                     .unwrap_or(self.screens.len().saturating_sub(1));
                 *at = (*at + 1).min(ceiling);
+                if self.lose_next_ack && *at == 1 {
+                    return Err(crate::driver::UiError::new(
+                        crate::driver::UiErrorKind::Timeout,
+                        "tap",
+                        "Next reached the caption page but its acknowledgement was lost",
+                    )
+                    .into());
+                }
             }
             Ok(())
         }
@@ -4547,6 +4817,34 @@ mod tests {
             self.tap(target.centre()).await
         }
         async fn locate(&self, query: ElementQuery<'_>) -> anyhow::Result<Option<ElementBox>> {
+            if self.repair_on_locate && !self.repaired.swap(true, Ordering::Relaxed) {
+                use crate::ui_automation::{
+                    ObservationCompleteness, ObservationSource, ObservedAppContext, UiObservation,
+                };
+                return Err(crate::driver::SessionEpochChanged {
+                    previous_epoch: "before-repair".into(),
+                    current_epoch: "repaired".into(),
+                    device_id: "fixture-phone".into(),
+                    package: "com.ss.android.ugc.trill".into(),
+                    fresh_observation: Box::new(UiObservation {
+                        device_id: "fixture-phone".into(),
+                        app: ObservedAppContext {
+                            package: Some("com.ss.android.ugc.trill".into()),
+                            ..Default::default()
+                        },
+                        session_epoch: "repaired".into(),
+                        observation_id: "repair-proof".into(),
+                        generation: 1,
+                        started_at_ms: 0,
+                        ended_at_ms: 1,
+                        source: ObservationSource::AccessibilityHierarchy,
+                        completeness: ObservationCompleteness::Partial,
+                        matches: vec![],
+                        unknown_match_count: 0,
+                    }),
+                }
+                .into());
+            }
             if !self.locate_delay.is_zero() {
                 tokio::time::sleep(self.locate_delay).await;
             }
@@ -4634,6 +4932,11 @@ mod tests {
             // screen still here", and a caption that follows the phone everywhere makes the
             // answer yes on screens that are not it.
             if wanted == "fixture-caption" && self.current().contains_key(wanted) {
+                let mut unknown = self.caption_unknown_reads.lock();
+                if *unknown > 0 {
+                    *unknown -= 1;
+                    return Ok(Vec::new());
+                }
                 let held = match (self.caption_never_takes, self.typed.lock().clone()) {
                     (true, _) => self.caption_placeholder.clone(),
                     (false, typed) => typed,
@@ -4948,6 +5251,79 @@ mod tests {
             "confirmation must preserve the frozen identity"
         );
         assert!(session.typed.lock().is_none());
+        assert_eq!(post_button_taps(&session), 0);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn sound_retries_share_one_total_budget_without_reopening_media() {
+        #[derive(Default)]
+        struct Journal(std::sync::atomic::AtomicUsize);
+        impl crate::publish_recovery::RecoveryJournal for Journal {
+            fn step(&self, _: &str, _: Option<&str>) -> anyhow::Result<()> {
+                Ok(())
+            }
+            fn retry(
+                &self,
+                _: &crate::publish_recovery::RecoveryFailure,
+            ) -> anyhow::Result<Option<Duration>> {
+                Ok((self.0.fetch_add(1, Ordering::Relaxed) < 3).then_some(Duration::ZERO))
+            }
+            fn sound(
+                &self,
+                _: Option<&SoundSelectionEvidence>,
+            ) -> anyhow::Result<Option<SoundSelectionEvidence>> {
+                Ok(None)
+            }
+        }
+        let journal = std::sync::Arc::new(Journal::default());
+        let session = FakeSession::full_walk("album");
+        session
+            .sound_entry_failures
+            .lock()
+            .extend([Duration::from_secs(70); 4]);
+        let started = Instant::now();
+        let result = crate::publish_recovery::scope(
+            journal.clone(),
+            publish_selected_media_with_sound_effect_intent(
+                &session,
+                plan(),
+                SoundPickerPlan::resolve("com.ss.android.ugc.trill", "en", "38.3.2").unwrap(),
+                &PublishSoundPolicy::TrendingAny {
+                    pool_size: 1,
+                    seed: 1,
+                },
+                |e: &ElementBox| e.centre(),
+                PickerSelection {
+                    album: "album",
+                    count: 1,
+                    screen: screen(),
+                    video: true,
+                },
+                "caption",
+                &AtomicBool::new(false),
+                |_| panic!("failed sound must not reach Post"),
+                &|_| {},
+                &|_| {},
+            ),
+        )
+        .await;
+        let error = result.expect_err("expired sound phase cannot reach Post");
+        let failure = crate::publish_recovery::describe(&error);
+        assert_eq!(failure.code, "publish_sound_budget_exhausted");
+        assert_eq!(failure.kind, crate::publish_recovery::FailureKind::Terminal);
+        assert!(
+            journal.0.load(Ordering::Relaxed) >= 1,
+            "fixture must reach the sound recovery owner"
+        );
+        assert!(
+            started.elapsed() <= Duration::from_secs(188),
+            "sound retry reset its 180s budget: {:?}",
+            started.elapsed()
+        );
+        assert!(
+            journal.0.load(Ordering::Relaxed) <= 2,
+            "expired budget must not spend another retry"
+        );
         assert_eq!(post_button_taps(&session), 0);
     }
 
@@ -5833,6 +6209,78 @@ mod tests {
                     && tap.y <= button.y + button.height
             })
             .count()
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn composer_read_preserves_driver_repair_for_dispatcher_without_tapping() {
+        let mut session = FakeSession::with(vec![edit_step()]);
+        session.repair_on_locate = true;
+        let composer = Composer::new(&session, plan(), |e: &ElementBox| e.centre());
+        let error = composer
+            .await_condition(
+                COMPOSER_WINDOW,
+                ElementQuery::Description {
+                    value: "fixture-edit-next",
+                    exact: true,
+                },
+                &AtomicBool::new(false),
+                |_| true,
+            )
+            .await
+            .expect_err("repair must not reuse a target");
+        assert!(
+            error.is::<crate::driver::SessionEpochChanged>(),
+            "typed repair was erased: {error:#}"
+        );
+        assert!(session.taps.lock().is_empty());
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn caption_unknown_is_observed_again_without_typing_or_navigation() {
+        let session = FakeSession::with(vec![post_screen()]);
+        *session.typed.lock() = Some("approved caption".into());
+        *session.caption_unknown_reads.lock() = 1;
+        let composer = Composer::new(&session, plan(), |e: &ElementBox| e.centre());
+        let started = Instant::now();
+        composer
+            .require_caption_unchanged("approved caption", &AtomicBool::new(false))
+            .await
+            .expect("one partial read cannot become a changed-caption refusal");
+        assert!(started.elapsed() <= COMPOSER_WINDOW);
+        assert!(session.taps.lock().is_empty());
+        assert_eq!(session.typed.lock().as_deref(), Some("approved caption"));
+        *session.typed.lock() = Some("different caption".into());
+        let error = composer
+            .require_caption_unchanged("approved caption", &AtomicBool::new(false))
+            .await
+            .expect_err("positive mismatch remains terminal");
+        assert_eq!(
+            crate::publish_recovery::describe(&error).kind,
+            crate::publish_recovery::FailureKind::Terminal
+        );
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn next_lost_ack_observes_caption_arrival_without_second_tap() {
+        let mut session = FakeSession::with(vec![edit_step(), post_screen()]);
+        session.lose_next_ack = true;
+        let mut composer = Composer::new(&session, plan(), |e: &ElementBox| e.centre());
+        assert!(composer
+            .advance_to_post_screen(&AtomicBool::new(false))
+            .await
+            .expect("lost Next acknowledgement must inspect arrival first"));
+        assert_eq!(session.taps.lock().len(), 1);
+        assert_eq!(*session.at.lock(), 1);
+        // The same lost ACK with an unreadable destination never permits
+        // another Next or any public effect.
+        let mut unknown = FakeSession::with(vec![edit_step(), scene(vec![], None)]);
+        unknown.lose_next_ack = true;
+        let mut composer = Composer::new(&unknown, plan(), |e: &ElementBox| e.centre());
+        assert!(composer
+            .advance_to_post_screen(&AtomicBool::new(false))
+            .await
+            .is_err());
+        assert_eq!(unknown.taps.lock().len(), 1);
     }
 
     #[tokio::test(start_paused = true)]

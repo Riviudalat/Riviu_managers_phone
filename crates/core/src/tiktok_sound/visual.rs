@@ -344,7 +344,13 @@ async fn capture_sheet(
     let reasoner = session
         .gui_reasoner()
         .context("visual sound local OCR missing")?;
-    let response = read_sound(reasoner.ocr(request.clone())).await?;
+    let response = read_sound(async {
+        reasoner
+            .ocr(request.clone())
+            .await
+            .map_err(|error| anyhow::Error::new(OcrReadUnavailable(error)))
+    })
+    .await?;
     response.validate_binding(&request)?;
     let tabs = selection_recovery::tabs(&response).unwrap_or_default();
     let mut lines = response.lines;

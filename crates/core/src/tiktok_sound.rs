@@ -62,6 +62,12 @@ pub(crate) struct SoundStopped;
 #[error("TikTok báo mạng không ổn định khi tải danh sách nhạc; chưa bấm Đăng")]
 pub(crate) struct SoundNetworkUnavailable;
 
+/// Only the OCR read failed; the caller must independently prove a measured
+/// XML state before navigating. Invalid OCR bindings are not this error.
+#[derive(Debug, thiserror::Error)]
+#[error("local OCR read unavailable: {0}")]
+pub(crate) struct OcrReadUnavailable(#[source] pub anyhow::Error);
+
 pub(crate) async fn reopen_failed_sound_sheet(
     session: &dyn UiSession,
     plan: SoundPickerPlan,
@@ -82,6 +88,7 @@ pub(crate) async fn reopen_failed_sound_sheet(
 
 /// One budget spans opening, loading, selecting and confirming. The scoped flag
 /// lets nested observations honor cancellation without abandoning a live tap.
+#[cfg(test)]
 pub(crate) async fn with_sound_budget<T>(
     stop: &AtomicBool,
     work: impl std::future::Future<Output = anyhow::Result<T>>,
@@ -116,9 +123,7 @@ pub(crate) async fn with_deadline_budget<T>(
         return SOUND_BUDGET
             .scope(budget, async {
                 check_wait()?;
-                let result = Box::pin(work).await;
-                check_wait()?;
-                result
+                finish_budget(Box::pin(work).await)
             })
             .await;
     }
@@ -131,9 +136,7 @@ pub(crate) async fn with_deadline_budget<T>(
         budget,
         crate::tiktok_composer::observation::with_binding(async {
             check_wait()?;
-            let result = Box::pin(work).await;
-            check_wait()?;
-            result
+            finish_budget(Box::pin(work).await)
         }),
     );
     tokio::pin!(task);
@@ -180,7 +183,7 @@ pub(crate) async fn with_stage_budget<T>(
                     "stageExhausted",
                     Some(&detail),
                 );
-                return Err(error);
+                return finish_budget(result);
             }
             result
         })
@@ -209,6 +212,23 @@ pub(crate) fn check_wait() -> anyhow::Result<()> {
         })
         .unwrap_or(Ok(()))
 }
+fn finish_budget<T>(result: anyhow::Result<T>) -> anyhow::Result<T> {
+    match check_wait() {
+        Ok(()) => result,
+        Err(wait)
+            if !wait.is::<SoundStopped>()
+                && result.as_ref().is_err_and(|error| {
+                    error.is::<crate::driver::SessionEpochChanged>()
+                        || crate::publish_recovery::describe(error).kind
+                            != crate::publish_recovery::FailureKind::Retryable
+                }) =>
+        {
+            result
+        }
+        Err(wait) => Err(wait),
+    }
+}
+
 pub(crate) async fn read_sound<T>(
     work: impl std::future::Future<Output = anyhow::Result<T>>,
 ) -> anyhow::Result<T> {
@@ -822,12 +842,23 @@ async fn observe_measured_sound_pool(
     match checked_measured_sound_observation(session, plan, &epoch, visual).await {
         Ok(pool) => return Ok(pool),
         Err(error) if error.is::<visual::VisualSoundPoolUnavailable>() => {}
-        Err(error) if error.is::<crate::driver::ScreenshotReadUnavailable>() => {
+        Err(error)
+            if error.is::<crate::driver::ScreenshotReadUnavailable>()
+                || error.is::<OcrReadUnavailable>() =>
+        {
             let pool = async {
                 snapshot::select_section_tab_xml_only(session, plan).await?;
                 snapshot::observe_xml_only(session, plan, maximum).await
             }
-            .await;
+            .await
+            .with_context(|| format!("independent sound XML proof after {error:#}"));
+            crate::publish_recovery::note_read(
+                "sound",
+                "measuredXmlAfterImageUnavailable",
+                1,
+                if pool.is_ok() { "ready" } else { "unavailable" },
+                Some(&error.to_string()),
+            );
             return checked_measured_sound_observation(session, plan, &epoch, pool).await;
         }
         Err(error) => return Err(error),
@@ -1578,6 +1609,37 @@ mod tests {
             "outer loading budget extended a fresh readback deadline"
         );
         assert!(start.elapsed() <= READBACK_WINDOW);
+        // An already-dispatched action must drain. Expiration refuses late
+        // success but must not erase a definitive refusal into retryable timeout.
+        for terminal in [false, true] {
+            let result = with_readback_budget(&stop, async {
+                tokio::time::sleep(READBACK_WINDOW + Duration::from_secs(1)).await;
+                if terminal {
+                    Err(crate::publish_recovery::RecoveryFailure::new(
+                        "fixture_identity_mismatch",
+                        crate::publish_recovery::FailureKind::Terminal,
+                        "sound identity changed",
+                    )
+                    .into())
+                } else {
+                    Ok(())
+                }
+            })
+            .await
+            .expect_err("late completion never becomes success");
+            let failure = crate::publish_recovery::describe(&result);
+            assert_eq!(
+                failure.kind,
+                if terminal {
+                    crate::publish_recovery::FailureKind::Terminal
+                } else {
+                    crate::publish_recovery::FailureKind::Retryable
+                }
+            );
+            if terminal {
+                assert_eq!(failure.code, "fixture_identity_mismatch");
+            }
+        }
     }
 
     #[tokio::test(start_paused = true)]
