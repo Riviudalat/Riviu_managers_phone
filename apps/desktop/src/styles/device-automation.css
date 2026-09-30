@@ -31,29 +31,9 @@
 .window-canvas > .dev-phone {
   width: 100% !important;
   height: auto !important;
-  aspect-ratio: auto;
+  aspect-ratio: 1 / 2;
   min-width: 0;
-  border-width: 1px;
-  border-color: var(--line-strong);
-  border-radius: 10px;
-  overflow: hidden;
 }
-.window-canvas > .dev-phone:hover { border-color: var(--primary); }
-.window-canvas > .dev-phone.selected,
-.window-canvas > .dev-phone.focused { border-color: var(--primary); box-shadow: 0 0 0 1px var(--primary); }
-.window-canvas > .dev-phone .dev-phone-screen { height: auto; aspect-ratio: 1 / 2; border-radius: 0; }
-.device-browser-toolbar {
-  padding: 12px;
-  border: 1px solid var(--line);
-  border-radius: 10px;
-  background: var(--bg-elevated);
-}
-.device-browser-toolbar .profile-toolbar { border: 0; padding: 0 0 10px; box-shadow: none; }
-.device-browser-toolbar .device-toolrow { border: 0; padding: 0; }
-.device-selection-summary { display: flex; flex-wrap: wrap; justify-content: space-between; gap: 6px 16px; color: var(--text-3); font-size: 12px; }
-.device-selection-summary strong { color: var(--text-1); font-variant-numeric: tabular-nums; }
-.device-selection-count { margin-left: 12px; color: var(--primary-deep); }
-@media (max-width: 1100px) { .device-selection-help { display: none; } }
 
 .device-automation-bar,
 .device-automation-head {

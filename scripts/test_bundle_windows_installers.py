@@ -3,13 +3,31 @@ from pathlib import Path
 import subprocess
 import tempfile
 import unittest
+import contextlib
+import shutil
+import uuid
 
 from scripts.bundle_windows_installers import MARKER, bundle, pristine_binary
 
 
+@contextlib.contextmanager
+def fixture_directory():
+    # Inherit the test runner's writable directory ACL. Windows restricted tokens
+    # cannot access TemporaryDirectory's owner-only security descriptor.
+    parent = Path(tempfile.gettempdir()).resolve()
+    root = parent / f"riviu-bundle-fixture-{uuid.uuid4()}"
+    root.mkdir()
+    try:
+        yield root
+    finally:
+        if root.resolve().parent != parent:
+            raise RuntimeError("fixture path left the test temporary directory")
+        shutil.rmtree(root)
+
+
 class BundleWindowsInstallersTests(unittest.TestCase):
-    def run_fixture(self, fail=False, corrupt=False):
-        with tempfile.TemporaryDirectory() as folder:
+    def run_fixture(self, fail=False, corrupt=False, frontend_ready=True):
+        with fixture_directory() as folder:
             root = Path(folder)
             cli = root / "node_modules/@tauri-apps/cli/tauri.js"
             cli.parent.mkdir(parents=True)
@@ -22,6 +40,12 @@ class BundleWindowsInstallersTests(unittest.TestCase):
 
             def run(command, **_kwargs):
                 self.assertEqual(app.read_bytes(), canonical)
+                if "--verify-frontend" in command:
+                    Path(command[-1]).write_text(json.dumps({
+                        "status": "ready" if frontend_ready else "missing",
+                        "frontendKind": "embeddedDirectory",
+                    }))
+                    return subprocess.CompletedProcess(command, 0)
                 self.assertIn("bundle", command)
                 self.assertNotIn("build", command)
                 kind = command[command.index("--bundles") + 1]
@@ -32,6 +56,12 @@ class BundleWindowsInstallersTests(unittest.TestCase):
                 return subprocess.CompletedProcess(command, 1 if fail else 0)
 
             operation = lambda: bundle(app, root, "x86_64-pc-windows-msvc", [root / "common.json"], root / "msi.json", root / "report.json", run=run)
+            if not frontend_ready:
+                with self.assertRaisesRegex(ValueError, "embedded frontend"):
+                    operation()
+                self.assertEqual(commands, [])
+                self.assertEqual(app.read_bytes(), canonical)
+                return
             if corrupt:
                 with self.assertRaisesRegex(ValueError, "changed outside"):
                     operation()
@@ -57,6 +87,9 @@ class BundleWindowsInstallersTests(unittest.TestCase):
 
     def test_unexpected_app_change_is_preserved_and_refused(self):
         self.run_fixture(corrupt=True)
+
+    def test_missing_embedded_frontend_never_starts_a_bundler(self):
+        self.run_fixture(frontend_ready=False)
 
     def test_ambiguous_or_unknown_marker_refuses(self):
         for data in [b"MZ", MARKER + b"BAD", MARKER + b"UNK" + MARKER + b"UNK"]:

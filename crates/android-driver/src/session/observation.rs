@@ -18,6 +18,21 @@ impl AndroidUiSession {
         &self,
         request: &ObservationRequest,
     ) -> anyhow::Result<UiObservation> {
+        self.observe_inner(request, true).await
+    }
+
+    pub(super) async fn observe_without_recovery_bounded(
+        &self,
+        request: &ObservationRequest,
+    ) -> anyhow::Result<UiObservation> {
+        self.observe_inner(request, false).await
+    }
+
+    async fn observe_inner(
+        &self,
+        request: &ObservationRequest,
+        allow_recovery: bool,
+    ) -> anyhow::Result<UiObservation> {
         let started = Instant::now();
         let started_at_ms = chrono::Utc::now().timestamp_millis();
         request.validate()?;
@@ -44,10 +59,17 @@ impl AndroidUiSession {
         } else {
             None
         };
-        let response = self
-            .agent
-            .observation_read(locator.as_ref(), deadline)
-            .await?;
+        let response = if allow_recovery {
+            self.agent
+                .observation_read(locator.as_ref(), deadline)
+                .await?
+        } else {
+            self.agent
+                .observation_read_without_recovery(locator.as_ref(), deadline)
+                .await?
+        };
+        let repaired_session = response.repaired_session;
+        let response = response.value;
         let (xml, source, native_rects, native_count) = if locator.is_some() {
             let entries = response
                 .get("value")
@@ -139,14 +161,23 @@ impl AndroidUiSession {
         .await
         .map_err(|_| anyhow!("observation_deadline_exceeded"))??;
         anyhow::ensure!(package == ended_package, "observation_foreground_changed");
-        anyhow::ensure!(
-            session_epoch == self.gui_session_epoch(),
-            "observation_session_changed"
-        );
+        let current_epoch = self.gui_session_epoch();
+        let repaired = if session_epoch != current_epoch {
+            anyhow::ensure!(
+                repaired_session.is_some_and(|(previous, current)| {
+                    session_epoch == format!("{}:{previous}", self.gui_epoch)
+                        && current_epoch == format!("{}:{current}", self.gui_epoch)
+                }),
+                "observation_session_changed"
+            );
+            true
+        } else {
+            false
+        };
         let observation = UiObservation {
             device_id: self.serial.clone(),
             app,
-            session_epoch,
+            session_epoch: current_epoch.clone(),
             observation_id: uuid::Uuid::new_v4().to_string(),
             generation,
             started_at_ms,
@@ -158,6 +189,16 @@ impl AndroidUiSession {
         };
         // Synchronous parsing/projection can finish after the timer would have fired.
         anyhow::ensure!(Instant::now() < deadline, "observation_deadline_exceeded");
+        if repaired {
+            return Err(riviu_core::driver::SessionEpochChanged {
+                previous_epoch: session_epoch,
+                current_epoch,
+                device_id: self.serial.clone(),
+                package,
+                fresh_observation: Box::new(observation),
+            }
+            .into());
+        }
         Ok(observation)
     }
 

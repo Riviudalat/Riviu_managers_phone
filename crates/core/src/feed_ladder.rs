@@ -51,6 +51,10 @@
 use crate::driver::UiSession;
 use crate::tiktok_labels::{controls_for, TikTokControl, TikTokControls};
 use crate::tiktok_target::is_measured_android_tiktok;
+use crate::ui_automation::runtime::{read_before_deadline, ReadWaitResult};
+use std::future::Future;
+use std::sync::atomic::{AtomicBool, Ordering};
+use tokio::time::Instant;
 
 /// Why a phone cannot be put through the ladder right now.
 ///
@@ -264,43 +268,106 @@ pub async fn step(
     labels: TikTokControls,
     spend: &mut LadderSpend,
 ) -> LadderStep {
-    if present(session, labels, TikTokControl::FeedTab).await {
-        return LadderStep::OnFeed;
+    // Idle callers retain their own outer timeout and non-cancellable policy.
+    // A failed read is never evidence that a safe rung, or the feed, is absent.
+    match step_inner(session, labels, spend, None).await {
+        Ok(ReadWaitResult::Ready(step)) => step,
+        Ok(_) => LadderStep::Stuck,
+        Err(error) => {
+            tracing::warn!(%error, "feed ladder read failed; leaving the device untouched");
+            LadderStep::Stuck
+        }
+    }
+}
+
+/// Use the caller's existing feed window for every read and re-check Stop before effects.
+pub(crate) async fn step_before_deadline(
+    session: &dyn UiSession,
+    labels: TikTokControls,
+    spend: &mut LadderSpend,
+    deadline: Instant,
+    stop: &AtomicBool,
+) -> anyhow::Result<ReadWaitResult<LadderStep>> {
+    step_inner(session, labels, spend, Some((deadline, stop))).await
+}
+
+async fn ladder_read<T>(
+    read: impl Future<Output = anyhow::Result<T>>,
+    budget: Option<(Instant, &AtomicBool)>,
+) -> anyhow::Result<ReadWaitResult<T>> {
+    match budget {
+        Some((deadline, stop)) => read_before_deadline(read, deadline, stop).await,
+        None => read.await.map(ReadWaitResult::Ready),
+    }
+}
+
+fn stopped_before_effect(
+    budget: Option<(Instant, &AtomicBool)>,
+) -> Option<ReadWaitResult<LadderStep>> {
+    match budget {
+        Some((_, stop)) if stop.load(Ordering::Relaxed) => Some(ReadWaitResult::Cancelled),
+        Some((deadline, _)) if Instant::now() >= deadline => Some(ReadWaitResult::DeadlineExceeded),
+        _ => None,
+    }
+}
+
+async fn step_inner(
+    session: &dyn UiSession,
+    labels: TikTokControls,
+    spend: &mut LadderSpend,
+    budget: Option<(Instant, &AtomicBool)>,
+) -> anyhow::Result<ReadWaitResult<LadderStep>> {
+    let epoch = session.gui_session_epoch();
+    macro_rules! read {
+        ($read:expr) => {
+            match ladder_read($read, budget).await? {
+                ReadWaitResult::Ready(value) => {
+                    anyhow::ensure!(
+                        session.gui_session_epoch() == epoch,
+                        "feed ladder session changed"
+                    );
+                    value
+                }
+                ReadWaitResult::Cancelled => return Ok(ReadWaitResult::Cancelled),
+                ReadWaitResult::DeadlineExceeded => return Ok(ReadWaitResult::DeadlineExceeded),
+            }
+        };
+    }
+    if read!(locate_checked(session, labels, TikTokControl::FeedTab)).is_some() {
+        return Ok(ReadWaitResult::Ready(LadderStep::OnFeed));
     }
 
-    // Read the full tree only behind the measured modal. A negative label alone
-    // is not enough to select a button in another prompt or an underlying page.
     if labels.package() == "com.ss.android.ugc.trill"
         && labels.resource_version() == Some("38.3.2")
         && labels.language() == "en"
         && session.supports_accessibility_readback()
-        && session
-            .locate(crate::ElementQuery::Description {
-                value: "Dialog",
-                exact: true,
-            })
-            .await
-            .ok()
-            .flatten()
-            .is_some()
+        && read!(session.locate(crate::ElementQuery::Description {
+            value: "Dialog",
+            exact: true,
+        }))
+        .is_some()
     {
-        if let Ok(tree) = session
-            .hierarchy_source_snapshot()
-            .await
-            .and_then(crate::ui_automation::tree::Tree::parse)
-        {
-            if let Some(button) = crate::app_automation::dialogs::decline_contacts(&tree, labels) {
-                return match session.tap(button.centre()).await {
-                    Ok(()) => LadderStep::Tapped {
-                        control: TikTokControl::DialogDismiss,
-                        says: "từ chối đồng bộ danh bạ trong hộp thoại TikTok",
-                    },
-                    Err(error) => LadderStep::TapFailed {
-                        control: TikTokControl::DialogDismiss,
-                        error: error.to_string(),
-                    },
-                };
+        let snapshot = read!(session.hierarchy_source_snapshot());
+        let tree = crate::ui_automation::tree::Tree::parse(snapshot)?;
+        if let Some(button) = crate::app_automation::dialogs::decline_contacts(&tree, labels) {
+            if let Some(stopped) = stopped_before_effect(budget) {
+                return Ok(stopped);
             }
+            anyhow::ensure!(
+                session.gui_session_epoch() == epoch,
+                "feed ladder session changed"
+            );
+            let result = session.tap(button.centre()).await;
+            return Ok(ReadWaitResult::Ready(match result {
+                Ok(()) => LadderStep::Tapped {
+                    control: TikTokControl::DialogDismiss,
+                    says: "từ chối đồng bộ danh bạ trong hộp thoại TikTok",
+                },
+                Err(error) => LadderStep::TapFailed {
+                    control: TikTokControl::DialogDismiss,
+                    error: error.to_string(),
+                },
+            }));
         }
     }
 
@@ -308,11 +375,19 @@ pub async fn step(
         if !rung.repeatable && spend.already_fired(index) {
             continue;
         }
-        let Some(element) = locate(session, labels, rung.control).await else {
+        let Some(element) = read!(locate_checked(session, labels, rung.control)) else {
             continue;
         };
+        if let Some(stopped) = stopped_before_effect(budget) {
+            return Ok(stopped);
+        }
+        anyhow::ensure!(
+            session.gui_session_epoch() == epoch,
+            "feed ladder session changed"
+        );
         spend.mark_fired(index);
-        return match session.tap(element).await {
+        let result = session.tap(element).await;
+        return Ok(ReadWaitResult::Ready(match result {
             Ok(()) => LadderStep::Tapped {
                 control: rung.control,
                 says: rung.says,
@@ -321,22 +396,40 @@ pub async fn step(
                 control: rung.control,
                 error: error.to_string(),
             },
-        };
+        }));
     }
 
     if spend.allow_back && spend.backs_left() {
+        if let Some(stopped) = stopped_before_effect(budget) {
+            return Ok(stopped);
+        }
+        anyhow::ensure!(
+            session.gui_session_epoch() == epoch,
+            "feed ladder session changed"
+        );
         spend.backs += 1;
-        // A refused Back is not worth its own arm: there is no second way to press it and
-        // nothing the caller would do differently, so the count is spent either way and
-        // the next poll re-probes the same screen.
+        // The already-dispatched gesture drains; its ACK is not a screen-state proof.
         let _ = session.back().await;
-        return LadderStep::PressedBack {
+        return Ok(ReadWaitResult::Ready(LadderStep::PressedBack {
             spent: spend.backs,
             limit: spend.back_limit,
-        };
+        }));
     }
+    Ok(ReadWaitResult::Ready(LadderStep::Stuck))
+}
 
-    LadderStep::Stuck
+async fn locate_checked(
+    session: &dyn UiSession,
+    labels: TikTokControls,
+    control: TikTokControl,
+) -> anyhow::Result<Option<crate::types::TapPoint>> {
+    let Some(label) = labels.label(control) else {
+        return Ok(None);
+    };
+    Ok(session
+        .locate(label.to_query())
+        .await?
+        .map(|element| element.centre()))
 }
 
 /// Whether TikTok's feed tab is on screen.
@@ -393,6 +486,7 @@ mod tests {
         backs: AtomicUsize,
         refuse_taps: bool,
         xml: Option<String>,
+        read_fails: bool,
     }
 
     impl FakePhone {
@@ -471,6 +565,7 @@ mod tests {
         }
 
         async fn locate(&self, query: ElementQuery<'_>) -> anyhow::Result<Option<ElementBox>> {
+            anyhow::ensure!(!self.read_fails, "fixture tree request timed out");
             let found = match query {
                 ElementQuery::Text { value, .. } => {
                     self.text.lock().expect("text").contains(&value)
@@ -493,6 +588,22 @@ mod tests {
                 clickable: true,
             }))
         }
+    }
+
+    #[tokio::test]
+    async fn feed_ladder_read_failure_never_becomes_permission_to_press_back() {
+        let phone = FakePhone {
+            read_fails: true,
+            ..Default::default()
+        };
+        let mut spend = LadderSpend::new(1);
+        spend.allow_back = true;
+        assert_eq!(
+            step(&phone, measured(), &mut spend).await,
+            LadderStep::Stuck
+        );
+        assert_eq!(phone.backs.load(Ordering::Relaxed), 0);
+        assert_eq!(phone.taps(), 0);
     }
 
     #[tokio::test]

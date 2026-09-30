@@ -274,10 +274,46 @@ pub fn classify(message: &str) -> FailureKind {
 pub trait RecoveryJournal: Send + Sync {
     fn step(&self, step: &str, checkpoint: Option<&str>) -> anyhow::Result<()>;
     fn retry(&self, failure: &RecoveryFailure) -> anyhow::Result<Option<Duration>>;
+    /// Diagnostics cannot alter a checkpoint or authorize retry of an effect.
+    fn note_read(&self, _note: &ReadRecoveryNote) -> anyhow::Result<()> {
+        Ok(())
+    }
     fn sound(
         &self,
         selection: Option<&crate::SoundSelectionEvidence>,
     ) -> anyhow::Result<Option<crate::SoundSelectionEvidence>>;
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ReadRecoveryNote {
+    pub stage: String,
+    pub strategy: String,
+    pub attempt: u32,
+    pub outcome: String,
+    pub error: Option<String>,
+}
+
+/// Record a strategy change in the existing per-device timeline, without turning a
+/// telemetry write failure into permission to repeat a successfully dispatched Post.
+pub fn note_read(stage: &str, strategy: &str, attempt: u32, outcome: &str, error: Option<&str>) {
+    let note = ReadRecoveryNote {
+        stage: stage.into(),
+        strategy: strategy.into(),
+        attempt,
+        outcome: outcome.into(),
+        error: error.map(str::to_owned),
+    };
+    if let Err(error) = JOURNAL
+        .try_with(|journal| journal.note_read(&note))
+        .unwrap_or(Ok(()))
+    {
+        tracing::warn!(
+            stage,
+            strategy,
+            "read recovery telemetry incomplete: {error}"
+        );
+    }
 }
 tokio::task_local! { static JOURNAL: Arc<dyn RecoveryJournal>; }
 pub fn active() -> bool {

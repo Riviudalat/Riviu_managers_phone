@@ -15,6 +15,10 @@ impl FlowCancellation {
         self.cancelled.load(std::sync::atomic::Ordering::Acquire)
     }
 
+    pub(crate) fn stop_flag(&self) -> &std::sync::atomic::AtomicBool {
+        self.cancelled.as_ref()
+    }
+
     pub(crate) async fn cancelled(&self) {
         loop {
             let changed = self.notify.notified();

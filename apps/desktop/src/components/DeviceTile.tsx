@@ -105,17 +105,6 @@ function DeviceTileInner({
       }}
       onDoubleClick={() => onOpen(device.udid)}
     >
-      <div className="dev-phone-info" role="gridcell">
-        <div className="dev-phone-heading">
-          <span className="dev-phone-index">Máy {index}</span>
-          <span className="dev-phone-selection" aria-hidden="true">{selected ? "✓" : ""}</span>
-        </div>
-        <span className="dev-phone-name" title={displayName}>{displayName}</span>
-        {username && <span className="dev-phone-handle" title={`@${username}`}>@{username}</span>}
-        <span className={`dev-phone-status is-${operational.kind}`} title={operationalLabel}>
-          {operationalLabel}
-        </span>
-      </div>
       {/* Every tile keeps the same phone-shaped frame regardless of stream
           state or the stream's own aspect, so the grid never reflows when a
           frame arrives — the "fixed frame" the operator asked for. */}
@@ -156,6 +145,16 @@ function DeviceTileInner({
           </span>
         )}
 
+        <div className="dev-phone-info">
+          <span className="dev-phone-index">Máy {index}</span>
+          <span className="dev-phone-name" title={displayName}>
+            {displayName}
+          </span>
+          {username && <span className="dev-phone-handle" title={`@${username}`}>@{username}</span>}
+          <span className={`dev-phone-status is-${operational.kind}`}>
+            {operationalLabel}
+          </span>
+        </div>
       </div>
 
       {/* Selection stays on the tile itself. The small open action is intentionally separate:

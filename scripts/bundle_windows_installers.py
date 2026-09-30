@@ -52,6 +52,17 @@ def bundle(
     cli = desktop / "node_modules/@tauri-apps/cli/tauri.js"
     if not cli.is_file():
         raise FileNotFoundError("Install the locked frontend dependencies before bundling")
+    restore_binary(executable, pristine, offset)
+    frontend_report = report_path.with_name(report_path.stem + "-frontend.json").resolve()
+    frontend_report.unlink(missing_ok=True)
+    verification = [str(executable), "--verify-frontend", str(frontend_report)]
+    checked = run(verification, cwd=desktop, check=False)
+    if checked.returncode:
+        raise subprocess.CalledProcessError(checked.returncode, verification)
+    frontend = json.loads(frontend_report.read_text(encoding="utf-8"))
+    if frontend.get("status") != "ready" or frontend.get("frontendKind") != "embeddedDirectory":
+        raise ValueError("Compiled application did not prove its embedded frontend")
+    report["frontend"] = frontend
     for kind in ("nsis", "msi"):
         restore_binary(executable, pristine, offset)
         overlays = configs + ([msi_config] if kind == "msi" else [])

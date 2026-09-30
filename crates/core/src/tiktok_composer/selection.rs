@@ -750,6 +750,8 @@ impl<P: TapPlanner> Composer<'_, P> {
         stop: &AtomicBool,
         trace: &mut PickerTrace,
     ) -> anyhow::Result<Selection> {
+        use crate::driver::{classify_read_failure, ReadFailureKind};
+        use crate::ui_automation::runtime::{read_before_deadline, ReadWaitResult};
         let wanted = trace.diagnostic.expected_count;
         if !(1..=crate::publish::MAX_CAROUSEL_IMAGES).contains(&wanted) {
             return Ok(Selection::NotEnoughSelected);
@@ -759,8 +761,45 @@ impl<P: TapPlanner> Composer<'_, P> {
             return Ok(Selection::Stopped);
         }
         let session = self.session;
+        let epoch = session.gui_session_epoch();
         let album_query = self.plan.album_menu;
-        let Some((initial, next)) = trace.read(session, controls, album_query, album).await? else {
+        let initial_deadline = crate::tiktok_sound::phase_deadline(PICKER_WINDOW);
+        let initial = loop {
+            match read_before_deadline(
+                trace.read(session, controls, album_query, album),
+                initial_deadline,
+                stop,
+            )
+            .await
+            {
+                Ok(ReadWaitResult::Ready(initial)) => break initial,
+                Ok(ReadWaitResult::Cancelled) => {
+                    trace.reason(SelectionReason::Stopped);
+                    return Ok(Selection::Stopped);
+                }
+                Ok(ReadWaitResult::DeadlineExceeded) => {
+                    trace.reason(SelectionReason::HierarchyReadFailed);
+                    return Ok(Selection::NotEnoughSelected);
+                }
+                Err(error) if classify_read_failure(&error) == ReadFailureKind::Transient => {
+                    if session.gui_session_epoch() != epoch {
+                        trace.reason(SelectionReason::HierarchyReadFailed);
+                        return Ok(Selection::NotEnoughSelected);
+                    }
+                    sleep(
+                        POLL.min(initial_deadline.saturating_duration_since(Instant::now())),
+                        stop,
+                    )
+                    .await;
+                }
+                Err(error) => return Err(error),
+            }
+        };
+        if session.gui_session_epoch() != epoch {
+            trace.reason(SelectionReason::HierarchyReadFailed);
+            return Ok(Selection::NotEnoughSelected);
+        }
+        let Some((initial, next)) = initial else {
             return Ok(Selection::NotEnoughSelected);
         };
         let [next_button] = next.as_slice() else {
@@ -809,38 +848,41 @@ impl<P: TapPlanner> Composer<'_, P> {
                 trace.reason(SelectionReason::TapFailed);
                 self.tap_inside(row).await?;
                 let expected = count + 1;
-                let mut deadline = Instant::now() + ARM_WINDOW;
+                let mut deadline = crate::tiktok_sound::phase_deadline(ARM_WINDOW);
                 // Trill 38.3.2, ce031713dd735a1103, 28/09/2026: after
                 // four verified selections, a 5151ms read had no album or
                 // controls. Missing evidence permits one observation window,
                 // never another tap; explicit album contradictions still stop.
-                let hard_deadline = deadline + Duration::from_secs(8);
+                let hard_deadline =
+                    crate::tiktok_sound::phase_deadline(ARM_WINDOW + Duration::from_secs(8));
                 let mut recovering_partial = false;
                 current = loop {
                     if stop.load(Ordering::Relaxed) {
                         trace.reason(SelectionReason::Stopped);
                         return Ok(Selection::Stopped);
                     }
-                    let observed = {
-                        let read = tokio::time::timeout_at(
-                            hard_deadline,
-                            trace.read(session, controls, album_query, album),
-                        );
-                        tokio::pin!(read);
-                        loop {
-                            tokio::select! {
-                                result = &mut read => break result.ok(),
-                                _ = tokio::time::sleep(POLL) => {
-                                    if stop.load(Ordering::Relaxed) {
-                                        break None;
-                                    }
-                                }
-                            }
+                    let observed = match read_before_deadline(
+                        trace.read(session, controls, album_query, album),
+                        hard_deadline,
+                        stop,
+                    )
+                    .await
+                    {
+                        Ok(ReadWaitResult::Ready(observed)) => observed,
+                        Ok(ReadWaitResult::Cancelled) => {
+                            trace.reason(SelectionReason::Stopped);
+                            return Ok(Selection::Stopped);
                         }
-                    };
-                    let observed = match observed {
-                        Some(result) => result?,
-                        None => None,
+                        Ok(ReadWaitResult::DeadlineExceeded) => None,
+                        Err(error)
+                            if classify_read_failure(&error) == ReadFailureKind::Transient =>
+                        {
+                            // The previous corner tap remains uncertain until
+                            // its ordinal/count is read; never replay it.
+                            trace.reason(SelectionReason::HierarchyReadFailed);
+                            None
+                        }
+                        Err(error) => return Err(error),
                     };
                     if stop.load(Ordering::Relaxed) {
                         trace.reason(SelectionReason::Stopped);
@@ -848,6 +890,10 @@ impl<P: TapPlanner> Composer<'_, P> {
                     }
                     if Instant::now() >= hard_deadline {
                         trace.reason(SelectionReason::SelectionReadbackUnproven);
+                        return Ok(Selection::NotEnoughSelected);
+                    }
+                    if session.gui_session_epoch() != epoch {
+                        trace.reason(SelectionReason::HierarchyReadFailed);
                         return Ok(Selection::NotEnoughSelected);
                     }
                     if trace.diagnostic.album_matches == Some(false) {
@@ -871,7 +917,11 @@ impl<P: TapPlanner> Composer<'_, P> {
                         trace.reason(SelectionReason::SelectionReadbackUnproven);
                         return Ok(Selection::NotEnoughSelected);
                     }
-                    sleep(POLL, stop).await;
+                    sleep(
+                        POLL.min(deadline.saturating_duration_since(Instant::now())),
+                        stop,
+                    )
+                    .await;
                 };
                 count = expected;
                 trace.verified(count);
@@ -918,15 +968,52 @@ impl<P: TapPlanner> Composer<'_, P> {
                 scrolls += 1;
                 trace.diagnostic.scroll_count = scrolls;
                 trace.diagnostic.stage = SelectionStage::ScrollReadback;
-                sleep(Duration::from_millis(450), stop).await;
-                let Some((rows, next)) = trace.read(session, controls, album_query, album).await?
-                else {
-                    return Ok(Selection::NotEnoughSelected);
-                };
-                let Some(observed) = visible_selection(rows, &next, screen, &mut grid, count)
-                else {
-                    trace.reason(SelectionReason::ScrollReadbackUnproven);
-                    return Ok(Selection::NotEnoughSelected);
+                let scroll_deadline = crate::tiktok_sound::phase_deadline(PICKER_WINDOW);
+                let observed = loop {
+                    let read = read_before_deadline(
+                        trace.read(session, controls, album_query, album),
+                        scroll_deadline,
+                        stop,
+                    )
+                    .await;
+                    let read = match read {
+                        Ok(ReadWaitResult::Ready(read)) => read,
+                        Ok(ReadWaitResult::Cancelled) => {
+                            trace.reason(SelectionReason::Stopped);
+                            return Ok(Selection::Stopped);
+                        }
+                        Ok(ReadWaitResult::DeadlineExceeded) => {
+                            trace.reason(SelectionReason::ScrollReadbackUnproven);
+                            return Ok(Selection::NotEnoughSelected);
+                        }
+                        Err(error)
+                            if classify_read_failure(&error) == ReadFailureKind::Transient =>
+                        {
+                            None
+                        }
+                        Err(error) => return Err(error),
+                    };
+                    if session.gui_session_epoch() != epoch {
+                        trace.reason(SelectionReason::HierarchyReadFailed);
+                        return Ok(Selection::NotEnoughSelected);
+                    }
+                    if trace.diagnostic.album_matches == Some(false) {
+                        return Ok(Selection::NotEnoughSelected);
+                    }
+                    if let Some((rows, next)) = read {
+                        let Some(observed) =
+                            visible_selection(rows, &next, screen, &mut grid, count)
+                        else {
+                            trace.reason(SelectionReason::ScrollReadbackUnproven);
+                            return Ok(Selection::NotEnoughSelected);
+                        };
+                        break observed;
+                    }
+                    sleep(
+                        POLL.min(scroll_deadline.saturating_duration_since(Instant::now())),
+                        stop,
+                    )
+                    .await;
                 };
                 trace.verified(count);
                 current = observed;
@@ -1115,6 +1202,7 @@ mod tests {
         fail_read_after: Option<usize>,
         partial_after_fifth: Mutex<Option<Duration>>,
         partial_forever: bool,
+        initial_read_delay: Duration,
         wrong_after_fifth: bool,
         swipes: Mutex<usize>,
     }
@@ -1136,6 +1224,7 @@ mod tests {
                 fail_read_after: None,
                 partial_after_fifth: Mutex::new(None),
                 partial_forever: false,
+                initial_read_delay: Duration::ZERO,
                 wrong_after_fifth: false,
                 swipes: Mutex::new(0),
             }
@@ -1249,6 +1338,9 @@ mod tests {
             &self,
         ) -> anyhow::Result<crate::driver::HierarchySourceSnapshot> {
             let reads = self.reads.fetch_add(1, Ordering::Relaxed);
+            if reads == 0 {
+                tokio::time::sleep(self.initial_read_delay).await;
+            }
             if self.fail_read_after.is_some_and(|limit| reads >= limit) {
                 anyhow::bail!("fixture hierarchy offline");
             }
@@ -1903,6 +1995,21 @@ mod tests {
         }
         assert!(KnownGrid::from_initial(uneven, 11).is_none());
     }
+
+    #[tokio::test(start_paused = true)]
+    async fn initial_picker_read_is_bounded_before_any_selection() {
+        let mut session = Picker::new(None);
+        session.initial_read_delay = PICKER_WINDOW + Duration::from_secs(1);
+        let start = Instant::now();
+        let result = run_picker(&session).await;
+        assert!(
+            !matches!(result, Selection::Armed { .. }),
+            "late initial picker evidence authorized selection"
+        );
+        assert!(session.taps.lock().is_empty());
+        assert!(start.elapsed() <= PICKER_WINDOW);
+    }
+
     #[tokio::test(start_paused = true)]
     async fn six_photos_require_six_corner_taps_and_six_ordinals() {
         let session = Picker::new(None);

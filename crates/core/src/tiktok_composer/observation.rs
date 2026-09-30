@@ -180,6 +180,80 @@ pub(crate) fn positive_query_known(observation: &UiObservation) -> bool {
     observation.unknown_match_count == 0 && !observation.matches.is_empty()
 }
 
+/// Narrow one already-bound snapshot without dropping unknown candidate matches.
+/// This is projection, never a new read or evidence of absence.
+pub(crate) fn project_query(snapshot: &UiObservation, query: &SemanticLocator) -> UiObservation {
+    use crate::ui_automation::resolver::{compile_locator, SemanticMatch};
+    let compiled = compile_locator(query);
+    let mut unknown_match_count = snapshot.unknown_match_count;
+    if snapshot.source == crate::ui_automation::ObservationSource::NativeQuery && query.id.is_some()
+    {
+        // Native Android exact-id observations count unreadable identifiers.
+        // The broad batch request did not have an id, so restore that guard.
+        unknown_match_count += snapshot
+            .matches
+            .iter()
+            .filter(|node| node.id.is_none())
+            .count();
+    }
+    let matches = snapshot
+        .matches
+        .iter()
+        .filter_map(|node| match compiled.matches(node) {
+            SemanticMatch::Match => Some(node.clone()),
+            SemanticMatch::Unknown => {
+                unknown_match_count += 1;
+                None
+            }
+            SemanticMatch::NoMatch => None,
+        })
+        .collect();
+    UiObservation {
+        device_id: snapshot.device_id.clone(),
+        app: snapshot.app.clone(),
+        session_epoch: snapshot.session_epoch.clone(),
+        observation_id: snapshot.observation_id.clone(),
+        generation: snapshot.generation,
+        started_at_ms: snapshot.started_at_ms,
+        ended_at_ms: snapshot.ended_at_ms,
+        source: snapshot.source,
+        completeness: snapshot.completeness,
+        matches,
+        unknown_match_count,
+    }
+}
+
+pub(crate) fn caption_values(
+    snapshot: &UiObservation,
+    package: &str,
+    id: &str,
+) -> anyhow::Result<Option<Vec<String>>> {
+    if !positive_query_known(snapshot) {
+        return Ok(None);
+    }
+    if snapshot.matches.len() > 1 {
+        anyhow::bail!("caption observation ambiguous");
+    }
+    let mut values = Vec::new();
+    for node in &snapshot.matches {
+        if node.id.as_deref() != Some(id)
+            || node.package.as_deref() != Some(package)
+            || node.visible != Some(true)
+            || node.enabled != Some(true)
+            || node.showing_hint != Some(false)
+            || node.password != Some(false)
+        {
+            return Ok(None);
+        }
+        let Some(text) = &node.text else {
+            return Ok(None);
+        };
+        tracing::debug!(focused = ?node.focused, "caption editor predicate observed");
+        values.push(text.clone());
+    }
+    Ok(Some(values))
+}
+
 /// Preserve cardinality and unknowns; missing attributes never become empty text.
 pub(crate) async fn caption(
     session: &dyn UiSession,
@@ -208,32 +282,7 @@ pub(crate) async fn caption(
         )
         .await?
         {
-            if !positive_query_known(&observation) {
-                return Ok(None);
-            }
-            if observation.matches.len() > 1 {
-                anyhow::bail!("caption observation ambiguous");
-            }
-            let mut values = Vec::new();
-            for node in &observation.matches {
-                if node.id.as_deref() != Some(id.as_str())
-                    || node.package.as_deref() != Some(package)
-                    || node.visible != Some(true)
-                    || node.enabled != Some(true)
-                    || node.showing_hint != Some(false)
-                    || node.password != Some(false)
-                {
-                    return Ok(None);
-                }
-                let Some(text) = &node.text else {
-                    return Ok(None);
-                };
-                // Focus is a caption/IME transition predicate, not proof that the
-                // system keyboard itself is visible outside the scoped package.
-                tracing::debug!(focused = ?node.focused, "caption editor predicate observed");
-                values.push(text.clone());
-            }
-            return Ok(Some(values));
+            return caption_values(&observation, package, &id);
         }
         let rows = read(deadline, Some(stop), session.locate_all_described(query)).await?;
         return Ok(rows.into_iter().map(|row| row.description).collect());

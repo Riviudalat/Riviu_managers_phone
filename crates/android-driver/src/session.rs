@@ -384,6 +384,13 @@ impl UiSession for AndroidUiSession {
         self.observe_bounded(request).await
     }
 
+    async fn observe_without_recovery(
+        &self,
+        request: &riviu_core::ui_automation::ObservationRequest,
+    ) -> anyhow::Result<riviu_core::ui_automation::UiObservation> {
+        self.observe_without_recovery_bounded(request).await
+    }
+
     fn set_gui_scope(&self, scope: riviu_core::ui_automation::GuiScope) {
         *self.gui_scope.lock() = Some(scope);
     }

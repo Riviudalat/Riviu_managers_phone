@@ -39,6 +39,7 @@ use tokio::time::Instant;
 use crate::driver::{ElementBox, ElementQuery, UiSession};
 use crate::interaction::CommentLocatorIdentity;
 use crate::tiktok_labels::{LabelMatch, TikTokControl, TikTokControls};
+use crate::ui_automation::runtime::{read_before_deadline, ReadWaitResult};
 use anyhow::Context;
 
 mod composer;
@@ -1977,21 +1978,38 @@ async fn await_mention_row(
     stop: &AtomicBool,
 ) -> anyhow::Result<Option<ElementBox>> {
     let deadline = Instant::now() + MENTION_PICKER_WAIT;
+    let epoch = session.gui_session_epoch();
+    let mut retried = false;
     loop {
-        if stop.load(Ordering::Relaxed) {
-            return Ok(None);
+        // Existing rows are excluded by identity; a fixed first sleep cannot prove
+        // that a network result is ready and must not hide Stop while a read hangs.
+        let result = read_before_deadline(mention_rows(session, handle), deadline, stop).await;
+        anyhow::ensure!(
+            session.gui_session_epoch() == epoch,
+            "mention picker session changed"
+        );
+        match result {
+            Ok(ReadWaitResult::Ready(rows)) => {
+                if let Some(row) = new_mention_row(rows, before) {
+                    return Ok(Some(row));
+                }
+            }
+            Ok(ReadWaitResult::Cancelled | ReadWaitResult::DeadlineExceeded) => return Ok(None),
+            Err(error)
+                if !retried
+                    && crate::driver::classify_read_failure(&error)
+                        == crate::driver::ReadFailureKind::Transient =>
+            {
+                retried = true;
+                tracing::debug!(%error, retry = 1, "retrying mention picker read within remaining budget");
+            }
+            Err(error) => return Err(error),
         }
-        // **Sleep before the first read, not after it.** The list is a network fetch, so at
-        // t=0 it definitionally has not arrived — and the only thing a read taken then can
-        // match is something that was already on screen, which is exactly the comment row
-        // this must never tap.
-        tokio::time::sleep(MENTION_PICKER_POLL).await;
-        if let Some(row) = new_mention_row(mention_rows(session, handle).await?, before) {
-            return Ok(Some(row));
-        }
-        if Instant::now() >= deadline {
-            return Ok(None);
-        }
+        crate::nurture::sleep_interruptible(
+            MENTION_PICKER_POLL.min(deadline.saturating_duration_since(Instant::now())),
+            stop,
+        )
+        .await;
     }
 }
 
@@ -3041,19 +3059,37 @@ async fn await_composer(
     stop: &AtomicBool,
 ) -> anyhow::Result<Option<String>> {
     let deadline = Instant::now() + crate::tiktok_drawer::DRAWER_WINDOW;
+    let epoch = session.gui_session_epoch();
+    let mut retried = false;
     loop {
-        if stop.load(Ordering::Relaxed) {
-            return Ok(None);
-        }
-        if let Some(text) = read_placeholder(session).await? {
-            if text != before {
-                return Ok(Some(text));
+        let result = read_before_deadline(read_placeholder(session), deadline, stop).await;
+        anyhow::ensure!(
+            session.gui_session_epoch() == epoch,
+            "reply composer session changed"
+        );
+        match result {
+            Ok(ReadWaitResult::Ready(value)) => {
+                if let Some(text) = value.filter(|text| text != before) {
+                    return Ok(Some(text));
+                }
             }
+            Ok(ReadWaitResult::Cancelled | ReadWaitResult::DeadlineExceeded) => return Ok(None),
+            Err(error)
+                if !retried
+                    && crate::driver::classify_read_failure(&error)
+                        == crate::driver::ReadFailureKind::Transient =>
+            {
+                retried = true;
+                tracing::debug!(%error, retry = 1, "retrying reply composer read within remaining budget");
+            }
+            Err(error) => return Err(error),
         }
-        if Instant::now() >= deadline {
-            return Ok(None);
-        }
-        tokio::time::sleep(crate::tiktok_drawer::DRAWER_POLL).await;
+        crate::nurture::sleep_interruptible(
+            crate::tiktok_drawer::DRAWER_POLL
+                .min(deadline.saturating_duration_since(Instant::now())),
+            stop,
+        )
+        .await;
     }
 }
 
@@ -4654,6 +4690,9 @@ mod tests {
         /// the latter, and a fake that can only fail single-element reads cannot prove that a
         /// broken list request is not mistaken for an empty comment list.
         all_failing_after: Mutex<Vec<(String, usize)>>,
+        /// Delay list responses to exercise deadline/Stop while a reply composer read is pending.
+        all_read_delay: Mutex<Option<Duration>>,
+        all_transient_reads: std::sync::atomic::AtomicUsize,
         /// Number of successful taps left before the transport starts failing.
         tap_failing_after: Mutex<Option<usize>>,
         /// Number of successful key-event writes left before the transport starts failing.
@@ -4852,6 +4891,24 @@ mod tests {
             }
         }
         async fn locate_all(&self, query: ElementQuery<'_>) -> anyhow::Result<Vec<ElementBox>> {
+            if self
+                .all_transient_reads
+                .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |left| {
+                    left.checked_sub(1)
+                })
+                .is_ok()
+            {
+                return Err(crate::driver::UiError::new(
+                    crate::driver::UiErrorKind::Timeout,
+                    "locateAll",
+                    "fixture read timeout",
+                )
+                .into());
+            }
+            let delay = *self.all_read_delay.lock();
+            if let Some(delay) = delay {
+                tokio::time::sleep(delay).await;
+            }
             let wanted = query_value(query);
             {
                 let mut failing = self.all_failing_after.lock();
@@ -5307,6 +5364,100 @@ mod tests {
             session.typed.lock().is_empty(),
             "nothing may be typed once the parent is in doubt"
         );
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn interaction_composer_and_mention_wait_retry_only_one_transient_read() {
+        for mention in [false, true] {
+            for failures in [1, 2] {
+                let session = DrawerSession::default().with_many(
+                    if mention {
+                        "android.widget.TextView"
+                    } else {
+                        EDIT
+                    },
+                    vec![node(
+                        199.0,
+                        1175.0,
+                        700.0,
+                        100.0,
+                        if mention {
+                            "exact.author"
+                        } else {
+                            "Trả lời exact.author"
+                        },
+                    )],
+                );
+                session
+                    .all_transient_reads
+                    .store(failures, Ordering::Relaxed);
+                let stop = AtomicBool::new(false);
+                let started = Instant::now();
+                let result = if mention {
+                    await_mention_row(&session, "exact.author", &[], &stop)
+                        .await
+                        .map(|row| row.is_some())
+                } else {
+                    await_composer(&session, "Thêm bình luận...", &stop)
+                        .await
+                        .map(|value| value.is_some())
+                };
+                if failures == 1 {
+                    assert!(result.expect("one transient read must recover"));
+                } else {
+                    assert!(result
+                        .expect_err("second failure is retained")
+                        .downcast_ref::<crate::driver::UiError>()
+                        .is_some());
+                }
+                assert!(
+                    started.elapsed()
+                        <= if mention {
+                            MENTION_PICKER_WAIT
+                        } else {
+                            crate::tiktok_drawer::DRAWER_WINDOW
+                        }
+                );
+                assert!(session.typed.lock().is_empty());
+                assert!(session.taps.lock().is_empty());
+            }
+        }
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn reply_composer_wait_rejects_late_or_cancelled_read() {
+        for cancelled in [true, false] {
+            let session = DrawerSession::default().with_many(
+                EDIT,
+                vec![node(199.0, 1175.0, 700.0, 100.0, "Trả lời exact.author")],
+            );
+            *session.all_read_delay.lock() = Some(if cancelled {
+                Duration::from_secs(1)
+            } else {
+                crate::tiktok_drawer::DRAWER_WINDOW + Duration::from_secs(1)
+            });
+            let stop = std::sync::Arc::new(AtomicBool::new(false));
+            if cancelled {
+                let stop = stop.clone();
+                tokio::spawn(async move {
+                    tokio::time::sleep(Duration::from_millis(100)).await;
+                    stop.store(true, Ordering::Relaxed);
+                });
+            }
+            let started = Instant::now();
+            assert!(await_composer(&session, "Thêm bình luận...", &stop)
+                .await
+                .expect("cancelled/expired composer read")
+                .is_none());
+            let limit = if cancelled {
+                Duration::from_millis(200)
+            } else {
+                crate::tiktok_drawer::DRAWER_WINDOW
+            };
+            assert!(started.elapsed() <= limit);
+            assert!(session.typed.lock().is_empty());
+            assert!(session.taps.lock().is_empty());
+        }
     }
 
     #[tokio::test(start_paused = true)]

@@ -215,6 +215,7 @@ mod tests {
         mode: &'static str,
         closed: AtomicBool,
         recycled: AtomicBool,
+        tap_completed: AtomicBool,
     }
     fn node(id: &str, text: &str, bounds: &str, extra: &str) -> String {
         format!(
@@ -269,6 +270,10 @@ mod tests {
                 "only Recent tab may be tapped"
             );
             self.taps.fetch_add(1, Ordering::Relaxed);
+            if self.mode == "slow-tap" {
+                tokio::time::sleep(Duration::from_secs(61)).await;
+            }
+            self.tap_completed.store(true, Ordering::Relaxed);
             Ok(())
         }
         async fn swipe(&self, _: crate::SwipeGesture) -> anyhow::Result<()> {
@@ -411,6 +416,7 @@ mod tests {
                 mode,
                 closed: AtomicBool::new(false),
                 recycled: AtomicBool::new(false),
+                tap_completed: AtomicBool::new(false),
             };
             let selection = crate::SoundSelectionEvidence {
                 section: crate::publish::SoundSectionKind::Trending,
@@ -469,5 +475,46 @@ mod tests {
             }
             assert_eq!(selection, unchanged);
         }
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn recent_recovery_deadline_drains_a_dispatched_tab_tap() {
+        let session = Session {
+            taps: AtomicUsize::new(0),
+            reads: AtomicUsize::new(0),
+            mode: "slow-tap",
+            closed: AtomicBool::new(false),
+            recycled: AtomicBool::new(false),
+            tap_completed: AtomicBool::new(false),
+        };
+        let selection = crate::SoundSelectionEvidence {
+            section: crate::publish::SoundSectionKind::Trending,
+            title: "Tùng Zin Zin".into(),
+            artist: "Kafkaf & Hằng ssi & Aries tis".into(),
+            index: 3,
+            candidates_digest: "frozen-pool".into(),
+            confirmed: true,
+        };
+        let started = Instant::now();
+        let stop = AtomicBool::new(false);
+        let result = with_sound_budget(
+            &stop,
+            recover_frozen_sound_pool(
+                &session,
+                SoundPickerPlan::resolve("com.ss.android.ugc.trill", "en", "38.3.2").unwrap(),
+                &selection,
+            ),
+        )
+        .await;
+        assert!(
+            result.is_err(),
+            "expired navigation cannot authorize selection"
+        );
+        assert!(
+            session.tap_completed.load(Ordering::Relaxed),
+            "the stage timeout abandoned a dispatched device gesture"
+        );
+        assert_eq!(session.taps.load(Ordering::Relaxed), 1);
+        assert!(started.elapsed() >= Duration::from_secs(61));
     }
 }

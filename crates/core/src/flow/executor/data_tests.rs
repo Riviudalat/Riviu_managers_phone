@@ -283,3 +283,101 @@ async fn visibility_capability_failure_stops_before_the_hierarchy_request() {
         .all(|a| a.action_kind != ActionKind::Log || a.state != FlowAttemptState::Succeeded));
     fixture.shutdown().await;
 }
+
+#[tokio::test]
+async fn visibility_read_cancelled_on_completion_never_commits_a_branch() {
+    let branch = data_node(
+        ActionKind::IfVisible,
+        CompiledActionConfig::IfVisible { locator: locator() },
+    );
+    let matched = log_node("matched", None);
+    let other = log_node("absent", None);
+    let branch_id = branch.id;
+    let mut compiled = read_plan(vec![branch, matched.clone(), other.clone()], true);
+    wire_branch(&mut compiled, branch_id, matched.id, other.id);
+    let fixture = ExecutorFixture::new(compiled, Arc::new(FixtureFrames::new(&[40])));
+    fixture
+        .driver
+        .supports_hierarchy
+        .store(true, Ordering::SeqCst);
+    *fixture.driver.hierarchy_xml.lock() = Some(format!(
+        r#"<hierarchy><node package="{TARGET}" class="android.widget.TextView" content-desc="caption" visible-to-user="true" bounds="[0,0][10,10]" /></hierarchy>"#
+    ));
+    fixture
+        .driver
+        .cancel_after_hierarchy_read
+        .store(true, Ordering::SeqCst);
+    let error = fixture
+        .executor
+        .run_device(fixture.device_run_id, fixture.plan.clone())
+        .await
+        .unwrap_err();
+    assert_eq!(error.code(), "Cancelled");
+    let detail = fixture.detail();
+    let predicate = detail
+        .attempts
+        .iter()
+        .find(|a| a.node_id == branch_id)
+        .unwrap();
+    assert_ne!(predicate.state, FlowAttemptState::Succeeded);
+    assert_eq!(predicate.chosen_port, None);
+    assert!(detail
+        .attempts
+        .iter()
+        .filter(|a| a.action_kind == ActionKind::Log)
+        .all(|a| a.state == FlowAttemptState::Queued && a.canonical_input.is_none()));
+    fixture.shutdown().await;
+}
+
+#[tokio::test]
+async fn visibility_transient_timeout_recovers_without_selecting_absent() {
+    let branch = data_node(
+        ActionKind::IfVisible,
+        CompiledActionConfig::IfVisible { locator: locator() },
+    );
+    let matched = log_node("matched", None);
+    let other = log_node("absent", None);
+    let branch_id = branch.id;
+    let mut compiled = read_plan(vec![branch, matched.clone(), other.clone()], true);
+    wire_branch(&mut compiled, branch_id, matched.id, other.id);
+    let fixture = ExecutorFixture::new(compiled, Arc::new(FixtureFrames::new(&[40])));
+    fixture
+        .driver
+        .supports_hierarchy
+        .store(true, Ordering::SeqCst);
+    fixture
+        .driver
+        .hierarchy_timeouts_remaining
+        .store(1, Ordering::SeqCst);
+    *fixture.driver.hierarchy_xml.lock() = Some(format!(
+        r#"<hierarchy><node package="{TARGET}" class="android.widget.TextView" content-desc="caption" visible-to-user="true" bounds="[0,0][10,10]" /></hierarchy>"#
+    ));
+    fixture
+        .executor
+        .run_device(fixture.device_run_id, fixture.plan.clone())
+        .await
+        .unwrap();
+    let detail = fixture.detail();
+    let predicate = detail
+        .attempts
+        .iter()
+        .find(|a| a.node_id == branch_id)
+        .unwrap();
+    assert_eq!(predicate.chosen_port.as_deref(), Some("matched"));
+    assert_eq!(
+        fixture
+            .driver
+            .operations
+            .lock()
+            .iter()
+            .filter(|op| op.as_str() == "hierarchySource")
+            .count(),
+        2
+    );
+    assert!(detail
+        .attempts
+        .iter()
+        .filter(|a| a.node_id == other.id)
+        .all(|a| a.state == FlowAttemptState::Queued));
+    fixture.shutdown().await;
+}

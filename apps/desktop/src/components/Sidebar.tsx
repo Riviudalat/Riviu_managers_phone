@@ -2,7 +2,6 @@ import type { PageId } from "../types";
 import { useState } from "react";
 import { ChevronDown, PanelLeftClose, PanelLeftOpen } from "lucide-react";
 import { MENU_ICONS } from "./menuIcons";
-import { useMediaQuery } from "../useMediaQuery";
 
 interface Props {
   page: PageId;
@@ -62,8 +61,6 @@ export function Sidebar({
   forceCompact = false,
   onPage,
 }: Props) {
-  const narrow = useMediaQuery("(max-width: 960px)");
-  const [narrowExpanded, setNarrowExpanded] = useState(false);
   const [railCollapsed, setRailCollapsed] = useState(() => {
     try { return localStorage.getItem("riviu.sidebar.rail") === "true"; }
     catch { return false; }
@@ -82,20 +79,17 @@ export function Sidebar({
     try { localStorage.setItem("riviu.sidebar.groups", JSON.stringify(next)); } catch { /* optional preference */ }
     return next;
   });
-  const toggleRail = () => {
-    if (narrow) { setNarrowExpanded(current => !current); return; }
-    setRailCollapsed(current => {
-      const next = !current;
-      try { localStorage.setItem("riviu.sidebar.rail", String(next)); } catch { /* optional preference */ }
-      return next;
-    });
-  };
-  const compactRail = forceCompact || (narrow ? !narrowExpanded : railCollapsed);
+  const toggleRail = () => setRailCollapsed(current => {
+    const next = !current;
+    try { localStorage.setItem("riviu.sidebar.rail", String(next)); } catch { /* optional preference */ }
+    return next;
+  });
+  const compactRail = railCollapsed || forceCompact;
   return (
     <aside className="aside" aria-label="Riviu Manager" data-rail-collapsed={compactRail}>
       <div className="aside-logo">
         <img src="/logo.jpg" alt="" />
-        <strong>Riviu Manager<small>Quản lý thiết bị</small></strong>
+        <strong>Riviu Manager<small>PHONE WORKSPACE</small></strong>
         <button type="button" className="aside-rail-toggle" aria-controls="primary-navigation"
           aria-expanded={!compactRail}
           aria-label={compactRail ? "Mở rộng thanh điều hướng" : "Thu gọn thanh điều hướng"}

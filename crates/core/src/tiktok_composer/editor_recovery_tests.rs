@@ -13,6 +13,8 @@ struct EditorSession {
     stop_on_read: Option<std::sync::Arc<AtomicBool>>,
     frames: AtomicUsize,
     ocr: Option<crate::ui_automation::SharedReasoner>,
+    element_delay: Duration,
+    snapshot_delay: Duration,
 }
 
 fn editor_xml(duplicate: bool, loading: bool) -> String {
@@ -44,6 +46,8 @@ impl EditorSession {
             stop_on_read: None,
             frames: AtomicUsize::new(0),
             ocr: None,
+            element_delay: Duration::ZERO,
+            snapshot_delay: Duration::ZERO,
         }
     }
 }
@@ -95,6 +99,7 @@ impl UiSession for EditorSession {
         }
     }
     async fn locate(&self, _: ElementQuery<'_>) -> anyhow::Result<Option<ElementBox>> {
+        tokio::time::sleep(self.element_delay).await;
         if self.ocr.is_some() {
             anyhow::ensure!(
                 self.frames.load(Ordering::Relaxed) >= 4,
@@ -108,6 +113,7 @@ impl UiSession for EditorSession {
         .into())
     }
     async fn hierarchy_source_snapshot(&self) -> anyhow::Result<crate::HierarchySourceSnapshot> {
+        tokio::time::sleep(self.snapshot_delay).await;
         if self.ocr.is_some() {
             anyhow::ensure!(
                 self.frames.load(Ordering::Relaxed) >= 4,
@@ -239,18 +245,26 @@ fn picker_next() -> ElementBox {
 
 #[tokio::test(start_paused = true)]
 async fn editor_recovers_a_failed_element_read_with_two_new_owned_snapshots() {
-    let session = EditorSession::ready();
-    let mut composer = Composer::new(&session, plan(), |e: &ElementBox| e.centre());
-    assert!(composer
-        .advance_to_edit_step(&picker_next(), &AtomicBool::new(false))
-        .await
-        .unwrap());
-    assert_eq!(session.reads.load(Ordering::Relaxed), 2);
-    assert_eq!(
-        session.taps.load(Ordering::Relaxed),
-        1,
-        "only picker Next, never editor Next or Post"
-    );
+    for delay in [Duration::ZERO, COMPOSER_WINDOW + Duration::from_secs(1)] {
+        let mut session = EditorSession::ready();
+        session.element_delay = delay;
+        let mut composer = Composer::new(&session, plan(), |e: &ElementBox| e.centre());
+        let started = Instant::now();
+        assert!(
+            composer
+                .advance_to_edit_step(&picker_next(), &AtomicBool::new(false))
+                .await
+                .unwrap(),
+            "remaining XML budget must recover the primary read; delay={delay:?}"
+        );
+        assert_eq!(session.reads.load(Ordering::Relaxed), 2);
+        assert_eq!(
+            session.taps.load(Ordering::Relaxed),
+            1,
+            "only picker Next, never editor Next or Post"
+        );
+        assert!(started.elapsed() <= Duration::from_secs(30));
+    }
 }
 
 #[tokio::test(start_paused = true)]
@@ -297,4 +311,26 @@ async fn editor_recovery_does_not_tap_picker_after_stop() {
         .await
         .unwrap());
     assert_eq!(session.taps.load(Ordering::Relaxed), 0);
+}
+
+#[tokio::test(start_paused = true)]
+async fn editor_recovery_spends_the_initial_read_inside_its_total_budget() {
+    let mut session = EditorSession::ready();
+    session.element_delay = COMPOSER_WINDOW - Duration::from_secs(1);
+    session.snapshot_delay = Duration::from_secs(13);
+    let mut composer = Composer::new(&session, plan(), |e: &ElementBox| e.centre());
+    let started = Instant::now();
+    let result = composer
+        .advance_to_edit_step(&picker_next(), &AtomicBool::new(false))
+        .await;
+    assert!(
+        !matches!(result, Ok(true)),
+        "late XML arrival extended the editor phase's total budget"
+    );
+    assert!(started.elapsed() <= Duration::from_secs(30));
+    assert_eq!(
+        session.taps.load(Ordering::Relaxed),
+        1,
+        "only the original picker Next"
+    );
 }

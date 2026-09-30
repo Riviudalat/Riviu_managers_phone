@@ -31,6 +31,22 @@ struct Recovery {
     run: PublishPipelineRun,
 }
 impl riviu_core::publish_recovery::RecoveryJournal for Recovery {
+    fn note_read(
+        &self,
+        note: &riviu_core::publish_recovery::ReadRecoveryNote,
+    ) -> anyhow::Result<()> {
+        self.db.append_publish_progress(
+            &self.run.campaign_id,
+            &self.assignment,
+            &progress::PublishProgress::ReadRecovery {
+                stage: note.stage.clone(),
+                strategy: note.strategy.clone(),
+                attempt: note.attempt,
+                outcome: note.outcome.clone(),
+                detail: serde_json::to_string(note)?,
+            },
+        )
+    }
     fn step(&self, step: &str, checkpoint: Option<&str>) -> anyhow::Result<()> {
         self.db
             .update_publish_recovery_step(&self.assignment, &self.run.token, step, checkpoint)

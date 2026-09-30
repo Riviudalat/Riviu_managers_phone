@@ -13,6 +13,118 @@ pub(crate) enum EditorState {
     Unknown,
 }
 
+/// A positive caption proof can authorize the existing conditional Back retry.
+/// false means unproved, never that the caption or editor is absent.
+pub(crate) async fn inspect_editor_and_caption(
+    session: &dyn UiSession,
+    plan: SoundPickerPlan,
+    expected_title: &str,
+    caption_query: ElementQuery<'_>,
+    expected_caption: &str,
+) -> anyhow::Result<(EditorState, Option<bool>)> {
+    anyhow::ensure!(
+        !expected_title.trim().is_empty(),
+        "selected sound title is empty"
+    );
+    let ElementQuery::ResourceIdSuffix(caption_suffix) = caption_query else {
+        return Ok((inspect(session, plan, expected_title, false).await?, None));
+    };
+    let deadline = phase_deadline(READBACK_WINDOW);
+    let mut cursor = Cursor::default();
+    let Some(snapshot) = observation::observe(
+        session,
+        plan.package,
+        SemanticLocator::default(),
+        deadline,
+        None,
+        &mut cursor,
+    )
+    .await?
+    else {
+        // Explicit Unsupported keeps the compatibility read route. An error or
+        // partial observation never falls back to a second independent caption.
+        return Ok((inspect(session, plan, expected_title, false).await?, None));
+    };
+    let mut suffixes = vec![plan.current_title_id];
+    if plan.dynamic {
+        suffixes.extend(
+            MEASURED_SOUND_PICKERS
+                .iter()
+                .filter(|p| p.plan.package == plan.package)
+                .map(|p| p.plan.current_title_id),
+        );
+        suffixes.sort_unstable();
+        suffixes.dedup();
+    }
+    let mut sound = EditorState::Unknown;
+    let mut sound_matches = 0;
+    let mut sound_unknown = snapshot.unknown_match_count;
+    for suffix in suffixes {
+        let projected = observation::project_query(
+            &snapshot,
+            &SemanticLocator {
+                id: Some(format!("{}{suffix}", plan.package)),
+                ..Default::default()
+            },
+        );
+        sound_unknown = sound_unknown.max(projected.unknown_match_count);
+        sound_matches += projected.matches.len();
+        if projected.matches.len() > 1 {
+            return Err(SoundMismatch("ambiguous").into());
+        }
+        if observation::positive_query_known(&projected) {
+            if let [node] = projected.matches.as_slice() {
+                if node.package.as_deref() == Some(plan.package)
+                    && node.visible == Some(true)
+                    && node.password == Some(false)
+                {
+                    if let Some(text) = &node.text {
+                        if same_editor_sound_title(text, expected_title) {
+                            sound = EditorState::Confirmed;
+                        } else if text.trim().eq_ignore_ascii_case("Loading") {
+                            sound = EditorState::Loading;
+                        } else if !text.trim().is_empty() {
+                            return Err(SoundMismatch("title mismatch").into());
+                        }
+                    }
+                }
+            }
+        }
+    }
+    if sound_matches > 1 {
+        return Err(SoundMismatch("ambiguous").into());
+    }
+    if sound_unknown > 0 {
+        sound = EditorState::Unknown;
+    }
+    let caption_id = format!("{}{caption_suffix}", plan.package);
+    let caption = observation::project_query(
+        &snapshot,
+        &SemanticLocator {
+            id: Some(caption_id.clone()),
+            role: Some("textbox".into()),
+            ..Default::default()
+        },
+    );
+    // A confirmed editor (or its positively observed Loading state) takes
+    // precedence over a caption retained underneath it. Only Unknown needs
+    // positive caption evidence to authorize the existing conditional retry.
+    let unchanged = if sound == EditorState::Unknown {
+        let values = observation::caption_values(&caption, plan.package, &caption_id)?;
+        matches!(values.as_deref(), Some([only]) if
+            crate::tiktok_composer::caption_readback_matches(only, expected_caption))
+    } else {
+        false
+    };
+    tracing::info!(session=%snapshot.session_epoch,package=plan.package,
+        generation=snapshot.generation,source=?snapshot.source,completeness=?snapshot.completeness,
+        sound=?sound,sound_matches,sound_unknown,caption_matches=caption.matches.len(),
+        caption_unknown=caption.unknown_match_count,caption_unchanged=unchanged,
+        "editor and caption observed in one snapshot");
+    observation::check(deadline, None)?;
+    Ok((sound, Some(unchanged)))
+}
+
 pub(super) async fn confirm(
     session: &dyn UiSession,
     plan: SoundPickerPlan,

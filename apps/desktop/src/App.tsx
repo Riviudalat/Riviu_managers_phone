@@ -773,11 +773,6 @@ function App() {
       <div className="main-col">
         <PageHeader
           title={title}
-          description={page === "control" ? "Quan sát, chọn máy và điều khiển dàn thiết bị"
-            : page === "publish" ? "Chuẩn bị nội dung, hẹn giờ và theo dõi kết quả đăng"
-            : page === "nurture" ? "Thiết lập phiên nuôi và theo dõi từng thiết bị"
-            : page === "interaction" ? "Chọn nội dung, thiết bị và kịch bản tương tác"
-            : undefined}
           icon={!PageIcon ? undefined : <PageIcon size={18} />}
           titleTestId="page-title"
           dragRegion
@@ -1059,12 +1054,6 @@ function App() {
                   </button>
                 </div>
                 <FilterToolbar viewMode={viewMode} onViewMode={setViewMode} />
-              </div>
-              <div className="device-selection-summary" aria-live="polite">
-                <span><strong>{visibleDevices.length}</strong> máy đang hiển thị
-                  <span className="device-selection-count">{selected.length} đã chọn</span>
-                </span>
-                <span className="device-selection-help">Bấm để chọn · Ctrl để chọn thêm · Bấm đúp để điều khiển</span>
               </div>
               </div>
 

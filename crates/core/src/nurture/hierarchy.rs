@@ -58,6 +58,7 @@ use crate::tiktok_save::{
 use crate::types::{
     NurtureCommentAttempt, NurturePhase, NurtureSessionStatus, NurtureSettings, TapPoint,
 };
+use crate::ui_automation::runtime::{read_before_deadline, ReadWaitResult};
 use crate::ActionFailure;
 use sha2::{Digest, Sha256};
 use uuid::Uuid;
@@ -607,7 +608,7 @@ async fn locate(
         TikTokControl::ProfileTab => "profile",
         _ => return Ok(None),
     };
-    crate::ui_automation::runtime::resolve_navigation(
+    crate::ui_automation::runtime::resolve_navigation_local(
         session,
         target,
         std::time::Duration::from_secs(30),
@@ -659,6 +660,32 @@ async fn fingerprint(session: &dyn UiSession, labels: TikTokControls) -> PostFin
         share: read(TikTokControl::Share).await,
         sound: read(TikTokControl::SoundLink).await,
     }
+}
+
+/// A wait must retain a failed tree read rather than treating it as an empty rail.
+async fn read_fingerprint(
+    session: &dyn UiSession,
+    labels: TikTokControls,
+) -> anyhow::Result<PostFingerprint> {
+    let epoch = session.gui_session_epoch();
+    let read = |control| async move {
+        Ok::<_, anyhow::Error>(
+            locate(session, labels, control)
+                .await?
+                .and_then(|element| element.description),
+        )
+    };
+    let observed = PostFingerprint {
+        author: read(TikTokControl::AuthorProfileLink).await?,
+        comments: read(TikTokControl::Comments).await?,
+        share: read(TikTokControl::Share).await?,
+        sound: read(TikTokControl::SoundLink).await?,
+    };
+    anyhow::ensure!(
+        session.gui_session_epoch() == epoch,
+        "rail session changed during read"
+    );
+    Ok(observed)
 }
 
 struct HierarchyNurtureSaveAdapter<'a> {
@@ -1424,6 +1451,9 @@ impl<'a> HierarchyRun<'a> {
         before: &PostFingerprint,
         stop: &AtomicBool,
     ) -> anyhow::Result<bool> {
+        if stop.load(Ordering::Relaxed) {
+            return Ok(false);
+        }
         // A vertical flick through the middle of the screen, clear of the rail on
         // the right and of the system gesture strip at the very bottom.
         //
@@ -1441,24 +1471,25 @@ impl<'a> HierarchyRun<'a> {
         };
         let path = self.planner.plan_swipe(from, to, duration_ms);
         self.session.swipe_path(path).await?;
-        sleep_interruptible(SWIPE_SETTLE, stop).await;
-        // Wait for the incoming card's rail rather than reading once and hoping.
-        // A card genuinely without a rail (LIVE, a photo carousel mid-transition)
-        // simply uses up the window, which costs a few seconds once and is the
-        // price of not miscounting every ordinary swipe that lands slowly.
-        let deadline = Instant::now() + RAIL_RETURN_WINDOW;
+        // Keep the former settle + arrival budget, but an outgoing, non-empty rail
+        // is still a pending transition. Read until the card actually changes.
+        let deadline = tokio::time::Instant::now() + SWIPE_SETTLE + RAIL_RETURN_WINDOW;
         loop {
-            let after = fingerprint(self.session, self.labels).await;
-            if !after.is_empty() {
-                return Ok(after != *before);
+            match read_before_deadline(read_fingerprint(self.session, self.labels), deadline, stop)
+                .await?
+            {
+                ReadWaitResult::Ready(after) if !after.is_empty() && after != *before => {
+                    return Ok(true);
+                }
+                ReadWaitResult::Ready(_) => {}
+                ReadWaitResult::Cancelled | ReadWaitResult::DeadlineExceeded => return Ok(false),
             }
-            if Instant::now() >= deadline || stop.load(Ordering::Relaxed) {
-                // Still nothing to fingerprint. That proves nothing either way, so
-                // it is not counted as a video — the same refusal the pixel engine
-                // makes when a swipe only moves the screen.
-                return Ok(false);
-            }
-            sleep_interruptible(RAIL_RETURN_POLL, stop).await;
+            sleep_interruptible(
+                RAIL_RETURN_POLL
+                    .min(deadline.saturating_duration_since(tokio::time::Instant::now())),
+                stop,
+            )
+            .await;
         }
     }
 }
@@ -1488,10 +1519,19 @@ pub(super) async fn ensure_tiktok_foreground(
     bundle_id: &str,
     stop: &AtomicBool,
 ) -> anyhow::Result<bool> {
-    if let Ok(package) = session.active_app_bundle().await {
-        if is_measured_tiktok(&package) {
-            return Ok(false);
+    let deadline = tokio::time::Instant::now() + FOREGROUND_WINDOW;
+    match read_before_deadline(session.active_app_bundle(), deadline, stop).await {
+        Ok(ReadWaitResult::Ready(package)) if is_measured_tiktok(&package) => return Ok(false),
+        Ok(ReadWaitResult::Ready(_)) => {}
+        Ok(ReadWaitResult::Cancelled) => anyhow::bail!("đã dừng trước khi mở TikTok"),
+        Ok(ReadWaitResult::DeadlineExceeded) => {
+            anyhow::bail!("hết thời gian kiểm tra TikTok foreground")
         }
+        Err(error)
+            if error
+                .downcast_ref::<crate::driver::UnsupportedCapability>()
+                .is_some() => {}
+        Err(error) => return Err(error),
     }
     if !is_measured_tiktok(bundle_id) {
         anyhow::bail!(
@@ -1504,18 +1544,24 @@ pub(super) async fn ensure_tiktok_foreground(
                 .join(", ")
         );
     }
+    anyhow::ensure!(!stop.load(Ordering::Relaxed), "đã dừng trước khi mở TikTok");
+    anyhow::ensure!(
+        tokio::time::Instant::now() < deadline,
+        "hết thời gian mở TikTok"
+    );
     session.launch_app_foreground(bundle_id).await?;
-    let deadline = Instant::now() + FOREGROUND_WINDOW;
-    while Instant::now() < deadline {
-        sleep_interruptible(FOREGROUND_POLL, stop).await;
-        if stop.load(Ordering::Relaxed) {
-            break;
+    loop {
+        match read_before_deadline(session.active_app_bundle(), deadline, stop).await? {
+            ReadWaitResult::Ready(package) if is_measured_tiktok(&package) => return Ok(true),
+            ReadWaitResult::Ready(_) => {}
+            ReadWaitResult::Cancelled => anyhow::bail!("đã dừng khi chờ TikTok foreground"),
+            ReadWaitResult::DeadlineExceeded => break,
         }
-        if let Ok(package) = session.active_app_bundle().await {
-            if is_measured_tiktok(&package) {
-                return Ok(true);
-            }
-        }
+        sleep_interruptible(
+            FOREGROUND_POLL.min(deadline.saturating_duration_since(tokio::time::Instant::now())),
+            stop,
+        )
+        .await;
     }
     // Naming the likeliest cause, because the symptom is indistinguishable from a slow
     // launch and the fix is on the phone rather than in the settings. Hit on 12/08/2026:
@@ -1677,7 +1723,13 @@ async fn run_hierarchy_session_inner(
             }
         }
     }
-    await_first_rail(&run, stop).await;
+    if let Err(error) = await_first_rail(&run, stop).await {
+        report(
+            status,
+            format!("failed — không đọc được rail TikTok: {error}"),
+        );
+        return HierarchySession::Refused;
+    }
     let outcome = run_feed(
         run,
         bundle_id,
@@ -1754,7 +1806,7 @@ const MODAL_BACK_LIMIT: u32 = 3;
 ///
 /// Absence is tolerated rather than treated as failure, for the same reason as there: a LIVE
 /// card or a photo carousel genuinely has no rail, and it simply uses up the window.
-async fn await_first_rail(run: &HierarchyRun<'_>, stop: &AtomicBool) {
+async fn await_first_rail(run: &HierarchyRun<'_>, stop: &AtomicBool) -> anyhow::Result<()> {
     // Twice: once for a card that is merely slow, and once more after selecting the For-You
     // tab, for a phone that is on the feed but not on *that* part of it.
     //
@@ -1766,33 +1818,49 @@ async fn await_first_rail(run: &HierarchyRun<'_>, stop: &AtomicBool) {
     // about twenty seconds each, and the same phones showed a complete rail a minute later
     // once something had tapped For You.
     for attempt in 0..2 {
-        if attempt == 1 {
-            let Some(element) = locate(run.session, run.labels, TikTokControl::FeedTab)
-                .await
-                .ok()
-                .flatten()
-            else {
-                return;
+        let deadline = tokio::time::Instant::now()
+            + RAIL_RETURN_WINDOW
+            + if attempt == 1 {
+                SWIPE_SETTLE
+            } else {
+                Duration::ZERO
             };
-            if run.session.tap(element.centre()).await.is_err() {
-                return;
-            }
-            sleep_interruptible(SWIPE_SETTLE, stop).await;
+        if attempt == 1 {
+            let element = match read_before_deadline(
+                locate(run.session, run.labels, TikTokControl::FeedTab),
+                deadline,
+                stop,
+            )
+            .await?
+            {
+                ReadWaitResult::Ready(Some(element)) => element,
+                ReadWaitResult::Ready(None) | ReadWaitResult::DeadlineExceeded => return Ok(()),
+                ReadWaitResult::Cancelled => anyhow::bail!("đã dừng khi chờ rail đầu tiên"),
+            };
+            anyhow::ensure!(
+                !stop.load(Ordering::Relaxed),
+                "đã dừng trước khi chọn tab feed"
+            );
+            run.session.tap(element.centre()).await?;
         }
-        let deadline = Instant::now() + RAIL_RETURN_WINDOW;
         loop {
-            if stop.load(Ordering::Relaxed) {
-                return;
+            match read_before_deadline(read_fingerprint(run.session, run.labels), deadline, stop)
+                .await?
+            {
+                ReadWaitResult::Ready(card) if !card.is_empty() => return Ok(()),
+                ReadWaitResult::Ready(_) => {}
+                ReadWaitResult::Cancelled => anyhow::bail!("đã dừng khi chờ rail đầu tiên"),
+                ReadWaitResult::DeadlineExceeded => break,
             }
-            if !fingerprint(run.session, run.labels).await.is_empty() {
-                return;
-            }
-            if Instant::now() >= deadline {
-                break;
-            }
-            sleep_interruptible(RAIL_RETURN_POLL, stop).await;
+            sleep_interruptible(
+                RAIL_RETURN_POLL
+                    .min(deadline.saturating_duration_since(tokio::time::Instant::now())),
+                stop,
+            )
+            .await;
         }
     }
+    Ok(())
 }
 
 /// Wait for the feed to be on screen. `false` means it never was.
@@ -1812,7 +1880,7 @@ async fn await_feed(
         );
         return false;
     }
-    let started = Instant::now();
+    let started = tokio::time::Instant::now();
     let deadline = started + FEED_READY_WINDOW;
     let mut said = false;
     // The rungs, their order and the argument for each live in [`crate::feed_ladder`]; the
@@ -1824,23 +1892,9 @@ async fn await_feed(
             return false;
         }
 
-        // **Past the window: look, never touch.** The check sits here — above every rung
-        // and below nothing — for two reasons that used to fight each other. It has to be
-        // above the rungs, because a decline label that stays on screen once put this loop
-        // in a tap-sleep-continue cycle that never reached a check at the bottom, and a
-        // session promising to give up after thirty seconds ran until something else
-        // stopped it. And a feed arriving on the very last poll still has to count, which
-        // is why the expiry path takes one more look before reporting failure rather than
-        // returning on the clock alone. Acting on that last look would be worse than not
-        // looking: a tap the session is about to abandon leaves the phone mid-transition
-        // for whoever comes next.
-        if Instant::now() >= deadline {
-            if feed_ladder::on_feed(run.session, run.labels).await {
-                if said {
-                    report(status, "feed đã lên".into());
-                }
-                return true;
-            }
+        // No unbounded final probe: a late tree cannot extend the caller's window
+        // or authorize another dismissal after this session has ended.
+        if tokio::time::Instant::now() >= deadline {
             report(
                 status,
                 format!(
@@ -1856,7 +1910,29 @@ async fn await_feed(
         // becomes available, so a slow splash screen is waited out rather than answered
         // with a keypress — see [`MODAL_BACK_DELAY`].
         spend.allow_back = started.elapsed() >= MODAL_BACK_DELAY;
-        let step = feed_ladder::step(run.session, run.labels, &mut spend).await;
+        let step = match feed_ladder::step_before_deadline(
+            run.session,
+            run.labels,
+            &mut spend,
+            deadline,
+            stop,
+        )
+        .await
+        {
+            Ok(ReadWaitResult::Ready(step)) => step,
+            Ok(ReadWaitResult::Cancelled) => return false,
+            Ok(ReadWaitResult::DeadlineExceeded) => continue,
+            Err(error) => {
+                report(
+                    status,
+                    format!("failed — không đọc được màn hình feed: {error}"),
+                );
+                return false;
+            }
+        };
+        if stop.load(Ordering::Relaxed) {
+            return false;
+        }
         if step == LadderStep::OnFeed {
             if said {
                 report(status, "feed đã lên".into());
@@ -1869,7 +1945,11 @@ async fn await_feed(
             said = true;
             report(status, "TikTok đang khởi động — chờ feed lên".into());
         }
-        sleep_interruptible(FEED_READY_POLL, stop).await;
+        sleep_interruptible(
+            FEED_READY_POLL.min(deadline.saturating_duration_since(tokio::time::Instant::now())),
+            stop,
+        )
+        .await;
     }
 }
 
@@ -2265,11 +2345,22 @@ pub(super) async fn run_feed(
             status.swipe_attempts += 1;
             let before = fingerprint(run.session, run.labels).await;
             sleep_interruptible(Duration::from_millis(human.think_pause_ms()), stop).await;
-            if run
+            let advanced = match run
                 .swipe_next(human.swipe_duration_ms(false), &before, stop)
                 .await
-                .unwrap_or(false)
             {
+                Ok(advanced) => advanced,
+                Err(error) => {
+                    report(status, format!("không đọc được kết quả vuốt: {error}"));
+                    outcome = Outcome::Failed;
+                    break;
+                }
+            };
+            if stop.load(Ordering::Relaxed) {
+                outcome = Outcome::Stopped;
+                break;
+            }
+            if advanced {
                 status.videos_done += 1;
             }
             sleep_interruptible(Duration::from_millis(human.after_swipe_pause_ms()), stop).await;
@@ -2707,14 +2798,25 @@ pub(super) async fn run_feed(
         // `pause_after_swipes` swipes. Never calling it left that setting **inert on Android** —
         // switched on in the UI, doing nothing on the twenty phones that actually run.
         sleep_interruptible(Duration::from_millis(human.think_pause_ms()), stop).await;
-        let advanced = run
+        let advanced = match run
             .swipe_next(
                 human.swipe_duration_ms(roll_bool(settings.frenzy_prob)),
                 &before,
                 stop,
             )
             .await
-            .unwrap_or(false);
+        {
+            Ok(advanced) => advanced,
+            Err(error) => {
+                report(status, format!("không đọc được kết quả vuốt: {error}"));
+                outcome = Outcome::Failed;
+                break;
+            }
+        };
+        if stop.load(Ordering::Relaxed) {
+            outcome = Outcome::Stopped;
+            break;
+        }
         sleep_interruptible(Duration::from_millis(human.after_swipe_pause_ms()), stop).await;
         if advanced {
             stuck_swipes = 0;
@@ -4129,6 +4231,8 @@ mod tests {
     #[derive(Default)]
     struct StuckDialogPhone {
         taps: std::sync::atomic::AtomicUsize,
+        stop_on_decline_read: Option<std::sync::Arc<AtomicBool>>,
+        read_delay: Option<Duration>,
     }
 
     #[async_trait::async_trait]
@@ -4163,6 +4267,14 @@ mod tests {
         }
 
         async fn locate(&self, query: ElementQuery<'_>) -> anyhow::Result<Option<ElementBox>> {
+            if let Some(delay) = self.read_delay {
+                tokio::time::sleep(delay).await;
+            }
+            if matches!(query, ElementQuery::Text { .. }) {
+                if let Some(stop) = &self.stop_on_decline_read {
+                    stop.store(true, Ordering::Relaxed);
+                }
+            }
             // The decline is always there. The feed never is.
             Ok(
                 matches!(query, ElementQuery::Text { .. }).then_some(ElementBox {
@@ -4175,6 +4287,39 @@ mod tests {
                     clickable: true,
                 }),
             )
+        }
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn nurture_feed_wait_rejects_stop_during_decline_read_and_stalled_tree() {
+        for cancelled in [true, false] {
+            let stop = std::sync::Arc::new(AtomicBool::new(false));
+            let phone = StuckDialogPhone {
+                stop_on_decline_read: cancelled.then(|| stop.clone()),
+                read_delay: (!cancelled).then_some(FEED_READY_WINDOW + Duration::from_secs(1)),
+                ..Default::default()
+            };
+            let screen = (1_080.0, 2_220.0);
+            let run = HierarchyRun {
+                session: &phone,
+                labels: english_38(),
+                screen,
+                planner: TouchPointPlanner::new(screen),
+                search_keyword: None,
+            };
+            let mut status = NurtureSessionStatus::new("feed-wait");
+            let report = |status: &mut NurtureSessionStatus, message: String| {
+                status.last_message = message;
+            };
+            let started = tokio::time::Instant::now();
+            let result = tokio::time::timeout(
+                FEED_READY_WINDOW + Duration::from_secs(1),
+                await_feed(&run, &stop, &mut status, &report),
+            )
+            .await;
+            assert_eq!(result.ok(), Some(false));
+            assert!(started.elapsed() <= FEED_READY_WINDOW);
+            assert_eq!(phone.taps.load(Ordering::Relaxed), 0);
         }
     }
 
@@ -4238,11 +4383,20 @@ mod tests {
         generation: std::sync::atomic::AtomicUsize,
         restarts: std::sync::atomic::AtomicUsize,
         raises: std::sync::atomic::AtomicUsize,
+        swipes: std::sync::atomic::AtomicUsize,
+        incoming_at: Option<tokio::time::Instant>,
+        rail_read_delay: Option<Duration>,
+        stop_on_rail_read: Option<std::sync::Arc<AtomicBool>>,
+        rail_read_error: bool,
     }
 
     impl StuckFeedPhone {
         fn card(&self, prefix: &str) -> Option<ElementBox> {
-            let generation = self.generation.load(Ordering::Relaxed);
+            let generation = self.generation.load(Ordering::Relaxed)
+                + usize::from(
+                    self.incoming_at
+                        .is_some_and(|at| tokio::time::Instant::now() >= at),
+                );
             Some(ElementBox {
                 x: 900.0,
                 y: 1_000.0,
@@ -4265,6 +4419,7 @@ mod tests {
         // which the feed behaves. That order is the measured shape: the gesture was never
         // the problem, the app's state was.
         async fn swipe(&self, _gesture: crate::types::SwipeGesture) -> anyhow::Result<()> {
+            self.swipes.fetch_add(1, Ordering::Relaxed);
             if self.restarts.load(Ordering::Relaxed) > 0 {
                 self.generation.fetch_add(1, Ordering::Relaxed);
             }
@@ -4308,6 +4463,15 @@ mod tests {
             let ElementQuery::Description { value, .. } = query else {
                 return Ok(None);
             };
+            if value == "comments" {
+                if let Some(delay) = self.rail_read_delay {
+                    tokio::time::sleep(delay).await;
+                }
+                if let Some(stop) = &self.stop_on_rail_read {
+                    stop.store(true, Ordering::Relaxed);
+                }
+                anyhow::ensure!(!self.rail_read_error, "fixture rail transport timeout");
+            }
             Ok(match value {
                 "For You" => Some(ElementBox {
                     x: 0.0,
@@ -4324,6 +4488,89 @@ mod tests {
                 _ => None,
             })
         }
+    }
+
+    fn original_stuck_feed_fingerprint() -> PostFingerprint {
+        PostFingerprint {
+            author: None,
+            comments: Some("comments 0".into()),
+            share: Some("Share video 0".into()),
+            sound: None,
+        }
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn nurture_swipe_waits_for_changed_card_without_dispatching_another_swipe() {
+        let phone = StuckFeedPhone {
+            incoming_at: Some(tokio::time::Instant::now() + Duration::from_millis(1_200)),
+            ..Default::default()
+        };
+        let screen = (1_080.0, 2_220.0);
+        let mut run = HierarchyRun {
+            session: &phone,
+            labels: english_38(),
+            screen,
+            planner: TouchPointPlanner::new(screen),
+            search_keyword: None,
+        };
+        assert!(run
+            .swipe_next(
+                320,
+                &original_stuck_feed_fingerprint(),
+                &AtomicBool::new(false)
+            )
+            .await
+            .expect("readable incoming card"));
+        assert_eq!(phone.swipes.load(Ordering::Relaxed), 1);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn nurture_swipe_rejects_cancelled_late_and_failed_rail_reads() {
+        for (delay, cancelled, failed) in [
+            (Duration::from_millis(100), true, false),
+            (Duration::from_secs(5), false, false),
+            (Duration::ZERO, false, true),
+        ] {
+            let stop = std::sync::Arc::new(AtomicBool::new(false));
+            let phone = StuckFeedPhone {
+                generation: 1.into(),
+                rail_read_delay: Some(delay),
+                stop_on_rail_read: cancelled.then(|| stop.clone()),
+                rail_read_error: failed,
+                ..Default::default()
+            };
+            let screen = (1_080.0, 2_220.0);
+            let mut run = HierarchyRun {
+                session: &phone,
+                labels: english_38(),
+                screen,
+                planner: TouchPointPlanner::new(screen),
+                search_keyword: None,
+            };
+            let started = tokio::time::Instant::now();
+            let result = run
+                .swipe_next(320, &original_stuck_feed_fingerprint(), &stop)
+                .await;
+            if failed {
+                assert!(result
+                    .expect_err("read failure must stay a failure")
+                    .to_string()
+                    .contains("rail transport timeout"));
+            } else {
+                assert!(!result.expect("unproved cancelled/expired swipe"));
+            }
+            assert!(started.elapsed() <= SWIPE_SETTLE + RAIL_RETURN_WINDOW);
+            assert_eq!(phone.swipes.load(Ordering::Relaxed), 1);
+        }
+    }
+
+    #[tokio::test]
+    async fn stopped_nurture_does_not_launch_tiktok() {
+        let phone = StuckFeedPhone::default();
+        ensure_tiktok_foreground(&phone, english_38().package(), &AtomicBool::new(true))
+            .await
+            .expect_err("stopped before launch");
+        assert_eq!(phone.raises.load(Ordering::Relaxed), 0);
     }
 
     /// Runs for real seconds: four honest swipe attempts have to happen before the restart

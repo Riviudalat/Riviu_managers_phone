@@ -88,6 +88,12 @@ pub enum AndroidObservationMode {
     Enriched,
 }
 
+pub(crate) struct AgentObservationRead {
+    pub value: Value,
+    /// Present only after this read performed one successful session replacement.
+    pub repaired_session: Option<(String, String)>,
+}
+
 // Appium uiautomator2-server v10.6.2 BaseElement.toModel keeps the attribute/ prefix.
 // Unsupported attributes (including showing-hint on some versions) are omitted.
 const OBSERVATION_ATTRIBUTES: &str = concat!(
@@ -276,6 +282,15 @@ impl Rect {
 ///
 /// Matched as a substring because the message carries a varying millisecond count.
 const STALE_TREE_MARKER: &str = "waiting for the root AccessibilityNodeInfo";
+
+fn observation_deadline_error() -> anyhow::Error {
+    riviu_core::driver::UiError::new(
+        riviu_core::driver::UiErrorKind::Timeout,
+        "observe",
+        "observation_deadline_exceeded",
+    )
+    .into()
+}
 
 /// Whether a failed accessibility request may be repeated after replacing the agent session.
 ///
@@ -538,20 +553,72 @@ impl AgentClient {
         self.observation_mode
     }
 
-    /// One bounded read with no retries, session recreation, or response-body diagnostics.
-    /// The absolute deadline covers headers, every body chunk, and JSON decoding.
+    /// One bounded read, with one session replacement only for the explicit stale-tree marker.
+    /// The same absolute deadline covers headers, body, repair, reread and JSON decoding.
     pub(crate) async fn observation_read(
         &self,
         locator: Option<&Locator>,
         deadline: std::time::Instant,
-    ) -> anyhow::Result<Value> {
+    ) -> anyhow::Result<AgentObservationRead> {
+        self.observation_read_inner(locator, deadline, true).await
+    }
+
+    pub(crate) async fn observation_read_without_recovery(
+        &self,
+        locator: Option<&Locator>,
+        deadline: std::time::Instant,
+    ) -> anyhow::Result<AgentObservationRead> {
+        self.observation_read_inner(locator, deadline, false).await
+    }
+
+    async fn observation_read_inner(
+        &self,
+        locator: Option<&Locator>,
+        deadline: std::time::Instant,
+        allow_recovery: bool,
+    ) -> anyhow::Result<AgentObservationRead> {
+        let previous = self.session_identity();
         let (method, suffix) = if locator.is_some() {
             (reqwest::Method::POST, "/elements")
         } else {
             (reqwest::Method::GET, "/source")
         };
-        self.observation_request(method, suffix, locator.map(Locator::to_body), deadline)
+        let body = locator.map(Locator::to_body);
+        match self
+            .observation_request(method.clone(), suffix, body.clone(), deadline)
             .await
+        {
+            Err(error) if allow_recovery && error.to_string().contains(STALE_TREE_MARKER) => {
+                // This never touches instrumentation or repeats an input route. The
+                // changed session identity invalidates any observation/action target
+                // bound before recovery, even if the reread succeeds.
+                tokio::time::timeout_at(
+                    tokio::time::Instant::from_std(deadline),
+                    self.recreate_session(),
+                )
+                .await
+                .map_err(|_| observation_deadline_error())??;
+                self.observation_request(method, suffix, body, deadline)
+                    .await
+                    .map(|value| AgentObservationRead {
+                        value,
+                        repaired_session: Some((previous, self.session_identity())),
+                    })
+                    .map_err(|error| {
+                        if error.to_string().contains(STALE_TREE_MARKER) {
+                            anyhow::Error::new(riviu_core::driver::AccessibilityReadUnavailable {
+                                message: error.to_string(),
+                            })
+                        } else {
+                            error
+                        }
+                    })
+            }
+            other => other.map(|value| AgentObservationRead {
+                value,
+                repaired_session: None,
+            }),
+        }
     }
 
     pub(crate) async fn observation_window_size(
@@ -582,11 +649,7 @@ impl AgentClient {
             tracing::debug!(serial = %self.serial, transport = "http", route = suffix,
                 "observation read command");
             let mut response = request.send().await.context("observation transport")?;
-            anyhow::ensure!(
-                response.status().is_success(),
-                "observation_http_status_{}",
-                response.status()
-            );
+            let status = response.status();
             let mut bytes = Vec::new();
             loop {
                 anyhow::ensure!(
@@ -608,10 +671,30 @@ impl AgentClient {
             }
             let value: Value =
                 serde_json::from_slice(&bytes).context("observation_invalid_json")?;
-            anyhow::ensure!(
-                value.pointer("/value/error").is_none(),
-                "observation_remote_error"
-            );
+            let message = value.pointer("/value/message").and_then(Value::as_str);
+            if message.is_some_and(|message| message.contains(STALE_TREE_MARKER)) {
+                return Err(riviu_core::driver::UiError::new(
+                    riviu_core::driver::UiErrorKind::Session,
+                    "observe",
+                    STALE_TREE_MARKER,
+                )
+                .into());
+            }
+            if !status.is_success() || value.pointer("/value/error").is_some() {
+                let kind = if value.pointer("/value/error").and_then(Value::as_str)
+                    == Some("invalid session id")
+                {
+                    riviu_core::driver::UiErrorKind::Session
+                } else {
+                    riviu_core::driver::UiErrorKind::Http
+                };
+                return Err(riviu_core::driver::UiError::new(
+                    kind,
+                    "observe",
+                    format!("observation_http_status_{status}"),
+                )
+                .into());
+            }
             anyhow::ensure!(
                 std::time::Instant::now() < deadline,
                 "observation_deadline_exceeded"
@@ -620,7 +703,7 @@ impl AgentClient {
         };
         tokio::time::timeout_at(tokio::time::Instant::from_std(deadline), read)
             .await
-            .map_err(|_| anyhow!("observation_deadline_exceeded"))?
+            .map_err(|_| observation_deadline_error())?
     }
 
     /// Replace a degraded session with a fresh one, in place.
@@ -1694,21 +1777,59 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn stale_tree_replacement_retries_the_read_only_once() {
+    async fn bounded_observation_without_recovery_never_replaces_a_blind_session() {
         let (client, routes, server) = session_replacement_fixture(true).await;
-        let result = client.source().await;
+        let result = client
+            .observation_read_without_recovery(
+                None,
+                std::time::Instant::now() + Duration::from_secs(2),
+            )
+            .await;
         server.abort();
         let _ = server.await;
-        assert!(result.unwrap_err().to_string().contains(STALE_TREE_MARKER));
+        assert!(
+            result.is_err(),
+            "a blind read is not empty hierarchy evidence"
+        );
         assert_eq!(
             *routes.lock(),
-            vec![
-                "GET /session/old/source HTTP/1.1",
-                "POST /session HTTP/1.1",
-                "POST /session/fresh/appium/settings HTTP/1.1",
-                "GET /session/fresh/source HTTP/1.1",
-            ]
+            vec!["GET /session/old/source HTTP/1.1"],
+            "a resumed wait may not spend a second session repair"
         );
+    }
+
+    #[tokio::test]
+    async fn stale_tree_replacement_retries_the_read_only_once() {
+        for bounded in [false, true] {
+            let (client, routes, server) = session_replacement_fixture(true).await;
+            let result = if bounded {
+                client
+                    .observation_read(None, std::time::Instant::now() + Duration::from_secs(2))
+                    .await
+                    .map(|_| ())
+            } else {
+                client.source().await.map(|_| ())
+            };
+            server.abort();
+            let _ = server.await;
+            assert!(
+                result
+                    .unwrap_err()
+                    .downcast_ref::<riviu_core::driver::AccessibilityReadUnavailable>()
+                    .is_some(),
+                "bounded={bounded}: failed recovery must retain the read-only unavailable type"
+            );
+            assert_eq!(
+                *routes.lock(),
+                vec![
+                    "GET /session/old/source HTTP/1.1",
+                    "POST /session HTTP/1.1",
+                    "POST /session/fresh/appium/settings HTTP/1.1",
+                    "GET /session/fresh/source HTTP/1.1",
+                ],
+                "bounded={bounded}: only one repair and one repeated read are permitted"
+            );
+        }
     }
 
     #[tokio::test]

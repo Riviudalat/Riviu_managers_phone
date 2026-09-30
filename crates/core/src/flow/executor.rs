@@ -208,6 +208,112 @@ impl From<FlowExecutionError> for ActionDispatchFailure {
 }
 
 impl FlowExecutor {
+    /// Retry only Android reads, keeping the original phase budget and durable attempt.
+    /// Legacy relays must finish their request before Stop is accepted; dropping their
+    /// HTTP future can wedge the relay. No dispatched gesture uses this helper.
+    async fn read_ui<T, F, R>(
+        &self,
+        session: &dyn crate::UiSession,
+        operation: &'static str,
+        deadline: tokio::time::Instant,
+        mut read: F,
+    ) -> Result<T, ActionDispatchFailure>
+    where
+        F: FnMut(Duration) -> R,
+        R: std::future::Future<Output = anyhow::Result<T>>,
+    {
+        use crate::ui_automation::runtime::{read_before_deadline, ReadWaitResult};
+        let epoch = session.gui_session_epoch();
+        let android_read = session.supports_element_bounds();
+        for retry in 0..=3 {
+            if self.deps.cancellation.is_cancelled() {
+                return Err(FlowExecutionError::new("Cancelled", "flow was cancelled").into());
+            }
+            let remaining = deadline.saturating_duration_since(tokio::time::Instant::now());
+            if remaining.is_zero() {
+                return Err(ActionDispatchFailure::deterministic_read(
+                    FlowExecutionError::new(
+                        "ReadDeadline",
+                        format!("{operation} exceeded its deadline"),
+                    ),
+                ));
+            }
+            let result = if android_read {
+                read_before_deadline(
+                    read(remaining),
+                    deadline,
+                    self.deps.cancellation.stop_flag(),
+                )
+                .await
+            } else {
+                let result = read(remaining).await;
+                if self.deps.cancellation.is_cancelled() {
+                    Ok(ReadWaitResult::Cancelled)
+                } else if tokio::time::Instant::now() >= deadline {
+                    Ok(ReadWaitResult::DeadlineExceeded)
+                } else {
+                    result.map(ReadWaitResult::Ready)
+                }
+            };
+            if self.deps.cancellation.is_cancelled() {
+                return Err(FlowExecutionError::new("Cancelled", "flow was cancelled").into());
+            }
+            if tokio::time::Instant::now() >= deadline {
+                return Err(ActionDispatchFailure::deterministic_read(
+                    FlowExecutionError::new(
+                        "ReadDeadline",
+                        format!("{operation} exceeded its deadline"),
+                    ),
+                ));
+            }
+            if epoch != session.gui_session_epoch() {
+                return Err(ActionDispatchFailure::deterministic_read(
+                    FlowExecutionError::new(
+                        "ReadBindingChanged",
+                        "UI session changed during Flow read",
+                    ),
+                ));
+            }
+            match result {
+                Ok(ReadWaitResult::Ready(value)) => {
+                    return Ok(value);
+                }
+                Ok(ReadWaitResult::Cancelled) => {
+                    return Err(FlowExecutionError::new("Cancelled", "flow was cancelled").into());
+                }
+                Ok(ReadWaitResult::DeadlineExceeded) => {
+                    return Err(ActionDispatchFailure::deterministic_read(
+                        FlowExecutionError::new(
+                            "ReadDeadline",
+                            format!("{operation} exceeded its deadline"),
+                        ),
+                    ));
+                }
+                Err(error)
+                    if android_read
+                        && retry < 3
+                        && crate::driver::classify_read_failure(&error)
+                            == crate::driver::ReadFailureKind::Transient =>
+                {
+                    tracing::warn!(run_id = %self.deps.run_id, device = %self.deps.udid,
+                        operation, retry = retry + 1, error = %error, "retrying read within its original deadline");
+                    let delay = WAIT_SLICE
+                        .min(deadline.saturating_duration_since(tokio::time::Instant::now()));
+                    tokio::select! {
+                        biased;
+                        _ = self.deps.cancellation.cancelled() => {}
+                        _ = tokio::time::sleep(delay) => {}
+                    }
+                }
+                Err(error) => {
+                    return Err(ActionDispatchFailure::deterministic_read(
+                        FlowExecutionError::other(error),
+                    ))
+                }
+            }
+        }
+        unreachable!("the final read attempt returns its error")
+    }
     pub(crate) fn new(deps: FlowExecutorDeps) -> Self {
         Self { deps }
     }
@@ -1474,12 +1580,12 @@ impl FlowExecutor {
                 let session = context
                     .session(&self.deps.control)
                     .map_err(FlowExecutionError::device)?;
-                let value = session
-                    .read_text(locator, Duration::from_secs(4))
-                    .await
-                    .map_err(|e| {
-                        ActionDispatchFailure::deterministic_read(FlowExecutionError::other(e))
-                    })?;
+                let deadline = tokio::time::Instant::now() + Duration::from_secs(4);
+                let value = self
+                    .read_ui(session.as_ref(), "readText", deadline, |remaining| {
+                        session.read_text(locator, remaining)
+                    })
+                    .await?;
                 if value.chars().count() > 4096 {
                     return Err(ActionDispatchFailure::deterministic_read(
                         FlowExecutionError::new(
@@ -1526,25 +1632,18 @@ impl FlowExecutor {
                 let session = context
                     .session(&self.deps.control)
                     .map_err(FlowExecutionError::device)?;
-                let observation = tokio::time::timeout(Duration::from_secs(30), async {
-                    let package = session.active_app_bundle().await?;
-                    let snapshot = session.hierarchy_source_snapshot().await?;
-                    anyhow::ensure!(
-                        session.active_app_bundle().await? == package,
-                        "active application changed during hierarchy observation"
-                    );
-                    Ok::<_, anyhow::Error>((package, snapshot))
-                })
-                .await
-                .map_err(|_| {
-                    ActionDispatchFailure::deterministic_read(FlowExecutionError::new(
-                        "ReadDeadline",
-                        "hierarchy read exceeded its deadline",
-                    ))
-                })?
-                .map_err(|e| {
-                    ActionDispatchFailure::deterministic_read(FlowExecutionError::other(e))
-                })?;
+                let deadline = tokio::time::Instant::now() + Duration::from_secs(30);
+                let observation = self
+                    .read_ui(session.as_ref(), "ifVisible", deadline, |_| async {
+                        let package = session.active_app_bundle().await?;
+                        let snapshot = session.hierarchy_source_snapshot().await?;
+                        anyhow::ensure!(
+                            session.active_app_bundle().await? == package,
+                            "active application changed during hierarchy observation"
+                        );
+                        Ok::<_, anyhow::Error>((package, snapshot))
+                    })
+                    .await?;
                 let (package, snapshot) = observation;
                 let visible = super::data::visible_in_snapshot(snapshot, &package, locator)
                     .map_err(|e| {
@@ -1945,11 +2044,11 @@ impl FlowExecutor {
                     )
                     .into());
                 }
-                if let Err(error) = session.assert_visible(accessibility_id).await {
-                    return Err(ActionDispatchFailure::deterministic_read(
-                        FlowExecutionError::other(error),
-                    ));
-                }
+                let deadline = tokio::time::Instant::now() + EVIDENCE_TIMEOUT;
+                self.read_ui(session.as_ref(), "assertVisible", deadline, |_| {
+                    session.assert_visible(accessibility_id)
+                })
+                .await?;
                 Ok(ActionOutput::None)
             }
             (
@@ -3051,6 +3150,8 @@ mod tests {
         supports_readback: Arc<AtomicBool>,
         supports_hierarchy: Arc<AtomicBool>,
         hierarchy_xml: Arc<Mutex<Option<String>>>,
+        cancel_after_hierarchy_read: Arc<AtomicBool>,
+        hierarchy_timeouts_remaining: Arc<AtomicUsize>,
         inspection_calls: AtomicUsize,
         launch_calls: Arc<AtomicUsize>,
         tap_calls: Arc<AtomicUsize>,
@@ -3097,6 +3198,8 @@ mod tests {
                 supports_readback: Arc::new(AtomicBool::new(true)),
                 supports_hierarchy: Arc::new(AtomicBool::new(false)),
                 hierarchy_xml: Arc::new(Mutex::new(None)),
+                cancel_after_hierarchy_read: Arc::new(AtomicBool::new(false)),
+                hierarchy_timeouts_remaining: Arc::new(AtomicUsize::new(0)),
                 inspection_calls: AtomicUsize::new(0),
                 launch_calls: Arc::new(AtomicUsize::new(0)),
                 tap_calls: Arc::new(AtomicUsize::new(0)),
@@ -3167,6 +3270,8 @@ mod tests {
         supports_readback: bool,
         supports_hierarchy: bool,
         hierarchy_xml: Arc<Mutex<Option<String>>>,
+        cancel_after_hierarchy_read: Arc<AtomicBool>,
+        hierarchy_timeouts_remaining: Arc<AtomicUsize>,
     }
 
     impl RecordingSession {
@@ -3259,11 +3364,28 @@ mod tests {
             &self,
         ) -> anyhow::Result<crate::HierarchySourceSnapshot> {
             self.push("hierarchySource");
+            if self
+                .hierarchy_timeouts_remaining
+                .fetch_update(Ordering::SeqCst, Ordering::SeqCst, |count| {
+                    count.checked_sub(1)
+                })
+                .is_ok()
+            {
+                return Err(crate::driver::UiError::new(
+                    crate::driver::UiErrorKind::Timeout,
+                    "hierarchySourceSnapshot",
+                    "fixture read timeout",
+                )
+                .into());
+            }
             let xml = self
                 .hierarchy_xml
                 .lock()
                 .clone()
                 .ok_or_else(|| anyhow::anyhow!("fixture hierarchy read failed"))?;
+            if self.cancel_after_hierarchy_read.load(Ordering::SeqCst) {
+                self.cancellation.cancel();
+            }
             Ok(crate::HierarchySourceSnapshot { xml, generation: 1 })
         }
 
@@ -3374,6 +3496,8 @@ mod tests {
                     && self.supports_readback.load(Ordering::SeqCst),
                 supports_hierarchy: self.supports_hierarchy.load(Ordering::SeqCst),
                 hierarchy_xml: self.hierarchy_xml.clone(),
+                cancel_after_hierarchy_read: self.cancel_after_hierarchy_read.clone(),
+                hierarchy_timeouts_remaining: self.hierarchy_timeouts_remaining.clone(),
             }))
         }
 

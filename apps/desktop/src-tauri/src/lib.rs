@@ -28,6 +28,7 @@ mod nurture_schedule;
 mod operator_commands;
 mod orchestration_commands;
 mod peripherals;
+pub mod packaged_frontend;
 mod phone_app_completion;
 mod public_cleanup_commands;
 mod publish_commands;
@@ -287,6 +288,12 @@ pub fn run() {
             .expect("failed to establish process-tree ownership");
     }
     let mut context = tauri::generate_context!();
+    if !cfg!(debug_assertions) {
+        if let Err(error) = packaged_frontend::inspect(&context) {
+            eprintln!("packaged frontend refused: {error:#}");
+            return;
+        }
+    }
     if let Err(error) = policy.configure_context(&mut context) {
         eprintln!("desktop UI smoke context refused: {error:#}");
         return;

@@ -706,6 +706,9 @@ toàn bộ bước mở bảng, chọn và xác nhận nhạc. App dùng vị tr
 không bỏ qua nhạc khi tải chậm. Quá thời hạn hoặc mất kết nối thì dừng trước Đăng
 và hiện nguyên nhân. Bấm **Tạm dừng** sẽ kết thúc cả vòng chờ nhạc.
 Nếu TikTok hiện lỗi mạng trong danh sách nhạc, app báo rõ lỗi đó và dừng trước Đăng.
+Chi tiết từng máy có dòng nhận diện khi đổi chiến lược hoặc hết thời gian chờ.
+Đọc cây UI bị lỗi không được tính là thiếu nút hoặc đã đăng thành công. Tạm dừng
+chặn bước kế tiếp; thao tác đã gửi được xử lý tới khi có kết quả để tránh bấm lặp.
 Tên nhạc bị rút gọn ở hàng đã chọn vẫn phải được xác nhận đầy đủ trên màn soạn bài.
 Trên Global 45.7.3 tiếng Anh, nếu bảng nhạc đã hiện mà OCR không đọc đủ tên hàng,
 app chỉ chuyển sang cây giao diện khi đã xác nhận đúng bảng, tab Hot và các hàng ổn

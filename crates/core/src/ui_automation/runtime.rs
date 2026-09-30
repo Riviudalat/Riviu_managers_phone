@@ -3,11 +3,58 @@
 use super::{model::*, resolver, tree::Tree};
 use base64::Engine;
 use sha2::{Digest, Sha256};
+use std::future::Future;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, Instant};
+
+/// A read can be abandoned without making a statement about the device's UI state.
+#[derive(Debug)]
+pub enum ReadWaitResult<T> {
+    Ready(T),
+    Cancelled,
+    DeadlineExceeded,
+}
+
+/// Bound a read by the caller's existing deadline and Stop flag. Read errors stay errors.
+/// Never wrap a dispatched gesture: an uncertain effect must drain and be reconciled.
+pub async fn read_before_deadline<T>(
+    read: impl Future<Output = anyhow::Result<T>>,
+    deadline: tokio::time::Instant,
+    stop: &AtomicBool,
+) -> anyhow::Result<ReadWaitResult<T>> {
+    if stop.load(Ordering::Relaxed) {
+        return Ok(ReadWaitResult::Cancelled);
+    }
+    if tokio::time::Instant::now() >= deadline {
+        return Ok(ReadWaitResult::DeadlineExceeded);
+    }
+    let cancelled = async {
+        while !stop.load(Ordering::Relaxed) {
+            tokio::time::sleep(Duration::from_millis(50)).await;
+        }
+    };
+    let result = tokio::select! {
+        biased;
+        _ = cancelled => return Ok(ReadWaitResult::Cancelled),
+        _ = tokio::time::sleep_until(deadline) => return Ok(ReadWaitResult::DeadlineExceeded),
+        result = read => result,
+    };
+    // Synchronous decoding or an immediately ready read can finish before the select
+    // polls its timers again. Guard errors too, so Stop cannot become a retry trigger.
+    if stop.load(Ordering::Relaxed) {
+        return Ok(ReadWaitResult::Cancelled);
+    }
+    if tokio::time::Instant::now() >= deadline {
+        return Ok(ReadWaitResult::DeadlineExceeded);
+    }
+    result.map(ReadWaitResult::Ready)
+}
 
 /// Wait using only `UiSession::observe`, one monotonic total deadline and cancellation.
 /// Unknown and ambiguous observations never satisfy an expectation. Closed cancellation
-/// channels cancel too. Transport failures propagate without recovery or public actions.
+/// channels cancel too. One transient read may be retried inside this same deadline;
+/// one driver-owned repair can rebind only fresh package/device proof. Binding failures
+/// and public actions never get replayed here.
 pub async fn wait_for_observation(
     session: &dyn crate::UiSession,
     request: &super::ObservationRequest,
@@ -28,6 +75,10 @@ pub async fn wait_for_observation(
         verdict: ExpectationVerdict::Unknown,
         observation: None,
     };
+    let mut epoch = session.gui_session_epoch();
+    let device_id = session.gui_scope().map(|scope| scope.device_id);
+    let mut retried_read = false;
+    let mut rebound = false;
     loop {
         if *cancel.borrow() || cancel.has_changed().is_err() {
             result.status = ObservationWaitStatus::Cancelled;
@@ -47,7 +98,13 @@ pub async fn wait_for_observation(
                 return Ok(result);
             }
             _ = tokio::time::sleep_until(deadline) => return Ok(result),
-            read = session.observe(&current) => read,
+            read = async {
+                if rebound {
+                    session.observe_without_recovery(&current).await
+                } else {
+                    session.observe(&current).await
+                }
+            } => read,
         };
         // Completion guards apply to errors too: a read may finish within one poll
         // after cancellation or the deadline, before select can poll its timers again.
@@ -58,8 +115,55 @@ pub async fn wait_for_observation(
         if tokio::time::Instant::now() >= deadline {
             return Ok(result);
         }
+        if !read.as_ref().is_err_and(|error| {
+            error
+                .downcast_ref::<crate::driver::SessionEpochChanged>()
+                .is_some()
+        }) {
+            anyhow::ensure!(
+                session.gui_session_epoch() == epoch,
+                "observation_session_changed"
+            );
+        }
         let observation = match read {
             Ok(observation) => observation,
+            Err(error)
+                if error
+                    .downcast_ref::<crate::driver::SessionEpochChanged>()
+                    .is_some() =>
+            {
+                let change = error
+                    .downcast_ref::<crate::driver::SessionEpochChanged>()
+                    .ok_or_else(|| anyhow::anyhow!("observation_rebind_refused"))?;
+                let package = request
+                    .scope
+                    .as_ref()
+                    .and_then(|scope| scope.package.as_ref());
+                anyhow::ensure!(
+                    !rebound
+                        && result.observation.is_none()
+                        && !epoch.is_empty()
+                        && change.previous_epoch == epoch
+                        && !change.current_epoch.is_empty()
+                        && change.current_epoch != epoch
+                        && session.gui_session_epoch() == change.current_epoch
+                        && device_id.as_ref() == Some(&change.device_id)
+                        && package == Some(&change.package)
+                        && change.fresh_observation.device_id == change.device_id
+                        && change.fresh_observation.app.package.as_ref() == package
+                        && change.fresh_observation.session_epoch == change.current_epoch,
+                    "observation_rebind_refused"
+                );
+                // This is the driver's already completed fresh read, not an old target
+                // or a permission to invoke another recovery. Foreground/device proof
+                // and the original deadline still bind the result.
+                epoch.clone_from(&change.current_epoch);
+                rebound = true;
+                let observation = change.fresh_observation.as_ref().clone();
+                tracing::info!(device = %change.device_id, package = %change.package,
+                    "rebound observation after one driver-owned session repair");
+                observation
+            }
             Err(error)
                 if error
                     .downcast_ref::<crate::driver::UnsupportedCapability>()
@@ -69,8 +173,34 @@ pub async fn wait_for_observation(
                 result.verdict = ExpectationVerdict::Unknown;
                 return Ok(result);
             }
+            Err(error)
+                if !retried_read
+                    && crate::driver::classify_read_failure(&error)
+                        == crate::driver::ReadFailureKind::Transient =>
+            {
+                retried_read = true;
+                // A failed read proves no UI state. Keep the previous evidence and
+                // spend only the remaining budget before one fresh read.
+                let delay = poll_interval
+                    .max(Duration::from_millis(1))
+                    .min(deadline.saturating_duration_since(tokio::time::Instant::now()));
+                tracing::debug!(error = %error, retry = 1, "retrying transient observation read");
+                tokio::select! {
+                    biased;
+                    _ = observation_cancelled(cancel) => {
+                        result.status = ObservationWaitStatus::Cancelled;
+                        return Ok(result);
+                    }
+                    _ = tokio::time::sleep(delay) => {}
+                }
+                continue;
+            }
             Err(error) => return Err(error),
         };
+        anyhow::ensure!(
+            session.gui_session_epoch() == epoch,
+            "observation_session_changed"
+        );
         anyhow::ensure!(
             !observation.device_id.is_empty()
                 && !observation.session_epoch.is_empty()
@@ -79,6 +209,16 @@ pub async fn wait_for_observation(
                 && observation.ended_at_ms >= observation.started_at_ms,
             "observation_binding_invalid"
         );
+        anyhow::ensure!(
+            epoch.is_empty() || observation.session_epoch == epoch,
+            "observation_session_changed"
+        );
+        if let Some(device_id) = &device_id {
+            anyhow::ensure!(
+                observation.device_id == *device_id,
+                "observation_device_changed"
+            );
+        }
         if let Some(package) = request.scope.as_ref().and_then(|s| s.package.as_ref()) {
             anyhow::ensure!(
                 observation.app.package.as_ref() == Some(package),
@@ -129,6 +269,24 @@ pub async fn resolve_navigation(
     target: &str,
     budget: Duration,
 ) -> anyhow::Result<Option<crate::ElementBox>> {
+    resolve_navigation_with_policy(session, target, budget, true).await
+}
+
+/// Resolve only measured local hierarchy targets, with no perception-provider request.
+pub async fn resolve_navigation_local(
+    session: &dyn crate::UiSession,
+    target: &str,
+    budget: Duration,
+) -> anyhow::Result<Option<crate::ElementBox>> {
+    resolve_navigation_with_policy(session, target, budget, false).await
+}
+
+async fn resolve_navigation_with_policy(
+    session: &dyn crate::UiSession,
+    target: &str,
+    budget: Duration,
+    allow_reasoner: bool,
+) -> anyhow::Result<Option<crate::ElementBox>> {
     let budget = if let Some(end) = session.gui_scope().and_then(|s| s.deadline_ms) {
         budget.min(Duration::from_millis(
             (end - chrono::Utc::now().timestamp_millis()).max(0) as u64,
@@ -142,21 +300,29 @@ pub async fn resolve_navigation(
     {
         return Ok(None);
     }
-    tokio::time::timeout(budget, resolve_inner(session, target, budget))
-        .await
-        .map_err(|_| anyhow::anyhow!("gui_deadline: hết thời gian nhận diện"))?
+    tokio::time::timeout(
+        budget,
+        resolve_inner(session, target, budget, allow_reasoner),
+    )
+    .await
+    .map_err(|_| anyhow::anyhow!("gui_deadline: hết thời gian nhận diện"))?
 }
 async fn resolve_inner(
     session: &dyn crate::UiSession,
     target: &str,
     budget: Duration,
+    allow_reasoner: bool,
 ) -> anyhow::Result<Option<crate::ElementBox>> {
     let started = Instant::now();
     let package = session.active_app_bundle().await?;
     let Some(adapter) = crate::app_automation::adapter(&package) else {
         return Ok(None);
     };
-    let reasoner = session.gui_reasoner();
+    let reasoner = if allow_reasoner {
+        session.gui_reasoner()
+    } else {
+        None
+    };
     let pack = session
         .gui_compatibility_pack(&package)
         .unwrap_or_else(|| adapter.pack());

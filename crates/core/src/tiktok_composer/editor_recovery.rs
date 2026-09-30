@@ -9,12 +9,13 @@ use sha2::{Digest, Sha256};
 /// loading the suggested sound is a separate state proved by the sound adapter.
 pub(super) async fn wait_rendered(
     session: &dyn UiSession,
+    deadline: Instant,
     stop: &AtomicBool,
 ) -> anyhow::Result<bool> {
+    use crate::ui_automation::runtime::{read_before_deadline, ReadWaitResult};
     let reasoner = session
         .gui_reasoner()
         .context("editor local OCR unavailable")?;
-    let deadline = Instant::now() + Duration::from_secs(60);
     let epoch = session.gui_session_epoch();
     anyhow::ensure!(!epoch.is_empty(), "editor render session missing");
     let mut previous = None;
@@ -110,9 +111,9 @@ pub(super) async fn wait_rendered(
             );
             Ok::<_, anyhow::Error>(response)
         };
-        let response = match tokio::time::timeout_at(deadline, work).await {
-            Ok(r) => r?,
-            Err(_) => return Ok(false),
+        let response = match read_before_deadline(work, deadline, stop).await? {
+            ReadWaitResult::Ready(response) => response,
+            ReadWaitResult::Cancelled | ReadWaitResult::DeadlineExceeded => return Ok(false),
         };
         if stop.load(Ordering::Relaxed) {
             return Ok(false);
@@ -138,56 +139,82 @@ pub(super) async fn wait_rendered(
         } else {
             previous = None;
         }
-        sleep(POLL, stop).await;
+        sleep(
+            POLL.min(deadline.saturating_duration_since(Instant::now())),
+            stop,
+        )
+        .await;
     }
     Ok(false)
 }
 
 // Two successful XML reads on the measured 45.7.3 editor took about 8 seconds
-// each. Bound recovery independently; a persistent unreadable app still refuses.
-const RECOVERY_WINDOW: Duration = Duration::from_secs(30);
+// each. This is one total phase budget including the initial element read.
+pub(super) const RECOVERY_WINDOW: Duration = Duration::from_secs(30);
 
 pub(super) fn transient_read(error: &anyhow::Error) -> bool {
-    error.chain().any(|cause| {
-        cause
-            .downcast_ref::<crate::driver::AccessibilityReadUnavailable>()
-            .is_some()
-            || cause
-                .downcast_ref::<reqwest::Error>()
-                .is_some_and(reqwest::Error::is_timeout)
-    })
+    matches!(
+        crate::driver::classify_read_failure(error),
+        crate::driver::ReadFailureKind::Transient | crate::driver::ReadFailureKind::Unavailable
+    )
 }
 
 pub(super) async fn observe(
     session: &dyn UiSession,
     package: &str,
     marker: ElementQuery<'_>,
+    deadline: Instant,
     stop: &AtomicBool,
 ) -> anyhow::Result<bool> {
-    let deadline = Instant::now() + RECOVERY_WINDOW;
+    use crate::ui_automation::runtime::{read_before_deadline, ReadWaitResult};
+    let epoch = session.gui_session_epoch();
     let mut previous: Option<(String, u64, ElementBox)> = None;
     while Instant::now() < deadline {
         if stop.load(Ordering::Relaxed) {
             return Ok(false);
         }
-        let epoch = session.gui_session_epoch();
-        let snapshot =
-            match tokio::time::timeout_at(deadline, session.hierarchy_source_snapshot()).await {
-                Ok(Ok(snapshot)) => snapshot,
-                Ok(Err(error)) if transient_read(&error) => {
-                    previous = None;
-                    sleep(POLL, stop).await;
-                    continue;
-                }
-                Ok(Err(error)) => return Err(error),
-                Err(_) => return Ok(false),
-            };
+        let snapshot = match read_before_deadline(
+            async {
+                anyhow::ensure!(
+                    !epoch.is_empty()
+                        && session.gui_session_epoch() == epoch
+                        && session.active_app_bundle().await? == package,
+                    "editor recovery app/session changed"
+                );
+                session.hierarchy_source_snapshot().await
+            },
+            deadline,
+            stop,
+        )
+        .await
+        {
+            Ok(ReadWaitResult::Ready(snapshot)) => snapshot,
+            Err(error) if transient_read(&error) => {
+                previous = None;
+                sleep(
+                    POLL.min(deadline.saturating_duration_since(Instant::now())),
+                    stop,
+                )
+                .await;
+                continue;
+            }
+            Err(error) => return Err(error),
+            Ok(ReadWaitResult::Cancelled | ReadWaitResult::DeadlineExceeded) => return Ok(false),
+        };
         if stop.load(Ordering::Relaxed) || Instant::now() >= deadline {
             return Ok(false);
         }
-        if epoch.is_empty() || epoch != session.gui_session_epoch() || snapshot.generation == 0 {
+        anyhow::ensure!(
+            epoch == session.gui_session_epoch(),
+            "editor recovery session replaced"
+        );
+        if snapshot.generation == 0 {
             previous = None;
-            sleep(POLL, stop).await;
+            sleep(
+                POLL.min(deadline.saturating_duration_since(Instant::now())),
+                stop,
+            )
+            .await;
             continue;
         }
         let tree = crate::ui_automation::tree::Tree::parse(snapshot)?;
@@ -216,11 +243,15 @@ pub(super) async fn observe(
             {
                 return Ok(!stop.load(Ordering::Relaxed));
             }
-            previous = Some((epoch, tree.generation, target));
+            previous = Some((epoch.clone(), tree.generation, target));
         } else {
             previous = None;
         }
-        sleep(POLL, stop).await;
+        sleep(
+            POLL.min(deadline.saturating_duration_since(Instant::now())),
+            stop,
+        )
+        .await;
     }
     Ok(false)
 }

@@ -1,5 +1,6 @@
 //! Fleet acceptance through production composer, stopping at its effect-intent callback.
 //! One driver/port allocator, bounded parallel devices, isolated imports and durable reports.
+//! Pass `-` for VIDEO_BUNDLE to rehearse only the operator's existing photo content.
 use anyhow::Context;
 use riviu_android_driver::AndroidDriver;
 use riviu_core::driver::{DeviceDriver, UiSession};
@@ -13,6 +14,8 @@ use std::{
 };
 #[path = "common/mod.rs"]
 mod common;
+#[path = "common/rehearsal_trace.rs"]
+mod rehearsal_trace;
 
 fn save(out: &Path, name: &str, value: &impl serde::Serialize) -> anyhow::Result<()> {
     std::fs::write(out.join(name), serde_json::to_vec_pretty(value)?)?;
@@ -57,6 +60,47 @@ async fn one(
         anyhow::ensure!(transfer["files"].as_u64()==Some(if bundle.video.is_some(){1}else{bundle.images.len() as u64}),"import count mismatch");
         driver.terminate_app(&serial,&pkg).await?;driver.launch_app(&serial,&pkg).await?;
         let session=driver.open_session(&serial).await?;
+        session.set_gui_scope(riviu_core::ui_automation::GuiScope {
+            run_id: id.clone(), assignment_id: Some(id.clone()),
+            device_id: serial.clone(), deadline_ms: None,
+        });
+        if std::env::var_os("RIVIU_REHEARSAL_TRACE").is_some() {
+            // Optional diagnostic reads only: a launch ACK is not foreground proof.
+            // Reuse controller-owned process inspection instead of a second ADB route.
+            let diagnostic_stop = AtomicBool::new(false);
+            let process_started = std::time::Instant::now();
+            let process = riviu_core::ui_automation::runtime::read_before_deadline(
+                async { Ok(control.inspect_app_process(&context, &pkg).await?) },
+                tokio::time::Instant::now() + tiktok_composer::COMPOSER_WINDOW,
+                &diagnostic_stop,
+            ).await;
+            let process = match process {
+                Ok(riviu_core::ui_automation::runtime::ReadWaitResult::Ready(state)) =>
+                    serde_json::json!({"bundleId":state.bundle_id,"pid":state.pid,"running":state.running}),
+                other => serde_json::json!({"unavailable":format!("{other:?}")}),
+            };
+            let process_read_ms = process_started.elapsed().as_millis();
+            let foreground_started = std::time::Instant::now();
+            let foreground = riviu_core::ui_automation::runtime::read_before_deadline(
+                session.active_app_bundle(),
+                tokio::time::Instant::now() + tiktok_composer::COMPOSER_WINDOW,
+                &diagnostic_stop,
+            ).await;
+            let foreground = match foreground {
+                Ok(riviu_core::ui_automation::runtime::ReadWaitResult::Ready(package)) =>
+                    serde_json::json!({"package":package}),
+                other => serde_json::json!({"unavailable":format!("{other:?}")}),
+            };
+            let state = serde_json::json!({
+                "serial":serial,"expectedPackage":pkg,"phase":"beforeProfile",
+                "process":process,"foreground":foreground,
+                "processReadMs":process_read_ms,
+                "foregroundReadMs":foreground_started.elapsed().as_millis(),
+            });
+            save(&out,"start-state.json",&state)?;
+            tracing::info!(serial=%serial,package=%pkg,phase="beforeProfile",
+                observed=%state,"rehearsal app process and foreground readback");
+        }
         let observed:anyhow::Result<()> = async {
             // Profile is an observed English accessibility description on this fleet.
             let profile=riviu_core::ElementQuery::Description{value:"Profile",exact:true};
@@ -145,6 +189,7 @@ async fn one(
 }
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
+    rehearsal_trace::install_from_environment()?;
     let args: Vec<_> = std::env::args().skip(1).collect();
     if args.len() == 2 && args[0] == "cleanup" {
         let root = PathBuf::from(&args[1]);
@@ -184,9 +229,18 @@ async fn main() -> anyhow::Result<()> {
     let photo = riviu_core::scan_publish_folder(&args[1], Default::default())?
         .bundles
         .remove(0);
-    let video = riviu_core::scan_publish_folder(&args[2], Default::default())?
-        .bundles
-        .remove(0);
+    let video = if args[2] == "-" {
+        None
+    } else {
+        let bundle = riviu_core::scan_publish_folder(&args[2], Default::default())?
+            .bundles
+            .remove(0);
+        anyhow::ensure!(
+            bundle.video.is_some(),
+            "VIDEO_BUNDLE must contain a video; use - for photos only"
+        );
+        Some(bundle)
+    };
     let driver = Arc::new(AndroidDriver::new(&common::repo_config())?);
     let control = Arc::new(riviu_core::DeviceControlPlane::new(
         driver.clone(),
@@ -214,16 +268,11 @@ async fn main() -> anyhow::Result<()> {
                 out.join(&serial).join("photo"),
             )
             .await;
-            let videos = one(
-                driver,
-                control,
-                serial.clone(),
-                video,
-                out.join(&serial).join("video"),
-            )
-            .await;
+            let videos = if let Some(video) = video {
+                Some(one(driver, control, serial.clone(), video, out.join(&serial).join("video")).await.is_ok())
+            } else { None };
             Ok::<_, anyhow::Error>(
-                serde_json::json!({"serial":serial,"photo":photos.is_ok(),"video":videos.is_ok()}),
+                serde_json::json!({"serial":serial,"photo":photos.is_ok(),"video":videos,"videoSkipped":videos.is_none()}),
             )
         });
     }
@@ -235,7 +284,7 @@ async fn main() -> anyhow::Result<()> {
     control.shutdown_cleanup().await?;
     anyhow::ensure!(
         rows.iter()
-            .all(|r| r["photo"] == true && r["video"] == true),
+            .all(|r| r["photo"] == true && (r["video"] == true || r["videoSkipped"] == true)),
         "some phones need repair; inspect summary and per-device evidence"
     );
     Ok(())

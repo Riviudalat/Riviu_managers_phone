@@ -24,7 +24,13 @@ fn same_editor_sound_title(observed: &str, expected: &str) -> bool {
     let normalize = |value: &str| {
         value
             .nfkc()
-            .map(|character| if character.is_whitespace() { ' ' } else { character })
+            .map(|character| {
+                if character.is_whitespace() {
+                    ' '
+                } else {
+                    character
+                }
+            })
             .collect::<String>()
     };
     normalize(observed.trim()) == normalize(expected.trim())
@@ -103,11 +109,18 @@ pub(crate) async fn with_deadline_budget<T>(
     deadline: Instant,
     work: impl std::future::Future<Output = anyhow::Result<T>>,
 ) -> anyhow::Result<T> {
-    if SOUND_BUDGET.try_with(|_| ()).is_ok() {
-        check_wait()?;
-        let result = Box::pin(work).await;
-        check_wait()?;
-        return result;
+    if let Ok(budget) = SOUND_BUDGET.try_with(|parent| SoundBudget {
+        deadline: parent.deadline.min(deadline),
+        stopped: parent.stopped.clone(),
+    }) {
+        return SOUND_BUDGET
+            .scope(budget, async {
+                check_wait()?;
+                let result = Box::pin(work).await;
+                check_wait()?;
+                result
+            })
+            .await;
     }
     let stopped = Arc::new(AtomicBool::new(stop.load(Ordering::Relaxed)));
     let budget = SoundBudget {
@@ -136,10 +149,49 @@ pub(crate) async fn with_deadline_budget<T>(
     }
 }
 
-pub(crate) fn phase_deadline(window: Duration) -> Instant {
+/// A shorter navigation stage shares the enclosing Stop flag and total deadline.
+/// This scopes reads; it never times out the whole future containing a gesture.
+pub(crate) async fn with_stage_budget<T>(
+    window: Duration,
+    work: impl std::future::Future<Output = anyhow::Result<T>>,
+) -> anyhow::Result<T> {
+    let stage_deadline = Instant::now() + window;
+    let budget = SOUND_BUDGET
+        .try_with(|parent| SoundBudget {
+            deadline: parent.deadline.min(stage_deadline),
+            stopped: parent.stopped.clone(),
+        })
+        .unwrap_or_else(|_| SoundBudget {
+            deadline: stage_deadline,
+            stopped: Arc::new(AtomicBool::new(false)),
+        });
     SOUND_BUDGET
-        .try_with(|b| b.deadline)
-        .unwrap_or_else(|_| Instant::now() + window)
+        .scope(budget, async {
+            check_wait()?;
+            let result = Box::pin(work).await;
+            // If a gesture consumed the remaining window, it has now drained.
+            // Expiration still refuses later selection/navigation.
+            if let Err(error) = check_wait() {
+                let detail = error.to_string();
+                crate::publish_recovery::note_read(
+                    "sound",
+                    "boundedStageObservation",
+                    1,
+                    "stageExhausted",
+                    Some(&detail),
+                );
+                return Err(error);
+            }
+            result
+        })
+        .await
+}
+
+pub(crate) fn phase_deadline(window: Duration) -> Instant {
+    let deadline = Instant::now() + window;
+    SOUND_BUDGET
+        .try_with(|b| b.deadline.min(deadline))
+        .unwrap_or(deadline)
 }
 pub(crate) fn check_wait() -> anyhow::Result<()> {
     SOUND_BUDGET
@@ -195,13 +247,10 @@ async fn sound_tap_armed(
     check_wait()
 }
 fn transient_sound_read(error: &anyhow::Error) -> bool {
-    error
-        .downcast_ref::<crate::driver::AccessibilityReadUnavailable>()
-        .is_some()
-        || error.chain().any(|e| {
-            e.downcast_ref::<reqwest::Error>()
-                .is_some_and(reqwest::Error::is_timeout)
-        })
+    matches!(
+        crate::driver::classify_read_failure(error),
+        crate::driver::ReadFailureKind::Transient | crate::driver::ReadFailureKind::Unavailable
+    )
 }
 
 /// The exact hierarchy shape measured for one TikTok build.
@@ -736,12 +785,12 @@ pub(crate) async fn recover_frozen_sound_pool(
     plan: SoundPickerPlan,
     selection: &crate::SoundSelectionEvidence,
 ) -> anyhow::Result<ObservedSoundPool> {
-    tokio::time::timeout(
+    with_stage_budget(
         Duration::from_secs(60),
         recent::recover(session, plan, selection),
     )
     .await
-    .context("frozen sound Recent recovery timed out")?
+    .context("frozen sound Recent recovery did not finish within its observation budget")
 }
 
 async fn observe_measured_sound_pool(
@@ -1507,6 +1556,28 @@ mod tests {
                 usize::from(entry_ready)
             );
         }
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn nested_readback_keeps_its_deadline_inside_the_sound_budget() {
+        let stop = AtomicBool::new(false);
+        let start = Instant::now();
+        let result = with_sound_budget(&stop, async {
+            with_readback_budget(
+                &stop,
+                read_sound(async {
+                    tokio::time::sleep(READBACK_WINDOW + Duration::from_secs(1)).await;
+                    Ok(())
+                }),
+            )
+            .await
+        })
+        .await;
+        assert!(
+            result.is_err(),
+            "outer loading budget extended a fresh readback deadline"
+        );
+        assert!(start.elapsed() <= READBACK_WINDOW);
     }
 
     #[tokio::test(start_paused = true)]

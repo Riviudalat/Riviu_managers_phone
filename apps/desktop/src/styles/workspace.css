@@ -10,14 +10,12 @@
 }
 
 .page-header-icon {
-  width: 36px;
-  height: 36px;
+  width: 28px;
+  height: 28px;
   display: grid;
   place-items: center;
-  flex: 0 0 36px;
+  flex: 0 0 28px;
   color: var(--primary);
-  background: var(--primary-50);
-  border-radius: 10px;
 }
 
 .page-header-copy {
@@ -34,13 +32,10 @@
 }
 
 .page-header-copy p {
-  margin: 4px 0 0;
+  margin: var(--space-1) 0 0;
   color: var(--text-3);
-  font-size: 12px;
+  font-size: var(--text-sm);
   line-height: var(--leading-normal);
-}
-@media (max-width: 1100px) {
-  .main-col > .page-header .page-header-copy p { display: none; }
 }
 
 .page-header.is-compact {

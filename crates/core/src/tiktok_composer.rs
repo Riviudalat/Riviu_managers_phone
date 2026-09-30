@@ -70,6 +70,8 @@ mod editor_recovery;
 #[cfg(test)]
 mod editor_recovery_tests;
 pub(crate) mod observation;
+#[cfg(test)]
+mod preparation_tests;
 mod progress;
 mod selection;
 pub use progress::{PublishProgress, PublishProgressObserver};
@@ -1002,23 +1004,27 @@ impl<'a, P: TapPlanner> Composer<'a, P> {
         crate::tiktok_sound::check_wait()
     }
 
-    /// Tap the composer tab and **wait until the bottom bar is gone**.
+    /// Tap the composer tab and wait for the measured camera shutter.
     ///
     /// The wait is the point, and an earlier version skipped it: it tapped and returned
     /// `true`, so a Create tap that the phone accepted and ignored — an overlay eating it,
     /// most often — was followed straight away by a blind arithmetic tap on the *feed*,
     /// around where the gallery entry would have been. That lands on the action rail.
     ///
-    /// The signal is the composer opener's own disappearance: it lives on the bottom tab bar,
-    /// which the composer replaces with its own mode row. A control this plan already
-    /// carries, and one no other screen can fake.
+    /// A missing opener is not arrival proof: semantic locate also reports None
+    /// for an ambiguous match. The shutter positively proves the camera screen.
     async fn open(&mut self, stop: &AtomicBool) -> anyhow::Result<bool> {
-        let Some(opener) = self.session.locate(self.plan.open).await? else {
+        let Some(opener) = self
+            .await_condition(COMPOSER_WINDOW, self.plan.open, stop, |_| true)
+            .await?
+        else {
             return Ok(false);
         };
         self.tap_inside(&opener).await?;
-        self.await_absent(COMPOSER_WINDOW, self.plan.open, stop)
-            .await
+        Ok(self
+            .await_condition(COMPOSER_WINDOW, self.plan.shutter, stop, |_| true)
+            .await?
+            .is_some())
     }
 
     /// Locate the shutter and tap the gallery entry anchored to it.
@@ -1039,62 +1045,132 @@ impl<'a, P: TapPlanner> Composer<'a, P> {
         screen: Screen,
         stop: &AtomicBool,
     ) -> anyhow::Result<bool> {
+        // Preserve the previous stage ceilings (8 + 8 + 30 + 3 seconds),
+        // but every strategy now consumes one enclosing gallery budget.
+        let deadline =
+            crate::tiktok_sound::phase_deadline(COMPOSER_WINDOW * 2 + Duration::from_secs(33));
+        let epoch = self.session.gui_session_epoch();
         let Some(shutter) = self
-            .await_condition(COMPOSER_WINDOW, self.plan.shutter, stop, |_| true)
+            .await_condition_until(
+                deadline.min(Instant::now() + COMPOSER_WINDOW),
+                self.plan.shutter,
+                stop,
+                |_| true,
+            )
             .await?
         else {
             return Ok(false);
         };
         if let Some(entry_query) = self.plan.gallery_entry {
             let entry = self
-                .await_condition(COMPOSER_WINDOW, entry_query, stop, |_| true)
-                .await?;
-            let entry = match entry {
-                Some(entry) => entry,
-                None if !stop.load(Ordering::Relaxed) => {
-                    let Some(entry) = crate::ui_automation::runtime::resolve_navigation(
-                        self.session,
+                .await_condition_until(
+                    deadline.min(Instant::now() + COMPOSER_WINDOW),
+                    entry_query,
+                    stop,
+                    |_| true,
+                )
+                .await;
+            if stop.load(Ordering::Relaxed) || Instant::now() >= deadline {
+                return Ok(false);
+            }
+            anyhow::ensure!(
+                self.session.gui_session_epoch() == epoch,
+                "gallery session changed before fallback"
+            );
+            let (entry, resolved_query) = match entry {
+                Ok(Some(entry)) => (entry, entry_query),
+                Ok(None) => {
+                    crate::publish_recovery::note_read(
                         "gallery",
-                        Duration::from_secs(30),
-                    )
-                    .await?
+                        "localSemanticGallery",
+                        1,
+                        "fallbackStarted",
+                        None,
+                    );
+                    let Some(entry) = self
+                        .await_condition_until(
+                            deadline.min(Instant::now() + Duration::from_secs(30)),
+                            ElementQuery::Semantic("gallery"),
+                            stop,
+                            |_| true,
+                        )
+                        .await?
                     else {
                         return Ok(false);
                     };
-                    if stop.load(Ordering::Relaxed) {
-                        return Ok(false);
-                    }
-                    entry
+                    (entry, ElementQuery::Semantic("gallery"))
                 }
-                None => return Ok(false),
+                Err(error) if editor_recovery::transient_read(&error) => {
+                    let detail = error.to_string();
+                    crate::publish_recovery::note_read(
+                        "gallery",
+                        "localSemanticGallery",
+                        1,
+                        "fallbackStarted",
+                        Some(&detail),
+                    );
+                    // This is the existing hierarchy adapter, not a remote
+                    // vision proposal. A tree error alone never grants a tap.
+                    let Some(entry) = self
+                        .await_condition_until(
+                            deadline.min(Instant::now() + Duration::from_secs(30)),
+                            ElementQuery::Semantic("gallery"),
+                            stop,
+                            |_| true,
+                        )
+                        .await
+                        .with_context(|| format!("gallery adapter read failed after: {error}"))?
+                    else {
+                        return Ok(false);
+                    };
+                    (entry, ElementQuery::Semantic("gallery"))
+                }
+                Err(error) => return Err(error),
             };
             // SM-G955U1 / Trill 38.3.2: shutter and gallery become locatable
             // before the camera finishes moving. Wait for the gallery's own
             // geometry to settle and tap its centre, not a pre-animation edge.
             let mut stable = entry;
-            let end = Instant::now() + Duration::from_secs(3);
+            let end = deadline.min(Instant::now() + Duration::from_secs(3));
             loop {
-                if stop.load(Ordering::Relaxed) {
-                    return Ok(false);
-                }
-                tokio::time::sleep(Duration::from_millis(350)).await;
-                let Some(current) = self.session.locate(entry_query).await? else {
+                sleep(
+                    Duration::from_millis(350).min(end.saturating_duration_since(Instant::now())),
+                    stop,
+                )
+                .await;
+                let Some(current) = self
+                    .await_condition_until(end, resolved_query, stop, |_| true)
+                    .await?
+                else {
                     return Ok(false);
                 };
+                anyhow::ensure!(
+                    self.session.gui_session_epoch() == epoch,
+                    "gallery session changed before navigation"
+                );
                 if current.x == stable.x
                     && current.y == stable.y
                     && current.width == stable.width
                     && current.height == stable.height
                 {
-                    self.session.activate_element(entry_query).await?;
+                    // Use the just-proved target. activate_element hides a new
+                    // unbounded read before dispatch and can race Stop there.
+                    if stop.load(Ordering::Relaxed) || Instant::now() >= end {
+                        return Ok(false);
+                    }
+                    self.tap_inside(&current).await?;
                     break;
-                }
-                if Instant::now() >= end {
-                    return Ok(false);
                 }
                 stable = current;
             }
             return Ok(true);
+        }
+        anyhow::ensure!(
+            self.session.gui_session_epoch() == epoch,
+            "gallery session changed before navigation"
+        );
+        if stop.load(Ordering::Relaxed) || Instant::now() >= deadline {
+            return Ok(false);
         }
         let Some(entry) = GalleryEntry::beside_shutter(screen, &shutter) else {
             return Ok(false);
@@ -1141,8 +1217,17 @@ impl<'a, P: TapPlanner> Composer<'a, P> {
         album: &str,
         stop: &AtomicBool,
     ) -> anyhow::Result<AlbumChoice> {
+        use crate::driver::{classify_read_failure, ReadFailureKind};
+        use crate::ui_automation::runtime::{read_before_deadline, ReadWaitResult};
+        let total_deadline = crate::tiktok_sound::phase_deadline(PICKER_WINDOW * 3);
+        let epoch = self.session.gui_session_epoch();
         let Some(menu) = self
-            .await_condition(PICKER_WINDOW, self.plan.album_menu, stop, |_| true)
+            .await_condition_until(
+                total_deadline.min(Instant::now() + PICKER_WINDOW),
+                self.plan.album_menu,
+                stop,
+                |_| true,
+            )
             .await?
         else {
             anyhow::bail!("album_menu_missing: chưa thấy nút chọn album của picker");
@@ -1151,7 +1236,7 @@ impl<'a, P: TapPlanner> Composer<'a, P> {
         // Galaxy S8+ fleet 08/09/2026: album rows arrive after the menu animation.
         // A single immediate read reported AlbumNotFound although import was verified.
         // Wait for one exact row with stable geometry; never choose an ambiguous album.
-        let deadline = Instant::now() + PICKER_WINDOW;
+        let deadline = total_deadline.min(Instant::now() + PICKER_WINDOW);
         let mut previous: Option<ElementBox> = None;
         let mut scrolls = 0;
         let mut empty_reads = 0;
@@ -1159,13 +1244,43 @@ impl<'a, P: TapPlanner> Composer<'a, P> {
             if stop.load(Ordering::Relaxed) {
                 return Ok(AlbumChoice::NotFound);
             }
-            let rows = self
-                .session
-                .locate_all_described(ElementQuery::Text {
+            let rows = match read_before_deadline(
+                self.session.locate_all_described(ElementQuery::Text {
                     value: album,
                     exact: true,
-                })
-                .await?;
+                }),
+                deadline,
+                stop,
+            )
+            .await
+            {
+                Ok(ReadWaitResult::Ready(rows)) => rows,
+                Ok(ReadWaitResult::Cancelled) => return Ok(AlbumChoice::NotFound),
+                Ok(ReadWaitResult::DeadlineExceeded) => anyhow::bail!(
+                    "album_not_visible: hết thời gian đọc album {album}; chưa chọn album"
+                ),
+                Err(error) if classify_read_failure(&error) == ReadFailureKind::Transient => {
+                    anyhow::ensure!(
+                        self.session.gui_session_epoch() == epoch,
+                        "album session changed before read retry"
+                    );
+                    // A failed read cannot count as an empty album list or
+                    // authorize a scroll. Retain the same search deadline.
+                    previous = None;
+                    tracing::debug!(%error, "album read retry within current deadline");
+                    sleep(
+                        POLL.min(deadline.saturating_duration_since(Instant::now())),
+                        stop,
+                    )
+                    .await;
+                    continue;
+                }
+                Err(error) => return Err(error),
+            };
+            anyhow::ensure!(
+                self.session.gui_session_epoch() == epoch,
+                "album session changed before navigation"
+            );
             match rows.as_slice() {
                 [row]
                     if previous.as_ref().is_some_and(|old| {
@@ -1183,9 +1298,27 @@ impl<'a, P: TapPlanner> Composer<'a, P> {
                     empty_reads += 1;
                     if empty_reads >= 2 && scrolls < 4 {
                         if let Some(query) = self.plan.album_scroll {
-                            let lists = self.session.locate_all(query).await?;
+                            let lists = match read_before_deadline(
+                                self.session.locate_all(query),
+                                deadline,
+                                stop,
+                            )
+                            .await?
+                            {
+                                ReadWaitResult::Ready(lists) => lists,
+                                ReadWaitResult::Cancelled | ReadWaitResult::DeadlineExceeded => {
+                                    return Ok(AlbumChoice::NotFound)
+                                }
+                            };
                             if let [list] = lists.as_slice() {
                                 if list.width > 0.0 && list.height > 0.0 {
+                                    anyhow::ensure!(
+                                        self.session.gui_session_epoch() == epoch,
+                                        "album session changed before scrolling"
+                                    );
+                                    if stop.load(Ordering::Relaxed) || Instant::now() >= deadline {
+                                        return Ok(AlbumChoice::NotFound);
+                                    }
                                     let x = list.x + list.width / 2.0;
                                     self.session
                                         .swipe(crate::SwipeGesture {
@@ -1212,14 +1345,34 @@ impl<'a, P: TapPlanner> Composer<'a, P> {
             if Instant::now() >= deadline {
                 anyhow::bail!("album_not_visible: chưa thấy album {album} sau {scrolls} lần cuộn; {empty_reads} lần đọc trống");
             }
-            sleep(POLL, stop).await;
+            sleep(
+                POLL.min(deadline.saturating_duration_since(Instant::now())),
+                stop,
+            )
+            .await;
         };
+        if stop.load(Ordering::Relaxed) || Instant::now() >= deadline {
+            return Ok(AlbumChoice::NotFound);
+        }
         self.tap_inside(&row).await?;
-        Ok(if self.pill_reads(album, stop).await? {
-            AlbumChoice::Confirmed
-        } else {
-            AlbumChoice::NotConfirmed
-        })
+        // This bool predicate owns an ordinary "not confirmed" outcome. A
+        // sound stage scope would turn that outcome into a sound timeout when
+        // the pill finishes at its deadline. Bound the read only and preserve
+        // the album contract instead.
+        Ok(
+            match read_before_deadline(
+                self.pill_reads(album, stop),
+                total_deadline.min(Instant::now() + PICKER_WINDOW),
+                stop,
+            )
+            .await?
+            {
+                ReadWaitResult::Ready(true) => AlbumChoice::Confirmed,
+                ReadWaitResult::Ready(false)
+                | ReadWaitResult::Cancelled
+                | ReadWaitResult::DeadlineExceeded => AlbumChoice::NotConfirmed,
+            },
+        )
     }
 
     /// Whether the album pill now names `album`.
@@ -1237,27 +1390,61 @@ impl<'a, P: TapPlanner> Composer<'a, P> {
     /// [`UiSession::locate_all_described`] is the one that reads `text`, which is why the
     /// readback goes through it and the tap above does not.
     async fn pill_reads(&self, album: &str, stop: &AtomicBool) -> anyhow::Result<bool> {
-        let deadline = Instant::now() + PICKER_WINDOW;
+        use crate::driver::{classify_read_failure, ReadFailureKind};
+        use crate::ui_automation::runtime::{read_before_deadline, ReadWaitResult};
+        let deadline = crate::tiktok_sound::phase_deadline(PICKER_WINDOW);
+        let epoch = self.session.gui_session_epoch();
         loop {
             if stop.load(Ordering::Relaxed) {
                 return Ok(false);
             }
-            let pills = self
-                .session
-                .locate_all_described(self.plan.album_menu)
-                .await
-                .unwrap_or_default();
-            if pills.iter().any(|pill| {
-                pill.description
-                    .as_deref()
-                    .is_some_and(|text| text.trim() == album)
-            }) {
+            let pills = match read_before_deadline(
+                self.session.locate_all_described(self.plan.album_menu),
+                deadline,
+                stop,
+            )
+            .await
+            {
+                Ok(ReadWaitResult::Ready(pills)) => pills,
+                Ok(ReadWaitResult::Cancelled | ReadWaitResult::DeadlineExceeded) => {
+                    return Ok(false)
+                }
+                Err(error) if classify_read_failure(&error) == ReadFailureKind::Transient => {
+                    anyhow::ensure!(
+                        self.session.gui_session_epoch() == epoch,
+                        "album pill session changed before read retry"
+                    );
+                    tracing::debug!(%error, "album pill read retry within current deadline");
+                    sleep(
+                        POLL.min(deadline.saturating_duration_since(Instant::now())),
+                        stop,
+                    )
+                    .await;
+                    continue;
+                }
+                Err(error) => return Err(error),
+            };
+            anyhow::ensure!(
+                self.session.gui_session_epoch() == epoch,
+                "album pill session changed"
+            );
+            anyhow::ensure!(
+                pills.len() <= 1,
+                "album_pill_ambiguous: nhiều nút album khớp"
+            );
+            if matches!(pills.as_slice(), [pill] if pill.description
+                .as_deref().is_some_and(|text| text.trim() == album))
+            {
                 return Ok(true);
             }
             if Instant::now() >= deadline {
                 return Ok(false);
             }
-            sleep(POLL, stop).await;
+            sleep(
+                POLL.min(deadline.saturating_duration_since(Instant::now())),
+                stop,
+            )
+            .await;
         }
     }
 
@@ -1444,21 +1631,103 @@ impl<'a, P: TapPlanner> Composer<'a, P> {
         }
         self.tap_inside(next).await?;
         if self.plan.wait_rendered_editor && self.session.gui_reasoner().is_some() {
-            return editor_recovery::wait_rendered(self.session, stop).await;
+            let deadline = crate::tiktok_sound::phase_deadline(Duration::from_secs(60));
+            let result = editor_recovery::wait_rendered(self.session, deadline, stop).await;
+            crate::publish_recovery::note_read(
+                "editor",
+                "measuredLocalOcr",
+                1,
+                if matches!(result, Ok(true)) {
+                    "ready"
+                } else {
+                    "unavailable"
+                },
+                result
+                    .as_ref()
+                    .err()
+                    .map(|error| error.to_string())
+                    .as_deref(),
+            );
+            return result;
         }
+        // The existing measured XML recovery window includes the first read,
+        // rather than starting another thirty seconds after that read fails.
+        let deadline = crate::tiktok_sound::phase_deadline(editor_recovery::RECOVERY_WINDOW);
+        let epoch = self.session.gui_session_epoch();
         match self.plan.edit_step_marker {
             Some(edit_next) => match self
-                .await_condition(COMPOSER_WINDOW, edit_next, stop, |_| true)
+                .await_condition_until(
+                    deadline.min(Instant::now() + COMPOSER_WINDOW),
+                    edit_next,
+                    stop,
+                    |_| true,
+                )
                 .await
             {
-                Ok(found) => Ok(!stop.load(Ordering::Relaxed) && found.is_some()),
+                Ok(Some(_)) => Ok(!stop.load(Ordering::Relaxed)),
+                Ok(None) if stop.load(Ordering::Relaxed) || Instant::now() >= deadline => Ok(false),
+                Ok(None) => {
+                    anyhow::ensure!(
+                        self.session.gui_session_epoch() == epoch,
+                        "editor session changed before deadline fallback"
+                    );
+                    let Some(controls) = self.plan.selection_controls else {
+                        return Ok(false);
+                    };
+                    let result = editor_recovery::observe(
+                        self.session,
+                        controls.package,
+                        edit_next,
+                        deadline,
+                        stop,
+                    )
+                    .await;
+                    crate::publish_recovery::note_read(
+                        "editor",
+                        "measuredXmlRecovery",
+                        1,
+                        if matches!(result, Ok(true)) {
+                            "ready"
+                        } else {
+                            "unavailable"
+                        },
+                        Some("initial editor observation window exhausted"),
+                    );
+                    result
+                }
                 Err(error) if editor_recovery::transient_read(&error) => {
+                    anyhow::ensure!(
+                        self.session.gui_session_epoch() == epoch,
+                        "editor session changed before fallback"
+                    );
                     let Some(controls) = self.plan.selection_controls else {
                         return Err(error);
                     };
-                    editor_recovery::observe(self.session, controls.package, edit_next, stop)
-                        .await
-                        .with_context(|| format!("editor arrival read failed: {error}"))
+                    let result = editor_recovery::observe(
+                        self.session,
+                        controls.package,
+                        edit_next,
+                        deadline,
+                        stop,
+                    )
+                    .await
+                    .with_context(|| format!("editor arrival read failed: {error}"));
+                    crate::publish_recovery::note_read(
+                        "editor",
+                        "measuredXmlRecovery",
+                        1,
+                        if matches!(result, Ok(true)) {
+                            "ready"
+                        } else {
+                            "unavailable"
+                        },
+                        result
+                            .as_ref()
+                            .err()
+                            .map(|error| error.to_string())
+                            .as_deref(),
+                    );
+                    result
                 }
                 Err(error) => Err(error),
             },
@@ -1653,27 +1922,34 @@ impl<'a, P: TapPlanner> Composer<'a, P> {
         if stop.load(Ordering::Relaxed) {
             return Ok(ComposerVerdict::Stopped);
         }
-        let deadline = Instant::now() + COMPOSER_WINDOW;
+        use crate::ui_automation::runtime::{read_before_deadline, ReadWaitResult};
+        let deadline = crate::tiktok_sound::phase_deadline(COMPOSER_WINDOW);
         let button = loop {
             if stop.load(Ordering::Relaxed) {
                 return Ok(ComposerVerdict::Stopped);
             }
-            if self.resolve_post_button(caption).await?.is_some() {
-                break true;
+            match read_before_deadline(self.resolve_post_button(caption), deadline, stop).await? {
+                ReadWaitResult::Ready(Some(_)) => break true,
+                ReadWaitResult::Ready(None) => {}
+                ReadWaitResult::Cancelled => return Ok(ComposerVerdict::Stopped),
+                ReadWaitResult::DeadlineExceeded => break false,
             }
-            if Instant::now() >= deadline {
-                break false;
-            }
-            sleep(POLL, stop).await;
+            sleep(
+                POLL.min(deadline.saturating_duration_since(Instant::now())),
+                stop,
+            )
+            .await;
         };
         if !button {
             #[cfg(debug_assertions)]
-            self.trace_missing_post_button("before-sound-reproof", caption)
+            self.trace_missing_post_button("before-sound-reproof", caption, stop)
                 .await;
             return Ok(ComposerVerdict::NoPostButton);
         };
         let prepared_epoch = self.session.gui_session_epoch();
-        if let Some((sound_plan, expected_title)) = self.pending_sound_proof.clone()
+        if let Some((sound_plan, expected_title)) = self
+            .pending_sound_proof
+            .clone()
             .filter(|(plan, _)| plan.post_back_query().is_some())
         {
             // Normalize IME and reach a positively observed editor in bounded preparation.
@@ -1683,16 +1959,22 @@ impl<'a, P: TapPlanner> Composer<'a, P> {
                 return Ok(ComposerVerdict::Stopped);
             }
             prepared?;
-            anyhow::ensure!(self.session.gui_session_epoch() == prepared_epoch,
-                "caption preparation session changed");
-            let prepared = self.prepare_sound_editor(sound_plan, &expected_title, caption, stop).await;
+            anyhow::ensure!(
+                self.session.gui_session_epoch() == prepared_epoch,
+                "caption preparation session changed"
+            );
+            let prepared = self
+                .prepare_sound_editor(sound_plan, &expected_title, caption, stop)
+                .await;
             if stop.load(Ordering::Relaxed) {
                 return Ok(ComposerVerdict::Stopped);
             }
             prepared?;
         }
-        anyhow::ensure!(self.session.gui_session_epoch() == prepared_epoch,
-            "caption preparation session changed");
+        anyhow::ensure!(
+            self.session.gui_session_epoch() == prepared_epoch,
+            "caption preparation session changed"
+        );
         let reproof_deadline = self
             .pending_sound_proof
             .as_ref()
@@ -1723,10 +2005,13 @@ impl<'a, P: TapPlanner> Composer<'a, P> {
                             "sound reproof: caption page did not return"
                         );
                         mark("restoreCaptionIfCleared");
-                        let caption_proof = self.restore_caption_cleared_by_editor(caption, stop)
+                        let caption_proof = self
+                            .restore_caption_cleared_by_editor(caption, stop)
                             .await?;
-                        anyhow::ensure!(caption_proof == CaptionOutcome::Typed,
-                            "sound reproof: caption readback was not confirmed");
+                        anyhow::ensure!(
+                            caption_proof == CaptionOutcome::Typed,
+                            "sound reproof: caption readback was not confirmed"
+                        );
                         mark("captionAfterReturn");
                     }
                     mark("finalBudgetCheck");
@@ -1769,8 +2054,11 @@ impl<'a, P: TapPlanner> Composer<'a, P> {
             Box::pin(self.await_final_post_button(caption, stop)).await?
         };
         let Some(button) = button else {
+            if stop.load(Ordering::Relaxed) {
+                return Ok(ComposerVerdict::Stopped);
+            }
             #[cfg(debug_assertions)]
-            self.trace_missing_post_button("after-sound-reproof", caption)
+            self.trace_missing_post_button("after-sound-reproof", caption, stop)
                 .await;
             return Ok(ComposerVerdict::NoPostButton);
         };
@@ -1778,6 +2066,10 @@ impl<'a, P: TapPlanner> Composer<'a, P> {
         if stop.load(Ordering::Relaxed) {
             return Ok(ComposerVerdict::Stopped);
         }
+        anyhow::ensure!(
+            self.session.gui_session_epoch() == reproof_epoch,
+            "Post target session changed before effect intent"
+        );
         if let Some(deadline) = reproof_deadline {
             observation::check(deadline, Some(stop))?;
             anyhow::ensure!(
@@ -1787,6 +2079,11 @@ impl<'a, P: TapPlanner> Composer<'a, P> {
         }
         before_post()?;
         (self.progress)(PublishProgress::SubmittingPost);
+        if stop.load(Ordering::Relaxed) {
+            // The durable intent already exists. Stop prevents this dispatch,
+            // but cannot turn that intent into permission to replay Post.
+            return Ok(ComposerVerdict::PostNotConfirmed);
+        }
         if self.tap_inside(&button).await.is_err() {
             // The tap may have reached the phone before the transport died.
             return Ok(ComposerVerdict::PostNotConfirmed);
@@ -1843,32 +2140,62 @@ impl<'a, P: TapPlanner> Composer<'a, P> {
         caption: &str,
         stop: &AtomicBool,
     ) -> anyhow::Result<Option<ElementBox>> {
+        use crate::ui_automation::runtime::{read_before_deadline, ReadWaitResult};
         let deadline = crate::tiktok_sound::phase_deadline(COMPOSER_WINDOW);
+        let epoch = self.session.gui_session_epoch();
         let mut waited = false;
         loop {
             if stop.load(Ordering::Relaxed) || Instant::now() >= deadline {
                 return Ok(None);
             }
-            if let Some(button) = self.resolve_post_button(caption).await? {
+            let button =
+                match read_before_deadline(self.resolve_post_button(caption), deadline, stop)
+                    .await?
+                {
+                    ReadWaitResult::Ready(button) => button,
+                    ReadWaitResult::Cancelled | ReadWaitResult::DeadlineExceeded => {
+                        return Ok(None)
+                    }
+                };
+            if let Some(button) = button {
+                anyhow::ensure!(
+                    self.session.gui_session_epoch() == epoch,
+                    "Post target session changed during read"
+                );
                 // Phone8,15/09: keyboard toolbar mr6 disappeared during sound
                 // reproof; normal bottom mr_ was visible in the later trace.
                 // After any wait, reprove caption and resolve once more so
                 // neither text nor geometry comes from before that transition.
                 let button = if waited {
                     Box::pin(self.require_caption_unchanged(caption, stop)).await?;
-                    self.resolve_post_button(caption).await?
+                    match read_before_deadline(self.resolve_post_button(caption), deadline, stop)
+                        .await?
+                    {
+                        ReadWaitResult::Ready(button) => button,
+                        ReadWaitResult::Cancelled | ReadWaitResult::DeadlineExceeded => {
+                            return Ok(None)
+                        }
+                    }
                 } else {
                     Some(button)
                 };
                 if stop.load(Ordering::Relaxed) || Instant::now() >= deadline {
                     return Ok(None);
                 }
+                anyhow::ensure!(
+                    self.session.gui_session_epoch() == epoch,
+                    "Post target session changed during reproof"
+                );
                 if button.is_some() {
                     return Ok(button);
                 }
             }
             waited = true;
-            sleep(POLL, stop).await;
+            sleep(
+                POLL.min(deadline.saturating_duration_since(Instant::now())),
+                stop,
+            )
+            .await;
         }
     }
 
@@ -1882,48 +2209,79 @@ impl<'a, P: TapPlanner> Composer<'a, P> {
         let epoch = self.session.gui_session_epoch();
         let started = Instant::now();
         let mut phase = "captionBeforeBack";
-        let result = crate::tiktok_sound::with_observation_budget(stop, Duration::from_secs(8), async {
-            let back_query = sound_plan.post_back_query().context("sound preparation back query missing")?;
-            Box::pin(self.require_caption_unchanged(caption, stop)).await?;
-            phase = "locateCaptionBack";
-            let back = crate::tiktok_sound::read_sound(self.session.locate_all(back_query)).await?;
-            let [back] = back.as_slice() else {
-                anyhow::bail!("sound preparation: caption back control missing or ambiguous");
-            };
-            phase = "tapCaptionBack";
-            self.tap_inside(back).await?;
-            phase = "inspectEditor";
-            use crate::tiktok_sound::observation::{inspect, EditorState};
-            match inspect(self.session, sound_plan, expected_title, false).await? {
-                EditorState::Confirmed => {}
-                EditorState::Loading => {
-                    phase = "editorLoading";
-                    // Positive loading authorizes reads only, not a second Back.
-                    Box::pin(confirm_sound(self.session, sound_plan, expected_title)).await?;
-                }
-                EditorState::Unknown => {
-                    phase = "captionRetryProof";
-                    // Retain the measured conditional retry: unknown alone never authorizes Back.
-                    if Box::pin(self.require_caption_unchanged(caption, stop)).await.is_ok() {
-                        phase = "locateCaptionBackRetry";
-                        let fresh_back = crate::tiktok_sound::read_sound(self.session.locate_all(back_query)).await?;
-                        let [fresh_back] = fresh_back.as_slice() else {
-                            anyhow::bail!("sound preparation: caption Back retry ambiguous");
-                        };
-                        phase = "tapCaptionBackRetry";
-                        self.tap_inside(fresh_back).await?;
+        let result =
+            crate::tiktok_sound::with_observation_budget(stop, Duration::from_secs(8), async {
+                let back_query = sound_plan
+                    .post_back_query()
+                    .context("sound preparation back query missing")?;
+                Box::pin(self.require_caption_unchanged(caption, stop)).await?;
+                phase = "locateCaptionBack";
+                let back =
+                    crate::tiktok_sound::read_sound(self.session.locate_all(back_query)).await?;
+                let [back] = back.as_slice() else {
+                    anyhow::bail!("sound preparation: caption back control missing or ambiguous");
+                };
+                phase = "tapCaptionBack";
+                self.tap_inside(back).await?;
+                phase = "inspectEditor";
+                use crate::tiktok_sound::observation::{inspect_editor_and_caption, EditorState};
+                let caption_query = self.plan.publish.context("caption plan missing")?.caption;
+                let (editor, caption_unchanged) = inspect_editor_and_caption(
+                    self.session,
+                    sound_plan,
+                    expected_title,
+                    caption_query,
+                    caption,
+                )
+                .await?;
+                match editor {
+                    EditorState::Confirmed => {}
+                    EditorState::Loading => {
+                        phase = "editorLoading";
+                        // Positive loading authorizes reads only, not a second Back.
+                        Box::pin(confirm_sound(self.session, sound_plan, expected_title)).await?;
                     }
-                    phase = "confirmEditorTransition";
-                    crate::tiktok_sound::confirm_sound_after_transition(
-                        self.session, sound_plan, expected_title, stop,
-                    ).await.context("sound editor navigation preparation")?;
+                    EditorState::Unknown => {
+                        phase = "captionRetryProof";
+                        // Retain the measured conditional retry: unknown alone never authorizes Back.
+                        let still_caption = match caption_unchanged {
+                            Some(proved) => proved,
+                            None => Box::pin(self.require_caption_unchanged(caption, stop))
+                                .await
+                                .is_ok(),
+                        };
+                        if still_caption {
+                            phase = "locateCaptionBackRetry";
+                            let fresh_back = crate::tiktok_sound::read_sound(
+                                self.session.locate_all(back_query),
+                            )
+                            .await?;
+                            let [fresh_back] = fresh_back.as_slice() else {
+                                anyhow::bail!("sound preparation: caption Back retry ambiguous");
+                            };
+                            phase = "tapCaptionBackRetry";
+                            self.tap_inside(fresh_back).await?;
+                        }
+                        phase = "confirmEditorTransition";
+                        crate::tiktok_sound::confirm_sound_after_transition(
+                            self.session,
+                            sound_plan,
+                            expected_title,
+                            stop,
+                        )
+                        .await
+                        .context("sound editor navigation preparation")?;
+                    }
                 }
-            }
-            crate::tiktok_sound::check_wait()?;
-            anyhow::ensure!(self.session.gui_session_epoch() == epoch, "sound preparation session changed");
-            phase = "editorConfirmed";
-            Ok(())
-        }).await;
+                crate::tiktok_sound::check_wait()?;
+                anyhow::ensure!(
+                    self.session.gui_session_epoch() == epoch,
+                    "sound preparation session changed"
+                );
+                phase = "editorConfirmed";
+                Ok(())
+            })
+            .await;
         tracing::info!(session = %epoch, package = self.plan.package, phase,
             elapsed_ms = started.elapsed().as_millis() as u64,
             error = ?result.as_ref().err().map(|error| format!("{error:#}")),
@@ -1931,22 +2289,35 @@ impl<'a, P: TapPlanner> Composer<'a, P> {
         result
     }
 
-    async fn prepare_caption_keyboard(&self, caption: &str, stop: &AtomicBool) -> anyhow::Result<()> {
+    async fn prepare_caption_keyboard(
+        &self,
+        caption: &str,
+        stop: &AtomicBool,
+    ) -> anyhow::Result<()> {
         crate::tiktok_sound::with_observation_budget(stop, Duration::from_secs(8), async {
             let epoch = self.session.gui_session_epoch();
             let started = Instant::now();
             let shown = match crate::tiktok_sound::read_sound(self.session.keyboard_shown()).await {
                 Ok(shown) => shown,
-                Err(error) if error.downcast_ref::<crate::driver::UnsupportedCapability>()
-                    .is_some_and(|unsupported| unsupported.capability == "keyboardShown") => return Ok(()),
+                Err(error)
+                    if error
+                        .downcast_ref::<crate::driver::UnsupportedCapability>()
+                        .is_some_and(|unsupported| unsupported.capability == "keyboardShown") =>
+                {
+                    return Ok(())
+                }
                 Err(error) => return Err(error),
             };
             if shown {
                 Box::pin(self.require_caption_unchanged(caption, stop)).await?;
                 // Re-read the positive predicate immediately before the one allowed Back.
-                let still_shown = crate::tiktok_sound::read_sound(self.session.keyboard_shown()).await?;
+                let still_shown =
+                    crate::tiktok_sound::read_sound(self.session.keyboard_shown()).await?;
                 observation::check_session(self.session)?;
-                anyhow::ensure!(self.session.gui_session_epoch() == epoch, "keyboard preparation session changed");
+                anyhow::ensure!(
+                    self.session.gui_session_epoch() == epoch,
+                    "keyboard preparation session changed"
+                );
                 crate::tiktok_sound::check_wait()?;
                 if still_shown {
                     self.session.back().await?; // never cancel an in-flight gesture
@@ -1957,12 +2328,16 @@ impl<'a, P: TapPlanner> Composer<'a, P> {
                 }
                 Box::pin(self.require_caption_unchanged(caption, stop)).await?;
             }
-            anyhow::ensure!(self.session.gui_session_epoch() == epoch, "keyboard preparation session changed");
+            anyhow::ensure!(
+                self.session.gui_session_epoch() == epoch,
+                "keyboard preparation session changed"
+            );
             tracing::info!(session = %epoch, was_shown = shown,
                 elapsed_ms = started.elapsed().as_millis() as u64,
                 "caption keyboard preparation before fresh sound proof");
             Ok(())
-        }).await
+        })
+        .await
     }
 
     async fn restore_caption_cleared_by_editor(
@@ -1972,7 +2347,10 @@ impl<'a, P: TapPlanner> Composer<'a, P> {
     ) -> anyhow::Result<CaptionOutcome> {
         // Both successful branches already perform an exact readback. Return that proof
         // explicitly instead of spending the final sound budget reading it a second time.
-        if Box::pin(self.require_caption_unchanged(caption, stop)).await.is_ok() {
+        if Box::pin(self.require_caption_unchanged(caption, stop))
+            .await
+            .is_ok()
+        {
             return Ok(CaptionOutcome::Typed);
         }
         anyhow::ensure!(
@@ -2053,48 +2431,71 @@ impl<'a, P: TapPlanner> Composer<'a, P> {
     ///
     /// **What this cannot cover:** dropping the future mid-`drive` — an aborted task — skips
     /// it entirely, because there is no async destructor to hang it on. A caller that aborts
-    /// publish work has to reconcile the phone itself.
+    /// publish work has to reconcile the phone itself. Production Stop skips this
+    /// navigation and leaves process teardown to the existing controller owner.
     pub async fn leave(&self) -> bool {
+        self.leave_with_stop(&AtomicBool::new(false)).await
+    }
+
+    async fn leave_with_stop(&self, stop: &AtomicBool) -> bool {
+        use crate::ui_automation::runtime::{read_before_deadline, ReadWaitResult};
+        let deadline = Instant::now() + COMPOSER_WINDOW;
+        let epoch = self.session.gui_session_epoch();
         for _ in 0..8 {
-            if self
-                .session
-                .locate(self.plan.open)
-                .await
-                .ok()
-                .flatten()
-                .is_some()
-            {
-                return true;
+            if stop.load(Ordering::Relaxed) || Instant::now() >= deadline {
+                return false;
             }
-            // **The exit sheet, on the build whose Back raises one.** Measured 31/08 on
-            // `musically` 46.2.1: Back on the edit step opens Discard / Save draft / Send
-            // to friends instead of leaving, so eight Backs bounced off the sheet and every
-            // walk on that build ended stranded inside it. When the plan carries the
-            // measured Discard row and it is on screen, tapping it IS this round's step
-            // back — it abandons a never-posted draft, nothing else. Centre-tapped, not
-            // planner-tapped: the walk-back is recovery, and jitter belongs to the walk.
+            let opener =
+                read_before_deadline(self.session.locate(self.plan.open), deadline, stop).await;
+            if self.session.gui_session_epoch() != epoch {
+                return false;
+            }
+            match opener {
+                Ok(ReadWaitResult::Ready(Some(_))) => return true,
+                Ok(ReadWaitResult::Cancelled | ReadWaitResult::DeadlineExceeded) => return false,
+                Ok(ReadWaitResult::Ready(None)) | Err(_) => {}
+            }
+            // Only this measured Discard row can replace one cleanup Back.
+            // A missing or failed read alone never authorizes a Discard tap.
             if let Some(discard) = self.plan.discard {
-                if let Ok(Some(row)) = self.session.locate(discard).await {
-                    let _ = self.session.tap(row.centre()).await;
-                    tokio::time::sleep(POLL).await;
-                    continue;
+                let row = read_before_deadline(self.session.locate(discard), deadline, stop).await;
+                if self.session.gui_session_epoch() != epoch {
+                    return false;
+                }
+                match row {
+                    Ok(ReadWaitResult::Ready(Some(row))) => {
+                        if stop.load(Ordering::Relaxed) || Instant::now() >= deadline {
+                            return false;
+                        }
+                        let _ = self.session.tap(row.centre()).await;
+                        sleep(
+                            POLL.min(deadline.saturating_duration_since(Instant::now())),
+                            stop,
+                        )
+                        .await;
+                        continue;
+                    }
+                    Ok(ReadWaitResult::Cancelled | ReadWaitResult::DeadlineExceeded) => {
+                        return false
+                    }
+                    Ok(ReadWaitResult::Ready(None)) | Err(_) => {}
                 }
             }
-            // A failed Back costs an attempt, not the attempt: one dropped request used to
-            // end this loop and leave the composer open.
+            if stop.load(Ordering::Relaxed) || Instant::now() >= deadline {
+                return false;
+            }
+            // Once Back is dispatched it drains; Stop only prevents later gestures.
             let _ = self.session.back().await;
-            // A real sleep, deliberately not the stop-aware one: this is the pause that lets
-            // the screen change between presses, and skipping it turns eight Backs into one
-            // burst the app coalesces — so a cancelled run would be the one left inside the
-            // composer.
-            tokio::time::sleep(POLL).await;
+            sleep(
+                POLL.min(deadline.saturating_duration_since(Instant::now())),
+                stop,
+            )
+            .await;
         }
-        self.session
-            .locate(self.plan.open)
-            .await
-            .ok()
-            .flatten()
-            .is_some()
+        matches!(
+            read_before_deadline(self.session.locate(self.plan.open), deadline, stop).await,
+            Ok(ReadWaitResult::Ready(Some(_)))
+        ) && self.session.gui_session_epoch() == epoch
     }
 
     /// Wait for the bottom tab bar to come back, ignoring reads that fail on the way.
@@ -2103,22 +2504,34 @@ impl<'a, P: TapPlanner> Composer<'a, P> {
     /// the Post tap, where "I could not read the screen" and "the post did not go" are
     /// different facts and only the second is worth reporting.
     async fn await_feed(&self, window: Duration) -> bool {
+        use crate::ui_automation::runtime::{read_before_deadline, ReadWaitResult};
         let deadline = Instant::now() + window;
+        let reconcile_stop = AtomicBool::new(false);
+        let epoch = self.session.gui_session_epoch();
         loop {
-            if matches!(self.session.locate(self.plan.open).await, Ok(Some(_))) {
-                return true;
+            // A submitted Post cannot be undone by Stop. Only reconciliation
+            // reads are bounded here, and a late feed never proves submission.
+            match read_before_deadline(
+                self.session.locate(self.plan.open),
+                deadline,
+                &reconcile_stop,
+            )
+            .await
+            {
+                Ok(ReadWaitResult::Ready(Some(_))) => {
+                    return self.session.gui_session_epoch() == epoch;
+                }
+                Ok(ReadWaitResult::DeadlineExceeded | ReadWaitResult::Cancelled) => return false,
+                Ok(ReadWaitResult::Ready(None)) | Err(_) => {}
             }
-            if Instant::now() >= deadline {
-                return false;
-            }
-            tokio::time::sleep(POLL).await;
+            tokio::time::sleep(POLL.min(deadline.saturating_duration_since(Instant::now()))).await;
         }
     }
 
     /// One latest XML per device and refusal branch, captured before leave()
     /// changes the failed screen. Diagnostics never replace the primary verdict.
     #[cfg(debug_assertions)]
-    async fn trace_missing_post_button(&self, stage: &str, caption: &str) {
+    async fn trace_missing_post_button(&self, stage: &str, caption: &str, stop: &AtomicBool) {
         let Some(folder) = std::env::var_os("RIVIU_PUBLISH_PICKER_TRACE") else {
             return;
         };
@@ -2128,7 +2541,17 @@ impl<'a, P: TapPlanner> Composer<'a, P> {
             anyhow::ensure!(folder.is_absolute(), "Post trace directory must be absolute");
             let scope = self.session.gui_scope();
             let device = scope.as_ref().map(|scope| scope.device_id.as_str()).unwrap_or("unscoped");
-            let snapshot = self.session.hierarchy_source_snapshot().await?;
+            let snapshot = match crate::ui_automation::runtime::read_before_deadline(
+                self.session.hierarchy_source_snapshot(),
+                Instant::now() + COMPOSER_WINDOW,
+                stop,
+            ).await? {
+                crate::ui_automation::runtime::ReadWaitResult::Ready(snapshot) => snapshot,
+                crate::ui_automation::runtime::ReadWaitResult::Cancelled
+                | crate::ui_automation::runtime::ReadWaitResult::DeadlineExceeded => {
+                    anyhow::bail!("diagnostic hierarchy read exhausted composer window")
+                }
+            };
             let xml_hash = format!("{:x}", Sha256::digest(snapshot.xml.as_bytes()));
             let metadata = serde_json::json!({
                 "stage":stage,
@@ -2162,18 +2585,29 @@ impl<'a, P: TapPlanner> Composer<'a, P> {
         query: ElementQuery<'_>,
         stop: &AtomicBool,
     ) -> anyhow::Result<bool> {
-        let deadline = Instant::now() + window;
+        use crate::ui_automation::runtime::{read_before_deadline, ReadWaitResult};
+        let deadline = crate::tiktok_sound::phase_deadline(window);
         loop {
-            if stop.load(Ordering::Relaxed) {
-                return Ok(false);
-            }
-            if self.session.locate(query).await?.is_none() {
+            // locate(None) can mean ambiguity for a semantic role; ask for all
+            // matches instead. Read errors/timeouts are never absence proof.
+            let rows = match read_before_deadline(
+                crate::tiktok_sound::read_sound(self.session.locate_all(query)),
+                deadline,
+                stop,
+            )
+            .await?
+            {
+                ReadWaitResult::Ready(rows) => rows,
+                ReadWaitResult::Cancelled | ReadWaitResult::DeadlineExceeded => return Ok(false),
+            };
+            if rows.is_empty() {
                 return Ok(true);
             }
-            if Instant::now() >= deadline {
-                return Ok(false);
-            }
-            sleep(POLL, stop).await;
+            sleep(
+                POLL.min(deadline.saturating_duration_since(Instant::now())),
+                stop,
+            )
+            .await;
         }
     }
 
@@ -2184,54 +2618,92 @@ impl<'a, P: TapPlanner> Composer<'a, P> {
         stop: &AtomicBool,
         ready: impl Fn(&ElementBox) -> bool,
     ) -> anyhow::Result<Option<ElementBox>> {
-        // ZERO is the existing one-shot probe contract, not an already-expired poll.
-        if window.is_zero() {
-            if stop.load(Ordering::Relaxed) {
-                return Ok(None);
-            }
-            let element = crate::tiktok_sound::read_sound(self.session.locate(query)).await?;
-            if stop.load(Ordering::Relaxed) {
-                return Ok(None);
-            }
-            return Ok(element.filter(|element| ready(element)));
-        }
-        let deadline = crate::tiktok_sound::phase_deadline(window);
+        // ZERO remains one read, not an already-expired poll. It still has a
+        // bounded observation and cannot accept a target after Stop.
+        let deadline = crate::tiktok_sound::phase_deadline(if window.is_zero() {
+            COMPOSER_WINDOW
+        } else {
+            window
+        });
+        self.await_condition_inner(deadline, query, stop, ready, window.is_zero())
+            .await
+    }
+
+    async fn await_condition_until(
+        &self,
+        deadline: Instant,
+        query: ElementQuery<'_>,
+        stop: &AtomicBool,
+        ready: impl Fn(&ElementBox) -> bool,
+    ) -> anyhow::Result<Option<ElementBox>> {
+        self.await_condition_inner(deadline, query, stop, ready, false)
+            .await
+    }
+
+    async fn await_condition_inner(
+        &self,
+        deadline: Instant,
+        query: ElementQuery<'_>,
+        stop: &AtomicBool,
+        ready: impl Fn(&ElementBox) -> bool,
+        once: bool,
+    ) -> anyhow::Result<Option<ElementBox>> {
+        use crate::driver::{classify_read_failure, ReadFailureKind};
+        use crate::ui_automation::runtime::{read_before_deadline, ReadWaitResult};
+        let epoch = self.session.gui_session_epoch();
+        let mut last_error = None;
         loop {
             // **Stop first.** With the order reversed a control that happened to be on screen
             // won over an already-set stop flag, so asking the run to stop while the Post
             // button was rendered handed that button straight back to the caller.
-            if stop.load(Ordering::Relaxed) || Instant::now() >= deadline {
+            if stop.load(Ordering::Relaxed) {
                 return Ok(None);
             }
-            // Bound only the observation, never a gesture. Outside a sound
-            // scope, read_sound alone has no deadline or stop flag to enforce.
-            let read = tokio::time::timeout_at(
-                deadline,
+            // Only the read is cancellable. Already-dispatched device gestures
+            // must drain and are never handed to this helper.
+            let observed = read_before_deadline(
                 crate::tiktok_sound::read_sound(self.session.locate(query)),
-            );
-            tokio::pin!(read);
-            let observed = loop {
-                tokio::select! {
-                    result = &mut read => break result,
-                    _ = tokio::time::sleep(POLL) => {
-                        if stop.load(Ordering::Relaxed) {
-                            return Ok(None);
-                        }
+                deadline,
+                stop,
+            )
+            .await;
+            if matches!(observed, Ok(ReadWaitResult::Ready(_)) | Err(_)) {
+                anyhow::ensure!(
+                    self.session.gui_session_epoch() == epoch,
+                    "composer read session changed before recovery"
+                );
+            }
+            let element = match observed {
+                Ok(ReadWaitResult::Ready(element)) => {
+                    anyhow::ensure!(
+                        self.session.gui_session_epoch() == epoch,
+                        "composer read session changed before navigation"
+                    );
+                    element
+                }
+                Ok(ReadWaitResult::Cancelled) => return Ok(None),
+                Ok(ReadWaitResult::DeadlineExceeded) => {
+                    return match last_error {
+                        Some(error) => Err(error),
+                        None => Ok(None),
                     }
                 }
+                Err(error)
+                    if !once && classify_read_failure(&error) == ReadFailureKind::Transient =>
+                {
+                    tracing::debug!(?query, %error, "composer read retry within current deadline");
+                    last_error = Some(error);
+                    None
+                }
+                Err(error) => return Err(error),
             };
-            // A completed read can race cancellation or the deadline. Neither
-            // a ready element nor a read error may authorize a later tap then.
-            if stop.load(Ordering::Relaxed) || Instant::now() >= deadline {
-                return Ok(None);
-            }
-            let Ok(observed) = observed else {
-                return Ok(None);
-            };
-            if let Some(element) = observed? {
+            if let Some(element) = element {
                 if ready(&element) {
                     return Ok(Some(element));
                 }
+            }
+            if once {
+                return Ok(None);
             }
             sleep(
                 POLL.min(deadline.saturating_duration_since(Instant::now())),
@@ -2397,7 +2869,7 @@ where
     // still marked permanently unclaimable, so the run sacrifices a post it could have had.
     // Leaving the phone as it is hands an operator a screen they can act on.
     if !matches!(outcome, Ok(ComposerVerdict::PostNotConfirmed)) {
-        composer.leave().await;
+        composer.leave_with_stop(stop).await;
     }
     outcome
 }
@@ -2628,7 +3100,16 @@ where
         .with_selection_diagnostics(diagnostics);
     let outcome = async {
         crate::publish_recovery::step("media", None)?;
-        match reach_selected_media_edit_step(&mut composer, requested_media, stop).await? {
+        // Keep the full media walk off the caller's async stack. This step now
+        // carries bounded primary/recovery reads for several screens; embedding
+        // all of that state in the sound journey exhausted Windows worker stacks.
+        match Box::pin(reach_selected_media_edit_step(
+            &mut composer,
+            requested_media,
+            stop,
+        ))
+        .await?
+        {
             ComposerVerdict::Stopped => {}
             refusal => return Ok((refusal, None)),
         }
@@ -2773,7 +3254,7 @@ where
     }
     .await;
     if !matches!(outcome, Ok((ComposerVerdict::PostNotConfirmed, _))) {
-        composer.leave().await;
+        composer.leave_with_stop(stop).await;
     }
     outcome
 }
@@ -2821,7 +3302,7 @@ pub async fn drive_to_edit_step(
 ) -> anyhow::Result<ComposerVerdict> {
     let mut composer = Composer::new(session, plan, plan_tap);
     let outcome = reach_edit_step(&mut composer, request, stop).await;
-    composer.leave().await;
+    composer.leave_with_stop(stop).await;
     outcome
 }
 
@@ -2879,6 +3360,7 @@ where
     P: TapPlanner,
     F: FnMut() -> anyhow::Result<()>,
 {
+    use crate::ui_automation::runtime::{read_before_deadline, ReadWaitResult};
     if !composer.plan.can_publish() {
         return Ok(ComposerVerdict::PostUnmeasured);
     }
@@ -2891,7 +3373,19 @@ where
             .publish
             .filter(|_| crate::publish_recovery::active())
         {
-            composer.session.locate_all(tail.post_button).await?.len() == 1
+            match read_before_deadline(
+                composer.session.locate_all(tail.post_button),
+                crate::tiktok_sound::phase_deadline(COMPOSER_WINDOW),
+                stop,
+            )
+            .await?
+            {
+                ReadWaitResult::Ready(found) => found.len() == 1,
+                ReadWaitResult::Cancelled => return Ok(ComposerVerdict::Stopped),
+                ReadWaitResult::DeadlineExceeded => {
+                    return Ok(ComposerVerdict::PostScreenDidNotOpen)
+                }
+            }
         } else {
             false
         };
@@ -3164,7 +3658,7 @@ async fn sleep(duration: Duration, stop: &AtomicBool) {
 // Global 46.2.1 video, 18/09: returning from the sound editor adds a space after
 // a hashtag immediately before a newline. Preserve every word, tag and line break;
 // only horizontal padding at the end of a line is insignificant.
-fn caption_readback_matches(observed: &str, expected: &str) -> bool {
+pub(crate) fn caption_readback_matches(observed: &str, expected: &str) -> bool {
     observed
         .trim()
         .lines()
@@ -3799,6 +4293,7 @@ mod tests {
         /// "I could not read the screen" and "the post did not go" are different facts.
         locate_fails_at: Option<usize>,
         locate_delay: Duration,
+        described_delay: Duration,
         fail_first_read_after_tap: bool,
         post_read_failed: Mutex<bool>,
         locates: Mutex<usize>,
@@ -4083,6 +4578,7 @@ mod tests {
             &self,
             query: ElementQuery<'_>,
         ) -> anyhow::Result<Vec<ElementBox>> {
+            tokio::time::sleep(self.described_delay).await;
             if query == ElementQuery::ResourceIdSuffix(":id/so9") {
                 let delay = self.sound_read_delays.lock().pop_front();
                 if let Some(delay) = delay {
@@ -5677,6 +6173,46 @@ mod tests {
     }
 
     #[tokio::test(start_paused = true)]
+    async fn stop_after_effect_intent_preserves_uncertainty_without_dispatching_post() {
+        for stop_in_callback in [false, true] {
+            let session = FakeSession::with(vec![post_screen(), feed()]);
+            let stop = AtomicBool::new(false);
+            let progress = |event: PublishProgress| {
+                if !stop_in_callback && event == PublishProgress::SubmittingPost {
+                    stop.store(true, Ordering::Relaxed);
+                }
+            };
+            let mut composer =
+                Composer::new(&session, plan(), |element: &ElementBox| element.centre())
+                    .with_progress(&progress);
+            let mut intents = 0;
+            let outcome = composer
+                .post_with_effect_intent("", &stop, &mut || {
+                    intents += 1;
+                    if stop_in_callback {
+                        stop.store(true, Ordering::Relaxed);
+                    }
+                    Ok(())
+                })
+                .await
+                .unwrap();
+            assert_eq!(
+                intents, 1,
+                "retain the single durable intent for reconciliation"
+            );
+            assert_eq!(outcome, ComposerVerdict::PostNotConfirmed);
+            assert!(
+                !outcome.may_retry(),
+                "a committed intent never becomes an automatic Post retry"
+            );
+            assert!(
+                session.taps.lock().is_empty(),
+                "Stop after the intent dispatched Post"
+            );
+        }
+    }
+
+    #[tokio::test(start_paused = true)]
     async fn effect_intent_failure_happens_before_post_and_keeps_the_attempt_retryable() {
         let session = FakeSession::full_walk("riviu-abc");
         let request = CarouselRequest {
@@ -5949,30 +6485,183 @@ mod tests {
 
     #[tokio::test(start_paused = true)]
     async fn a_condition_read_cannot_outlive_its_window() {
-        let session = FakeSession {
-            locate_delay: COMPOSER_WINDOW + Duration::from_secs(1),
-            ..FakeSession::with(vec![edit_step()])
-        };
-        let composer = Composer::new(&session, plan(), |element: &ElementBox| element.centre());
-        let stop = AtomicBool::new(false);
-        let start = Instant::now();
-        let ready = composer
-            .await_condition(
+        for sound_scope in [false, true] {
+            let session = FakeSession {
+                locate_delay: COMPOSER_WINDOW + Duration::from_secs(1),
+                ..FakeSession::with(vec![edit_step()])
+            };
+            let composer = Composer::new(&session, plan(), |element: &ElementBox| element.centre());
+            let stop = AtomicBool::new(false);
+            let start = Instant::now();
+            let work = composer.await_condition(
                 COMPOSER_WINDOW,
                 plan().publish.unwrap().edit_next,
                 &stop,
                 |_| true,
-            )
-            .await
+            );
+            let ready = if sound_scope {
+                crate::tiktok_sound::with_sound_budget(&stop, work).await
+            } else {
+                work.await
+            }
             .expect("an exhausted wait returns no target");
+            assert!(
+                start.elapsed() <= COMPOSER_WINDOW,
+                "read exceeded the total wait window; sound_scope={sound_scope}"
+            );
+            assert!(
+                ready.is_none(),
+                "a late element must not authorize navigation"
+            );
+        }
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn an_absence_read_cannot_authorize_navigation_after_stop_or_deadline() {
+        for stopped in [false, true] {
+            let session = FakeSession {
+                locate_delay: if stopped {
+                    Duration::from_secs(1)
+                } else {
+                    COMPOSER_WINDOW + Duration::from_secs(1)
+                },
+                ..FakeSession::with(vec![camera()])
+            };
+            let composer = Composer::new(&session, plan(), |element: &ElementBox| element.centre());
+            let stop = AtomicBool::new(false);
+            let started = Instant::now();
+            let (result, ()) = tokio::join!(
+                composer.await_absent(COMPOSER_WINDOW, plan().open, &stop),
+                async {
+                    if stopped {
+                        tokio::time::sleep(Duration::from_millis(100)).await;
+                        stop.store(true, Ordering::Relaxed);
+                    }
+                }
+            );
+            assert!(
+                !result.expect("an exhausted or stopped wait is not absence proof"),
+                "a late absent control authorized navigation; stopped={stopped}"
+            );
+            assert!(started.elapsed() <= COMPOSER_WINDOW);
+            if stopped {
+                assert!(started.elapsed() <= Duration::from_millis(200));
+            }
+            assert!(session.taps.lock().is_empty());
+        }
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn a_stop_during_gallery_geometry_read_cannot_activate_gallery() {
+        let plan = ComposerPlan::resolve(&every_publish_control_measured_with_gallery_id())
+            .expect("the fixture is complete");
+        let entry = labelled("", 0.0, 1891.0, 179.0, 179.0);
+        let session = FakeSession {
+            locate_delay: Duration::from_secs(1),
+            ..FakeSession::with(vec![
+                scene(
+                    vec![
+                        (
+                            "fixture-shutter",
+                            labelled("Record video", 375.0, 1545.0, 330.0, 330.0),
+                        ),
+                        ("fixture-gallery-entry", entry.clone()),
+                    ],
+                    None,
+                )
+                .leaving_by(entry),
+                picker("All", None),
+            ])
+        };
+        let mut composer = Composer::new(&session, plan, |element: &ElementBox| element.centre());
+        let stop = AtomicBool::new(false);
+        let (result, ()) = tokio::join!(composer.tap_gallery_entry(screen(), &stop), async {
+            tokio::time::sleep(Duration::from_millis(2400)).await;
+            stop.store(true, Ordering::Relaxed);
+        });
+        assert!(!result.expect("a stopped gallery read returns no navigation"));
         assert!(
-            start.elapsed() <= COMPOSER_WINDOW,
-            "read exceeded the total wait window"
+            session.taps.lock().is_empty(),
+            "gallery was opened after Stop"
         );
+        assert_eq!(session.on_screen(), 0);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn stopped_album_row_read_cannot_select_an_album() {
+        let session = FakeSession {
+            described_delay: Duration::from_secs(1),
+            ..FakeSession::with(vec![
+                picker("All", Some("fixture-album-menu")),
+                picker("All", None).leaving_by(box_at(0.0, 400.0)),
+                picker("riviu-abc", None),
+            ])
+            .rows("riviu-abc", vec![box_at(0.0, 400.0)])
+        };
+        let mut composer = Composer::new(&session, plan(), |element: &ElementBox| element.centre());
+        let stop = AtomicBool::new(false);
+        let (result, ()) = tokio::join!(composer.select_album("riviu-abc", &stop), async {
+            tokio::time::sleep(Duration::from_millis(1500)).await;
+            stop.store(true, Ordering::Relaxed);
+        });
+        assert!(!matches!(result, Ok(AlbumChoice::Confirmed)));
+        assert_eq!(
+            session.taps.lock().len(),
+            1,
+            "only opening the album menu, never selecting after Stop"
+        );
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn late_album_pill_read_does_not_prove_selection() {
+        let pill_session = FakeSession {
+            described_delay: PICKER_WINDOW + Duration::from_secs(1),
+            ..FakeSession::with(vec![picker("riviu-abc", None)])
+        };
+        let composer = Composer::new(&pill_session, plan(), |element: &ElementBox| {
+            element.centre()
+        });
+        let start = Instant::now();
+        assert!(!composer
+            .pill_reads("riviu-abc", &AtomicBool::new(false))
+            .await
+            .unwrap());
+        assert!(start.elapsed() <= PICKER_WINDOW);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn late_feed_read_does_not_prove_submission() {
+        let feed_session = FakeSession {
+            locate_delay: POST_CONFIRM_WINDOW + Duration::from_secs(1),
+            ..FakeSession::with(vec![feed()])
+        };
+        let composer = Composer::new(&feed_session, plan(), |element: &ElementBox| {
+            element.centre()
+        });
+        let start = Instant::now();
+        assert!(!composer.await_feed(POST_CONFIRM_WINDOW).await);
+        assert!(start.elapsed() <= POST_CONFIRM_WINDOW);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn stop_during_post_reproof_does_not_wait_for_a_target_or_publish() {
+        let session = FakeSession {
+            locate_delay: Duration::from_secs(1),
+            ..FakeSession::with(vec![post_screen()])
+        };
+        let mut composer = Composer::new(&session, plan(), |element: &ElementBox| element.centre());
+        let stop = AtomicBool::new(false);
+        let start = Instant::now();
+        let (result, ()) = tokio::join!(composer.post("", &stop), async {
+            tokio::time::sleep(Duration::from_millis(100)).await;
+            stop.store(true, Ordering::Relaxed);
+        });
+        assert_eq!(result.unwrap(), ComposerVerdict::Stopped);
         assert!(
-            ready.is_none(),
-            "a late element must not authorize navigation"
+            start.elapsed() <= Duration::from_millis(200),
+            "Stop waited for late Post evidence"
         );
+        assert!(session.taps.lock().is_empty());
     }
 
     // ------------------------------------------------------------------- post
@@ -6425,6 +7114,55 @@ mod tests {
             *session.backs.lock(),
             0,
             "Back was pressed on a screen that may be the one committing the post"
+        );
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn a_stopped_publish_does_not_query_or_back_out_during_cleanup() {
+        let session = FakeSession::with(vec![feed(), camera()]);
+        *session.at.lock() = 1;
+        let request = CarouselRequest {
+            album: "riviu-abc",
+            images: 3,
+            caption: "",
+            screen: screen(),
+        };
+        let result = publish_carousel(
+            &session,
+            plan(),
+            |element: &ElementBox| element.centre(),
+            &request,
+            &AtomicBool::new(true),
+        )
+        .await
+        .unwrap();
+        assert!(!result.is_submitted());
+        assert_eq!(*session.locates.lock(), 0, "Stop must skip cleanup reads");
+        assert_eq!(
+            *session.backs.lock(),
+            0,
+            "Stop must not dispatch another Back"
+        );
+        assert!(session.taps.lock().is_empty());
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn pending_cleanup_read_cannot_outlive_the_composer_window() {
+        let session = FakeSession {
+            locate_delay: COMPOSER_WINDOW + Duration::from_secs(1),
+            ..FakeSession::with(vec![feed()])
+        };
+        let composer = Composer::new(&session, plan(), |element: &ElementBox| element.centre());
+        let started = Instant::now();
+        assert!(
+            !composer.leave().await,
+            "late cleanup evidence cannot prove arrival"
+        );
+        assert!(started.elapsed() <= COMPOSER_WINDOW);
+        assert_eq!(
+            *session.backs.lock(),
+            0,
+            "expired observation cannot authorize Back"
         );
     }
 

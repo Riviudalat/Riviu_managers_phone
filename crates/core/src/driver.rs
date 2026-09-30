@@ -20,6 +20,18 @@ pub struct ScreenshotReadUnavailable {
     pub bytes: usize,
 }
 
+/// A driver-owned read repaired its session and proved the foreground package unchanged.
+/// No target from the failed read is usable; callers may only start a fresh bound read.
+#[derive(Debug, Error)]
+#[error("observation_session_changed")]
+pub struct SessionEpochChanged {
+    pub previous_epoch: String,
+    pub current_epoch: String,
+    pub device_id: String,
+    pub package: String,
+    pub fresh_observation: Box<crate::ui_automation::UiObservation>,
+}
+
 use crate::device_capabilities::{
     validate_clipboard_read_limit, AgentInstallProof, ClipboardAccessMode,
     DeviceCapabilitySnapshot, UiCapabilities,
@@ -219,6 +231,64 @@ pub fn ui_error_kind(err: &anyhow::Error) -> UiErrorKind {
     err.downcast_ref::<UiError>()
         .map(|e| e.kind)
         .unwrap_or(UiErrorKind::Other)
+}
+
+/// Recovery policy for a failed read. It never authorizes replay of a gesture or public effect.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ReadFailureKind {
+    Unsupported,
+    Transient,
+    /// The driver's read recovery is exhausted or the returned image is unusable.
+    Unavailable,
+    Permanent,
+}
+
+/// Classify a known read's error without treating malformed or incomplete evidence as absence.
+/// Structured UI errors also have to identify a read operation; an action timeout is permanent
+/// here, even when its transport happens to carry a reqwest error further down the chain.
+pub fn classify_read_failure(error: &anyhow::Error) -> ReadFailureKind {
+    if error.downcast_ref::<UnsupportedCapability>().is_some() {
+        return ReadFailureKind::Unsupported;
+    }
+    if error
+        .downcast_ref::<AccessibilityReadUnavailable>()
+        .is_some()
+        || error.downcast_ref::<ScreenshotReadUnavailable>().is_some()
+    {
+        return ReadFailureKind::Unavailable;
+    }
+    if let Some(error) = error.downcast_ref::<UiError>() {
+        let read = matches!(
+            error.op.as_str(),
+            "observe"
+                | "locate"
+                | "locateAll"
+                | "locateStateful"
+                | "hierarchySourceSnapshot"
+                | "readText"
+                | "screenshot"
+                | "windowSize"
+                | "activeAppBundle"
+                | "keyboardShown"
+        );
+        return if read
+            && matches!(
+                error.kind,
+                UiErrorKind::Transport | UiErrorKind::Timeout | UiErrorKind::Session
+            ) {
+            ReadFailureKind::Transient
+        } else {
+            ReadFailureKind::Permanent
+        };
+    }
+    if error.chain().any(|source| {
+        source
+            .downcast_ref::<reqwest::Error>()
+            .is_some_and(|error| error.is_timeout() || error.is_connect() || error.is_body())
+    }) {
+        return ReadFailureKind::Transient;
+    }
+    ReadFailureKind::Permanent
 }
 
 #[async_trait]
@@ -683,6 +753,15 @@ pub trait UiSession: Send + Sync {
         _request: &crate::ui_automation::ObservationRequest,
     ) -> anyhow::Result<crate::ui_automation::UiObservation> {
         unsupported("ui_observation")
+    }
+
+    /// Continue a bound wait after its one repair; this read must not repair the session again.
+    /// Legacy drivers remain unsupported, so no backend can silently grant another recovery.
+    async fn observe_without_recovery(
+        &self,
+        _request: &crate::ui_automation::ObservationRequest,
+    ) -> anyhow::Result<crate::ui_automation::UiObservation> {
+        unsupported("ui_observation_without_recovery")
     }
 
     fn set_gui_scope(&self, _scope: crate::ui_automation::GuiScope) {}

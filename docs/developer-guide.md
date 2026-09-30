@@ -45,6 +45,18 @@ Deployment checker được build từ crate `riviu-deployment-checker`, dùng l
 kiểm package của desktop mà không link Tauri. Stage đúng checker sau lần compile
 cuối và đối chiếu hash trước bundle; EXE/MSI dùng chung app đã compile một lần.
 
+Thư mục bản giao đặt theo version, ví dụ `target/0.2.65/`, chứa bộ cài và hồ sơ
+build của bản đó. Các bản tiếp theo dùng `target/<version>/`; cache Cargo dùng
+chung trong `target`, không tạo cache biên dịch riêng cho từng version.
+
+Trước đóng gói, chạy binary release với `--verify-frontend <report.json>` bằng
+đường dẫn report tuyệt đối. Report phải chứng minh `embeddedDirectory`, có
+`index.html` và đủ các asset được HTML tham chiếu. Bundler Windows kiểm điều kiện
+này trước khi tạo installer. Overlay `frontendDist` dùng đường dẫn tương đối với
+`src-tauri`; chuỗi Windows dạng `C:/...` bị Tauri giải mã thành URL `c:` và không
+nhúng giao diện. Kiểm hash resource không thay thế phép kiểm frontend hoặc phép
+mở WebView của bản đã đóng gói.
+
 DTO thiết bị, khả năng, Dừng, timeline và Sheet proof được sinh bằng ts-rs 12.0.1:
 `cargo run --locked -p riviu-core --example export_ipc -- apps/desktop/src/generated-ipc.ts`.
 `python scripts/check_generated_ipc.py` kiểm không có drift. TanStack Query chỉ
@@ -99,8 +111,20 @@ generation mới trước tap; không ghép kết quả find/rect của node đ�
 Nếu máy đã có nick gán, transaction giữ account và transaction ghi intent Post
 đều so với account đọc được. Đổi nick giữa hai transaction làm lượt Đăng bị từ chối;
 không tự sửa metadata từ quan sát và không sửa bằng chứng bài đã đăng trước đó.
+Chờ đọc Android dùng một deadline cho từng bước, kiểm Dừng cả trước và sau đọc.
+Lỗi transport/timeout được phân loại riêng; không coi nó là nút vắng mặt. Chờ
+semantic chỉ phục hồi session một lần với package/device/epoch được chứng minh,
+sau đó dùng đường đọc không phục hồi lại. Selector và XPath cùng đọc cây trợ năng;
+fallback điều hướng cục bộ không gọi provider. OCR/template chỉ dùng profile đã đo
+và ảnh mới, không cấp quyền bấm từ kết quả mơ hồ. Timeline đăng lưu bước, chiến
+lược và kết quả phục hồi đọc trong các event hiện có, không đổi checkpoint.
+Flow Delay, khoảng xem video/nghỉ, polling và backoff vẫn giữ nguyên. Chỉ các điểm
+chờ sẵn sàng đã có hợp đồng quan sát mới dùng điều kiện; không thay hàng loạt sleep.
+Không bọc timeout quanh future đã gửi tap/Back/Send/Post: cho thao tác kết thúc,
+rồi kiểm Dừng và đối soát trước bước kế tiếp. Không tự phát lại effect chưa rõ.
+
 Sau khi bấm Next của picker, lỗi accessibility/HTTP timeout ở bước chờ editor
-cho phép quan sát XML thêm tối đa 30 giây. Chỉ hai generation mới trong cùng phiên,
+cho phép quan sát XML trong tổng tối đa 30 giây, kể cả lần đọc đầu. Chỉ hai generation mới trong cùng phiên,
 cùng một nút Next đã đo và không có Loading mới chứng minh đã tới editor.
 Phục hồi này không bấm lại picker, không ghi intent và không gọi Đăng; Dừng vẫn
 được kiểm trước tap và sau mỗi lần đọc.

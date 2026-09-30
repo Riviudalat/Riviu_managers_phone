@@ -448,15 +448,17 @@ pub(super) async fn observe_initial(
     maximum: usize,
 ) -> anyhow::Result<ObservedSoundPool> {
     let saw_hot = AtomicBool::new(false);
-    let result = tokio::time::timeout(
+    let deadline =
+        phase_deadline(Duration::from_secs(60)).min(Instant::now() + Duration::from_secs(60));
+    let result = with_stage_budget(
         Duration::from_secs(60),
         observe_inner(session, plan, maximum, true, &saw_hot),
     )
     .await;
     check_wait()?;
     match result {
-        Ok(result) => result,
-        Err(_) => visual_pool_timeout(&saw_hot),
+        Err(_) if Instant::now() >= deadline => visual_pool_timeout(&saw_hot),
+        result => result,
     }
 }
 

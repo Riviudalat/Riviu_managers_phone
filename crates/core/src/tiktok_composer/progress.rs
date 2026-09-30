@@ -2,6 +2,13 @@
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum PublishProgress {
+    ReadRecovery {
+        stage: String,
+        strategy: String,
+        attempt: u32,
+        outcome: String,
+        detail: String,
+    },
     RetryWaiting {
         step: String,
         attempt: u32,
@@ -74,6 +81,7 @@ pub type PublishProgressObserver<'a> = dyn Fn(PublishProgress) + Send + Sync + '
 impl PublishProgress {
     pub fn state(&self) -> &'static str {
         match self {
+            Self::ReadRecovery { .. } => "read_recovery",
             Self::RetryWaiting { .. } => "retry_waiting",
             Self::RehearsalReady => "rehearsal_ready",
             Self::WaitingTransfer => "waiting_transfer",
@@ -116,6 +124,25 @@ impl PublishProgress {
 
     pub fn message(&self, device: &str) -> String {
         match self {
+            Self::ReadRecovery {
+                stage,
+                attempt,
+                outcome,
+                ..
+            } => {
+                let step = match stage.as_str() {
+                    "gallery" => "mở thư viện",
+                    "editor" => "mở màn chỉnh sửa",
+                    "sound" => "chọn nhạc",
+                    _ => "đọc giao diện",
+                };
+                let state = match outcome.as_str() {
+                    "ready" => "đã nhận diện",
+                    "stageExhausted" | "unavailable" => "chưa nhận diện được",
+                    _ => "đang kiểm tra lại",
+                };
+                format!("{step} · {state} · lượt {attempt}")
+            }
             Self::RetryWaiting {
                 step,
                 attempt,
@@ -192,6 +219,7 @@ impl PublishProgress {
 
     pub fn detail(&self) -> Option<&str> {
         match self {
+            Self::ReadRecovery { detail, .. } => Some(detail),
             Self::RetryWaiting { reason, .. } => Some(reason),
             Self::LinkPending { reason }
             | Self::LinkNeedsReview { reason }

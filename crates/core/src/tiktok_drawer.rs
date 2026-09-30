@@ -37,6 +37,7 @@ use crate::ActionFailure;
 
 use crate::driver::{ElementBox, ElementQuery, UiSession};
 use crate::tiktok_labels::{TikTokControl, TikTokControls};
+use crate::ui_automation::runtime::{read_before_deadline, ReadWaitResult};
 
 /// The comment field's widget class.
 ///
@@ -228,11 +229,49 @@ impl<'a, P: TapPlanner> CommentDrawer<'a, P> {
         self.session.tap(point).await
     }
 
+    async fn opener_before(
+        &self,
+        query: ElementQuery<'_>,
+        deadline: Instant,
+        stop: &AtomicBool,
+    ) -> anyhow::Result<Option<ElementBox>> {
+        let epoch = self.session.gui_session_epoch();
+        match read_before_deadline(self.session.locate(query), deadline, stop).await? {
+            ReadWaitResult::Ready(Some(element)) => {
+                anyhow::ensure!(
+                    self.session.gui_session_epoch() == epoch,
+                    "Comment opener session changed"
+                );
+                return Ok(Some(element));
+            }
+            ReadWaitResult::Ready(None) => {}
+            ReadWaitResult::Cancelled | ReadWaitResult::DeadlineExceeded => return Ok(None),
+        }
+        let remaining = deadline.saturating_duration_since(Instant::now());
+        // This fallback only consults the compatibility pack and re-observes XML.
+        // It cannot call a GUI reasoner or send a screenshot to an LLM.
+        match read_before_deadline(
+            crate::ui_automation::runtime::resolve_navigation_local(
+                self.session,
+                "comments",
+                remaining,
+            ),
+            deadline,
+            stop,
+        )
+        .await?
+        {
+            ReadWaitResult::Ready(element) => Ok(element),
+            ReadWaitResult::Cancelled | ReadWaitResult::DeadlineExceeded => Ok(None),
+        }
+    }
+
     /// Open the drawer from the post's comment control, and return the input field.
     ///
     /// `Ok(None)` means the drawer never produced a field — a real observation, and
     /// the caller decides whether to back out.
     pub async fn open(&mut self, stop: &AtomicBool) -> anyhow::Result<Option<ElementBox>> {
+        let deadline = Instant::now() + DRAWER_WINDOW;
         let Some(opener) = self
             .labels
             .label(TikTokControl::Comments)
@@ -240,33 +279,30 @@ impl<'a, P: TapPlanner> CommentDrawer<'a, P> {
         else {
             return Ok(None);
         };
-        let opener = match self.session.locate(opener).await? {
-            Some(opener) => Some(opener),
-            None if !stop.load(Ordering::Relaxed) => {
-                crate::ui_automation::runtime::resolve_navigation(
-                    self.session,
-                    "comments",
-                    Duration::from_secs(30),
-                )
-                .await?
-            }
-            None => None,
-        };
-        let Some(opener) = opener else {
+        let Some(opener) = self.opener_before(opener, deadline, stop).await? else {
             return Ok(None);
         };
         if stop.load(Ordering::Relaxed) {
             return Ok(None);
         }
-        self.tap_inside(&opener).await?;
+        let dispatched = self.tap_inside(&opener).await;
         // Wait for the field rather than sleeping a fixed time: the drawer loads
         // comments over the network and can take noticeably longer than the animation.
-        self.await_element(DRAWER_WINDOW, ElementQuery::ClassName(EDIT_TEXT), stop)
-            .await
+        let mut field = self
+            .await_condition_before(deadline, ElementQuery::ClassName(EDIT_TEXT), stop, |_| true)
+            .await?;
+        if dispatched.is_err() && field.is_some() {
+            field = self.reconcile_open_before(deadline, stop).await?;
+        }
+        if field.is_none() {
+            dispatched?;
+        }
+        Ok(field)
     }
 
     /// Open for the all-in-one posting flow while retaining the first tap boundary.
     async fn open_for_post(&mut self, stop: &AtomicBool) -> Result<OpenForPost, ActionFailure> {
+        let deadline = Instant::now() + DRAWER_WINDOW;
         let Some(opener) = self
             .labels
             .label(TikTokControl::Comments)
@@ -275,40 +311,106 @@ impl<'a, P: TapPlanner> CommentDrawer<'a, P> {
             return Ok(OpenForPost::NoControl);
         };
         let found = self
-            .session
-            .locate(opener)
+            .opener_before(opener, deadline, stop)
             .await
             .map_err(ActionFailure::before)?;
-        let found = if found.is_none() && !stop.load(Ordering::Relaxed) {
-            crate::ui_automation::runtime::resolve_navigation(
-                self.session,
-                "comments",
-                Duration::from_secs(30),
-            )
-            .await
-            .map_err(ActionFailure::before)?
-        } else {
-            found
-        };
         let Some(opener) = found else {
             return Ok(OpenForPost::NoControl);
         };
         if stop.load(Ordering::Relaxed) {
             return Ok(OpenForPost::NoControl);
         }
-        self.tap_inside(&opener)
+        let dispatched = self.tap_inside(&opener).await;
+        let mut field = self
+            .await_condition_before(deadline, ElementQuery::ClassName(EDIT_TEXT), stop, |_| true)
             .await
             .map_err(ActionFailure::after)?;
-        Ok(
-            match self
-                .await_element(DRAWER_WINDOW, ElementQuery::ClassName(EDIT_TEXT), stop)
+        if dispatched.is_err() && field.is_some() {
+            field = self
+                .reconcile_open_before(deadline, stop)
                 .await
-                .map_err(ActionFailure::after)?
-            {
-                Some(field) => OpenForPost::Field(field),
-                None => OpenForPost::NoDrawer,
-            },
-        )
+                .map_err(ActionFailure::after)?;
+        }
+        if let Some(field) = field {
+            // A lost opener ACK can be reconciled from this positive drawer state.
+            // The opener is never tapped again.
+            Ok(OpenForPost::Field(field))
+        } else {
+            dispatched.map_err(ActionFailure::after)?;
+            Ok(OpenForPost::NoDrawer)
+        }
+    }
+
+    async fn reconcile_open_before(
+        &self,
+        deadline: Instant,
+        stop: &AtomicBool,
+    ) -> anyhow::Result<Option<ElementBox>> {
+        let Some(send_query) = self.send_query() else {
+            return Ok(None);
+        };
+        let epoch = self.session.gui_session_epoch();
+        loop {
+            let read = async {
+                if self.session.supports_accessibility_readback() {
+                    anyhow::ensure!(
+                        self.session.active_app_bundle().await? == self.labels.package(),
+                        "Comment drawer foreground changed"
+                    );
+                    let snapshot = self.session.hierarchy_source_snapshot().await?;
+                    let send =
+                        snapshot_send_control(snapshot.clone(), self.labels.package(), send_query)?;
+                    if send.is_none_or(|button| button.enabled) {
+                        return Ok(None);
+                    }
+                    let tree = crate::ui_automation::tree::Tree::parse(snapshot)?;
+                    let fields: Vec<_> = tree
+                        .nodes
+                        .iter()
+                        .enumerate()
+                        .filter(|(index, node)| {
+                            node.visible(self.labels.package())
+                                && tree.ancestors_visible(*index)
+                                && node.attr("class") == EDIT_TEXT
+                                && node.attr("enabled") == "true"
+                                && node.attr("password") != "true"
+                        })
+                        .filter_map(|(_, node)| node.rect())
+                        .collect();
+                    return Ok(match fields.as_slice() {
+                        [field] => Some(field.clone()),
+                        _ => None,
+                    });
+                }
+                let send = self.locate_send(send_query).await?;
+                if send.is_none_or(|button| button.enabled) {
+                    return Ok(None);
+                }
+                let fields = self
+                    .session
+                    .locate_all(ElementQuery::ClassName(EDIT_TEXT))
+                    .await?;
+                Ok(match fields.as_slice() {
+                    [field] if field.enabled => Some(field.clone()),
+                    _ => None,
+                })
+            };
+            let result = read_before_deadline(read, deadline, stop).await?;
+            anyhow::ensure!(
+                self.session.gui_session_epoch() == epoch,
+                "Comment drawer session changed"
+            );
+            match result {
+                ReadWaitResult::Ready(Some(field)) => return Ok(Some(field)),
+                ReadWaitResult::Ready(None) => {}
+                ReadWaitResult::Cancelled | ReadWaitResult::DeadlineExceeded => return Ok(None),
+            }
+            sleep(
+                DRAWER_POLL.min(deadline.saturating_duration_since(Instant::now())),
+                stop,
+            )
+            .await;
+        }
     }
 
     /// Focus the field and set the text.
@@ -347,6 +449,10 @@ impl<'a, P: TapPlanner> CommentDrawer<'a, P> {
         text: &str,
         stop: &AtomicBool,
     ) -> anyhow::Result<TypedInto> {
+        anyhow::ensure!(
+            !stop.load(Ordering::Relaxed),
+            "Comment stopped before focus"
+        );
         self.tap_inside(field).await?;
         let Some(send) = self.send_query() else {
             return Ok(TypedInto::NoSendControl);
@@ -398,18 +504,36 @@ impl<'a, P: TapPlanner> CommentDrawer<'a, P> {
         send: &ElementBox,
         stop: &AtomicBool,
     ) -> anyhow::Result<bool> {
+        if stop.load(Ordering::Relaxed) {
+            return Ok(false);
+        }
         self.tap_inside(send).await?;
         let Some(query) = self.send_query() else {
             return Ok(false);
         };
-        let disarmed = self
-            .await_condition(SEND_WINDOW, query, stop, |element| !element.enabled)
-            .await?
-            .is_some();
-        if disarmed {
-            return Ok(true);
+        let deadline = Instant::now() + SEND_WINDOW;
+        let epoch = self.session.gui_session_epoch();
+        loop {
+            match read_before_deadline(self.locate_send(query), deadline, stop).await? {
+                ReadWaitResult::Ready(observed) => {
+                    anyhow::ensure!(
+                        self.session.gui_session_epoch() == epoch,
+                        "Send session changed"
+                    );
+                    if observed.as_ref().is_some_and(|element| !element.enabled)
+                        || (observed.is_none() && !self.session.supports_element_bounds())
+                    {
+                        return Ok(true);
+                    }
+                }
+                ReadWaitResult::Cancelled | ReadWaitResult::DeadlineExceeded => return Ok(false),
+            }
+            sleep(
+                DRAWER_POLL.min(deadline.saturating_duration_since(Instant::now())),
+                stop,
+            )
+            .await;
         }
-        Ok(self.locate_send(query).await?.is_none())
     }
 
     /// Back out until the feed tab is visible again.
@@ -422,23 +546,36 @@ impl<'a, P: TapPlanner> CommentDrawer<'a, P> {
     /// **The caller decides when to call this.** Interaction deliberately does not,
     /// until it has read its posted comment back out of the still-open list.
     pub async fn leave(&self, stop: &AtomicBool) -> bool {
+        let deadline = Instant::now() + DRAWER_WINDOW;
         let feed = self
             .labels
             .label(TikTokControl::FeedTab)
             .map(|label| label.to_query());
         for _ in 0..3 {
             if let Some(feed) = feed {
-                if self.session.locate(feed).await.ok().flatten().is_some() {
-                    return true;
+                match read_before_deadline(self.session.locate(feed), deadline, stop).await {
+                    Ok(ReadWaitResult::Ready(Some(_))) => return true,
+                    Ok(ReadWaitResult::Ready(None)) => {}
+                    _ => return false,
                 }
+            }
+            if stop.load(Ordering::Relaxed) || Instant::now() >= deadline {
+                return false;
             }
             if self.session.back().await.is_err() {
                 return false;
             }
-            sleep(DRAWER_POLL, stop).await;
+            sleep(
+                DRAWER_POLL.min(deadline.saturating_duration_since(Instant::now())),
+                stop,
+            )
+            .await;
         }
         if let Some(feed) = feed {
-            return self.session.locate(feed).await.ok().flatten().is_some();
+            return matches!(
+                read_before_deadline(self.session.locate(feed), deadline, stop).await,
+                Ok(ReadWaitResult::Ready(Some(_)))
+            );
         }
         false
     }
@@ -460,6 +597,19 @@ impl<'a, P: TapPlanner> CommentDrawer<'a, P> {
         ready: impl Fn(&ElementBox) -> bool,
     ) -> anyhow::Result<Option<ElementBox>> {
         let deadline = Instant::now() + window;
+        self.await_condition_before(deadline, query, stop, ready)
+            .await
+    }
+
+    async fn await_condition_before(
+        &self,
+        deadline: Instant,
+        query: ElementQuery<'_>,
+        stop: &AtomicBool,
+        ready: impl Fn(&ElementBox) -> bool,
+    ) -> anyhow::Result<Option<ElementBox>> {
+        let epoch = self.session.gui_session_epoch();
+        let mut retried = false;
         loop {
             // Stop first, before the screen is even read. This loop's answer is what
             // authorises the Send tap, and checking stop only *after* a ready element
@@ -468,20 +618,44 @@ impl<'a, P: TapPlanner> CommentDrawer<'a, P> {
             if stop.load(Ordering::Relaxed) {
                 return Ok(None);
             }
-            let observed = if self.send_query() == Some(query) {
-                self.locate_send(query).await?
-            } else {
-                self.session.locate(query).await?
+            let read = async {
+                if self.send_query() == Some(query) {
+                    self.locate_send(query).await
+                } else {
+                    self.session.locate(query).await
+                }
+            };
+            let result = read_before_deadline(read, deadline, stop).await;
+            anyhow::ensure!(
+                self.session.gui_session_epoch() == epoch,
+                "Comment drawer session changed"
+            );
+            let observed = match result {
+                Ok(ReadWaitResult::Ready(observed)) => observed,
+                Ok(ReadWaitResult::Cancelled | ReadWaitResult::DeadlineExceeded) => {
+                    return Ok(None)
+                }
+                Err(error)
+                    if !retried
+                        && crate::driver::classify_read_failure(&error)
+                            == crate::driver::ReadFailureKind::Transient =>
+                {
+                    retried = true;
+                    tracing::debug!(%error, retry = 1, "retrying comment drawer read within remaining budget");
+                    None
+                }
+                Err(error) => return Err(error),
             };
             if let Some(element) = observed {
                 if ready(&element) {
                     return Ok(Some(element));
                 }
             }
-            if Instant::now() >= deadline {
-                return Ok(None);
-            }
-            sleep(DRAWER_POLL, stop).await;
+            sleep(
+                DRAWER_POLL.min(deadline.saturating_duration_since(Instant::now())),
+                stop,
+            )
+            .await;
         }
     }
 }
@@ -680,6 +854,11 @@ mod tests {
         /// error here is the realistic one: the agent is reached, the drawer is open, and
         /// the request dies mid-gesture.
         typing_fails: bool,
+        read_delay: Option<Duration>,
+        reads: std::sync::atomic::AtomicUsize,
+        fail_first_tap: AtomicBool,
+        partial_android: bool,
+        transient_reads: std::sync::atomic::AtomicUsize,
     }
 
     impl FakeSession {
@@ -710,6 +889,10 @@ mod tests {
     impl UiSession for FakeSession {
         async fn tap(&self, point: TapPoint) -> anyhow::Result<()> {
             self.taps.lock().push(point);
+            anyhow::ensure!(
+                !self.fail_first_tap.swap(false, Ordering::Relaxed),
+                "opener acknowledgement lost"
+            );
             Ok(())
         }
         async fn swipe(&self, _gesture: crate::types::SwipeGesture) -> anyhow::Result<()> {
@@ -739,9 +922,41 @@ mod tests {
             None
         }
         fn supports_element_bounds(&self) -> bool {
-            true
+            self.partial_android
+        }
+        fn supports_accessibility_readback(&self) -> bool {
+            self.partial_android
+        }
+        async fn active_app_bundle(&self) -> anyhow::Result<String> {
+            Ok("com.ss.android.ugc.trill".into())
+        }
+        async fn hierarchy_source_snapshot(
+            &self,
+        ) -> anyhow::Result<crate::HierarchySourceSnapshot> {
+            Ok(crate::HierarchySourceSnapshot {
+                generation: self.reads.fetch_add(1, Ordering::Relaxed) as u64 + 1,
+                xml: r#"<hierarchy><node package="com.ss.android.ugc.trill" class="android.widget.FrameLayout" bounds="[0,0][1080,2220]"/></hierarchy>"#.into(),
+            })
         }
         async fn locate(&self, query: ElementQuery<'_>) -> anyhow::Result<Option<ElementBox>> {
+            self.reads.fetch_add(1, Ordering::Relaxed);
+            if self
+                .transient_reads
+                .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |left| {
+                    left.checked_sub(1)
+                })
+                .is_ok()
+            {
+                return Err(crate::driver::UiError::new(
+                    crate::driver::UiErrorKind::Timeout,
+                    "locate",
+                    "fixture read timeout",
+                )
+                .into());
+            }
+            if let Some(delay) = self.read_delay {
+                tokio::time::sleep(delay).await;
+            }
             let wanted = match query {
                 ElementQuery::Description { value, .. } => value,
                 ElementQuery::ClassName(value) => value,
@@ -763,6 +978,9 @@ mod tests {
                 .iter()
                 .find(|(key, _)| key == wanted)
                 .map(|(_, element)| element.clone()))
+        }
+        async fn locate_all(&self, query: ElementQuery<'_>) -> anyhow::Result<Vec<ElementBox>> {
+            Ok(self.locate(query).await?.into_iter().collect())
         }
     }
 
@@ -943,6 +1161,142 @@ mod tests {
     /// more comment left a live account after the hand went up. Stop is checked before
     /// the screen is read, which makes it authoritative at the last boundary before the
     /// irreversible tap.
+    #[tokio::test(start_paused = true)]
+    async fn drawer_wait_retries_only_one_transient_read_inside_original_budget() {
+        for failures in [1, 2] {
+            let session = FakeSession {
+                transient_reads: failures.into(),
+                ..FakeSession::default().sticking("@2131823284", element(true))
+            };
+            let drawer = CommentDrawer::new(&session, vietnamese(), centre_planner());
+            let started = Instant::now();
+            let result = drawer.await_armed(&AtomicBool::new(false)).await;
+            if failures == 1 {
+                assert!(result.expect("one transient read must recover").is_some());
+            } else {
+                assert!(result
+                    .expect_err("second failure is retained")
+                    .downcast_ref::<crate::driver::UiError>()
+                    .is_some());
+            }
+            assert_eq!(session.reads.load(Ordering::Relaxed), 2);
+            assert!(started.elapsed() <= ARM_WINDOW);
+            assert!(session.taps.lock().is_empty());
+        }
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn drawer_armed_wait_rejects_cancelled_or_late_read() {
+        for cancelled in [true, false] {
+            let session = FakeSession {
+                read_delay: Some(if cancelled {
+                    Duration::from_secs(1)
+                } else {
+                    ARM_WINDOW + Duration::from_secs(1)
+                }),
+                ..FakeSession::default().sticking("@2131823284", element(true))
+            };
+            let drawer = CommentDrawer::new(&session, vietnamese(), centre_planner());
+            let stop = std::sync::Arc::new(AtomicBool::new(false));
+            if cancelled {
+                let stop = stop.clone();
+                tokio::spawn(async move {
+                    tokio::time::sleep(Duration::from_millis(100)).await;
+                    stop.store(true, Ordering::Relaxed);
+                });
+            }
+            let started = Instant::now();
+            assert!(drawer.await_armed(&stop).await.unwrap().is_none());
+            assert!(
+                started.elapsed()
+                    <= if cancelled {
+                        Duration::from_millis(200)
+                    } else {
+                        ARM_WINDOW
+                    }
+            );
+            assert!(session.taps.lock().is_empty());
+        }
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn drawer_partial_android_tree_after_send_never_proves_success() {
+        let session = FakeSession {
+            partial_android: true,
+            ..Default::default()
+        };
+        let mut drawer = CommentDrawer::new(&session, vietnamese(), centre_planner());
+        let started = Instant::now();
+        assert!(!drawer
+            .tap_send_and_confirm_disarm(&element(true), &AtomicBool::new(false))
+            .await
+            .unwrap());
+        assert_eq!(session.taps.lock().len(), 1);
+        assert!(session.typed.lock().is_empty());
+        assert!(started.elapsed() <= SEND_WINDOW);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn drawer_send_probe_stays_inside_window_and_never_replays_send() {
+        let session = FakeSession {
+            read_delay: Some(SEND_WINDOW + Duration::from_secs(1)),
+            ..FakeSession::default().sticking("@2131823284", element(true))
+        };
+        let mut drawer = CommentDrawer::new(&session, vietnamese(), centre_planner());
+        let started = Instant::now();
+        assert!(!drawer
+            .tap_send_and_confirm_disarm(&element(true), &AtomicBool::new(false))
+            .await
+            .unwrap());
+        assert!(started.elapsed() <= SEND_WINDOW);
+        assert_eq!(session.taps.lock().len(), 1);
+        assert_eq!(session.reads.load(Ordering::Relaxed), 1);
+
+        let session = FakeSession::default();
+        let mut drawer = CommentDrawer::new(&session, vietnamese(), centre_planner());
+        assert!(!drawer
+            .tap_send_and_confirm_disarm(&element(true), &AtomicBool::new(true))
+            .await
+            .unwrap());
+        assert!(session.taps.lock().is_empty());
+        assert_eq!(session.reads.load(Ordering::Relaxed), 0);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn drawer_lost_opener_ack_reconciles_field_without_retapping() {
+        for has_send in [true, false] {
+            let session = FakeSession {
+                fail_first_tap: AtomicBool::new(true),
+                sticky: Mutex::new(vec![(EDIT_TEXT.into(), element(true))]),
+                ..FakeSession::with(vec![("bình luận", Some(element(true)))])
+            };
+            if has_send {
+                session
+                    .sticky
+                    .lock()
+                    .push(("@2131823284".into(), element(false)));
+            }
+            let mut drawer = CommentDrawer::new(&session, vietnamese(), centre_planner());
+            let result = drawer.open_for_post(&AtomicBool::new(false)).await;
+            if has_send {
+                assert!(matches!(result.unwrap(), OpenForPost::Field(_)));
+            } else {
+                assert!(result.is_err(), "an unrelated search/inline field without Send cannot reconcile a lost opener ACK");
+            }
+            assert_eq!(session.taps.lock().len(), 1);
+            assert!(session.typed.lock().is_empty());
+        }
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn drawer_leave_after_stop_does_not_press_back_or_read() {
+        let session = FakeSession::default();
+        let drawer = CommentDrawer::new(&session, vietnamese(), centre_planner());
+        assert!(!drawer.leave(&AtomicBool::new(true)).await);
+        assert_eq!(*session.backs.lock(), 0);
+        assert_eq!(session.reads.load(Ordering::Relaxed), 0);
+    }
+
     #[tokio::test(start_paused = true)]
     async fn a_stop_set_before_the_poll_beats_an_armed_send() {
         let session = FakeSession::default().sticking("@2131823284", element(true));
