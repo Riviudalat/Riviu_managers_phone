@@ -767,10 +767,12 @@ mod tests {
                 .await
         });
         started_rx.await.unwrap();
-        tokio::select! {
-            _ = completed.settle_ready(&db) => panic!("settlement crossed a held writer lane"),
-            _ = tokio::time::sleep(Duration::from_millis(1)) => {}
-        }
+        // Paused Tokio time does not auto-advance while the blocking writer is
+        // active. Poll once and drop the borrowed future to model a losing
+        // select branch without waiting for that writer's wall-clock timeout.
+        let mut settling = Box::pin(completed.settle_ready(&db));
+        assert!(futures_util::poll!(settling.as_mut()).is_pending());
+        drop(settling);
         assert!(
             completed.in_flight.is_some(),
             "select cancellation retains the owned DB task"
