@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useMemo, useRef, useState, type ReactNode } from "react";
 import type { UnlistenFn } from "@tauri-apps/api/event";
-import { RefreshCw, Search, ListChecks, ArrowUpRight } from "lucide-react";
+import { RefreshCw, Search, ListChecks, ArrowUpRight, AppWindow } from "lucide-react";
 import { AutomationTabs, type AutomationMode } from "../components/AutomationTabs";
 import { PublishQuickSetup as PublishWizard } from "../components/publish/PublishQuickSetup";
 import { PublishSchedulePlanner } from "../components/publish/PublishSchedulePlanner";
@@ -15,6 +15,8 @@ import { deviceGuardBlock, UNKNOWN_PUBLISH_GUARD } from "../components/publish/p
 
 import {
   listenRiviuEvents,
+  deviceThreadsAccount,
+  launchDeviceApp,
   operationGetRun,
   operationListRuns,
   publishCancel,
@@ -1670,6 +1672,15 @@ function isComposing(assignment: PublishAssignmentRecord): boolean {
   catch { return false; }
 }
 
+function campaignApp(detail: PublishCampaignDetail): "Threads" | "TikTok" {
+  try {
+    const created = detail.events.find(event => event.kind === "created");
+    return JSON.parse(created?.payloadJson ?? "null")?.network === "threads" ? "Threads" : "TikTok";
+  } catch {
+    return "TikTok";
+  }
+}
+
 function CampaignDetail({
   detail,
   error,
@@ -1697,7 +1708,32 @@ function CampaignDetail({
   recoveryError?: string;
   resumeVerification: (assignment: PublishAssignmentRecord, capability: PublishRecoveryCapability) => void;
 }) {
+  const [openingUdid, setOpeningUdid] = useState<string | null>(null);
+  const [checkingUdid, setCheckingUdid] = useState<string | null>(null);
+  const [deviceChecks, setDeviceChecks] = useState<Record<string, string>>({});
   if (!detail && !error && !loading) return null;
+  const appName = detail ? campaignApp(detail) : "TikTok";
+  const openThreads = async (udid: string) => {
+    setOpeningUdid(udid);
+    try {
+      await launchDeviceApp(udid, "com.instagram.barcelona");
+    } catch (cause) {
+      setDeviceChecks(current => ({ ...current, [udid]: describeError(cause) }));
+    } finally {
+      setOpeningUdid(null);
+    }
+  };
+  const checkThreads = async (udid: string) => {
+    setCheckingUdid(udid);
+    try {
+      const info = await deviceThreadsAccount(udid);
+      setDeviceChecks(current => ({ ...current, [udid]: `@${info.account} · ${info.version} · ${info.locale}` }));
+    } catch (cause) {
+      setDeviceChecks(current => ({ ...current, [udid]: describeError(cause) }));
+    } finally {
+      setCheckingUdid(null);
+    }
+  };
   // Current assignment evidence outranks a completed snapshot from before the
   // latest read. Submission alone must never claim Post or Sheet completion.
   const pendingPost = detail?.campaign.state === "verifying"
@@ -1744,7 +1780,7 @@ function CampaignDetail({
                     ? "Kết quả chưa chắc chắn"
                     : "Còn bước cần hoàn tất"}
               </StatusChip>
-              <span>{reviewPost ? "Đã dừng kiểm tra tự động; mở TikTok kiểm tra bài đăng hoặc bản nháp" : pendingPost ? "Bài đang chờ xác minh sẽ không được đăng lại" : retryScopeLabel(snapshot.retryScope, snapshotSheetEnabled(snapshot))}</span>
+              <span>{reviewPost ? `Đã dừng kiểm tra tự động; mở ${appName} kiểm tra bài đăng hoặc bản nháp` : pendingPost ? "Bài đang chờ xác minh sẽ không được đăng lại" : retryScopeLabel(snapshot.retryScope, snapshotSheetEnabled(snapshot))}</span>
               <span>
                 {supersededSheet ? "Nghĩa vụ ghi Sheet cũ đã đóng; kết quả giữ trong app"
                   : !snapshotSheetEnabled(snapshot)
@@ -1761,7 +1797,7 @@ function CampaignDetail({
             <span>{detail.assignments.filter(a => ["queued", "scheduled", "ready", "preparing"].includes(a.state)).length} máy chờ tải</span>
             <span>{detail.assignments.filter(a => a.state === "transferring").length} máy đang tải</span>
             <span>{detail.assignments.filter(a => a.state === "imported" && !isComposing(a)).length} máy đã tải, chờ đăng</span>
-            <span>{detail.assignments.filter(isComposing).length} máy đang chuẩn bị bài trên TikTok</span>
+            <span>{detail.assignments.filter(isComposing).length} máy đang chuẩn bị bài trên {appName}</span>
             <span>{detail.assignments.filter(a => a.state === "posting").length} máy đang gửi bài</span>
             <span>{detail.assignments.filter(a => a.state === "verifying").length} máy chờ liên kết</span>
             <span>{detail.assignments.filter(a => ["uncertain", "failedBeforeDispatch", "missed"].includes(a.state)).length} máy cần xử lý</span>
@@ -1786,6 +1822,7 @@ function CampaignDetail({
                         <summary>Chi tiết</summary>
                         <code>{raw}</code>
                       </details>
+                      {appName === "Threads" && devices.some(device => device.udid === assignment.udid && device.platform === "android") && <span className="publish-device-actions"><button type="button" disabled={openingUdid !== null || checkingUdid !== null} aria-label={`Mở Threads trên ${deviceDisplayName(devices, metas, assignment.udid)}`} onClick={() => void openThreads(assignment.udid)}><AppWindow size={14} aria-hidden="true"/>Mở Threads</button><button type="button" disabled={openingUdid !== null || checkingUdid !== null} aria-label={`Kiểm tra Threads trên ${deviceDisplayName(devices, metas, assignment.udid)}`} onClick={() => void checkThreads(assignment.udid)}><Search size={14} aria-hidden="true"/>Kiểm tra máy</button>{deviceChecks[assignment.udid] && <small role="status">{deviceChecks[assignment.udid]}</small>}</span>}
                     </span>
                   );
                 },
@@ -1800,8 +1837,8 @@ function CampaignDetail({
                   return <span>
                     {capability?.recovery?.state==="waitingDevice"&&<p>Mất kết nối · chờ đúng máy kết nối lại, còn {Math.max(0,Math.ceil(((capability.recovery.reconnectDeadline??0)-Date.now())/1000))} giây</p>}
                     {capability?.recovery?.state==="retryWaiting"&&<p>Thử lại {capability.recovery.retriesUsed}/{capability.recovery.maxRetries} · {capability.recovery.step}</p>}
-                    {needsPublicationReview(assignment) ? <>Cần kiểm tra bài đăng<p>{publicationReviewReason(assignment.evidenceJson) ?? "Chưa có đủ bằng chứng xác nhận bài; kiểm tra TikTok trước khi tiếp tục."}</p></>
-                      : <>{isComposing(assignment) ? "Đang chuẩn bị bài trên TikTok" : PUBLISH_STATE_LABELS[assignment.state] ?? "Trạng thái chưa nhận diện"}{dispatchDetail(assignment) && <p>{dispatchDetail(assignment)}</p>}{verificationDetail(assignment.evidenceJson) && <p>{verificationDetail(assignment.evidenceJson)}</p>}</>}
+                    {needsPublicationReview(assignment) ? <>Cần kiểm tra bài đăng<p>{publicationReviewReason(assignment.evidenceJson) ?? `Chưa có đủ bằng chứng xác nhận bài; kiểm tra ${appName} trước khi tiếp tục.`}</p></>
+                      : <>{isComposing(assignment) ? `Đang chuẩn bị bài trên ${appName}` : PUBLISH_STATE_LABELS[assignment.state] ?? "Trạng thái chưa nhận diện"}{dispatchDetail(assignment) && <p>{dispatchDetail(assignment)}</p>}{verificationDetail(assignment.evidenceJson) && <p>{verificationDetail(assignment.evidenceJson)}</p>}</>}
                     <PrePostFailureEvidence assignment={assignment}/>
                     {retryable && <><button type="button" disabled={busy || loading || !capability?.retryBeforePost.allowed}
                       aria-label={`Thử lại trước khi Đăng · ${deviceDisplayName(devices, metas, assignment.udid)}`}
@@ -1826,7 +1863,7 @@ function CampaignDetail({
                       Đã xác minh link · Mở bài
                     </a>
                   ) : (
-                    <span>{needsPublicationReview(assignment) ? "Chưa có liên kết; không tự đăng lại" : assignment.state === "verifying" ? "Đã gửi bài; chờ TikTok hoàn tất và xác minh liên kết" : "Chưa có liên kết xác nhận"}</span>
+                    <span>{needsPublicationReview(assignment) ? "Chưa có liên kết; không tự đăng lại" : assignment.state === "verifying" ? `Đã bấm Đăng; chờ ${appName} hoàn tất và xác minh liên kết` : "Chưa có liên kết xác nhận"}</span>
                   );
                 },
               },

@@ -7,6 +7,7 @@ struct Session {
     disconnected: bool,
     composer: bool,
     fail_share: bool,
+    account_probe: bool,
     taps: Mutex<Vec<TapPoint>>,
     clipboard: Mutex<Vec<u8>>,
 }
@@ -17,6 +18,7 @@ impl Session {
             disconnected: false,
             composer: false,
             fail_share: false,
+            account_probe: false,
             taps: Mutex::new(vec![]),
             clipboard: Mutex::new(b"operator clipboard".to_vec()),
         }
@@ -49,6 +51,10 @@ impl UiSession for Session {
     }
     async fn tap(&self, point: TapPoint) -> anyhow::Result<()> {
         self.taps.lock().push(point);
+        if self.account_probe {
+            *self.stage.lock() = 0;
+            return Ok(());
+        }
         if self.taps.lock().len() == 2 {
             *self.stage.lock() = 2;
         } else if self.taps.lock().len() == 3 {
@@ -83,6 +89,20 @@ impl UiSession for Session {
     async fn assert_visible(&self, _: &str) -> anyhow::Result<()> {
         unreachable!()
     }
+}
+
+#[tokio::test]
+async fn account_probe_returns_from_measured_post_detail_before_reading_profile() {
+    let session = Session {
+        stage: Mutex::new(2),
+        account_probe: true,
+        ..Session::new()
+    };
+    assert_eq!(
+        observed_profile_account(&session).await.unwrap(),
+        "fixture.account"
+    );
+    assert_eq!(session.taps.lock().len(), 2);
 }
 fn submitted() -> String {
     (chrono::Utc::now() - chrono::Duration::seconds(180)).to_rfc3339()

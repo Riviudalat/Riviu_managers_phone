@@ -206,12 +206,56 @@ pub fn profile_account(tree: &Tree) -> anyhow::Result<String> {
 }
 
 pub async fn observed_profile_account(session: &dyn UiSession) -> anyhow::Result<String> {
+    for _ in 0..3 {
+        let tree = observe(session).await?;
+        if !tree
+            .nodes
+            .iter()
+            .any(|node| node.attr("resource-id") == "PermalinkScreen")
+        {
+            break;
+        }
+        tap_resource(session, "navigation_bar_back_button").await?;
+    }
     tap_resource(session, "barcelona_tab_profile").await?;
-    let profile = wait_for(session, "own profile header", |tree| {
-        profile_account(tree).is_ok()
-    })
-    .await?;
-    profile_account(&profile).context("Threads own profile account unavailable")
+    for _ in 0..12 {
+        let profile = wait_for(session, "own profile", |tree| {
+            tree.nodes.iter().any(|node| {
+                node.attr("resource-id") == "barcelona_tab_profile"
+                    && node.attr("selected") == "true"
+            })
+        })
+        .await?;
+        if let Ok(account) = profile_account(&profile) {
+            return Ok(account);
+        }
+        if let Some(scroll) = profile
+            .nodes
+            .iter()
+            .find(|node| {
+                node.attr("resource-id") == "IgLazyColumn" && node.attr("scrollable") == "true"
+            })
+            .and_then(Node::rect)
+        {
+            let x = scroll.x + scroll.width / 2.0;
+            session
+                .swipe(crate::SwipeGesture {
+                    from: crate::TapPoint {
+                        x,
+                        y: scroll.y + scroll.height * 0.3,
+                    },
+                    to: crate::TapPoint {
+                        x,
+                        y: scroll.y + scroll.height * 0.8,
+                    },
+                    duration_ms: 500,
+                })
+                .await?;
+        } else {
+            tokio::time::sleep(std::time::Duration::from_secs(1)).await;
+        }
+    }
+    anyhow::bail!("Threads own profile account unavailable")
 }
 
 pub fn selected_ordinal(description: &str) -> Option<usize> {

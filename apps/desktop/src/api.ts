@@ -832,6 +832,14 @@ export async function deviceThreadsBuild(udid: string) {
   return invoke<ThreadsBuildInfo>("device_threads_build", { udid });
 }
 
+export interface ThreadsAccountInfo extends ThreadsBuildInfo {
+  account: string;
+}
+
+export async function deviceThreadsAccount(udid: string) {
+  return invoke<ThreadsAccountInfo>("device_threads_account", { udid });
+}
+
 /**
  * Run one operator-typed shell command on a device.
  *

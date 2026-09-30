@@ -11,6 +11,7 @@ import userEvent from "@testing-library/user-event";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import {
+  deviceThreadsAccount,
   listenRiviuEvents,
   operationListRuns,
   publishGet,
@@ -184,6 +185,7 @@ vi.mock("../api", () => ({
   // the effect's cleanup honest without the test caring about events.
   listenRiviuEvents: vi.fn(async () => () => undefined),
   publishImagePreview: vi.fn(async () => "data:image/jpeg;base64,AA=="),
+  deviceThreadsAccount: vi.fn(async (udid: string) => ({ packageName: "com.instagram.barcelona", version: "446.0.0.32.78", locale: "en", account: `account.${udid.toLowerCase()}` })),
   publishAutoAssign: vi.fn(async () => ({ plan: [] })),
   listAppsLibrary: vi.fn(async () => []),
   listGroups: vi.fn(async () => []),
@@ -230,22 +232,23 @@ vi.mock("../api", () => ({
   saveScript: vi.fn(async () => undefined),
 }));
 
-function iphone(udid: string): DeviceInfo {
+function androidPhone(udid: string): DeviceInfo {
   return {
     udid,
     name: udid,
-    model: "iPhone10,1",
-    platform: "ios",
-    osVersion: "16.7.15",
+    model: "SM-G950F",
+    platform: "android",
+    osVersion: "9",
     connection: "usb",
     status: "ready",
     wdaReady: true,
   };
 }
 
-const devices = [iphone("PHONE-A"), iphone("PHONE-B"), iphone("PHONE-C")];
+const devices = [androidPhone("PHONE-A"), androidPhone("PHONE-B"), androidPhone("PHONE-C")];
 
 beforeEach(() => {
+  vi.mocked(deviceThreadsAccount).mockReset().mockImplementation(async udid => ({ packageName: "com.instagram.barcelona", version: "446.0.0.32.78", locale: "en", account: `account.${udid.toLowerCase()}` }));
   vi.mocked(publishList).mockReset().mockResolvedValue([]);
   vi.mocked(publishGet).mockReset().mockResolvedValue(null);
   HTMLDialogElement.prototype.showModal = function () {
@@ -786,6 +789,7 @@ describe("production publish wizard", () => {
 
 describe("publish campaign monitoring", () => {
   it("retries only a child that failed before Post while another child awaits its link", async () => {
+    const events = [{ revision: 1, kind: "created", payloadJson: JSON.stringify({ network: "threads" }), createdAt: "2026-09-10T00:00:00Z" }];
     const campaign = { id: "mixed-retry", requestId: "r", sourceRoot: "C:/fixture", state: "verifying", assignments: [],
       createdAt: "2026-09-10T00:00:00Z", updatedAt: "2026-09-10T00:00:00Z" };
     const failed = { id: "failed-child", campaignId: campaign.id, udid: "PHONE-A", state: "failedBeforeDispatch", effectIntent: null };
@@ -793,11 +797,11 @@ describe("publish campaign monitoring", () => {
     vi.mocked(publishRecoveryCapabilities).mockResolvedValue([{ assignmentId: failed.id, revision: 3, verificationResumed: false,
       checkLink: { allowed: false, reason: null }, resumeVerification: { allowed: false, reason: null }, retryBeforePost: { allowed: true, reason: null } }]);
     vi.mocked(publishList).mockResolvedValue([campaign] as never);
-    vi.mocked(publishGet).mockResolvedValue({ campaign, bundles: [], assignments: [failed, pending], events: [] } as never);
+    vi.mocked(publishGet).mockResolvedValue({ campaign, bundles: [], assignments: [failed, pending], events } as never);
     vi.mocked(publishReconcile).mockResolvedValue({ campaignId: campaign.id, inputDigest: "digest", status: "partial",
       retryScope: "linkAndSheet", reportJson: { sheetEnabled: false }, updatedAt: campaign.updatedAt });
     vi.mocked(publishRetryAssignment).mockImplementationOnce(async () => {
-      vi.mocked(publishGet).mockResolvedValue({ campaign, bundles: [], events: [], assignments: [{ ...failed, state: "queued" }, pending] } as never);
+      vi.mocked(publishGet).mockResolvedValue({ campaign, bundles: [], events, assignments: [{ ...failed, state: "queued" }, pending] } as never);
     });
     let confirmRetry!: (value: boolean) => void;
     vi.mocked(requestConfirm).mockImplementationOnce(() => new Promise(resolve => { confirmRetry = resolve; }));
@@ -815,7 +819,9 @@ describe("publish campaign monitoring", () => {
     await waitFor(() => expect(screen.queryByRole("button", { name: /^Thử lại trước khi Đăng/ })).toBeNull());
     expect(executeCampaign).not.toHaveBeenCalled();
     expect(createCampaign).not.toHaveBeenCalled();
-    expect(screen.getByText("Đã gửi bài; chờ TikTok hoàn tất và xác minh liên kết")).toBeVisible();
+    expect(screen.getByText("Đã bấm Đăng; chờ Threads hoàn tất và xác minh liên kết")).toBeVisible();
+    expect(screen.getAllByRole("button", { name: /^Mở Threads trên/ })).toHaveLength(2);
+    expect(screen.getAllByRole("button", { name: /^Kiểm tra Threads trên/ })).toHaveLength(2);
   });
 
   it.each([

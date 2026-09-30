@@ -1,6 +1,6 @@
 import { useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 import { AppWindow, ArrowLeft, ArrowRight, Check, FolderOpen, ListFilter, LoaderCircle, Music2, Pencil, Search, Undo2, Zap, X } from "lucide-react";
-import { launchDeviceApp } from "../../api";
+import { deviceThreadsAccount, launchDeviceApp, type ThreadsAccountInfo } from "../../api";
 import type { PublishWizardProps } from "./PublishWizard";
 import { PublishMedia } from "./PublishMedia";
 import { PublishDialog } from "./PublishDialog";
@@ -63,6 +63,9 @@ export function PublishQuickSetup(p: QuickProps) {
   const [reportPage, setReportPage] = useState(0);
   const [confirming, setConfirming] = useState(false);
   const [openingUdid, setOpeningUdid] = useState<string | null>(null);
+  const [checkingUdid, setCheckingUdid] = useState<string | null>(null);
+  const [checkingQuick, setCheckingQuick] = useState(false);
+  const [threadsChecks, setThreadsChecks] = useState<Record<string, { info?: ThreadsAccountInfo; error?: string }>>({});
   const latest = useRef<AssignmentSnapshot | null>(null);
   const pendingAssignment = useRef(false);
   const rootRef = useRef<HTMLDivElement>(null);
@@ -85,6 +88,9 @@ export function PublishQuickSetup(p: QuickProps) {
   const devices = useMemo(() => orderDevicesByNumber(p.devices, p.metas), [p.devices, p.metas]);
   const selectable = devices.filter(d => (d.status === "ready" || d.status === "busy" || d.status === "connected") && p.eligible.includes(d.udid));
   const ready = selectable.filter(d => canReceive(p, d.udid));
+  const quickReady = p.network === "threads"
+    ? ready.filter(d => d.platform === "android" && d.status !== "busy" && threadsChecks[d.udid]?.info && !deviceGuardPending(p.deviceGuards?.[d.udid]) && !deviceGuardBlock(p.deviceGuards, d.udid))
+    : ready;
   const pendingBlock = selected.map(bundle => p.assignments[bundle.id]).filter(Boolean)
     .map(udid => deviceGuardBlock(p.deviceGuards, udid)).find(Boolean);
   const unknownGuard = selected.some(bundle => {
@@ -99,7 +105,7 @@ export function PublishQuickSetup(p: QuickProps) {
   const checkReason = p.scanning ? "Đang quét và xác nhận nội dung…" : p.preflightLoading ? "Đang kiểm tra đợt đăng…" : p.busy ? "Đang xử lý tác vụ…" : selection.reason;
   const mappingKey = JSON.stringify([p.selectedIds, p.selectedIds.map(id => p.assignments[id] ?? "")]);
   // Chỉ snapshot đã commit được phép cấp quyền cho handler/continuation sau await.
-  const assignmentKey = JSON.stringify([p.sourceRoot, p.manifest, p.selectedIds, p.assignments, p.eligible,
+  const assignmentKey = JSON.stringify([p.network, p.sourceRoot, p.manifest, p.selectedIds, p.assignments, p.eligible,
     p.devices.map(d => [d.udid, d.status]), p.deviceGuards]);
   useLayoutEffect(() => {
     latest.current = { props: p, activeId: active?.id, activeVisible, locked, key: assignmentKey };
@@ -122,10 +128,48 @@ export function PublishQuickSetup(p: QuickProps) {
     if (p.onAssignmentChange) p.onAssignmentChange(ids, assignments);
     else { p.onSelect(ids); p.onAssign(assignments); }
   };
-  const autoAssign = () => {
-    if (locked || confirming || !bundles.length) return;
+  const checkThreads = async (udid: string) => {
+    setCheckingUdid(udid);
+    try {
+      const info = await deviceThreadsAccount(udid);
+      setThreadsChecks(current => ({ ...current, [udid]: { info } }));
+      return info;
+    } catch (cause) {
+      setThreadsChecks(current => ({ ...current, [udid]: { error: describeError(cause) } }));
+      return null;
+    } finally {
+      setCheckingUdid(null);
+    }
+  };
+  const autoAssign = async () => {
+    if (locked || confirming || checkingQuick || !bundles.length) return;
+    const start = latest.current;
+    let readyIds = ready.map(d => d.udid);
+    let rejected = 0;
+    if (p.network === "threads") {
+      setCheckingQuick(true);
+      readyIds = [];
+      const accounts = new Set<string>();
+      try {
+        for (const device of ready) {
+          if (device.platform !== "android" || device.status === "busy" || deviceGuardPending(p.deviceGuards?.[device.udid]) || deviceGuardBlock(p.deviceGuards, device.udid)) {
+            rejected++;
+            continue;
+          }
+          const info = await checkThreads(device.udid);
+          if (!latest.current || latest.current.key !== start?.key || latest.current.props.active === false) return;
+          if (info && !accounts.has(info.account.toLowerCase())) {
+            readyIds.push(device.udid);
+            accounts.add(info.account.toLowerCase());
+          } else rejected++;
+        }
+      } finally {
+        setCheckingQuick(false);
+      }
+    }
+    if (!latest.current || latest.current.key !== start?.key || latest.current.locked) return;
     const next = allocateQuickPosts({ sourceIds: bundles.map(b => b.id), selectedIds: p.selectedIds,
-      assignments: p.assignments, eligibleIds: p.eligible, readyIds: ready.map(d => d.udid), picked });
+      assignments: p.assignments, eligibleIds: p.eligible, readyIds, picked });
     const after = JSON.stringify([next.ids, next.ids.map(id => next.assignments[id] ?? "")]);
     if (after !== mappingKey) {
       setUndo({ source: p.sourceRoot, ids: p.selectedIds, assignments: p.assignments, picked, after });
@@ -134,14 +178,15 @@ export function PublishQuickSetup(p: QuickProps) {
     setPicked(next.picked);
     setError("");
     const leftover = bundles.length - next.ids.length;
-    const freeReady = ready.length - next.picked.length;
-    setNotice(!next.ids.length
+    const freeReady = readyIds.length - next.picked.length;
+    const resultNotice = !next.ids.length
       ? "Chưa có máy sẵn sàng trong phạm vi. Kiểm tra kết nối hoặc chọn lại nhóm máy."
       : leftover
         ? `Đã gán ${next.ids.length} bài cho ${next.ids.length} máy. ${leftover} bài còn lại vì hết máy sẵn sàng hoặc đạt giới hạn 100 bài.`
         : freeReady
           ? `Đã gán ${next.ids.length} bài cho ${next.ids.length} máy. Còn ${freeReady} máy sẵn sàng nhưng hết bài trong nguồn.`
-          : `Đã gán ${next.ids.length} bài cho ${next.ids.length} máy.`);
+          : `Đã gán ${next.ids.length} bài cho ${next.ids.length} máy.`;
+    setNotice(rejected ? `${resultNotice} ${rejected} máy không đạt kiểm tra Threads hoặc còn bài chờ đối soát.` : resultNotice);
   };
   const undoAssignment = () => {
     if (locked || confirming || !undo || undo.source !== p.sourceRoot || undo.after !== mappingKey) return;
@@ -272,14 +317,14 @@ export function PublishQuickSetup(p: QuickProps) {
         <section className="pq-devices pq-panel" aria-label="Máy thực hiện">
           <header className="pq-devices-header"><div><h2>Thiết bị</h2><div className={`pq-active-post${active && !activeVisible ? " is-hidden" : ""}`} role="status">{active && !activeVisible ? <><span>Bài đang gán bị lọc ẩn.</span><button type="button" className="ghost" onClick={() => { revealAfterCommit.current = active.id; setQuery(""); }}>Hiện bài</button></> : <span title={active?.name}>Gán: <strong>{active?.name ?? "Chưa chọn bài"}</strong>{active && !p.selectedIds.includes(active.id) ? " · Tick bài trước" : ""}</span>}</div></div>{p.scopeControl ?? <span>{ready.length} sẵn sàng</span>}</header>
           <div className="pq-panel-tools pq-device-tools">
-            <div className="pq-quick-actions"><button type="button" className="pq-quick-button" disabled={locked || confirming || !bundles.length} onClick={autoAssign}><Zap size={15} aria-hidden="true"/>Chọn nhanh</button><button type="button" aria-label="Hoàn tác gán nhanh" disabled={locked || confirming || !undo || undo.source !== p.sourceRoot || undo.after !== mappingKey} onClick={undoAssignment}><Undo2 size={15} aria-hidden="true"/>Hoàn tác</button></div>
+            <div className="pq-quick-actions"><button type="button" className="pq-quick-button" disabled={locked || confirming || checkingQuick || !bundles.length} onClick={() => void autoAssign()}>{checkingQuick ? <LoaderCircle size={15} className="spin" aria-hidden="true"/> : <Zap size={15} aria-hidden="true"/>}{checkingQuick ? "Đang kiểm tra máy…" : "Chọn nhanh"}</button><button type="button" aria-label="Hoàn tác gán nhanh" disabled={locked || confirming || checkingQuick || !undo || undo.source !== p.sourceRoot || undo.after !== mappingKey} onClick={undoAssignment}><Undo2 size={15} aria-hidden="true"/>Hoàn tác</button></div>
             <div className="pq-device-searchbar"><label className="pq-search"><Search size={15}/><input aria-label="Tìm số máy" value={deviceQuery} onChange={e => setDeviceQuery(e.target.value)} placeholder="Tìm máy / tài khoản"/></label>
             <details className="pq-device-filters" onKeyDown={e => { if (e.key === "Escape") { e.currentTarget.open = false; e.currentTarget.querySelector("summary")?.focus(); } }}><summary aria-label="Bộ lọc thiết bị" title="Bộ lọc thiết bị"><ListFilter size={15}/><span>Bộ lọc thiết bị</span></summary><div>
               <label><input type="checkbox" checked={onlyFree} onChange={e => setOnlyFree(e.target.checked)}/>Chỉ hiện máy sẵn sàng chưa có bài</label>
               {p.scopeControl && <label><input type="checkbox" checked={showOutOfScope} onChange={e => setShowOutOfScope(e.target.checked)}/>Hiện máy ngoài phạm vi</label>}
-              <button type="button" className="ghost" title="Chọn tất cả máy sẵn sàng trong phạm vi, kể cả ngoài kết quả tìm kiếm" disabled={locked || confirming || !ready.length} onClick={() => { if (!locked && !confirming) setPicked(ready.map(d => d.udid)); }}>Chọn tất cả sẵn sàng</button>
+              <button type="button" className="ghost" title="Chọn tất cả máy sẵn sàng trong phạm vi, kể cả ngoài kết quả tìm kiếm" disabled={locked || confirming || !quickReady.length} onClick={() => { if (!locked && !confirming) setPicked(quickReady.map(d => d.udid)); }}>Chọn tất cả sẵn sàng</button>
               <button type="button" className="ghost" disabled={locked || confirming || (!picked.length && !selected.some(b => p.assignments[b.id]))} onClick={() => { if (!locked && !confirming) { setPicked([]); p.onAssign({}); } }}>Bỏ chọn toàn bộ máy</button>
-              <small>{mapped} bài đã ghép · {ready.length} máy sẵn sàng / {devices.length} tổng. Bộ lọc chỉ đổi danh sách đang xem, không đổi Chọn nhanh.</small>
+              <small>{mapped} bài đã ghép · {p.network === "threads" ? `${quickReady.length} máy đã xác nhận Threads / ${devices.length} tổng` : `${ready.length} máy sẵn sàng / ${devices.length} tổng`}. Bộ lọc chỉ đổi danh sách đang xem, không đổi Chọn nhanh.</small>
             </div></details></div>
           </div>
           {!p.eligible.length && <p className="pq-scope-hint">Chọn Toàn bộ máy hoặc một nhóm để ghép bài.</p>}
@@ -289,18 +334,20 @@ export function PublishQuickSetup(p: QuickProps) {
             const current = assigned?.id === active?.id && !!assigned;
             const action = current ? "Đã gán" : assigned ? active && validOldMachine(p, active.id) ? "Đổi chỗ" : "Thay bài" : "Gán";
             const assignable = !!active && activeVisible && p.selectedIds.includes(active.id) && canReceive(p, d.udid);
+            const threadsCheck = threadsChecks[d.udid];
             return <div className="pq-device-row" key={d.udid}>
               <MachineChoice number={tileNumber(i + 1, p.metas.get(d.udid))} name={tileName(d, p.metas.get(d.udid))} status={d.status} reason={d.lastError} label={`Chọn ${label(d.udid)}`} checked={checked} disabled={locked || confirming || (!checked && !canReceive(p, d.udid))} onChange={value => {
                 if (locked || confirming || (value && !canReceive(p, d.udid))) return;
                 setPicked(value ? [...new Set([...picked, d.udid])] : picked.filter(id => id !== d.udid)); if (!value) clearDevice(d.udid);
               }} detail={<>
-                <span title={assigned?.name ?? p.metas.get(d.udid)?.handle ?? ""}>{assigned?.name ?? p.metas.get(d.udid)?.handle ?? (p.eligible.includes(d.udid) ? "Chưa ghép bài" : "Ngoài phạm vi")}</span>
+                <span title={assigned?.name ?? threadsCheck?.info?.account ?? p.metas.get(d.udid)?.handle ?? ""}>{assigned?.name ?? (threadsCheck?.info ? `@${threadsCheck.info.account}` : p.metas.get(d.udid)?.handle) ?? (p.eligible.includes(d.udid) ? "Chưa ghép bài" : "Ngoài phạm vi")}</span>
+                {p.network === "threads" && threadsCheck?.error && <span role="status">{threadsCheck.error}</span>}
                 {(block || pending) && <div className="publish-device-pending" role="status"><strong>{block ?? "Bài cũ còn cần kiểm tra link"}</strong>
                   {pending && <><span>{pending.reason}</span>{p.onPendingPublication && <button type="button" disabled={locked} aria-label={`Xem bài đang chờ · ${label(d.udid)}`} onClick={() => { if (!locked) p.onPendingPublication?.(pending.campaignId); }}>Xem bài đang chờ</button>}</>}
                 </div>}
               </>}/>
               <button type="button" className="pq-assign-button" aria-label={`${action} ${active?.name ?? "bài"} · ${label(d.udid)}`} disabled={locked || confirming || !assignable || current} title={!activeVisible ? "Hiện lại bài đang gán trước khi phân công" : block ?? (!p.eligible.includes(d.udid) ? "Máy ngoài phạm vi" : action)} onClick={() => { if (active) void assign(active.id, d.udid, true); }}>{action}</button>
-              {p.network === "threads" && d.platform === "android" && <div className="pq-device-open-app"><button type="button" aria-label={`Mở Threads trên ${label(d.udid)}`} disabled={locked || openingUdid !== null || !p.eligible.includes(d.udid) || !["ready", "connected"].includes(d.status)} onClick={() => void openThreads(d.udid)}>{openingUdid === d.udid ? <LoaderCircle size={14} className="spin" aria-hidden="true"/> : <AppWindow size={14} aria-hidden="true"/>}{openingUdid === d.udid ? "Đang mở Threads…" : "Mở Threads"}</button></div>}
+              {p.network === "threads" && d.platform === "android" && <div className="pq-device-open-app"><button type="button" aria-label={`Mở Threads trên ${label(d.udid)}`} disabled={locked || openingUdid !== null || checkingQuick || checkingUdid !== null || !p.eligible.includes(d.udid) || !["ready", "connected"].includes(d.status)} onClick={() => void openThreads(d.udid)}>{openingUdid === d.udid ? <LoaderCircle size={14} className="spin" aria-hidden="true"/> : <AppWindow size={14} aria-hidden="true"/>}{openingUdid === d.udid ? "Đang mở Threads…" : "Mở Threads"}</button><button type="button" aria-label={`Kiểm tra Threads trên ${label(d.udid)}`} disabled={locked || checkingQuick || checkingUdid !== null || openingUdid !== null || !p.eligible.includes(d.udid) || !["ready", "connected"].includes(d.status)} onClick={() => void checkThreads(d.udid)}>{checkingUdid === d.udid ? <LoaderCircle size={14} className="spin" aria-hidden="true"/> : <Search size={14} aria-hidden="true"/>}{checkingUdid === d.udid ? "Đang kiểm tra…" : "Kiểm tra Threads"}</button></div>}
             </div>;
           })}{!filteredDevices.length && <p className="pq-list-empty">{devices.length ? "Không có máy khớp bộ lọc." : "Chưa có thiết bị. Kết nối máy để ghép bài."}</p>}</div>
         </section>

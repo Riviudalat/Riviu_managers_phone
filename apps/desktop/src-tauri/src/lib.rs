@@ -443,6 +443,7 @@ pub fn run() {
             commands::uninstall_app,
             commands::list_installed_apps,
             commands::device_threads_build,
+            commands::device_threads_account,
             commands::device_shell,
             commands::import_media,
             commands::export_media,

@@ -63,6 +63,59 @@ pub async fn device_threads_build(
 
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
+pub struct ThreadsAccountInfo {
+    pub package_name: String,
+    pub version: String,
+    pub locale: String,
+    pub account: String,
+}
+
+/// Checks the measured build and reads the logged-in account through Riviu's device lease.
+#[tauri::command]
+pub async fn device_threads_account(
+    state: State<'_, AppState>,
+    udid: String,
+) -> Result<ThreadsAccountInfo, CommandError> {
+    let _admission = state.ensure_accepting_work()?;
+    let device = state
+        .registry
+        .list()
+        .into_iter()
+        .find(|device| device.udid == udid)
+        .ok_or_else(|| err("Thiết bị không còn kết nối"))?;
+    if device.platform != riviu_core::DevicePlatform::Android {
+        return Err(err("Kiểm tra Threads chỉ hỗ trợ Android"));
+    }
+    let (package_name, version, locale) = state.control.threads_build(&udid).await?;
+    if !riviu_core::threads_publish::measured_mobile_build(&package_name, &version, &locale) {
+        return Err(err("Threads chưa cài hoặc build/ngôn ngữ chưa được đo"));
+    }
+    let context = state
+        .control
+        .open_manual_session(&udid, DeviceWorkOwner::ManualControl)
+        .await?;
+    let result = async {
+        state
+            .control
+            .foreground_session_app(&context, &package_name)
+            .await?;
+        let session = state.control.session(&context)?;
+        riviu_core::threads_publish::mobile::observed_profile_account(session.as_ref()).await
+    }
+    .await;
+    let cleanup = state.control.close_manual_session(context);
+    let account = result.map_err(CommandError::operation)?;
+    cleanup.map_err(CommandError::from)?;
+    Ok(ThreadsAccountInfo {
+        package_name,
+        version,
+        locale,
+        account,
+    })
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
 pub struct DeviceWorkState {
     pub udid: String,
     pub current_owner: Option<DeviceWorkOwner>,

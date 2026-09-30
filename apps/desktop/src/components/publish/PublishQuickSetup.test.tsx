@@ -1,10 +1,10 @@
 import { cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import { afterEach, beforeEach, expect, it, vi } from "vitest";
-import { launchDeviceApp } from "../../api";
+import { deviceThreadsAccount, launchDeviceApp } from "../../api";
 import { PublishQuickSetup } from "./PublishQuickSetup";
 import type { PublishWizardProps } from "./PublishWizard";
 import type { PublishDeviceGuards } from "../../types";
-vi.mock("../../api", () => ({ publishImagePreview: vi.fn(), launchDeviceApp: vi.fn() }));
+vi.mock("../../api", () => ({ publishImagePreview: vi.fn(), launchDeviceApp: vi.fn(), deviceThreadsAccount: vi.fn() }));
 const row = { assignmentId: "pending-a", campaignId: "campaign-a", updatedAt: "2026-09-15T12:00:00Z", reason: "TikTok báo bài đang được xử lý" };
 const guards: PublishDeviceGuards = { a: { blocking: [row], linkReview: [] }, b: { blocking: [], linkReview: [] } };
 function props(): PublishWizardProps {
@@ -12,6 +12,7 @@ function props(): PublishWizardProps {
   return { sourceRoot: "fixture", manifest: { sourceRoot: "fixture", scannedAt: "now", bundles, notices: [], ignoredPartnerFiles: 0, ignoredHiddenFiles: 0 }, selectedIds: ["one"], assignments: { one: "a" }, captions: {}, devices: ["a", "b"].map(udid => ({ udid, name: udid, platform: "android", model: "test", osVersion: "9", connection: "usb", status: "ready", wdaReady: true })), metas: new Map(), eligible: ["a", "b"], busy: false, scanning: false, preflightLoading: false, preflight: null, preflightError: null, sound: { kind: "default" }, sheet: false, cleanup: false, runAt: "", onSource: vi.fn(), onScan: vi.fn(), onSelect: vi.fn(), onAssign: vi.fn(), onCaption: vi.fn(), onSheet: vi.fn(), onCleanup: vi.fn(), onRunAt: vi.fn(), onPreflight: vi.fn(), onExecute: vi.fn(), onHistory: vi.fn(), settings: null };
 }
 beforeEach(() => {
+  vi.mocked(deviceThreadsAccount).mockReset();
   if (!HTMLDialogElement.prototype.showModal) Object.defineProperty(HTMLDialogElement.prototype, "showModal", { configurable: true, writable: true, value() {} });
   if (!HTMLDialogElement.prototype.close) Object.defineProperty(HTMLDialogElement.prototype, "close", { configurable: true, writable: true, value() {} });
   vi.spyOn(HTMLDialogElement.prototype, "showModal").mockImplementation(function (this: HTMLDialogElement) { this.setAttribute("open", ""); });
@@ -28,6 +29,42 @@ it("opens Threads only on the chosen Android device without starting publication
   expect(p.onExecute).not.toHaveBeenCalled();
   view.rerender(<PublishQuickSetup {...p} network="tiktok" />);
   expect(screen.queryByRole("button", { name: /Mở Threads trên/ })).toBeNull();
+});
+it("checks the selected phone's real Threads account without publishing", async () => {
+  vi.mocked(deviceThreadsAccount).mockResolvedValue({ packageName: "com.instagram.barcelona", version: "446.0.0.32.78", locale: "en", account: "test.account" });
+  const p = props();
+  render(<PublishQuickSetup {...p} network="threads" />);
+  fireEvent.click(screen.getByRole("button", { name: "Kiểm tra Threads trên Máy 2 · b" }));
+  await waitFor(() => expect(screen.getByText("@test.account")).toBeVisible());
+  expect(deviceThreadsAccount).toHaveBeenCalledExactlyOnceWith("b");
+  expect(p.onPreflight).not.toHaveBeenCalled();
+  expect(p.onExecute).not.toHaveBeenCalled();
+});
+it("quick assigns only freshly verified Threads accounts without pending posts", async () => {
+  vi.mocked(deviceThreadsAccount).mockResolvedValue({ packageName: "com.instagram.barcelona", version: "446.0.0.32.78", locale: "en", account: "ready.account" });
+  const p = props(), assign = vi.fn();
+  render(<PublishQuickSetup {...p} network="threads" selectedIds={[]} assignments={{}} deviceGuards={guards} onAssignmentChange={assign} />);
+  fireEvent.click(screen.getByRole("button", { name: "Chọn nhanh" }));
+  await waitFor(() => expect(assign).toHaveBeenCalledExactlyOnceWith(["one"], { one: "b" }));
+  expect(deviceThreadsAccount).toHaveBeenCalledExactlyOnceWith("b");
+  expect(p.onExecute).not.toHaveBeenCalled();
+});
+it("quick assignment leaves posts unassigned when Threads account cannot be verified", async () => {
+  vi.mocked(deviceThreadsAccount).mockRejectedValue(new Error("Threads chưa cài"));
+  const p = props(), assign = vi.fn();
+  render(<PublishQuickSetup {...p} network="threads" selectedIds={[]} assignments={{}} onAssignmentChange={assign} />);
+  fireEvent.click(screen.getByRole("button", { name: "Chọn nhanh" }));
+  await waitFor(() => expect(screen.getAllByText("Threads chưa cài")).toHaveLength(2));
+  expect(assign).not.toHaveBeenCalled();
+  expect(p.onExecute).not.toHaveBeenCalled();
+});
+it("quick assignment uses only one machine per Threads account", async () => {
+  vi.mocked(deviceThreadsAccount).mockResolvedValue({ packageName: "com.instagram.barcelona", version: "446.0.0.32.78", locale: "en", account: "shared.account" });
+  const p = props(), assign = vi.fn();
+  render(<PublishQuickSetup {...p} network="threads" selectedIds={[]} assignments={{}} onAssignmentChange={assign} />);
+  fireEvent.click(screen.getByRole("button", { name: "Chọn nhanh" }));
+  await waitFor(() => expect(assign).toHaveBeenCalledExactlyOnceWith(["one"], { one: "a" }));
+  expect(deviceThreadsAccount).toHaveBeenCalledTimes(2);
 });
 it("shows source partner warnings without blocking valid publishing or changing source data", () => {
   const p = props();
