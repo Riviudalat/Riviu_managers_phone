@@ -124,7 +124,7 @@ fn contacts_prompt_enters_recovery_without_becoming_publication_proof() {
             &tree(xml.replace("syncing your phone contacts", "sharing your location")),
             &plan
         ),
-        Screen::Unknown
+        Screen::UnrecognizedDialog
     );
 }
 
@@ -533,7 +533,9 @@ impl Session {
             "feed" => node(":id/profile", "", "Profile", "[800,1800][1000,1900]", true),
             "dialog" => node("", "Not now", "", "[0,1200][300,1300]", true),
             "composer" => node(":id/gx_", "Draft text", "", "[0,500][600,650]", true),
-            "login" => node("", "Log in", "", "[0,500][600,650]", true),
+            "login" => format!(
+                r#"<node package="{PACKAGE}" class="android.widget.TextView" resource-id="{PACKAGE}:id/title" text="Log in to TikTok" bounds="[0,500][600,650]" displayed="true"/><node package="{PACKAGE}" class="android.widget.Button" content-desc="Use phone / email / username" bounds="[0,700][600,850]" enabled="true" clickable="true" displayed="true"/>"#
+            ),
             "comments" => comments_drawer_xml(),
             "profile" => {
                 // Account controls reproduce the already retained 46.2.1 fixture;
@@ -758,6 +760,8 @@ impl UiSession for Session {
     async fn app_version(&self, _: &str) -> Option<String> {
         if self.global_45_7_3 {
             Some("45.7.3".into())
+        } else if self.trill {
+            Some("38.3.2".into())
         } else {
             self.photo_counter.then(|| "38.3.2".into())
         }

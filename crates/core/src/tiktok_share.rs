@@ -1360,6 +1360,7 @@ mod tests {
         page: Mutex<&'static str>,
         backs: Mutex<usize>,
         taps: Mutex<usize>,
+        generation: std::sync::atomic::AtomicU64,
         package: &'static str,
     }
     #[async_trait::async_trait]
@@ -1415,8 +1416,15 @@ mod tests {
             &self,
         ) -> anyhow::Result<crate::HierarchySourceSnapshot> {
             Ok(crate::HierarchySourceSnapshot {
-                generation: 1,
-                xml: "<hierarchy/>".into(),
+                generation: self
+                    .generation
+                    .fetch_add(1, std::sync::atomic::Ordering::Relaxed)
+                    + 1,
+                xml: if *self.page.lock() == "own" {
+                    r#"<hierarchy><node package="com.ss.android.ugc.trill" class="android.widget.TextView" resource-id="com.ss.android.ugc.trill:id/dby" text="Edit profile" bounds="[100,400][400,500]" enabled="true" displayed="true"/><node package="com.ss.android.ugc.trill" class="android.widget.Button" resource-id="com.ss.android.ugc.trill:id/mjf" text="@fixture.actor" bounds="[100,300][400,400]" enabled="true" displayed="true"/></hierarchy>"#.into()
+                } else {
+                    "<hierarchy/>".into()
+                },
             })
         }
         async fn locate_all_described(
@@ -1445,6 +1453,7 @@ mod tests {
             page: Mutex::new("foreign"),
             backs: Mutex::new(0),
             taps: Mutex::new(0),
+            generation: std::sync::atomic::AtomicU64::new(0),
             package: "com.ss.android.ugc.trill",
         };
         assert_eq!(
@@ -1463,6 +1472,7 @@ mod tests {
             page: Mutex::new("startup_ad"),
             backs: Mutex::new(0),
             taps: Mutex::new(0),
+            generation: std::sync::atomic::AtomicU64::new(0),
             package: "com.zhiliaoapp.musically",
         };
         navigate_own_profile(&phone, &labels).await.unwrap();
@@ -1474,6 +1484,7 @@ mod tests {
             page: Mutex::new("startup_ad"),
             backs: Mutex::new(0),
             taps: Mutex::new(0),
+            generation: std::sync::atomic::AtomicU64::new(0),
             package: "com.android.settings",
         };
         assert!(navigate_own_profile(&wrong_app, &labels).await.is_err());
@@ -1680,6 +1691,7 @@ mod tests {
         draft_badge: ElementBox,
         draft_taps: Mutex<usize>,
         post_taps: Mutex<usize>,
+        generation: std::sync::atomic::AtomicU64,
         badge_read_fails: bool,
         post_matches: bool,
     }
@@ -1717,6 +1729,7 @@ mod tests {
                 ),
                 draft_taps: Mutex::new(0),
                 post_taps: Mutex::new(0),
+                generation: std::sync::atomic::AtomicU64::new(0),
                 badge_read_fails: false,
                 post_matches: true,
             }
@@ -1788,7 +1801,10 @@ mod tests {
                 "account read outside profile"
             );
             Ok(crate::HierarchySourceSnapshot {
-                generation: 1,
+                generation: self
+                    .generation
+                    .fetch_add(1, std::sync::atomic::Ordering::Relaxed)
+                    + 1,
                 xml: include_str!("../fixtures/tiktok-publish/musically-46.2.1-en/profile.xml")
                     .into(),
             })
