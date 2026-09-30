@@ -1627,6 +1627,7 @@ mod tests {
     // This command delegates to the production semantic executor. Require the
     // exact sole delegation AND a checked guard in that executor, not an exemption.
     fn inspector_delegates_admission(body: &str) -> bool {
+        use syn::spanned::Spanned;
         let function: syn::ItemFn = syn::parse_str(body).expect("inspector command");
         let [syn::Stmt::Expr(syn::Expr::Await(awaited), None)] = function.block.stmts.as_slice() else {
             return false;
