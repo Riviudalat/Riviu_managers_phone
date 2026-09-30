@@ -1678,10 +1678,18 @@ impl<'a, P: TapPlanner> Composer<'a, P> {
         {
             // Normalize IME and reach a positively observed editor in bounded preparation.
             // Neither preparation supplies the final sound proof: it is read afresh below.
-            self.prepare_caption_keyboard(caption, stop).await?;
+            let prepared = self.prepare_caption_keyboard(caption, stop).await;
+            if stop.load(Ordering::Relaxed) {
+                return Ok(ComposerVerdict::Stopped);
+            }
+            prepared?;
             anyhow::ensure!(self.session.gui_session_epoch() == prepared_epoch,
                 "caption preparation session changed");
-            self.prepare_sound_editor(sound_plan, &expected_title, caption, stop).await?;
+            let prepared = self.prepare_sound_editor(sound_plan, &expected_title, caption, stop).await;
+            if stop.load(Ordering::Relaxed) {
+                return Ok(ComposerVerdict::Stopped);
+            }
+            prepared?;
         }
         anyhow::ensure!(self.session.gui_session_epoch() == prepared_epoch,
             "caption preparation session changed");
