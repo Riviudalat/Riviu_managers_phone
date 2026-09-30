@@ -625,7 +625,7 @@ fn video_viewer_caption(
         // Only a complete, non-ellipsized caption excludes this tile. A folded
         // caption may still need expansion or the public metadata fallback.
         let folded =
-            visible.trim_end_matches(|c: char| matches!(c, '\u{2060}' | '\u{200e}' | '\u{200f}'));
+            visible.trim_end_matches(['\u{2060}', '\u{200e}', '\u{200f}']);
         if package == "com.zhiliaoapp.musically"
             && version == "45.7.3"
             && !folded.is_empty()
