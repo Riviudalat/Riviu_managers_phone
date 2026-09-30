@@ -89,8 +89,12 @@ fn red_fraction(img: &image::RgbImage, r: OcrRect) -> f64 {
 }
 
 fn hot_selected(img: &image::RgbImage, tabs: &[OcrRect]) -> bool {
+    selected_tab(img, tabs) == Some(0)
+}
+
+fn selected_tab(img: &image::RgbImage, tabs: &[OcrRect]) -> Option<usize> {
     if tabs.len() != 4 {
-        return false;
+        return None;
     }
     let underlined = |r: &OcrRect| {
         (r.y + r.height + 15..r.y + r.height + 50)
@@ -104,7 +108,9 @@ fn hot_selected(img: &image::RgbImage, tabs: &[OcrRect]) -> bool {
                     > 0.8
             })
     };
-    underlined(&tabs[0]) && tabs[1..].iter().all(|r| !underlined(r))
+    let mut selected = tabs.iter().enumerate().filter(|(_, rect)| underlined(rect));
+    let index = selected.next()?.0;
+    selected.next().is_none().then_some(index)
 }
 
 fn pool_from_image(
@@ -483,7 +489,8 @@ async fn observe_inner(
 ) -> anyhow::Result<ObservedSoundPool> {
     let deadline = phase_deadline(Duration::from_secs(60));
     let mut prior: Option<(String, ObservedSoundPool)> = None;
-    let mut navigated = !navigate;
+    let mut navigation_attempts = 0;
+    let mut unselected_tabs: Option<(String, usize, Vec<OcrRect>)> = None;
     let mut generation = 0;
     let mut last_rejection = None;
     loop {
@@ -508,10 +515,29 @@ async fn observe_inner(
         if hot_selected(&img, &tabs) {
             saw_hot.store(true, Ordering::Relaxed);
         }
-        if !hot_selected(&img, &tabs) && !navigated {
+        let selected = selected_tab(&img, &tabs);
+        let same_unselected_tabs =
+            unselected_tabs
+                .as_ref()
+                .is_some_and(|(before_epoch, before_selected, before)| {
+                    before_epoch == &epoch && Some(*before_selected) == selected && before == &tabs
+                });
+        unselected_tabs = selected
+            .filter(|index| *index != 0)
+            .map(|index| (epoch.clone(), index, tabs.clone()));
+        // A navigation ACK is not arrival: machine25 stayed on For You after
+        // its first Hot tap. One retry requires two fresh unchanged tab reads;
+        // never retry after Hot has appeared or enlarge the shared deadline.
+        if navigate
+            && !saw_hot.load(Ordering::Relaxed)
+            && !hot_selected(&img, &tabs)
+            && navigation_attempts < 2
+            && (navigation_attempts == 0 || same_unselected_tabs)
+        {
             let point = selection_recovery::prove_sheet(session, plan).await?;
             tap_native_image(session, point).await?;
-            navigated = true;
+            navigation_attempts += 1;
+            unselected_tabs = None;
             prior = None;
             continue;
         }
