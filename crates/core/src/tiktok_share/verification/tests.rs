@@ -1287,6 +1287,17 @@ async fn global_45_7_3_candidate_trace_is_bounded_and_redacts_caption_and_time()
         Some(VerificationReason::CaptionMismatch)
     );
     assert_eq!(trace[0].caption_digest, trace[1].caption_digest);
+    assert_eq!(
+        trace
+            .iter()
+            .filter_map(|entry| entry.canonical_url.as_deref())
+            .collect::<Vec<_>>(),
+        vec![URL]
+    );
+    assert!(trace
+        .iter()
+        .filter(|entry| entry.canonical_url.is_some())
+        .all(|entry| entry.post_id_allocated_at.is_some()));
     assert!(trace.iter().all(|entry| {
         entry
             .caption_digest
@@ -1348,6 +1359,8 @@ fn global_45_7_3_repeated_mismatches_do_not_exhaust_unique_search_budget() {
     for index in 0..12 {
         let unique = index % 6;
         trace.push(VerificationCandidateTrace {
+            canonical_url: None,
+            post_id_allocated_at: None,
             viewport: index / 6 + 1,
             index: index % 6 + 1,
             profile_snapshot_generation: u64::from(index) + 1,
@@ -1364,6 +1377,8 @@ fn global_45_7_3_repeated_mismatches_do_not_exhaust_unique_search_budget() {
     assert!(candidate_budget_exhausted(&older, &trace, 12));
     for index in 12..18 {
         trace.push(VerificationCandidateTrace {
+            canonical_url: None,
+            post_id_allocated_at: None,
             caption_digest: Some(format!("caption-{index}")),
             time_digest: Some(format!("time-{index}")),
             ..trace[0].clone()

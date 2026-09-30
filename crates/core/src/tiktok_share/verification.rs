@@ -394,6 +394,10 @@ impl UnknownScreenShape {
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub(crate) struct VerificationCandidateTrace {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) canonical_url: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) post_id_allocated_at: Option<String>,
     pub(crate) viewport: u32,
     pub(crate) index: u32,
     pub(crate) profile_snapshot_generation: u64,
@@ -681,6 +685,26 @@ struct Capture<'a> {
 }
 
 impl Capture<'_> {
+    fn remember_proven_candidate(
+        &mut self,
+        candidate: &mut Option<(String, VerificationDiagnostic)>,
+        proof: (String, VerificationDiagnostic),
+    ) -> Result<(), VerificationReason> {
+        // Preserve both proven URLs before the unchanged ambiguity refusal.
+        // ID allocation is diagnostic, not publication time or a newest-post rule.
+        if let Some(last) = self.diagnostic.candidate_trace.last_mut() {
+            last.canonical_url = Some(proof.0.clone());
+            last.post_id_allocated_at = proof
+                .0
+                .rsplit('/')
+                .next()
+                .and_then(|id| id.parse::<u64>().ok())
+                .and_then(|id| chrono::DateTime::from_timestamp((id >> 32) as i64, 0))
+                .map(|at| at.to_rfc3339());
+        }
+        remember_candidate(candidate, proof)
+    }
+
     fn trace_enabled(&self) -> bool {
         matches!(
             (
@@ -1435,6 +1459,8 @@ impl Capture<'_> {
                     self.diagnostic
                         .candidate_trace
                         .push(VerificationCandidateTrace {
+                            canonical_url: None,
+                            post_id_allocated_at: None,
                             viewport: page + 1,
                             index: page_index,
                             profile_snapshot_generation: tree.generation,
@@ -1461,7 +1487,10 @@ impl Capture<'_> {
                     match self.visible_video().await {
                         Ok(Some(link)) => {
                             self.mark_candidate(VerificationReason::Verified);
-                            remember_candidate(&mut candidate, (link, self.diagnostic.clone()))?;
+                            self.remember_proven_candidate(
+                                &mut candidate,
+                                (link, self.diagnostic.clone()),
+                            )?;
                             break 'candidate_proof;
                         }
                         Ok(None) => {}
@@ -1490,7 +1519,7 @@ impl Capture<'_> {
                             if let Some(link) = self.public_link.take() {
                                 self.mark_candidate(VerificationReason::Verified);
                                 self.diagnostic.stage = "videoPublicProof";
-                                remember_candidate(
+                                self.remember_proven_candidate(
                                     &mut candidate,
                                     (link, self.diagnostic.clone()),
                                 )?;
@@ -1507,7 +1536,7 @@ impl Capture<'_> {
                                     Ok(link) => {
                                         closed?;
                                         self.mark_candidate(VerificationReason::Verified);
-                                        remember_candidate(&mut candidate, link)?;
+                                        self.remember_proven_candidate(&mut candidate, link)?;
                                         break;
                                     }
                                     Err(VerificationReason::OtherPublication) => {
@@ -1530,7 +1559,7 @@ impl Capture<'_> {
                                         };
                                         if let Some(link) = self.public_link.take() {
                                             self.diagnostic.stage = "videoPublicProof";
-                                            remember_candidate(
+                                            self.remember_proven_candidate(
                                                 &mut candidate,
                                                 (link, self.diagnostic.clone()),
                                             )?;
@@ -1585,7 +1614,7 @@ impl Capture<'_> {
                                     Ok(link) => {
                                         self.mark_candidate(VerificationReason::Verified);
                                         self.diagnostic.stage = "expandedPhotoPublicProof";
-                                        remember_candidate(
+                                        self.remember_proven_candidate(
                                             &mut candidate,
                                             (link, self.diagnostic.clone()),
                                         )?;
