@@ -556,9 +556,9 @@ async fn observe_inner(
                     screen == (1080.0, 2220.0),
                     "Hot recovery native coordinates unmeasured"
                 );
+                let package = read_sound(session.active_app_bundle()).await?;
                 anyhow::ensure!(
-                    session.gui_session_epoch() == epoch
-                        && read_sound(session.active_app_bundle()).await? == plan.package,
+                    session.gui_session_epoch() == epoch && package == plan.package,
                     "Hot recovery app/session changed"
                 );
                 check_wait()?;
