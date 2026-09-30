@@ -316,7 +316,7 @@ impl Database {
         bundles: &[crate::PublishBundle],
         initial_snapshot: Option<&crate::PublishExecutionSnapshotDraft>,
     ) -> anyhow::Result<bool> {
-        request.network.ensure_implemented()?;
+        request.network.ensure_publish_implemented()?;
         if let Some(target) = &request.sheet_delivery {
             target.validate()?;
             anyhow::ensure!(

@@ -47,6 +47,20 @@ impl SocialNetwork {
         matches!(self, Self::TikTok)
     }
 
+    pub fn is_publish_implemented(self) -> bool {
+        self.is_implemented()
+            || (self == Self::Threads && crate::threads_publish::mobile::ADAPTER_ENABLED)
+    }
+
+    pub fn ensure_publish_implemented(self) -> anyhow::Result<()> {
+        anyhow::ensure!(
+            self.is_publish_implemented(),
+            "{} chưa có adapter Đăng bài đã kiểm chứng",
+            self.display_name()
+        );
+        Ok(())
+    }
+
     pub fn ensure_implemented(self) -> anyhow::Result<()> {
         if self.is_implemented() {
             Ok(())

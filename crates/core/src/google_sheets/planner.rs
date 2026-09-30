@@ -297,6 +297,11 @@ fn partners(p: &Value) -> Result<Vec<String>> {
         .collect()
 }
 fn canonical(url: &str) -> bool {
+    if crate::publish_submission::canonical_publication_author(url)
+        .is_ok_and(|(network, _)| network == crate::SocialNetwork::Threads)
+    {
+        return true;
+    }
     let Ok(u) = url::Url::parse(url) else {
         return false;
     };

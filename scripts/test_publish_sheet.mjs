@@ -581,6 +581,27 @@ test("compact sheet appends by received link order while retaining each machine 
 
 const deliveryV2 = { deliveryVersion: 2, spreadsheetId: "fixture-book", sheetGid: 0, deliveryRevision: 1, rowKind: "canonical" };
 
+test("Threads canonical delivery survives a lost response without adding another row", () => {
+  const h = harness();
+  const post = { ...deliveryV2, postUrl: "https://www.threads.com/@fixture.account/post/Fixture123" };
+  h.state.lostResponse = true;
+  assert.equal(h.deliver(post).ok, false);
+  const resumed = h.deliver(post);
+  assert.equal(resumed.ok, true, resumed.error);
+  assert.equal(resumed.duplicate, true);
+  assert.equal(h.cells.length, 2);
+  assert.equal(h.cells[1][3], post.postUrl);
+  assert.equal(h.state.writes, 1);
+});
+
+test("Threads share URLs, tracking and foreign hosts cannot be delivered as canonical", () => {
+  for (const postUrl of ["https://www.threads.com/share/example/", "https://www.threads.com/@fixture/post/Fixture123?tracking=1", "https://www.threads.com.evil.test/@fixture/post/Fixture123"]) {
+    const h = harness();
+    assert.equal(h.deliver({ ...deliveryV2, postUrl }).ok, false);
+    assert.equal(h.state.writes, 0);
+  }
+});
+
 test('v2 readback bypasses SpreadsheetApp cache after an advanced API commit', () => {
   const h=harness({headers:internalHeaders});h.state.staleReads=true;
   const pending={...deliveryV2,...internalRow,rowRevision:1,deliveryRevision:1};

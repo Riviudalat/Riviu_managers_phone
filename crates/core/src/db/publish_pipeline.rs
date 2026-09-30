@@ -25,7 +25,7 @@ impl Database {
         if let Some(request) = request {
             serde_json::from_str::<crate::PublishCampaignRequest>(&request)?
                 .network
-                .ensure_implemented()?;
+                .ensure_publish_implemented()?;
         }
         let now = Utc::now().to_rfc3339();
         let token = Uuid::new_v4().to_string();

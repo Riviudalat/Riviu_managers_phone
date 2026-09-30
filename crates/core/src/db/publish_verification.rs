@@ -187,7 +187,12 @@ fn submission_identity_complete(intent: Option<&str>) -> bool {
             value["expectedAccount"].as_str().is_some_and(|account| {
                 let handle = account.trim().trim_start_matches('@');
                 !handle.is_empty()
-                    && handle.len() <= 24
+                    && handle.len()
+                        <= if value["package"] == crate::threads_publish::ANDROID_PACKAGE {
+                            30
+                        } else {
+                            24
+                        }
                     && !handle.ends_with('.')
                     && handle
                         .bytes()
@@ -1332,27 +1337,7 @@ impl Database {
         poster: &str,
         partners: &[String],
     ) -> anyhow::Result<bool> {
-        let parsed = url::Url::parse(post_url)?;
-        anyhow::ensure!(
-            parsed.scheme() == "https"
-                && matches!(
-                    parsed.host_str(),
-                    Some("www.tiktok.com" | "tiktok.com" | "m.tiktok.com")
-                )
-                && parsed.username().is_empty()
-                && parsed.password().is_none()
-                && parsed.port_or_known_default() == Some(443),
-            "verification requires canonical TikTok HTTPS link"
-        );
-        let targets = crate::interaction::parse_tiktok_links(post_url);
-        anyhow::ensure!(
-            targets.len() == 1
-                && targets[0]
-                    .target
-                    .as_ref()
-                    .is_some_and(|target| target.normalized_url == post_url),
-            "verification requires canonical post identity without tracking"
-        );
+        let (network, author) = crate::publish_submission::canonical_publication_author(post_url)?;
         let mut evidence: serde_json::Value = serde_json::from_str(evidence_json)?;
         let proof = evidence.get("post").unwrap_or(&evidence);
         anyhow::ensure!(
@@ -1362,6 +1347,16 @@ impl Database {
         );
         let mut conn = self.conn()?;
         let transaction = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
+        let request: String = transaction.query_row(
+            "SELECT request_json FROM publish_campaigns WHERE id=?1",
+            [&candidate.campaign_id],
+            |row| row.get(0),
+        )?;
+        let request: crate::PublishCampaignRequest = serde_json::from_str(&request)?;
+        anyhow::ensure!(
+            network == request.network,
+            "Verified URL differs from campaign network"
+        );
         let current: Option<(String,Option<String>,Option<String>)> = transaction.query_row(
             "SELECT state,effect_intent,evidence_json FROM publish_assignments WHERE id=?1 AND campaign_id=?2 AND revision=?3",
             params![candidate.assignment_id,candidate.campaign_id,candidate.revision],
@@ -1388,9 +1383,7 @@ impl Database {
             .and_then(serde_json::Value::as_str)
         {
             anyhow::ensure!(
-                targets[0].target.as_ref().is_some_and(|target| target
-                    .author
-                    .eq_ignore_ascii_case(account.trim_start_matches('@'))),
+                author.eq_ignore_ascii_case(account.trim_start_matches('@')),
                 "verified link does not match the account recorded before Post"
             );
         }

@@ -431,13 +431,10 @@ nhưng các điểm lưu settings/profile/campaign, claim job và worker phục 
 chối network chưa hỗ trợ trước effect. Chỉ thêm enum hoặc adapter GUI không cấp quyền
 chạy Nuôi, Tương tác hay Đăng trên Threads.
 
-`threads_publish::THREADS_PUBLISH_FLOW` mô tả các trạng thái dự kiến của đường Android, không
-phải selector hay engine đã chạy: nhận diện app → composer → media → caption → trạng thái nút
-Đăng → intent bền vững → gửi một lần → xác minh bài của chính tài khoản → permalink. Preflight
-chỉ đọc `com.instagram.barcelona`/version/locale rồi fail-closed cho đến khi có fixture và verifier.
+`threads_publish::THREADS_PUBLISH_FLOW` mô tả thứ tự của adapter Android: nhận diện app → composer → album media → caption → trạng thái nút Đăng → intent bền vững → gửi một lần → xác minh bài của chính tài khoản → permalink. Adapter chỉ nhận `com.instagram.barcelona` build `446.0.0.32.78`, locale `en`/`en-US`, 1-14 ảnh; fixture accessibility đã ẩn danh ở `crates/core/fixtures/threads_446`. Matcher dùng ảnh chụp album riêng và SHA nguồn, đối chiếu mọi thumbnail kể cả hàng bị che cần cuộn. Verifier chỉ mở bài từ caption trên profile, kiểm author/time ở màn chi tiết và canonical permalink; lỗi sau intent phải giữ `uncertain` để đối soát mà không dispatch lại. Build 448 và locale khác vẫn fail-closed.
 Package Android theo [Google Play](https://play.google.com/store/apps/details?id=com.instagram.barcelona);
 giới hạn caption 500 ký tự và loại media theo [giới thiệu chính thức của Meta](https://about.fb.com/news/2023/07/introducing-threads-new-app-text-sharing/).
-Tài liệu này không xác nhận label accessibility của một build cụ thể.
+Các nguồn bên ngoài không xác nhận label accessibility của một build cụ thể; fixture trong repo là bằng chứng cho build được bật.
 Orchestration fleet (`OrchestrationDocumentV1`) là đồ thị gọi vào engine Nuôi /
 Tương tác / Đăng hiện có; nút “Tạo mẫu 3 chức năng” seed 3 hồ sơ + một điều phối
 Nuôi→Tương tác→Đăng. Engine vẫn là source of truth, không thay bằng node Flow V2 tap/swipe.

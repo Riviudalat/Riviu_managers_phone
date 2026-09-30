@@ -490,9 +490,8 @@ chọn nội dung, ghép máy, kiểm tra trước khi đăng, hẹn giờ và t
 yêu cầu preflight và lịch, không đổi tab bằng cách chỉ thay nhãn. Preflight Android đọc package
 `com.instagram.barcelona`, version và locale; kiểm nội dung tối đa 500 ký tự cùng media,
 rồi báo riêng các bước composer/xác minh chưa được đo. Threads không dùng bộ chọn nhạc TikTok.
-Hiện preflight Threads vẫn khóa thao tác **Đăng bài** vì chưa đo ứng dụng Threads trên thiết bị và chưa có cách xác minh
-liên kết sau khi gửi. Không có bài nào được gửi từ tab Threads cho tới khi đủ hai điều kiện này.
-Trong **Thiết lập**, nút **Mở Threads** trên từng dòng máy Android đưa ứng dụng Threads lên màn hình máy đó để đăng tay hoặc kiểm tra tài khoản. Máy cần kết nối, nằm trong phạm vi đã chọn và không có tác vụ điều khiển đang giữ máy. Thao tác này không chọn media, nhập caption hoặc gửi bài; kết quả preflight vẫn khóa **Đăng bài**.
+Với Android chạy Threads `446.0.0.32.78` ở locale `en` hoặc `en-US`, Riviu có thể tự chuyển album ảnh của từng bài, chọn đúng ảnh theo thứ tự nguồn, nhập caption và xác minh bài trên profile của chính tài khoản trước khi lưu permalink. Mỗi bài hỗ trợ 1-14 ảnh; video, build/locale khác và album không khớp vẫn bị preflight chặn. Không cần ghi Flow hoặc chọn ảnh trong Inspector khi vận hành. Sau khi bấm Đăng một lần, kết quả chưa rõ được giữ để đối soát; không bấm Đăng lại cho cùng lượt. Nếu bật Google Sheet, cần kiểm tra kết nối ghi trước khi chạy; khi tắt Sheet, kết quả chỉ lưu trong Riviu.
+Trong **Thiết lập**, nút **Mở Threads** trên từng dòng máy Android đưa ứng dụng Threads lên màn hình máy đó để đăng tay hoặc kiểm tra tài khoản. Máy cần kết nối, nằm trong phạm vi đã chọn và không có tác vụ điều khiển đang giữ máy. Thao tác này không chọn media, nhập caption hoặc gửi bài; quyền chạy tự động vẫn phụ thuộc kết quả preflight của đúng máy và bài đã ghép.
 
 Mỗi thư mục bài Threads dùng cấu trúc nguồn sau (tên phần sau dấu `-` có thể thay đổi):
 

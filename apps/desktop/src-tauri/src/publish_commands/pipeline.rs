@@ -24,6 +24,7 @@ struct Runtime {
     agent: String,
     run: PublishPipelineRun,
     sound: riviu_core::PublishSoundPolicy,
+    network: riviu_core::SocialNetwork,
 }
 struct Recovery {
     db: Arc<Database>,
@@ -109,18 +110,34 @@ impl Runtime {
             .context("campaign disappeared")?;
         single.assignments = vec![a.clone()];
         single.bundles = vec![bundle.clone()];
-        preflight::refuse_unmeasured_video_assignments_before_transfer(&self.control, &single)
-            .await?;
-        preflight::refuse_devices_whose_composer_is_not_measured([(
-            a.udid.as_str(),
-            preflight::readiness_of(&self.control, &a.udid).await,
-        )])?;
-        preflight::refuse_devices_whose_sound_picker_is_not_measured(&self.control, &[a]).await?;
-        preflight::refuse_assignments_whose_bundle_is_too_large([(
-            a.udid.as_str(),
-            bundle,
-            preflight::max_images_for(preflight::route_of(&self.control, &a.udid)),
-        )])?;
+        if self.network == riviu_core::SocialNetwork::Threads {
+            let (package, version, locale) = self.control.threads_build(&a.udid).await?;
+            anyhow::ensure!(
+                riviu_core::threads_publish::measured_mobile_build(&package, &version, &locale),
+                "Threads build/locale chưa được đo"
+            );
+            riviu_core::threads_publish::validate_caption(&bundle.caption)?;
+            anyhow::ensure!(
+                bundle.video.is_none()
+                    && (1..=riviu_core::threads_publish::mobile::MAX_MEASURED_IMAGES)
+                        .contains(&bundle.images.len()),
+                "Threads chỉ hỗ trợ album ảnh đã đo"
+            );
+        } else {
+            preflight::refuse_unmeasured_video_assignments_before_transfer(&self.control, &single)
+                .await?;
+            preflight::refuse_devices_whose_composer_is_not_measured([(
+                a.udid.as_str(),
+                preflight::readiness_of(&self.control, &a.udid).await,
+            )])?;
+            preflight::refuse_devices_whose_sound_picker_is_not_measured(&self.control, &[a])
+                .await?;
+            preflight::refuse_assignments_whose_bundle_is_too_large([(
+                a.udid.as_str(),
+                bundle,
+                preflight::max_images_for(preflight::route_of(&self.control, &a.udid)),
+            )])?;
+        }
         self.advance(
             a,
             revision,
@@ -232,7 +249,7 @@ pub(crate) async fn execute_pipeline(
     let request = db
         .publish_campaign_request(&campaign)?
         .context("campaign missing")?;
-    request.network.ensure_implemented()?;
+    request.network.ensure_publish_implemented()?;
     anyhow::ensure!(
         request.verification_contract_version == Some(1)
             && (!request.sheet_enabled
@@ -441,7 +458,7 @@ pub(crate) async fn run_dispatcher(
                     let request = work_db
                         .publish_campaign_request(&task_job.run.campaign_id)?
                         .context("request missing")?;
-                    request.network.ensure_implemented()?;
+                    request.network.ensure_publish_implemented()?;
                     anyhow::ensure!(
                         request.execution_confirmed
                             && request.verification_contract_version == Some(1)
@@ -453,6 +470,7 @@ pub(crate) async fn run_dispatcher(
                         "publish approval or verification contract missing"
                     );
                     let runtime = Runtime {
+                        network: request.network,
                         control: work_control,
                         db: work_db,
                         frames: work_frames,

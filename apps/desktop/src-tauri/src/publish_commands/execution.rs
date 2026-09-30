@@ -665,7 +665,7 @@ pub(super) fn post_url_owed(evidence: &serde_json::Value) -> Option<&str> {
         .or_else(|| evidence.get("postUrl"))
         .and_then(serde_json::Value::as_str)
         .map(str::trim)
-        .filter(|url| riviu_core::tiktok_share::looks_like_a_post_link(url))
+        .filter(|url| riviu_core::publish_submission::canonical_publication_author(url).is_ok())
 }
 
 /// Who the sheet says posted. Always `bot`, and the sheet is why.
@@ -1148,7 +1148,7 @@ pub(crate) async fn execute_publish_campaign_inner(
     let request = db
         .publish_campaign_request(&campaign_id)?
         .ok_or_else(|| anyhow::anyhow!("publish campaign request not found"))?;
-    request.network.ensure_implemented()?;
+    request.network.ensure_publish_implemented()?;
     let mut detail = db
         .get_publish_campaign(&campaign_id)?
         .ok_or_else(|| anyhow::anyhow!("publish campaign not found"))?;
@@ -2002,10 +2002,11 @@ pub(super) async fn capture_confirmed_assignment_link(
     bundle: &riviu_core::PublishBundle,
     observer: Option<&riviu_core::db::PendingPublishVerification>,
 ) -> anyhow::Result<ConfirmedAssignmentLink> {
-    db.publish_campaign_request(&assignment.campaign_id)?
+    let network = db
+        .publish_campaign_request(&assignment.campaign_id)?
         .context("publish campaign request not found")?
-        .network
-        .ensure_implemented()?;
+        .network;
+    network.ensure_publish_implemented()?;
     anyhow::ensure!(
         matches!(
             assignment.state,
@@ -2015,6 +2016,9 @@ pub(super) async fn capture_confirmed_assignment_link(
         ),
         "link recovery requires a submitted post; never dispatch Post here"
     );
+    if network == riviu_core::SocialNetwork::Threads {
+        return super::threads_runtime::capture(db, control, assignment, bundle, observer).await;
+    }
     anyhow::ensure!(
         !bundle.caption.trim().is_empty(),
         "caption missing for own-post proof"
@@ -2187,7 +2191,7 @@ pub(crate) async fn post_publish_campaign_inner(
     let request = db
         .publish_campaign_request(&campaign_id)?
         .ok_or_else(|| anyhow::anyhow!("publish campaign request not found"))?;
-    request.network.ensure_implemented()?;
+    request.network.ensure_publish_implemented()?;
     let detail = db
         .get_publish_campaign(&campaign_id)?
         .ok_or_else(|| anyhow::anyhow!("publish campaign not found"))?;
@@ -2402,10 +2406,10 @@ pub(super) fn attach_selection_diagnostic(
 }
 
 pub(super) struct AssignmentPostAttempt {
-    outcome: PostOutcome,
-    claim_refused: bool,
-    final_revision: Option<i64>,
-    selection_diagnostic: Option<serde_json::Value>,
+    pub(super) outcome: PostOutcome,
+    pub(super) claim_refused: bool,
+    pub(super) final_revision: Option<i64>,
+    pub(super) selection_diagnostic: Option<serde_json::Value>,
 }
 
 #[cfg(any(test, feature = "diagnostics"))]
@@ -2473,7 +2477,7 @@ async fn post_one_assignment_owned(
     };
     let request = match db.publish_campaign_request(campaign_id) {
         Ok(Some(request))
-            if request.network.is_implemented()
+            if request.network.is_publish_implemented()
                 && request.verification_contract_version == Some(1)
                 && (!request.sheet_enabled
                     || request
@@ -2488,6 +2492,18 @@ async fn post_one_assignment_owned(
                 .into(),
         )),
     };
+    if request.network == riviu_core::SocialNetwork::Threads {
+        return super::threads_runtime::post(
+            control,
+            db,
+            assignment,
+            bundle,
+            &request,
+            run,
+            initial_revision,
+        )
+        .await;
+    }
     let cleanup_policy = request.cleanup_policy;
     let defer_link_capture = run.is_some() || request.run_at.is_some();
     // **Everything before the phone opens is a refusal, not an unknown.** These used to be

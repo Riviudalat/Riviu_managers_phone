@@ -445,11 +445,6 @@ pub fn run() {
             commands::device_threads_build,
             commands::device_shell,
             commands::import_media,
-            commands::import_publish_bundle,
-            #[cfg(debug_assertions)]
-            commands::threads_submit_prepared_canary,
-            #[cfg(debug_assertions)]
-            commands::threads_reconcile_canary,
             commands::export_media,
             commands::set_screen_rotation,
             commands::screenshot,

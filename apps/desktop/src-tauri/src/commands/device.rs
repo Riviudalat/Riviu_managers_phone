@@ -340,6 +340,7 @@ pub async fn import_media(
 
 /// Import exactly one scanned post bundle into one device album for Threads calibration.
 /// The production publish transfer uses the same stage/prepare/import control plane.
+#[allow(dead_code)]
 #[tauri::command]
 pub async fn import_publish_bundle(
     state: State<'_, AppState>,
@@ -413,6 +414,124 @@ pub async fn import_publish_bundle(
 /// Development canary for one already prepared Threads composer. A durable claim is
 /// written before Post; an ambiguous result can only be reconciled, never replayed.
 #[cfg(debug_assertions)]
+#[allow(dead_code)]
+#[tauri::command]
+pub async fn threads_prepare_canary(
+    state: State<'_, AppState>,
+    udid: String,
+    source_root: String,
+    bundle_id: String,
+    import_id: String,
+    expected_account: String,
+) -> Result<serde_json::Value, CommandError> {
+    let _admission = state.ensure_accepting_work()?;
+    let (package, version, locale) = state.control.threads_build(&udid).await?;
+    if package != riviu_core::threads_publish::ANDROID_PACKAGE
+        || version != riviu_core::threads_publish::mobile::MEASURED_VERSION
+        || !matches!(locale.as_str(), "en" | "en-US")
+    {
+        return Err(CommandError::invalid_argument(
+            "Threads build/locale unmeasured",
+        ));
+    }
+    let manifest = riviu_core::scan_publish_folder(
+        PathBuf::from(source_root),
+        riviu_core::PublishScanOptions::default(),
+    )
+    .map_err(CommandError::operation)?;
+    let bundle = manifest
+        .bundles
+        .into_iter()
+        .find(|bundle| bundle.id == bundle_id)
+        .ok_or_else(|| CommandError::invalid_argument("Threads bundle missing"))?;
+    with_manual_session(
+        &state,
+        &udid,
+        DeviceWorkOwner::ManualControl,
+        move |session| async move {
+            session
+                .restart_app(riviu_core::threads_publish::ANDROID_PACKAGE)
+                .await?;
+            let prepared = riviu_core::threads_publish::mobile::prepare(
+                session.as_ref(),
+                &bundle,
+                &import_id,
+                &expected_account,
+            )
+            .await?;
+            Ok(serde_json::to_value(prepared)?)
+        },
+    )
+    .await
+}
+
+/// Verify the earlier canary using the production adapter, without a Post path.
+#[cfg(debug_assertions)]
+#[allow(dead_code)]
+#[tauri::command]
+pub async fn threads_verify_canary(
+    state: State<'_, AppState>,
+    udid: String,
+    source_root: String,
+    bundle_id: String,
+) -> Result<serde_json::Value, CommandError> {
+    let _admission = state.ensure_accepting_work()?;
+    let key = format!("threads.canary.intent.{udid}.{bundle_id}");
+    let intent: serde_json::Value = serde_json::from_str(
+        &state
+            .db
+            .get_setting(&key)
+            .map_err(CommandError::operation)?
+            .ok_or_else(|| CommandError::invalid_argument("Threads canary intent missing"))?,
+    )
+    .map_err(CommandError::operation)?;
+    let account = intent["expectedAccount"]
+        .as_str()
+        .ok_or_else(|| CommandError::invalid_argument("Threads account missing"))?
+        .to_owned();
+    let submitted = intent["claimedAt"]
+        .as_str()
+        .ok_or_else(|| CommandError::invalid_argument("Threads timestamp missing"))?
+        .to_owned();
+    let manifest = riviu_core::scan_publish_folder(
+        PathBuf::from(source_root),
+        riviu_core::PublishScanOptions::default(),
+    )
+    .map_err(CommandError::operation)?;
+    let bundle = manifest
+        .bundles
+        .into_iter()
+        .find(|b| b.id == bundle_id)
+        .ok_or_else(|| CommandError::invalid_argument("Threads bundle missing"))?;
+    if intent["captionSha256"] != bundle.caption_sha256 {
+        return Err(CommandError::invalid_argument(
+            "Threads source caption changed",
+        ));
+    }
+    let url = with_manual_session(
+        &state,
+        &udid,
+        DeviceWorkOwner::ManualControl,
+        move |session| async move {
+            riviu_core::threads_publish::mobile::verify(
+                session.as_ref(),
+                &bundle.caption,
+                &account,
+                &submitted,
+            )
+            .await
+        },
+    )
+    .await?;
+    state
+        .db
+        .verify_threads_canary_post(&key, &url)
+        .map_err(CommandError::operation)?;
+    Ok(serde_json::json!({"state":"verified","permalink":url}))
+}
+
+#[cfg(debug_assertions)]
+#[allow(dead_code)]
 #[tauri::command]
 pub async fn threads_submit_prepared_canary(
     state: State<'_, AppState>,
@@ -490,6 +609,7 @@ pub async fn threads_submit_prepared_canary(
 }
 
 #[cfg(debug_assertions)]
+#[allow(dead_code)]
 #[tauri::command]
 pub async fn threads_reconcile_canary(
     state: State<'_, AppState>,
@@ -587,6 +707,7 @@ pub async fn threads_reconcile_canary(
         }
         let client = reqwest::Client::builder()
             .redirect(reqwest::redirect::Policy::none())
+            .timeout(std::time::Duration::from_secs(15))
             .build()
             .map_err(CommandError::operation)?;
         let response = client

@@ -419,7 +419,7 @@ function validateDeliveryTarget(sheet, payload) {
   if (payload.spreadsheetId !== sheet.getParent().getId() || payload.sheetGid !== sheet.getSheetId()) throw new Error('Đích Sheet khác bảng hoặc tab đã chốt');
   if (typeof payload.assignmentId !== 'string' || !payload.assignmentId.trim() || payload.assignmentId !== payload.assignmentId.trim()
     || typeof payload.postUrl !== 'string' || payload.postUrl !== payload.postUrl.trim()
-    || (payload.postUrl && !/^https:\/\/(?:www\.)?tiktok\.com\/@[^/?#]+\/(?:photo|video)\/\d+$/.test(payload.postUrl))
+    || (payload.postUrl && !isCanonicalPublicationLink(payload.postUrl))
     || typeof payload.poster !== 'string' || !payload.poster.trim()) throw new Error('Danh tính hoặc canonical Link không hợp lệ');
   if (payload.rowKind === 'internalReport' && payload.deliveryRevision !== payload.rowRevision) throw new Error('Revision báo cáo không khớp deliveryRevision');
 }
@@ -620,6 +620,11 @@ function rowFingerprintMatches(values, expected) {
   return false;
 }
 
+function isCanonicalPublicationLink(link) {
+  return /^https:\/\/(?:www\.)?tiktok\.com\/@[^/?#]+\/(?:photo|video)\/\d+$/.test(link)
+    || /^https:\/\/www\.threads\.com\/@[a-z0-9_](?:[a-z0-9_.]{0,28}[a-z0-9_])?\/post\/[A-Za-z0-9_-]+$/.test(link);
+}
+
 function payloadFingerprintMatches(poster, postedAt, postUrl, metadata, partners, expected) {
   const candidate = partners.slice();
   while (candidate.length >= 1) {
@@ -653,8 +658,8 @@ function deliverInternal(sheet, layout, payload, postUrl, assignmentId) {
     throw new Error('Hàng canonical chỉ dành cho bài đã xác minh');
   }
   if (payload.rowKind === 'canonical' && payload.postedAt === null) throw new Error('Hàng canonical cần thời điểm gửi bài đã lưu');
-  if (postUrl && !/^https:\/\/(?:www\.)?tiktok\.com\/@[^/?#]+\/(?:photo|video)\/\d+$/.test(postUrl)) {
-    throw new Error('Link báo cáo phải là canonical TikTok HTTPS');
+  if (postUrl && !isCanonicalPublicationLink(postUrl)) {
+    throw new Error('Link báo cáo phải là canonical TikTok hoặc Threads HTTPS');
   }
   if (versioned && ((payload.status === 'Đã xác minh') !== Boolean(postUrl))) {
     throw new Error('Chỉ trạng thái Đã xác minh được có canonical link');

@@ -14,11 +14,11 @@
     "shareSheet": ["post_share_sheet_copy_link_button", "Link"]
   },
   "observed": {
-    "importAlbumPhotoCount": 1,
-    "selectedPhotoCount": 1,
+    "importAlbumPhotoCount": 14,
+    "selectedPhotoCount": 14,
     "clipboardLinkForm": "https://www.threads.com/share/<share-id>/",
     "redirectForm": "https://www.threads.com/@<account>/post/<post-id>?<tracking>",
-    "afterNewSendMeasured": false,
-    "publicPostDispatched": false
+    "afterNewSendMeasured": true,
+    "publicPostDispatched": true
   }
 }

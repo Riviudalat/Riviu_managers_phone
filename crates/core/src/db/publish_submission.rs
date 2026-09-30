@@ -1,22 +1,24 @@
 use super::*;
-use crate::publish_submission::{normalize_publish_account, PublishSubmissionProof};
+use crate::publish_submission::PublishSubmissionProof;
 
 fn require_assigned_account(
     conn: &Connection,
     assignment: &str,
     observed: &str,
 ) -> anyhow::Result<()> {
-    let assigned: String = conn.query_row(
-        "SELECT COALESCE(m.handle,'') FROM publish_assignments a
+    let (assigned, network): (String, String) = conn.query_row(
+        "SELECT COALESCE(m.handle,''),COALESCE(json_extract(c.request_json,'$.network'),'tiktok')
+         FROM publish_assignments a JOIN publish_campaigns c ON c.id=a.campaign_id
          LEFT JOIN device_meta m ON m.udid=a.udid WHERE a.id=?1",
         [assignment],
-        |row| row.get(0),
+        |row| Ok((row.get(0)?, row.get(1)?)),
     )?;
     // Older imported records can lack operator metadata. A configured identity
     // is authoritative and may never be silently replaced by an observed one.
-    if !assigned.trim().is_empty() {
+    if network == "tiktok" && !assigned.trim().is_empty() {
         anyhow::ensure!(
-            normalize_publish_account(&assigned)? == normalize_publish_account(observed)?,
+            crate::threads_publish::normalize_threads_account(&assigned)?
+                == crate::threads_publish::normalize_threads_account(observed)?,
             "Tài khoản trên máy không khớp nick đã gán; chưa Đăng"
         );
     }
@@ -29,7 +31,7 @@ impl Database {
     }
     /// Reserve across every device and both TikTok packages. No clock expiry after dispatch.
     pub fn reserve_publish_account(&self, assignment: &str, account: &str) -> anyhow::Result<()> {
-        let account = normalize_publish_account(account)?;
+        let account = crate::threads_publish::normalize_threads_account(account)?;
         let mut conn = self.conn()?;
         let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
         let eligible: bool = tx.query_row(
@@ -79,7 +81,7 @@ pub(super) fn validate_submission_claim(
         "SELECT c.request_json,a.bundle_id FROM publish_assignments a JOIN publish_campaigns c ON c.id=a.campaign_id WHERE a.id=?1",
         [assignment], |r| Ok((r.get(0)?,r.get(1)?)))?;
     let request: crate::PublishCampaignRequest = serde_json::from_str(&request)?;
-    request.network.ensure_implemented()?;
+    request.network.ensure_publish_implemented()?;
     if request.verification_contract_version.is_none() {
         return Ok(());
     }
@@ -95,6 +97,11 @@ pub(super) fn validate_submission_claim(
     let proof: PublishSubmissionProof =
         serde_json::from_str(intent).context("Thiếu bằng chứng trước Đăng")?;
     proof.validate()?;
+    anyhow::ensure!(
+        (proof.package == crate::threads_publish::ANDROID_PACKAGE)
+            == (request.network == crate::SocialNetwork::Threads),
+        "Submission package differs from campaign network"
+    );
     let submitted = chrono::DateTime::parse_from_rfc3339(&proof.submitted_at)?.with_timezone(&Utc);
     let age = Utc::now().signed_duration_since(submitted).num_seconds();
     anyhow::ensure!(
@@ -131,7 +138,7 @@ pub(super) fn validate_submission_claim(
                     == crate::tiktok_labels::normalise_language(&proof.locale)),
         "TikTok đã thay đổi so với lần kiểm tra; kiểm tra lại trước Đăng"
     );
-    let account = normalize_publish_account(&proof.expected_account)?;
+    let account = crate::threads_publish::normalize_threads_account(&proof.expected_account)?;
     require_assigned_account(conn, assignment, &account)?;
     let owns: bool = conn.query_row("SELECT EXISTS(SELECT 1 FROM publish_account_reservations WHERE account=?1 AND assignment_id=?2)",
         params![account,assignment], |r| r.get(0))?;
@@ -169,16 +176,10 @@ pub(super) fn record_canonical_identity(
         observed["publicationVerified"] == true && observed["postUrl"].as_str() == Some(post_url),
         "Liên kết chưa có bằng chứng xác minh bài đăng"
     );
-    let targets = crate::interaction::parse_tiktok_links(post_url);
+    let (network, author) = crate::publish_submission::canonical_publication_author(post_url)?;
     anyhow::ensure!(
-        targets.len() == 1
-            && targets[0]
-                .target
-                .as_ref()
-                .is_some_and(|target| target.normalized_url == post_url
-                    && target
-                        .author
-                        .eq_ignore_ascii_case(proof.expected_account.trim_start_matches('@'))),
+        network == request.network
+            && author.eq_ignore_ascii_case(proof.expected_account.trim_start_matches('@')),
         "Liên kết không khớp tài khoản trước Đăng"
     );
     let owner: Option<String> = conn

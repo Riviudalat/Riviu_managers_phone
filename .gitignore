@@ -42,6 +42,8 @@ sidecars/riviu-android-agent/local.properties
 # untracked at the root on 24/08/2026, one `git add -A` away from being published. Dump into
 # target/ (already ignored) when you want to keep one.
 *.xml
+# Sanitized Threads accessibility fixtures; raw captures stay under target/.
+!crates/core/fixtures/threads_446/*.xml
 !apps/desktop/**/*.xml
 !sidecars/**/*.xml
 # Sanitized, measured bookmark fixtures only; raw device dumps remain ignored.

@@ -62,7 +62,7 @@ pub(super) fn evidence_has_post_link(raw: Option<&str>) -> bool {
         })
         .and_then(serde_json::Value::as_str)
         .map(str::trim)
-        .is_some_and(crate::tiktok_share::looks_like_a_post_link)
+        .is_some_and(|link| crate::publish_submission::canonical_publication_author(link).is_ok())
 }
 
 pub(super) fn reconciled_sheet_delivery_status(

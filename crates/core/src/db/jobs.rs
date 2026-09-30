@@ -110,7 +110,33 @@ impl Database {
     }
 }
 
+fn save_job_on(conn: &Connection, job: &JobRecord) -> anyhow::Result<()> {
+    conn.execute(
+            r#"
+            INSERT INTO jobs (id, script_name, udids_json, status, created_at, updated_at, steps_json, error)
+            VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)
+            ON CONFLICT(id) DO UPDATE SET
+              status=excluded.status,
+              updated_at=excluded.updated_at,
+              steps_json=excluded.steps_json,
+              error=excluded.error
+            "#,
+            params![
+                job.id.to_string(),
+                job.script_name,
+                serde_json::to_string(&job.udids)?,
+                serde_json::to_string(&job.status)?,
+                job.created_at.to_rfc3339(),
+                job.updated_at.to_rfc3339(),
+                serde_json::to_string(&job.steps)?,
+                job.error,
+            ],
+        )?;
+    Ok(())
+}
+
 #[cfg(test)]
+#[allow(clippy::items_after_test_module)]
 mod threads_canary_tests {
     use super::*;
 
@@ -144,31 +170,6 @@ mod threads_canary_tests {
         drop(reopened);
         let _ = std::fs::remove_file(path);
     }
-}
-
-fn save_job_on(conn: &Connection, job: &JobRecord) -> anyhow::Result<()> {
-    conn.execute(
-            r#"
-            INSERT INTO jobs (id, script_name, udids_json, status, created_at, updated_at, steps_json, error)
-            VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)
-            ON CONFLICT(id) DO UPDATE SET
-              status=excluded.status,
-              updated_at=excluded.updated_at,
-              steps_json=excluded.steps_json,
-              error=excluded.error
-            "#,
-            params![
-                job.id.to_string(),
-                job.script_name,
-                serde_json::to_string(&job.udids)?,
-                serde_json::to_string(&job.status)?,
-                job.created_at.to_rfc3339(),
-                job.updated_at.to_rfc3339(),
-                serde_json::to_string(&job.steps)?,
-                job.error,
-            ],
-        )?;
-    Ok(())
 }
 fn list_jobs_on(conn: &Connection, limit: usize) -> anyhow::Result<Vec<JobRecord>> {
     let mut stmt = conn.prepare(

@@ -4,6 +4,10 @@ use image::{imageops::FilterType, DynamicImage, GenericImageView, RgbImage};
 use serde::{Deserialize, Serialize};
 use url::Url;
 
+pub mod mobile;
+#[cfg(test)]
+mod mobile_recovery_tests;
+
 pub const ANDROID_PACKAGE: &str = "com.instagram.barcelona";
 pub const MAX_CAPTION_CHARS: usize = 500;
 
@@ -45,8 +49,11 @@ pub fn validate_caption(caption: &str) -> anyhow::Result<()> {
 
 /// No tuple is admitted until its accessibility hierarchy and post-link verifier
 /// have been captured as fixtures. Package detection alone is not automation support.
-pub fn measured_mobile_build(_package: &str, _version: &str, _locale: &str) -> bool {
-    false
+pub fn measured_mobile_build(package: &str, version: &str, locale: &str) -> bool {
+    mobile::ADAPTER_ENABLED
+        && package == ANDROID_PACKAGE
+        && version == mobile::MEASURED_VERSION
+        && matches!(locale, "en" | "en-US")
 }
 
 pub fn normalize_threads_account(account: &str) -> anyhow::Result<String> {
@@ -73,6 +80,7 @@ pub fn canonical_post_permalink(
     let parsed = Url::parse(redirected_url)?;
     anyhow::ensure!(
         parsed.scheme() == "https"
+            && parsed.port_or_known_default() == Some(443)
             && matches!(parsed.host_str(), Some("threads.com" | "www.threads.com")),
         "Threads permalink must use HTTPS on threads.com"
     );
@@ -144,6 +152,22 @@ pub fn match_imported_photos(
     expected_album: &str,
     album_photo_count: usize,
 ) -> anyhow::Result<Vec<usize>> {
+    match_imported_photos_observations(
+        source_images,
+        &[(screenshot_png, cells)],
+        album_title,
+        expected_album,
+        album_photo_count,
+    )
+}
+
+pub fn match_imported_photos_observations(
+    source_images: &[&[u8]],
+    observations: &[(&[u8], &[GalleryPhotoCell])],
+    album_title: &str,
+    expected_album: &str,
+    album_photo_count: usize,
+) -> anyhow::Result<Vec<usize>> {
     anyhow::ensure!(
         !source_images.is_empty(),
         "Threads album has no source images"
@@ -153,53 +177,84 @@ pub fn match_imported_photos(
         "Threads import album differs"
     );
     anyhow::ensure!(
-        album_photo_count == source_images.len() && cells.len() == source_images.len(),
+        album_photo_count == source_images.len()
+            && !observations.is_empty()
+            && observations
+                .iter()
+                .all(|(_, cells)| cells.len() == source_images.len()),
         "Threads album photo count differs"
     );
-    let screen = image::load_from_memory(screenshot_png)?;
-    let screen_bounds = screen.dimensions();
-    let samples = cells
+    let full_height = observations
         .iter()
-        .map(|cell| {
+        .flat_map(|(_, cells)| cells.iter().map(|cell| cell.height))
+        .max()
+        .unwrap_or_default();
+    let mut samples = vec![Vec::new(); source_images.len()];
+    for (png, cells) in observations {
+        let screen = image::load_from_memory(png)?;
+        let bounds = screen.dimensions();
+        for (position, cell) in cells.iter().enumerate() {
             anyhow::ensure!(
-                cell.width >= 48 && cell.height >= 48,
-                "Threads thumbnail is too small"
-            );
-            anyhow::ensure!(
-                cell.x
-                    .checked_add(cell.width)
-                    .is_some_and(|right| right <= screen_bounds.0)
+                cell.width >= 48
+                    && cell.height >= 48
+                    && cell
+                        .x
+                        .checked_add(cell.width)
+                        .is_some_and(|x| x <= bounds.0)
                     && cell
                         .y
                         .checked_add(cell.height)
-                        .is_some_and(|bottom| bottom <= screen_bounds.1),
-                "Threads thumbnail is outside screenshot"
+                        .is_some_and(|y| y <= bounds.1),
+                "Threads thumbnail is outside screenshot or too small"
             );
-            Ok(center_sample(&screen.crop_imm(
-                cell.x,
-                cell.y,
-                cell.width,
-                cell.height,
-            )))
-        })
-        .collect::<anyhow::Result<Vec<_>>>()?;
+            if cell.height * 100 >= full_height * 95 {
+                samples[position].push(center_sample(&screen.crop_imm(
+                    cell.x,
+                    cell.y,
+                    cell.width,
+                    cell.height,
+                )));
+            }
+        }
+    }
+    anyhow::ensure!(
+        samples.iter().all(|set| !set.is_empty()),
+        "Threads album has a clipped photo without a full observation"
+    );
+    for set in &samples {
+        if set.len() > 1 {
+            anyhow::ensure!(
+                set[1..]
+                    .iter()
+                    .all(|other| thumbnail_error(&set[0], other) <= 8.0),
+                "Threads gallery order changed between observations"
+            );
+        }
+    }
     let mut ordered = Vec::with_capacity(source_images.len());
     for bytes in source_images {
         let source = center_sample(&image::load_from_memory(bytes)?);
         let mut scores = samples
             .iter()
             .enumerate()
-            .map(|(index, sample)| (index, thumbnail_error(&source, sample)))
+            .map(|(index, set)| {
+                (
+                    index,
+                    set.iter()
+                        .map(|sample| thumbnail_error(&source, sample))
+                        .fold(f64::INFINITY, f64::min),
+                )
+            })
             .collect::<Vec<_>>();
         scores.sort_by(|a, b| a.1.total_cmp(&b.1));
         anyhow::ensure!(
             scores[0].1 <= 15.0
                 && scores
                     .get(1)
-                    .is_none_or(|other| other.1 - scores[0].1 >= 12.0),
+                    .is_none_or(|other| other.1 - scores[0].1 >= 8.0),
             "Threads thumbnail identity is ambiguous"
         );
-        ordered.push(cells[scores[0].0].element_index);
+        ordered.push(observations.last().unwrap().1[scores[0].0].element_index);
     }
     let unique = ordered.iter().collect::<std::collections::HashSet<_>>();
     anyhow::ensure!(
@@ -376,15 +431,21 @@ mod tests {
     }
 
     #[test]
-    fn measured_fixture_keeps_send_closed_without_after_send_verifier() {
+    fn measured_fixture_admits_only_observed_build_and_locale() {
         let fixture: serde_json::Value =
             serde_json::from_str(include_str!("../fixtures/threads_446_en_us.json")).unwrap();
-        assert_eq!(fixture["observed"]["afterNewSendMeasured"], false);
-        assert_eq!(fixture["observed"]["publicPostDispatched"], false);
-        assert!(!measured_mobile_build(
+        assert_eq!(fixture["observed"]["afterNewSendMeasured"], true);
+        assert_eq!(fixture["observed"]["publicPostDispatched"], true);
+        assert!(measured_mobile_build(
             fixture["package"].as_str().unwrap(),
             fixture["version"].as_str().unwrap(),
             fixture["locale"].as_str().unwrap(),
         ));
+        assert!(!measured_mobile_build(
+            ANDROID_PACKAGE,
+            mobile::MEASURED_VERSION,
+            "vi"
+        ));
+        assert!(!measured_mobile_build(ANDROID_PACKAGE, "448.0.0.0.0", "en"));
     }
 }

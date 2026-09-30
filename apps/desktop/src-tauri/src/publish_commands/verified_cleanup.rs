@@ -13,7 +13,7 @@ pub(crate) async fn cleanup_verified_assignments(
         if db
             .publish_campaign_request(&candidate.campaign_id)?
             .is_none_or(|request| {
-                !request.network.is_implemented()
+                !request.network.is_publish_implemented()
                     || request.verification_contract_version != Some(1)
             })
         {
@@ -35,7 +35,7 @@ pub(super) async fn cleanup_verified_assignment(
     db.publish_campaign_request(&candidate.campaign_id)?
         .context("publish campaign request not found")?
         .network
-        .ensure_implemented()?;
+        .ensure_publish_implemented()?;
     let Some(_permit) =
         db.try_publish_work(&candidate.udid, "cleanup", &candidate.assignment_id)?
     else {

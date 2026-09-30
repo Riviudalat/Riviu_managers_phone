@@ -40,22 +40,7 @@ fn cleanup_import(evidence: &serde_json::Value) -> Option<String> {
         return None;
     }
     let link = post.get("postUrl")?.as_str()?;
-    let url = url::Url::parse(link).ok()?;
-    if url.scheme() != "https"
-        || !matches!(
-            url.host_str(),
-            Some("www.tiktok.com" | "tiktok.com" | "m.tiktok.com")
-        )
-        || !url.username().is_empty()
-        || url.password().is_some()
-        || url.port_or_known_default() != Some(443)
-    {
-        return None;
-    }
-    let targets = crate::interaction::parse_tiktok_links(link);
-    if targets.len() != 1 || targets[0].target.as_ref()?.normalized_url != link {
-        return None;
-    }
+    crate::publish_submission::canonical_publication_author(link).ok()?;
     let import = if let Some(cleanup) = evidence.get("cleanup").filter(|value| value.is_object()) {
         if cleanup.get("state").and_then(|value| value.as_str()) == Some("cleaned") {
             return None;
@@ -108,7 +93,16 @@ fn candidate_from_connection(
     if request.cleanup_policy != crate::PublishCleanupPolicy::DeleteImportedAssetsAfterVerified {
         return Ok(None);
     }
-    let evidence = serde_json::from_str(&evidence_json)?;
+    let evidence: serde_json::Value = serde_json::from_str(&evidence_json)?;
+    let post = evidence.get("post").unwrap_or(&evidence);
+    let link_network = post
+        .get("postUrl")
+        .and_then(serde_json::Value::as_str)
+        .and_then(|link| crate::publish_submission::canonical_publication_author(link).ok())
+        .map(|(network, _)| network);
+    if link_network != Some(request.network) {
+        return Ok(None);
+    }
     Ok(
         cleanup_import(&evidence).map(|import_id| PendingPublishCleanup {
             assignment_id: id.into(),

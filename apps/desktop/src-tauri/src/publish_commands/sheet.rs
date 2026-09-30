@@ -124,7 +124,7 @@ async fn deliver_bound_claim(
         db.publish_campaign_request(&campaign_id)?
             .context("Sheet campaign request not found")?
             .network
-            .ensure_implemented()?;
+            .ensure_publish_implemented()?;
         let (settings, direct) = db
             .storage_read(|db| {
                 Ok((

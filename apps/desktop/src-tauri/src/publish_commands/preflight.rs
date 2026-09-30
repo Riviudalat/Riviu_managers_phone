@@ -720,11 +720,11 @@ async fn build_threads_preflight(
             ));
         }
         let media_ok = match &bundle.media_kind {
-            riviu_core::PublishMediaKind::Video => {
-                bundle.video.is_some() && bundle.images.is_empty()
-            }
+            riviu_core::PublishMediaKind::Video => false,
             riviu_core::PublishMediaKind::Image => {
-                bundle.video.is_none() && !bundle.images.is_empty()
+                bundle.video.is_none()
+                    && (1..=riviu_core::threads_publish::mobile::MAX_MEASURED_IMAGES)
+                        .contains(&bundle.images.len())
             }
         };
         if !media_ok {
@@ -828,12 +828,14 @@ async fn build_threads_preflight(
         } else {
             (None, None, None, false)
         };
-        row_issues.push(preflight_issue(
-            "threads_verification_unimplemented",
-            udid,
-            &bundle.id,
-            "Chưa có engine xác minh bài Threads và lấy permalink; chưa được phép gửi Đăng",
-        ));
+        if !riviu_core::threads_publish::mobile::ADAPTER_ENABLED {
+            row_issues.push(preflight_issue(
+                "threads_verification_unimplemented",
+                udid,
+                &bundle.id,
+                "Chưa có engine xác minh bài Threads và lấy permalink; chưa được phép gửi Đăng",
+            ));
+        }
 
         observations.push(serde_json::json!({
             "ordinal": ordinal,
@@ -911,7 +913,7 @@ pub(super) fn require_supported_publish_network(
     network: riviu_core::SocialNetwork,
 ) -> anyhow::Result<()> {
     anyhow::ensure!(
-        network == riviu_core::SocialNetwork::TikTok,
+        network.is_publish_implemented(),
         "Chưa thể đăng lên {}: thiếu locator composer và bộ xác minh liên kết theo package/build/locale. Không dùng luồng TikTok cho mạng này",
         network.display_name()
     );
@@ -924,12 +926,11 @@ mod network_gate_tests {
     use riviu_core::SocialNetwork;
 
     #[test]
-    fn only_measured_tiktok_pipeline_is_admitted() {
+    fn measured_tiktok_and_threads_publish_pipelines_are_admitted() {
         assert!(require_supported_publish_network(SocialNetwork::TikTok).is_ok());
-        for network in [SocialNetwork::Threads, SocialNetwork::Instagram] {
-            let error = require_supported_publish_network(network).unwrap_err();
-            assert!(error.to_string().contains(network.display_name()));
-        }
+        assert!(require_supported_publish_network(SocialNetwork::Threads).is_ok());
+        let error = require_supported_publish_network(SocialNetwork::Instagram).unwrap_err();
+        assert!(error.to_string().contains("Instagram"));
     }
 }
 
@@ -1070,11 +1071,12 @@ mod sheet_choice_tests {
         .await
         .unwrap();
         assert!(!threads.report.can_execute);
-        assert!(threads
-            .report
-            .issues
-            .iter()
-            .any(|issue| issue.code == "threads_verification_unimplemented"));
+        assert!(threads.report.issues.iter().any(|issue| {
+            matches!(
+                issue.code.as_str(),
+                "threads_android_required" | "threads_media_invalid"
+            )
+        }));
         control.shutdown_cleanup().await.unwrap();
         drop(db);
         std::fs::remove_file(path).unwrap();

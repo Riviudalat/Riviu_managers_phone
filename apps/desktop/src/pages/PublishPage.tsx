@@ -1319,7 +1319,6 @@ export function PublishPage({
       </div>
       <AutomationTabs id="publish" label="Chế độ Đăng bài" value={workspaceTab} onChange={setWorkspaceTab} />
       <PublishHostLimits onSaved={() => setLimitsRevision(revision => revision + 1)} />
-      {publishNetwork === "threads" && <div className="publish-global-notice"><StatusNotice tone="warning">Đang dùng sườn chiến dịch đăng bài cho Threads. Preflight sẽ giữ nút Đăng bị khóa cho tới khi package/build/locale, composer và bộ xác minh liên kết Threads được đo.</StatusNotice></div>}
       {guardsFailed && <div className="publish-global-notice"><StatusNotice tone="warning">{UNKNOWN_PUBLISH_GUARD}. <button type="button" onClick={() => void refreshDeviceGuards()}>Kiểm tra lại trạng thái bài</button></StatusNotice></div>}
       {notice && (
         <div className="publish-global-notice">

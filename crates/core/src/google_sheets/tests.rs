@@ -142,6 +142,35 @@ fn committed_timeout_retry_and_restart_select_the_same_row() {
 }
 
 #[test]
+fn threads_permalink_is_validated_for_direct_sheet_delivery() {
+    let (metadata, layout, _) = fixture();
+    let target = crate::publish_sheet::SheetDeliveryTarget {
+        version: 2,
+        spreadsheet_id: metadata.spreadsheet_id.clone(),
+        sheet_gid: 0,
+        internal_reporting: true,
+        reporting_epoch: Some("fixture-epoch".into()),
+    };
+    let mut row = payload(
+        "threads-post",
+        1,
+        "https://www.threads.com/@fixture/post/Fixture123",
+    );
+    assert!(validate_payload(&row, &target, &layout).is_ok());
+    for invalid in [
+        "https://www.threads.com/share/example/",
+        "https://www.threads.com/@another/post/Fixture123",
+        "https://www.threads.com/@fixture/post/Fixture123?tracking=1",
+    ] {
+        row["postUrl"] = json!(invalid);
+        assert!(
+            validate_payload(&row, &target, &layout).is_err(),
+            "{invalid}"
+        );
+    }
+}
+
+#[test]
 fn failed_diagnostic_projects_only_exact_publication_note_without_raw_cell_data() {
     let (m, l, mut rows) = fixture();
     let url = "https://www.tiktok.com/@fixture/photo/111";

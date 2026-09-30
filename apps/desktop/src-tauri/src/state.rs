@@ -2972,7 +2972,9 @@ mod tests {
         assert!(production.contains("flows.defer_startup_recovery()?"));
         assert!(production.contains("let local_api_allowed = !self.dev_acceptance.active()"));
         assert!(production.contains("let automatic_device_workers_frozen ="));
-        assert!(production.contains("if acceptance.active() {\n                return;"));
+        assert!(production
+            .replace("\r\n", "\n")
+            .contains("if acceptance.active() {\n                return;"));
         assert_eq!(production.matches("RIVIU_DEV_MANUAL_ACCEPTANCE").count(), 0);
     }
 
