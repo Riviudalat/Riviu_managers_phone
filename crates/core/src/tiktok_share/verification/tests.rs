@@ -559,7 +559,21 @@ impl Session {
                         node(":id/cover", "", "", "[0,1050][400,1500]", true)
                     )
                 };
-                format!("{}{}{}<node package=\"{PACKAGE}\" enabled=\"true\" scrollable=\"true\" bounds=\"[0,500][900,1750]\">{covers}</node>", node("", "Edit", "", "[600,100][750,150]", true), node(if self.global_45_7_3 { ":id/s0v" } else { ":id/scn" }, "@fixture.account", "", "[300,160][600,210]", true), node("", "", "Profile menu", "[800,100][900,150]", true))
+                let edit = if self.trill {
+                    format!(
+                        r#"<node package="{PACKAGE}" class="android.widget.TextView" resource-id="{PACKAGE}:id/dby" text="Edit profile" bounds="[600,100][750,150]" enabled="true" displayed="true"/>"#
+                    )
+                } else {
+                    node("", "Edit", "", "[600,100][750,150]", true)
+                };
+                let username_id = if self.trill {
+                    ":id/mjf"
+                } else if self.global_45_7_3 {
+                    ":id/s0v"
+                } else {
+                    ":id/scn"
+                };
+                format!("{edit}{}{}<node package=\"{PACKAGE}\" enabled=\"true\" scrollable=\"true\" bounds=\"[0,500][900,1750]\">{covers}</node>", node(username_id, "@fixture.account", "", "[300,160][600,210]", true), node("", "", "Profile menu", "[800,100][900,150]", true))
             }
             "post" => format!(
                 "{}{}{}{}{}",
