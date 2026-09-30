@@ -1,6 +1,46 @@
 //! The submitted publication keeps its identity while TikTok restarts for Copy.
 use riviu_core::{db::Database, DeviceControlPlane, PublishAssignmentRecord, UiSessionContext};
 
+/// Samsung Android9, machine30 capture 2026-09-30T01:07Z: IME hides the
+/// contacts/tabs. This only permits hiding that IME, never closing the picker.
+fn measured_blank_recipient_search(tree: &riviu_core::ui_automation::tree::Tree) -> bool {
+    const PACKAGE: &str = "com.samsung.android.messaging";
+    let one = |id: &str| {
+        let mut found = tree.nodes.iter().enumerate().filter(|(index, node)| {
+            node.visible(PACKAGE)
+                && node.visibility() == Some(true)
+                && tree.ancestors_visible(*index)
+                && node.attr("resource-id") == id
+        });
+        let index = found.next()?.0;
+        found.next().is_none().then_some(index)
+    };
+    let Some(root) = one("com.samsung.android.messaging:id/picker_activity_main") else {
+        return false;
+    };
+    let Some(search) = one("com.samsung.android.messaging:id/search_src_text") else {
+        return false;
+    };
+    let Some(empty) = one("com.samsung.android.messaging:id/empty_layout") else {
+        return false;
+    };
+    let node = &tree.nodes[search];
+    tree.inside(search, root)
+        && tree.inside(empty, root)
+        && node.attr("class") == "android.widget.EditText"
+        && node.attr("hint") == "Search Contacts or enter number"
+        && node.attr("text") == "Search Contacts or enter number"
+        && node.attr("showing-hint") == "true"
+        && node.attr("focused") == "true"
+        && tree.nodes.iter().enumerate().all(|(index, node)| {
+            !node.visible(PACKAGE)
+                || index == search
+                || (node.attr("text").is_empty()
+                    && node.attr("content-desc").is_empty()
+                    && node.attr("class") != "android.widget.EditText")
+        })
+}
+
 fn measured_empty_recipient_picker(tree: &riviu_core::ui_automation::tree::Tree) -> bool {
     const PACKAGE: &str = "com.samsung.android.messaging";
     let one = |id: &str| {
@@ -695,6 +735,7 @@ pub(super) async fn foreground(
     // Back only from the measured empty recipient picker; never select a recipient
     // or interact with a message composer or another application.
     let session = control.session(context)?;
+    let mut hid_recipient_keyboard = false;
     for _ in 0..2 {
         if session.active_app_bundle().await.ok().as_deref()
             != Some("com.samsung.android.messaging")
@@ -702,7 +743,53 @@ pub(super) async fn foreground(
             break;
         }
         let source = session.hierarchy_source_snapshot().await?;
-        let tree = riviu_core::ui_automation::tree::Tree::parse(source)?;
+        let mut tree = riviu_core::ui_automation::tree::Tree::parse(source)?;
+        if !hid_recipient_keyboard && measured_blank_recipient_search(&tree) {
+            let epoch = session.gui_session_epoch();
+            if !epoch.is_empty() && session.keyboard_shown().await? {
+                let fresh = session.hierarchy_source_snapshot().await?;
+                let fresh = riviu_core::ui_automation::tree::Tree::parse(fresh)?;
+                if measured_blank_recipient_search(&fresh)
+                    && session.gui_session_epoch() == epoch
+                    && session.active_app_bundle().await?.as_str()
+                        == "com.samsung.android.messaging"
+                    && session.keyboard_shown().await?
+                {
+                    authorize()?;
+                    anyhow::ensure!(
+                        session.gui_session_epoch() == epoch,
+                        "recipient picker session changed"
+                    );
+                    hid_recipient_keyboard = true;
+                    session.back().await?;
+                    // Same session and positive IME disappearance must precede a
+                    // fresh full empty-picker proof. Never treat partial XML as empty.
+                    let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(3);
+                    while session.keyboard_shown().await? {
+                        authorize()?;
+                        anyhow::ensure!(
+                            tokio::time::Instant::now() < deadline,
+                            "recipient keyboard did not close"
+                        );
+                        tokio::time::sleep(std::time::Duration::from_millis(150)).await;
+                    }
+                    authorize()?;
+                    anyhow::ensure!(
+                        session.gui_session_epoch() == epoch
+                            && session.active_app_bundle().await?.as_str()
+                                == "com.samsung.android.messaging",
+                        "recipient picker changed after hiding keyboard"
+                    );
+                    tree = riviu_core::ui_automation::tree::Tree::parse(
+                        session.hierarchy_source_snapshot().await?,
+                    )?;
+                    anyhow::ensure!(
+                        session.gui_session_epoch() == epoch,
+                        "recipient picker session changed after read"
+                    );
+                }
+            }
+        }
         if !(measured_empty_recipient_picker(&tree) || legacy_empty_recipient_picker(&tree))
             || session.active_app_bundle().await.ok().as_deref()
                 != Some("com.samsung.android.messaging")
@@ -937,6 +1024,26 @@ mod tests {
 
     fn parsed(xml: String) -> Tree {
         Tree::parse(HierarchySourceSnapshot { generation: 1, xml }).unwrap()
+    }
+
+    #[test]
+    fn observed_keyboard_picker_only_authorizes_empty_search_recovery() {
+        let xml = include_str!("fixtures/samsung-empty-recipient-keyboard.xml");
+        let tree = parsed(xml.to_owned());
+        assert!(!measured_empty_recipient_picker(&tree));
+        assert!(!legacy_empty_recipient_picker(&tree));
+        assert!(measured_blank_recipient_search(&tree));
+        for unsafe_xml in [
+            xml.replace(
+                "text=\"Search Contacts or enter number\"",
+                "text=\"0123456789\"",
+            ),
+            xml.replace("showing-hint=\"true\"", "showing-hint=\"false\""),
+            xml.replace("com.samsung.android.messaging", "com.other.messaging"),
+            xml.replace("picker_activity_main", "message_composer"),
+        ] {
+            assert!(!measured_blank_recipient_search(&parsed(unsafe_xml)));
+        }
     }
 
     #[test]

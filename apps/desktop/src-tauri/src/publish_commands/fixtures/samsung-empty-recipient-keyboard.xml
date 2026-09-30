@@ -1,0 +1,49 @@
+<hierarchy class="hierarchy">
+  <android.widget.FrameLayout package="com.samsung.android.messaging" class="android.widget.FrameLayout" text="" focused="false" bounds="[0,0][2220,1080]" displayed="true" showing-hint="false">
+    <android.widget.FrameLayout package="com.samsung.android.messaging" class="android.widget.FrameLayout" text="" focused="false" bounds="[126,0][2220,1080]" displayed="true" showing-hint="false">
+      <android.widget.FrameLayout package="com.samsung.android.messaging" class="android.widget.FrameLayout" text="" focused="false" bounds="[126,0][2220,1080]" displayed="true" showing-hint="false">
+        <android.widget.LinearLayout package="com.samsung.android.messaging" class="android.widget.LinearLayout" text="" resource-id="com.samsung.android.messaging:id/action_bar_root" focused="false" bounds="[126,0][2220,1080]" displayed="true" showing-hint="false">
+          <android.widget.FrameLayout package="com.samsung.android.messaging" class="android.widget.FrameLayout" text="" resource-id="android:id/content" focused="false" bounds="[126,0][2220,1080]" displayed="true" showing-hint="false">
+            <android.widget.LinearLayout package="com.samsung.android.messaging" class="android.widget.LinearLayout" text="" resource-id="com.samsung.android.messaging:id/picker_activity_main" focused="false" bounds="[126,0][2220,1080]" displayed="true" showing-hint="false">
+              <android.view.ViewGroup package="com.samsung.android.messaging" class="android.view.ViewGroup" text="" focused="false" bounds="[126,0][2220,922]" displayed="true" showing-hint="false">
+                <android.widget.LinearLayout package="com.samsung.android.messaging" class="android.widget.LinearLayout" text="" resource-id="com.samsung.android.messaging:id/list_fragment_container" focused="false" bounds="[126,0][2220,922]" displayed="true" showing-hint="false">
+                  <android.widget.FrameLayout package="com.samsung.android.messaging" class="android.widget.FrameLayout" text="" focused="false" bounds="[126,0][2220,922]" displayed="true" showing-hint="false">
+                    <android.widget.FrameLayout package="com.samsung.android.messaging" class="android.widget.FrameLayout" text="" resource-id="com.samsung.android.messaging:id/contact_list_fragment_container" focused="false" bounds="[126,0][2220,922]" displayed="true" showing-hint="false">
+                      <android.widget.FrameLayout package="com.samsung.android.messaging" class="android.widget.FrameLayout" text="" resource-id="com.samsung.android.messaging:id/picker_select_container" focused="false" bounds="[126,0][2220,922]" displayed="true" showing-hint="false">
+                        <android.widget.LinearLayout package="com.samsung.android.messaging" class="android.widget.LinearLayout" text="" focused="false" bounds="[126,0][2220,922]" displayed="true" showing-hint="false">
+                          <android.widget.ScrollView package="com.samsung.android.messaging" class="android.widget.ScrollView" text="" focused="false" bounds="[126,0][2220,169]" displayed="true" showing-hint="false">
+                            <android.widget.RelativeLayout package="com.samsung.android.messaging" class="android.widget.RelativeLayout" text="" focused="false" bounds="[126,0][2220,169]" displayed="true" showing-hint="false">
+                              <android.widget.FrameLayout package="com.samsung.android.messaging" class="android.widget.FrameLayout" text="" resource-id="com.samsung.android.messaging:id/contact_list_search_view_container" focused="false" bounds="[126,0][2220,169]" displayed="true" showing-hint="false">
+                                <android.support.v7.widget.LinearLayoutCompat package="com.samsung.android.messaging" class="android.support.v7.widget.LinearLayoutCompat" text="" resource-id="com.samsung.android.messaging:id/contact_list_search_view" focused="false" bounds="[126,11][2220,137]" displayed="true" showing-hint="false">
+                                  <android.widget.LinearLayout package="com.samsung.android.messaging" class="android.widget.LinearLayout" text="" resource-id="com.samsung.android.messaging:id/search_bar" focused="false" bounds="[126,11][2220,137]" displayed="true" showing-hint="false">
+                                    <android.widget.LinearLayout package="com.samsung.android.messaging" class="android.widget.LinearLayout" text="" resource-id="com.samsung.android.messaging:id/search_edit_frame" focused="false" bounds="[126,11][2220,137]" displayed="true" showing-hint="false">
+                                      <android.widget.LinearLayout package="com.samsung.android.messaging" class="android.widget.LinearLayout" text="" resource-id="com.samsung.android.messaging:id/search_plate" focused="false" bounds="[126,16][2220,132]" displayed="true" showing-hint="false">
+                                        <android.widget.EditText package="com.samsung.android.messaging" class="android.widget.EditText" text="Search Contacts or enter number" resource-id="com.samsung.android.messaging:id/search_src_text" focused="true" bounds="[179,16][2194,132]" displayed="true" hint="Search Contacts or enter number" showing-hint="true" />
+                                      </android.widget.LinearLayout>
+                                    </android.widget.LinearLayout>
+                                  </android.widget.LinearLayout>
+                                </android.support.v7.widget.LinearLayoutCompat>
+                              </android.widget.FrameLayout>
+                            </android.widget.RelativeLayout>
+                          </android.widget.ScrollView>
+                          <android.widget.FrameLayout package="com.samsung.android.messaging" class="android.widget.FrameLayout" text="" resource-id="com.samsung.android.messaging:id/list_container_public" focused="false" bounds="[126,169][2220,922]" displayed="true" showing-hint="false">
+                            <android.widget.ScrollView package="com.samsung.android.messaging" class="android.widget.ScrollView" text="" resource-id="com.samsung.android.messaging:id/empty_layout" focused="false" bounds="[126,169][2220,922]" displayed="true" showing-hint="false">
+                              <android.widget.LinearLayout package="com.samsung.android.messaging" class="android.widget.LinearLayout" text="" focused="false" bounds="[126,169][2220,922]" displayed="true" showing-hint="false">
+                                <android.widget.RelativeLayout package="com.samsung.android.messaging" class="android.widget.RelativeLayout" text="" resource-id="com.samsung.android.messaging:id/empty_title_container" focused="false" bounds="[126,169][2220,922]" displayed="true" showing-hint="false" />
+                              </android.widget.LinearLayout>
+                            </android.widget.ScrollView>
+                          </android.widget.FrameLayout>
+                        </android.widget.LinearLayout>
+                      </android.widget.FrameLayout>
+                    </android.widget.FrameLayout>
+                  </android.widget.FrameLayout>
+                </android.widget.LinearLayout>
+                <android.widget.LinearLayout package="com.samsung.android.messaging" class="android.widget.LinearLayout" text="" resource-id="com.samsung.android.messaging:id/app_bar" focused="false" bounds="[126,0][2220,147]" displayed="true" showing-hint="false" />
+              </android.view.ViewGroup>
+            </android.widget.LinearLayout>
+          </android.widget.FrameLayout>
+        </android.widget.LinearLayout>
+      </android.widget.FrameLayout>
+    </android.widget.FrameLayout>
+  </android.widget.FrameLayout>
+</hierarchy>
