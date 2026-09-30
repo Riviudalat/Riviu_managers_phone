@@ -1899,8 +1899,9 @@ mod tests {
             .unwrap_err();
         assert!(
             error
-                .chain()
-                .any(|cause| cause.to_string() == "publish observation deadline exceeded"),
+                .downcast_ref::<crate::driver::UiError>()
+                .is_some_and(|error| error.op == "observe"
+                    && matches!(error.kind, crate::driver::UiErrorKind::Timeout)),
             "wrong editor title must not be accepted before the readback deadline: {error:#}"
         );
         assert_eq!(session.taps.load(Ordering::Relaxed), 1);

@@ -914,8 +914,9 @@ mod tests {
             .await
             .unwrap_err();
         assert!(
-            e.chain()
-                .any(|cause| cause.to_string() == "publish observation deadline exceeded"),
+            e.downcast_ref::<crate::driver::UiError>()
+                .is_some_and(|error| error.op == "observe"
+                    && matches!(error.kind, crate::driver::UiErrorKind::Timeout)),
             "selected marker must not accept a wrong editor title before the deadline: {e:#}"
         );
         assert_eq!(s.taps.load(Ordering::Relaxed), 1);
