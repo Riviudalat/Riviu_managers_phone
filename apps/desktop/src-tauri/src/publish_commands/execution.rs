@@ -384,7 +384,6 @@ pub async fn publish_create_campaign(
     )
     .await
     .map_err(err)?;
-    require_current_preflight_digest(&prepared.report, &approved_input_digest).map_err(err)?;
     if !prepared.report.can_execute {
         return Err(err(format!(
             "preflight từ chối chiến dịch: {}",
@@ -397,6 +396,7 @@ pub async fn publish_create_campaign(
                 .join("; ")
         )));
     }
+    require_current_preflight_digest(&prepared.report, &approved_input_digest).map_err(err)?;
     let selected = prepared.bundles;
     // Concurrent copies belong to separate preparation attempts. Only the
     // winner's managed media is committed; cleanup never deletes another caller's copy.
