@@ -780,7 +780,12 @@ mod tests {
         let e = with_sound_budget(&stop, observe(&s, plan(), 5))
             .await
             .unwrap_err();
-        assert!(format!("{e:#}").contains("3 phút"));
+        let failure = crate::publish_recovery::describe(&e);
+        assert_eq!(failure.code, "sound_load_timeout");
+        assert_eq!(
+            failure.kind,
+            crate::publish_recovery::FailureKind::Retryable
+        );
         assert_eq!(at.elapsed(), SOUND_WINDOW);
         assert_eq!(s.taps.load(Ordering::Relaxed), 0);
         let at = Instant::now();
@@ -908,7 +913,11 @@ mod tests {
         let e = choose_and_confirm_sound(&s, plan(), &p, 1)
             .await
             .unwrap_err();
-        assert!(format!("{e:#}").contains("selected sound was not confirmed"));
+        assert!(
+            e.chain()
+                .any(|cause| cause.to_string() == "publish observation deadline exceeded"),
+            "selected marker must not accept a wrong editor title before the deadline: {e:#}"
+        );
         assert_eq!(s.taps.load(Ordering::Relaxed), 1);
     }
     fn node(id: &str, text: &str, bounds: &str, selected: bool) -> String {

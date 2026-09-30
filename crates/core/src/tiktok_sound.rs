@@ -1764,7 +1764,12 @@ mod tests {
         let error = choose_and_confirm_sound(&session, plan, &pool, 0)
             .await
             .unwrap_err();
-        assert!(format!("{error:#}").contains("selected sound was not confirmed"));
+        assert!(
+            error
+                .chain()
+                .any(|cause| cause.to_string() == "publish observation deadline exceeded"),
+            "wrong editor title must not be accepted before the readback deadline: {error:#}"
+        );
         assert_eq!(session.taps.load(Ordering::Relaxed), 1);
         assert!(session.closed.load(Ordering::Relaxed));
     }
