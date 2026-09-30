@@ -169,6 +169,16 @@ pub fn retryable_error(code: &'static str, message: impl Into<String>) -> anyhow
     ClassifiedRecoveryError(RecoveryFailure::new(code, FailureKind::Retryable, message)).into()
 }
 
+/// A read phase exhausted its existing budget; this never describes a gesture.
+pub(crate) fn observation_deadline() -> anyhow::Error {
+    crate::driver::UiError::new(
+        crate::driver::UiErrorKind::Timeout,
+        "observe",
+        "publish observation deadline exceeded",
+    )
+    .into()
+}
+
 pub fn describe(error: &anyhow::Error) -> RecoveryFailure {
     if let Some(failure) = error.downcast_ref::<RecoveryFailure>() {
         return failure.clone();
@@ -194,6 +204,32 @@ pub fn describe(error: &anyhow::Error) -> RecoveryFailure {
             FailureKind::Terminal,
             format!("{error:#}"),
         );
+    }
+    if error.is::<crate::driver::SessionEpochChanged>() {
+        return RecoveryFailure::new(
+            "publish_observation_session_repaired",
+            FailureKind::Retryable,
+            format!("{error:#}"),
+        );
+    }
+    if let Some(ui) = error.downcast_ref::<crate::driver::UiError>() {
+        use crate::driver::UiErrorKind;
+        let classified = match (ui.op.as_str(), ui.kind) {
+            ("observe", UiErrorKind::Timeout) => {
+                Some(("publish_observation_deadline", FailureKind::Retryable))
+            }
+            ("observe", UiErrorKind::Transport) => {
+                Some(("publish_observation_transient", FailureKind::Retryable))
+            }
+            (
+                "tap" | "activate_element" | "typeText" | "type_text" | "swipe" | "back" | "home",
+                UiErrorKind::Timeout,
+            ) => Some(("publish_action_outcome_unknown", FailureKind::Terminal)),
+            _ => None,
+        };
+        if let Some((code, kind)) = classified {
+            return RecoveryFailure::new(code, kind, format!("{error:#}"));
+        }
     }
     RecoveryFailure::legacy(format!("{error:#}"))
 }
@@ -346,15 +382,40 @@ pub fn stored_sound() -> anyhow::Result<Option<crate::SoundSelectionEvidence>> {
 }
 
 pub async fn retry(error: &anyhow::Error, stop: &AtomicBool) -> anyhow::Result<bool> {
+    retry_inner(error, stop, None).await
+}
+
+/// Pre-effect retry whose backoff consumes, rather than resets, the phase deadline.
+pub async fn retry_until(
+    error: &anyhow::Error,
+    stop: &AtomicBool,
+    deadline: tokio::time::Instant,
+) -> anyhow::Result<bool> {
+    retry_inner(error, stop, Some(deadline)).await
+}
+
+async fn retry_inner(
+    error: &anyhow::Error,
+    stop: &AtomicBool,
+    deadline: Option<tokio::time::Instant>,
+) -> anyhow::Result<bool> {
     let failure = describe(error);
-    if stop.load(Ordering::Acquire) || failure.kind != FailureKind::Retryable {
+    if stop.load(Ordering::Acquire)
+        || failure.kind != FailureKind::Retryable
+        // This repair needs fresh admitted account/session proof, not a local loop.
+        || failure.code == "publish_observation_session_repaired"
+    {
         return Ok(false);
+    }
+    if deadline.is_some_and(|end| tokio::time::Instant::now() >= end) {
+        return Err(observation_deadline());
     }
     let delay = JOURNAL
         .try_with(|j| j.retry(&failure))
         .unwrap_or(Ok(None))?;
     let Some(delay) = delay else { return Ok(false) };
-    let until = tokio::time::Instant::now() + delay;
+    let retry_at = tokio::time::Instant::now() + delay;
+    let until = deadline.map_or(retry_at, |end| retry_at.min(end));
     while tokio::time::Instant::now() < until {
         anyhow::ensure!(!stop.load(Ordering::Acquire), "Đã dừng; không thử lại");
         tokio::time::sleep(
@@ -364,6 +425,9 @@ pub async fn retry(error: &anyhow::Error, stop: &AtomicBool) -> anyhow::Result<b
         .await;
     }
     anyhow::ensure!(!stop.load(Ordering::Acquire), "Đã dừng; không thử lại");
+    if deadline.is_some_and(|end| tokio::time::Instant::now() >= end) {
+        return Err(observation_deadline());
+    }
     JOURNAL.try_with(|j| j.step("", None)).unwrap_or(Ok(()))?;
     Ok(true)
 }
@@ -433,5 +497,112 @@ mod tests {
         assert_eq!(failure.kind, FailureKind::Retryable);
         assert_eq!(failure.code, "agent_status_unavailable");
         assert_eq!(failure.minimum_retry_delay(), Some(Duration::from_secs(65)));
+    }
+}
+
+#[cfg(test)]
+mod publish_read_recovery_tests {
+    use super::*;
+    use crate::driver::{UiError, UiErrorKind};
+
+    #[test]
+    fn observation_deadline_is_typed_without_turning_action_timeouts_into_retry() {
+        let read = anyhow::Error::new(UiError::new(
+            UiErrorKind::Timeout,
+            "observe",
+            "budget elapsed",
+        ))
+        .context("caption predicate");
+        assert_eq!(describe(&read).code, "publish_observation_deadline");
+        assert_eq!(describe(&read).kind, FailureKind::Retryable);
+        for operation in ["tap", "activate_element", "typeText"] {
+            let action = anyhow::Error::new(UiError::new(
+                UiErrorKind::Timeout,
+                operation,
+                "budget elapsed",
+            ));
+            assert_eq!(
+                describe(&action).kind,
+                FailureKind::Terminal,
+                "uncertain action must not become replayable: {operation}"
+            );
+        }
+        assert_eq!(
+            describe(&anyhow::anyhow!("observation_session_changed")).kind,
+            FailureKind::Terminal,
+            "unproven epoch changes must not get the driver-repair retry policy"
+        );
+    }
+
+    #[derive(Default)]
+    struct Journal {
+        retries: std::sync::atomic::AtomicUsize,
+        resumed: std::sync::atomic::AtomicUsize,
+    }
+
+    impl RecoveryJournal for Journal {
+        fn step(&self, _: &str, _: Option<&str>) -> anyhow::Result<()> {
+            self.resumed.fetch_add(1, Ordering::Relaxed);
+            Ok(())
+        }
+        fn retry(&self, _: &RecoveryFailure) -> anyhow::Result<Option<Duration>> {
+            self.retries.fetch_add(1, Ordering::Relaxed);
+            Ok(Some(Duration::from_secs(10)))
+        }
+        fn sound(
+            &self,
+            _: Option<&crate::SoundSelectionEvidence>,
+        ) -> anyhow::Result<Option<crate::SoundSelectionEvidence>> {
+            Ok(None)
+        }
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn phase_deadline_caps_backoff_and_expired_phase_never_requests_retry() {
+        let journal = Arc::new(Journal::default());
+        let error = retryable_error("fixture_read", "transient read");
+        let stop = AtomicBool::new(false);
+        let started = tokio::time::Instant::now();
+        scope(journal.clone(), async {
+            let failure = retry_until(&error, &stop, started).await.unwrap_err();
+            assert_eq!(describe(&failure).code, "publish_observation_deadline");
+            assert_eq!(journal.retries.load(Ordering::Relaxed), 0);
+            let failure = retry_until(&error, &stop, started + Duration::from_millis(200))
+                .await
+                .unwrap_err();
+            assert_eq!(describe(&failure).code, "publish_observation_deadline");
+        })
+        .await;
+        assert_eq!(journal.retries.load(Ordering::Relaxed), 1);
+        assert_eq!(journal.resumed.load(Ordering::Relaxed), 0);
+        assert_eq!(
+            tokio::time::Instant::now() - started,
+            Duration::from_millis(200)
+        );
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn repaired_session_does_not_spend_a_local_retry_or_resume_old_phase() {
+        let journal = Arc::new(Journal::default());
+        let stop = AtomicBool::new(false);
+        let error = RecoveryFailure::new(
+            "publish_observation_session_repaired",
+            FailureKind::Retryable,
+            "driver repaired observation",
+        )
+        .into();
+        scope(journal.clone(), async {
+            assert!(!retry(&error, &stop).await.unwrap());
+            assert!(!retry_until(
+                &error,
+                &stop,
+                tokio::time::Instant::now() + Duration::from_secs(1)
+            )
+            .await
+            .unwrap());
+        })
+        .await;
+        assert_eq!(journal.retries.load(Ordering::Relaxed), 0);
+        assert_eq!(journal.resumed.load(Ordering::Relaxed), 0);
     }
 }

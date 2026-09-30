@@ -1,6 +1,8 @@
 //! Bounded, read-only publish predicates. An observation is never a tap target.
 use super::*;
-use crate::driver::UnsupportedCapability;
+use crate::driver::{
+    classify_read_failure, ReadFailureKind, SessionEpochChanged, UnsupportedCapability,
+};
 use crate::ui_automation::{
     ObservationFieldMask, ObservationRequest, ObservationScope, SemanticLocator, UiObservation,
     MAX_OBSERVATION_BUDGET_MS,
@@ -10,6 +12,7 @@ use crate::ui_automation::{
 pub(crate) struct Cursor {
     epoch: Option<String>,
     previous: Option<(u64, String)>,
+    retried_read: bool,
 }
 
 tokio::task_local! {
@@ -50,15 +53,14 @@ pub(crate) fn android(package: &str) -> bool {
 }
 
 pub(crate) fn check(deadline: Instant, stop: Option<&AtomicBool>) -> anyhow::Result<()> {
-    crate::tiktok_sound::check_wait()?;
     anyhow::ensure!(
         !stop.is_some_and(|flag| flag.load(Ordering::Relaxed)),
         "publish observation stopped"
     );
-    anyhow::ensure!(
-        Instant::now() < deadline,
-        "publish observation deadline exceeded"
-    );
+    crate::tiktok_sound::check_wait()?;
+    if Instant::now() >= deadline {
+        return Err(crate::publish_recovery::observation_deadline());
+    }
     Ok(())
 }
 
@@ -74,12 +76,12 @@ pub(crate) async fn read<T>(
     let mut poll = tokio::time::interval(Duration::from_millis(50));
     let value = loop {
         tokio::select! {
-            result = &mut task => break result.context("publish observation deadline exceeded")??,
+            result = &mut task => break result,
             _ = poll.tick() => check(deadline, stop)?,
         }
     };
     check(deadline, stop)?;
-    Ok(value)
+    value.map_err(|_| crate::publish_recovery::observation_deadline())?
 }
 
 /// None means the capability explicitly reported Unsupported, never empty evidence.
@@ -94,12 +96,14 @@ pub(crate) async fn observe(
     check(deadline, stop)?;
     let epoch = cursor
         .epoch
-        .get_or_insert_with(|| session.gui_session_epoch());
+        .get_or_insert_with(|| session.gui_session_epoch())
+        .clone();
     anyhow::ensure!(
-        *epoch == session.gui_session_epoch(),
+        epoch == session.gui_session_epoch(),
         "publish observation epoch changed"
     );
-    let request = ObservationRequest {
+    check_session(session)?;
+    let mut request = ObservationRequest {
         query,
         scope: Some(ObservationScope {
             package: Some(package.into()),
@@ -118,21 +122,74 @@ pub(crate) async fn observe(
             .as_millis()
             .min(MAX_OBSERVATION_BUDGET_MS as u128) as u64,
     };
-    let observation = match read(deadline, stop, session.observe(&request)).await {
-        Ok(value) => value,
-        Err(error)
-            if error
-                .downcast_ref::<UnsupportedCapability>()
-                .is_some_and(|e| e.capability == "ui_observation") =>
+    let observation = loop {
+        check(deadline, stop)?;
+        check_session(session)?;
+        anyhow::ensure!(
+            epoch == session.gui_session_epoch(),
+            "publish observation epoch changed"
+        );
+        request.remaining_ms = deadline
+            .saturating_duration_since(Instant::now())
+            .as_millis()
+            .min(MAX_OBSERVATION_BUDGET_MS as u128) as u64;
+        let result = read(deadline, stop, session.observe(&request)).await;
+        // A driver repair belongs to the phase owner. Do not accept its fresh proof
+        // under an old cursor or replace this typed error with a plain epoch mismatch.
+        if result
+            .as_ref()
+            .is_err_and(|error| error.is::<SessionEpochChanged>())
         {
-            return Ok(None)
+            return result.map(Some);
         }
-        Err(error) => return Err(error),
+        check(deadline, stop)?;
+        anyhow::ensure!(
+            epoch == session.gui_session_epoch(),
+            "publish observation epoch changed"
+        );
+        match result {
+            Ok(value) => break value,
+            Err(error)
+                if error
+                    .downcast_ref::<UnsupportedCapability>()
+                    .is_some_and(|e| e.capability == "ui_observation") =>
+            {
+                return Ok(None)
+            }
+            Err(error) if classify_read_failure(&error) == ReadFailureKind::Transient => {
+                // Claim the retry at the enclosing phase, so a new selector/cursor
+                // cannot replenish it. A standalone caller keeps it on its cursor.
+                let claimed = PHASE_CURSOR
+                    .try_with(|shared| {
+                        let mut phase = shared.borrow_mut();
+                        !std::mem::replace(&mut phase.retried_read, true)
+                    })
+                    .unwrap_or_else(|_| !std::mem::replace(&mut cursor.retried_read, true));
+                if !claimed {
+                    return Err(error);
+                }
+                crate::publish_recovery::note_read(
+                    "observation",
+                    "sameSessionRead",
+                    1,
+                    "retry",
+                    None,
+                );
+                let delay = Duration::from_millis(250)
+                    .min(deadline.saturating_duration_since(Instant::now()));
+                read(deadline, stop, async {
+                    tokio::time::sleep(delay).await;
+                    Ok(())
+                })
+                .await?;
+            }
+            Err(error) => return Err(error),
+        }
     };
     anyhow::ensure!(
         !epoch.is_empty()
-            && observation.session_epoch == *epoch
-            && session.gui_session_epoch() == *epoch
+            && observation.session_epoch == epoch
+            && session.gui_session_epoch() == epoch
             && observation.app.package.as_deref() == Some(package)
             && !observation.device_id.is_empty()
             && session
@@ -292,6 +349,110 @@ pub(crate) async fn caption(
     Ok(rows.into_iter().map(|row| row.description).collect())
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum CaptionState {
+    Confirmed,
+    Cleared,
+    Unknown,
+    Mismatch,
+}
+
+fn snapshot_caption_cleared(snapshot: &UiObservation, package: &str, id: &str) -> bool {
+    let [node] = snapshot.matches.as_slice() else {
+        return false;
+    };
+    positive_query_known(snapshot)
+        && node.id.as_deref() == Some(id)
+        && node.package.as_deref() == Some(package)
+        && node.class_name.as_deref() == Some("android.widget.EditText")
+        && node.enabled == Some(true)
+        && node.visible == Some(true)
+        && node.password == Some(false)
+        && node.text.as_ref().is_some_and(|text| {
+            text.is_empty()
+                || (node.showing_hint == Some(true)
+                    && node
+                        .raw_attributes
+                        .as_ref()
+                        .and_then(|attrs| attrs.get("hint"))
+                        .is_some_and(|hint| !hint.is_empty() && hint == text))
+        })
+}
+
+fn snapshot_caption_state(
+    snapshot: &UiObservation,
+    package: &str,
+    id: &str,
+    expected: &str,
+) -> anyhow::Result<CaptionState> {
+    anyhow::ensure!(snapshot.matches.len() <= 1, "caption observation ambiguous");
+    if snapshot_caption_cleared(snapshot, package, id) {
+        return Ok(CaptionState::Cleared);
+    }
+    let values = caption_values(snapshot, package, id)?;
+    Ok(match values.as_deref() {
+        Some([value]) if super::caption_readback_matches(value, expected) => {
+            CaptionState::Confirmed
+        }
+        Some([_]) => CaptionState::Mismatch,
+        _ => CaptionState::Unknown,
+    })
+}
+
+/// One supported snapshot distinguishes a positive empty/hint from unknown text.
+/// Only explicit Unsupported may use the compatibility reads below.
+#[allow(clippy::too_many_arguments)]
+pub(crate) async fn caption_state(
+    session: &dyn UiSession,
+    package: &str,
+    query: ElementQuery<'_>,
+    expected: &str,
+    deadline: Instant,
+    stop: &AtomicBool,
+    cursor: &mut Cursor,
+) -> anyhow::Result<CaptionState> {
+    if android(package) {
+        if let ElementQuery::ResourceIdSuffix(suffix) = query {
+            let id = format!("{package}{suffix}");
+            if let Some(snapshot) = observe(
+                session,
+                package,
+                SemanticLocator {
+                    id: Some(id.clone()),
+                    role: Some("textbox".into()),
+                    ..Default::default()
+                },
+                deadline,
+                Some(stop),
+                cursor,
+            )
+            .await?
+            {
+                return snapshot_caption_state(&snapshot, package, &id, expected);
+            }
+        }
+    }
+    // Preserve WDA's no-midflight-cancellation contract on the compatibility path.
+    let rows = if android(package) {
+        read(deadline, Some(stop), session.locate_all_described(query)).await?
+    } else {
+        session.locate_all_described(query).await?
+    };
+    anyhow::ensure!(rows.len() <= 1, "caption observation ambiguous");
+    let Some(value) = rows.first().and_then(|row| row.description.as_ref()) else {
+        return Ok(CaptionState::Unknown);
+    };
+    if super::caption_readback_matches(value, expected) {
+        return Ok(CaptionState::Confirmed);
+    }
+    // Text alone cannot distinguish a placeholder from a genuine different caption.
+    // Keep the existing positive XML proof before authorizing caption restoration.
+    if android(package) && caption_cleared(session, package, query, deadline, stop).await? {
+        return Ok(CaptionState::Cleared);
+    }
+    Ok(CaptionState::Mismatch)
+}
+
 pub(super) async fn caption_cleared(
     session: &dyn UiSession,
     package: &str,
@@ -315,25 +476,7 @@ pub(super) async fn caption_cleared(
         )
         .await?
         {
-            let [node] = snapshot.matches.as_slice() else {
-                return Ok(false);
-            };
-            return Ok(positive_query_known(&snapshot)
-                && node.id.as_deref() == Some(id.as_str())
-                && node.package.as_deref() == Some(package)
-                && node.class_name.as_deref() == Some("android.widget.EditText")
-                && node.enabled == Some(true)
-                && node.visible == Some(true)
-                && node.password == Some(false)
-                && node.text.as_ref().is_some_and(|text| {
-                    text.is_empty()
-                        || (node.showing_hint == Some(true)
-                            && node
-                                .raw_attributes
-                                .as_ref()
-                                .and_then(|attrs| attrs.get("hint"))
-                                .is_some_and(|hint| !hint.is_empty() && hint == text))
-                }));
+            return Ok(snapshot_caption_cleared(&snapshot, package, &id));
         }
     }
     let actual_package = read(deadline, Some(stop), session.active_app_bundle()).await?;
@@ -342,4 +485,315 @@ pub(super) async fn caption_cleared(
         read(deadline, Some(stop), session.hierarchy_source_snapshot()).await?,
     )?;
     Ok(super::caption_is_empty_after_editor(&tree, package, query))
+}
+
+#[cfg(test)]
+mod publish_read_recovery_tests {
+    use super::*;
+    use crate::driver::{SessionEpochChanged, UiError, UiErrorKind};
+    use crate::ui_automation::{ObservationCompleteness, ObservationSource, ObservedAppContext};
+    use std::collections::VecDeque;
+
+    enum Reply {
+        Transient,
+        Fresh,
+        Repair,
+        Unsupported(&'static str),
+        Invalid,
+    }
+
+    struct Session {
+        replies: parking_lot::Mutex<VecDeque<Reply>>,
+        budgets: parking_lot::Mutex<Vec<u64>>,
+        epoch: parking_lot::Mutex<String>,
+    }
+
+    impl Session {
+        fn new(replies: impl IntoIterator<Item = Reply>) -> Self {
+            Self {
+                replies: parking_lot::Mutex::new(replies.into_iter().collect()),
+                budgets: parking_lot::Mutex::new(Vec::new()),
+                epoch: parking_lot::Mutex::new("epoch".into()),
+            }
+        }
+
+        fn fresh(&self, generation: u64) -> UiObservation {
+            UiObservation {
+                device_id: "phone".into(),
+                app: ObservedAppContext {
+                    package: Some("com.ss.android.ugc.trill".into()),
+                    ..Default::default()
+                },
+                session_epoch: self.gui_session_epoch(),
+                observation_id: format!("observation-{generation}"),
+                generation,
+                started_at_ms: 1,
+                ended_at_ms: 2,
+                source: ObservationSource::AccessibilityHierarchy,
+                completeness: ObservationCompleteness::Unknown,
+                matches: Vec::new(),
+                unknown_match_count: 0,
+            }
+        }
+    }
+
+    #[async_trait::async_trait]
+    impl UiSession for Session {
+        fn stream_url(&self) -> Option<String> {
+            None
+        }
+        fn gui_session_epoch(&self) -> String {
+            self.epoch.lock().clone()
+        }
+        async fn observe(&self, request: &ObservationRequest) -> anyhow::Result<UiObservation> {
+            self.budgets.lock().push(request.remaining_ms);
+            let reply = self
+                .replies
+                .lock()
+                .pop_front()
+                .expect("unexpected extra read");
+            tokio::time::sleep(Duration::from_millis(25)).await;
+            match reply {
+                Reply::Transient => {
+                    Err(
+                        UiError::new(UiErrorKind::Transport, "observe", "fixture read failure")
+                            .into(),
+                    )
+                }
+                Reply::Fresh => Ok(self.fresh(self.budgets.lock().len() as u64)),
+                Reply::Repair => {
+                    *self.epoch.lock() = "replacement".into();
+                    Err(SessionEpochChanged {
+                        previous_epoch: "epoch".into(),
+                        current_epoch: "replacement".into(),
+                        device_id: "phone".into(),
+                        package: "com.ss.android.ugc.trill".into(),
+                        fresh_observation: Box::new(self.fresh(1)),
+                    }
+                    .into())
+                }
+                Reply::Unsupported(capability) => Err(UnsupportedCapability { capability }.into()),
+                Reply::Invalid => anyhow::bail!("observation binding invalid"),
+            }
+        }
+        async fn tap(&self, _: crate::TapPoint) -> anyhow::Result<()> {
+            panic!("read must not tap")
+        }
+        async fn swipe(&self, _: crate::SwipeGesture) -> anyhow::Result<()> {
+            panic!("read must not swipe")
+        }
+        async fn type_text(&self, _: &str) -> anyhow::Result<()> {
+            panic!("read must not type")
+        }
+        async fn home(&self) -> anyhow::Result<()> {
+            panic!("read must not navigate")
+        }
+        async fn find_and_tap(&self, _: &str) -> anyhow::Result<()> {
+            panic!("read must not tap")
+        }
+        async fn assert_visible(&self, _: &str) -> anyhow::Result<()> {
+            panic!("read must not use legacy assertion")
+        }
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn transient_retry_budget_is_shared_across_fresh_cursors_in_one_phase() {
+        let session = Session::new([
+            Reply::Transient,
+            Reply::Fresh,
+            Reply::Transient,
+            Reply::Fresh,
+        ]);
+        let deadline = Instant::now() + Duration::from_secs(1);
+        with_binding(async {
+            let first = observe(
+                &session,
+                "com.ss.android.ugc.trill",
+                SemanticLocator::default(),
+                deadline,
+                None,
+                &mut Cursor::default(),
+            )
+            .await;
+            assert!(
+                first.is_ok(),
+                "a transient read must receive one fresh observation: {first:?}"
+            );
+            let second = observe(
+                &session,
+                "com.ss.android.ugc.trill",
+                SemanticLocator::default(),
+                deadline,
+                None,
+                &mut Cursor::default(),
+            )
+            .await;
+            assert!(
+                second.is_err(),
+                "a new selector/cursor must not gain another retry"
+            );
+        })
+        .await;
+        let budgets = session.budgets.lock();
+        assert_eq!(budgets.len(), 3);
+        assert!(
+            budgets.windows(2).all(|pair| pair[1] < pair[0]),
+            "remaining deadline must shrink: {budgets:?}"
+        );
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn completed_error_after_stop_or_deadline_never_becomes_a_retry() {
+        let stop = AtomicBool::new(false);
+        let error = read(
+            Instant::now() + Duration::from_secs(1),
+            Some(&stop),
+            async {
+                stop.store(true, Ordering::Relaxed);
+                Err::<(), _>(
+                    UiError::new(UiErrorKind::Transport, "observe", "fixture read failure").into(),
+                )
+            },
+        )
+        .await
+        .unwrap_err();
+        assert!(
+            error.to_string().contains("stopped"),
+            "Stop must win over a simultaneously completed error: {error:#}"
+        );
+        assert_eq!(
+            crate::publish_recovery::describe(&error).kind,
+            crate::publish_recovery::FailureKind::Terminal
+        );
+
+        let error = read(
+            Instant::now() + Duration::from_millis(5),
+            None,
+            std::future::pending::<anyhow::Result<()>>(),
+        )
+        .await
+        .unwrap_err();
+        let failure = crate::publish_recovery::describe(&error.context("caption read"));
+        assert_eq!(failure.code, "publish_observation_deadline");
+        assert_eq!(
+            failure.kind,
+            crate::publish_recovery::FailureKind::Retryable
+        );
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn repaired_session_is_typed_owner_recovery_and_never_an_inline_observation() {
+        let session = Session::new([Reply::Repair]);
+        let mut cursor = Cursor::default();
+        let error = observe(
+            &session,
+            "com.ss.android.ugc.trill",
+            SemanticLocator::default(),
+            Instant::now() + Duration::from_secs(1),
+            None,
+            &mut cursor,
+        )
+        .await
+        .unwrap_err();
+        assert!(
+            error.is::<SessionEpochChanged>(),
+            "owner must receive driver repair proof"
+        );
+        assert!(
+            cursor.previous.is_none(),
+            "repair proof must not become accepted old-phase evidence"
+        );
+        let failure = crate::publish_recovery::describe(&error.context("final sound observation"));
+        assert_eq!(failure.code, "publish_observation_session_repaired");
+        assert_eq!(
+            failure.kind,
+            crate::publish_recovery::FailureKind::Retryable
+        );
+        assert_eq!(session.budgets.lock().len(), 1);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn only_explicit_observation_unsupported_returns_legacy_fallback() {
+        for (reply, legacy) in [
+            (Reply::Unsupported("ui_observation"), true),
+            (Reply::Unsupported("screenshot"), false),
+            (Reply::Invalid, false),
+        ] {
+            let session = Session::new([reply]);
+            let result = observe(
+                &session,
+                "com.ss.android.ugc.trill",
+                SemanticLocator::default(),
+                Instant::now() + Duration::from_secs(1),
+                None,
+                &mut Cursor::default(),
+            )
+            .await;
+            assert_eq!(matches!(result, Ok(None)), legacy);
+            if !legacy {
+                assert!(result.is_err());
+            }
+            assert_eq!(session.budgets.lock().len(), 1);
+        }
+    }
+
+    #[test]
+    fn caption_state_requires_positive_empty_or_exact_text_proof() {
+        use crate::ui_automation::SemanticNode;
+        let session = Session::new([]);
+        let package = "com.ss.android.ugc.trill";
+        let id = format!("{package}:id/caption");
+        let known = SemanticNode {
+            id: Some(id.clone()),
+            package: Some(package.into()),
+            class_name: Some("android.widget.EditText".into()),
+            text: Some("approved caption".into()),
+            enabled: Some(true),
+            visible: Some(true),
+            password: Some(false),
+            showing_hint: Some(false),
+            ..Default::default()
+        };
+        let mut snapshot = session.fresh(1);
+        snapshot.matches.push(known.clone());
+        assert_eq!(
+            snapshot_caption_state(&snapshot, package, &id, "approved caption").unwrap(),
+            CaptionState::Confirmed
+        );
+        snapshot.matches[0].text = Some("different caption".into());
+        assert_eq!(
+            snapshot_caption_state(&snapshot, package, &id, "approved caption").unwrap(),
+            CaptionState::Mismatch
+        );
+        snapshot.matches[0].text = None;
+        assert_eq!(
+            snapshot_caption_state(&snapshot, package, &id, "approved caption").unwrap(),
+            CaptionState::Unknown
+        );
+        snapshot.matches[0].text = Some(String::new());
+        assert_eq!(
+            snapshot_caption_state(&snapshot, package, &id, "approved caption").unwrap(),
+            CaptionState::Cleared
+        );
+        snapshot.unknown_match_count = 1;
+        assert_eq!(
+            snapshot_caption_state(&snapshot, package, &id, "approved caption").unwrap(),
+            CaptionState::Unknown
+        );
+        snapshot.unknown_match_count = 0;
+        snapshot.matches[0].text = Some("Describe your post".into());
+        snapshot.matches[0].showing_hint = Some(true);
+        assert_eq!(
+            snapshot_caption_state(&snapshot, package, &id, "approved caption").unwrap(),
+            CaptionState::Unknown
+        );
+        snapshot.matches[0].raw_attributes =
+            Some([("hint".into(), "Describe your post".into())].into());
+        assert_eq!(
+            snapshot_caption_state(&snapshot, package, &id, "").unwrap(),
+            CaptionState::Cleared
+        );
+        snapshot.matches.push(known);
+        assert!(snapshot_caption_state(&snapshot, package, &id, "approved caption").is_err());
+    }
 }
