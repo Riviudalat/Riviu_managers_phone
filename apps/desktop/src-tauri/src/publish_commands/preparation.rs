@@ -136,6 +136,28 @@ pub(super) async fn guard_fingerprint(
     .await
 }
 
+/// Only public configuration identity is retained. Tokens stay inside the existing
+/// writer check; its result is never cached across preflight/Start invocations.
+pub(super) async fn sheet_binding(
+    db: &Arc<Database>,
+    enabled: bool,
+) -> anyhow::Result<Option<serde_json::Value>> {
+    if !enabled {
+        return Ok(None);
+    }
+    db.storage_read(|db| {
+        Ok(Some(serde_json::json!({
+            "provider": db.get_setting(riviu_core::db::SHEET_PROVIDER_SETTING)?,
+            "connection": db.google_sheet_connection()?,
+            "url": db.get_setting(riviu_core::publish_sheet::SHEET_URL_SETTING)?,
+            "authorizationGeneration": db.get_setting("google.sheets.authorization-generation")?,
+            "migration": db.get_setting(riviu_core::db::GOOGLE_MIGRATION_SETTING)?,
+            "layout": db.get_setting(riviu_core::publish_sheet::INTERNAL_REPORTING_SETTING)?,
+        })))
+    })
+    .await
+}
+
 pub(super) async fn remember_prepared(
     db: &Arc<Database>,
     request: riviu_core::PublishPreflightRequest,
@@ -180,6 +202,7 @@ pub(super) async fn reuse_prepared(
     db: &Arc<Database>,
     request: &riviu_core::PublishPreflightRequest,
     manifest: &PublishFolderManifest,
+    sheet: &super::preflight::VerifiedSheetChoice,
 ) -> anyhow::Result<Option<super::preflight::PreparedPublishPreflight>> {
     use futures_util::stream::{self, StreamExt};
     let id = CONTEXT
@@ -216,6 +239,11 @@ pub(super) async fn reuse_prepared(
     let Some(cached) = cached else {
         return Ok(None);
     };
+    // A refused or changed Sheet answer is passed to the full report builder.
+    // Never return a cached canExecute=true over this request's writer refusal.
+    if sheet.as_ref().ok() != Some(&cached.prepared.report.sheet_delivery) {
+        return Ok(None);
+    }
     let mut bundles = request
         .bundle_ids
         .iter()
@@ -264,13 +292,6 @@ pub(super) async fn reuse_prepared(
         }
     }
     let mut prepared = cached.prepared;
-    stage(db, "checkingSheet").await?;
-    let sheet = super::preflight::verify_sheet_delivery_choice(db, request.sheet_enabled)
-        .await
-        .map_err(anyhow::Error::msg)?;
-    if sheet != prepared.report.sheet_delivery {
-        return Ok(None);
-    }
     for udid in &request.udids {
         anyhow::ensure!(
             control.current_work_owner(udid).is_none(),
@@ -287,7 +308,6 @@ pub(super) async fn reuse_prepared(
             return Ok(None);
         }
     }
-    stage(db, "checkingDevices").await?;
     // Keep the approved immutable digest, and only return after the critical guards above.
     prepared.report.can_execute = true;
     Ok(Some(prepared))

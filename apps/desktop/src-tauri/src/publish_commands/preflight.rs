@@ -450,12 +450,61 @@ pub(super) async fn build_publish_preflight(
         .map_err(anyhow::Error::new)?;
 
     let manifest = scan_preflight_source(&request.source_root).await?;
+    preparation::stage(db, "checkingSheet").await?;
+    let binding = preparation::sheet_binding(db, request.sheet_enabled).await?;
+    let started = Instant::now();
+    let sheet_choice = verify_sheet_delivery_choice(db, request.sheet_enabled).await;
+    log::info!(
+        "publish preparation writer check completed in {}ms",
+        started.elapsed().as_millis()
+    );
+    anyhow::ensure!(
+        preparation::sheet_binding(db, request.sheet_enabled).await? == binding,
+        "Kết nối Sheet đã thay đổi trong lúc kiểm tra; kiểm tra lại trước khi đăng"
+    );
+    let sheet_enabled = request.sheet_enabled;
+    let prepared = build_publish_preflight_reusing_sheet(
+        control,
+        registry,
+        db,
+        request,
+        &manifest,
+        sheet_choice,
+    )
+    .await?;
+    anyhow::ensure!(
+        preparation::sheet_binding(db, sheet_enabled).await? == binding,
+        "Kết nối Sheet đã thay đổi trong lúc chuẩn bị; kiểm tra lại trước khi đăng"
+    );
+    Ok(prepared)
+}
+
+/// Cache misses must consume this request's completed writer check. In particular,
+/// a slow Sheet check can expire device evidence without authorizing another scan.
+async fn build_publish_preflight_reusing_sheet(
+    control: &DeviceControlPlane,
+    registry: &riviu_core::DeviceRegistry,
+    db: &Arc<Database>,
+    request: riviu_core::PublishPreflightRequest,
+    manifest: &PublishFolderManifest,
+    sheet_choice: VerifiedSheetChoice,
+) -> anyhow::Result<PreparedPublishPreflight> {
+    preparation::stage(db, "checkingDevices").await?;
     if let Some(prepared) =
-        preparation::reuse_prepared(control, registry, db, &request, &manifest).await?
+        preparation::reuse_prepared(control, registry, db, &request, manifest, &sheet_choice)
+            .await?
     {
         return Ok(prepared);
     }
-    build_publish_preflight_from_manifest(control, registry, db, request, &manifest).await
+    build_publish_preflight_from_manifest_with_sheet(
+        control,
+        registry,
+        db,
+        request,
+        manifest,
+        sheet_choice,
+    )
+    .await
 }
 
 pub(super) async fn scan_preflight_source(
@@ -1019,7 +1068,9 @@ mod sheet_choice_tests {
             internal_reporting: true,
         };
         let shared = Ok(Some(target.clone()));
-        let first = build_publish_preflight_from_manifest_with_sheet(
+        // A cache miss after a slow writer check must keep that same checked
+        // result. This scratch DB has no credentials/endpoint to check again.
+        let first = build_publish_preflight_reusing_sheet(
             &control,
             &registry,
             &db,
@@ -1060,7 +1111,7 @@ mod sheet_choice_tests {
         .unwrap();
         assert_ne!(first.report.input_digest, changed.report.input_digest);
         for _ in 0..2 {
-            let failed = build_publish_preflight_from_manifest_with_sheet(
+            let failed = build_publish_preflight_reusing_sheet(
                 &control,
                 &registry,
                 &db,
