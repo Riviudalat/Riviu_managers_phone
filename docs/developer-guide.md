@@ -82,6 +82,22 @@ Recovery state lưu thêm `lastErrorCode` và `lastErrorKind`. Các đường m�
 cũ. Thay chữ hiển thị không được đổi retry policy. Retry vẫn chỉ trước Post và tối đa
 ba lần mỗi bước.
 
+Publish observation dùng lỗi deadline có kiểu và một lượt đọc lại transient trong
+cùng phase/deadline; tạo cursor mới không làm mới ngân sách. `SessionEpochChanged`
+giữ nguyên kiểu để chủ phase/dispatcher bỏ target cũ và xác minh lại account, không
+chấp nhận observation của phiên mới dưới binding cũ. Caption Unknown được đọc lại;
+nội dung khác thật hoặc mơ hồ vẫn từ chối. Bước nhạc có một deadline 180 giây chung
+cho các attempt/backoff; hết tổng budget không tự requeue để cấp lại cửa sổ mới.
+
+Dispatcher giữ completion receipt đến khi SQLite xác nhận cùng
+assignment/campaign/run/attempt/device/phase/revision. Journal cạnh DB lưu receipt
+trước settlement; khôi phục journal trước orphan sweep, chỉ chuyển trạng thái DB,
+không gọi điện thoại. Lỗi ghi journal vẫn thử DB; khi cả hai thất bại giữ receipt
+trong bộ nhớ và ghi lỗi. Shutdown chỉ thử lưu một lượt, không chờ DB vô hạn.
+Startup chưa khôi phục xong chặn admission Publish bằng lỗi rõ ràng và dùng
+dispatcher hiện có thử lại; không tạo scheduler mới. Cleanup work claim chỉ nhắm
+đúng owner/thiết bị/stage của worker đã kết thúc, không xóa claim của phase kế tiếp.
+
 Preflight Android dùng `DeviceControlPlane::tiktok_action_capabilities` và catalog
 `app_automation::action_capabilities` chung cho UI, Nuôi thủ công/lịch/Điều phối,
 Tương tác và Đăng bài. Readiness chỉ đọc khóa màn hình, transport và owner, không

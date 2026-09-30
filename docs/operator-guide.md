@@ -717,10 +717,16 @@ app chỉ chuyển sang cây giao diện khi đã xác nhận đúng bảng, tab
 Lỗi tạm thời trước Đăng được **tự thử lại tối đa 3 lần ngoài lần chạy đầu**, chờ lần
 lượt 2, 5 và 10 giây. Nếu agent Android không đọc được cây UI hoặc không trả `/status`,
 lượt kế tiếp chờ ít nhất đến hết khoảng phục hồi của phiên (tối đa khoảng 65 giây),
-không tiêu hết lượt thử trong lúc instrumentation còn cooldown. Mỗi lần chọn nhạc vẫn có thời hạn riêng 3 phút. App ưu tiên
+không tiêu hết lượt thử trong lúc instrumentation còn cooldown. Bước chọn nhạc có
+tổng thời hạn 3 phút, gồm các lần đọc lại và khoảng chờ thử lại; không cấp thêm
+3 phút sau mỗi lỗi. Hết thời hạn thì máy dừng trước Đăng và cần bấm **Thử lại**.
+App ưu tiên
 tiếp tục bước đang lỗi, giữ bài, caption và nhạc đã chọn; nếu mất màn soạn thì dựng
 lại từ bản đã duyệt. Media còn đúng hash và MediaStore được dùng lại.
 Máy mất kết nối được chờ đúng serial tối đa **2 phút**, không giữ slot của máy khác.
+Caption tạm thời chưa đọc được được kiểm tra lại trong thời hạn của bước, không
+bị coi ngay là đã đổi nội dung. Sau nút Tiếp bị mất phản hồi, app kiểm tra màn đã
+tới trước khi tiếp tục; không bấm lại chỉ vì chưa nhận được ACK.
 Sai account, chưa cho phép USB, thiếu quyền hoặc phiên bản chưa hỗ trợ cần xử lý trước.
 Khi mở phiên TikTok trên Android user 0, app tự cấp các quyền runtime còn thiếu trong
 danh sách Camera, Microphone, đọc và ghi bộ nhớ nếu TikTok đã khai báo chúng; app đọc
@@ -736,6 +742,10 @@ nhưng chờ hết cooldown của máy trước khi mở phiên mới. Khi đang
 hiện bước cùng số lần. Bài đã Post chỉ có **Kiểm tra liên kết** hoặc **Ghi lại Sheet**;
 không gửi lại Post. Dừng hủy cả lượt đang chờ. Mở lại app giữ bộ đếm và yêu cầu bấm
 Thử lại cho lượt phục hồi bị gián đoạn. **Tải lại tiến độ** chỉ đọc lại màn hình theo dõi.
+Nếu máy đã làm xong nhưng lưu kết quả tạm thời lỗi, app thử lưu lại kết quả đó,
+không chạy lại điện thoại. Khi mở app mà còn kết quả chưa đối soát được, Đăng bài
+báo rõ nguyên nhân và tự kiểm tra lại sau 30 giây. Kiểm tra quyền ghi và dung lượng
+ổ đĩa nếu trạng thái này kéo dài; không tạo thêm lượt đăng để xử lý lỗi lưu kết quả.
 Khi quay lại từ phần nhạc, app đối chiếu lại toàn bộ caption. Khoảng trắng cuối dòng
 do TikTok thêm sau hashtag được chấp nhận; thay đổi chữ, hashtag hoặc xuống dòng vẫn
 bị từ chối trước Đăng.
