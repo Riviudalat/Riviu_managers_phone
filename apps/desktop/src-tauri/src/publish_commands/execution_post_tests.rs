@@ -49,8 +49,7 @@ async fn dispatch_recovery_missing_metadata_is_retryable_but_unsupported_locale_
     ] {
         let error = publish_runtime_labels(&MetadataSession { language, version }, package)
             .await
-            .err()
-            .expect("missing metadata must refuse before composer");
+            .expect_err("missing metadata must refuse before composer");
         let failure = describe(&error);
         assert_eq!(
             failure.kind,
@@ -67,8 +66,7 @@ async fn dispatch_recovery_missing_metadata_is_retryable_but_unsupported_locale_
         package,
     )
     .await
-    .err()
-    .expect("unsupported locale must still refuse");
+    .expect_err("unsupported locale must still refuse");
     assert_eq!(describe(&unsupported).kind, FailureKind::Terminal);
     let (language, version, _) = publish_runtime_labels(
         &MetadataSession {
