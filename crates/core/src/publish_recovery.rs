@@ -115,6 +115,9 @@ impl RecoveryFailure {
             FailureKind::Retryable if blind_android_agent(&message) => {
                 "agent_accessibility_unavailable"
             }
+            FailureKind::Retryable if adb_daemon_connect_timeout(&message) => {
+                "adb_daemon_connect_timeout"
+            }
             FailureKind::Retryable => "legacy_retryable",
             FailureKind::Terminal => "legacy_terminal",
         };
@@ -152,6 +155,13 @@ fn blind_android_agent(message: &str) -> bool {
 fn unavailable_android_agent_status(message: &str) -> bool {
     let message = message.to_ascii_lowercase();
     message.contains("the agent on ") && message.contains("did not answer /status within")
+}
+
+fn adb_daemon_connect_timeout(message: &str) -> bool {
+    let message = message.to_ascii_lowercase();
+    message.contains("adb.exe: cannot connect to daemon at tcp:5037:")
+        && message.contains("cannot connect to 127.0.0.1:5037:")
+        && message.contains("(10060)")
 }
 
 #[derive(Debug)]
@@ -274,6 +284,12 @@ pub fn classify(message: &str) -> FailureKind {
         return FailureKind::Disconnected;
     }
     if unavailable_android_agent_status(message) {
+        return FailureKind::Retryable;
+    }
+    // Windows ADB reports WSAETIMEDOUT without the words "timeout" or "timed
+    // out". Match the measured loopback daemon failure, after specific terminal
+    // refusals; the existing intent/revision gates still own permission to retry.
+    if adb_daemon_connect_timeout(message) {
         return FailureKind::Retryable;
     }
     if [
@@ -439,6 +455,17 @@ mod tests {
     fn absent_transport_is_distinct_from_retryable_and_terminal_errors() {
         assert_eq!(classify("adb -s ce031713840038030c shell getprop service.adb.tcp.port failed: adb.exe: device 'ce031713840038030c' not found"),FailureKind::Disconnected);
         assert_eq!(classify("adb: connection reset"), FailureKind::Retryable);
+        let daemon_connect = "stagePublishMedia failed for device ce11171be88ba30d01: query MediaStore for the campaign's rows: adb -s ce11171be88ba30d01 shell content query --uri content://media/external/video/media --projection _id:_data 2>&1 failed: * daemon still not running\r\nadb.exe: cannot connect to daemon at tcp:5037: cannot connect to 127.0.0.1:5037: A connection attempt failed because the connected party did not properly respond after a period of time, or established connection failed because connected host has failed to respond. (10060)";
+        let daemon_failure = RecoveryFailure::legacy(daemon_connect);
+        assert_eq!(daemon_failure.kind, FailureKind::Retryable);
+        assert_eq!(daemon_failure.code, "adb_daemon_connect_timeout");
+        for refusal in [
+            format!("device unauthorized: {daemon_connect}"),
+            daemon_connect.replace("127.0.0.1:5037", "192.0.2.1:5037"),
+            daemon_connect.replace("(10060)", "(10013)"),
+        ] {
+            assert_eq!(classify(&refusal), FailureKind::Terminal, "{refusal}");
+        }
         assert_eq!(
             classify("TikTok báo mạng không ổn định khi tải danh sách nhạc"),
             FailureKind::Retryable
