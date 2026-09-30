@@ -272,6 +272,104 @@ pub(crate) async fn execute_pipeline(
     Ok(())
 }
 
+struct CompletedDispatch {
+    job: riviu_core::db::PublishDispatchJob,
+    error: Option<anyhow::Error>,
+}
+
+struct PendingCompletion {
+    receipt: Arc<CompletedDispatch>,
+    retry_at: tokio::time::Instant,
+    failures: u32,
+}
+
+#[derive(Default)]
+struct DispatchCompletions {
+    pending: Vec<PendingCompletion>,
+    in_flight: Option<(
+        PendingCompletion,
+        tokio::task::JoinHandle<anyhow::Result<bool>>,
+    )>,
+}
+
+impl DispatchCompletions {
+    fn push(&mut self, job: riviu_core::db::PublishDispatchJob, error: Option<anyhow::Error>) {
+        self.pending.push(PendingCompletion {
+            receipt: Arc::new(CompletedDispatch { job, error }),
+            retry_at: tokio::time::Instant::now(),
+            failures: 0,
+        });
+    }
+
+    async fn settle_ready(&mut self, db: &Arc<Database>) {
+        // The dispatcher polls this future alongside Stop/ticks and phone joins.
+        // Losing that select race must retain both the receipt and owned DB task.
+        if self.in_flight.is_none() {
+            let Some(index) = self
+                .pending
+                .iter()
+                .position(|pending| tokio::time::Instant::now() >= pending.retry_at)
+            else {
+                std::future::pending::<()>().await;
+                return;
+            };
+            let pending = self.pending.remove(index);
+            let receipt = pending.receipt.clone();
+            let db = db.clone();
+            let task = tokio::spawn(async move {
+                db.storage_write(move |db| {
+                    db.settle_publish_dispatch_completion(&receipt.job, receipt.error.as_ref())
+                })
+                .await
+            });
+            self.in_flight = Some((pending, task));
+        }
+        let result = (&mut self.in_flight.as_mut().expect("owned settlement task").1)
+            .await
+            .map_err(anyhow::Error::from)
+            .and_then(|result| result);
+        let (mut pending, _) = self.in_flight.take().expect("joined settlement task");
+        if let Err(error) = result {
+            pending.failures = pending.failures.saturating_add(1);
+            pending.retry_at = tokio::time::Instant::now()
+                + Duration::from_secs(
+                    [1, 2, 5, 10, 30][pending.failures.saturating_sub(1).min(4) as usize],
+                );
+            log::error!(
+                "publish dispatch completion retained assignment={} attempt={}: {error:#}",
+                pending.receipt.job.assignment_id,
+                pending.receipt.job.attempt_id
+            );
+            self.pending.push(pending);
+        }
+    }
+
+    async fn preserve_on_shutdown(&self, db: &Arc<Database>) {
+        // One filesystem-only pass, including a DB task still waiting for its
+        // writer slot. Its owned task may finish while the runtime lives; a stale
+        // file is harmless because startup replays only the exact CAS. Shutdown
+        // never waits indefinitely for SQLite or cancels a dispatched write.
+        for pending in self
+            .pending
+            .iter()
+            .chain(self.in_flight.iter().map(|(pending, _)| pending))
+        {
+            let receipt = pending.receipt.clone();
+            let db = db.clone();
+            let result = tokio::task::spawn_blocking(move || {
+                db.persist_publish_dispatch_completion(&receipt.job, receipt.error.as_ref())
+            })
+            .await
+            .map_err(anyhow::Error::from)
+            .and_then(|result| result);
+            if let Err(error) = result {
+                log::error!("publish completion could not be journaled at shutdown assignment={}: {error:#}; durable job remains for conservative orphan recovery",
+                    pending.receipt.job.assignment_id);
+            }
+        }
+    }
+}
+
 /// One application dispatcher serves immediate and scheduled campaigns. Queue rows
 /// hold IDs only; media and driver sessions are loaded after global stage admission.
 #[allow(clippy::too_many_arguments)]
@@ -287,23 +385,24 @@ pub(crate) async fn run_dispatcher(
 ) {
     let mut tasks = tokio::task::JoinSet::<anyhow::Result<()>>::new();
     let mut owned = HashMap::new();
+    let mut completed = DispatchCompletions::default();
     let mut interval = tokio::time::interval(Duration::from_millis(250));
     let mut online = std::collections::HashSet::new();
     let mut unavailable = HashMap::new();
     let mut roster_at = None;
+    let mut recovery_at = tokio::time::Instant::now();
     interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
     loop {
         tokio::select! {
             _ = interval.tick() => {},
+            _ = completed.settle_ready(&db), if db.ensure_publish_recovery_ready().is_ok() => {},
             Some(result) = tasks.join_next_with_id(), if !tasks.is_empty() => {
                 let (id, error) = match result {
                     Ok((id, result)) => (id, result.err()),
                     Err(e) => (e.id(), Some(anyhow::Error::new(e))),
                 };
                 if let Some(job) = owned.remove(&id) {
-                    if let Err(e) = db.finish_publish_dispatch_error(&job,error.as_ref()) {
-                        log::error!("publish dispatch settlement: {e:#}");
-                    }
+                    completed.push(job, error);
                 }
             }
         }
@@ -314,10 +413,25 @@ pub(crate) async fn run_dispatcher(
                     Err(e) => (e.id(), Some(anyhow::Error::new(e))),
                 };
                 if let Some(job) = owned.remove(&id) {
-                    let _ = db.finish_publish_dispatch_error(&job, error.as_ref());
+                    completed.push(job, error);
                 }
             }
+            completed.preserve_on_shutdown(&db).await;
             break;
+        }
+        if db.ensure_publish_recovery_ready().is_err() {
+            if tokio::time::Instant::now() >= recovery_at {
+                if let Err(error) = db
+                    .storage_write(|db| db.recover_publish_dispatch_startup())
+                    .await
+                {
+                    log::error!("publish startup recovery pending: {error:#}");
+                }
+                recovery_at = tokio::time::Instant::now() + Duration::from_secs(30);
+            }
+            if db.ensure_publish_recovery_ready().is_err() {
+                continue;
+            }
         }
         let result = async {
             // Only this dispatcher observes joined workers and their released device owners.
@@ -559,6 +673,180 @@ where
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test(start_paused = true)]
+    async fn dispatch_recovery_retries_settlement_without_replaying_completed_publications() {
+        let path = std::env::temp_dir().join(format!("dispatch-completion-{}.db", Uuid::new_v4()));
+        let db = Arc::new(Database::open(&path).unwrap());
+        let bundles: Vec<_> = (0..2)
+            .map(|i| PublishBundle {
+                id: format!("bundle-{i}"),
+                source_path: "C:/fixture".into(),
+                name: format!("bundle-{i}"),
+                media_kind: riviu_core::PublishMediaKind::Image,
+                images: vec![],
+                video: None,
+                caption_path: "C:/fixture/caption.txt".into(),
+                caption: "fixture caption".into(),
+                caption_sha256: "0".repeat(64),
+                total_bytes: 0,
+                partners: vec![],
+            })
+            .collect();
+        let request = PublishCampaignRequest {
+            sheet_delivery: None,
+            verification_contract_version: Some(1),
+            verification_builds: vec![],
+            request_id: Uuid::new_v4().to_string(),
+            source_root: "C:/fixture".into(),
+            bundle_ids: bundles.iter().map(|bundle| bundle.id.clone()).collect(),
+            udids: vec!["phone-a".into(), "phone-b".into()],
+            run_at: None,
+            visibility: PublishVisibility::Public,
+            cleanup_policy: PublishCleanupPolicy::KeepImportedAssets,
+            network: riviu_core::SocialNetwork::TikTok,
+            sound_policy: riviu_core::PublishSoundPolicy::Default,
+            sheet_enabled: false,
+            execution_confirmed: true,
+            target_snapshot: None,
+        };
+        let campaign = db.create_publish_campaign(&request, &bundles).unwrap();
+        let run = db.claim_publish_pipeline(&campaign.id).unwrap().unwrap();
+        let mut jobs = db.pending_publish_dispatch(10).unwrap();
+        assert_eq!(jobs.len(), 2);
+        let conn = rusqlite::Connection::open(&path).unwrap();
+        let intent = r#"{"effectIntent":"post","expectedAccount":"fixture"}"#;
+        for job in &mut jobs {
+            db.init_publish_recovery(&job.assignment_id, &run.token)
+                .unwrap();
+            assert!(db.claim_publish_dispatch(job, 0).unwrap());
+            // These workers have already returned from their phone calls. Keep the
+            // durable Post intent while injecting a fault in DB completion only.
+            job.phase = "compose".into();
+            conn.execute(
+                "UPDATE publish_dispatch_jobs SET phase='compose' WHERE assignment_id=?1",
+                [&job.assignment_id],
+            )
+            .unwrap();
+            conn.execute(
+                "UPDATE publish_assignments SET state='verifying',effect_intent=?2,evidence_json=?2 WHERE id=?1",
+                rusqlite::params![job.assignment_id, intent],
+            ).unwrap();
+        }
+        conn.execute_batch(&format!(
+            "CREATE TRIGGER reject_completion BEFORE UPDATE OF state ON publish_dispatch_jobs
+             WHEN OLD.assignment_id='{}' AND NEW.state<>'running'
+             BEGIN SELECT RAISE(FAIL,'fixture settlement unavailable'); END;",
+            jobs[0].assignment_id,
+        ))
+        .unwrap();
+        let dispatch_state = |job: &riviu_core::db::PublishDispatchJob| -> String {
+            conn.query_row(
+                "SELECT state FROM publish_dispatch_jobs WHERE assignment_id=?1",
+                [&job.assignment_id],
+                |row| row.get(0),
+            )
+            .unwrap()
+        };
+        let mut completed = DispatchCompletions::default();
+        completed.push(
+            jobs[0].clone(),
+            Some(anyhow::anyhow!("network response lost after Post")),
+        );
+        completed.push(jobs[1].clone(), None);
+        let (started_tx, started_rx) = tokio::sync::oneshot::channel();
+        let (release_tx, release_rx) = std::sync::mpsc::channel();
+        let busy_db = db.clone();
+        let writer = tokio::spawn(async move {
+            busy_db
+                .storage_write(move |_| {
+                    let _ = started_tx.send(());
+                    release_rx.recv_timeout(Duration::from_secs(5))?;
+                    Ok(())
+                })
+                .await
+        });
+        started_rx.await.unwrap();
+        tokio::select! {
+            _ = completed.settle_ready(&db) => panic!("settlement crossed a held writer lane"),
+            _ = tokio::time::sleep(Duration::from_millis(1)) => {}
+        }
+        assert!(
+            completed.in_flight.is_some(),
+            "select cancellation retains the owned DB task"
+        );
+        assert_eq!(completed.pending.len(), 1);
+        completed.preserve_on_shutdown(&db).await;
+        assert_eq!(fs::read_dir(path.with_extension("publish-completions")).unwrap().count(), 2,
+            "shutdown must preserve pending and inflight receipts without waiting for SQLite admission");
+        release_tx.send(()).unwrap();
+        writer.await.unwrap().unwrap();
+        completed.settle_ready(&db).await;
+        completed.settle_ready(&db).await;
+        assert_eq!(
+            dispatch_state(&jobs[1]),
+            "finished",
+            "one failed receipt must not hide healthy completion"
+        );
+        assert_eq!(dispatch_state(&jobs[0]), "running");
+        assert_eq!(
+            completed.pending.len(),
+            1,
+            "a failed settlement must retain its exact completion receipt"
+        );
+
+        // A persistent SQLite fault cannot keep shutdown retrying forever. The
+        // exact receipt remains on disk for a new Database instance to replay.
+        completed.preserve_on_shutdown(&db).await;
+        assert_eq!(
+            fs::read_dir(path.with_extension("publish-completions"))
+                .unwrap()
+                .count(),
+            1
+        );
+
+        conn.execute_batch("DROP TRIGGER reject_completion;")
+            .unwrap();
+        tokio::time::advance(Duration::from_secs(2)).await;
+        completed.settle_ready(&db).await;
+        assert!(completed.pending.is_empty());
+        assert_eq!(dispatch_state(&jobs[0]), "finished");
+        let (attempt, revision): (String, i64) = conn
+            .query_row(
+                "SELECT attempt_id,revision FROM publish_dispatch_jobs WHERE assignment_id=?1",
+                [&jobs[0].assignment_id],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .unwrap();
+        assert_eq!(attempt, jobs[0].attempt_id);
+        assert_eq!(revision, jobs[0].revision + 2);
+        assert_eq!(
+            conn.query_row("SELECT COUNT(*) FROM publish_attempts", [], |row| row
+                .get::<_, i64>(0))
+                .unwrap(),
+            2
+        );
+        for assignment in db
+            .get_publish_campaign(&campaign.id)
+            .unwrap()
+            .unwrap()
+            .assignments
+        {
+            assert_eq!(assignment.state, Stage::Verifying);
+            assert_eq!(assignment.effect_intent.as_deref(), Some(intent));
+        }
+        // A repeated ACK is stale, not permission to reopen the completed job.
+        completed.push(jobs[0].clone(), None);
+        completed.settle_ready(&db).await;
+        assert!(completed.pending.is_empty());
+        assert_eq!(dispatch_state(&jobs[0]), "finished");
+        assert!(db.pending_publish_dispatch(10).unwrap().is_empty());
+        assert!(db.finish_publish_pipeline(&run).unwrap());
+        drop(conn);
+        drop(db);
+        let _ = fs::remove_file(path);
+    }
+
     #[tokio::test]
     async fn fast_transfer_enters_post_while_slow_transfer_is_blocked_and_reuses_upload_slot() {
         let slots = Arc::new(Semaphore::new(2));

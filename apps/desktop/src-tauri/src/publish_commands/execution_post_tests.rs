@@ -1,6 +1,87 @@
 use super::*;
 use riviu_core::tiktok_share::{LinkCapture, OwnPostLink};
 
+struct MetadataSession {
+    language: Option<&'static str>,
+    version: Option<&'static str>,
+}
+
+#[async_trait::async_trait]
+impl riviu_core::UiSession for MetadataSession {
+    async fn tap(&self, _: TapPoint) -> anyhow::Result<()> {
+        panic!("metadata read dispatched tap")
+    }
+    async fn swipe(&self, _: riviu_core::SwipeGesture) -> anyhow::Result<()> {
+        panic!("metadata read dispatched swipe")
+    }
+    async fn type_text(&self, _: &str) -> anyhow::Result<()> {
+        panic!("metadata read typed text")
+    }
+    async fn home(&self) -> anyhow::Result<()> {
+        panic!("metadata read dispatched Home")
+    }
+    async fn find_and_tap(&self, _: &str) -> anyhow::Result<()> {
+        panic!("metadata read dispatched tap")
+    }
+    async fn assert_visible(&self, _: &str) -> anyhow::Result<()> {
+        panic!("metadata read inspected composer")
+    }
+    async fn ui_language(&self) -> Option<String> {
+        self.language.map(str::to_owned)
+    }
+    async fn app_version(&self, _: &str) -> Option<String> {
+        self.version.map(str::to_owned)
+    }
+    fn stream_url(&self) -> Option<String> {
+        None
+    }
+}
+
+#[tokio::test]
+async fn dispatch_recovery_missing_metadata_is_retryable_but_unsupported_locale_is_not() {
+    use riviu_core::publish_recovery::{describe, FailureKind};
+    let package = "com.zhiliaoapp.musically";
+    for (language, version) in [
+        (None, Some("45.7.3")),
+        (Some("en"), None),
+        (Some(" "), Some("45.7.3")),
+        (Some("en"), Some("")),
+    ] {
+        let error = publish_runtime_labels(&MetadataSession { language, version }, package)
+            .await
+            .err()
+            .expect("missing metadata must refuse before composer");
+        let failure = describe(&error);
+        assert_eq!(
+            failure.kind,
+            FailureKind::Retryable,
+            "unavailable metadata must keep bounded pre-Post recovery"
+        );
+        assert_eq!(failure.code, "publish_metadata_unavailable");
+    }
+    let unsupported = publish_runtime_labels(
+        &MetadataSession {
+            language: Some("unmeasured-locale"),
+            version: Some("45.7.3"),
+        },
+        package,
+    )
+    .await
+    .err()
+    .expect("unsupported locale must still refuse");
+    assert_eq!(describe(&unsupported).kind, FailureKind::Terminal);
+    let (language, version, _) = publish_runtime_labels(
+        &MetadataSession {
+            language: Some("en"),
+            version: Some("45.7.3"),
+        },
+        package,
+    )
+    .await
+    .unwrap();
+    assert_eq!((language.as_str(), version.as_str()), ("en", "45.7.3"));
+}
+
 #[test]
 fn new_publish_requires_one_successful_release_for_every_selected_phone() {
     use riviu_core::ipc_contract::{OperationStopResult, StopDeviceResult};

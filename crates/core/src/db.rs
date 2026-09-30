@@ -113,6 +113,7 @@ pub struct Database {
     dispatch_connection: parking_lot::Mutex<Option<std::sync::Arc<parking_lot::Mutex<Connection>>>>,
     /// Process-local exit fence read by both Post claims; see `publish_shutdown`.
     publish_shutdown: std::sync::atomic::AtomicBool,
+    publish_recovery_error: parking_lot::RwLock<Option<String>>,
 }
 
 const NURTURE_SETTINGS_MIGRATION_V2: &str = "nurture.settings.migration.v2";
@@ -131,6 +132,7 @@ impl Database {
             secrets: None,
             dispatch_connection: parking_lot::Mutex::new(None),
             publish_shutdown: std::sync::atomic::AtomicBool::new(false),
+            publish_recovery_error: parking_lot::RwLock::new(None),
         };
         db.migrate()?;
         Ok(db)

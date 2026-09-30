@@ -2,6 +2,8 @@
 use super::*;
 use serde::{Deserialize, Serialize};
 
+mod completion;
+
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct PublishLimits {
@@ -102,6 +104,7 @@ impl Database {
         assignment_id: &str,
         request: Option<(i64, &str)>,
     ) -> anyhow::Result<Option<PublishPipelineRun>> {
+        self.ensure_publish_recovery_ready()?;
         let mut conn = self.conn()?;
         let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
         if let Some((revision, request_id)) = request {
@@ -321,6 +324,7 @@ impl Database {
         stage: &str,
         owner: &str,
     ) -> anyhow::Result<Option<PublishWorkPermit>> {
+        self.ensure_publish_recovery_ready()?;
         let connection = self.dispatch_conn()?;
         let mut conn = connection.lock();
         let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;

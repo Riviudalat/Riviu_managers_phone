@@ -13,6 +13,7 @@ impl Database {
         &self,
         campaign_id: &str,
     ) -> anyhow::Result<Option<PublishPipelineRun>> {
+        self.ensure_publish_recovery_ready()?;
         let mut conn = self.conn()?;
         let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
         let request: Option<String> = tx

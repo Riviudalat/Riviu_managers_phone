@@ -3679,6 +3679,31 @@ pub(super) async fn post_through_the_pixel_grid(
 /// second time because the two checks answer at different moments and the phone can change in
 /// between: an app that updated between transfer and post has a `versionName` this catalogue
 /// may not know, and the resource ids it keys on are reassigned on every rebuild.
+async fn publish_runtime_labels(
+    session: &dyn riviu_core::UiSession,
+    package: &str,
+) -> anyhow::Result<(String, String, riviu_core::tiktok_labels::TikTokControls)> {
+    let language = session.ui_language().await.unwrap_or_default();
+    let version = session.app_version(package).await.unwrap_or_default();
+    if language.trim().is_empty() || version.trim().is_empty() {
+        // The driver returns Option for metadata, so unavailable transport/readback
+        // has no tuple to classify as unsupported. Preserve a typed pre-Post failure
+        // for the existing bounded dispatcher; never select a default build.
+        return Err(riviu_core::publish_recovery::RecoveryFailure::new(
+            "publish_metadata_unavailable",
+            riviu_core::publish_recovery::FailureKind::Retryable,
+            format!(
+                "Chưa đọc đủ ngôn ngữ/phiên bản TikTok {package} trước Đăng (language={}, version={})",
+                !language.trim().is_empty(),
+                !version.trim().is_empty(),
+            ),
+        ).into());
+    }
+    let labels = riviu_core::tiktok_labels::controls_for_runtime(package, &language, &version)
+        .ok_or_else(|| anyhow::anyhow!("chưa đo nhãn TikTok cho {package} / {language:?}"))?;
+    Ok((language, version, labels))
+}
+
 // The request fields remain explicit because the source-order regression tests verify that the
 // immutable campaign/card identity and the one-shot callback reach the same measured composer.
 #[allow(clippy::too_many_arguments)]
@@ -3722,12 +3747,12 @@ pub(super) async fn post_through_the_composer(
         Ok(package) => package,
         Err(error) => return refuse(format!("không xác định được bản TikTok ({error})")),
     };
-    let language = session.ui_language().await.unwrap_or_default();
-    let version = session.app_version(&package).await.unwrap_or_default();
-    let Some(labels) =
-        riviu_core::tiktok_labels::controls_for_runtime(&package, &language, &version)
-    else {
-        return refuse(format!("chưa đo nhãn TikTok cho {package} / {language:?}"));
+    let (language, version, labels) = match publish_runtime_labels(session, &package).await {
+        Ok(metadata) => metadata,
+        Err(error) => {
+            *recovery_failure = Some(riviu_core::publish_recovery::describe(&error));
+            return refuse(error.to_string());
+        }
     };
     let plan = match ComposerPlan::resolve(&labels) {
         Ok(plan) => plan,

@@ -37,6 +37,10 @@ pub async fn publish_start(
     preparation_id: Option<String>,
 ) -> Result<PublishStartReceipt, CommandError> {
     let admission = state.ensure_accepting_work()?;
+    state
+        .db
+        .ensure_publish_recovery_ready()
+        .map_err(preflight::err)?;
     if !confirmed {
         return Err(CommandError::invalid_argument(
             "Cần xác nhận bắt đầu đúng lượt đăng",

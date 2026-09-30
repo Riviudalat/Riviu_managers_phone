@@ -1209,7 +1209,10 @@ impl AppState {
         // re-enters it. Settling it as `uncertain` is what makes it permanently
         // unclaimable, which is the only safe answer when nobody can tell whether the post
         // went out.
-        match db.interrupt_orphaned_publish_campaigns() {
+        match db
+            .storage_write(|db| db.recover_publish_dispatch_startup())
+            .await
+        {
             Ok(0) => {}
             Ok(count) => log::warn!(
                 "{count} chiến dịch đăng bài còn dở từ lần chạy trước đã được đánh dấu là đã dừng"
@@ -2502,6 +2505,9 @@ impl AppState {
                     if !publish_acceptance
                         .allows_any(crate::dev_acceptance::AcceptanceCapability::PublishSchedule)
                     {
+                        continue;
+                    }
+                    if publish_db.ensure_publish_recovery_ready().is_err() {
                         continue;
                     }
                     let Ok(scheduled) = publish_db.scheduled_publish_campaigns() else {

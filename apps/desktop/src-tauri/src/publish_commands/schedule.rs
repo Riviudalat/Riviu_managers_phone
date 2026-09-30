@@ -283,6 +283,10 @@ pub async fn publish_schedule_create(
     confirmed: bool,
 ) -> Result<Vec<PublishCampaignRecord>, CommandError> {
     let _admission = state.ensure_accepting_work()?;
+    state
+        .db
+        .ensure_publish_recovery_ready()
+        .map_err(preflight::err)?;
     if !confirmed {
         return Err(preflight::err("cần xác nhận lịch đăng công khai"));
     }
