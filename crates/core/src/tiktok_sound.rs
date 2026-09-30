@@ -16,6 +16,19 @@ use tokio::time::Instant;
 
 use crate::driver::{ElementBox, ElementQuery, UiSession};
 use crate::publish::SoundCandidate;
+use unicode_normalization::UnicodeNormalization;
+
+// TikTok can style the selected editor title (e.g. mathematical bold plus NBSP)
+// while the picker exposes plain text. Preserve letters, case and punctuation.
+fn same_editor_sound_title(observed: &str, expected: &str) -> bool {
+    let normalize = |value: &str| {
+        value
+            .nfkc()
+            .map(|character| if character.is_whitespace() { ' ' } else { character })
+            .collect::<String>()
+    };
+    normalize(observed.trim()) == normalize(expected.trim())
+}
 
 pub(crate) mod observation;
 mod recent;

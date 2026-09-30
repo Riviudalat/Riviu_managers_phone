@@ -402,6 +402,8 @@ pub(crate) struct VerificationCandidateTrace {
     pub(crate) caption_digest: Option<String>,
     pub(crate) time_digest: Option<String>,
     pub(crate) reason_code: Option<VerificationReason>,
+    pub(crate) started_at_ms: u64,
+    pub(crate) elapsed_ms: Option<u64>,
 }
 
 fn candidate_budget_exhausted(
@@ -680,8 +682,14 @@ struct Capture<'a> {
 
 impl Capture<'_> {
     fn trace_enabled(&self) -> bool {
-        self.plan.labels.package() == "com.zhiliaoapp.musically"
-            && self.plan.labels.resource_version() == Some("45.7.3")
+        matches!(
+            (
+                self.plan.labels.package(),
+                self.plan.labels.resource_version()
+            ),
+            ("com.zhiliaoapp.musically", Some("45.7.3"))
+                | ("com.ss.android.ugc.trill", Some("38.3.2"))
+        )
     }
 
     fn trace_digest(&self, value: &str) -> String {
@@ -694,12 +702,17 @@ impl Capture<'_> {
     fn mark_candidate(&mut self, reason: VerificationReason) {
         if let Some(last) = self.diagnostic.candidate_trace.last_mut() {
             last.reason_code = Some(reason);
+            last.elapsed_ms = Some(self.started.elapsed().as_millis() as u64 - last.started_at_ms);
         }
     }
 
     fn matched_photo_failure(&mut self, error: &anyhow::Error) -> Option<VerificationReason> {
         if error.is::<super::photo_proof::OtherPublication>() {
             return Some(VerificationReason::OtherPublication);
+        }
+        if error.is::<super::photo_proof::EarlierPublication>() {
+            self.diagnostic.expanded_photo_error = Some(error.to_string());
+            return Some(VerificationReason::SubmissionTooOld);
         }
         self.diagnostic.expanded_photo_error = Some(error.to_string());
         let failure = error.downcast_ref::<super::photo_proof::MatchedPhotoCopyFailure>()?;
@@ -844,8 +857,13 @@ impl Capture<'_> {
                 if last_screen.as_ref() != Some(&screen)
                     || last_action_at.is_some_and(|at| at.elapsed() >= Duration::from_secs(5))
                 {
-                    let mut button =
-                        tree.control(self.plan.labels.package(), self.plan.labels.label(control));
+                    let facebook_prompt = control == TikTokControl::DialogDismiss
+                        && decline_facebook_permission(&tree, self.plan).is_some();
+                    let mut button = if facebook_prompt {
+                        decline_facebook_permission(&tree, self.plan)
+                    } else {
+                        tree.control(self.plan.labels.package(), self.plan.labels.label(control))
+                    };
                     if button.is_none() && control == TikTokControl::DialogDismiss {
                         button = decline_facebook_permission(&tree, self.plan).or_else(|| {
                             crate::app_automation::dialogs::decline_contacts(
@@ -875,6 +893,19 @@ impl Capture<'_> {
                         last_action_at = Some(Instant::now());
                         actions += 1;
                         self.diagnostic.navigation_actions += 1;
+                        if facebook_prompt {
+                            let wait_started = Instant::now();
+                            loop {
+                                let fresh = self.read().await?;
+                                if decline_facebook_permission(&fresh, self.plan).is_none() {
+                                    break;
+                                }
+                                if wait_started.elapsed() >= Duration::from_secs(5) {
+                                    return Err(VerificationReason::UnrecognizedDialog);
+                                }
+                                tokio::time::sleep(POLL).await;
+                            }
+                        }
                     }
                 }
             } else if screen == Screen::Unknown
@@ -1244,6 +1275,53 @@ impl Capture<'_> {
                 Ok(Some(link))
             }
             Err(error) => {
+                if error.is::<super::photo_proof::PhotoCarouselViewer>() {
+                    let photo = super::photo_proof::capture_expanded_photo_link_counted(
+                        self.session,
+                        self.plan.labels.package(),
+                        self.caption,
+                        self.identity,
+                        &mut self.diagnostic.copy_attempts,
+                        self.other_publication_urls,
+                    )
+                    .await;
+                    if self.expired() {
+                        return Err(VerificationReason::SearchBudgetExhausted);
+                    }
+                    return match photo {
+                        Ok(link) => {
+                            self.diagnostic.stage = "expandedPhotoPublicProof";
+                            Ok(Some(link))
+                        }
+                        Err(error) => {
+                            self.diagnostic.expanded_photo_error = Some(error.to_string());
+                            if error.is::<super::photo_proof::EarlierPublication>() {
+                                return Err(VerificationReason::SubmissionTooOld);
+                            }
+                            match self.matched_photo_failure(&error) {
+                                Some(reason) => Err(reason),
+                                None => Ok(None),
+                            }
+                        }
+                    };
+                }
+                if self.plan.labels.package() == "com.zhiliaoapp.musically"
+                    && self.plan.labels.resource_version() == Some("45.7.3")
+                {
+                    if let Some(mismatch) =
+                        error.downcast_ref::<super::photo_proof::FullVideoCaptionMismatch>()
+                    {
+                        let caption_digest = self.trace_digest(&mismatch.caption);
+                        let time_digest =
+                            mismatch.time.as_deref().map(|time| self.trace_digest(time));
+                        if let Some(last) = self.diagnostic.candidate_trace.last_mut() {
+                            last.post_snapshot_generation = Some(mismatch.generation);
+                            last.caption_digest = Some(caption_digest);
+                            last.time_digest = time_digest;
+                        }
+                        return Err(VerificationReason::CaptionMismatch);
+                    }
+                }
                 self.diagnostic.expanded_photo_error = Some(format!("video: {error:#}"));
                 match self.matched_photo_failure(&error) {
                     Some(reason) => Err(reason),
@@ -1256,7 +1334,12 @@ impl Capture<'_> {
     async fn capture(&mut self) -> Result<String, VerificationReason> {
         match self.visible_video().await {
             Ok(Some(link)) => return Ok(link),
-            Ok(None) | Err(VerificationReason::OtherPublication) => {}
+            Ok(None)
+            | Err(
+                VerificationReason::OtherPublication
+                | VerificationReason::CaptionMismatch
+                | VerificationReason::SubmissionTooOld,
+            ) => {}
             Err(reason) => return Err(reason),
         }
         match super::photo_proof::capture_expanded_photo_link_counted(
@@ -1275,7 +1358,10 @@ impl Capture<'_> {
             }
             Err(error) => {
                 if let Some(reason) = self.matched_photo_failure(&error) {
-                    if reason != VerificationReason::OtherPublication {
+                    if !matches!(
+                        reason,
+                        VerificationReason::OtherPublication | VerificationReason::SubmissionTooOld
+                    ) {
                         return Err(reason);
                     }
                 }
@@ -1313,15 +1399,6 @@ impl Capture<'_> {
             let mut unresolved_candidate = None;
             let mut page_index = 0;
             loop {
-                if self.expired()
-                    || candidate_budget_exhausted(
-                        self.plan,
-                        &self.diagnostic.candidate_trace,
-                        self.diagnostic.candidates_visited,
-                    )
-                {
-                    return Err(VerificationReason::SearchBudgetExhausted);
-                }
                 let tiles = tree.grid(self.plan);
                 let next = tiles.into_iter().find(|tile| {
                     !visited.contains(&(
@@ -1337,6 +1414,15 @@ impl Capture<'_> {
                     }
                     break;
                 };
+                if self.expired()
+                    || candidate_budget_exhausted(
+                        self.plan,
+                        &self.diagnostic.candidate_trace,
+                        self.diagnostic.candidates_visited,
+                    )
+                {
+                    return Err(VerificationReason::SearchBudgetExhausted);
+                }
                 visited.insert((
                     tile.x.to_bits(),
                     tile.y.to_bits(),
@@ -1357,6 +1443,8 @@ impl Capture<'_> {
                             caption_digest: None,
                             time_digest: None,
                             reason_code: None,
+                            started_at_ms: self.started.elapsed().as_millis() as u64,
+                            elapsed_ms: None,
                         });
                 }
                 self.diagnostic.stage = "postProof";
@@ -1380,6 +1468,16 @@ impl Capture<'_> {
                         Err(VerificationReason::OtherPublication) => {
                             self.mark_candidate(VerificationReason::OtherPublication);
                             last_reason = VerificationReason::OtherPublication;
+                            break 'candidate_proof;
+                        }
+                        Err(VerificationReason::CaptionMismatch) => {
+                            self.mark_candidate(VerificationReason::CaptionMismatch);
+                            last_reason = VerificationReason::CaptionMismatch;
+                            break 'candidate_proof;
+                        }
+                        Err(VerificationReason::SubmissionTooOld) => {
+                            self.mark_candidate(VerificationReason::SubmissionTooOld);
+                            last_reason = VerificationReason::SubmissionTooOld;
                             break 'candidate_proof;
                         }
                         Err(reason) => {
@@ -1495,7 +1593,11 @@ impl Capture<'_> {
                                     }
                                     Err(error) => {
                                         if let Some(failure) = self.matched_photo_failure(&error) {
-                                            if failure != VerificationReason::OtherPublication {
+                                            if !matches!(
+                                                failure,
+                                                VerificationReason::OtherPublication
+                                                    | VerificationReason::SubmissionTooOld
+                                            ) {
                                                 return Err(failure);
                                             }
                                             reason = failure;

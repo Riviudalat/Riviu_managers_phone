@@ -321,11 +321,14 @@ pub async fn publish_create_campaign(
     {
         return Ok(prior);
     }
+    let handoff_deadline = tokio::time::Instant::now() + Duration::from_secs(125);
     let handoff = if confirmed && run_at.is_none() {
-        Some(crate::commands::lock_manual_handoff()?)
+        Some(crate::commands::wait_manual_handoff_until(handoff_deadline).await?)
     } else {
         None
     };
+    // Shutdown may have started while this accepted request waited its turn.
+    let _after_handoff_admission = state.ensure_accepting_work()?;
     preflight::require_new_publish_delivery(
         preflight_request.sheet_enabled,
         preflight_request.delete_after_publish,
@@ -367,7 +370,7 @@ pub async fn publish_create_campaign(
             preparation::progress(udid, "preparingDevices", "running", 0, None);
         }
         let result =
-            crate::commands::prepare_publish_devices(&app, &state, udids.clone(), handoff).await?;
+            crate::commands::prepare_publish_devices(&app, &state, udids.clone(), handoff, handoff_deadline).await?;
         require_released_publish_devices(&udids, &result).map_err(err)?;
     }
     preparation::stage(&state.db, "checkingDevices")

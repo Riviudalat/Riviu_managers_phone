@@ -260,7 +260,7 @@ async fn confirm_editor_observed(
             plan.package,
             ElementQuery::ResourceIdSuffix(plan.current_title_id),
         );
-        let valid = matches!(title.as_slice(),[index]if tree.nodes[*index].attr("text").trim()==expected.trim());
+        let valid = matches!(title.as_slice(),[index]if same_editor_sound_title(tree.nodes[*index].attr("text"), expected));
         let sheet = plan.snapshot_layout().is_some_and(|layout| {
             !tree
                 .matching(plan.package, ElementQuery::ResourceIdSuffix(layout.tab_id))

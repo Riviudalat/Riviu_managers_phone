@@ -21,6 +21,108 @@ impl std::error::Error for MatchedPhotoCopyFailure {}
 #[error("canonical link belongs to another publication")]
 pub(super) struct OtherPublication;
 
+#[derive(Debug, thiserror::Error)]
+#[error("complete video caption differs")]
+pub(super) struct FullVideoCaptionMismatch {
+    pub(super) caption: String,
+    pub(super) time: Option<String>,
+    pub(super) generation: u64,
+}
+
+#[derive(Debug, thiserror::Error)]
+#[error("measured photo carousel viewer")]
+pub(super) struct PhotoCarouselViewer;
+
+#[derive(Debug, thiserror::Error)]
+#[error("copied post ID predates the recorded preparation window")]
+pub(super) struct EarlierPublication;
+
+fn measured_global_photo_viewer(tree: &Tree, package: &str, version: &str) -> bool {
+    if package != "com.zhiliaoapp.musically" || version != "45.7.3" {
+        return false;
+    }
+    let containers = tree.matching(
+        package,
+        ElementQuery::ResourceIdSuffix(":id/widget_container"),
+    );
+    let counters = tree.matching(package, ElementQuery::ResourceIdSuffix(":id/q9x"));
+    let labels = tree.matching(package, ElementQuery::ResourceIdSuffix(":id/zm7"));
+    let ([container], [counter]) = (containers.as_slice(), counters.as_slice()) else {
+        return false;
+    };
+    if !tree.inside(*counter, *container) {
+        return false;
+    }
+    let labelled_photo = match labels.as_slice() {
+        [label] => {
+            let node = &tree.nodes[*label];
+            tree.inside(*label, *container)
+                && node.attr("class") == "android.widget.TextView"
+                && node.attr("text") == "Photo"
+                && node.visible(package)
+                && tree.ancestors_visible(*label)
+                && node.rect().is_some()
+        }
+        [] => {
+            // One measured Global 45.7.3 carousel omits the Photo word while
+            // retaining the same six-dot rail and sibling image page.
+            let roots = tree.matching(package, ElementQuery::ResourceIdSuffix(":id/view_rootview"));
+            let pagers = tree.matching(package, ElementQuery::ResourceIdSuffix(":id/q_i"));
+            let images = tree.matching(package, ElementQuery::ResourceIdSuffix(":id/vgh"));
+            match (roots.as_slice(), pagers.as_slice(), images.as_slice()) {
+                ([root], [pager], [image]) => {
+                    tree.inside(*container, *root)
+                        && tree.inside(*pager, *root)
+                        && tree.inside(*image, *pager)
+                        && tree.nodes[*pager].attr("scrollable") == "true"
+                        && tree.nodes[*image].attr("class") == "android.widget.ImageView"
+                        && tree.nodes[*image].visible(package)
+                        && tree.ancestors_visible(*image)
+                        && tree.nodes[*image].rect().is_some()
+                }
+                _ => false,
+            }
+        }
+        _ => false,
+    };
+    if !labelled_photo {
+        return false;
+    }
+    let counter_node = &tree.nodes[*counter];
+    if counter_node.attr("class") != "android.widget.LinearLayout"
+        || !counter_node.visible(package)
+        || !tree.ancestors_visible(*counter)
+        || counter_node.rect().is_none()
+    {
+        return false;
+    }
+    let dots = tree
+        .nodes
+        .iter()
+        .enumerate()
+        .filter(|(index, node)| {
+            node.parent == Some(*counter)
+                && node.visible(package)
+                && tree.ancestors_visible(*index)
+                && node.attr("class") == "android.widget.ImageView"
+                && node.attr("resource-id").is_empty()
+                && node.rect().is_some_and(|rect| {
+                    rect.width > 0.0
+                        && rect.height > 0.0
+                        && rect.width <= 32.0
+                        && rect.height <= 32.0
+                })
+        })
+        .count();
+    (2..=35).contains(&dots)
+        && tree
+            .nodes
+            .iter()
+            .filter(|node| node.parent == Some(*counter))
+            .count()
+            == dots
+}
+
 fn exclude_other_publication(
     canonical: &str,
     other_publication_urls: &[String],
@@ -61,10 +163,11 @@ fn validate_photo_identity(
     );
     // IDs have one-second resolution and may be allocated when the app opens.
     // Earlier IDs require the actual recorded session start, never a guessed grace period.
+    if allocated.timestamp() < prepared.timestamp() {
+        return Err(EarlierPublication.into());
+    }
     anyhow::ensure!(
-        allocated.timestamp() >= prepared.timestamp()
-            && allocated <= submitted + chrono::Duration::minutes(30)
-            && allocated <= chrono::Utc::now(),
+        allocated <= submitted + chrono::Duration::minutes(30) && allocated <= chrono::Utc::now(),
         "copied post ID is outside recorded publication window"
     );
     Ok(id.to_owned())
@@ -318,6 +421,10 @@ pub(super) async fn capture_visible_video_link_counted(
     );
     let tree = Tree::parse(session.hierarchy_source_snapshot().await?)?;
     let version = session.app_version(package).await.unwrap_or_default();
+    if measured_global_photo_viewer(&tree, package, &version) {
+        video_viewer_caption(&tree, package, &version, caption)?;
+        return Err(PhotoCarouselViewer.into());
+    }
     let (caption_id, share) = video_viewer_caption(&tree, package, &version, caption)?;
     let _ = caption_id;
     let photo_counter = measured_photo_counter(&tree, package, &version);
@@ -348,12 +455,29 @@ pub(super) async fn capture_visible_video_link_counted(
             "matched video candidate link resolution: {error:#}"
         )))
     })?;
-    anyhow::ensure!(
-        viewer_kind_matches_link(&canonical, photo_counter)?,
-        "copied content kind does not match measured viewer"
-    );
+    // Negative identity is independent of viewer kind. Reject a known other or
+    // earlier publication before a transient carousel marker can mask its cause.
     exclude_other_publication(&canonical, other_publication_urls)?;
     validate_photo_identity(&canonical, identity)?;
+    let copied_photo = url::Url::parse(&canonical)?
+        .path_segments()
+        .is_some_and(|mut segments| segments.nth(1) == Some("photo"));
+    let kind_proven = if viewer_kind_matches_link(&canonical, photo_counter)? {
+        true
+    } else if package == "com.ss.android.ugc.trill"
+        && version == "38.3.2"
+        && copied_photo
+        && session.active_app_bundle().await? == package
+    {
+        // TikTok can render the caption/share before its carousel counter.
+        // Re-read this measured candidate; link kind alone is not proof.
+        let fresh = Tree::parse(session.hierarchy_source_snapshot().await?)?;
+        video_viewer_caption(&fresh, package, &version, caption).is_ok()
+            && measured_photo_counter(&fresh, package, &version)
+    } else {
+        false
+    };
+    anyhow::ensure!(kind_proven, "copied content kind does not match measured viewer");
     validate_public_link(&canonical, caption, identity)
         .await
         .map_err(|error| {
@@ -494,12 +618,35 @@ fn video_viewer_caption(
                 .and_then(|tail| tail.chars().next())
                 .is_some_and(|scalar| u32::from(scalar) > 0xffff)
         });
-    anyhow::ensure!(
-        visible == expected
-            || prefix.is_some_and(|p| p.chars().count() >= 20 && expected.starts_with(p))
-            || scalar_placeholder,
-        "video caption differs"
-    );
+    if visible != expected
+        && !prefix.is_some_and(|p| p.chars().count() >= 20 && expected.starts_with(p))
+        && !scalar_placeholder
+    {
+        // Only a complete, non-ellipsized caption excludes this tile. A folded
+        // caption may still need expansion or the public metadata fallback.
+        let folded =
+            visible.trim_end_matches(|c: char| matches!(c, '\u{2060}' | '\u{200e}' | '\u{200f}'));
+        if package == "com.zhiliaoapp.musically"
+            && version == "45.7.3"
+            && !folded.is_empty()
+            && prefix.is_none()
+            && !folded.ends_with('…')
+            && !folded.ends_with("...")
+            && !folded.ends_with("…more")
+        {
+            let times = tree.matching(package, ElementQuery::ResourceIdSuffix(":id/zwj"));
+            return Err(FullVideoCaptionMismatch {
+                caption: tree.nodes[*index].attr("text").to_owned(),
+                time: match times.as_slice() {
+                    [time] => Some(tree.nodes[*time].attr("text").to_owned()),
+                    _ => None,
+                },
+                generation: tree.generation,
+            }
+            .into());
+        }
+        anyhow::bail!("video caption differs");
+    }
     anyhow::ensure!(
         tree.matching(package, share).len() == 1,
         "video share control missing or ambiguous"
@@ -654,6 +801,98 @@ mod tests {
         let good = xml(observed, "Video");
         let duplicate=good.replace("</hierarchy>",&format!(r#"<node package="{package}" resource-id="{package}:id/dmk" text="{observed}" bounds="[10,1200][900,1400]" displayed="true"/></hierarchy>"#));
         assert!(video_viewer_caption(&parse(duplicate), package, "38.3.2", expected).is_err());
+    }
+    #[test]
+    fn global_45_7_3_word_joiner_ellipsis_is_not_a_full_caption_rejection() {
+        let package = "com.zhiliaoapp.musically";
+        let expected = "A complete caption that continues after the visible prefix #fixture";
+        let xml = |caption: &str| {
+            format!(
+            "<hierarchy><node package=\"{package}\" content-desc=\"Video\" bounds=\"[0,0][1080,1965]\" displayed=\"true\"/><node package=\"{package}\" resource-id=\"{package}:id/desc\" text=\"{caption}\" bounds=\"[10,1500][900,1700]\" displayed=\"true\"/></hierarchy>"
+        )
+        };
+        let read = |caption: &str| {
+            Tree::parse(crate::HierarchySourceSnapshot {
+                generation: 1,
+                xml: xml(caption),
+            })
+            .unwrap()
+        };
+        let folded = "A complete caption that continues…\u{2060}";
+        let error = video_viewer_caption(&read(folded), package, "45.7.3", expected).unwrap_err();
+        assert!(!error.is::<FullVideoCaptionMismatch>());
+        let wrong = video_viewer_caption(
+            &read("A different complete caption"),
+            package,
+            "45.7.3",
+            expected,
+        )
+        .unwrap_err();
+        assert!(wrong.is::<FullVideoCaptionMismatch>());
+    }
+    #[test]
+    fn measured_global_carousel_requires_photo_label_and_bounded_dot_counter() {
+        let package = "com.zhiliaoapp.musically";
+        let xml = format!(
+            r#"<hierarchy>
+          <node package="{package}" resource-id="{package}:id/widget_container" bounds="[0,0][1080,1965]" displayed="true">
+            <node package="{package}" class="android.widget.LinearLayout" resource-id="{package}:id/q9x" bounds="[452,1615][628,1631]" displayed="true">
+              <node package="{package}" class="android.widget.ImageView" bounds="[452,1615][468,1631]" displayed="true"/>
+              <node package="{package}" class="android.widget.ImageView" bounds="[484,1615][500,1631]" displayed="true"/>
+            </node>
+            <node package="{package}" class="android.widget.TextView" resource-id="{package}:id/zm7" text="Photo" bounds="[329,1666][429,1723]" displayed="true"/>
+          </node>
+        </hierarchy>"#
+        );
+        let read = |source: String| {
+            Tree::parse(crate::HierarchySourceSnapshot {
+                generation: 1,
+                xml: source,
+            })
+            .unwrap()
+        };
+        assert!(measured_global_photo_viewer(
+            &read(xml.clone()),
+            package,
+            "45.7.3"
+        ));
+        let no_label = xml.replace(
+            &format!("<node package=\"{package}\" class=\"android.widget.TextView\" resource-id=\"{package}:id/zm7\" text=\"Photo\" bounds=\"[329,1666][429,1723]\" displayed=\"true\"/>"),
+            &format!("<node package=\"{package}\" resource-id=\"{package}:id/q_i\" scrollable=\"true\" bounds=\"[0,63][1080,1965]\" displayed=\"true\"><node package=\"{package}\" class=\"android.widget.ImageView\" resource-id=\"{package}:id/vgh\" bounds=\"[0,63][1080,1584]\" displayed=\"true\"/></node>"),
+        );
+        let no_label = no_label.replace(
+            &format!("<node package=\"{package}\" resource-id=\"{package}:id/widget_container\" bounds=\"[0,0][1080,1965]\" displayed=\"true\">"),
+            &format!("<node package=\"{package}\" resource-id=\"{package}:id/view_rootview\" bounds=\"[0,0][1080,1965]\" displayed=\"true\"><node package=\"{package}\" resource-id=\"{package}:id/widget_container\" bounds=\"[0,0][1080,1965]\" displayed=\"true\">"),
+        ).replace(
+            &format!("<node package=\"{package}\" resource-id=\"{package}:id/q_i\" scrollable=\"true\" bounds=\"[0,63][1080,1965]\" displayed=\"true\"><node package=\"{package}\" class=\"android.widget.ImageView\" resource-id=\"{package}:id/vgh\" bounds=\"[0,63][1080,1584]\" displayed=\"true\"/></node>"),
+            "",
+        ).replace(
+            "</hierarchy>",
+            &format!("<node package=\"{package}\" resource-id=\"{package}:id/q_i\" scrollable=\"true\" bounds=\"[0,63][1080,1965]\" displayed=\"true\"><node package=\"{package}\" class=\"android.widget.ImageView\" resource-id=\"{package}:id/vgh\" bounds=\"[0,63][1080,1584]\" displayed=\"true\"/></node></node></hierarchy>"),
+        );
+        assert!(measured_global_photo_viewer(
+            &read(no_label.clone()),
+            package,
+            "45.7.3"
+        ));
+        assert!(!measured_global_photo_viewer(
+            &read(no_label.replace(":id/vgh", ":id/other")),
+            package,
+            "45.7.3"
+        ));
+        for changed in [
+            xml.replace("text=\"Photo\"", "text=\"Video\""),
+            xml.replace(":id/q9x", ":id/other"),
+            xml.replace(":id/zm7", ":id/other"),
+            xml.replace("[484,1615][500,1631]", "[484,1615][560,1660]"),
+        ] {
+            assert!(!measured_global_photo_viewer(
+                &read(changed),
+                package,
+                "45.7.3"
+            ));
+        }
+        assert!(!measured_global_photo_viewer(&read(xml), package, "46.2.1"));
     }
     #[test]
     fn global_video_literal_more_suffix_only_authorizes_copy_not_publication_proof() {

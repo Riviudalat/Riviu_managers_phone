@@ -79,7 +79,7 @@ pub(crate) async fn inspect(
                     if let [only] = rows.as_slice() {
                         if only.visible == Some(true) && only.password == Some(false) {
                             if let Some(value) = &only.text {
-                                if value.trim() == expected {
+                                if same_editor_sound_title(value, expected) {
                                     observation::check(deadline, None)?;
                                     return Ok(EditorState::Confirmed);
                                 }
@@ -130,7 +130,7 @@ pub(crate) async fn inspect(
                     .await?;
                 }
                 if matches!(rows.as_slice(), [only] if only.description.as_deref()
-                    .is_some_and(|text| text.trim() == expected))
+                    .is_some_and(|text| same_editor_sound_title(text, expected)))
                 {
                     observation::check(deadline, None)?;
                     return Ok(EditorState::Confirmed);

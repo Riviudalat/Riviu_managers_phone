@@ -158,7 +158,7 @@ thành username và không dùng mapping này cho build khác chưa đo.
 
 `RIVIU_DEV_MANUAL_ACCEPTANCE=1` trong bản debug giữ mọi lịch tự chạy ở trạng thái
 chờ và không sửa lịch đã lưu. Chế độ này cũng không tự resume Flow/Điều phối,
-không chạy cleanup/idle sweep/comment verifier, không tự đóng app và không bind
+không chạy idle sweep/comment verifier, không tự đóng app và không bind
 Local API đã lưu. Dispatcher chỉ nhận đúng cặp campaign/máy trong file tuyệt đối
 `RIVIU_DEV_ACCEPTANCE_SCOPE`; `RIVIU_DEV_ACCEPTANCE_ACTIVATION` phải khớp
 `activationId` trong file. Thiếu file/activation, JSON lỗi hoặc ID không khớp đều
@@ -168,6 +168,13 @@ phiên làm toàn bộ gate đóng lại. Giới hạn concurrent production v�
 Nghiệm thu hẹn giờ phải bật riêng `capabilities.publishSchedule`; chỉ lịch có
 campaign và toàn bộ máy nằm trong scope mới được clock production nhận khi tới
 giờ. Các lịch khác, Nuôi và Điều phối vẫn đóng băng, không sửa lịch đã lưu.
+
+Verifier nền chỉ nhận bài đến hạn khi có `publishVerification` hợp lệ cho đúng
+campaign và serial. Nó dùng cùng ngân sách 3 lần không tiến triển và nhịp 5 phút;
+không tự mở lại bài cần review. Truy vấn và cập nhật lượt thiết bị giới hạn trong
+scope. Cleanup nền cần riêng `publishCleanup` và chỉ dọn bản chuyển đã có proof
+canonical qua kiểm revision/lease hiện có. Thiếu hoặc đổi scope thì không nhận
+việc mới; dùng Dừng để hủy và nhả việc đang chạy.
 
 Scope tối thiểu chỉ mở dispatch do harness đã xác nhận; verifier và Sheet vẫn tắt:
 
@@ -784,16 +791,16 @@ khi production đang giữ máy. CDP không có sẵn thì dừng; việc chạy
 cấp quyền tạo thêm lượt public.
 Khi nghiệm thu Android cắm USB, thêm `--real-android true`: harness đối chiếu từng
 serial với roster Android USB `connected/ready` của chính AppState trước mọi
-preflight/Create/Execute. Thiếu máy, app đang chạy mock hoặc roster cũ đều bị từ
+preflight/Start. Thiếu máy, app đang chạy mock hoặc roster cũ đều bị từ
 chối; `inspect` không mang cờ này chỉ là phép đọc trạng thái, exit 0 không chứng
 nhận máy thật. Cờ được ghim trong fingerprint của preflight và submit.
 
 | Mode | Hành vi | Điều không thực hiện |
 |---|---|---|
 | `inspect` (mặc định) | Đọc roster + device metadata; nếu có campaign ID/receipt thì đọc `publish_get` | Không preflight, quét nguồn, Sheet check, mở thiết bị hoặc mutate |
-| `preflight` | Kiểm OAuth writer/target/epoch và gọi `publish_preflight`; máy chưa gán nick thì đọc username trên điện thoại, khóa vào hash xác nhận | Không create/execute/Post |
-| `submit` | Đọc lại đúng account đã duyệt trên từng máy; persist request trước create và intent trước Execute | Không tự replay Execute khi intent đã tồn tại |
-| `observe` | Poll `publish_get` đến hạn báo cáo | Không gọi kiểm link chủ động, retry, resume, terminate hoặc Post |
+| `preflight` | Giữ UUID trong `preflight-request.json`, kích hoạt scope đúng UUID/máy trước `publish_preflight(requestId)`; kiểm OAuth writer/target/epoch và username | Không Start/Post |
+| `submit` | Đọc lại account, writer và scope; fsync `start-intent.json` trước một `publish_start`, rồi đọc `publish_start_status` | Không phát lại Start khi intent đã tồn tại |
+| `observe` | Đọc `publish_start_status` rồi poll `publish_get` đến hạn; report cũ vẫn đọc theo đường cũ | Không gọi kiểm link chủ động, retry, resume, terminate hoặc Post |
 
 `publish_sheet_check` có thể lưu cấu hình kết nối đã xác minh và làm network I/O;
 chỉ gọi trong preflight/submit, **không** thuộc inspect read-only. Script không chuẩn
@@ -801,7 +808,7 @@ bị/reset Sheet, đổi writer hay lấy token. OAuth direct phải active và 
 check phải xác minh đúng gid/epoch, preflight phải có Sheet enabled + target v2.
 Username gán sẵn là ràng buộc bổ sung, không bắt buộc để Đăng. Nếu metadata trống,
 preflight đọc username trên máy; không đọc rõ thì dừng, không tự điền metadata.
-Submit chỉ Create/Execute nếu username đọc lại khớp snapshot đã duyệt. Lượt harness
+Submit chỉ Start nếu username đọc lại khớp snapshot đã duyệt. Lượt harness
 mới yêu cầu dọn media nhập tạm sau khi xác minh bài và Sheet; nguồn gốc vẫn giữ.
 Nhạc/caption lấy từ `--content-snapshot` và bundle, không tự sửa nội dung hoặc cấu
 hình fleet.
@@ -817,11 +824,11 @@ máy bị chặn. Số máy lấy từ metadata, thiếu thì `null`, không đo
 node scripts/publish_acceptance.mjs --report-dir $reportDir --udids $udids --cdp $cdp
 
 # Có đọc thiết bị/network qua AppState production; không tạo bài.
-node scripts/publish_acceptance.mjs --mode preflight --report-dir $reportDir --udids $udids --source $source --bundle-ids $bundleIds --sheet-id $sheetId --sheet-gid $sheetGid --cdp $cdp
+node scripts/publish_acceptance.mjs --mode preflight --report-dir $reportDir --udids $udids --source $source --bundle-ids $bundleIds --sheet-id $sheetId --sheet-gid $sheetGid --dev-scope $scopeFile --real-android true --cdp $cdp
 
 # CHỈ sau khi phạm vi/nội dung/số bài được người vận hành cho phép đăng public.
 # $confirmation là đúng hash report.confirmation từ preflight trên.
-node scripts/publish_acceptance.mjs --mode submit --report-dir $reportDir --udids $udids --source $source --bundle-ids $bundleIds --sheet-id $sheetId --sheet-gid $sheetGid --cdp $cdp --confirm $confirmation
+node scripts/publish_acceptance.mjs --mode submit --report-dir $reportDir --udids $udids --source $source --bundle-ids $bundleIds --sheet-id $sheetId --sheet-gid $sheetGid --dev-scope $scopeFile --real-android true --cdp $cdp --confirm $confirmation
 
 # Quan sát bài đã gửi; hết hạn báo cáo không dừng worker của app.
 node scripts/publish_acceptance.mjs --mode observe --report-dir $reportDir --udids $udids --campaign-id $campaignId --cdp $cdp --wait-seconds 600 --poll-seconds 10
@@ -836,14 +843,18 @@ Không truyền lệnh IPC tùy ý. `--wait-seconds` chỉ dành observe (0–86
 giây chỉ đọc metadata, **không đổi nhịp verifier 300 giây**. Observe cần đúng danh sách
 UDID của toàn campaign; thiếu/dư assignment là scope mismatch, không báo pass.
 
-Intent ghi exclusive + fsync trước IPC. `create-intent.json` giữ UUID requestId,
-fingerprint toàn request và confirmation; mất ACK create thì chạy lại **cùng submit,
-cùng thư mục, cùng hash** để backend trả receipt cũ. Không đổi ID hoặc sửa/xóa intent.
-Có `execute-intent.json` thì submit sau chỉ đọc campaign, kể cả process chết trước
-khi biết Execute đã tới backend hay chưa. Khi chưa có intent local nhưng backend
-đã có effect/dispatch hoặc campaign/assignment không còn queued/ready, harness cũng
-chỉ observe, không Execute dựa vào việc mất file local. Trường hợp này có thể chưa được enqueued:
-đối chiếu trong app, không tự phát lại lệnh. Report directory có lock chống chạy
+Lượt mới mặc định dùng giao thức Start; `--protocol legacy` không cho preflight/submit
+qua CLI. Scope dev ban đầu phải có đúng danh sách máy và `campaignIds: []`. Harness
+ghi độc quyền `preflight-request.json` với UUID; kích hoạt scope chứa đúng UUID ấy
+trước khi gọi preflight. Scope đã kích hoạt là một chiều trong process này; nếu
+preflight lỗi, không đổi campaign ID/capability để thử lại, cần lượt nghiệm thu mới
+và đối chiếu owner/intent cũ. Preflight lưu `preflight.json` với requestId, digest,
+preparationId, writer/epoch, account và hash duyệt. Submit ghi `start-intent.json`
+exclusive + fsync trước `publish_start`; nếu mất ACK, chỉ đọc
+`publish_start_status(requestId)`, không phát lại Start hoặc đổi requestId/thư mục.
+Khi status có campaign ID, phải khớp ID đã duyệt rồi mới đọc campaign. Report cũ
+có `create-intent.json`/`execute-intent.json` vẫn được observe, nhưng không
+được submit theo đường cũ. Report directory có lock chống chạy
 đồng thời; lock còn sau crash cần kiểm tiến trình đã kết thúc trước khi người vận
 hành gỡ lock, không gỡ intent. Không dùng report directory khác để né bảo vệ.
 

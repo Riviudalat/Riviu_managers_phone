@@ -5,7 +5,7 @@ import { pathToFileURL } from 'node:url';
 import { setTimeout as delay } from 'node:timers/promises';
 
 const MODES = ['inspect', 'preflight', 'submit', 'observe'];
-const FLAGS = ['mode', 'report-dir', 'udids', 'source', 'bundle-ids', 'sheet-id', 'sheet-gid',
+const FLAGS = ['mode', 'protocol', 'report-dir', 'udids', 'source', 'bundle-ids', 'sheet-id', 'sheet-gid',
   'sheet-disabled', 'real-android', 'dev-scope', 'cdp', 'page-url', 'campaign-id', 'confirm', 'wait-seconds', 'poll-seconds', 'content-snapshot'];
 const check = (condition, message) => { if (!condition) throw new Error(message); };
 const hash = value => createHash('sha256').update(JSON.stringify(value)).digest('hex');
@@ -146,6 +146,8 @@ export function parseArgs(argv) {
     flags[name] = value;
   }
   const mode = flags.mode ?? 'inspect';
+  const protocol = flags.protocol ?? (['preflight', 'submit'].includes(mode) ? 'start' : 'legacy');
+  check(['legacy', 'start'].includes(protocol), '--protocol phải là legacy hoặc start');
   check(flags['sheet-disabled'] === undefined || flags['sheet-disabled'] === 'true',
     '--sheet-disabled only accepts the explicit value true');
   check(flags['real-android'] === undefined || flags['real-android'] === 'true',
@@ -158,7 +160,7 @@ export function parseArgs(argv) {
     && cdp.port && cdp.pathname === '/' && !cdp.search && !cdp.hash && !cdp.username && !cdp.password,
   '--cdp chỉ nhận HTTP loopback bằng địa chỉ IP và cổng, không path/credential');
   check(!flags['dev-scope'] || path.isAbsolute(flags['dev-scope']), '--dev-scope phải là đường dẫn tuyệt đối');
-  const options = { mode, reportDir: path.resolve(flags['report-dir']), cdp: cdp.origin,
+  const options = { mode, protocol, reportDir: path.resolve(flags['report-dir']), cdp: cdp.origin,
     pageUrl: flags['page-url'] ?? null, udids: list(flags.udids, '--udids'),
     source: flags.source ? path.resolve(flags.source) : null,
     contentSnapshot: flags['content-snapshot'] ? read(path.resolve(flags['content-snapshot'])) : null,
@@ -196,6 +198,7 @@ export function parseArgs(argv) {
 }
 function scope(options) {
   return { cdp: options.cdp, pageUrl: options.pageUrl, source: options.source,
+    ...(options.protocol === 'start' ? { protocol: 'start' } : {}),
     contentSnapshot: options.contentSnapshot, udids: options.udids, bundleIds: options.bundleIds,
     ...(options.realAndroid ? { realAndroid: true } : {}),
     sheetId: options.sheetId, sheetGid: options.sheetGid, ...(options.sheetDisabled ? { sheetDisabled: true } : {}),
@@ -350,6 +353,180 @@ async function summarize(detail, options, invoke, accounts) {
     urlReadback: { status: allSent && counts.urlReadback === rows.length ? 'matched' : 'pending', reason: 'Cần canonical post proof, receipt đúng revision/epoch và ô Sheet khớp.' } };
 }
 
+async function runStartProtocol(options, { invoke, sleep, now, file, report, currentAccounts }) {
+  const prepared = read(file('preflight.json'));
+  const startIntent = read(file('start-intent.json'));
+  check(!read(file('create-intent.json')) && !read(file('execute-intent.json'))
+    && !read(file('campaign.json')), 'Report cũ dùng Create/Execute; chỉ observe, không submit lại');
+  if (options.mode === 'preflight') {
+    check(!startIntent, 'Start intent đã tồn tại; chỉ observe bằng đúng requestId');
+    let reservation = read(file('preflight-request.json'));
+    if (!reservation) {
+      const devScope = inspectDevScope(options.devScope, options.udids);
+      reservation = { requestId: randomUUID(), devScope,
+        scopeFingerprint: hash(scope(options)), at: new Date(now()).toISOString() };
+      write(file('preflight-request.json'), reservation, true);
+    }
+    check(reservation.scopeFingerprint === hash(scope(options))
+      && reservation.devScope?.path === options.devScope
+      && /^[a-f0-9-]{36}$/.test(reservation.requestId),
+    'Preflight reservation không khớp phạm vi đã đóng băng');
+    const state = validateDevScopeForSubmit(reservation.devScope,
+      { id: reservation.requestId }, options.udids);
+    if (state === 'inactiveApproved') {
+      activateDevScope(reservation.devScope, reservation.requestId, options.udids);
+    }
+    report.devScope = { ...reservation.devScope, state: 'activeForRequest',
+      requestId: reservation.requestId };
+    const writer = await checkSheet(invoke, options);
+    const request = { sourceRoot: options.source, bundleIds: options.bundleIds, udids: options.udids,
+      targetRef: { type: 'explicit', udids: options.udids }, runAt: null,
+      captionOverrides: options.contentSnapshot?.captionOverrides ?? {},
+      soundPolicy: options.contentSnapshot?.soundPolicy ?? { kind: 'default' },
+      sheetEnabled: true, deleteAfterPublish: true };
+    const preflight = await invoke('publish_preflight',
+      { request, requestId: reservation.requestId });
+    report.preflight = preflight;
+    const target = preflight.sheetDelivery ?? null;
+    check(preflight.canExecute === true && preflight.sheetEnabled === true && target?.version === 2
+      && target.spreadsheetId === writer.spreadsheetId && target.sheetGid === writer.sheetGid
+      && target.reportingEpoch === writer.reportingEpoch,
+    'Preflight bị chặn hoặc sai đích Sheet/epoch');
+    check(preflight.assignments?.length === options.udids.length
+      && preflight.assignments.every((a, i) => a.udid === options.udids[i]
+        && a.bundleId === options.bundleIds[i] && a.ordinal === i),
+    'Preflight thay đổi mapping đã yêu cầu');
+    const accounts = { ...currentAccounts };
+    for (const udid of options.udids.filter(id => !currentAccounts[id])) {
+      const reading = await invoke('interaction_read_account', { udid });
+      check(reading?.udid === udid && reading.status === 'unassigned'
+        && !handle(reading.expectedHandle)
+        && /^[a-z0-9_.]{1,24}$/.test(handle(reading.observedHandle))
+        && /^[a-f0-9]{64}$/.test(reading.snapshotSha256 ?? ''),
+      `Không đọc được username trên máy ${udid}; chưa tạo lượt đăng`);
+      accounts[udid] = handle(reading.observedHandle);
+    }
+    check(options.udids.every(id => /^[a-z0-9_.]{1,24}$/.test(handle(accounts[id]))),
+      'Chưa có username hợp lệ để xác minh bài đăng');
+    const approval = { scope: scope(options), devScope: reservation.devScope,
+      requestId: reservation.requestId, accounts, metadataAccounts: currentAccounts,
+      request, inputDigest: preflight.inputDigest, preparationId: preflight.preparationId,
+      sheetDelivery: target, writer };
+    report.confirmation = hash(approval);
+    write(file('preflight.json'), { approval, confirmation: report.confirmation });
+    report.acceptance = 'preflightOnly';
+    report.accountSnapshot = options.udids.some(id => !currentAccounts[id])
+      ? 'approvedDeviceReadback' : 'currentMetadata';
+    return { exitCode: 0, report };
+  }
+  check(prepared && hash(prepared.approval) === prepared.confirmation
+    && prepared.approval.scope?.protocol === 'start'
+    && (options.mode !== 'submit'
+      || hash(scope(options)) === hash(prepared.approval.scope)),
+  'Không có preflight start khớp phạm vi');
+  const approval = prepared.approval, accounts = approval.accounts;
+  check(approval.devScope?.path === (options.devScope ?? approval.devScope?.path)
+    && validateDevScopeForSubmit(approval.devScope, { id: approval.requestId },
+      options.udids) === 'activeForCampaign',
+  'Scope nghiệm thu không còn cấp quyền đúng requestId');
+  if (options.mode === 'submit') {
+    check(prepared.confirmation === options.confirm, 'Confirmation/preflight không khớp');
+    check(approval.request?.sheetEnabled === true && approval.request?.deleteAfterPublish === true
+      && approval.sheetDelivery?.version === 2 && approval.writer,
+    'Preflight thiếu Sheet hoặc cleanup bắt buộc');
+    check(options.udids.every(id => handle(approval.metadataAccounts[id]) === currentAccounts[id]),
+      'Nick gán đã đổi sau preflight; không Start');
+    const writer = await checkSheet(invoke, options);
+    check(hash(writer) === hash(approval.writer), 'Writer/target/epoch đã đổi; không Start');
+    let intent = startIntent;
+    if (!intent) {
+      for (const udid of options.udids) {
+        const reading = await invoke('interaction_read_account', { udid });
+        const assigned = handle(approval.metadataAccounts[udid]);
+        check(reading?.udid === udid && reading.status === (assigned ? 'matched' : 'unassigned')
+          && handle(reading.expectedHandle) === assigned
+          && handle(reading.observedHandle) === handle(accounts[udid])
+          && /^[a-f0-9]{64}$/.test(reading.snapshotSha256 ?? ''),
+        `Account preflight did not match approved device identity for ${udid}`);
+      }
+      intent = { confirmation: options.confirm, requestId: approval.requestId,
+        request: approval.request, approvedInputDigest: approval.inputDigest,
+        preparationId: approval.preparationId, at: new Date(now()).toISOString() };
+      write(file('start-intent.json'), intent, true);
+      report.start = 'intended';
+      try {
+        const receipt = await invoke('publish_start', { request: intent.request,
+          requestId: intent.requestId, approvedInputDigest: intent.approvedInputDigest,
+          confirmed: true, preparationId: intent.preparationId });
+        check(receipt?.requestId === intent.requestId
+          && receipt.reservedCampaignId === intent.requestId,
+        'Start receipt sai requestId');
+        report.start = 'acknowledged';
+      } catch (error) {
+        report.start = 'ackUnknownNeverReplay';
+        report.startError = String(error);
+      }
+    } else {
+      check(intent.confirmation === options.confirm && intent.requestId === approval.requestId
+        && hash(intent.request) === hash(approval.request)
+        && intent.approvedInputDigest === approval.inputDigest
+        && intent.preparationId === approval.preparationId,
+      'Start intent không khớp preflight; không phát lại');
+      report.start = 'alreadyIntendedObserveOnly';
+    }
+  } else {
+    check(options.mode === 'observe' && startIntent?.requestId === approval.requestId,
+      'Observe start cần đúng durable intent');
+    check(!options.campaignId || options.campaignId === approval.requestId,
+      'Observe start sai campaign ID đã cấp quyền');
+  }
+  const deadline = now() + (options.mode === 'observe' ? options.waitSeconds * 1000 : 0);
+  let exitCode = 2;
+  do {
+    const status = await invoke('publish_start_status', { requestId: approval.requestId });
+    if (!status) {
+      report.acceptance = 'ackUnknown';
+      report.start = 'intentWithoutReceiptNeverReplay';
+    } else {
+      check(status.requestId === approval.requestId
+        && status.reservedCampaignId === approval.requestId
+        && status.inputDigest === approval.inputDigest,
+      'Start status không khớp request/preflight');
+      report.startStatus = status;
+      if (status.state === 'failed' && !status.campaignId) {
+        report.acceptance = 'blockedFailed';
+        report.error = status.error ?? 'Start failed before campaign';
+        exitCode = 1;
+      } else if (!status.campaignId) {
+        report.acceptance = 'pending';
+      } else {
+        check(status.campaignId === approval.requestId,
+          'Campaign ID khác requestId đã cấp quyền; không đánh dấu đạt');
+        const detail = await invoke('publish_get', { campaignId: status.campaignId });
+        check(detail?.campaign?.id === status.campaignId
+          && detail.campaign.requestId === approval.requestId,
+        'Campaign không khớp Start receipt');
+        check(detail.assignments?.length === options.udids.length
+          && new Set(detail.assignments.map(assignment => assignment.id)).size === options.udids.length
+          && detail.assignments.every((assignment, index) =>
+            assignment.campaignId === status.campaignId
+            && assignment.udid === options.udids[index]
+            && assignment.ordinal === index
+            && assignment.bundleId === `${approval.requestId}:${approval.request.bundleIds[index]}`),
+        'Assignments khác mapping bài-máy đã duyệt; không đánh dấu đạt');
+        write(file('detail.json'), detail);
+        const result = await summarize(detail, options, invoke, accounts);
+        Object.assign(report, result);
+        exitCode = result.exitCode;
+      }
+    }
+    if (options.mode !== 'observe' || exitCode !== 2 || now() >= deadline) break;
+    await sleep(Math.min(options.pollSeconds * 1000, deadline - now()));
+  } while (true);
+  if (exitCode === 2 && report.acceptance === 'pending') report.acceptance = 'pendingDeadline';
+  return { exitCode, report };
+}
+
 /** Same runner for CLI and tests. Only invoke is replaced in tests; files are durable. */
 export async function runAcceptance(options, { invoke, sleep = delay, now = Date.now }) {
   fs.mkdirSync(options.reportDir, { recursive: true });
@@ -390,6 +567,16 @@ export async function runAcceptance(options, { invoke, sleep = delay, now = Date
       report.realAndroidRoster = 'verified';
     }
     const currentAccounts = Object.fromEntries(report.roster.selected.map(r => [r.udid, r.assignedHandle ?? '']));
+    const startObserve = options.mode === 'observe' && prepared?.approval?.scope?.protocol === 'start';
+    if ((options.protocol === 'start' || startObserve)
+      && ['preflight', 'submit', 'observe'].includes(options.mode)) {
+      const outcome = await runStartProtocol(
+        startObserve ? { ...options, protocol: 'start' } : options,
+        { invoke, sleep, now, file, report, currentAccounts });
+      report = outcome.report;
+      exitCode = outcome.exitCode;
+      return { exitCode, report };
+    }
     const accounts = prepared?.approval.accounts ?? { ...currentAccounts };
     report.accountSnapshot = prepared?.approval.accounts ? 'approvedPreflight' : 'currentMetadata';
     if (options.mode === 'submit' && prepared?.approval.accounts) {
@@ -603,7 +790,8 @@ export async function runAcceptance(options, { invoke, sleep = delay, now = Date
 }
 
 const ALLOWED_IPC = new Set(['list_devices', 'list_device_metas', 'operation_prepare_devices', 'interaction_read_account', 'publish_get', 'google_sheets_status',
-  'publish_sheet_readback', 'publish_sheet_check', 'publish_preflight', 'publish_create_campaign', 'publish_execute']);
+  'publish_sheet_readback', 'publish_sheet_check', 'publish_preflight', 'publish_create_campaign',
+  'publish_execute', 'publish_start', 'publish_start_status']);
 export async function connectIPC(options, chromium) {
   const browser = await chromium.connectOverCDP(options.cdp, { timeout: 15000 });
   try {
@@ -630,6 +818,8 @@ if (process.argv[1] && import.meta.url === pathToFileURL(path.resolve(process.ar
   let transport;
   try {
     const options = parseArgs(process.argv.slice(2));
+    check(options.protocol !== 'legacy' || !['preflight', 'submit'].includes(options.mode),
+      'Legacy Create/Execute không còn dùng cho lượt đăng mới; dùng --protocol start');
     const { chromium } = await import('../apps/desktop/node_modules/playwright/index.mjs');
     transport = await connectIPC(options, chromium);
     const result = await runAcceptance(options, transport);

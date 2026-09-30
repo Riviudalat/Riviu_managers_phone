@@ -22,10 +22,10 @@ function environment(t) {
     capabilities: { publishVerification: false, sheetDelivery: false } };
   fs.writeFileSync(devScope, JSON.stringify(initialDevScope) + '\n');
   const options = (mode = 'inspect', more = []) => parseArgs([
-    '--mode', mode, '--report-dir', dir, ...base,
+    '--mode', mode, '--protocol', 'legacy', '--report-dir', dir, ...base,
     ...(['preflight', 'submit'].includes(mode) ? ['--dev-scope', devScope] : []), ...more]);
   const phoneOnlyOptions = (mode = 'inspect', more = []) => parseArgs([
-    '--mode', mode, '--report-dir', dir, '--udids', 'phone-b,phone-a', '--source', source,
+    '--mode', mode, '--protocol', 'legacy', '--report-dir', dir, '--udids', 'phone-b,phone-a', '--source', source,
     '--bundle-ids', 'bundle-b,bundle-a', '--sheet-disabled', 'true', '--dev-scope', devScope, ...more]);
   const calls = [];
   let created;
@@ -161,6 +161,123 @@ test('preflight binds explicit mapping and Sheet identity but never creates', as
   assert.ok(e.calls.some(c => c.command === 'google_sheets_status'));
   assert.ok(e.calls.some(c => c.command === 'publish_sheet_check'));
   assert.equal(e.calls.some(c => c.command === 'publish_create_campaign'), false);
+});
+
+test('manual acceptance preflight authorizes its exact durable start ID before IPC', async t => {
+  const e = environment(t);
+  const invoke = async (command, args) => {
+    if (command !== 'publish_preflight') return e.invoke(command, args);
+    const scope = JSON.parse(fs.readFileSync(e.devScope, 'utf8'));
+    const allowed = typeof args?.requestId === 'string'
+      && scope.campaignIds.length === 1 && scope.campaignIds[0] === args.requestId
+      && scope.deviceIds.join(',') === 'phone-b,phone-a';
+    const response = await e.invoke(command, args);
+    return { ...response, canExecute: allowed,
+      startBlock: allowed ? null : 'AcceptanceScopeDenied' };
+  };
+  const options = e.options('preflight');
+  options.protocol = 'start';
+  const result = await runAcceptance(options, { invoke });
+  assert.equal(result.exitCode, 0, result.report.error);
+  const requestId = e.calls.find(call => call.command === 'publish_preflight').args.requestId;
+  assert.match(requestId, /^[a-f0-9-]{36}$/);
+  assert.equal(JSON.parse(fs.readFileSync(e.devScope, 'utf8')).campaignIds[0], requestId);
+});
+
+test('new acceptance defaults to Start while historical observe stays readable', () => {
+  const args = ['--report-dir', path.resolve('out'), ...base,
+    '--dev-scope', path.resolve('scope.json')];
+  assert.equal(parseArgs(['--mode', 'preflight', ...args]).protocol, 'start');
+  assert.equal(parseArgs(['--mode', 'submit', ...args, '--confirm', 'a'.repeat(64)]).protocol, 'start');
+  assert.equal(parseArgs(['--mode', 'observe', '--report-dir', path.resolve('out'),
+    '--udids', 'phone-b,phone-a', '--campaign-id', 'old-campaign']).protocol, 'legacy');
+});
+
+test('start protocol saves intent before Start and only reads status after lost ACK', async t => {
+  const e = environment(t);
+  let status;
+  let loseAck = true;
+  let statusUnavailable = true;
+  const invoke = async (command, args) => {
+    if (command === 'publish_start') {
+      e.calls.push({ command, args: structuredClone(args) });
+      const intent = JSON.parse(fs.readFileSync(path.join(e.dir, 'start-intent.json'), 'utf8'));
+      assert.equal(intent.requestId, args.requestId);
+      assert.deepEqual(args.request, intent.request);
+      assert.equal(JSON.parse(fs.readFileSync(e.devScope, 'utf8')).campaignIds[0],
+        args.requestId);
+      status = { requestId: args.requestId, reservedCampaignId: args.requestId,
+        campaignId: args.requestId, inputDigest: args.approvedInputDigest,
+        state: 'queued', stage: 'queued', error: null };
+      e.detail.campaign.id = args.requestId;
+      e.detail.campaign.requestId = args.requestId;
+      e.detail.assignments.forEach((a, index) => {
+        a.campaignId = args.requestId;
+        a.bundleId = `${args.requestId}:${args.request.bundleIds[index]}`;
+      });
+      if (loseAck) { loseAck = false; throw new Error('start ACK lost'); }
+      return structuredClone(status);
+    }
+    if (command === 'publish_start_status') {
+      e.calls.push({ command, args: structuredClone(args) });
+      if (statusUnavailable) { statusUnavailable = false; return null; }
+      return structuredClone(status);
+    }
+    if (command === 'publish_get') {
+      e.calls.push({ command, args: structuredClone(args) });
+      assert.equal(args.campaignId, status.campaignId);
+      return structuredClone(e.detail);
+    }
+    return e.invoke(command, args);
+  };
+  const preflight = e.options('preflight');
+  preflight.protocol = 'start';
+  const prepared = await runAcceptance(preflight, { invoke });
+  assert.equal(prepared.exitCode, 0, prepared.report.error);
+  const submit = e.options('submit', ['--confirm', prepared.report.confirmation]);
+  submit.protocol = 'start';
+  const first = await runAcceptance(submit, { invoke });
+  assert.equal(first.exitCode, 2, first.report.error);
+  assert.equal(first.report.acceptance, 'ackUnknown');
+  assert.equal(e.calls.filter(call => call.command === 'publish_start').length, 1);
+  const second = await runAcceptance(submit, { invoke });
+  assert.equal(second.exitCode, 2, second.report.error);
+  assert.equal(e.calls.filter(call => call.command === 'publish_start').length, 1);
+  assert.equal(e.calls.some(call => call.command === 'publish_create_campaign'
+    || call.command === 'publish_execute'), false);
+  assert.equal(second.report.start, 'alreadyIntendedObserveOnly');
+  const observe = e.options('observe', ['--campaign-id', status.campaignId]);
+  const observed = await runAcceptance(observe, { invoke });
+  assert.equal(observed.exitCode, 2, observed.report.error);
+  assert.equal(e.calls.filter(call => call.command === 'publish_start').length, 1);
+  assert.equal(observed.report.campaignId, status.campaignId);
+  const wrong = e.options('observe', ['--campaign-id', 'foreign-campaign']);
+  const refused = await runAcceptance(wrong, { invoke });
+  assert.equal(refused.exitCode, 1);
+  assert.equal(e.calls.filter(call => call.command === 'publish_start').length, 1);
+  let clock = 0;
+  const statusReadsBefore = e.calls.filter(call => call.command === 'publish_start_status').length;
+  const waiting = e.options('observe', ['--campaign-id', status.campaignId,
+    '--wait-seconds', '10', '--poll-seconds', '5']);
+  const waited = await runAcceptance(waiting, {
+    invoke, now: () => clock, sleep: async ms => { clock += ms; },
+  });
+  assert.equal(waited.exitCode, 2);
+  assert.equal(waited.report.acceptance, 'pendingDeadline');
+  assert.equal(e.calls.filter(call => call.command === 'publish_start_status').length
+    - statusReadsBefore, 3);
+  assert.equal(e.calls.filter(call => call.command === 'publish_start').length, 1);
+  e.detail.assignments[0].bundleId = `${status.requestId}:other-bundle`;
+  const altered = await runAcceptance(observe, { invoke });
+  assert.equal(altered.exitCode, 1);
+  assert.match(altered.report.error, /mapping bài-máy/);
+  assert.equal(e.calls.filter(call => call.command === 'publish_start').length, 1);
+  e.detail.assignments[0].bundleId = status.requestId + ':bundle-b';
+  e.detail.assignments[1].id = e.detail.assignments[0].id;
+  const duplicated = await runAcceptance(observe, { invoke });
+  assert.equal(duplicated.exitCode, 1);
+  assert.match(duplicated.report.error, /mapping bài-máy/);
+  assert.equal(e.calls.filter(call => call.command === 'publish_start').length, 1);
 });
 
 test('active Sheet can preflight without a last Picker selection', async t => {

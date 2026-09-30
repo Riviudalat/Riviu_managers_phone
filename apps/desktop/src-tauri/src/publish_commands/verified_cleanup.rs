@@ -19,7 +19,7 @@ pub async fn publish_cleanup_verified_assignment(
     .await
 }
 
-async fn manual_cleanup_verified_assignment(
+pub(crate) async fn manual_cleanup_verified_assignment(
     policy: &crate::dev_acceptance::DevAcceptancePolicy,
     control: &DeviceControlPlane,
     db: &Database,

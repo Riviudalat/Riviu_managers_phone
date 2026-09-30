@@ -1007,6 +1007,16 @@ impl Database {
         self.publish_verification_candidates(limit, None, false, true)
     }
 
+    /// Automatic recovery restricted to one campaign; unlike explicit link checks,
+    /// this does not reopen review rows or admit legacy verification contracts.
+    pub fn pending_current_publish_verifications_for_campaign(
+        &self,
+        campaign_id: &str,
+        limit: usize,
+    ) -> anyhow::Result<Vec<PendingPublishVerification>> {
+        self.publish_verification_candidates(limit, Some(campaign_id), false, true)
+    }
+
     /// An explicit warm link check may settle review rows without opening the Post path.
     pub fn publish_verifications_for_campaign(
         &self,

@@ -9,10 +9,11 @@ tile/canvas, mật độ và cử chỉ thiết bị. Không toast nổi; trạn
 monitor nguồn và ActivityCenter. Đây là tiêu chí triển khai, không tự xác nhận mọi
 màn hình đã vượt cổng screenshot/accessibility.
 
-Sidebar cố định 196 px (184 px trên màn hẹp); tiêu đề nhóm ẩn/hiện các mục bên trong,
-không thu toàn sidebar thành icon. Mục đang chọn dùng cam đặc/chữ trắng ngay khi
-đổi trang, không chờ fade mới đủ tương phản. Automation có ba trang Nuôi TikTok, Tương tác,
-Đăng bài cùng My Apps, Lượt chạy, Tác vụ đã lưu và Flow thiết bị. Header cao tối thiểu 56 px, trạng thái có nhãn **Toàn hệ thống**;
+Sidebar rộng 224 px (200 px trên màn hẹp), có nút thu gọn thành icon;
+dưới 960 px mặc định dùng thanh icon, vẫn mở rộng được bằng nút điều hướng;
+tiêu đề nhóm ẩn/hiện các mục bên trong. Mục đang chọn dùng nền cam nhạt,
+chữ cam đậm và vạch cam bên trái. Automation có ba trang Nuôi TikTok, Tương tác,
+Đăng bài cùng My Apps, Lượt chạy, Tác vụ đã lưu và Flow thiết bị. Header cao tối thiểu 68 px, trạng thái có nhãn **Toàn hệ thống**;
 máy thực hiện của mỗi workspace là một phạm vi riêng. Mỗi vùng có một hành động
 chính màu cam, thao tác phụ trung tính. **Bảo trì → Sửa Riviu Agent** tách khỏi
 các lệnh mở máy/đồng bộ. Quét thiết bị xuất hiện tại toolbar Thiết bị hoặc header
@@ -27,7 +28,12 @@ bung/thu số máy bên trong. Dropdown dùng chung nền trắng, viền trung 
 hover/đã chọn màu cam nhạt, dấu chọn và menu cuộn, chuyển động 180–200 ms.
 My Apps dùng bảng ứng dụng gọn. Mở ứng dụng vào trang vận hành cũ; Thêm Flow mở editor
 riêng với thư viện hành động bên trái, canvas chính, cấu hình và thiết bị bên phải.
-Monitor tiến trình vẫn không modal và hoạt động xuyên trang. Bảng có cuộn riêng;
+Tên, model, tài khoản và trạng thái máy nằm trên nền sáng riêng phía trên preview;
+không che hình điện thoại. Preview trong lưới giữ tỉ lệ 1:2; thẻ có thêm phần thông tin
+cao 88 px. Dấu chọn trên thẻ và bộ đếm dưới thanh lọc dùng cùng selection hiện có.
+Monitor tiến trình vẫn không modal và hoạt động xuyên trang, mặc định nằm góc phải
+phía dưới, chừa 88 px cho thanh hành động; có thể kéo đổi vị trí.
+Tab Thiết lập/Hẹn giờ/Theo dõi dùng chung nền trắng và mục chọn cam nhạt. Bảng có cuộn riêng;
 thanh hành động và nút chạy nằm trong viewport ở kích thước laptop. Chuyển màu nhẹ
 120–180 ms, không hiệu ứng lặp trang trí; hỗ trợ giảm chuyển động.
 

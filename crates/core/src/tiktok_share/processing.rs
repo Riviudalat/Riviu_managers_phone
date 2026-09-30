@@ -116,16 +116,25 @@ pub(super) async fn observe_frames(
         min_confidence: 0.9,
     };
     let mut regions = vec![None];
-    // Global45.7.3/en, native1080x2220: the processing toast overlaps the
+    // Global45.7.3/en and Trill38.3.2/en, native1080x2220: the processing toast overlaps the
     // search bar. OCR of the full upper quarter merges them into one line.
+    // Trill machine5 trace 2026-09-29T20:59:15Z: full crop reads only Search;
+    // this ROI reads Post is being processed at confidence0.9657.
     // The measured crop only classifies pending; it cannot prove publication.
     if (before.width, before.height) == (1080, 555) {
         let measured = tokio::time::timeout_at(
             deadline.min(tokio::time::Instant::now() + Duration::from_secs(5)),
             async {
-                let package = "com.zhiliaoapp.musically";
-                session.active_app_bundle().await.ok().as_deref() == Some(package)
-                    && session.app_version(package).await.as_deref() == Some("45.7.3")
+                let package = match session.active_app_bundle().await {
+                    Ok(package) => package,
+                    Err(_) => return false,
+                };
+                let expected = match package.as_str() {
+                    "com.zhiliaoapp.musically" => "45.7.3",
+                    "com.ss.android.ugc.trill" => "38.3.2",
+                    _ => return false,
+                };
+                session.app_version(&package).await.as_deref() == Some(expected)
                     && session.ui_language().await.as_deref() == Some("en")
             },
         )

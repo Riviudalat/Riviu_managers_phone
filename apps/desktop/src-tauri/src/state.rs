@@ -388,7 +388,8 @@ pub struct AppState {
     /// Dropping a `UiSessionContext` releases the lease and the activity permit and nothing
     /// else, so "the last holder releases it" is already the semantics rather than a new one.
     overlay_sessions: AsyncMutex<HashMap<String, Arc<UiSessionContext>>>,
-    semantic_sessions: Arc<parking_lot::Mutex<HashMap<String, Arc<semantic_sessions::SemanticOwner>>>>,
+    semantic_sessions:
+        Arc<parking_lot::Mutex<HashMap<String, Arc<semantic_sessions::SemanticOwner>>>>,
     /// One gate per device, so opening an overlay serialises against itself and nothing else.
     ///
     /// Held only while a `begin` is in flight for that phone. The map of gates is locked just
@@ -1467,7 +1468,9 @@ impl AppState {
     /// `lifecycle.outstanding() == 0`. A held ManualControl deadlocks that wait.
     pub async fn close_all_overlay_sessions(&self) {
         let semantic_devices: Vec<_> = self.semantic_sessions.lock().keys().cloned().collect();
-        for udid in semantic_devices { self.release_semantic_owner(&udid); }
+        for udid in semantic_devices {
+            self.release_semantic_owner(&udid);
+        }
         let contexts: Vec<Arc<UiSessionContext>> = {
             let mut sessions = self.overlay_sessions.lock().await;
             sessions.drain().map(|(_, context)| context).collect()
@@ -1592,7 +1595,7 @@ impl AppState {
         // A submitted post may finish uploading after its command returns or after restart.
         // Recover only its identity/link, inside the same per-device ownership as the UI.
         // No external watcher, global app-closed check, or second Post is involved.
-        if !self.dev_acceptance.automatic_device_workers_frozen() {
+        {
             let db = self.db.clone();
             let control = self.control.clone();
             let events = self.events.clone();
@@ -1623,6 +1626,14 @@ impl AppState {
                         while queue.next().await.is_some() {}
                         break;
                     }
+                    // The loop may exist while manual acceptance is frozen, but it
+                    // performs no queue reads or mutations until this capability's
+                    // activation and pinned scope validate. Other workers stay frozen.
+                    if !acceptance.allows_any(
+                        crate::dev_acceptance::AcceptanceCapability::PublishVerification,
+                    ) {
+                        continue;
+                    }
                     if !acceptance.active() {
                         match db.expire_current_publish_verifications() {
                             Ok(campaigns) => {
@@ -1638,13 +1649,38 @@ impl AppState {
                             Err(error) => log::warn!("publish verification deadline: {error}"),
                         }
                     }
-                    let pending = match db.pending_current_publish_verifications(1000) {
+                    let candidates = if acceptance.active() {
+                        let campaign_ids = acceptance.scoped_campaign_ids();
+                        campaign_ids
+                            .into_iter()
+                            .try_fold(Vec::new(), |mut rows, id| {
+                                rows.extend(
+                                    db.pending_current_publish_verifications_for_campaign(
+                                        &id, 1000,
+                                    )?,
+                                );
+                                Ok::<_, anyhow::Error>(rows)
+                            })
+                    } else {
+                        db.pending_current_publish_verifications(1000)
+                    };
+                    let mut pending = match candidates {
                         Ok(rows) => rows,
                         Err(error) => {
                             log::warn!("publish verification queue: {error}");
                             continue;
                         }
                     };
+                    // Fairness rotation writes a per-device turn. Scope before that
+                    // write as well as before lease acquisition; unrelated devices
+                    // must not be rotated by an acceptance-only verifier.
+                    pending.retain(|row| {
+                        acceptance.allows(
+                            crate::dev_acceptance::AcceptanceCapability::PublishVerification,
+                            &row.campaign_id,
+                            &row.udid,
+                        )
+                    });
                     failed_until.retain(|_, until| *until > Instant::now());
                     match db.publish_limits() {
                         Ok(limits) => queue.set_capacity(limits.verify),
@@ -1687,8 +1723,16 @@ impl AppState {
                             break;
                         };
                         let (control, db, events) = (control.clone(), db.clone(), events.clone());
+                        let queued_acceptance = acceptance.clone();
                         queue.push(row.udid.clone(), async move {
                             let _admitted = admitted;
+                            if !queued_acceptance.allows(
+                                crate::dev_acceptance::AcceptanceCapability::PublishVerification,
+                                &row.campaign_id,
+                                &row.udid,
+                            ) {
+                                return Ok(false);
+                            }
                             crate::publish_commands::verify_pending_assignment(
                                 &control, &db, &events, &row,
                             )
@@ -1699,7 +1743,8 @@ impl AppState {
             });
         }
 
-        if !self.dev_acceptance.automatic_device_workers_frozen() {
+        {
+            let acceptance = self.dev_acceptance.clone();
             let (control, db, events, admission, stop) = (
                 self.control.clone(),
                 self.db.clone(),
@@ -1718,6 +1763,80 @@ impl AppState {
                     let Ok(_admitted) = admission.ensure_accepting_work() else {
                         break;
                     };
+                    if acceptance.active() {
+                        if !acceptance
+                            .allows_any(crate::dev_acceptance::AcceptanceCapability::PublishCleanup)
+                        {
+                            continue;
+                        }
+                        let campaign_ids = acceptance.scoped_campaign_ids();
+                        let candidates =
+                            (|| -> anyhow::Result<Vec<riviu_core::db::PendingPublishCleanup>> {
+                                let mut candidates = Vec::new();
+                                for id in campaign_ids {
+                                    let Some(detail) = db.get_publish_campaign(&id)? else {
+                                        continue;
+                                    };
+                                    for assignment in detail.assignments {
+                                        if !acceptance.allows(
+                                            crate::dev_acceptance::AcceptanceCapability::PublishCleanup,
+                                            &id,
+                                            &assignment.udid,
+                                        ) {
+                                            continue;
+                                        }
+                                        if let Some(candidate) =
+                                            db.pending_publish_cleanup(&assignment.id)?
+                                        {
+                                            candidates.push(candidate);
+                                        }
+                                    }
+                                }
+                                Ok(candidates)
+                            })();
+                        let candidates = match candidates {
+                            Ok(rows) => rows,
+                            Err(error) => {
+                                log::warn!("scoped publish cleanup queue: {error:#}");
+                                continue;
+                            }
+                        };
+                        for candidate in candidates
+                            .into_iter()
+                            .filter(|row| {
+                                acceptance.allows(
+                                    crate::dev_acceptance::AcceptanceCapability::PublishCleanup,
+                                    &row.campaign_id,
+                                    &row.udid,
+                                )
+                            })
+                            .take(20)
+                        {
+                            if stop.load(Ordering::Acquire) {
+                                break;
+                            }
+                            // Reuse the same guarded implementation as explicit cleanup:
+                            // pinned capability, revision, lease and final proof checks.
+                            if let Err(error) =
+                                crate::publish_commands::manual_cleanup_verified_assignment(
+                                    &acceptance,
+                                    &control,
+                                    &db,
+                                    &events,
+                                    &candidate.assignment_id,
+                                    candidate.revision,
+                                )
+                                .await
+                            {
+                                log::warn!(
+                                    "scoped publish cleanup {}: {}",
+                                    candidate.assignment_id,
+                                    error.message
+                                );
+                            }
+                        }
+                        continue;
+                    }
                     if let Err(error) = crate::publish_commands::cleanup_verified_assignments(
                         &control, &db, &events, 20,
                     )
@@ -2994,8 +3113,8 @@ mod tests {
                 .nth(1)
                 .expect("publish verification scope")
                 .trim_start()
-                .starts_with("if !self.dev_acceptance.automatic_device_workers_frozen() {"),
-            "manual acceptance must not launch a verifier before explicit scoped IPC"
+                .contains("if !acceptance.allows_any("),
+            "manual acceptance verifier must validate its capability before queue access"
         );
         assert!(production.contains("acceptance.schedules_frozen()"));
         assert!(production

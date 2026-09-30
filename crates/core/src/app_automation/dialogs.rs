@@ -53,17 +53,45 @@ pub fn decline_contacts(tree: &Tree, labels: TikTokControls) -> Option<ElementBo
 
 pub fn decline_facebook_permission(tree: &Tree, labels: TikTokControls) -> Option<ElementBox> {
     let package = labels.package();
-    if package != "com.ss.android.ugc.trill" || labels.resource_version() != Some("38.3.2") {
-        return None;
-    }
-    let prompt = tree.matching(package, ElementQuery::ResourceIdSuffix(":id/d2o"));
+    let prompt_id = match (package, labels.resource_version()) {
+        ("com.ss.android.ugc.trill", Some("38.3.2")) => ":id/d2o",
+        ("com.zhiliaoapp.musically", Some("45.7.3")) if labels.language() == "en" => ":id/esv",
+        _ => return None,
+    };
+    let prompt = tree.matching(package, ElementQuery::ResourceIdSuffix(prompt_id));
     let [index] = prompt.as_slice() else {
         return None;
     };
-    if !tree.nodes[*index]
-        .attr("text")
-        .contains("Give TikTok access to your Facebook friends list and email?")
-    {
+    let text = tree.nodes[*index].attr("text");
+    let question = "Give TikTok access to your Facebook friends list and email?";
+    let measured_global = package == "com.zhiliaoapp.musically";
+    if measured_global {
+        // The measured Global dialog wraps this text in bidi formatting characters.
+        let plain: String = text
+            .chars()
+            .filter(|ch| !matches!(ch, '\u{200e}' | '\u{200f}' | '\u{2066}'..='\u{2069}'))
+            .collect();
+        if plain != "Give TikTok access to your Facebook friends list and email? This will be used to improve your TikTok experience, including connecting you with people you may know, people you share connections with on Facebook, and personalizing your ads. Learn more in the Help Center"
+            || tree.nodes[*index].attr("class") != "android.widget.TextView"
+        {
+            return None;
+        }
+        let dialogs = tree.matching(
+            package,
+            ElementQuery::Description {
+                value: "Dialog",
+                exact: true,
+            },
+        );
+        let [dialog] = dialogs.as_slice() else {
+            return None;
+        };
+        if tree.nodes[*dialog].attr("resource-id") != format!("{package}:id/visual_area")
+            || !tree.inside(*index, *dialog)
+        {
+            return None;
+        }
+    } else if !text.contains(question) {
         return None;
     }
     let controls = tree.matching(
@@ -78,6 +106,18 @@ pub fn decline_facebook_permission(tree: &Tree, labels: TikTokControls) -> Optio
     };
     if tree.nodes[*index].attr("class") != "android.widget.Button" {
         return None;
+    }
+    if measured_global {
+        let dialogs = tree.matching(
+            package,
+            ElementQuery::Description {
+                value: "Dialog",
+                exact: true,
+            },
+        );
+        if !matches!(dialogs.as_slice(), [dialog] if tree.inside(*index, *dialog)) {
+            return None;
+        }
     }
     tree.nodes[*index]
         .rect()
@@ -236,6 +276,31 @@ mod tests {
     }
     fn tree(xml: String) -> Tree {
         Tree::parse(crate::HierarchySourceSnapshot { generation: 1, xml }).unwrap()
+    }
+
+    #[test]
+    fn global_facebook_prompt_allows_only_the_unique_negative_button() {
+        let package = "com.zhiliaoapp.musically";
+        let labels = crate::tiktok_labels::controls_for(package, "en", "45.7.3").unwrap();
+        let prompt = "\u{200e}\u{200e}Give TikTok access to your Facebook friends list and email?\u{200e} \u{2068}This will be used to improve your TikTok experience, including connecting you with people you may know, people you share connections with on Facebook, and personalizing your ads. Learn more in the Help Center\u{2069}";
+        let xml = format!(
+            r#"<hierarchy><node package="{package}" content-desc="Dialog" resource-id="{package}:id/visual_area" bounds="[172,732][907,1424]" displayed="true"><node package="{package}" class="android.widget.TextView" resource-id="{package}:id/esv" text="{prompt}" bounds="[225,795][843,1245]" displayed="true"/><node package="{package}" class="android.widget.Button" text="OK" enabled="true" clickable="true" bounds="[540,1299][907,1424]" displayed="true"/><node package="{package}" class="android.widget.Button" text="Don’t allow" enabled="true" clickable="true" bounds="[172,1299][539,1424]" displayed="true"/></node></hierarchy>"#
+        );
+        let button = decline_facebook_permission(&tree(xml.clone()), labels).unwrap();
+        assert_eq!(
+            (button.x, button.y, button.width, button.height),
+            (172.0, 1299.0, 367.0, 125.0)
+        );
+        for changed in [
+            xml.replace("friends list and email", "payment details"),
+            xml.replace("personalizing your ads", "sharing your contacts"),
+            xml.replace("Don’t allow", "Allow"),
+            xml.replace("text=\"Don’t allow\" enabled=\"true\"", "text=\"Don’t allow\" enabled=\"false\""),
+            xml.replace("content-desc=\"Dialog\"", "content-desc=\"Other\""),
+            xml.replace("</hierarchy>", &format!(r#"<node package="{package}" class="android.widget.Button" text="Don’t allow" enabled="true" clickable="true" bounds="[1,1][2,2]" displayed="true"/></hierarchy>"#)),
+        ] {
+            assert!(decline_facebook_permission(&tree(changed), labels).is_none());
+        }
     }
 
     #[test]

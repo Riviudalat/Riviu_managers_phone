@@ -13,6 +13,14 @@ pub(crate) fn lock_manual_handoff() -> Result<tokio::sync::MutexGuard<'static, (
         .map_err(|_| CommandError::operation("Đang nhả thiết bị cho yêu cầu trước; chờ hoàn tất"))
 }
 
+pub(crate) async fn wait_manual_handoff_until(
+    deadline: tokio::time::Instant,
+) -> Result<tokio::sync::MutexGuard<'static, ()>, CommandError> {
+    tokio::time::timeout_at(deadline, HANDOFF.lock())
+        .await
+        .map_err(|_| CommandError::operation("Đã hết thời gian chờ lượt nhả thiết bị; chưa tạo chiến dịch"))
+}
+
 #[derive(Default)]
 struct HandoffStops {
     operations: Vec<String>,
@@ -209,7 +217,8 @@ pub async fn operation_prepare_devices(
     let _admission = state.ensure_accepting_work()?;
     let handoff = lock_manual_handoff()?;
     if selected_only.unwrap_or(false) {
-        return prepare_publish_devices(&app, &state, udids, &handoff).await;
+        return prepare_publish_devices(&app, &state, udids, &handoff,
+            tokio::time::Instant::now() + std::time::Duration::from_secs(125)).await;
     }
     prepare_manual_devices(&app, &state, udids, &handoff).await
 }
@@ -464,8 +473,12 @@ pub(crate) async fn prepare_publish_devices(
     state: &AppState,
     udids: Vec<String>,
     _handoff: &tokio::sync::MutexGuard<'static, ()>,
+    deadline: tokio::time::Instant,
 ) -> Result<OperationStopResult, CommandError> {
     let timing = StopTiming::new("publishHandoff");
+    if tokio::time::Instant::now() >= deadline {
+        return Err(CommandError::operation("Đã hết thời gian chờ lượt nhả thiết bị; chưa thay đổi tác vụ cũ"));
+    }
     if udids.is_empty() || udids.len() > 500 {
         return Err(CommandError::invalid_argument("Chọn từ 1 đến 500 thiết bị"));
     }
@@ -510,7 +523,6 @@ pub(crate) async fn prepare_publish_devices(
         state.nurture.stop(udid);
         state.end_overlay_session(udid).await?;
     }
-    let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(125);
     let mut waiting = HashSet::new();
     loop {
         waiting.clear();

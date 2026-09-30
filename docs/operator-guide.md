@@ -70,6 +70,11 @@ kiểm và đóng cả hai gói TikTok trên đúng máy trước khi nhả phi�
 chứng nhả máy của lượt Dừng hiện tại, bài cũ chờ link không khóa vĩnh viễn mục
 chọn ứng dụng; việc đăng mới vẫn phải chọn đúng gói và đối chiếu tài khoản.
 
+Trong Control Center, tên máy và trạng thái nằm phía trên hình điện thoại. Bấm thẻ
+để chọn, Ctrl để chọn thêm và bấm đúp hoặc nút phóng to để điều khiển. Bộ đếm dưới
+thanh lọc cho biết số máy đang hiển thị và tổng số đã chọn. Bảng theo dõi tác vụ mặc
+định ở góc phải phía dưới; kéo thanh tiêu đề để chuyển vị trí, Escape để thu gọn.
+
 **Chọn thiết bị** mở danh sách toàn bộ máy, kể cả khi phạm vi hiện tại đang rỗng;
 có thể chọn từng máy, theo nhóm hoặc toàn bộ. Máy đang bận được chọn cho lượt mới,
 nhưng chỉ được chạy sau khi tác vụ cũ nhả máy thành công.
@@ -931,9 +936,11 @@ Xem lệnh và tham số trong [hướng dẫn phát triển](developer-guide.md
 
 Báo cáo canary kỹ thuật cô lập trước đây có thể mang nhãn Sheet-disabled; đó không
 phải đường tạo lượt đăng mới trong ứng dụng và không chứng minh ghi Sheet. Harness phải
-nhả tác vụ cũ trước Create, scope dev phải có activation ngẫu nhiên khớp process,
+đối soát tác vụ cũ trước Start, scope dev phải có activation ngẫu nhiên khớp process,
 và kết quả chỉ được gọi `phoneOnly/sheetDisabled`, không phải nghiệm thu end-to-end
-Sheet. Mất ACK handoff/Create/Execute đều giữ intent và không tự phát lại.
+Sheet. Lượt mới ghi intent trước Start; mất ACK thì chỉ đọc lại receipt theo đúng
+requestId, không tự gửi Start lần hai. Báo cáo cũ chỉ được quan sát, không replay
+Create/Execute.
 
 Đọc từng mốc, không gộp thành một dấu thành công:
 
@@ -949,9 +956,10 @@ Sheet. Mất ACK handoff/Create/Execute đều giữ intent và không tự phá
 
 Mã thoát `2` là còn chờ/hết hạn hoặc ACK chưa rõ; `1` là lỗi/bị chặn; `3` là đã có
 verified + sent nhưng chưa đủ readback bổ sung. `0` của inspect/preflight chỉ nghĩa
-bước đọc/kiểm đầu vào xong, **không** là nghiệm thu post→Sheet. Khi mất ACK tạo, giữ
-nguyên report-dir và requestId đã lưu; kỹ thuật tiếp tục cùng request. Đã có Execute
-intent thì harness không tự gửi Execute lần nữa, kể cả chưa biết backend đã nhận.
+bước đọc/kiểm đầu vào xong, **không** là nghiệm thu post→Sheet. Khi mất ACK Start, giữ
+nguyên report-dir và requestId đã lưu; kỹ thuật chỉ đọc `publish_start_status`.
+Có `start-intent.json` thì harness không tự gửi Start lần nữa, kể cả chưa biết
+backend đã nhận.
 Không xóa intent, tạo thư mục khác hoặc đổi requestId để “thử lại”. Bài pending được
 app kiểm theo lịch hiện có; không đóng TikTok hoặc gửi lại để giải quyết thiếu link.
 

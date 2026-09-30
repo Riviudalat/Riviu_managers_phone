@@ -206,6 +206,58 @@ fn short_ellipsized_caption_requests_expansion_without_accepting_a_prefix() {
     assert!(session.actions.lock().is_empty());
 }
 
+#[test]
+fn earlier_copied_photo_is_a_rejected_old_candidate_not_an_unresolved_caption() {
+    let session = Session::default();
+    let plan = plan();
+    let identity = identity();
+    let mut capture = Capture {
+        session: &session,
+        plan: &plan,
+        caption: CAPTION,
+        identity: &identity,
+        other_publication_urls: &[],
+        started: Instant::now(),
+        caption_expanded: false,
+        public_link: None,
+        trace_nonce: [0; 16],
+        diagnostic: VerificationDiagnostic {
+            publication_evidence: None,
+            contract_version: 1,
+            package: PACKAGE.into(),
+            locale: "en".into(),
+            version: "46.2.1".into(),
+            stage: "postProof",
+            reason_code: VerificationReason::CaptionMissing,
+            snapshot_generation: 1,
+            caption_candidates: 0,
+            time_candidates: 0,
+            time_label: None,
+            navigation_actions: 0,
+            candidates_visited: 0,
+            viewports_visited: 0,
+            copy_attempts: 0,
+            elapsed_ms: 0,
+            navigation_matches: 0,
+            navigation_enabled: 0,
+            navigation_clickable: 0,
+            screen_state: String::new(),
+            unknown_screen_shape: None,
+            expanded_photo_error: None,
+            candidate_trace: Vec::new(),
+        },
+    };
+    let error = anyhow::Error::new(super::super::photo_proof::EarlierPublication);
+    assert_eq!(
+        capture.matched_photo_failure(&error),
+        Some(VerificationReason::SubmissionTooOld)
+    );
+    assert_eq!(
+        capture.diagnostic.expanded_photo_error.as_deref(),
+        Some("copied post ID predates the recorded preparation window")
+    );
+}
+
 fn node(id: &str, text: &str, description: &str, bounds: &str, clickable: bool) -> String {
     format!(
         r#"<node package="{PACKAGE}" class="android.widget.Button" resource-id="{PACKAGE}{id}" text="{text}" content-desc="{description}" bounds="{bounds}" enabled="true" clickable="{clickable}" displayed="true"/>"#
@@ -704,7 +756,11 @@ impl UiSession for Session {
         Ok(self.package().into())
     }
     async fn app_version(&self, _: &str) -> Option<String> {
-        self.photo_counter.then(|| "38.3.2".into())
+        if self.global_45_7_3 {
+            Some("45.7.3".into())
+        } else {
+            self.photo_counter.then(|| "38.3.2".into())
+        }
     }
     async fn hierarchy_source_snapshot(&self) -> anyhow::Result<crate::HierarchySourceSnapshot> {
         tokio::time::sleep(self.snapshot_delay).await;
@@ -1279,6 +1335,8 @@ fn global_45_7_3_repeated_mismatches_do_not_exhaust_unique_search_budget() {
             caption_digest: Some(format!("caption-{unique}")),
             time_digest: Some(format!("time-{unique}")),
             reason_code: Some(VerificationReason::CaptionMismatch),
+            started_at_ms: 0,
+            elapsed_ms: None,
         });
     }
     assert!(!candidate_budget_exhausted(&global, &trace, 12));

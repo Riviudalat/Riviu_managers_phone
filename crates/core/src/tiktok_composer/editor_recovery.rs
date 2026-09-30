@@ -68,6 +68,25 @@ pub(super) async fn wait_rendered(
             };
             let mut response = reasoner.ocr(request.clone()).await?;
             response.validate_binding(&request)?;
+            // Global45.7.3/en machine29, 2026-09-29T21:39:16Z, 1080x2220:
+            // gesture navigation puts Next at y2078 (bottom2109), below the
+            // original crop. Whole union crop missed it; this measured region
+            // reads Next at confidence0.9587. Only observe the same frame.
+            if !response.lines.iter().any(|line| line.text == "Next") {
+                let lower_request = OcrRequest {
+                    request_id: uuid::Uuid::new_v4().to_string(),
+                    roi: Some(OcrRect {
+                        x: 0,
+                        y: 1980,
+                        width: 1080,
+                        height: 214,
+                    }),
+                    ..request.clone()
+                };
+                let lower = reasoner.ocr(lower_request.clone()).await?;
+                lower.validate_binding(&lower_request)?;
+                response.lines.extend(lower.lines);
+            }
             if !response.lines.iter().any(|line| line.text == "Your Story") {
                 let story_request = OcrRequest {
                     request_id: uuid::Uuid::new_v4().to_string(),
@@ -75,7 +94,9 @@ pub(super) async fn wait_rendered(
                         x: 210,
                         y: 1940,
                         width: 300,
-                        height: 110,
+                        // Includes the measured button-navigation and gesture-
+                        // navigation labels; same-frame OCR still requires exact text.
+                        height: 200,
                     }),
                     ..request
                 };

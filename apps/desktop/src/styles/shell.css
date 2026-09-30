@@ -70,8 +70,8 @@
 .aside-logo {
   display: flex;
   align-items: center;
-  gap: 0.55rem;
-  padding: var(--space-3);
+  gap: 8px;
+  padding: 12px;
   min-height: var(--header-height);
   border-bottom: 1px solid var(--nav-line);
 }
@@ -84,7 +84,7 @@
   flex-shrink: 0;
 }
 .aside-logo strong {
-  font-size: var(--text-base);
+  font-size: 13px;
   font-weight: 700;
   letter-spacing: 0;
   white-space: nowrap;
@@ -92,7 +92,13 @@
   color: var(--text-1);
 }
 
-.aside-logo small { display: none; }
+.aside-logo small {
+  display: block;
+  margin-top: 3px;
+  font-size: 12px;
+  color: var(--nav-muted);
+  font-weight: 400;
+}
 
 .aside-rail-toggle {
   width: 30px;
@@ -138,7 +144,7 @@
 }
 .aside[data-rail-collapsed="true"] .menu-item {
   justify-content: center;
-  width: 42px;
+  width: 100%;
   min-height: 40px;
   padding: 8px;
   margin: 1px 0;
@@ -164,13 +170,13 @@
   flex: 1;
   min-height: 0;
   overflow: auto;
-  padding: var(--space-2);
+  padding: 12px;
   scrollbar-width: thin;
   overscroll-behavior: contain;
 }
 
 .menu-group + .menu-group {
-  margin-top: var(--space-4);
+  margin-top: 20px;
 }
 
 .menu-group h2 {
@@ -192,12 +198,12 @@
   background: transparent;
   color: var(--nav-text);
   padding: var(--space-2) var(--space-3);
-  border-radius: 6px;
+  border-radius: 8px;
   text-align: left;
   font-weight: 500;
   font-size: var(--text-base);
   margin: 1px 0;
-  min-height: 36px;
+  min-height: 38px;
   height: auto;
   line-height: var(--leading-normal);
   /* Mục đang chọn phải có chữ/nền tương phản ngay, không chờ hết fade. */
@@ -209,10 +215,10 @@
 }
 .menu-item.active,
 .menu-item.active:hover {
-  background: var(--primary);
-  color: var(--text-inverse);
+  background: var(--primary-50);
+  color: var(--primary-deep);
   font-weight: var(--weight-semibold);
-  box-shadow: var(--shadow-sm);
+  box-shadow: inset 3px 0 var(--primary);
 }
 .menu-item .mi {
   width: 20px;
@@ -230,9 +236,9 @@
 
 .aside-stats {
   flex: 0 0 auto;
-  padding: var(--space-2) var(--space-3);
+  padding: 12px 16px;
   border-top: 1px solid var(--nav-line);
-  background: var(--nav-panel);
+  background: var(--bg-elevated);
 }
 .aside-stats h4 {
   margin: 0 0 var(--space-1);
@@ -262,6 +268,8 @@
     min-width: var(--aside-w-compact);
   }
   .aside-logo img { width: 28px; height: 28px; }
+  .aside-logo { gap: 6px; padding: 10px 8px; }
+  .aside-logo strong { font-size: 12px; }
   .menu-item { font-size: var(--text-sm); gap: var(--space-2); }
 }
 
@@ -306,7 +314,7 @@
 }
 
 .content-control {
-  padding: 0.65rem 1rem 1rem;
+  padding: 16px 20px 20px;
 }
 
 .automation-page-stack {
