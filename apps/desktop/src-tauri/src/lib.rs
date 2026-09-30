@@ -1270,6 +1270,10 @@ mod tests {
             include_str!("publish_commands/execution.rs"),
         ),
         (
+            "publish_commands/start.rs",
+            include_str!("publish_commands/start.rs"),
+        ),
+        (
             "publish_commands/schedule.rs",
             include_str!("publish_commands/schedule.rs"),
         ),
@@ -1606,7 +1610,8 @@ mod tests {
             ADMISSION_EXEMPT.iter().copied().collect();
         let mut offenders = Vec::new();
         for (file, name, body) in all_commands() {
-            if command_holds_admission(body) || exempt.contains_key(name) {
+            if command_holds_admission(body) || exempt.contains_key(name)
+                || (name == "inspector_v2" && inspector_delegates_admission(body)) {
                 continue;
             }
             offenders.push(format!("{file}::{name}"));
@@ -1617,6 +1622,34 @@ mod tests {
              with a reason: {}",
             offenders.join(", ")
         );
+    }
+
+    // This command delegates to the production semantic executor. Require the
+    // exact sole delegation AND a checked guard in that executor, not an exemption.
+    fn inspector_delegates_admission(body: &str) -> bool {
+        let function: syn::ItemFn = syn::parse_str(body).expect("inspector command");
+        let [syn::Stmt::Expr(syn::Expr::Await(awaited), None)] = function.block.stmts.as_slice() else {
+            return false;
+        };
+        let syn::Expr::Call(call) = awaited.base.as_ref() else { return false; };
+        let syn::Expr::Path(path) = call.func.as_ref() else { return false; };
+        let names: Vec<_> = path.path.segments.iter().map(|segment| segment.ident.to_string()).collect();
+        if names != ["semantic", "execute"] { return false; }
+        let source = include_str!("inspector_commands/semantic.rs");
+        let parsed = syn::parse_file(source).expect("semantic source");
+        parsed.items.iter().any(|item| {
+            let syn::Item::Fn(function) = item else { return false; };
+            function.sig.ident == "execute" && command_holds_admission(
+                &source[function.sig.span().byte_range().start..function.block.span().byte_range().end],
+            )
+        })
+    }
+
+    #[test]
+    fn semantic_delegation_cannot_hide_an_unadmitted_prefix_or_other_executor() {
+        assert!(inspector_delegates_admission("async fn inspector_v2() { semantic::execute(&state, owner, request).await }"));
+        assert!(!inspector_delegates_admission("async fn inspector_v2() { mutate(); semantic::execute(&state, owner, request).await }"));
+        assert!(!inspector_delegates_admission("async fn inspector_v2() { other::execute(&state, owner, request).await }"));
     }
 
     /// The scan sees every command that is actually registered — proved, not assumed.

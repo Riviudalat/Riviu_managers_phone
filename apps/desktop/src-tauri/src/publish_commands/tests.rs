@@ -69,7 +69,15 @@ fn folder_scan_and_preflight_share_the_bounded_blocking_worker() {
             body.contains("bounded_publish_scan(Arc::clone(&PUBLISH_SCAN_SLOTS), move || {"),
             "{signature} must scan inside the shared bounded worker"
         );
-        assert_eq!(body.matches("scan_publish_folder(").count(), 1);
+        if signature.contains("scan_preflight_source") {
+            assert_eq!(body.matches("preparation::scan_source(source_root)").count(), 1);
+            let source = include_str!("preparation.rs");
+            let scan = source.split("pub(super) fn scan_source(").nth(1).unwrap()
+                .split("\n}").next().unwrap();
+            assert_eq!(scan.matches("scan_publish_folder(").count(), 1);
+        } else {
+            assert_eq!(body.matches("scan_publish_folder(").count(), 1);
+        }
         assert!(body.contains(".await"));
     }
 }
