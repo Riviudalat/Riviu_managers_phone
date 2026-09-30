@@ -100,9 +100,10 @@ describe("publish preflight result", () => {
     await userEvent.click(screen.getByRole("button", { name: "Đạt (0)" }));
     expect(screen.getByText("Không có máy trong nhóm này.")).toBeVisible();
   });
-  it("shows the blocking link check when all four legacy checks pass",()=>{
+  it("shows the blocking link check when all four legacy checks pass",async()=>{
     const issue={code:"link_verification_unmeasured",udid:"phone-1",message:"locale unsupported"};
     render(<PublishPreflightResult report={{...report,assignments:[{...row,composer:"pass",soundPicker:"pass",issues:[issue],checks:[{id:"link",label:"Nhận diện xác minh liên kết",status:"blocked",reason:issue.message}]}],issues:[issue]}} machineName={()=>"Máy 1"} page={0} onPage={vi.fn()} onRetry={vi.fn()} busy={false}/>);
+    await userEvent.click(screen.getByText("Chi tiết kiểm tra"));
     expect(screen.getByText("Nhận diện xác minh liên kết")).toBeVisible();
     expect(screen.getByText("Bị chặn")).toBeVisible();
     expect(screen.queryByText("Có điều kiện chưa đạt")).toBeNull();
@@ -120,6 +121,7 @@ describe("publish preflight result", () => {
       />,
     );
     const card = screen.getByRole("article", { name: "Máy 1 · Đà Lạt" });
+    await userEvent.click(within(card).getByText("Chi tiết kiểm tra"));
     expect(
       within(card).getByText(/TikTok quốc tế · Phiên bản 45.7.3/),
     ).toBeVisible();

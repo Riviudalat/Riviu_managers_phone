@@ -41,7 +41,7 @@ describe("Publish API client", () => {
     await publishReconcile("campaign-a");
 
     expect(vi.mocked(invoke).mock.calls).toEqual([
-      ["publish_preflight", { request }],
+      ["publish_preflight", { request, requestId: null }],
       [
         "publish_create_campaign",
         {
