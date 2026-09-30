@@ -2108,10 +2108,15 @@ impl<'a, P: TapPlanner> Composer<'a, P> {
                     Box::pin(confirm_sound(self.session, sound_plan, &expected_title)).await?;
                     if sound_plan.post_back_query().is_some() {
                         mark("returnToCaption");
-                        anyhow::ensure!(
-                            Box::pin(self.advance_to_post_screen(stop)).await?,
-                            "sound reproof: caption page did not return"
-                        );
+                        if !Box::pin(self.advance_to_post_screen(stop)).await? {
+                            // Failure to observe a transition is not a proved
+                            // caption mismatch. Keep the unchanged deadline and
+                            // let the pre-effect recovery owner classify it.
+                            return Err(crate::publish_recovery::retryable_error(
+                                "final_caption_arrival_unconfirmed",
+                                "sound reproof: caption page did not return before its deadline; no Post dispatched",
+                            ));
+                        }
                         mark("restoreCaptionIfCleared");
                         let caption_proof = self
                             .restore_caption_cleared_by_editor(caption, stop)
@@ -2382,8 +2387,44 @@ impl<'a, P: TapPlanner> Composer<'a, P> {
                             let [fresh_back] = fresh_back.as_slice() else {
                                 anyhow::bail!("sound preparation: caption Back retry ambiguous");
                             };
-                            phase = "tapCaptionBackRetry";
-                            self.tap_inside(fresh_back).await?;
+                            // Global 45.7.3, machine28, 2026-09-30T17:58:52Z:
+                            // the first Back reached the editor while the caption
+                            // batch/Back lookup completed. The resource id also
+                            // matched the editor arrow; replay opened Discard.
+                            // Reprove the screen AFTER that lookup, using one fresh
+                            // batch, immediately before any second navigation.
+                            phase = "recheckCaptionBackRetry";
+                            let (fresh_editor, fresh_caption) = inspect_editor_and_caption(
+                                self.session,
+                                sound_plan,
+                                expected_title,
+                                caption_query,
+                                caption,
+                            )
+                            .await?;
+                            let retry_caption = match fresh_caption {
+                                Some(proved) => proved,
+                                None if fresh_editor == EditorState::Unknown => {
+                                    let state = observation::caption_state(
+                                        self.session,
+                                        self.plan.package,
+                                        caption_query,
+                                        caption,
+                                        crate::tiktok_sound::phase_deadline(Duration::from_secs(8)),
+                                        stop,
+                                        &mut observation::Cursor::default(),
+                                    )
+                                    .await?;
+                                    state == observation::CaptionState::Confirmed
+                                        || (caption.trim().is_empty()
+                                            && state == observation::CaptionState::Cleared)
+                                }
+                                None => false,
+                            };
+                            if fresh_editor == EditorState::Unknown && retry_caption {
+                                phase = "tapCaptionBackRetry";
+                                self.tap_inside(fresh_back).await?;
+                            }
                         }
                         phase = "confirmEditorTransition";
                         crate::tiktok_sound::confirm_sound_after_transition(
@@ -4541,6 +4582,7 @@ mod tests {
         caption_unknown_reads: Mutex<usize>,
         lose_next_ack: bool,
         arrival_read_failure: bool,
+        caption_return_delay: Duration,
         repair_on_locate: bool,
         repaired: AtomicBool,
         sound_entry_failures: Mutex<std::collections::VecDeque<Duration>>,
@@ -4846,6 +4888,9 @@ mod tests {
             self.tap(target.centre()).await
         }
         async fn locate(&self, query: ElementQuery<'_>) -> anyhow::Result<Option<ElementBox>> {
+            if *self.at.lock() == 2 && !self.caption_return_delay.is_zero() {
+                tokio::time::sleep(self.caption_return_delay).await;
+            }
             if self.arrival_read_failure && *self.at.lock() == 1 {
                 return Err(crate::driver::UiError::new(
                     crate::driver::UiErrorKind::Transport,
@@ -6443,6 +6488,45 @@ mod tests {
             assert_eq!(*session.backs.lock(), 0);
             assert_eq!(session.typed.lock().as_deref(), Some("caption"));
         }
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn final_caption_arrival_deadline_is_retryable_without_post_or_sound_change() {
+        let mut caption_page = post_screen();
+        caption_page
+            .elements
+            .insert(":id/aun".into(), box_at(20.0, 70.0));
+        caption_page.exit = Some(":id/aun".into());
+        let mut session = FakeSession::with(vec![
+            caption_page,
+            sound_edit_step("Sound A"),
+            post_screen(),
+        ]);
+        session.caption_return_delay = Duration::from_secs(9);
+        *session.typed.lock() = Some("caption".into());
+        let mut composer = Composer::new(&session, plan(), |e: &ElementBox| e.centre());
+        composer.pending_sound_proof = Some((
+            SoundPickerPlan::resolve("com.ss.android.ugc.trill", "en", "38.3.2").unwrap(),
+            "Sound A".into(),
+        ));
+        let mut intents = 0;
+        let started = Instant::now();
+        let error = composer
+            .post_with_effect_intent("caption", &AtomicBool::new(false), &mut || {
+                intents += 1;
+                Ok(())
+            })
+            .await
+            .expect_err("late caption arrival cannot permit Post");
+        assert_eq!(
+            crate::publish_recovery::describe(&error).kind,
+            crate::publish_recovery::FailureKind::Retryable,
+            "{error:#}"
+        );
+        assert_eq!(intents, 0);
+        assert_eq!(post_button_taps(&session), 0);
+        assert_eq!(session.typed.lock().as_deref(), Some("caption"));
+        assert!(started.elapsed() <= Duration::from_secs(8));
     }
 
     #[tokio::test(start_paused = true)]

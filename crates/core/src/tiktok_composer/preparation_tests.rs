@@ -48,7 +48,14 @@ impl UiSession for PreparationSession {
             if read == 0 {
                 // Live #8, 30/09/2026: first post-Back source returned Unknown
                 // after about 6.3 s. A positive editor arrives in the next read.
-                tokio::time::sleep(Duration::from_millis(6300)).await;
+                tokio::time::sleep(Duration::from_millis(
+                    if self.unproved_caption == Some("caption-transition") {
+                        700
+                    } else {
+                        6300
+                    },
+                ))
+                .await;
                 if let Some(mode) = self.unproved_caption {
                     if mode == "upstream-unknown-candidate" {
                         unknown_match_count = 1;
@@ -197,6 +204,42 @@ async fn partial_editor_read_does_not_spend_a_second_caption_probe_before_recove
     );
     assert_eq!(session.extra_caption_reads.load(Ordering::Relaxed), 0);
     assert_eq!(session.editor_reads.load(Ordering::Relaxed), 2);
+}
+
+#[tokio::test(start_paused = true)]
+async fn caption_transition_during_back_lookup_does_not_retry_on_the_editor() {
+    let session = PreparationSession {
+        observations: AtomicUsize::new(0),
+        editor_reads: AtomicUsize::new(0),
+        extra_caption_reads: AtomicUsize::new(0),
+        taps: AtomicUsize::new(0),
+        unproved_caption: Some("caption-transition"),
+    };
+    let labels = crate::tiktok_labels::controls_for(PACKAGE, "en", "38.3.2").unwrap();
+    let mut plan = ComposerPlan::resolve(&labels).unwrap();
+    plan.publish.as_mut().unwrap().caption = ElementQuery::ResourceIdSuffix(":id/eej");
+    let mut composer = Composer::new(&session, plan, |element: &ElementBox| element.centre());
+    let started = Instant::now();
+    composer
+        .prepare_sound_editor(
+            SoundPickerPlan::resolve(PACKAGE, "en", "38.3.2").unwrap(),
+            "Sound A",
+            "approved caption",
+            &AtomicBool::new(false),
+        )
+        .await
+        .expect("a completed first Back must retain the selected editor");
+    assert_eq!(
+        session.taps.load(Ordering::Relaxed),
+        1,
+        "caption proof taken before the Back lookup cannot authorize a second Back on the editor"
+    );
+    assert!(started.elapsed() <= Duration::from_secs(8));
+    assert_eq!(
+        session.extra_caption_reads.load(Ordering::Relaxed),
+        0,
+        "the retry predicate is one batched editor/caption observation"
+    );
 }
 
 #[tokio::test(start_paused = true)]
