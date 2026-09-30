@@ -840,7 +840,20 @@ async fn observe_measured_sound_pool(
     }
     let visual = visual::observe_initial(session, plan, maximum).await;
     match checked_measured_sound_observation(session, plan, &epoch, visual).await {
-        Ok(pool) => return Ok(pool),
+        Ok(_) => {
+            // Machine25, 2026-09-30: stable OCR lost Vietnamese accents and
+            // froze a spelling which the exact editor could never confirm.
+            // OCR proves this measured Hot sheet and its navigation only. Before
+            // policy selection or durable binding, obtain an independent fresh
+            // XML pool with exact row/title/artist identity in two generations.
+            let canonical = snapshot::observe_direct(session, plan, maximum).await;
+            let canonical =
+                checked_measured_sound_observation(session, plan, &epoch, canonical).await?;
+            return canonical.ok_or_else(|| crate::publish_recovery::retryable_error(
+                "sound_identity_unavailable",
+                "Đã thấy hàng nhạc nhưng chưa đọc chính xác tên và nghệ sĩ; chưa chọn nhạc hoặc bấm Đăng",
+            ));
+        }
         Err(error) if error.is::<visual::VisualSoundPoolUnavailable>() => {}
         Err(error)
             if error.is::<crate::driver::ScreenshotReadUnavailable>()

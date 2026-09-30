@@ -3443,11 +3443,11 @@ where
                 && crate::publish_recovery::describe(&error).kind
                     == crate::publish_recovery::FailureKind::Retryable
             {
-                crate::publish_recovery::RecoveryFailure::new(
+                error.context(crate::publish_recovery::RecoveryFailure::new(
                     "publish_sound_budget_exhausted",
                     crate::publish_recovery::FailureKind::Terminal,
                     "Đã hết thời gian tải và xác nhận nhạc; chưa bấm Đăng. Có thể chọn Thử lại để bắt đầu lượt mới.",
-                ).into()
+                ))
             } else { error }
         });
         let (sound_plan, mut selection) = match chosen {

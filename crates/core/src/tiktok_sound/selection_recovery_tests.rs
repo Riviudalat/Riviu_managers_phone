@@ -79,6 +79,7 @@ struct Session {
     xml_override: Option<String>,
     fixed_xml_generation: bool,
     incomplete_direct_reads: bool,
+    identity_after_visual: bool,
     screenshot_unavailable: bool,
     editor_before_sound: bool,
     hot_requires_tap: bool,
@@ -115,6 +116,7 @@ impl Session {
             xml_override: None,
             fixed_xml_generation: false,
             incomplete_direct_reads: false,
+            identity_after_visual: false,
             screenshot_unavailable: false,
             editor_before_sound: false,
             hot_requires_tap: false,
@@ -204,6 +206,12 @@ impl UiSession for Session {
     }
     async fn hierarchy_source_snapshot(&self) -> anyhow::Result<crate::HierarchySourceSnapshot> {
         let n = self.reads.fetch_add(1, Ordering::Relaxed) + 1;
+        if self.identity_after_visual && n == 1 {
+            return Ok(crate::HierarchySourceSnapshot {
+                generation: n as u64,
+                xml: "<hierarchy/>".into(),
+            });
+        }
         if self.incomplete_direct_reads
             && ((!self.editor_before_sound && n <= 2)
                 || (self.editor_before_sound && self.taps.load(Ordering::Relaxed) > 0 && n <= 5))
@@ -549,6 +557,66 @@ struct TransientMissingTabOcr {
 
 struct TransientSheetOcr {
     calls: AtomicUsize,
+}
+struct AccentLossOcr;
+#[async_trait::async_trait]
+impl GuiReasoner for AccentLossOcr {
+    async fn resolve(&self, _: GuiRequest) -> anyhow::Result<GuiResponse> {
+        unreachable!()
+    }
+    async fn ocr(&self, request: OcrRequest) -> anyhow::Result<OcrResponse> {
+        let mut result = TransientSheetOcr {
+            calls: AtomicUsize::new(1),
+        }
+        .ocr(request)
+        .await?;
+        for line in &mut result.lines {
+            if line.text.starts_with("Th") {
+                line.text = "Thuong Nhau Dén Thé Ma".into();
+            }
+        }
+        result.text = result
+            .lines
+            .iter()
+            .map(|line| line.text.as_str())
+            .collect::<Vec<_>>()
+            .join("\n");
+        Ok(result)
+    }
+}
+
+#[tokio::test(start_paused = true)]
+async fn visual_ocr_title_never_becomes_frozen_identity_before_fresh_xml() {
+    // Machine25, 2026-09-30T18:24:29Z: OCR froze this accent-corrupted title;
+    // editor XML later proved the exact decomposed spelling until budget expiry.
+    let canonical = "Thương Nhau Đến Thế Mà";
+    for xml_available in [true, false] {
+        let mut session = Session::new();
+        session.read_failure = false;
+        session.identity_after_visual = true;
+        session.xml_override =
+            Some(sound_xml(false, true).replace("text=\"One\"", &format!("text=\"{canonical}\"")));
+        session.fixed_xml_generation = !xml_available;
+        session.png =
+            include_bytes!("../../fixtures/tiktok-publish/musically-45.7.3-en/hot-visual.png")
+                .to_vec();
+        session.ocr = Arc::new(AccentLossOcr);
+        let result = resume_open_sounds(&session, plan(), 5).await;
+        if xml_available {
+            let pool = result.expect("fresh stable XML must own title and artist before binding");
+            assert!(!pool.visual);
+            assert_eq!(pool.candidates[0].title, canonical);
+            assert_eq!(pool.candidates[0].artist, "Artist");
+        } else {
+            let error = result.expect_err("OCR-only spelling cannot freeze the identity");
+            assert_eq!(
+                crate::publish_recovery::describe(&error).code,
+                "sound_identity_unavailable"
+            );
+        }
+        assert_eq!(session.taps.load(Ordering::Relaxed), 0);
+        assert_eq!(session.backs.load(Ordering::Relaxed), 0);
+    }
 }
 struct TabsWithoutRowsOcr;
 struct SlowOcr;
