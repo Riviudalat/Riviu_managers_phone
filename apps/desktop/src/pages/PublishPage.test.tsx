@@ -29,6 +29,9 @@ import {
   publishSheetGetConfig,
   publishSheetCheck,
   googleSheetsStatus,
+  googleSheetsVerifyReadonly,
+  publishStart,
+  publishStartStatus,
   publishSetLimits,
 } from "../api";
 import { PublishPage } from "./PublishPage";
@@ -195,6 +198,8 @@ vi.mock("../api", () => ({
   publishCreateCampaign: (...args: unknown[]) =>
     createCampaign(...(args as [])),
   publishExecute: (...args: unknown[]) => executeCampaign(...(args as [])),
+  publishStart: vi.fn(async (_request, requestId) => ({ requestId, state: "accepted", stage: "queued", campaignId: "campaign-1", error: null })),
+  publishStartStatus: vi.fn(async () => null),
   publishGet: vi.fn(async () => null),
   publishDeviceGuards: vi.fn(async (udids: string[]) => Object.fromEntries(udids.map(id => [id, { blocking: [], linkReview: [] }]))),
   publishGetLimits: vi.fn(async () => ({ transfer: 4, compose: 4, verify: 4, deviceTotal: 8 })),
@@ -222,6 +227,7 @@ vi.mock("../api", () => ({
     webhookUrl: "",
     hasToken: false,
   })),
+  googleSheetsVerifyReadonly: vi.fn(async () => ({readyRead:true,result:{spreadsheetId:"fixture",sheetGid:0,reportingReady:true,message:"Verified"},binding:{clientId:"id",accountId:"operator",spreadsheetId:"fixture",sheetGid:0,writerId:"writer",reportingEpoch:null,authorizationGeneration:0},verifiedAt:Date.now(),expiresAt:Date.now()+300000,writePermission:"verified"})),
   googleSheetsStatus: vi.fn(async () => ({ configured: false, connected: false, active: false,
     clientId: "", pickerConfigured: false, phase: "idle" })),
   publishSheetCheck: vi.fn(),
@@ -248,6 +254,10 @@ const devices = [iphone("PHONE-A"), iphone("PHONE-B"), iphone("PHONE-C")];
 
 beforeEach(() => {
   clearSheetVerificationSession();
+  vi.mocked(googleSheetsVerifyReadonly).mockReset().mockResolvedValue({readyRead:true,result:{spreadsheetId:"fixture",sheetGid:0,reportingReady:true,message:"Verified"},binding:{clientId:"id",accountId:"operator",spreadsheetId:"fixture",sheetGid:0,writerId:"writer",reportingEpoch:null,authorizationGeneration:0},verifiedAt:Date.now(),expiresAt:Date.now()+300000,writePermission:"verified"} as never);
+  localStorage.removeItem("riviu.publish.pending-start.v1");
+  vi.mocked(publishStart).mockReset().mockImplementation(async (_request, requestId) => ({requestId,state:"accepted",stage:"queued",campaignId:"campaign-1",error:null}) as never);
+  vi.mocked(publishStartStatus).mockReset().mockResolvedValue(null);
   vi.mocked(publishList).mockReset().mockResolvedValue([]);
   vi.mocked(publishGet).mockReset().mockResolvedValue(null);
   HTMLDialogElement.prototype.showModal = function () {
@@ -305,44 +315,39 @@ async function prepareOne() {
 }
 
 describe("production publish wizard", () => {
-  it("shows preparation and device-check phases without claiming a device passed early", async () => {
-    let finishPreparation!: (value: { operationId: string; state: "closed"; devices: []; stopMarker: null }) => void;
+  it("preflight reads device checks without stopping owners or starting a post", async () => {
     let finishCheck!: (value: PublishPreflightReport) => void;
     const defaultPreflight = preflightCampaign.getMockImplementation()!;
-    vi.mocked(operationPrepareDevices).mockImplementationOnce(() => new Promise(resolve => { finishPreparation = resolve; }));
     preflightCampaign.mockImplementationOnce(() => new Promise(resolve => { finishCheck = resolve; }));
     render(<PublishPage devices={devices} selected={[]} onSelectUdids={() => {}} />);
     await prepareOne();
+    await waitFor(() => expect(screen.getByRole("button", {name:"Kiểm tra & đăng"})).toBeEnabled());
     await userEvent.click(screen.getByRole("button", { name: "Kiểm tra & đăng" }));
-    expect(await screen.findByText("Đang chuẩn bị thiết bị…")).toBeVisible();
-    expect(preflightCampaign).not.toHaveBeenCalled();
-    await act(async () => finishPreparation({ operationId: "handoff", state: "closed", devices: [], stopMarker: null }));
-    expect(await screen.findByText("Đang kiểm tra từng máy…")).toBeVisible();
+    await waitFor(() => expect(preflightCampaign).toHaveBeenCalledOnce());
+    expect(operationPrepareDevices).not.toHaveBeenCalled();
+    expect(publishStart).not.toHaveBeenCalled();
     expect(screen.queryByText("Đạt kiểm tra")).toBeNull();
-    const request = preflightCampaign.mock.calls[0]?.[0];
-    expect(request).toBeDefined();
-    const approved = await defaultPreflight(request);
-    await act(async () => finishCheck(approved));
+    const request = preflightCampaign.mock.calls[0][0];
+    await act(async () => finishCheck(await defaultPreflight(request)));
     expect(await screen.findByText("Đầu vào đã đạt kiểm tra. Chưa đăng bài.")).toBeVisible();
-    expect(createCampaign).not.toHaveBeenCalled();
   });
-
   it("still reaches final backend handoff when a link verifier starts after preflight", async () => {
     let listener!: (event: AppEvent) => void;
     vi.mocked(listenRiviuEvents).mockImplementationOnce(async callback => { listener = callback; return () => {}; });
     render(<PublishPage devices={devices} selected={[]} onSelectUdids={() => {}} />);
     await prepareOne();
+    await waitFor(() => expect(screen.getByRole("button", {name:"Kiểm tra & đăng"})).toBeEnabled());
     await userEvent.click(screen.getByRole("button", { name: "Kiểm tra & đăng" }));
-    const confirm = await screen.findByRole("button", { name: "Xác nhận đăng 1 bài" });
+    const confirm = await screen.findByRole("button", { name: "Xác nhận đăng công khai 1 bài" });
     await waitFor(() => expect(confirm).toBeEnabled());
     vi.mocked(publishDeviceGuards).mockImplementation(async ids => Object.fromEntries(ids.map(id => [id, {
       blocking: [{ assignmentId: "old-post", campaignId: "old-campaign", updatedAt: "2026-09-23T00:00:00Z", reason: "Đang lấy link bài cũ" }], linkReview: [],
     }])));
     await act(async () => listener({ type: "publishUpdated", campaignId: "old-campaign" } as AppEvent));
     await waitFor(() => expect(screen.getAllByText("Máy còn bài chưa lấy được link").length).toBeGreaterThan(0));
-    createCampaign.mockRejectedValueOnce(new Error("Tác vụ cũ chưa nhả thiết bị; chưa đăng bài mới"));
+    vi.mocked(publishStart).mockRejectedValueOnce(new Error("Tác vụ cũ chưa nhả thiết bị; chưa đăng bài mới"));
     await userEvent.click(confirm);
-    await waitFor(() => expect(createCampaign).toHaveBeenCalledOnce());
+    await waitFor(() => expect(publishStart).toHaveBeenCalledOnce());
     expect(executeCampaign).not.toHaveBeenCalled();
     expect(screen.getAllByRole("alert").some(alert => alert.textContent?.includes("Tác vụ cũ chưa nhả thiết bị"))).toBe(true);
   });
@@ -380,72 +385,71 @@ describe("production publish wizard", () => {
     expect(await screen.findByText("Đã lưu giới hạn cho toàn ứng dụng trên máy tính này.")).toBeVisible();
     expect(screen.getByRole("spinbutton", { name: "Lượt chuyển media" })).toHaveValue(2);
     expect(createCampaign).not.toHaveBeenCalled();
+    expect(publishStart).not.toHaveBeenCalled();
   });
 
-  it("keeps the same creation identity after a lost ACK and a page restart", async () => {
-    createCampaign.mockRejectedValueOnce(new Error("lost create ACK"));
+  it("keeps the same start identity after a lost ACK and a page restart", async () => {
+    vi.mocked(publishStart).mockRejectedValueOnce(new Error("lost start ACK"));
     const view = render(<PublishPage devices={devices} selected={[]} onSelectUdids={() => {}} />);
     await prepareOne();
+    await waitFor(() => expect(screen.getByRole("button", {name:"Kiểm tra & đăng"})).toBeEnabled());
     await userEvent.click(screen.getByRole("button", { name: "Kiểm tra & đăng" }));
-    const confirm = await screen.findByRole("button", { name: "Xác nhận đăng 1 bài" });
+    const confirm = await screen.findByRole("button", { name: "Xác nhận đăng công khai 1 bài" });
     await waitFor(() => expect(confirm).toBeEnabled());
     await userEvent.click(confirm);
-    await waitFor(() => expect(createCampaign).toHaveBeenCalledOnce());
-    const requestId = (createCampaign.mock.calls[0] as unknown[])[11];
-    expect(requestId).toEqual(expect.any(String));
-    expect(executeCampaign).not.toHaveBeenCalled();
-    // The draft saver is debounced independently of the create ACK. Finish the
-    // ordinary navigation flush before remounting the page for this IPC replay.
+    await waitFor(() => expect(publishStart).toHaveBeenCalledOnce());
+    await screen.findByText("lost start ACK");
+    const requestId = vi.mocked(publishStart).mock.calls[0][1];
+    expect(JSON.parse(localStorage.getItem("riviu.publish.pending-start.v1")!).requestId).toBe(requestId);
     await act(async () => { expect(await requestWorkspaceLeave()).toBe(true); });
     view.unmount();
     render(<PublishPage devices={devices} selected={[]} onSelectUdids={() => {}} />);
     await waitFor(() => expect(screen.getByRole("checkbox", { name: "Chọn bo1" })).toBeChecked());
+    await waitFor(() => expect(screen.getByRole("button", {name:"Kiểm tra & đăng"})).toBeEnabled());
     await userEvent.click(screen.getByRole("button", { name: "Kiểm tra & đăng" }));
-    const retry = await screen.findByRole("button", { name: "Xác nhận đăng 1 bài" });
+    const retry = await screen.findByRole("button", { name: "Xác nhận đăng công khai 1 bài" });
     await waitFor(() => expect(retry).toBeEnabled());
     await userEvent.click(retry);
-    await waitFor(() => expect(createCampaign).toHaveBeenCalledTimes(2));
-    expect((createCampaign.mock.calls[1] as unknown[])[11]).toBe(requestId);
-    await waitFor(() => expect(executeCampaign).toHaveBeenCalledOnce());
-    expect(localStorage.getItem("riviu.publish.pending-create.v1")).toBeNull();
+    await waitFor(() => expect(publishStart).toHaveBeenCalledTimes(2));
+    expect(vi.mocked(publishStart).mock.calls[1][1]).toBe(requestId);
+    await waitFor(() => expect(JSON.parse(localStorage.getItem("riviu.publish.pending-start.v1")!).status.campaignId).toBe("campaign-1"));
+    expect(createCampaign).not.toHaveBeenCalled();
+    expect(executeCampaign).not.toHaveBeenCalled();
   });
-
-  it("admits only one publish request while native confirmation is pending", async () => {
-    let confirmPost!: (accepted: boolean) => void;
-    vi.mocked(requestConfirm).mockImplementation(() => new Promise(resolve => { confirmPost = resolve; }));
+  it("admits one start from the single review confirmation while its receipt is pending", async () => {
+    let accept!: (value: Awaited<ReturnType<typeof publishStart>>) => void;
+    vi.mocked(publishStart).mockImplementationOnce(() => new Promise(resolve => { accept = resolve; }));
     render(<PublishPage devices={devices} selected={[]} onSelectUdids={() => {}} />);
     await prepareOne();
+    await waitFor(() => expect(screen.getByRole("button", {name:"Kiểm tra & đăng"})).toBeEnabled());
     await userEvent.click(screen.getByRole("button", { name: "Kiểm tra & đăng" }));
-    const confirm = await screen.findByRole("button", { name: "Xác nhận đăng 1 bài" });
+    const confirm = await screen.findByRole("button", { name: "Xác nhận đăng công khai 1 bài" });
     await waitFor(() => expect(confirm).toBeEnabled());
-    fireEvent.click(confirm);
-    fireEvent.click(confirm);
-    expect(requestConfirm).toHaveBeenCalledOnce();
-    await act(async () => confirmPost(true));
-    await waitFor(() => expect(createCampaign).toHaveBeenCalledOnce());
-    expect(executeCampaign).toHaveBeenCalledOnce();
+    fireEvent.click(confirm); fireEvent.click(confirm);
+    await waitFor(() => expect(publishStart).toHaveBeenCalledOnce());
+    expect(requestConfirm).not.toHaveBeenCalled();
+    await act(async () => accept({requestId:vi.mocked(publishStart).mock.calls[0][1],state:"accepted",stage:"queued",campaignId:"campaign-1",error:null} as never));
+    expect(createCampaign).not.toHaveBeenCalled();
+    expect(executeCampaign).not.toHaveBeenCalled();
   });
-
-  it("selects the newly created campaign after entering Setup from an older operation", async () => {
-    const oldCampaign = { id: "old-operation", requestId: "old", sourceRoot: "C:/old-source", state: "succeeded", assignments: [], createdAt: "2026-09-09T00:00:00Z", updatedAt: "2026-09-09T00:00:00Z" };
-    const newCampaign = { ...oldCampaign, id: "campaign-1", sourceRoot: "C:/carousels", state: "prepared" };
-    vi.mocked(publishGet).mockResolvedValueOnce({ campaign: oldCampaign, bundles: [], events: [], assignments: [] } as never);
+  it("announces the accepted start receipt after entering Setup from an older operation", async () => {
+    const oldCampaign = { id:"old-operation",requestId:"old",sourceRoot:"C:/old-source",state:"succeeded",assignments:[],createdAt:"2026-09-09T00:00:00Z",updatedAt:"2026-09-09T00:00:00Z" };
+    vi.mocked(publishGet).mockResolvedValueOnce({campaign:oldCampaign,bundles:[],events:[],assignments:[]} as never);
     vi.mocked(publishList).mockResolvedValue([oldCampaign] as never);
-    createCampaign.mockImplementationOnce(async () => {
-      vi.mocked(publishList).mockResolvedValue([oldCampaign, newCampaign] as never);
-      return newCampaign as never;
-    });
-    render(<PublishPage devices={devices} selected={[]} onSelectUdids={() => {}} operationSource={{ operationId: "publish:old-operation", sourceId: "old-operation", kind: "publish" }} />);
-    await screen.findByRole("button", { name: "Ẩn chi tiết máy" });
-    await userEvent.click(screen.getByRole("tab", { name: "Thiết lập" }));
-    await prepareOne();
-    await userEvent.click(screen.getByRole("button", { name: "Kiểm tra & đăng" }));
-    const confirm = await screen.findByRole("button", { name: "Xác nhận đăng 1 bài" });
-    await waitFor(() => expect(confirm).toBeEnabled());
-    await userEvent.click(confirm);
-    await waitFor(() => expect(document.querySelector(".publish-monitor-detail-head")).toHaveTextContent("Chiến dịch 2"));
-    expect(document.querySelector(".publish-monitor-detail-head")).toHaveTextContent("carousels");
-    expect(executeCampaign).toHaveBeenCalledWith("campaign-1", true);
+    const acknowledged = vi.fn();
+    window.addEventListener("riviu:publish-start-acknowledged",acknowledged);
+    try {
+      render(<PublishPage devices={devices} selected={[]} onSelectUdids={() => {}} operationSource={{operationId:"publish:old-operation",sourceId:"old-operation",kind:"publish"}} />);
+      await screen.findByRole("button",{name:"Ẩn chi tiết máy"});
+      await userEvent.click(screen.getByRole("tab",{name:"Thiết lập"}));
+      await prepareOne();
+      await userEvent.click(screen.getByRole("button",{name:"Kiểm tra & đăng"}));
+      const confirm=await screen.findByRole("button",{name:"Xác nhận đăng công khai 1 bài"});
+      await waitFor(()=>expect(confirm).toBeEnabled()); await userEvent.click(confirm);
+      await waitFor(()=>expect(acknowledged).toHaveBeenCalledOnce());
+      expect((acknowledged.mock.calls[0][0] as CustomEvent).detail.status.campaignId).toBe("campaign-1");
+      expect(executeCampaign).not.toHaveBeenCalled();
+    } finally {window.removeEventListener("riviu:publish-start-acknowledged",acknowledged);}
   });
   it("ignores a legacy hidden future runAt when publishing immediately from Setup", async () => {
     writeFormDraft("publish", { sourceRoot: "C:/carousels", bundleIds: ["b1"],
@@ -453,18 +457,20 @@ describe("production publish wizard", () => {
       runAt: "2099-09-09T12:00", soundPolicyOverride: null, sheetEnabled: false, deleteAfterPublish: false });
     render(<PublishPage devices={devices} selected={[]} onSelectUdids={() => {}} />);
     await waitFor(() => expect(screen.getByRole("checkbox", { name: "Chọn bo1" })).toBeChecked());
+    await waitFor(() => expect(screen.getByRole("button", {name:"Kiểm tra & đăng"})).toBeEnabled());
+    await waitFor(() => expect(screen.getByRole("button", {name:"Kiểm tra & đăng"})).toBeEnabled());
     await userEvent.click(screen.getByRole("button", { name: "Kiểm tra & đăng" }));
-    const confirm = await screen.findByRole("button", { name: "Xác nhận đăng 1 bài" });
+    const confirm = await screen.findByRole("button", { name: "Xác nhận đăng công khai 1 bài" });
     await waitFor(() => expect(confirm).toBeEnabled());
-    expect(preflightCampaign).toHaveBeenLastCalledWith(expect.objectContaining({ runAt: null }));
+    expect(preflightCampaign).toHaveBeenLastCalledWith(expect.objectContaining({ runAt: null }),expect.any(String));
     await userEvent.click(confirm);
-    await waitFor(() => expect(createCampaign).toHaveBeenCalledOnce());
-    expect((createCampaign.mock.calls[0] as unknown[])[3]).toBeNull();
+    await waitFor(() => expect(publishStart).toHaveBeenCalledOnce());
+    expect(vi.mocked(publishStart).mock.calls[0][0].runAt).toBeNull();
     expect(preflightCampaign).toHaveBeenLastCalledWith(expect.objectContaining({
       sheetEnabled: true, deleteAfterPublish: true,
-    }));
-    expect((createCampaign.mock.calls[0] as unknown[]).slice(9, 11)).toEqual([true, true]);
-    expect(executeCampaign).toHaveBeenCalledWith("campaign-1", true);
+    }),expect.any(String));
+    expect(vi.mocked(publishStart).mock.calls[0][0]).toMatchObject({sheetEnabled:true,deleteAfterPublish:true});
+    expect(executeCampaign).not.toHaveBeenCalled();
   });
   it("autosaves mapping and caption, rescans on remount and requires fresh preflight", async () => {
     const view = render(<PublishPage devices={devices} selected={[]} onSelectUdids={() => {}} />);
@@ -473,6 +479,7 @@ describe("production publish wizard", () => {
     await act(async () => { expect(await requestWorkspaceLeave()).toBe(true); });
     expect(requestConfirm).not.toHaveBeenCalled();
     expect(createCampaign).not.toHaveBeenCalled();
+    expect(publishStart).not.toHaveBeenCalled();
     view.unmount();
     render(<PublishPage devices={devices} selected={[]} onSelectUdids={() => {}} />);
     await waitFor(() => expect(screen.getByRole("checkbox", { name: "Chọn bo1" })).toBeChecked());
@@ -493,6 +500,7 @@ describe("production publish wizard", () => {
     ).not.toBeChecked();
     expect(screen.getByRole("button", { name: "Kiểm tra & đăng" })).toBeDisabled();
     expect(createCampaign).not.toHaveBeenCalled();
+    expect(publishStart).not.toHaveBeenCalled();
     expect(preflightCampaign).not.toHaveBeenCalled();
   });
   it("keeps scan errors and ignores late success after source edit", async () => {
@@ -526,49 +534,20 @@ describe("production publish wizard", () => {
       await screen.findByText("Chưa tìm thấy gói bài trong thư mục đã chọn"),
     ).toBeVisible();
   });
-  it("posts only after current preflight and explicit confirmation, carrying Sheet and cleanup", async () => {
-    render(
-      <PublishPage devices={devices} selected={[]} onSelectUdids={() => {}} />,
-    );
+  it("starts only after current preflight and one explicit confirmation carrying Sheet and cleanup", async () => {
+    render(<PublishPage devices={devices} selected={[]} onSelectUdids={() => {}} />);
     await prepareOne();
-    await userEvent.click(
-      screen.getByRole("button", { name: "Kiểm tra & đăng" }),
-    );
-    const confirm = await screen.findByRole("button", {
-      name: "Xác nhận đăng 1 bài",
-    });
+    await waitFor(() => expect(screen.getByRole("button", {name:"Kiểm tra & đăng"})).toBeEnabled());
+    await userEvent.click(screen.getByRole("button", { name: "Kiểm tra & đăng" }));
+    const confirm = await screen.findByRole("button", { name: "Xác nhận đăng công khai 1 bài" });
     await waitFor(() => expect(confirm).toBeEnabled());
-    expect(createCampaign).not.toHaveBeenCalled();
-    expect(preflightCampaign).toHaveBeenLastCalledWith(
-      expect.objectContaining({
-        bundleIds: ["b1"],
-        udids: ["PHONE-A"],
-        deleteAfterPublish: true,
-        sheetEnabled: true,
-      }),
-    );
+    expect(publishStart).not.toHaveBeenCalled();
     await userEvent.click(confirm);
-    await waitFor(() => expect(createCampaign).toHaveBeenCalledTimes(1));
-    expect(createCampaign).toHaveBeenCalledWith(
-      "C:/carousels",
-      ["b1"],
-      ["PHONE-A"],
-      null,
-      { b1: "caption for bo1" },
-      expect.any(Object),
-      { type: "explicit", udids: ["PHONE-A"] },
-      true,
-      "approved-digest-1",
-      true,
-      true,
-      expect.any(String),
-    );
-    expect(executeCampaign).toHaveBeenCalledWith("campaign-1", true);
-    expect(requestConfirm).toHaveBeenCalledWith(
-      expect.objectContaining({
-        message: expect.stringContaining("sau khi mở TikTok"),
-      }),
-    );
+    await waitFor(() => expect(publishStart).toHaveBeenCalledOnce());
+    expect(publishStart).toHaveBeenCalledWith(expect.objectContaining({sourceRoot:"C:/carousels",bundleIds:["b1"],udids:["PHONE-A"],runAt:null,captionOverrides:{b1:"caption for bo1"},sheetEnabled:true,deleteAfterPublish:true}),expect.any(String),"approved-digest-1",undefined);
+    expect(requestConfirm).not.toHaveBeenCalled();
+    expect(createCampaign).not.toHaveBeenCalled();
+    expect(executeCampaign).not.toHaveBeenCalled();
   });
   it("keeps unsupported remote TikTok preflight visible and never creates or posts", async () => {
     const implementation = preflightCampaign.getMockImplementation()!;
@@ -596,13 +575,16 @@ describe("production publish wizard", () => {
     });
     render(<PublishPage devices={devices} selected={[]} onSelectUdids={() => {}} />);
     await prepareOne();
+    await waitFor(() => expect(screen.getByRole("button", {name:"Kiểm tra & đăng"})).toBeEnabled());
     await userEvent.click(screen.getByRole("button", { name: "Kiểm tra & đăng" }));
+    await userEvent.click(await screen.findByText("Chi tiết kiểm tra"));
     expect(await screen.findByText(/TikTok quốc tế · Phiên bản 45.7.3/)).toBeVisible();
     expect(screen.getByText("Chưa hỗ trợ luồng đăng trên bản TikTok này")).toBeVisible();
-    const confirm = screen.getByRole("button", { name: "Xác nhận đăng 1 bài" });
+    const confirm = screen.getByRole("button", { name: "Xác nhận đăng công khai 1 bài" });
     expect(confirm).toBeDisabled();
     await userEvent.click(confirm);
     expect(createCampaign).not.toHaveBeenCalled();
+    expect(publishStart).not.toHaveBeenCalled();
     expect(executeCampaign).not.toHaveBeenCalled();
   });
   it("rejects a late preflight when its assigned machine leaves the scope", async () => {
@@ -646,15 +628,9 @@ describe("production publish wizard", () => {
       screen.getByRole("button", { name: "Kiểm tra & đăng" }),
     ).toBeDisabled();
     expect(createCampaign).not.toHaveBeenCalled();
+    expect(publishStart).not.toHaveBeenCalled();
   });
-  it("does not create a campaign if the roster changes during native confirmation", async () => {
-    let approve!: (value: boolean) => void;
-    vi.mocked(requestConfirm).mockImplementationOnce(
-      () =>
-        new Promise((resolve) => {
-          approve = resolve;
-        }),
-    );
+  it("invalidates the review when the roster changes before confirmation", async () => {
     const view = render(
       <PublishPage
         devices={devices}
@@ -668,10 +644,9 @@ describe("production publish wizard", () => {
       screen.getByRole("button", { name: "Kiểm tra & đăng" }),
     );
     const confirm = await screen.findByRole("button", {
-      name: "Xác nhận đăng 1 bài",
+      name: "Xác nhận đăng công khai 1 bài",
     });
     await waitFor(() => expect(confirm).toBeEnabled());
-    await userEvent.click(confirm);
     view.rerender(
       <PublishPage
         devices={devices}
@@ -680,8 +655,9 @@ describe("production publish wizard", () => {
         onSelectUdids={() => {}}
       />,
     );
-    await act(async () => approve(true));
+    await waitFor(() => expect(screen.getByRole("button", {name:"Xác nhận đăng công khai 1 bài"})).toBeDisabled());
     expect(createCampaign).not.toHaveBeenCalled();
+    expect(publishStart).not.toHaveBeenCalled();
     expect(executeCampaign).not.toHaveBeenCalled();
   });
   it("shows one folder picker beside scan without profiles or settings tab", async () => {
@@ -696,9 +672,9 @@ describe("production publish wizard", () => {
     await userEvent.click(screen.getByRole("button", { name: "Quét" }));
     await waitFor(() => expect(publishScanFolder).toHaveBeenCalledWith("C:/carousels"));
     expect(createCampaign).not.toHaveBeenCalled();
+    expect(publishStart).not.toHaveBeenCalled();
   });
-  it("does not publish when native confirmation is cancelled", async () => {
-    vi.mocked(requestConfirm).mockResolvedValueOnce(false);
+  it("does not start when the review is cancelled", async () => {
     render(
       <PublishPage devices={devices} selected={[]} onSelectUdids={() => {}} />,
     );
@@ -707,11 +683,12 @@ describe("production publish wizard", () => {
       screen.getByRole("button", { name: "Kiểm tra & đăng" }),
     );
     const confirm = await screen.findByRole("button", {
-      name: "Xác nhận đăng 1 bài",
+      name: "Xác nhận đăng công khai 1 bài",
     });
     await waitFor(() => expect(confirm).toBeEnabled());
-    await userEvent.click(confirm);
+    await userEvent.click(screen.getByRole("button", {name:"Quay lại"}));
     expect(createCampaign).not.toHaveBeenCalled();
+    expect(publishStart).not.toHaveBeenCalled();
   });
   it("changing caption invalidates the approved digest", async () => {
     render(
@@ -723,7 +700,7 @@ describe("production publish wizard", () => {
     );
     await waitFor(() =>
       expect(
-        screen.getByRole("button", { name: "Xác nhận đăng 1 bài" }),
+        screen.getByRole("button", { name: "Xác nhận đăng công khai 1 bài" }),
       ).toBeEnabled(),
     );
     await userEvent.click(screen.getByRole("button", { name: "Đóng" }));
@@ -756,7 +733,7 @@ describe("production publish wizard", () => {
       screen.getByRole("button", { name: "Kiểm tra & đăng" }),
     );
     expect(preflightCampaign).toHaveBeenLastCalledWith(
-      expect.objectContaining({ bundleIds: ["b2"], udids: ["PHONE-B"] }),
+      expect.objectContaining({ bundleIds: ["b2"], udids: ["PHONE-B"] }),expect.any(String),
     );
   });
   it("preserves edited caption without modifying source manifest", async () => {
@@ -779,7 +756,7 @@ describe("production publish wizard", () => {
       screen.getByRole("button", { name: "Kiểm tra & đăng" }),
     );
     expect(preflightCampaign).toHaveBeenLastCalledWith(
-      expect.objectContaining({ captionOverrides: { b1: "Nội dung mới" } }),
+      expect.objectContaining({ captionOverrides: { b1: "Nội dung mới" } }),expect.any(String),
     );
   });
 });
@@ -815,6 +792,7 @@ describe("publish campaign monitoring", () => {
     await waitFor(() => expect(screen.queryByRole("button", { name: /^Thử lại trước khi Đăng/ })).toBeNull());
     expect(executeCampaign).not.toHaveBeenCalled();
     expect(createCampaign).not.toHaveBeenCalled();
+    expect(publishStart).not.toHaveBeenCalled();
     expect(screen.getByText("Đã gửi bài; chờ TikTok hoàn tất và xác minh liên kết")).toBeVisible();
   });
 
@@ -972,6 +950,7 @@ describe("publish campaign monitoring", () => {
   });
 
   it("checks the inline Sheet link without dispatching or claiming write access", async () => {
+    vi.mocked(googleSheetsVerifyReadonly).mockResolvedValue({readyRead:true,result:{spreadsheetId:"fixture",sheetGid:0,reportingReady:false,message:"Đọc được bảng; chưa xác minh kết nối ghi."},binding:{clientId:"id",accountId:"operator",spreadsheetId:"fixture",sheetGid:0,writerId:"writer",reportingEpoch:null,authorizationGeneration:0},verifiedAt:Date.now(),expiresAt:Date.now()+300000,writePermission:"unknown"} as never);
     vi.mocked(googleSheetsStatus).mockResolvedValue({ configured: true, connected: true, active: true, accountId: "operator", writerId: "writer", clientId: "id", pickerConfigured: true, phase: "idle", sheetUrl: "https://docs.google.com/spreadsheets/d/fixture/edit#gid=0" });
     const url = "https://docs.google.com/spreadsheets/d/fixture/edit#gid=0";
     vi.mocked(publishSheetCheck).mockResolvedValue({ sheetUrl: url, spreadsheetId: "fixture", sheetGid: 0,
@@ -981,25 +960,23 @@ describe("publish campaign monitoring", () => {
     fireEvent.change(screen.getByRole("textbox", { name: "Link Google Sheet" }), { target: { value: url } });
     fireEvent.click(screen.getByRole("button", { name: "Kiểm tra kết nối" }));
     await waitFor(() => expect(publishSheetCheck).toHaveBeenCalledWith(url));
-    expect(await screen.findByText("Đọc được bảng; chưa xác minh kết nối ghi.")).toBeVisible();
+    expect(await screen.findByText(/Đọc được bảng; chưa xác minh kết nối ghi\./)).toBeVisible();
     expect(createCampaign).not.toHaveBeenCalled();
+    expect(publishStart).not.toHaveBeenCalled();
     expect(executeCampaign).not.toHaveBeenCalled();
   });
 
-  it("does not preflight or create a publication when the old device owner cannot stop", async () => {
-    vi.mocked(operationPrepareDevices).mockRejectedValueOnce(Error("Tác vụ cũ chưa nhả thiết bị"));
+  it("shows a backend handoff refusal at Start without a legacy execute", async () => {
+    vi.mocked(publishStart).mockImplementationOnce(async (_request,requestId)=>({requestId,state:"failed",stage:"preparingDevices",campaignId:null,error:{code:"DeviceBusy",message:"Tác vụ cũ chưa nhả thiết bị"}}) as never);
     render(<PublishPage devices={devices} selected={[]} onSelectUdids={() => {}} />);
-    await userEvent.click(screen.getByRole("button", { name: "Chọn thư mục" }));
-    await userEvent.click(screen.getByRole("button", { name: "Quét" }));
-    await userEvent.click(await screen.findByRole("checkbox", { name: "Chọn bo1" }));
-    fireEvent.change(screen.getByRole("combobox", { name: "Máy nhận bài bo1" }), { target: { value: "PHONE-A" } });
-    await userEvent.click(screen.getByRole("button", { name: "Kiểm tra & đăng" }));
-    expect(await screen.findByRole("alert")).toHaveTextContent("Tác vụ cũ chưa nhả thiết bị");
-    expect(preflightCampaign).not.toHaveBeenCalled();
-    expect(createCampaign).not.toHaveBeenCalled();
+    await prepareOne(); await userEvent.click(screen.getByRole("button",{name:"Kiểm tra & đăng"}));
+    const confirm=await screen.findByRole("button",{name:"Xác nhận đăng công khai 1 bài"});
+    await waitFor(()=>expect(confirm).toBeEnabled()); await userEvent.click(confirm);
+    await waitFor(()=>expect(screen.getAllByRole("alert").some(x=>x.textContent?.includes("Tác vụ cũ chưa nhả thiết bị"))).toBe(true));
+    expect(operationPrepareDevices).not.toHaveBeenCalled();
     expect(executeCampaign).not.toHaveBeenCalled();
+    expect(localStorage.getItem("riviu.publish.pending-start.v1")).toBeNull();
   });
-
   it("invalidates an in-flight Sheet read when its URL is edited", async () => {
     vi.mocked(googleSheetsStatus).mockResolvedValue({ configured: true, connected: true, active: true, accountId: "operator", writerId: "writer", clientId: "id", pickerConfigured: true, phase: "idle", sheetUrl: "https://docs.google.com/spreadsheets/d/old/edit#gid=0" });
     let answer!: (value: never) => void;
@@ -1018,7 +995,8 @@ describe("publish campaign monitoring", () => {
   });
 
   it("requires a verified Sheet connection and invalidates publish preflight after editing its URL", async () => {
-    vi.mocked(googleSheetsStatus).mockResolvedValue({ configured: true, connected: true, active: true, accountId: "operator", writerId: "writer", clientId: "id", pickerConfigured: true, phase: "idle", sheetUrl: "https://docs.google.com/spreadsheets/d/current/edit#gid=0" });
+    vi.mocked(googleSheetsVerifyReadonly).mockResolvedValue({readyRead:true,result:{spreadsheetId:"current",sheetGid:0,reportingReady:false,message:"Đọc được bảng, chưa xác minh ghi"},binding:{clientId:"id",accountId:"operator",spreadsheetId:"current",sheetGid:0,writerId:"writer",reportingEpoch:null,authorizationGeneration:0},verifiedAt:Date.now(),expiresAt:Date.now()+300000,writePermission:"unknown"} as never);
+    vi.mocked(googleSheetsStatus).mockResolvedValue({ configured: true, connected: true, active: true, hasSheetsScope: true, accountId: "operator", writerId: "writer", clientId: "id", pickerConfigured: true, phase: "idle", sheetUrl: "https://docs.google.com/spreadsheets/d/current/edit#gid=0" });
     const url = "https://docs.google.com/spreadsheets/d/current/edit#gid=0";
     vi.mocked(publishSheetCheck).mockResolvedValue({ sheetUrl: url, spreadsheetId: "current", sheetGid: 0,
       readable: true, connectionVerified: false, layout: "internal", columns: [], message: "Đọc được bảng, chưa xác minh ghi" });
@@ -1030,7 +1008,7 @@ describe("publish campaign monitoring", () => {
     const publish = screen.getByRole("button", { name: "Kiểm tra & đăng" });
     expect(publish).toBeDisabled();
     await userEvent.click(screen.getByRole("button", { name: "Kiểm tra kết nối" }));
-    await screen.findByText("Đọc được bảng, chưa xác minh ghi");
+    await screen.findByText(/Đọc được bảng, chưa xác minh ghi/);
     expect(publish).toBeDisabled();
     expect(preflightCampaign).not.toHaveBeenCalled();
     vi.mocked(publishSheetCheck).mockResolvedValueOnce({ sheetUrl: url, spreadsheetId: "current", sheetGid: 0,
@@ -1038,12 +1016,13 @@ describe("publish campaign monitoring", () => {
     await userEvent.click(screen.getByRole("button", { name: "Kiểm tra kết nối" }));
     await waitFor(() => expect(publish).toBeEnabled());
     await userEvent.click(publish);
-    await waitFor(() => expect(screen.getByRole("button", { name: "Xác nhận đăng 1 bài" })).toBeEnabled());
+    await waitFor(() => expect(screen.getByRole("button", { name: "Xác nhận đăng công khai 1 bài" })).toBeEnabled());
     await userEvent.click(screen.getByRole("button", { name: "Đóng" }));
     fireEvent.change(input, { target: { value: "https://docs.google.com/spreadsheets/d/other/edit#gid=0" } });
     expect(publish).toBeDisabled();
-    expect(screen.queryByRole("button", { name: "Xác nhận đăng 1 bài" })).toBeNull();
+    expect(screen.queryByRole("button", { name: "Xác nhận đăng công khai 1 bài" })).toBeNull();
     expect(createCampaign).not.toHaveBeenCalled();
+    expect(publishStart).not.toHaveBeenCalled();
     expect(executeCampaign).not.toHaveBeenCalled();
   });
 
@@ -1081,7 +1060,7 @@ describe("publish campaign monitoring", () => {
     });
     render(<PublishPage devices={devices} selected={[]} onSelectUdids={() => {}} />);
     fireEvent.click(screen.getByRole("tab", { name: "Theo dõi" }));
-    expect(await screen.findByText("Đã bấm Đăng · chờ xác minh")).toBeVisible();
+    expect(await screen.findByText("Kiểm tra thao tác Đăng đã có · chờ xác minh")).toBeVisible();
     fireEvent.click(screen.getByRole("button", { name: "Chi tiết máy" }));
     const panel = await screen.findByRole("region", { name: "Chi tiết chiến dịch đang chọn" });
     expect(within(panel).getByText("Đang chờ xác minh bài đăng")).toBeVisible();
@@ -1116,7 +1095,7 @@ describe("publish campaign monitoring", () => {
     });
     render(<PublishPage devices={devices} selected={[]} onSelectUdids={() => {}} />);
     fireEvent.click(screen.getByRole("tab", { name: "Theo dõi" }));
-    expect(await screen.findByText("Đã bấm Đăng · chờ xác minh")).toBeVisible();
+    expect(await screen.findByText("Kiểm tra thao tác Đăng đã có · chờ xác minh")).toBeVisible();
     fireEvent.click(screen.getByRole("button", { name: "Chi tiết máy" }));
     const panel = await screen.findByRole("region", { name: "Chi tiết chiến dịch đang chọn" });
     expect(within(panel).getByText("Đang chờ xác minh bài đăng")).toBeVisible();
@@ -1128,7 +1107,7 @@ describe("publish campaign monitoring", () => {
     expect(screen.queryByRole("button", { name: "Chạy lại từ đầu" })).toBeNull();
     expect(within(panel).getByText(/TikTok đang xử lý/)).toBeVisible();
     expect(within(panel).getByText(/Kiểm tra tiếp:/)).toBeVisible();
-    expect(within(panel).getByText(/Tự kiểm tra mỗi 5 phút đến khi có link/)).toBeVisible();
+    expect(within(panel).getByText(/Kiểm tra mỗi 5 phút; dừng sau 3 lượt liên tiếp/)).toBeVisible();
     expect(within(panel).queryByText(/Ngân sách tự kiểm:/)).toBeNull();
     expect(executeCampaign).not.toHaveBeenCalled();
   });
@@ -1157,6 +1136,7 @@ describe("publish campaign monitoring", () => {
     fireEvent.click(await screen.findByRole("button", { name: "Dừng kiểm tra lại" }));
     await waitFor(() => expect(operationStop).toHaveBeenCalledWith("publish:stopped"));
     expect(createCampaign).not.toHaveBeenCalled();
+    expect(publishStart).not.toHaveBeenCalled();
     expect(executeCampaign).not.toHaveBeenCalled();
     expect(publishRetryAssignment).not.toHaveBeenCalled();
   });
@@ -1191,6 +1171,7 @@ describe("publish campaign monitoring", () => {
     if (outcome !== "stale") expect(publishResumeVerification).not.toHaveBeenCalled();
     expect(executeCampaign).not.toHaveBeenCalled();
     expect(createCampaign).not.toHaveBeenCalled();
+    expect(publishStart).not.toHaveBeenCalled();
     expect(publishRetryAssignment).not.toHaveBeenCalled();
   });
 
@@ -1332,6 +1313,7 @@ describe("publish campaign monitoring", () => {
     expect(executeCampaign).not.toHaveBeenCalled();
     expect(requestConfirm).toHaveBeenCalledWith(expect.objectContaining({ message: expect.stringContaining("Chỉ tiếp tục lấy liên kết") }));
     expect(createCampaign).not.toHaveBeenCalled();
+    expect(publishStart).not.toHaveBeenCalled();
   });
 
   it("rejects a stale full-pipeline retry for a publication needing review", async () => {
@@ -1384,6 +1366,7 @@ describe("publish campaign monitoring", () => {
     expect(executeCampaign).not.toHaveBeenCalled();
     expect(requestConfirm).toHaveBeenCalledWith(expect.objectContaining({ message: expect.stringContaining("Chỉ tiếp tục lấy liên kết") }));
     expect(createCampaign).not.toHaveBeenCalled();
+    expect(publishStart).not.toHaveBeenCalled();
     expect(screen.queryByRole("button", { name: "Chạy lại từ đầu" })).toBeNull();
   });
 
@@ -1412,6 +1395,7 @@ describe("publish campaign monitoring", () => {
     expect(await screen.findByText(/1 bài đã bấm Đăng, chưa lấy được liên kết xác minh/)).toHaveTextContent("Riviu tự kiểm tra khi máy rảnh");
     expect(screen.getByText(/1 bài đã bấm Đăng, chưa lấy được liên kết xác minh/)).toHaveTextContent("Sheet chờ liên kết đã xác minh.");
     expect(createCampaign).not.toHaveBeenCalled();
+    expect(publishStart).not.toHaveBeenCalled();
   });
 
   it("keeps closed reporting epochs independent from old completed snapshots", async () => {
@@ -1642,7 +1626,7 @@ describe("publish campaign monitoring", () => {
     await act(async () => receive!({ type: "publishUpdated", campaignId: campaign.id, revision: 3 }));
     await waitFor(() => expect(within(panel).queryByText("Đang đăng")).toBeNull());
     await act(async () => older(detail("verifying")));
-    expect(within(panel).queryByText("Đã bấm Đăng · chờ xác minh")).toBeNull();
+    expect(within(panel).queryByText("Kiểm tra thao tác Đăng đã có · chờ xác minh")).toBeNull();
     expect(within(panel).getByText("Đã đăng")).toBeVisible();
     expect(publishReconcile).toHaveBeenCalledTimes(1);
     expect(executeCampaign).not.toHaveBeenCalled();
@@ -1858,6 +1842,7 @@ describe("publish campaign monitoring", () => {
     expect(screen.getByText("Chọn một chiến dịch để theo dõi")).toBeVisible();
     expect(screen.queryByRole("region", { name: "Chi tiết chiến dịch đang chọn" })).toBeNull();
     expect(createCampaign).not.toHaveBeenCalled();
+    expect(publishStart).not.toHaveBeenCalled();
     expect(executeCampaign).not.toHaveBeenCalled();
   });
   it("brings the selected campaign detail into view in the stacked monitor", async () => {
@@ -1873,6 +1858,7 @@ describe("publish campaign monitoring", () => {
     await waitFor(() => expect(scrollIntoView).toHaveBeenCalledWith({ block: "start" }));
     expect(publishGet).toHaveBeenCalledWith(campaign.id);
     expect(createCampaign).not.toHaveBeenCalled();
+    expect(publishStart).not.toHaveBeenCalled();
   });
   it("hides selected campaign actions when a monitor filter excludes that campaign", async () => {
     const campaign = { id: "hidden-by-filter", requestId: "r", sourceRoot: "C:/needs-review", state: "failedBeforeDispatch",
@@ -1909,5 +1895,5 @@ it("quick selection trims to available capacity and keeps pairs across an offlin
   view.rerender(<PublishPage {...props}/>);
   await waitFor(() => expect(check).toBeEnabled());
   await userEvent.click(check);
-  await waitFor(() => expect(preflightCampaign).toHaveBeenCalledWith(expect.objectContaining({ bundleIds: ["b1", "b2"], udids: ["PHONE-A", "PHONE-B"] })));
+  await waitFor(() => expect(preflightCampaign).toHaveBeenCalledWith(expect.objectContaining({ bundleIds: ["b1", "b2"], udids: ["PHONE-A", "PHONE-B"] }), expect.any(String)));
 });
