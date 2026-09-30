@@ -410,6 +410,19 @@ impl DirectSheetsClient {
         query: &[(&str, String)],
         body: Option<&Value>,
     ) -> Result<Value> {
+        self.request_service_before_dispatch(drive, method, path, query, body, None)
+            .await
+    }
+
+    async fn request_service_before_dispatch(
+        &self,
+        drive: bool,
+        method: reqwest::Method,
+        path: &str,
+        query: &[(&str, String)],
+        body: Option<&Value>,
+        before_dispatch: Option<&mut (dyn FnMut() -> Result<()> + Send)>,
+    ) -> Result<Value> {
         #[cfg(not(test))]
         pace_requests(&REQUEST_START).await;
         #[cfg(test)]
@@ -460,8 +473,19 @@ impl DirectSheetsClient {
         if let Some(body) = body {
             request = request.json(body);
         }
-        let mut response = request
-            .send()
+        // Preparing/pacing/admission can be cancelled without sending HTTP.
+        // Arm durable mutations only after those waits and serialization, with
+        // no await before execute is first polled. Its existing request timeout
+        // and post-dispatch uncertainty semantics remain unchanged.
+        let request = request
+            .build()
+            .map_err(|_| DirectSheetsError::transport())?;
+        if let Some(before_dispatch) = before_dispatch {
+            before_dispatch()?;
+        }
+        let mut response = self
+            .http
+            .execute(request)
             .await
             .map_err(|_| DirectSheetsError::transport())?;
         if !response.status().is_success() {
@@ -493,12 +517,23 @@ impl DirectSheetsClient {
     }
 
     async fn batch(&self, book: &str, requests: Vec<Value>) -> Result<()> {
+        self.batch_before_dispatch(book, requests, None).await
+    }
+
+    async fn batch_before_dispatch(
+        &self,
+        book: &str,
+        requests: Vec<Value>,
+        before_dispatch: Option<&mut (dyn FnMut() -> Result<()> + Send)>,
+    ) -> Result<()> {
         let response = self
-            .request(
+            .request_service_before_dispatch(
+                false,
                 reqwest::Method::POST,
                 &format!("{book}:batchUpdate"),
                 &[],
                 Some(&json!({"requests":requests,"includeSpreadsheetInResponse":false})),
+                before_dispatch,
             )
             .await?;
         if response["spreadsheetId"] != book {

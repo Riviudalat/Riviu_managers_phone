@@ -18,6 +18,7 @@ enum Phase {
     Settled,
     Released,
 }
+
 #[derive(Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 struct Operation {
@@ -485,10 +486,14 @@ impl DirectSheetsClient {
             return Err(uncertain());
         }
         requests.push(json!({"updateDeveloperMetadata":{"dataFilters":[op.filter(false)],"developerMetadata":{"metadataValue":op.lock_value(true)},"fields":"metadataValue"}}));
-        op.transition(db, Phase::MutationPending)?;
+        let book = op.target.spreadsheet_id.clone();
+        let mut before_dispatch = || op.transition(db, Phase::MutationPending);
         // Exactly one dispatch. Even a successful HTTP response is insufficient
         // until the atomic marker AND exact row/owner receipt are read back.
-        if let Err(error) = self.batch(&op.target.spreadsheet_id, requests).await {
+        if let Err(error) = self
+            .batch_before_dispatch(&book, requests, Some(&mut before_dispatch))
+            .await
+        {
             if matches!(
                 error.status,
                 Some(400 | 401 | 403 | 404 | 409 | 412 | 422 | 429)
@@ -757,5 +762,74 @@ impl DirectSheetsClient {
         let mut check = meta.check();
         check.writable = true;
         Ok(check)
+    }
+}
+
+#[cfg(test)]
+mod dispatch_boundary_tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn cancelled_http_admission_keeps_shared_mutation_unarmed() {
+        let path = std::env::temp_dir().join(format!(
+            "sheet-dispatch-boundary-{}.db",
+            uuid::Uuid::new_v4()
+        ));
+        let db = Database::open(&path).unwrap();
+        let target = SheetDeliveryTarget {
+            version: 2,
+            spreadsheet_id: "fixture-book".into(),
+            sheet_gid: 0,
+            internal_reporting: true,
+            reporting_epoch: Some("fixture-epoch".into()),
+        };
+        let mut op = Operation {
+            token: uuid::Uuid::new_v4().to_string(),
+            writer: uuid::Uuid::new_v4().to_string(),
+            target,
+            payload: None,
+            payload_hash: "fixture".into(),
+            upgrade_confirmed: false,
+            phase: Phase::Acquired,
+            epoch: Some("fixture-epoch".into()),
+            lock_epoch: Some("fixture-epoch".into()),
+            row: None,
+            width: None,
+            duplicate: false,
+            receipt: None,
+            scan: None,
+        };
+        let key = journal_key(&op.target);
+        assert!(db
+            .google_shared_journal_cas(&key, None, &op.serialized())
+            .unwrap());
+        // Use the real production admission semaphore. Holding every permit
+        // guarantees that no request can leave the client during this timeout.
+        let permits = crate::publish_sheet::SHEET_HTTP_SLOTS
+            .acquire_many(2)
+            .await
+            .unwrap();
+        let client = DirectSheetsClient::new("fixture-token").unwrap();
+        let book = op.target.spreadsheet_id.clone();
+        let mut arm = || op.transition(&db, Phase::MutationPending);
+        let result = tokio::time::timeout(
+            Duration::from_millis(20),
+            client.batch_before_dispatch(&book, vec![], Some(&mut arm)),
+        )
+        .await;
+        assert!(
+            result.is_err(),
+            "blocked admission must cancel before HTTP dispatch"
+        );
+        drop(permits);
+        let saved: Operation =
+            serde_json::from_str(&db.google_shared_journal_read(&key).unwrap().unwrap()).unwrap();
+        assert!(
+            saved.phase == Phase::Acquired,
+            "an unsent mutation must remain acquired so recovery can safely replan"
+        );
+        assert!(saved.receipt.is_none());
+        drop(db);
+        let _ = std::fs::remove_file(path);
     }
 }
