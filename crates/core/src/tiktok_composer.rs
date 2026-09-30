@@ -3304,6 +3304,8 @@ where
         progress(PublishProgress::OpeningSounds);
         let mut observed = None;
         let mut selected = crate::publish_recovery::stored_sound()?;
+        let mut provisional = None;
+        let mut provisional_row_proved = false;
         let mut selection_may_have_landed = selected.is_some();
         let mut sound_sheet_may_be_open = false;
         let mut reopen_network_sheet = false;
@@ -3363,6 +3365,29 @@ where
                     }
                     let pool = observed.as_ref().context("sound pool missing")?;
                     let sound_plan = pool.effective_plan(sound_plan);
+                    if selected.is_none()
+                        && matches!(sound_policy, PublishSoundPolicy::TrendingAny { .. })
+                        && crate::tiktok_sound::provisional_visual_pool(sound_plan, pool)
+                    {
+                        if provisional.is_none() {
+                            provisional = Some(select_sound_candidate(sound_policy, &pool.candidates)?);
+                        }
+                        let proposed = provisional.as_ref().context("provisional sound missing")?;
+                        let index = current_sound_target_index(proposed, &pool.candidates)?;
+                        let recovering = enter_sound_selection_attempt(&mut selection_may_have_landed);
+                        progress(PublishProgress::SelectingSound { title: proposed.title.clone() });
+                        let canonical_title = crate::tiktok_sound::choose_provisional_sound(
+                            session, sound_plan, pool, index, recovering, &mut provisional_row_proved,
+                        ).await?;
+                        let mut canonical = proposed.clone();
+                        canonical.title = canonical_title;
+                        canonical.confirmed = true;
+                        // This is the first durable binding, after exact editor
+                        // proof. A frozen selection never enters this branch.
+                        let canonical = crate::publish_recovery::bind_sound(&canonical)?;
+                        selected = Some(canonical.clone());
+                        return Ok((sound_plan, canonical));
+                    }
                     if selected.is_none() {
                         // This is the first observed pool, before our first row tap.
                         // TikTok may have auto-selected a row on editor entry. Bind

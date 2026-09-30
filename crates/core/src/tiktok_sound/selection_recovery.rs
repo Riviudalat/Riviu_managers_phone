@@ -211,7 +211,9 @@ pub(super) async fn confirm_editor(
     plan: SoundPickerPlan,
     expected: &str,
 ) -> anyhow::Result<()> {
-    confirm_editor_observed(session, plan, expected, None).await
+    confirm_editor_observed(session, plan, expected, None, false)
+        .await
+        .map(|_| ())
 }
 
 pub(super) async fn confirm_editor_in_epoch(
@@ -220,7 +222,19 @@ pub(super) async fn confirm_editor_in_epoch(
     expected: &str,
     epoch: &str,
 ) -> anyhow::Result<()> {
-    confirm_editor_observed(session, plan, expected, Some(epoch)).await
+    confirm_editor_observed(session, plan, expected, Some(epoch), false)
+        .await
+        .map(|_| ())
+}
+
+pub(super) async fn confirm_provisional_editor(
+    session: &dyn UiSession,
+    plan: SoundPickerPlan,
+    expected: &str,
+    epoch: &str,
+) -> anyhow::Result<String> {
+    anyhow::ensure!(measured(plan), "provisional sound tuple unmeasured");
+    confirm_editor_observed(session, plan, expected, Some(epoch), true).await
 }
 
 async fn confirm_editor_observed(
@@ -228,10 +242,11 @@ async fn confirm_editor_observed(
     plan: SoundPickerPlan,
     expected: &str,
     pinned_epoch: Option<&str>,
-) -> anyhow::Result<()> {
+    provisional: bool,
+) -> anyhow::Result<String> {
     let deadline =
         phase_deadline(Duration::from_secs(30)).min(Instant::now() + Duration::from_secs(30));
-    let mut previous: Option<(String, u64)> = None;
+    let mut previous: Option<(String, u64, String)> = None;
     while Instant::now() < deadline {
         check_wait()?;
         let epoch = session.gui_session_epoch();
@@ -260,7 +275,15 @@ async fn confirm_editor_observed(
             plan.package,
             ElementQuery::ResourceIdSuffix(plan.current_title_id),
         );
-        let valid = matches!(title.as_slice(),[index]if same_editor_sound_title(tree.nodes[*index].attr("text"), expected));
+        let observed_title = match title.as_slice() {
+            [index] => tree.nodes[*index].attr("text"),
+            _ => "",
+        };
+        let valid = if provisional {
+            visual::provisional_title_matches(observed_title, expected)
+        } else {
+            same_editor_sound_title(observed_title, expected)
+        };
         let sheet = plan.snapshot_layout().is_some_and(|layout| {
             !tree
                 .matching(plan.package, ElementQuery::ResourceIdSuffix(layout.tab_id))
@@ -274,10 +297,11 @@ async fn confirm_editor_observed(
         let editor_next = !recent::measured(plan)
             || matches!(tree.matching(plan.package,ElementQuery::ResourceIdSuffix(":id/kl_")).as_slice(),[i] if tree.nodes[*i].attr("text")=="Next");
         if valid && !sheet && editor_next {
-            if previous
-                .as_ref()
-                .is_some_and(|(p, g)| p == &epoch && tree.generation > *g)
-            {
+            if previous.as_ref().is_some_and(|(p, g, prior_title)| {
+                p == &epoch
+                    && tree.generation > *g
+                    && same_editor_sound_title(prior_title, observed_title)
+            }) {
                 anyhow::ensure!(
                     read_sound(session.active_app_bundle()).await? == plan.package,
                     "sound recovery app changed"
@@ -287,9 +311,9 @@ async fn confirm_editor_observed(
                     session.gui_session_epoch() == epoch,
                     "sound recovery session changed after editor proof"
                 );
-                return Ok(());
+                return Ok(observed_title.nfc().collect());
             }
-            previous = Some((epoch, tree.generation));
+            previous = Some((epoch, tree.generation, observed_title.into()));
         } else {
             previous = None;
         }

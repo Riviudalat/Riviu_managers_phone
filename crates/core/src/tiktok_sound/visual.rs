@@ -579,10 +579,81 @@ pub(super) async fn choose(
     pool: &ObservedSoundPool,
     index: usize,
 ) -> anyhow::Result<()> {
-    let candidate = pool
+    select_row_and_close(session, plan, pool, index, &mut false).await?;
+    selection_recovery::confirm_editor(session, plan, &pool.candidates[index].title).await
+}
+
+pub(super) fn provisional_title_matches(observed: &str, expected: &str) -> bool {
+    !observed.trim().is_empty()
+        && !expected.trim().is_empty()
+        && fold_sound_title(observed.trim()) == fold_sound_title(expected.trim())
+}
+
+/// Only an unbound TrendingAny row may get its authoritative spelling from
+/// the editor. The visual row/artist and selected state must already be proved.
+pub(super) async fn choose_provisional(
+    session: &dyn UiSession,
+    plan: SoundPickerPlan,
+    pool: &ObservedSoundPool,
+    index: usize,
+    recovering: bool,
+    row_proved: &mut bool,
+) -> anyhow::Result<String> {
+    anyhow::ensure!(
+        selection_recovery::measured(plan) && pool.visual,
+        "provisional sound tuple unmeasured"
+    );
+    let epoch = session.gui_session_epoch();
+    let expected = &pool
         .candidates
         .get(index)
-        .context("visual sound index out of range")?;
+        .context("provisional sound row missing")?
+        .title;
+    anyhow::ensure!(
+        pool.candidates
+            .iter()
+            .filter(|candidate| provisional_title_matches(&candidate.title, expected))
+            .count()
+            == 1,
+        "provisional sound identity ambiguous"
+    );
+    if recovering {
+        let (image, lines, tabs, current) = capture(session, plan, 1).await?;
+        anyhow::ensure!(current == epoch, "provisional sound session changed");
+        if tabs.len() == 4 {
+            let fresh = pool_from_image(&image, &lines, &tabs, plan, pool.maximum_visible)?;
+            reproof_target(pool, &fresh, index)?;
+            anyhow::ensure!(
+                selected_row_ready(&image, &tabs, pool, index),
+                "provisional sound selection remains unknown; refusing another row tap"
+            );
+            wait_selected_row(session, plan, pool, index).await?;
+            *row_proved = true;
+            selection_recovery::prove_sheet(session, plan).await?;
+            check_wait()?;
+            session.back().await?;
+        }
+    } else {
+        select_row_and_close(session, plan, pool, index, row_proved).await?;
+    }
+    anyhow::ensure!(
+        *row_proved && session.gui_session_epoch() == epoch,
+        "provisional sound row proof missing or session changed"
+    );
+    selection_recovery::confirm_provisional_editor(session, plan, expected, &epoch).await
+}
+
+async fn select_row_and_close(
+    session: &dyn UiSession,
+    plan: SoundPickerPlan,
+    pool: &ObservedSoundPool,
+    index: usize,
+    row_proved: &mut bool,
+) -> anyhow::Result<()> {
+    anyhow::ensure!(
+        index < pool.candidates.len(),
+        "visual sound index out of range"
+    );
     let fresh = observe(session, plan, pool.maximum_visible, false).await?;
     if let Some(selected) = fresh.selected_index {
         if selected != index {
@@ -603,12 +674,13 @@ pub(super) async fn choose(
         tap_native_image(session, target.centre()).await?;
     }
     wait_selected_row(session, plan, &fresh, index).await?;
+    *row_proved = true;
     // One reversible selection only. Fresh sheet proof authorizes Back; exact
     // title on two XML editor snapshots is the final independent verification.
     selection_recovery::prove_sheet(session, plan).await?;
     check_wait()?;
     session.back().await?;
-    selection_recovery::confirm_editor(session, plan, &candidate.title).await
+    Ok(())
 }
 
 pub(super) async fn recover(
@@ -928,6 +1000,7 @@ mod tests {
 
     struct Ocr {
         accent_loss: bool,
+        canonical_probe: bool,
     }
     #[async_trait::async_trait]
     impl GuiReasoner for Ocr {
@@ -936,7 +1009,7 @@ mod tests {
         }
         async fn ocr(&self, r: OcrRequest) -> anyhow::Result<OcrResponse> {
             let (_, mut rows, tabs, _) = fixture();
-            if self.accent_loss && r.languages == ["vi", "en"] {
+            if self.canonical_probe || (self.accent_loss && r.languages == ["vi", "en"]) {
                 rows[0].text = "Thuong Nhau Den The".into();
             }
             let selected_hash = format!(
@@ -986,6 +1059,8 @@ mod tests {
         loading_frames: usize,
         initially_selected: bool,
         accent_loss: bool,
+        canonical_probe: bool,
+        lose_selection_ack: bool,
     }
     #[async_trait::async_trait]
     impl UiSession for Session {
@@ -998,6 +1073,7 @@ mod tests {
         fn gui_reasoner(&self) -> Option<crate::ui_automation::SharedReasoner> {
             Some(Arc::new(Ocr {
                 accent_loss: self.accent_loss,
+                canonical_probe: self.canonical_probe,
             }))
         }
         async fn active_app_bundle(&self) -> anyhow::Result<String> {
@@ -1019,6 +1095,7 @@ mod tests {
         }
         async fn tap(&self, _: crate::TapPoint) -> anyhow::Result<()> {
             self.taps.fetch_add(1, Ordering::Relaxed);
+            anyhow::ensure!(!self.lose_selection_ack, "fixture lost sound selection ACK");
             Ok(())
         }
         async fn back(&self) -> anyhow::Result<()> {
@@ -1082,6 +1159,8 @@ mod tests {
                 loading_frames: 0,
                 initially_selected: false,
                 accent_loss,
+                canonical_probe: false,
+                lose_selection_ack: false,
             };
             let plan = fixture().3;
             let pool = observe(&s, plan, 5, false).await.unwrap();
@@ -1093,6 +1172,45 @@ mod tests {
         }
     }
     #[tokio::test(start_paused = true)]
+    async fn provisional_visual_choice_reads_canonical_editor_spelling_without_second_pick() {
+        for (wrong_title, lost_ack) in [(false, false), (true, false), (false, true)] {
+            let session = Session {
+                taps: AtomicUsize::new(0),
+                backs: AtomicUsize::new(0),
+                reads: AtomicUsize::new(0),
+                wrong_title,
+                selection_reads: AtomicUsize::new(0),
+                loading_frames: 0,
+                initially_selected: false,
+                accent_loss: true,
+                canonical_probe: true,
+                lose_selection_ack: lost_ack,
+            };
+            let plan = fixture().3;
+            let pool = observe(&session, plan, 5, false).await.unwrap();
+            assert_eq!(pool.candidates[0].title, "Thuong Nhau Den The");
+            let mut row_proved = false;
+            let first = choose_provisional(&session, plan, &pool, 0, false, &mut row_proved).await;
+            let result = if lost_ack {
+                assert!(first.is_err());
+                assert!(!row_proved);
+                choose_provisional(&session, plan, &pool, 0, true, &mut row_proved).await
+            } else {
+                first
+            };
+            if wrong_title {
+                assert!(result.is_err(), "different words cannot be canonicalized");
+            } else {
+                assert_eq!(result.unwrap(), "Thương Nhau Đến Thế");
+            }
+            assert!(row_proved);
+            assert_eq!(session.taps.load(Ordering::Relaxed), 1);
+            assert_eq!(session.backs.load(Ordering::Relaxed), 1);
+            assert!(session.reads.load(Ordering::Relaxed) >= 2);
+        }
+    }
+
+    #[tokio::test(start_paused = true)]
     async fn slow_sound_download_is_observed_before_leaving_sheet_without_second_pick() {
         let session = Session {
             taps: AtomicUsize::new(0),
@@ -1103,6 +1221,8 @@ mod tests {
             loading_frames: 3,
             initially_selected: false,
             accent_loss: false,
+            canonical_probe: false,
+            lose_selection_ack: false,
         };
         let plan = fixture().3;
         let pool = observe(&session, plan, 5, false).await.unwrap();
@@ -1123,6 +1243,8 @@ mod tests {
             loading_frames: 0,
             initially_selected: false,
             accent_loss: false,
+            canonical_probe: false,
+            lose_selection_ack: false,
         };
         let plan = fixture().3;
         let pool = observe(&session, plan, 5, false).await.unwrap();
@@ -1144,6 +1266,8 @@ mod tests {
             loading_frames: 0,
             initially_selected: true,
             accent_loss: false,
+            canonical_probe: false,
+            lose_selection_ack: false,
         };
         let plan = fixture().3;
         let pool = observe(&session, plan, 5, false).await.unwrap();

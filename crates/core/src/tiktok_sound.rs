@@ -840,20 +840,7 @@ async fn observe_measured_sound_pool(
     }
     let visual = visual::observe_initial(session, plan, maximum).await;
     match checked_measured_sound_observation(session, plan, &epoch, visual).await {
-        Ok(_) => {
-            // Machine25, 2026-09-30: stable OCR lost Vietnamese accents and
-            // froze a spelling which the exact editor could never confirm.
-            // OCR proves this measured Hot sheet and its navigation only. Before
-            // policy selection or durable binding, obtain an independent fresh
-            // XML pool with exact row/title/artist identity in two generations.
-            let canonical = snapshot::observe_direct(session, plan, maximum).await;
-            let canonical =
-                checked_measured_sound_observation(session, plan, &epoch, canonical).await?;
-            return canonical.ok_or_else(|| crate::publish_recovery::retryable_error(
-                "sound_identity_unavailable",
-                "Đã thấy hàng nhạc nhưng chưa đọc chính xác tên và nghệ sĩ; chưa chọn nhạc hoặc bấm Đăng",
-            ));
-        }
+        Ok(pool) => return Ok(pool),
         Err(error) if error.is::<visual::VisualSoundPoolUnavailable>() => {}
         Err(error)
             if error.is::<crate::driver::ScreenshotReadUnavailable>()
@@ -1161,6 +1148,29 @@ async fn observe_sound_pool(
 }
 
 /// Tap the selected row once and prove the editor now names the same sound.
+pub(crate) fn provisional_visual_pool(plan: SoundPickerPlan, pool: &ObservedSoundPool) -> bool {
+    pool.visual && selection_recovery::measured(pool.effective_plan(plan))
+}
+
+pub(crate) async fn choose_provisional_sound(
+    session: &dyn UiSession,
+    plan: SoundPickerPlan,
+    pool: &ObservedSoundPool,
+    index: usize,
+    recovering: bool,
+    row_proved: &mut bool,
+) -> anyhow::Result<String> {
+    visual::choose_provisional(
+        session,
+        pool.effective_plan(plan),
+        pool,
+        index,
+        recovering,
+        row_proved,
+    )
+    .await
+}
+
 pub async fn choose_and_confirm_sound(
     session: &dyn UiSession,
     plan: SoundPickerPlan,
