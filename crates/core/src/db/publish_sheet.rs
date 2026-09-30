@@ -898,17 +898,13 @@ mod tests {
     }
 
     #[test]
-    fn scheduled_verification_keeps_checking_after_thirty_minutes_and_restart() {
+    fn scheduled_verification_preserves_cadence_then_parks_without_progress_after_restart() {
         let (db, path, campaign, assignment, intent) = review_fixture(60);
         mark_scheduled(&db, &campaign);
         assert!(db.expire_due_publish_verifications().unwrap().is_empty());
         for (code, delay) in [
             ("linkUnavailable", 300),
             ("readFailed", 300),
-            ("readFailed", 300),
-            ("readFailed", 300),
-            ("readFailed", 300),
-            ("linkUnavailable", 300),
         ] {
             let candidate = db.pending_publish_verifications(10).unwrap().remove(0);
             assert!(db
@@ -941,6 +937,14 @@ mod tests {
             .claim_publish_assignment_for_posting(&assignment, &intent)
             .unwrap());
         assert!(db.pending_publish_sheet_row(&assignment).unwrap().is_none());
+        assert!(db.record_publish_verification_observation(&row, "still no new proof", "readFailed").unwrap());
+        assert!(db.pending_publish_verifications(10).unwrap().is_empty());
+        let review = db.get_publish_campaign(&campaign).unwrap().unwrap();
+        let evidence: serde_json::Value = serde_json::from_str(review.assignments[0].evidence_json.as_deref().unwrap()).unwrap();
+        assert_eq!(evidence["verificationStatus"]["state"], "needsReview");
+        assert!(evidence["verificationStatus"]["nextCheckAt"].is_null());
+        assert_eq!(evidence["verificationBudget"]["noProgressObservations"], 3);
+        let row = db.publish_verifications_for_campaign(&campaign, 10).unwrap().remove(0);
         let url = "https://www.tiktok.com/@fixture/photo/1234567890123456789";
         let evidence = serde_json::json!({"postUrl":url,"publicationVerified":true}).to_string();
         assert!(db
@@ -1156,7 +1160,7 @@ mod tests {
     #[test]
     fn verification_five_minute_cadence_survives_read_failures_and_restart() {
         let (db, path, campaign, _, intent) = review_fixture(1);
-        for seconds in [300, 300, 300, 300] {
+        for seconds in [300, 300] {
             let candidate = db.pending_publish_verifications(10).unwrap().remove(0);
             assert!(db
                 .record_publish_verification_observation(
@@ -1191,7 +1195,7 @@ mod tests {
         );
         let evidence: serde_json::Value =
             serde_json::from_str(detail.assignments[0].evidence_json.as_deref().unwrap()).unwrap();
-        assert_eq!(evidence["verificationStatus"]["attempts"], 5);
+        assert_eq!(evidence["verificationStatus"]["attempts"], 3);
         assert_eq!(evidence["verificationStatus"]["readFailures"], 0);
         assert_eq!(
             evidence["verificationStatus"]["reasonCode"],
@@ -1201,7 +1205,17 @@ mod tests {
             .pending_publish_sheet_row(&candidate.assignment_id)
             .unwrap()
             .is_none());
+        assert_eq!(evidence["verificationStatus"]["state"], "needsReview");
+        assert!(evidence["verificationStatus"]["nextCheckAt"].is_null());
+        assert_eq!(evidence["verificationBudget"]["noProgressObservations"], 3);
+        assert!(db.pending_publish_verifications(10).unwrap().is_empty());
         drop(db);
+        let reopened = Database::open(&path).unwrap();
+        assert!(reopened.pending_publish_verifications(10).unwrap().is_empty());
+        let review = reopened.get_publish_campaign(&campaign).unwrap().unwrap();
+        assert_eq!(review.assignments[0].effect_intent.as_deref(), Some(intent.as_str()));
+        assert!(!reopened.claim_publish_assignment_for_posting(&candidate.assignment_id, &intent).unwrap());
+        drop(reopened);
         std::fs::remove_file(path).unwrap();
     }
 

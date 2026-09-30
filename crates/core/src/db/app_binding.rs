@@ -246,19 +246,9 @@ mod tests {
     fn migration_47_adds_binding_table_without_changing_existing_rows() {
         let path =
             std::env::temp_dir().join(format!("app-binding-migration-{}.db", Uuid::new_v4()));
-        {
-            let database = Database::open(&path).unwrap();
-            database
-                .set_setting("fixture.before.binding", "kept")
-                .unwrap();
-        }
-        let connection = Connection::open(&path).unwrap();
-        connection
-            .execute("DELETE FROM schema_migrations WHERE version=47", [])
-            .unwrap();
-        connection
-            .execute("DROP TABLE device_app_bindings", [])
-            .unwrap();
+        let mut connection = Connection::open(&path).unwrap();
+        super::super::migrations::initialize_through(&mut connection, 46).unwrap();
+        connection.execute("INSERT INTO settings(key,value) VALUES('fixture.before.binding','kept')", []).unwrap();
         drop(connection);
         let migrated = Database::open(&path).unwrap();
         let backup = path.with_extension("pre-device-app-v46.db");
@@ -283,7 +273,7 @@ mod tests {
             .optional()
             .unwrap()
             .is_none());
-        assert_eq!(migrated.schema_version().unwrap(), 47);
+        assert_eq!(migrated.schema_version().unwrap(), 48);
         assert_eq!(
             migrated
                 .get_setting("fixture.before.binding")
@@ -348,7 +338,7 @@ mod tests {
             .optional()
             .unwrap()
             .is_none());
-        assert_eq!(migrated.schema_version().unwrap(), 47);
+        assert_eq!(migrated.schema_version().unwrap(), 48);
         assert_eq!(
             migrated
                 .get_setting("fixture.direct.v43")
@@ -401,7 +391,7 @@ mod tests {
                 .unwrap(),
             "kept"
         );
-        assert_eq!(migrated.schema_version().unwrap(), 47);
+        assert_eq!(migrated.schema_version().unwrap(), 48);
         assert_eq!(
             migrated
                 .get_setting("fixture.legacy.v1")
@@ -445,7 +435,7 @@ mod tests {
                 .unwrap(),
             "must survive"
         );
-        assert_eq!(migrated.schema_version().unwrap(), 47);
+        assert_eq!(migrated.schema_version().unwrap(), 48);
         drop(backup_connection);
         drop(migrated);
         let _ = std::fs::remove_file(path);
@@ -473,7 +463,7 @@ mod tests {
         }
         barrier.wait();
         for thread in threads {
-            assert_eq!(thread.join().unwrap().unwrap(), 47);
+            assert_eq!(thread.join().unwrap().unwrap(), 48);
         }
         let backup = path.with_extension("pre-device-app-v43.db");
         assert_eq!(

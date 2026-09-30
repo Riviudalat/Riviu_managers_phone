@@ -56,7 +56,7 @@ mod tests {
     #[test]
     fn explicit_intents_survive_restart_retry_is_same_row_and_stale_results_lose() {
         let f = Fixture::new();
-        assert_eq!(f.db.schema_version().unwrap(), 47);
+        assert_eq!(f.db.schema_version().unwrap(), 48);
         assert!(f.db.list_due_app_completions(32).unwrap().is_empty());
         let first = f.db.request_app_completion("a", PACKAGE).unwrap();
         assert_eq!(first, 1);
