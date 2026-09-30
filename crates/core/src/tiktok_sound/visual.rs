@@ -620,6 +620,16 @@ pub(super) async fn choose_provisional(
     if recovering {
         let (image, lines, tabs, current) = capture(session, plan, 1).await?;
         anyhow::ensure!(current == epoch, "provisional sound session changed");
+        if tabs.len() != 4 && !*row_proved {
+            // Machine29, 2026-09-30T21:00:10Z: selected Hot row was visible,
+            // but OCR missed a tab. Missing sheet proof is not editor proof.
+            // Keep the existing proposal and let its bounded owner retry only
+            // observations; never send the uncertain row tap again.
+            return Err(crate::publish_recovery::retryable_error(
+                "sound_selection_observation_unknown",
+                "Chưa đọc đủ màn nhạc đã chọn; chờ bằng chứng mới, không bấm chọn lại",
+            ));
+        }
         if tabs.len() == 4 {
             let fresh = pool_from_image(&image, &lines, &tabs, plan, pool.maximum_visible)?;
             reproof_target(pool, &fresh, index)?;
@@ -1001,6 +1011,7 @@ mod tests {
     struct Ocr {
         accent_loss: bool,
         canonical_probe: bool,
+        missing_tab: bool,
     }
     #[async_trait::async_trait]
     impl GuiReasoner for Ocr {
@@ -1031,6 +1042,9 @@ mod tests {
                 })
                 .collect();
             lines.extend(rows.into_iter().filter(|l| r.region().contains(&l.bounds)));
+            if self.missing_tab {
+                lines.retain(|line| line.text != "Recent");
+            }
             Ok(OcrResponse {
                 protocol_version: 1,
                 request_id: r.request_id,
@@ -1061,6 +1075,7 @@ mod tests {
         accent_loss: bool,
         canonical_probe: bool,
         lose_selection_ack: bool,
+        next_capture_missing_tab: AtomicBool,
     }
     #[async_trait::async_trait]
     impl UiSession for Session {
@@ -1074,6 +1089,7 @@ mod tests {
             Some(Arc::new(Ocr {
                 accent_loss: self.accent_loss,
                 canonical_probe: self.canonical_probe,
+                missing_tab: self.next_capture_missing_tab.swap(false, Ordering::Relaxed),
             }))
         }
         async fn active_app_bundle(&self) -> anyhow::Result<String> {
@@ -1161,6 +1177,7 @@ mod tests {
                 accent_loss,
                 canonical_probe: false,
                 lose_selection_ack: false,
+                next_capture_missing_tab: AtomicBool::new(false),
             };
             let plan = fixture().3;
             let pool = observe(&s, plan, 5, false).await.unwrap();
@@ -1173,7 +1190,12 @@ mod tests {
     }
     #[tokio::test(start_paused = true)]
     async fn provisional_visual_choice_reads_canonical_editor_spelling_without_second_pick() {
-        for (wrong_title, lost_ack) in [(false, false), (true, false), (false, true)] {
+        for (wrong_title, lost_ack, missing_recovery_tab) in [
+            (false, false, false),
+            (true, false, false),
+            (false, true, false),
+            (false, true, true),
+        ] {
             let session = Session {
                 taps: AtomicUsize::new(0),
                 backs: AtomicUsize::new(0),
@@ -1185,6 +1207,7 @@ mod tests {
                 accent_loss: true,
                 canonical_probe: true,
                 lose_selection_ack: lost_ack,
+                next_capture_missing_tab: AtomicBool::new(false),
             };
             let plan = fixture().3;
             let pool = observe(&session, plan, 5, false).await.unwrap();
@@ -1194,6 +1217,28 @@ mod tests {
             let result = if lost_ack {
                 assert!(first.is_err());
                 assert!(!row_proved);
+                if missing_recovery_tab {
+                    session
+                        .next_capture_missing_tab
+                        .store(true, Ordering::Relaxed);
+                    let unknown =
+                        choose_provisional(&session, plan, &pool, 0, true, &mut row_proved)
+                            .await
+                            .expect_err(
+                                "one missing OCR tab cannot prove the editor or selected row",
+                            );
+                    let failure = crate::publish_recovery::describe(&unknown);
+                    assert_eq!(
+                        failure.kind,
+                        crate::publish_recovery::FailureKind::Retryable,
+                        "partial recovery must retain observation-only retry: {unknown:#}"
+                    );
+                    assert_eq!(failure.code, "sound_selection_observation_unknown");
+                    assert!(!row_proved);
+                    assert_eq!(session.taps.load(Ordering::Relaxed), 1);
+                    assert_eq!(session.backs.load(Ordering::Relaxed), 0);
+                    assert_eq!(session.reads.load(Ordering::Relaxed), 0);
+                }
                 choose_provisional(&session, plan, &pool, 0, true, &mut row_proved).await
             } else {
                 first
@@ -1223,6 +1268,7 @@ mod tests {
             accent_loss: false,
             canonical_probe: false,
             lose_selection_ack: false,
+            next_capture_missing_tab: AtomicBool::new(false),
         };
         let plan = fixture().3;
         let pool = observe(&session, plan, 5, false).await.unwrap();
@@ -1245,6 +1291,7 @@ mod tests {
             accent_loss: false,
             canonical_probe: false,
             lose_selection_ack: false,
+            next_capture_missing_tab: AtomicBool::new(false),
         };
         let plan = fixture().3;
         let pool = observe(&session, plan, 5, false).await.unwrap();
@@ -1268,6 +1315,7 @@ mod tests {
             accent_loss: false,
             canonical_probe: false,
             lose_selection_ack: false,
+            next_capture_missing_tab: AtomicBool::new(false),
         };
         let plan = fixture().3;
         let pool = observe(&session, plan, 5, false).await.unwrap();
