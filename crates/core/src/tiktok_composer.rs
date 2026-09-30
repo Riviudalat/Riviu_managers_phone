@@ -3616,6 +3616,8 @@ where
             .plan
             .publish
             .is_some_and(|tail| matches!(tail.caption, ElementQuery::ResourceIdSuffix(_)));
+    let caption_deadline =
+        bounded_caption.then(|| crate::tiktok_sound::phase_deadline(COMPOSER_WINDOW));
     let caption_work = async {
         loop {
             if crate::publish_recovery::active() && bounded_caption && !caption.trim().is_empty() {
@@ -3651,18 +3653,28 @@ where
                 }
             }
             match composer.type_caption(caption, stop).await {
-                Err(error) if crate::publish_recovery::retry(&error, stop).await? => continue,
-                Err(error) => return Err(error),
+                Err(error) => {
+                    let retry = if let Some(deadline) = caption_deadline {
+                        crate::publish_recovery::retry_until(&error, stop, deadline).await?
+                    } else {
+                        crate::publish_recovery::retry(&error, stop).await?
+                    };
+                    if retry {
+                        continue;
+                    }
+                    return Err(error);
+                }
                 Ok(CaptionOutcome::NotConfirmed) => {
-                    if crate::publish_recovery::retry(
-                        &crate::publish_recovery::retryable_error(
-                            "caption_readback_timeout",
-                            "caption readback timeout before Post",
-                        ),
-                        stop,
-                    )
-                    .await?
-                    {
+                    let error = crate::publish_recovery::retryable_error(
+                        "caption_readback_timeout",
+                        "caption readback timeout before Post",
+                    );
+                    let retry = if let Some(deadline) = caption_deadline {
+                        crate::publish_recovery::retry_until(&error, stop, deadline).await?
+                    } else {
+                        crate::publish_recovery::retry(&error, stop).await?
+                    };
+                    if retry {
                         continue;
                     }
                     return Ok(Some(ComposerVerdict::CaptionNotConfirmed));
@@ -3676,8 +3688,8 @@ where
         }
         Ok(None)
     };
-    let caption_verdict = if bounded_caption {
-        crate::tiktok_sound::with_observation_budget(stop, COMPOSER_WINDOW, caption_work).await?
+    let caption_verdict = if let Some(deadline) = caption_deadline {
+        crate::tiktok_sound::with_deadline_budget(stop, deadline, caption_work).await?
     } else {
         caption_work.await?
     };
