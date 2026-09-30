@@ -543,7 +543,36 @@ async fn observe_inner(
             && (navigation_attempts == 0 || same_unselected_tabs)
         {
             let point = selection_recovery::prove_sheet(session, plan).await?;
-            tap_native_image(session, point).await?;
+            anyhow::ensure!(Instant::now() < deadline, "Hot navigation deadline expired");
+            if navigation_attempts == 0 {
+                tap_native_image(session, point).await?;
+            } else {
+                // Machine29, 2026-10-01: two acknowledged overlay taps left
+                // For You selected at the measured native Hot centre. After
+                // fresh unchanged unselected proof, use the ordinary contact
+                // route once; its distinct input strategy still needs Hot proof.
+                let screen = read_sound(session.window_size()).await?;
+                anyhow::ensure!(
+                    screen == (1080.0, 2220.0),
+                    "Hot recovery native coordinates unmeasured"
+                );
+                anyhow::ensure!(
+                    session.gui_session_epoch() == epoch
+                        && read_sound(session.active_app_bundle()).await? == plan.package,
+                    "Hot recovery app/session changed"
+                );
+                check_wait()?;
+                anyhow::ensure!(Instant::now() < deadline, "Hot recovery deadline expired");
+                session.tap(point).await?;
+                check_wait()?;
+                crate::publish_recovery::note_read(
+                    "sound",
+                    "nativeHotNavigation",
+                    2,
+                    "awaitingProof",
+                    None,
+                );
+            }
             navigation_attempts += 1;
             unselected_tabs = None;
             prior = None;
