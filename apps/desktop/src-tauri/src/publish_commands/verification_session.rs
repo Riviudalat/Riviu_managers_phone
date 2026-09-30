@@ -229,7 +229,8 @@ mod tests {
         let phone = Phone::new();
         let authorize = || phone.authorize();
         let session = VerificationSession::new(&phone, &authorize);
-        session.tap(TapPoint { x: 1.0, y: 1.0 }).await.unwrap();
+        let stopped = session.tap(TapPoint { x: 1.0, y: 1.0 }).await.unwrap_err();
+        assert_eq!(stopped.to_string(), "operator stopped");
         assert!(phone.finished.load(Ordering::SeqCst));
         assert!(session.tap(TapPoint { x: 1.0, y: 1.0 }).await.is_err());
         assert_eq!(phone.taps.load(Ordering::SeqCst), 1);
