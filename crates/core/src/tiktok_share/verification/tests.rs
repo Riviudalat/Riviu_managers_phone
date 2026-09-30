@@ -757,6 +757,9 @@ impl UiSession for Session {
     async fn active_app_bundle(&self) -> anyhow::Result<String> {
         Ok(self.package().into())
     }
+    async fn ui_language(&self) -> Option<String> {
+        Some("en".into())
+    }
     async fn app_version(&self, _: &str) -> Option<String> {
         if self.global_45_7_3 {
             Some("45.7.3".into())
