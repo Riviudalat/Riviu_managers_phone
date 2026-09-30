@@ -676,6 +676,14 @@ chạy trước Copy. Cùng lease giữ suốt chu kỳ; kiểm revision/stop tr
 không đóng máy còn bài khác đang giữ. Proof restart ghi vào `verificationDiagnostic.appRestart`.
 Android hẹn giờ bắt đầu kiểm khi phiên đăng nhả máy; lỗi restart cũng giữ nhịp 300 giây.
 Unknown receipt và iOS giữ đường đọc không restart. LinkAndSheet không quay lại Post.
+Riêng Global 45.7.3/en, receipt `post_uncertain` chỉ được restart một lần cho đúng intent
+khi lượt Copy trước đó đã ghi `tiktokProcessing` trên bài ứng viên, tài khoản trước Post đã
+được xác minh, hai snapshot mới cùng phiên cho thấy viewer ảnh đã ổn định và caption
+đầy đủ khớp bundle. Giao dịch CAS giữ dấu restart theo assignment và hash intent trước
+khi tắt app; lỗi hoặc crash không tự lặp lại thao tác tắt. Màn Home, composer, upload,
+khác tài khoản hoặc máy còn bài khác chưa rõ kết quả đều giữ đường quan sát/review.
+Restart chỉ mở lại TikTok để lấy link; không bấm Đăng lần nữa và không coi Copy
+`tiktokProcessing` là bằng chứng bài đã xuất bản.
 Review cũ có cause `verificationDeadline` và ngân sách 30/240 phút được tiếp tục
 bằng CAS khi effect intent còn đủ tài khoản/thời điểm gửi; review vì lý do khác giữ
 nguyên, kể cả sau một lần kiểm chủ động thất bại. Đổi trạng thái không tái phát Post

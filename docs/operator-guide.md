@@ -652,6 +652,11 @@ Tắt/mở lỗi cũng giữ bài và chờ lần kiểm kế tiếp.
 Lỗi đọc clipboard được hiển thị riêng với trường hợp đọc thành công nhưng chưa
 có link mới. Thông báo TikTok đang xử lý có ảnh đối chiếu sau Copy; trạng thái
 này vẫn là chờ, chưa tính là xuất bản hoặc ghi link thành công.
+Với Global 45.7.3, nếu lần kiểm tra đã thấy thông báo xử lý trên đúng bài nhưng
+chưa có link, app có thể tắt/mở lại TikTok đúng một lần cho intent đó sau khi
+xác nhận màn bài ảnh và caption khớp qua hai lần đọc mới. Đây chỉ là bước
+khôi phục lấy link, không đăng lại; khi màn soạn, tải lên hoặc bài khác chưa rõ
+kết quả, app giữ nguyên TikTok và tiếp tục báo Cần kiểm tra.
 Khi TikTok hiện “Post is being processed” sau Sao chép liên kết và app đọc được
 thông báo đó, Theo dõi ghi **TikTok báo bài đang được xử lý**. Nếu không đọc được
 thông báo, app chỉ ghi **TikTok chưa trả link**; không suy đoán bài đã xuất bản.

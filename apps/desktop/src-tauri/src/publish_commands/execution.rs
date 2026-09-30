@@ -2136,6 +2136,9 @@ pub(super) async fn capture_confirmed_assignment_link(
                 .into(),
         };
         let restart = super::verification_restart::requested(assignment, &package);
+        let processing_restart = !restart && observer.is_some()
+            && super::verification_restart::processing_restart_requested(
+                assignment, &package, &language, &version);
         if let Some(recorded) = intent["package"].as_str().filter(|value| !value.is_empty()) {
             anyhow::ensure!(recorded == package, "Gói TikTok đã đổi so với lúc gửi; chưa tiếp tục xác minh");
         }
@@ -2155,15 +2158,35 @@ pub(super) async fn capture_confirmed_assignment_link(
         };
         let guarded = super::verification_session::VerificationSession::new(session.as_ref(), &authorize);
         guarded.check()?;
+        let processing_admission = if processing_restart && !shared_debt {
+            match super::verification_restart::admit_processing_restart(
+                &guarded, &package, &bundle.caption).await {
+                Ok(proof) => Some(proof),
+                Err(error) => {
+                    log::info!("publish processing restart not admitted assignment={}: {error:#}", assignment.id);
+                    None
+                }
+            }
+        } else { None };
+        let processing_claimed = if processing_admission.is_some() {
+            guarded.check()?;
+            if let Some(observer) = observer {
+                db.claim_publish_processing_restart(observer)?
+            } else { false }
+        } else { false };
         let restart_proof = if shared_debt {
             Some(super::verification_restart::admit_warm(&guarded, &package, &language, &version, &identity.account).await?)
-        } else { super::verification_restart::foreground(control, &context, &package, restart, || {
+        } else { super::verification_restart::foreground(control, &context, &package, restart || processing_claimed, || {
             super::verification_restart::authorize_restart(db, assignment, observer)
         }).await.map_err(|error| anyhow::Error::new(super::verification::VerificationObservation {
             code: "readFailed",
             reason: format!("Chưa mở lại TikTok để lấy link: {error}; thử lại sau 5 phút"),
             diagnostic: Some(serde_json::json!({"appRestart":{"state":"failed","package":package,"error":error.to_string()}})),
         }))? };
+        let restart_proof = restart_proof.map(|mut proof| {
+            if let Some(admission) = processing_admission { proof["processingAdmission"] = admission; }
+            proof
+        });
         if let Some(proof) = &restart_proof {
             log::info!("publish verification restart assignment={} proof={}", assignment.id, proof);
         }

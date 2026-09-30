@@ -912,6 +912,46 @@ impl Database {
             && observer_authorized(&conn, candidate)?)
     }
 
+    /// Reserve one destructive app restart for this immutable Post intent.
+    /// A crash after the claim leaves the receipt observational instead of
+    /// repeatedly closing TikTok on every verification tick.
+    pub fn claim_publish_processing_restart(
+        &self,
+        candidate: &PendingPublishVerification,
+    ) -> anyhow::Result<bool> {
+        use sha2::Digest;
+        let mut conn = self.conn()?;
+        let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
+        let Some((current, state, active)) = recovery_row(&tx, &candidate.assignment_id)? else {
+            return Ok(false);
+        };
+        if active
+            || !may_verify(&state, current.effect_intent.as_deref(), current.evidence_json.as_deref())
+            || current.campaign_id != candidate.campaign_id
+            || current.udid != candidate.udid
+            || current.revision != candidate.revision
+            || current.effect_intent != candidate.effect_intent
+            || current.evidence_json != candidate.evidence_json
+            || !observer_authorized(&tx, candidate)?
+        {
+            return Ok(false);
+        }
+        let Some(intent) = candidate.effect_intent.as_deref() else { return Ok(false) };
+        let intent_sha256 = format!("{:x}", sha2::Sha256::digest(intent.as_bytes()));
+        let key = format!("publish.processing_restart.{}.{}",
+            candidate.assignment_id, intent_sha256);
+        let proof = serde_json::json!({"assignmentId":candidate.assignment_id,
+            "campaignId":candidate.campaign_id,"udid":candidate.udid,
+            "intentSha256":intent_sha256,
+            "claimedAt":Utc::now().to_rfc3339(),"observerRevision":candidate.revision});
+        let claimed = tx.execute(
+            "INSERT OR IGNORE INTO settings(key,value) VALUES(?1,?2)",
+            params![key, proof.to_string()],
+        )? == 1;
+        tx.commit()?;
+        Ok(claimed)
+    }
+
     pub fn observe_stale_publish_idle_for_candidate(
         &self,
         candidate: &PendingPublishVerification,

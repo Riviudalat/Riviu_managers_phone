@@ -123,6 +123,84 @@ pub(super) fn requested(assignment: &PublishAssignmentRecord, package: &str) -> 
         && post["postUrl"].as_str().is_none_or(str::is_empty)
 }
 
+pub(super) fn processing_restart_requested(
+    assignment: &PublishAssignmentRecord,
+    package: &str,
+    locale: &str,
+    version: &str,
+) -> bool {
+    if (package, locale, version) != ("com.zhiliaoapp.musically", "en", "45.7.3") {
+        return false;
+    }
+    let Some(intent) = assignment.effect_intent.as_deref()
+        .and_then(|raw| serde_json::from_str::<serde_json::Value>(raw).ok()) else { return false };
+    let Some(evidence) = assignment.evidence_json.as_deref()
+        .and_then(|raw| serde_json::from_str::<serde_json::Value>(raw).ok()) else { return false };
+    let post = evidence.get("post").unwrap_or(&evidence);
+    matches!(intent["effectIntent"].as_str(), Some("post" | "post_carousel"))
+        && intent["package"] == package
+        && intent["expectedAccount"].as_str().is_some_and(|account| !account.trim().is_empty())
+        && intent["submittedAt"].as_str().is_some_and(|at| chrono::DateTime::parse_from_rfc3339(at).is_ok())
+        && matches!(assignment.state, riviu_core::PublishCampaignState::Verifying | riviu_core::PublishCampaignState::Uncertain)
+        && post["publicationVerified"] != true
+        && post["postUrl"].as_str().is_none_or(str::is_empty)
+        && evidence["verificationStatus"]["reasonCode"] == "tiktokProcessing"
+        && evidence["verificationDiagnostic"]["package"] == package
+        && evidence["verificationDiagnostic"]["locale"] == locale
+        && evidence["verificationDiagnostic"]["version"] == version
+        && evidence["verificationDiagnostic"]["copyAttempts"].as_u64().is_some_and(|count| count > 0)
+        && evidence["verificationDiagnostic"]["expandedPhotoError"].as_str()
+            .is_some_and(|error| error.contains("ProcessingNotice") && error.contains("Post is being processed"))
+        && evidence["accountDiagnostic"]["state"] == "proved"
+        && evidence["accountDiagnostic"]["package"] == package
+        && evidence["accountDiagnostic"]["expectedAccount"].as_str().is_some_and(|account|
+            account.trim_start_matches('@').eq_ignore_ascii_case(
+                intent["expectedAccount"].as_str().unwrap_or_default().trim_start_matches('@')))
+        && evidence["accountDiagnostic"]["observedAccount"].as_str().is_some_and(|account|
+            account.trim_start_matches('@').eq_ignore_ascii_case(
+                intent["expectedAccount"].as_str().unwrap_or_default().trim_start_matches('@')))
+}
+
+/// The measured expanded-photo surface exposes the complete caption. Home and
+/// partially captioned feed cards are not evidence that an upload has settled.
+pub(super) async fn admit_processing_restart(
+    session: &dyn riviu_core::UiSession,
+    package: &str,
+    caption: &str,
+) -> anyhow::Result<serde_json::Value> {
+    anyhow::ensure!(!caption.trim().is_empty(), "processing restart caption missing");
+    let epoch = session.gui_session_epoch();
+    anyhow::ensure!(!epoch.is_empty(), "processing restart session epoch missing");
+    let mut previous = None;
+    for _ in 0..2 {
+        anyhow::ensure!(session.gui_session_epoch() == epoch
+            && session.active_app_bundle().await? == package,
+            "processing restart foreground changed");
+        let tree = riviu_core::ui_automation::tree::Tree::parse(
+            session.hierarchy_source_snapshot().await?)?;
+        anyhow::ensure!(global_warm_surface(&tree) == Some("expandedPhotoViewer"),
+            "processing restart requires settled measured photo viewer");
+        let captions = tree.matching(package,
+            riviu_core::ElementQuery::ResourceIdSuffix(":id/rey"));
+        let [index] = captions.as_slice() else {
+            anyhow::bail!("processing restart caption not unique");
+        };
+        let normalize = |text: &str| text.split_whitespace().collect::<Vec<_>>().join(" ");
+        anyhow::ensure!(normalize(tree.nodes[*index].attr("text")) == normalize(caption),
+            "processing restart caption differs from immutable bundle");
+        if let Some(before) = previous {
+            anyhow::ensure!(tree.generation > before,
+                "processing restart viewer snapshot stale");
+        }
+        previous = Some(tree.generation);
+    }
+    anyhow::ensure!(session.gui_session_epoch() == epoch
+        && session.active_app_bundle().await? == package,
+        "processing restart foreground changed");
+    Ok(serde_json::json!({"state":"measuredProcessingViewer","package":package,
+        "snapshotGeneration":previous}))
+}
+
 fn authorize_current(
     db: &Database,
     assignment: &PublishAssignmentRecord,
@@ -859,6 +937,39 @@ mod tests {
 
     fn parsed(xml: String) -> Tree {
         Tree::parse(HierarchySourceSnapshot { generation: 1, xml }).unwrap()
+    }
+
+    #[test]
+    fn uncertain_processing_receipt_can_request_one_measured_restart() {
+        let assignment = PublishAssignmentRecord {
+            publication_id: "publication".into(), attempt_id: None, dispatch: None,
+            sheet_delivery: None, id: "assignment".into(), campaign_id: "campaign".into(),
+            bundle_id: "bundle".into(), ordinal: 0, udid: "phone".into(),
+            state: riviu_core::PublishCampaignState::Uncertain,
+            effect_intent: Some(serde_json::json!({"effectIntent":"post",
+                "package":"com.zhiliaoapp.musically", "expectedAccount":"fixture.account",
+                "submittedAt":"2026-09-30T00:00:00Z"}).to_string()),
+            evidence_json: Some(serde_json::json!({"effectIntent":"post_carousel",
+                "accountDiagnostic":{"state":"proved","package":"com.zhiliaoapp.musically",
+                    "expectedAccount":"fixture.account","observedAccount":"fixture.account"},
+                "verificationStatus":{"reasonCode":"tiktokProcessing"},
+                "verificationDiagnostic":{"package":"com.zhiliaoapp.musically",
+                    "locale":"en","version":"45.7.3","copyAttempts":1,
+                    "expandedPhotoError":"ProcessingNotice { text: Post is being processed }"}}
+            ).to_string()), error_code: None,
+        };
+        assert!(!requested(&assignment, "com.zhiliaoapp.musically"));
+        assert!(processing_restart_requested(&assignment,
+            "com.zhiliaoapp.musically", "en", "45.7.3"));
+        assert!(!processing_restart_requested(&assignment,
+            "com.zhiliaoapp.musically", "en", "45.4.3"));
+        let mut missing_copy = assignment.clone();
+        let mut evidence: serde_json::Value = serde_json::from_str(
+            missing_copy.evidence_json.as_deref().unwrap()).unwrap();
+        evidence["verificationDiagnostic"]["copyAttempts"] = 0.into();
+        missing_copy.evidence_json = Some(evidence.to_string());
+        assert!(!processing_restart_requested(&missing_copy,
+            "com.zhiliaoapp.musically", "en", "45.7.3"));
     }
 
     #[test]

@@ -208,6 +208,9 @@ fn operator_stop_preserves_post_intent_rejects_stale_observer_and_parks_checks_a
         .unwrap();
     assert!(!before.is_empty());
     let intent = before[0].effect_intent.clone();
+    assert!(db.claim_publish_processing_restart(&before[0]).unwrap());
+    assert!(!db.claim_publish_processing_restart(&before[0]).unwrap(),
+        "the same immutable intent cannot restart TikTok twice");
     db.conn()
         .unwrap()
         .execute(
@@ -217,6 +220,8 @@ fn operator_stop_preserves_post_intent_rejects_stale_observer_and_parks_checks_a
         .unwrap();
     let devices = db.stop_publish_operation(&campaign).unwrap();
     assert!(!devices.is_empty());
+    assert!(!db.claim_publish_processing_restart(&before[1]).unwrap(),
+        "Stop revokes a previously selected observer before any app effect");
     assert!(!db
         .record_publish_verification_pending(&before[0], "late callback")
         .unwrap());
