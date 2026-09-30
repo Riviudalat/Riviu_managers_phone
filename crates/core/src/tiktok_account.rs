@@ -224,6 +224,7 @@ fn global_username_id(version: Option<&str>) -> Option<&'static str> {
 fn global_profile_from_snapshot_with_id(
     xml: &str,
     username_id: &str,
+    resource_version: Option<&str>,
 ) -> anyhow::Result<Option<String>> {
     let tree = crate::ui_automation::tree::Tree::parse(crate::HierarchySourceSnapshot {
         generation: 1,
@@ -233,6 +234,9 @@ fn global_profile_from_snapshot_with_id(
     let mut menus = 0;
     let mut bio_edits = 0;
     let mut selected_profiles = 0;
+    let mut private_tabs = 0;
+    let mut private_locks = 0;
+    let mut favorites_tabs = 0;
     let mut usernames = Vec::new();
     for (index, node) in tree.nodes.iter().enumerate() {
         if !node.visible("com.zhiliaoapp.musically")
@@ -243,6 +247,35 @@ fn global_profile_from_snapshot_with_id(
             continue;
         }
         if username_id == "s0v" {
+            // Global 45.7.3 can retain the draft banner over its profile menu
+            // with a populated bio. Private/Favorites management tabs remain
+            // visible; prove these and the selected own-profile tab in one tree.
+            if resource_version == Some("45.7.3")
+                && node.attr("class") == "android.widget.RelativeLayout"
+                && node.visibility() == Some(true)
+                && node.rect().is_some()
+            {
+                let private = node.attr("content-desc") == "Private videos";
+                let locks = tree
+                    .nodes
+                    .iter()
+                    .enumerate()
+                    .filter(|(child_index, child)| {
+                        child.parent == Some(index)
+                            && child.attr("class") == "android.widget.ImageView"
+                            && child.attr("resource-id") == "com.zhiliaoapp.musically:id/jsr"
+                            && child.attr("content-desc") == "Lock"
+                            && child.visible("com.zhiliaoapp.musically")
+                            && child.visibility() == Some(true)
+                            && tree.ancestors_visible(*child_index)
+                            && child.attr("enabled") == "true"
+                            && child.rect().is_some()
+                    })
+                    .count();
+                private_tabs += usize::from(private);
+                private_locks += usize::from(private && locks == 1);
+                favorites_tabs += usize::from(node.attr("content-desc") == "Favorites");
+            }
             let bio = node.attr("class") == "android.widget.Button"
                 && node.attr("resource-id") == "com.zhiliaoapp.musically:id/rv2"
                 && node.attr("text") == "Add bio"
@@ -279,7 +312,13 @@ fn global_profile_from_snapshot_with_id(
         }
     }
     Ok(((edits == 1 && menus == 1)
-        || (username_id == "s0v" && bio_edits == 1 && selected_profiles == 1))
+        || (username_id == "s0v" && bio_edits == 1 && selected_profiles == 1)
+        || (resource_version == Some("45.7.3")
+            && username_id == "s0v"
+            && selected_profiles == 1
+            && private_tabs == 1
+            && private_locks == 1
+            && favorites_tabs == 1))
         .then(|| single_username(&usernames))
         .flatten())
 }
@@ -370,7 +409,7 @@ pub async fn observe_own_account(
         let handle = if labels.package() == "com.zhiliaoapp.musically" && !labels.adaptive() {
             let id = global_username_id(labels.resource_version())
                 .ok_or_else(|| anyhow::anyhow!("unmeasured account build"))?;
-            global_profile_from_snapshot_with_id(&snapshot.xml, id)?
+            global_profile_from_snapshot_with_id(&snapshot.xml, id, labels.resource_version())?
         } else {
             profile_from_tree(&tree, labels)
         };
@@ -682,17 +721,20 @@ mod tests {
         ] {
             let id = global_username_id(Some(version)).unwrap();
             assert_eq!(
-                global_profile_from_snapshot_with_id(xml, id)
+                global_profile_from_snapshot_with_id(xml, id, Some(version))
                     .unwrap()
                     .as_deref(),
                 Some("fixture.account")
             );
-            assert!(global_profile_from_snapshot_with_id(xml, "s0v")
-                .unwrap()
-                .is_none());
+            assert!(
+                global_profile_from_snapshot_with_id(xml, "s0v", Some(version))
+                    .unwrap()
+                    .is_none()
+            );
             assert!(global_profile_from_snapshot_with_id(
                 &xml.replace("Profile menu", "Other menu"),
-                id
+                id,
+                Some(version)
             )
             .unwrap()
             .is_none());
@@ -700,7 +742,7 @@ mod tests {
         assert!(global_username_id(Some("46.4.4")).is_none());
     }
     fn global_profile_from_snapshot(xml: &str) -> anyhow::Result<Option<String>> {
-        global_profile_from_snapshot_with_id(xml, "s0v")
+        global_profile_from_snapshot_with_id(xml, "s0v", Some("45.7.3"))
     }
     use crate::tiktok_labels::controls_for;
     use std::collections::VecDeque;
@@ -821,6 +863,26 @@ mod tests {
         ] {
             assert_eq!(global_profile_from_snapshot(&changed).unwrap(), None);
         }
+        const POPULATED: &str = include_str!(
+            "../../../fixtures/tiktok/account-musically-45.7.3-en-draft-overlay-populated-bio.xml"
+        );
+        assert_eq!(
+            global_profile_from_snapshot(POPULATED).unwrap().as_deref(),
+            Some("fixture.account")
+        );
+        for changed in [
+            POPULATED.replace("selected=\"true\"", "selected=\"false\""),
+            POPULATED.replace("content-desc=\"Lock\"", "content-desc=\"Other\""),
+            POPULATED.replace("content-desc=\"Private videos\"", "content-desc=\"Public videos\""),
+            POPULATED.replace("content-desc=\"Favorites\"", "content-desc=\"Other\""),
+            POPULATED.replace("</hierarchy>", "<node package=\"com.zhiliaoapp.musically\" class=\"android.widget.Button\" resource-id=\"com.zhiliaoapp.musically:id/s0v\" text=\"@other.account\" displayed=\"true\" enabled=\"true\" clickable=\"true\" bounds=\"[1,1][40,40]\"/></hierarchy>"),
+        ] {
+            assert_eq!(global_profile_from_snapshot(&changed).unwrap(), None);
+        }
+        assert_eq!(
+            global_profile_from_snapshot_with_id(POPULATED, "s0v", Some("46.0.0")).unwrap(),
+            None
+        );
     }
 
     #[tokio::test]
