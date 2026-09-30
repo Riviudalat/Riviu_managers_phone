@@ -788,6 +788,21 @@ describe("production publish wizard", () => {
 });
 
 describe("publish campaign monitoring", () => {
+  it("labels a queued Threads compose phase as Threads", async () => {
+    const campaign = { id: "threads-queued", requestId: "r", sourceRoot: "C:/fixture", state: "posting", assignments: [],
+      createdAt: "2026-09-10T00:00:00Z", updatedAt: "2026-09-10T00:00:00Z" };
+    const assignment = { id: "queued-child", campaignId: campaign.id, udid: "PHONE-A", state: "preparing",
+      dispatch: { state: "queued", phase: "compose", queuedAtMs: Date.parse(campaign.createdAt) } };
+    vi.mocked(publishList).mockResolvedValue([campaign] as never);
+    vi.mocked(publishGet).mockResolvedValue({ campaign, bundles: [], assignments: [assignment],
+      events: [{ revision: 1, kind: "created", payloadJson: JSON.stringify({ network: "threads" }), createdAt: campaign.createdAt }] } as never);
+    render(<PublishPage devices={devices} selected={[]} onSelectUdids={() => {}} />);
+    fireEvent.click(screen.getByRole("tab", { name: "Theo dõi" }));
+    fireEvent.click(await screen.findByRole("button", { name: "Chi tiết máy" }));
+    expect(await screen.findByText(/Chờ thao tác Threads/)).toBeVisible();
+    expect(screen.queryByText(/Chờ thao tác TikTok/)).toBeNull();
+  });
+
   it("retries only a child that failed before Post while another child awaits its link", async () => {
     const events = [{ revision: 1, kind: "created", payloadJson: JSON.stringify({ network: "threads" }), createdAt: "2026-09-10T00:00:00Z" }];
     const campaign = { id: "mixed-retry", requestId: "r", sourceRoot: "C:/fixture", state: "verifying", assignments: [],

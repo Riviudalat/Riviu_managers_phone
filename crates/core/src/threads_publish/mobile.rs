@@ -35,7 +35,12 @@ fn threads_media_permission_button(tree: &Tree) -> anyhow::Result<ElementBox> {
             node.visible(INSTALLER)
                 && node.attr("resource-id")
                     == "com.android.packageinstaller:id/permission_allow_button"
-                && node.attr("text") == "Allow"
+                && node
+                    .attr("text")
+                    .chars()
+                    .filter(|character| character.is_alphanumeric())
+                    .collect::<String>()
+                    == "Allow"
                 && node.attr("enabled") == "true"
         })
         .filter_map(Node::rect)
@@ -206,18 +211,7 @@ pub fn profile_account(tree: &Tree) -> anyhow::Result<String> {
 }
 
 pub async fn observed_profile_account(session: &dyn UiSession) -> anyhow::Result<String> {
-    for _ in 0..3 {
-        let tree = observe(session).await?;
-        if !tree
-            .nodes
-            .iter()
-            .any(|node| node.attr("resource-id") == "PermalinkScreen")
-        {
-            break;
-        }
-        tap_resource(session, "navigation_bar_back_button").await?;
-    }
-    tap_resource(session, "barcelona_tab_profile").await?;
+    return_to_profile(session).await?;
     for _ in 0..12 {
         let profile = wait_for(session, "own profile", |tree| {
             tree.nodes.iter().any(|node| {
@@ -256,6 +250,85 @@ pub async fn observed_profile_account(session: &dyn UiSession) -> anyhow::Result
         }
     }
     anyhow::bail!("Threads own profile account unavailable")
+}
+
+fn share_sheet_open(tree: &Tree) -> bool {
+    tree.nodes.iter().any(|node| {
+        node.attr("resource-id") == "post_share_sheet_copy_link_button"
+            && node.attr("clickable") == "true"
+    }) && tree
+        .nodes
+        .iter()
+        .any(|node| node.attr("content-desc") == "Close sheet" && node.attr("clickable") == "true")
+}
+
+fn login_screen_open(tree: &Tree) -> bool {
+    tree.nodes
+        .iter()
+        .any(|node| node.attr("resource-id") == "login_screen_login_with_ig_button")
+        && tree
+            .nodes
+            .iter()
+            .any(|node| node.attr("resource-id") == "login_screen_create_ig_account_button")
+}
+
+fn require_measured_gallery_title(tree: &Tree) -> anyhow::Result<()> {
+    ensure!(
+        !tree.nodes.iter().any(|node| node.attr("text") == "Mới đây"),
+        "Threads gallery uses Vietnamese UI; only the English gallery is measured"
+    );
+    ensure!(
+        tree.nodes.iter().any(|node| node.attr("text") == "Recents"),
+        "Threads measured gallery title is missing"
+    );
+    Ok(())
+}
+
+async fn close_share_sheet(session: &dyn UiSession) -> anyhow::Result<bool> {
+    if !share_sheet_open(&observe(session).await?) {
+        return Ok(false);
+    }
+    tap_description(session, "Close sheet").await?;
+    Ok(true)
+}
+
+async fn return_to_profile(session: &dyn UiSession) -> anyhow::Result<()> {
+    for _ in 0..4 {
+        let tree = observe(session).await?;
+        ensure!(
+            !login_screen_open(&tree),
+            "Threads account is not signed in"
+        );
+        if share_sheet_open(&tree) {
+            tap_description(session, "Close sheet").await?;
+        } else if tree
+            .nodes
+            .iter()
+            .any(|node| node.attr("resource-id") == "PermalinkScreen")
+        {
+            tap_resource(session, "navigation_bar_back_button").await?;
+        } else if let Some(composer) = tree
+            .nodes
+            .iter()
+            .find(|node| node.attr("resource-id") == "new_thread_screen_composer")
+        {
+            ensure!(
+                composer.attr("text").is_empty()
+                    && !tree.nodes.iter().any(|node| {
+                        matches!(
+                            node.attr("content-desc"),
+                            "Photo preview" | "Remove attachment"
+                        )
+                    }),
+                "Threads composer has a draft; keep it for operator review"
+            );
+            tap_resource(session, "navigation_bar_back_button").await?;
+        } else {
+            tap_resource(session, "barcelona_tab_profile").await?;
+            return Ok(());
+        }
+    }
+    anyhow::bail!("Threads could not return from share sheet or post detail to profile")
 }
 
 pub fn selected_ordinal(description: &str) -> Option<usize> {
@@ -386,6 +459,13 @@ pub async fn prepare(
         "Threads composer contains existing attachments"
     );
     tap_resource(session, "new_thread_screen_gallery_button").await?;
+    let picker = wait_for(session, "gallery title", |tree| {
+        tree.nodes
+            .iter()
+            .any(|node| matches!(node.attr("text"), "Recents" | "Mới đây"))
+    })
+    .await?;
+    require_measured_gallery_title(&picker)?;
     tap_text(session, "Recents").await?;
     let albums = wait_for(session, "exact import album", |tree| {
         album_count(tree, import_id).is_ok()
@@ -837,14 +917,7 @@ pub async fn verify(
     {
         tap_text(session, "Not now").await?;
     }
-    if initial
-        .nodes
-        .iter()
-        .any(|node| node.attr("resource-id") == "PermalinkScreen")
-    {
-        tap_resource(session, "navigation_bar_back_button").await?;
-    }
-    tap_resource(session, "barcelona_tab_profile").await?;
+    return_to_profile(session).await?;
     // Refresh the observed profile viewport before searching the newly uploaded post.
     let mut profile = wait_for(session, "own profile", |tree| {
         tree.nodes.iter().any(|node| {
@@ -940,6 +1013,9 @@ pub async fn verify(
             {
                 tracing::warn!("Threads clipboard restore: {error}");
             }
+            if let Err(error) = close_share_sheet(session).await {
+                tracing::warn!("Threads share sheet cleanup: {error}");
+            }
             return result;
         }
         if attempt < 5 {
@@ -1024,6 +1100,8 @@ mod tests {
     fn media_permission_requires_exact_threads_prompt_and_allow_button() {
         let xml = include_str!("../../fixtures/threads_446/media_permission.xml");
         assert!(threads_media_permission_button(&fixture(xml)).is_ok());
+        let padded = xml.replace("text=\"Allow\"", "text=\"&#x200E;&#x200F;Allow&#x200E;\"");
+        assert!(threads_media_permission_button(&fixture(&padded)).is_ok());
         assert!(
             threads_media_permission_button(&fixture(&xml.replace("Threads", "Other app")))
                 .is_err()
@@ -1032,6 +1110,14 @@ mod tests {
             &xml.replace("permission_allow_button", "permission_deny_button")
         ))
         .is_err());
+    }
+    #[test]
+    fn vietnamese_threads_gallery_is_rejected_even_when_device_locale_is_english() {
+        let gallery = fixture(include_str!("../../fixtures/threads_446/gallery_vi.xml"));
+        assert!(require_measured_gallery_title(&gallery)
+            .unwrap_err()
+            .to_string()
+            .contains("Vietnamese UI"));
     }
     #[test]
     fn own_post_verification_binds_share_to_author_caption_and_submission_time() {

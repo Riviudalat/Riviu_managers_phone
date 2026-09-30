@@ -8,6 +8,9 @@ struct Session {
     composer: bool,
     fail_share: bool,
     account_probe: bool,
+    initial_share_overlay: bool,
+    login: bool,
+    empty_composer: bool,
     taps: Mutex<Vec<TapPoint>>,
     clipboard: Mutex<Vec<u8>>,
 }
@@ -19,6 +22,9 @@ impl Session {
             composer: false,
             fail_share: false,
             account_probe: false,
+            initial_share_overlay: false,
+            login: false,
+            empty_composer: false,
             taps: Mutex::new(vec![]),
             clipboard: Mutex::new(b"operator clipboard".to_vec()),
         }
@@ -34,13 +40,18 @@ impl UiSession for Session {
         Ok(super::ANDROID_PACKAGE.into())
     }
     async fn hierarchy_source_snapshot(&self) -> anyhow::Result<HierarchySourceSnapshot> {
-        let xml = if self.composer {
+        let xml = if self.login {
+            include_str!("../../fixtures/threads_446/login.xml")
+        } else if self.empty_composer && *self.stage.lock() == 4 {
+            include_str!("../../fixtures/threads_446/empty_composer.xml")
+        } else if self.composer {
             include_str!("../../fixtures/threads_446/composer.xml")
         } else {
             match *self.stage.lock() {
                 0 => include_str!("../../fixtures/threads_446/profile.xml"),
                 1 => include_str!("../../fixtures/threads_446/own_post.xml"),
                 2 => include_str!("../../fixtures/threads_446/detail.xml"),
+                4 => include_str!("../../fixtures/threads_446/share_overlay.xml"),
                 _ => include_str!("../../fixtures/threads_446/share.xml"),
             }
         };
@@ -55,12 +66,18 @@ impl UiSession for Session {
             *self.stage.lock() = 0;
             return Ok(());
         }
-        if self.taps.lock().len() == 2 {
+        let tap_count = self.taps.lock().len();
+        if self.initial_share_overlay && tap_count <= 2 {
+            *self.stage.lock() = if tap_count == 1 { 2 } else { 0 };
+            return Ok(());
+        }
+        let publish_taps = tap_count - usize::from(self.initial_share_overlay) * 2;
+        if publish_taps == 2 {
             *self.stage.lock() = 2;
-        } else if self.taps.lock().len() == 3 {
+        } else if publish_taps == 3 {
             anyhow::ensure!(!self.fail_share, "connection lost after Share");
             *self.stage.lock() = 3;
-        } else if self.taps.lock().len() == 4 {
+        } else if publish_taps == 4 {
             *self.clipboard.lock() =
                 b"https://www.threads.com/@fixture.account/post/Fixture123".to_vec();
         }
@@ -104,6 +121,49 @@ async fn account_probe_returns_from_measured_post_detail_before_reading_profile(
     );
     assert_eq!(session.taps.lock().len(), 2);
 }
+
+#[tokio::test]
+async fn account_probe_reports_logged_out_threads_without_waiting_for_profile_tab() {
+    let session = Session {
+        login: true,
+        ..Session::new()
+    };
+    assert!(observed_profile_account(&session)
+        .await
+        .unwrap_err()
+        .to_string()
+        .contains("not signed in"));
+    assert!(session.taps.lock().is_empty());
+}
+
+#[tokio::test]
+async fn account_probe_returns_from_empty_composer_without_touching_post() {
+    let session = Session {
+        stage: Mutex::new(4),
+        account_probe: true,
+        empty_composer: true,
+        ..Session::new()
+    };
+    assert_eq!(
+        observed_profile_account(&session).await.unwrap(),
+        "fixture.account"
+    );
+    assert_eq!(session.taps.lock().len(), 2);
+}
+
+#[tokio::test]
+async fn account_probe_keeps_existing_composer_draft() {
+    let session = Session {
+        composer: true,
+        ..Session::new()
+    };
+    assert!(observed_profile_account(&session)
+        .await
+        .unwrap_err()
+        .to_string()
+        .contains("keep it for operator review"));
+    assert!(session.taps.lock().is_empty());
+}
 fn submitted() -> String {
     (chrono::Utc::now() - chrono::Duration::seconds(180)).to_rfc3339()
 }
@@ -122,6 +182,23 @@ async fn reconciliation_after_restart_only_reads_own_post_and_restores_clipboard
         assert_eq!(*session.clipboard.lock(), b"operator clipboard");
         assert_eq!(session.taps.lock().len(), 4);
     }
+}
+
+#[tokio::test]
+async fn reconciliation_closes_measured_share_overlay_before_reading_own_profile() {
+    let session = Session {
+        stage: Mutex::new(4),
+        initial_share_overlay: true,
+        ..Session::new()
+    };
+    assert_eq!(
+        verify(&session, "Fixture caption", "fixture.account", &submitted())
+            .await
+            .unwrap(),
+        "https://www.threads.com/@fixture.account/post/Fixture123"
+    );
+    assert_eq!(session.taps.lock().len(), 6);
+    assert_eq!(*session.clipboard.lock(), b"operator clipboard");
 }
 
 #[tokio::test]

@@ -271,7 +271,7 @@ function canRetryAssignment(assignment: PublishAssignmentRecord, campaign: Publi
     && !["queued", "running"].includes(assignment.dispatch?.state ?? "");
 }
 
-function dispatchDetail(assignment: PublishAssignmentRecord): string | null {
+function dispatchDetail(assignment: PublishAssignmentRecord, appName: "Threads" | "TikTok"): string | null {
   const dispatch = assignment.dispatch;
   const reason = dispatch?.reason ?? assignment.errorCode;
   const reasons: Record<string, string> = {
@@ -286,7 +286,7 @@ function dispatchDetail(assignment: PublishAssignmentRecord): string | null {
   if (!dispatch || !["queued", "running", "paused"].includes(dispatch.state)) return null;
   const time = new Date(dispatch.queuedAtMs);
   return [
-    `${dispatch.state === "running" ? "Đang" : "Chờ"} ${dispatch.phase === "transfer" ? "chuyển media" : "thao tác TikTok"}`,
+    `${dispatch.state === "running" ? "Đang" : "Chờ"} ${dispatch.phase === "transfer" ? "chuyển media" : `thao tác ${appName}`}`,
     Number.isFinite(time.getTime()) && `Vào hàng: ${time.toLocaleString("vi-VN")}`,
     dispatch.owner && `Đang giữ lượt: ${dispatch.owner}`,
     dispatch.state !== "running" && (reasons[reason ?? ""] ?? "Chờ lượt điều phối"),
@@ -295,7 +295,7 @@ function dispatchDetail(assignment: PublishAssignmentRecord): string | null {
 
 const PUBLISH_LIMIT_FIELDS: { key: keyof PublishLimits; label: string }[] = [
   { key: "transfer", label: "Lượt chuyển media" },
-  { key: "compose", label: "Phiên thao tác TikTok" },
+  { key: "compose", label: "Phiên thao tác đăng bài" },
   { key: "verify", label: "Lượt xác minh liên kết" },
   { key: "deviceTotal", label: "Tổng lượt điều khiển thiết bị" },
 ];
@@ -348,11 +348,12 @@ function PublishHostLimits({ onSaved }: { onSaved: () => void }) {
 }
 
 function pendingPublicationMessage(detail: PublishCampaignDetail, sheetEnabled: boolean): string | null {
+  const appName = campaignApp(detail);
   const review = detail.assignments.filter(needsPublicationReview).length;
-  if (review) return `${review} bài cần kiểm tra trên điện thoại. Chưa có đủ bằng chứng xác nhận; tác vụ tự kiểm tra đã dừng. Mở TikTok để xem bài đăng hoặc bản nháp, rồi chọn Kiểm tra liên kết. App giữ nội dung và không tự đăng lại.`;
+  if (review) return `${review} bài cần kiểm tra trên điện thoại. Chưa có đủ bằng chứng xác nhận; tác vụ tự kiểm tra đã dừng. Mở ${appName} để xem bài đăng hoặc bản nháp, rồi chọn Kiểm tra liên kết. App giữ nội dung và không tự đăng lại.`;
   const pending = detail.assignments.filter((assignment) => assignment.state === "verifying").length;
   if (!pending) return null;
-  return `${pending} bài đã bấm Đăng, đang chờ TikTok hoàn tất và xác minh liên kết. Riviu tự kiểm tra khi máy rảnh; giữ app và điện thoại kết nối.${sheetEnabled ? " Sheet chờ liên kết đã xác minh." : " Không ghi Sheet."}`;
+  return `${pending} bài đã bấm Đăng, đang chờ ${appName} hoàn tất và xác minh liên kết. Riviu tự kiểm tra khi máy rảnh; giữ app và điện thoại kết nối.${sheetEnabled ? " Sheet chờ liên kết đã xác minh." : " Không ghi Sheet."}`;
 }
 
 function retryActionLabel(
@@ -367,6 +368,7 @@ function retryActionLabel(
 
 function cleanupEvidence(
   evidenceJson?: string | null,
+  appName: "Threads" | "TikTok" = "TikTok",
 ): { label: string; raw: string } | null {
   if (!evidenceJson) return null;
   try {
@@ -389,7 +391,7 @@ function cleanupEvidence(
       const appCleanup = "appCleanup" in cleanup ? cleanup.appCleanup : null;
       const leftRunning = appCleanup && typeof appCleanup === "object"
         && "state" in appCleanup && appCleanup.state === "leftRunning";
-      return { label: leftRunning ? "đã giữ nội dung và để TikTok tiếp tục xử lý" : "đã giữ nội dung trên máy", raw };
+      return { label: leftRunning ? `đã giữ nội dung và để ${appName} tiếp tục xử lý` : "đã giữ nội dung trên máy", raw };
     }
     if (state === "not_cleaned") {
       return {
@@ -1838,7 +1840,7 @@ function CampaignDetail({
                     {capability?.recovery?.state==="waitingDevice"&&<p>Mất kết nối · chờ đúng máy kết nối lại, còn {Math.max(0,Math.ceil(((capability.recovery.reconnectDeadline??0)-Date.now())/1000))} giây</p>}
                     {capability?.recovery?.state==="retryWaiting"&&<p>Thử lại {capability.recovery.retriesUsed}/{capability.recovery.maxRetries} · {capability.recovery.step}</p>}
                     {needsPublicationReview(assignment) ? <>Cần kiểm tra bài đăng<p>{publicationReviewReason(assignment.evidenceJson) ?? `Chưa có đủ bằng chứng xác nhận bài; kiểm tra ${appName} trước khi tiếp tục.`}</p></>
-                      : <>{isComposing(assignment) ? `Đang chuẩn bị bài trên ${appName}` : PUBLISH_STATE_LABELS[assignment.state] ?? "Trạng thái chưa nhận diện"}{dispatchDetail(assignment) && <p>{dispatchDetail(assignment)}</p>}{verificationDetail(assignment.evidenceJson) && <p>{verificationDetail(assignment.evidenceJson)}</p>}</>}
+                      : <>{isComposing(assignment) ? `Đang chuẩn bị bài trên ${appName}` : PUBLISH_STATE_LABELS[assignment.state] ?? "Trạng thái chưa nhận diện"}{dispatchDetail(assignment, appName) && <p>{dispatchDetail(assignment, appName)}</p>}{verificationDetail(assignment.evidenceJson) && <p>{verificationDetail(assignment.evidenceJson)}</p>}</>}
                     <PrePostFailureEvidence assignment={assignment}/>
                     {retryable && <><button type="button" disabled={busy || loading || !capability?.retryBeforePost.allowed}
                       aria-label={`Thử lại trước khi Đăng · ${deviceDisplayName(devices, metas, assignment.udid)}`}
@@ -1934,7 +1936,7 @@ function CampaignDetail({
                 id: "cleanup",
                 label: "Dọn nội dung tạm",
                 render: (assignment: PublishAssignmentRecord) => {
-                  const cleanup = cleanupEvidence(assignment.evidenceJson);
+                  const cleanup = cleanupEvidence(assignment.evidenceJson, appName);
                   return cleanup ? (
                     <span>
                       {cleanup.label}
