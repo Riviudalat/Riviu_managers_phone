@@ -26,7 +26,8 @@ Xem `wda.rs::prime_session()`.
 
 Đặt 20 hoặc 50 → lệnh kế tiếp treo ngay (đã thử cả hai). Đây là ràng buộc cứng.
 Hệ quả: **không dùng được element finding** (TikTok không lộ TextField/TextView ở
-depth 1), và ô nhập bình luận không focus được (xem §5).
+depth 1), và ô nhập bình luận không focus được. Xem [contract bình luận](05-trang-thai-binh-luan.md);
+các số đo và điều tra focus lịch sử nằm trong snapshot được liên kết từ tài liệu đó.
 
 ### 2.4 Thứ tự khởi động: session TRƯỚC, stream SAU
 

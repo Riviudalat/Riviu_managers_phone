@@ -86,7 +86,7 @@ Với Comment/Post/Follow/Like/Save hay ghi/xóa dữ liệu thật:
 4. Canary được phép: một thiết bị với tác vụ vô hại, bằng chứng trước-sau.
 5. Fleet được phép: mở rộng có giới hạn, status/evidence theo từng máy; không bỏ bước 4 chỉ vì compiler xanh.
 
-Dùng `test-driven-development` khi thay logic, `systematic-debugging` khi fail, `verification-before-completion` trước bàn giao. Lượt chỉ cài skill không phải dịp chạy 4–5.
+Dùng `systematic-debugging` khi fail. Nếu khả dụng, dùng `test-driven-development` khi thay logic và `verification-before-completion` trước bàn giao; nếu thiếu, giữ regression và cổng kiểm theo [testing runbook](../../../docs/development/testing.md), không tự cài hoặc giả đã gọi skill. Lượt chỉ cài skill không phải dịp chạy 4–5.
 
 ## Đầu ra cần có
 

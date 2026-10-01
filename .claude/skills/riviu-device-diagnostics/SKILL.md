@@ -63,7 +63,7 @@ Trước thay đổi WDA/iOS đọc hết `docs/agents/02-wda-doc-truoc-khi-sua.
 ## 4. Fixture → headless → live có phép
 
 - Với perception, capture fixture qua đường được phép, replay local bằng production parser/verifier. Phép replay chỉ xác nhận fixture đó, không chứng minh máy đang sống.
-- Khi sửa lỗi: test tái hiện nguyên nhân, test hậu điều kiện và trường hợp từ chối; đọc references của `test-driven-development`. Không mock chính lớp cần chứng minh.
+- Khi sửa lỗi: test tái hiện nguyên nhân, test hậu điều kiện và trường hợp từ chối. Dùng `test-driven-development` nếu có trong danh sách khả dụng; nếu thiếu, theo [testing runbook](../../../docs/development/testing.md). Không tự cài skill và không mock chính lớp cần chứng minh.
 - Khi nghiệm thu logic thiết bị, ưu tiên headless gọi production, không lái chuột desktop dễ bấm nhầm. **Headless không đồng nghĩa read-only**; kiểm source/flags trước run.
 - Chỉ run canary với tác vụ vô hại trong phạm vi được cho phép. Không dùng Post/Comment hoặc hành động thật không đảo ngược làm phép thử connectivity.
 - Sau dispatch không rõ kết quả, giữ trạng thái chưa xác định và kiểm chứng lại; không biến thành timeout đơn thuần rồi retry.
@@ -74,4 +74,4 @@ Chỉ đề xuất sửa tại lớp đã có bằng chứng, từng thay đổi
 
 ## 6. Bàn giao bằng chứng
 
-Nêu: triệu chứng; điều kiện tái hiện; lớp lỗi đã xác định hoặc giả thuyết còn lại; device và snapshot/log đã dùng (che định danh nếu chia sẻ); phép đo đã chạy; side effect thực sự có; phần offline/mock/live; điều gì còn chưa chứng minh. Gọi `verification-before-completion` trước báo đã sửa/đã chạy được. Không báo “PASS fleet” từ một máy hay một fixture.
+Nêu: triệu chứng; điều kiện tái hiện; lớp lỗi đã xác định hoặc giả thuyết còn lại; device và snapshot/log đã dùng (che định danh nếu chia sẻ); phép đo đã chạy; side effect thực sự có; phần offline/mock/live; điều gì còn chưa chứng minh. Dùng `verification-before-completion` nếu khả dụng; nếu thiếu, đối chiếu cổng và bằng chứng theo [testing runbook](../../../docs/development/testing.md). Không giả đã gọi skill và không báo “PASS fleet” từ một máy hay một fixture.

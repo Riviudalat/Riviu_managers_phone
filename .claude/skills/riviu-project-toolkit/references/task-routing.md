@@ -32,7 +32,7 @@ Bảng dưới là bản đồ theo năng lực, không phải toàn bộ depend
 | Cấu hình MCP/hooks/permissions | `update-config` | Tài liệu MCP chính chủ và source launcher | Merge không ghi đè, tối thiểu quyền, readiness đúng tầng |
 | Tích hợp LLM/provider | Skill/tài liệu đúng provider đang làm | Đánh giá prompt/eval theo yêu cầu | Không đổi provider/model do sở thích; không gọi API tốn phí ngoài phạm vi |
 
-Skill chung cho thay đổi hành vi là `test-driven-development`; trước tuyên bố hoàn tất là `verification-before-completion`. Không đọc lại chúng ở mỗi tool call nếu đã nạp và còn phù hợp.
+Nếu khả dụng, dùng `test-driven-development` cho thay đổi hành vi và `verification-before-completion` trước tuyên bố hoàn tất. Nếu thiếu, giữ regression/cổng kiểm và yêu cầu bằng chứng theo [testing runbook](../../../../docs/development/testing.md), không tự cài hoặc giả đã gọi skill. Không đọc lại skill ở mỗi tool call nếu đã nạp và còn phù hợp.
 
 ## 2. Chuỗi sử dụng mẫu
 

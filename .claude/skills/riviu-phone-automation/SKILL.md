@@ -74,9 +74,9 @@ Ghi Inspector là thay đổi DB host, phải nằm trong yêu cầu. `riviu_rec
 
 - Luồng nhiều bước, nhiều máy, nhánh/chờ/retry: `riviu-interaction-flows`.
 - Máy nhận nhưng không điều khiển được, stale frame, sai label hoặc timeout: `riviu-device-diagnostics` + `systematic-debugging`.
-- Sửa Rust: `rust-best-practices`; thay hành vi: `test-driven-development`.
+- Sửa Rust: `rust-best-practices`; thay hành vi: dùng `test-driven-development` nếu khả dụng, nếu thiếu viết regression theo [testing runbook](../../../docs/development/testing.md), không tự cài skill.
 - Chạy/screenshot desktop: `run-riviu-managers-phone`, không lẫn desktop automation với phone automation.
-- Trước báo hoàn tất: `verification-before-completion`, chỉ báo bằng chứng đã có.
+- Trước báo hoàn tất: dùng `verification-before-completion` nếu khả dụng; nếu thiếu đối chiếu cổng và bằng chứng theo testing runbook. Không giả đã gọi skill; chỉ báo bằng chứng đã có.
 
 ## Bàn giao
 
