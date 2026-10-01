@@ -35,7 +35,7 @@ API hiện có nhóm GET catalog/list/detail/run-history và POST chạy/cancel:
 - `POST /v1/flows/{id}/runs`
 - `POST /v1/flow-runs/{id}/cancel`
 
-Đọc parser/payload handler trước khi gọi. Năm tool Riviu MCP trong `scripts/riviu_agent_mcp.mjs` không có Flow-run; không chế ra `riviu_flow_run`. Cancel requested không chứng minh worker đã dừng hoặc thiết bị đã nhả lease.
+Đọc parser/payload handler trước khi gọi. Registry Riviu MCP trong `scripts/riviu_agent_mcp.mjs` gồm nhóm legacy và semantic v2, nhưng không có Flow-run; không chế ra `riviu_flow_run`. Đối chiếu danh sách tool thực sự được expose trong phiên. Cancel requested không chứng minh worker đã dừng hoặc thiết bị đã nhả lease.
 
 ## Ví dụ cổng kiểm thật
 
@@ -61,3 +61,6 @@ Dùng đúng toolchain/lệnh của runbook nếu repo đổi. Test importer kh�
 - Kết quả riêng từng máy, biến không rò qua run, retry không lặp bước đã được xác nhận.
 
 Dùng fixture/mock tại biên I/O thật sự cần cô lập. Bài test phải gọi code production, kỳ vọng độc lập với code được test; không kiểm mỗi chuỗi source hoặc mock gọi lại chính nó.
+
+Semantic v2 cần begin/end và refs còn hạn; legacy recording giữ giao thức cũ. Xem
+[bản đồ controller](../../riviu-phone-automation/references/control-routes.md), không suy tool chạy Flow từ Inspector.

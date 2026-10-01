@@ -32,6 +32,25 @@ class DocsLinkTests(unittest.TestCase):
             (root / "space name.md").write_text("# Hello: world\n", encoding="utf-8")
             self.assertEqual(check_docs.inspect(root, ["a.md", "space name.md"]), [])
 
+    def test_reference_links_and_unicode_anchor(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            (root / "a.md").write_text("[hướng dẫn][Guide]\n[Guide]: b.md#thiết-bị\n", encoding="utf8")
+            (root / "b.md").write_text("# Thiết bị\n", encoding="utf8")
+            self.assertEqual(check_docs.inspect(root, ["a.md", "b.md"]), [])
+            (root / "b.md").write_text("# Other\n", encoding="utf8")
+            self.assertIn("missing heading anchor", check_docs.inspect(root, ["a.md", "b.md"])[0])
+
+    def test_historical_section_shorthand_is_rejected_only_in_current_docs(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            (root / "README.md").write_text("See §9.51\n", encoding="utf8")
+            (root / "docs/archive").mkdir(parents=True)
+            (root / "docs/archive/old.md").write_text("See §9.51\n", encoding="utf8")
+            errors = check_docs.inspect(root, ["README.md", "docs/archive/old.md"])
+            self.assertEqual(len(errors), 1)
+            self.assertIn("historical section shorthand", errors[0])
+
     def test_links_in_code_do_not_count(self):
         self.assertEqual(check_docs.links("```md\n[no](absent.md)\n```\n    [no](absent.md)\n"), [])
 

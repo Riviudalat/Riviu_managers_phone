@@ -2,7 +2,7 @@
 
 Đọc [`README.md`](README.md) trước. Hướng dẫn sản phẩm:
 
-- [`docs/operator-guide.md`](docs/operator-guide.md) — vận hành 12 trang UI
+- [`docs/operator-guide.md`](docs/operator-guide.md) — quy trình vận hành và xử lý lỗi
 - [`docs/developer-guide.md`](docs/developer-guide.md) — hợp đồng phát triển và cổng kiểm
 - [`docs/agents/README.md`](docs/agents/README.md) — ràng buộc kỹ thuật còn hiệu lực
 - [`docs/agent-toolkit-setup.md`](docs/agent-toolkit-setup.md) — thiết lập và chọn skill/MCP; điểm vào điều phối là [`riviu-project-toolkit`](.claude/skills/riviu-project-toolkit/SKILL.md)

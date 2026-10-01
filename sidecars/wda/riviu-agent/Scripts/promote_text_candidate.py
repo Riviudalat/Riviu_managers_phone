@@ -8,8 +8,12 @@ import hashlib
 import json
 import os
 import shutil
+import sys
 from pathlib import Path
 from typing import Any
+
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+import comment_evidence
 
 
 TARGET_BUNDLE = "com.ss.iphone.ugc.Ame"
@@ -39,8 +43,18 @@ def _read_json(path: Path) -> dict[str, Any]:
 
 
 def _validate_evidence(evidence: dict[str, Any], evidence_path: Path) -> str:
+    if evidence.get("schemaVersion") != 2:
+        raise PromotionError("Historical evidence is read-only; new promotion requires bound schema 2 evidence")
+    try:
+        comment_evidence.validate(evidence_path, evidence, evidence.get("runId", ""))
+    except (OSError, ValueError, KeyError, comment_evidence.EvidenceError) as exc:
+        raise PromotionError("Comment evidence binding is invalid") from exc
     if evidence.get("environment") != "LIVE_MAC_DEVICE":
         raise PromotionError("text promotion requires LIVE_MAC_DEVICE evidence")
+    # This standalone scout cannot attest the relay/installed artifact. An operator
+    # can confirm visible content, not turn locally supplied IPA hashes into live proof.
+    if evidence.get("schemaVersion") == 2:
+        raise PromotionError("Standalone comment evidence has no runtime artifact/device attestation; promotion is unavailable")
     if evidence.get("gateStatus") != "PASS":
         raise PromotionError("text promotion requires a passing comment gate")
     if evidence.get("targetBundle") != TARGET_BUNDLE:
@@ -81,6 +95,9 @@ def promote(
     candidate_ipa = candidate_manifest_path.parent / str(candidate.get("ipa", ""))
     if not candidate_ipa.is_file():
         raise PromotionError(f"candidate IPA is missing: {candidate_ipa}")
+    if (evidence["identity"]["candidateSha256"] != _sha256(candidate_ipa)
+            or evidence["identity"]["manifestSha256"] != _sha256(candidate_manifest_path)):
+        raise PromotionError("Evidence belongs to a different candidate")
     if candidate.get("protocolVersion") != 2:
         raise PromotionError("text promotion requires protocol version 2")
 

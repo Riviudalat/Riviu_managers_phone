@@ -28,3 +28,8 @@
 # perfectly right on the machine that wrote them. That is the failure mode where
 # CI is green for the author and red for everybody else.
 sidecars/android/** -text
+
+# These reviewed knowledge packages record exact installed-byte provenance.
+# Keep their hashes stable on Windows clones without renormalizing runtime assets.
+.claude/skills/rust-best-practices/** text eol=lf
+.claude/skills/systematic-debugging/** text eol=lf

@@ -4208,7 +4208,7 @@ mod tests {
                 "../../../sidecars/signer/riviu_signer.py",
                 "sidecars/signer/riviu_signer.py",
             ),
-            ("../../../logo.jpg", "sidecars/wda/logo.jpg"),
+            ("../public/logo.jpg", "sidecars/wda/logo.jpg"),
             (
                 "../../../sidecars/wda/AppIcon.appiconset/",
                 "sidecars/wda/AppIcon.appiconset/",

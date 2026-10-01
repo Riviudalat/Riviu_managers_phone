@@ -5,8 +5,8 @@ shell trắng, nền trung tính `#F5F6F8`, primary
 cam Riviu `#C2410C`; control 36 px, body 14 px, chữ phụ 13 px, chú thích tối thiểu 12 px,
 heading trang 20 px. Noto Sans/Noto Sans Mono đóng gói cùng app. Control bo 6 px,
 panel bo 8 px; khoảng cách theo thang 4/8/12/16/24 px. Giữ Tauri/React/Rust,
-tile/canvas, mật độ và cử chỉ thiết bị. Không toast nổi; trạng thái ở cạnh hành động,
-monitor nguồn và ActivityCenter. Đây là tiêu chí triển khai, không tự xác nhận mọi
+tile/canvas, mật độ và cử chỉ thiết bị. Thông báo ngắn có thể dùng toast đóng được; lỗi và trạng thái bền vẫn ở cạnh
+hành động, monitor nguồn và ActivityCenter. Đây là tiêu chí triển khai, không tự xác nhận mọi
 màn hình đã vượt cổng screenshot/accessibility.
 
 Sidebar rộng 224 px (200 px trên màn hẹp), có nút thu gọn thành icon;
@@ -31,8 +31,7 @@ riêng với thư viện hành động bên trái, canvas chính, cấu hình v�
 Tên, model, tài khoản và trạng thái máy nằm trên nền sáng riêng phía trên preview;
 không che hình điện thoại. Preview trong lưới giữ tỉ lệ 1:2; thẻ có thêm phần thông tin
 cao 88 px. Dấu chọn trên thẻ và bộ đếm dưới thanh lọc dùng cùng selection hiện có.
-Monitor tiến trình vẫn không modal và hoạt động xuyên trang, mặc định nằm góc phải
-phía dưới, chừa 88 px cho thanh hành động; có thể kéo đổi vị trí.
+Monitor tiến trình vẫn không modal và hoạt động xuyên trang, mặc định nằm góc phải phía trên; có thể kéo đổi vị trí.
 Tab Thiết lập/Hẹn giờ/Theo dõi dùng chung nền trắng và mục chọn cam nhạt. Bảng có cuộn riêng;
 thanh hành động và nút chạy nằm trong viewport ở kích thước laptop. Chuyển màu nhẹ
 120–180 ms, không hiệu ứng lặp trang trí; hỗ trợ giảm chuyển động.
@@ -68,7 +67,7 @@ quyết định thiết kế Riviu, không phải tuyên bố parity toàn bộ 
 |---|---|---|---|---|
 | Thiết bị | toolbar, group tabs, grid/table, drawer | nhóm, trạng thái, tìm kiếm, máy chọn | trạng thái máy; mở máy hoặc Chẩn đoán | tập lọc giống grid/table; tile/canvas không đổi |
 | Chẩn đoán | bảng điều kiện, detail bằng chứng | máy/phạm vi | readiness/lỗi; sửa đúng điều kiện | không tự repair từ health false-negative |
-| Nuôi | Thiết lập/Theo dõi, hồ sơ | scope, nhịp, effect, lịch | phiên/máy/effect; đọc bằng chứng | credential riêng, draft/readiness, target isolation |
+| Nuôi | Thiết lập/Hẹn giờ/Theo dõi | scope, nhịp, effect, lịch | phiên/máy/effect; đọc bằng chứng | credential riêng, draft/readiness, target isolation |
 | Tương tác | Thiết lập/Theo dõi, assignment | URL hiện tại, actors, nội dung | campaign/outcome; source retry | URL parse stale, profile identity, uncertain |
 | Đăng bài | ba khung chọn bài / bài↔máy / thiết bị; caption dialog | nguồn/caption/nhạc/Sheet/máy | preflight, Post/URL/Sheet/cleanup; retry phạm vi thiếu | không đăng lại Partial; active bị lọc ẩn, confirm stale, focus caption, target-bound digest |
 | Flow | editor mở, mode/device/fleet, execution detail | graph/node/target/revision | run/node history; mở lỗi | Save/Archive/import identity, guard, node effects |
@@ -84,7 +83,7 @@ quyết định thiết kế Riviu, không phải tuyên bố parity toàn bộ 
 | Cài đặt | section rõ, lưu từng vùng | form/credential | persisted readback | stale response, draft guard, restart indication |
 | Trợ giúp | hướng dẫn theo nhiệm vụ | lối vào theo việc cần làm | điều hướng tới màn thật | không phát tác vụ khi bấm lối tắt |
 
-Sidebar có 16 page; editor My Apps, Điều phối và Macro là subview. Dữ liệu và
+Sidebar theo danh sách MENU trong Sidebar.tsx; editor My Apps, Điều phối và Macro là subview. Dữ liệu và
 Mạng/Proxy còn nhánh render nhưng chưa có lối vào sidebar; không tự mở thêm menu.
 Danh sách phải tách initial loading, refresh, lỗi có retry, rỗng thật và không khớp
 bộ lọc. Refresh lỗi giữ dữ liệu cũ khi còn hợp lệ; response cũ không được đổi view mới.

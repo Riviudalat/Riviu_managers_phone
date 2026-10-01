@@ -1,5 +1,10 @@
 # Nurture human-v2 verification
 
+> **Historical evidence, not a recovery procedure.** `rollback-db.sh` restores the
+> entire database, not only settings, and defaults to the operational macOS DB.
+> Never run it on current data. Reproduce only on an explicitly selected disposable
+> copy with the original backup. The archived script/patch bytes are unchanged.
+
 Date: 2026-08-06
 Device: iPhone 8, iOS 16.7.15, UDID `a99f4bd9f877b2a0e3682ee24fd1c68f75ba6982`
 
@@ -12,7 +17,7 @@ Device: iPhone 8, iOS 16.7.15, UDID `a99f4bd9f877b2a0e3682ee24fd1c68f75ba6982`
 - `codesign --verify --deep --strict`: PASS
 - Patch: `nurture-human-v2.patch`
 - Rollback script: `rollback.sh`
-- Settings rollback script: `rollback-db.sh`
+- Historical whole-database rollback script: `rollback-db.sh`
 - Baseline rollback copy: `/Applications/Riviumanagersphone Full.app.rollback-20260806-human-v2`
 - Baseline executable SHA-256: `335c35fcb79af920e0714b2f96d20ffeb250100ef361628f8ff798252d1ef68a`
 

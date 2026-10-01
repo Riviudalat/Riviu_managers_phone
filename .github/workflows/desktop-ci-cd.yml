@@ -121,7 +121,9 @@ jobs:
           # minute is worth a minute.
           python -m unittest discover -s tools/interaction-gate0 -p "test_probe.py" -v
 
-          python -m unittest scripts.test_check_docs -v
+          python -m unittest scripts.test_check_docs scripts.test_branding_source -v
+          python -m unittest discover -s sidecars/wda/riviu-agent/Tests -p "test_probe_tiktok_comment.py" -v
+          powershell -NoProfile -File scripts/test_run_skill.ps1
           python scripts/check_docs.py
 
       # Repo-side digest check for the bundled Android tools. Deliberately in the

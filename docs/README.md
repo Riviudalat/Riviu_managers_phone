@@ -5,7 +5,7 @@ Tài liệu hiện tại phân biệt hợp đồng sản phẩm với bằng ch
 
 | Nhu cầu | Điểm vào |
 |---|---|
-| Vận hành 12 trang, hiểu đầu vào và kết quả | [Hướng dẫn vận hành](operator-guide.md) |
+| Vận hành theo nhiệm vụ, hiểu đầu vào và kết quả | [Hướng dẫn vận hành](operator-guide.md) |
 | Sửa code, chọn cổng và chạy ứng dụng | [Hướng dẫn phát triển](developer-guide.md) |
 | Tiếp nhận thay đổi, bảo toàn bằng chứng | [Runbook agent](agents/agent-runbook.md) |
 | Thiết lập và chọn skill/MCP cho toàn dự án | [Bộ công cụ agent](agent-toolkit-setup.md) |
@@ -15,6 +15,12 @@ Tài liệu hiện tại phân biệt hợp đồng sản phẩm với bằng ch
 | Kiểm toán đường dẫn và xoá dữ liệu trùng | [Hồ sơ dọn tài liệu](archive/cleanup-2026-09-06.md) |
 | Khảo sát giao thức và công cụ | [GenFarmer](re/genfarmer/README.md), [Riviu Agent](re/riviu-agent/README.md), [RT-MMO](re/rtmmo-agent/README.md) |
 | Giới hạn nguồn và ma trận parity | [Provenance](provenance/xiaowei-safe-parity.md) |
+
+## Hướng dẫn theo chủ đề
+
+- [Cài đặt/chuyển máy/backup](operator/installation-and-data.md)
+- [Thiết bị](operator/devices.md), [Nuôi/Tương tác](operator/automation.md), [Đăng bài](operator/publish.md), [Flow/API](operator/flow-api.md)
+- [Kiểm thử](development/testing.md), [Build/release](development/build-release.md), [Contract](development/contracts.md), [Publish acceptance](development/publish-acceptance.md)
 
 ## Bằng chứng và tài nguyên
 

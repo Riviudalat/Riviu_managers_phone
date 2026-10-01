@@ -19,7 +19,7 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent
 REPO = ROOT.parents[1]
-LOGO = REPO / "logo.jpg"
+LOGO = REPO / "apps" / "desktop" / "public" / "logo.jpg"
 ICONSET = ROOT / "AppIcon.appiconset"
 OUT_DIR = ROOT / "branded"
 OUT_APP = OUT_DIR / "Riviumanagersphone.app"

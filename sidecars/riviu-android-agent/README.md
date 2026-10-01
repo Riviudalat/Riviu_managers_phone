@@ -21,7 +21,7 @@ feature being silently dead on every phone — `pm path` says only whether
 *something* is installed.
 
 Typing stays `ACTION_SET_TEXT`. View stays scrcpy 3.3.4. Evidence stays minicap.
-See `AGENTS.md` §9.51 / §9.52.
+See [Android contract](../../docs/agents/09-fleet-android.md).
 
 ## The APK in `sidecars/android/noarch/` is pinned, and must stay pinned
 
@@ -77,7 +77,7 @@ To ship it:
 4. `python scripts/collect_desktop_ci_artifacts.py verify-android-tools`.
 
 Override at runtime without bundling: `RIVIU_ANDROID_AGENT_APK=<path>`.
-Precedence is `config → env → bundled`, same trap as minicap (§9.27).
+Precedence is `config → env → bundled`, check the current driver resolver before overriding.
 
 ## Deployment
 
@@ -117,7 +117,7 @@ purpose: it is how the host tells "helper too old" apart from "phone cannot", an
 answer has to be readable *before* a token has been provisioned.
 
 This section said "Loopback only" and nothing else for as long as the token existed, which
-is a load-bearing omission rather than a missing detail — AGENTS.md §9.97 flagged that exact
+is a load-bearing omission rather than a missing detail — the historical security review flagged that exact
 sentence as *"một giả định chịu lực và nó sai"*. Verified on hardware: 19/19 phones,
 `no-token=401 / wrong=401 / right=200` per device
 (`docs/verification/security-hardening-20260822/`).
@@ -144,7 +144,7 @@ reintroduce it from this table's history.
 
 Staged images live in the app's external files dir, `inbox/<relativePath>`.
 Push there with `adb push` (from PowerShell or Rust — Git Bash mangles
-`/sdcard`, §9.12). `relativePath` is one segment: letters, digits, `.`, `_`, `-`.
+`/sdcard` paths). `relativePath` is one segment: letters, digits, `.`, `_`, `-`.
 
 ## Verify without devices
 

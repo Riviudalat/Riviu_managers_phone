@@ -1,0 +1,102 @@
+{
+  "repository": "obra/superpowers",
+  "commit": "8ca22dba9a94f28898bbce59f2537ff4d87c747d",
+  "schemaVersion": 1,
+  "distribution": "selective-local-adaptation-not-upstream-copy",
+  "reviewedOn": "2026-10-01",
+  "upstreamFilesReviewed": [
+    {
+      "path": "LICENSE",
+      "sha256": "a37e0e9697144819e1d965176ac4ae5bc3fa02d11e7812036bbcadf6dafe2400",
+      "bytes": 1070,
+      "upstreamPath": "LICENSE"
+    },
+    {
+      "path": "CREATION-LOG.md",
+      "sha256": "c24733a5b1821bd6bed1fc950261f0b9f4e90097e0bbb96459d8179713730789",
+      "bytes": 4257,
+      "upstreamPath": "skills/systematic-debugging/CREATION-LOG.md"
+    },
+    {
+      "path": "SKILL.md",
+      "sha256": "808fc5717aa88ad65efff312b11c186294d3e6ee301afb584e2f86599b137787",
+      "bytes": 9465,
+      "upstreamPath": "skills/systematic-debugging/SKILL.md"
+    },
+    {
+      "path": "condition-based-waiting-example.ts",
+      "sha256": "40ae5ebe497fdf310200e43fe986552546d0a22837c0d39e855db1cfd33eb88e",
+      "bytes": 5054,
+      "upstreamPath": "skills/systematic-debugging/condition-based-waiting-example.ts"
+    },
+    {
+      "path": "condition-based-waiting.md",
+      "sha256": "e89fec8400d6cd50f43407cec9fab50976ba4d55d0ec2eb51c0bd68036b54c26",
+      "bytes": 3516,
+      "upstreamPath": "skills/systematic-debugging/condition-based-waiting.md"
+    },
+    {
+      "path": "defense-in-depth.md",
+      "sha256": "1e175fb86fc357e58c6aebf5441e481e1b7868b4380c0456b63a17eefbd18ba7",
+      "bytes": 3650,
+      "upstreamPath": "skills/systematic-debugging/defense-in-depth.md"
+    },
+    {
+      "path": "find-polluter.sh",
+      "sha256": "dd7b8f13c4cc2a24b33ff87b18da9248f3e1c80a085c3316224f69ff0fa5c43c",
+      "bytes": 1986,
+      "upstreamPath": "skills/systematic-debugging/find-polluter.sh"
+    },
+    {
+      "path": "root-cause-tracing.md",
+      "sha256": "75b933b6a8c40bdb2031b10f21654395b56ec6ab6bc7b018c18d3fe57aeb7fb8",
+      "bytes": 5321,
+      "upstreamPath": "skills/systematic-debugging/root-cause-tracing.md"
+    },
+    {
+      "path": "test-academic.md",
+      "sha256": "fe2ba480d78ac0d686dc025f41c2a32a43d642bf533f91b0c6053a04d35d6486",
+      "bytes": 653,
+      "upstreamPath": "skills/systematic-debugging/test-academic.md"
+    },
+    {
+      "path": "test-pressure-1.md",
+      "sha256": "0b6a915db0054577819834c79be9eb614e97bddba10d73768e1fbe91cfed048a",
+      "bytes": 1900,
+      "upstreamPath": "skills/systematic-debugging/test-pressure-1.md"
+    },
+    {
+      "path": "test-pressure-2.md",
+      "sha256": "b2030aeffba07050e8ad573ddf87486457c4a016a786bb326235bebd856f2016",
+      "bytes": 2283,
+      "upstreamPath": "skills/systematic-debugging/test-pressure-2.md"
+    },
+    {
+      "path": "test-pressure-3.md",
+      "sha256": "96b50a52e2c7989c9cf20fb752c47c1e9a3a70dc362f8f7989f8f5b64dac7708",
+      "bytes": 2692,
+      "upstreamPath": "skills/systematic-debugging/test-pressure-3.md"
+    }
+  ],
+  "installedFiles": [
+    {
+      "path": "LICENSE",
+      "sha256": "a37e0e9697144819e1d965176ac4ae5bc3fa02d11e7812036bbcadf6dafe2400"
+    },
+    {
+      "path": "references/evidence-debugging.md",
+      "sha256": "f895d8a50aaabdd32f7624ca8267d1e208243c00ead1116f30119eebfae16330"
+    },
+    {
+      "path": "SKILL.md",
+      "sha256": "0b26a7482821655afcaca437ad05b7f2dd9bbe481606fb35145e4139a224a19a"
+    }
+  ],
+  "adaptations": [
+    "Entry and references rewritten as a focused local edition; upstream chapters retained only in ignored review staging, not advertised as installed.",
+    "No allowed-tools, hooks, plugin dependencies, shell scripts, pressure fixtures, installation/update/all-features commands.",
+    "Repo ownership, device-effect permissions, pinned toolchain and verification contracts override generic examples.",
+    "Removed secret-enumerating/signing diagnostics, unsafe path-prefix example, direct-effect reproduction and plugin skill invocations."
+  ],
+  "installedHashPolicy": "SHA-256 over installed LF bytes; .gitattributes pins checkout EOL for these two skills."
+}

@@ -113,7 +113,7 @@ impl GoogleOAuthClientConfig {
         ] {
             if let Some(value) = value {
                 anyhow::ensure!(
-                    !value.is_empty()
+                    !value.trim().is_empty()
                         && value.len() <= 4096
                         && !value.chars().any(char::is_control),
                     "Google {name} không hợp lệ"

@@ -9,6 +9,7 @@ the captured frame before the evidence is accepted.
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
 import os
 import struct
@@ -20,6 +21,9 @@ import urllib.request
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
+
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+import comment_evidence
 
 try:
     from PIL import Image
@@ -51,6 +55,9 @@ class ProbeConfig:
     frames_dir: Path
     sidecar: Path
     operator_confirmed_comment_visible: bool
+    candidate_manifest: Path
+    isolated_device_confirmed: bool = False
+    allow_send: bool = False
 
 
 class ControlClient:
@@ -193,6 +200,20 @@ def _send_button_redness(path: Path) -> float:
 
 
 def run(config: ProbeConfig) -> dict[str, Any]:
+    if not config.allow_send or not config.isolated_device_confirmed or not config.udid.strip():
+        raise ProbeError("Explicit Send authorization and an isolated device are required")
+    if config.operator_confirmed_comment_visible:
+        raise ProbeError("Do not pre-confirm a future frame; use --confirm-evidence after this run")
+    manifest = json.loads(config.candidate_manifest.read_text(encoding="utf8"))
+    ipa = config.candidate_manifest.parent / manifest["ipa"]
+    if comment_evidence.digest(ipa) != manifest.get("sha256"):
+        raise ProbeError("Candidate IPA does not match its manifest")
+    identity = {"deviceId": config.udid, "targetBundle": TARGET_BUNDLE,
+                "candidateSha256": comment_evidence.digest(ipa),
+                "manifestSha256": comment_evidence.digest(config.candidate_manifest),
+                "runtimeBindingVerified": False,
+                "commentSha256": hashlib.sha256(config.comment_text.encode("utf8")).hexdigest()}
+    intent = comment_evidence.claim(config.output, config.frames_dir, identity)
     token = os.environ.get(TOKEN_ENV, "").strip()
     if len(token.encode("utf-8")) < 32:
         raise ProbeError(f"{TOKEN_ENV} must contain at least 256 bits")
@@ -234,15 +255,11 @@ def run(config: ProbeConfig) -> dict[str, Any]:
     composer_cleared = sent_redness < armed_redness * 0.6
     if not composer_cleared:
         raise ProbeError("composer did not visibly clear after tapping Send")
-    if not config.operator_confirmed_comment_visible:
-        raise ProbeError(
-            "inspect sent.jpg and rerun with --operator-confirmed-comment-visible"
-        )
 
     evidence = {
         "schemaVersion": 1,
         "environment": LIVE_ENVIRONMENT,
-        "gateStatus": "PASS",
+        "gateStatus": "PENDING_OPERATOR",
         "targetBundle": TARGET_BUNDLE,
         "agentControlUrl": config.control_url,
         "sessionCreatedFresh": True,
@@ -257,32 +274,29 @@ def run(config: ProbeConfig) -> dict[str, Any]:
         "composerClearedAfterSend": True,
         "armedSendButtonRedness": round(armed_redness, 4),
         "sentSendButtonRedness": round(sent_redness, 4),
-        "operatorConfirmedCommentVisible": True,
+        "operatorConfirmedCommentVisible": False,
     }
-    temporary = config.output.with_suffix(config.output.suffix + ".tmp")
-    temporary.write_text(json.dumps(evidence, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
-    os.replace(temporary, config.output)
-    return evidence
+    return comment_evidence.pending(config.output, intent, evidence)
 
 
 def _parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--udid", required=True)
+    parser.add_argument("--udid")
     parser.add_argument("--control-url", default="http://127.0.0.1:18100")
     parser.add_argument("--mjpeg-port", type=int, default=9094)
-    parser.add_argument("--comment-text", required=True)
+    parser.add_argument("--comment-text")
     parser.add_argument("--comment-point", type=_parse_point, default=(343.0, 377.0))
     parser.add_argument("--composer-point", type=_parse_point, default=(120.0, 640.0))
     parser.add_argument("--send-point", type=_parse_point, default=(337.0, 427.0))
     parser.add_argument(
         "--frames-dir",
         type=Path,
-        default=Path("docs/re/riviu-agent/tiktok-comment-live"),
+        default=None,
     )
     parser.add_argument(
         "--output",
         type=Path,
-        default=Path("docs/re/riviu-agent/tiktok-comment-live.json"),
+        default=None,
     )
     parser.add_argument(
         "--sidecar",
@@ -290,12 +304,27 @@ def _parser() -> argparse.ArgumentParser:
         default=Path("sidecars/pymobiledevice3/riviu_pmd.py"),
     )
     parser.add_argument("--operator-confirmed-comment-visible", action="store_true")
+    parser.add_argument("--confirm-evidence", type=Path)
+    parser.add_argument("--run-id")
+    parser.add_argument("--candidate-manifest", type=Path)
+    parser.add_argument("--isolated-device-confirmed", action="store_true")
+    parser.add_argument("--allow-send", action="store_true")
     return parser
 
 
 def main() -> int:
     args = _parser().parse_args()
     try:
+        if args.confirm_evidence:
+            if not args.run_id or not args.operator_confirmed_comment_visible:
+                raise ProbeError("Confirm requires the recorded run ID and an explicit frame review")
+            if args.allow_send or args.udid or args.comment_text:
+                raise ProbeError("Confirmation is offline; do not supply execution arguments")
+            evidence = comment_evidence.confirm(args.confirm_evidence, args.run_id)
+            print(json.dumps({"ok": True, "gateStatus": evidence["gateStatus"], "runId": evidence["runId"]}))
+            return 0
+        if not all((args.udid, args.comment_text, args.output, args.frames_dir, args.candidate_manifest)):
+            raise ProbeError("Execution requires udid, comment-text, output, frames-dir and candidate-manifest")
         config = ProbeConfig(
             udid=args.udid,
             control_url=args.control_url,
@@ -308,9 +337,12 @@ def main() -> int:
             frames_dir=args.frames_dir,
             sidecar=args.sidecar,
             operator_confirmed_comment_visible=args.operator_confirmed_comment_visible,
+            candidate_manifest=args.candidate_manifest,
+            isolated_device_confirmed=args.isolated_device_confirmed,
+            allow_send=args.allow_send,
         )
         evidence = run(config)
-    except ProbeError as exc:
+    except (ProbeError, comment_evidence.EvidenceError, OSError, ValueError, KeyError) as exc:
         print(json.dumps({"ok": False, "error": str(exc)}, ensure_ascii=True))
         return 1
     print(
@@ -318,13 +350,14 @@ def main() -> int:
             {
                 "ok": True,
                 "gateStatus": evidence["gateStatus"],
+                "runId": evidence["runId"],
                 "evidence": str(args.output),
                 "frames": str(args.frames_dir),
             },
             ensure_ascii=True,
         )
     )
-    return 0
+    return 2  # observation saved; operator confirmation remains pending
 
 
 if __name__ == "__main__":

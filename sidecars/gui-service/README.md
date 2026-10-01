@@ -63,6 +63,9 @@ với TM_CCOEFF_NORMED và loại các đỉnh trùng vị trí giữa các tỷ
 `POST /v1/gui/ocr` dùng Tesseract qua `tesserocr==2.10.0`; Windows đóng gói
 Tesseract 5.5.2, các nền tảng khác dùng native library trong wheel đã khóa.
 Wheel macOS hiện yêu cầu macOS 15 trở lên cho OCR; Windows x64 đã có package gate.
+CI desktop hiện chỉ stage/bundle GUI-service trên Windows. Wheel có mặt không
+chứng minh bộ cài macOS mang runtime này; các chức năng phụ thuộc service trên
+macOS còn thiếu package parity.
 `tessdata_fast` có hai bộ `vie` và `eng`, ghim commit và SHA-256 trong
 `riviu_gui/ocr-models.json`. Trước khi chạy dev hãy gọi
 `python sidecars/gui-service/stage_ocr_models.py` từ gốc repo. Build gọi bước này

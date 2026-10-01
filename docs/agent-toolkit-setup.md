@@ -12,6 +12,8 @@ Bộ skill trong repository hướng dẫn chọn, dùng và kiểm chứng côn
 | [riviu-device-diagnostics](../.claude/skills/riviu-device-diagnostics/SKILL.md) | Chẩn đoán transport/session/perception/input/verifier, fixture/headless/live |
 | [run-riviu-managers-phone](../.claude/skills/run-riviu-managers-phone/SKILL.md) | Skill có sẵn của dự án cho build/run/screenshot/kiểm desktop |
 | [Rule định tuyến](../.claude/rules/riviu-toolkit.md) | Nhắc chọn toolkit cho việc đáng kể, giữ quyền và đọc references theo nhu cầu |
+| [rust-best-practices](../.claude/skills/rust-best-practices/SKILL.md) | Bản prose chọn lọc/adapt Apollo: ownership, async, errors, tests; pin và license trong UPSTREAM.json/LICENSE |
+| [systematic-debugging](../.claude/skills/systematic-debugging/SKILL.md) | Bản prose chọn lọc/adapt Superpowers: reproduction, root cause và evidence; không kèm plugin/hooks/scripts |
 
 Đây là **file thật**, không phải symlink/junction tới home của người tạo. Bốn skill `riviu-*` là hướng dẫn tự soạn cho dự án, không phải sản phẩm chính thức của GenFarmer hoặc nhà cung cấp MCP. Bản chuẩn để sửa và review là `.claude/skills/` trong repo; bản runtime `.agents/` của một số host không phải nguồn chuẩn.
 
@@ -51,7 +53,9 @@ Một skill được coi là chuyên môn cần dùng khi nhiệm vụ khớp, n
 
 ### Nguồn bên ngoài đã được chọn
 
-Những liên kết sau là nguồn, **không phải script cài tự động và không khóa phiên bản cho repository này**:
+Hai bản local chọn lọc đã đi cùng repo: Apollo Rust tại commit `222dfc07720227bd0f330bd1b45a9741b1c97bee` và Superpowers debugging tại `8ca22dba9a94f28898bbce59f2537ff4d87c747d`. Mọi file nguồn đã đọc được ghi hash riêng với file installed trong `UPSTREAM.json`; license MIT giữ nguyên. Đây là adaptation viết lại có ghi nguồn, **không phải copy nguyên upstream** hoặc cài qua CLI `skills add`. Không kèm allowed-tools, hooks, script/pressure fixtures hoặc plugin phụ thuộc. Host cần nhận diện lại danh sách skill; file tồn tại không chứng minh tác vụ đã chạy.
+
+Các liên kết còn lại là nguồn tham khảo, **không phải script cài tự động hay quyền cài cả catalog**:
 
 | Nguồn | Phần hữu ích |
 |---|---|

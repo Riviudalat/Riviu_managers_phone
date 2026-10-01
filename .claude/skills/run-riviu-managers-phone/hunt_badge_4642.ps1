@@ -1,8 +1,10 @@
 param(
-  [string]$Serial  = "ce0517155ab38c390d",
+  [string]$Serial,
   [string]$Package = "com.zhiliaoapp.musically",
-  [int]$Rounds     = 22,
+  [int]$Rounds = 1,
   [string]$Out,
+  [switch]$IsolatedDeviceConfirmed,
+  [switch]$AllowSwipe,
   [switch]$ForceStop
 )
 # ASCII source only: PowerShell 5.1 reads this file as the system ANSI codepage, so a literal
@@ -13,7 +15,19 @@ param(
 # an absolute adb path from one machine, a hard-coded scratchpad GUID that had already expired,
 # and a call to `dump_agent.ps1` that exists nowhere in the tree. All three are gone -- the dump
 # is done here, and the only inputs are a serial and a package.
-$ErrorActionPreference = 'Continue'
+$ErrorActionPreference = 'Stop'
+# This flag records operator authorization, not a technical lease proof. Never use
+# this direct-ADB scout alongside a controller that owns the selected device.
+if ([string]::IsNullOrWhiteSpace($Serial) -or -not $IsolatedDeviceConfirmed) {
+  throw 'Pass an exact serial and -IsolatedDeviceConfirmed after releasing its controller. No ADB command was run.'
+}
+if ($Rounds -lt 1 -or $Rounds -gt 50 -or ($Rounds -gt 1 -and -not $AllowSwipe)) {
+  throw 'Rounds must be 1..50; multiple rounds require explicit -AllowSwipe.'
+}
+if ($Package -notmatch '^[A-Za-z0-9_.]+$') { throw 'Invalid package' }
+if (-not $Out -or -not [IO.Path]::IsPathRooted($Out) -or (Test-Path -LiteralPath $Out)) {
+  throw 'Use a new absolute output directory for this authorized scout.'
+}
 
 function Resolve-Adb {
   # Same precedence the app itself uses (crates/android-driver/src/adb.rs): the explicit env
@@ -33,6 +47,10 @@ function Resolve-Adb {
 }
 
 $adb = Resolve-Adb
+function Invoke-ScoutAdb {
+  & $adb @args
+  if ($LASTEXITCODE -ne 0) { throw "ADB scout command failed with exit $LASTEXITCODE; no automatic retry." }
+}
 if (-not $Out) { $Out = Join-Path $env:TEMP "riviu-badge-4642" }
 New-Item -ItemType Directory -Force -Path $Out | Out-Null
 "adb   : $adb"
@@ -46,9 +64,9 @@ function Get-Hierarchy([string]$Destination) {
   # there is no agent to talk to, and the two cannot both hold the accessibility service. Do not
   # run this while the desktop app has the same phone in a live session -- see AGENTS.md on
   # dumping a tree with the app attached.
-  & $adb -s $Serial shell uiautomator dump /sdcard/riviu_hunt.xml | Out-Null
-  & $adb -s $Serial pull /sdcard/riviu_hunt.xml $Destination | Out-Null
-  & $adb -s $Serial shell rm -f /sdcard/riviu_hunt.xml | Out-Null
+  Invoke-ScoutAdb -s $Serial shell uiautomator dump /sdcard/riviu_hunt.xml | Out-Null
+  Invoke-ScoutAdb -s $Serial pull /sdcard/riviu_hunt.xml $Destination | Out-Null
+  Invoke-ScoutAdb -s $Serial shell rm -f /sdcard/riviu_hunt.xml | Out-Null
   if (-not (Test-Path $Destination)) { throw "dump produced no file" }
 }
 
@@ -56,9 +74,9 @@ if ($ForceStop) {
   # The feed on this phone has been parked on one card. A force-stop is the only thing that
   # reliably gives TikTok a fresh For You page. 20s is short of the 40s window AGENTS.md 9.19
   # measured for a cold start reaching the *post* page, which is fine: this only needs the feed.
-  & $adb -s $Serial shell am force-stop $Package
+  Invoke-ScoutAdb -s $Serial shell am force-stop $Package
   Start-Sleep -Seconds 2
-  & $adb -s $Serial shell monkey -p $Package -c android.intent.category.LAUNCHER 1 | Out-Null
+  Invoke-ScoutAdb -s $Serial shell monkey -p $Package -c android.intent.category.LAUNCHER 1 | Out-Null
   "relaunched; waiting for the feed"
   Start-Sleep -Seconds 20
 }
@@ -68,7 +86,7 @@ for ($i = 1; $i -le $Rounds; $i++) {
   $n = "{0:d2}" -f $i
   $xmlPath = Join-Path $Out "$n.xml"
   try { Get-Hierarchy $xmlPath }
-  catch { "  round $n dump failed: " + $_.Exception.Message; continue }
+  catch { throw "Round $n failed; no further device work: $($_.Exception.Message)" }
   $xml = Get-Content $xmlPath -Raw -Encoding UTF8
   $hasPhoto = $xml -match 'text="Photo"'
   $hasAnh   = $xml -match $anhPattern
@@ -76,13 +94,13 @@ for ($i = 1; $i -le $Rounds; $i++) {
   if ($hasPhoto -or $hasAnh) {
     $found++
     # Keep a frame of the card the badge was read on, so the claim is checkable by eye.
-    & $adb -s $Serial shell "screencap -p /sdcard/riviu_badge.png"
-    & $adb -s $Serial pull /sdcard/riviu_badge.png (Join-Path $Out "$n-hit.png") | Out-Null
-    & $adb -s $Serial shell rm -f /sdcard/riviu_badge.png | Out-Null
+    Invoke-ScoutAdb -s $Serial shell "screencap -p /sdcard/riviu_badge.png"
+    Invoke-ScoutAdb -s $Serial pull /sdcard/riviu_badge.png (Join-Path $Out "$n-hit.png") | Out-Null
+    Invoke-ScoutAdb -s $Serial shell rm -f /sdcard/riviu_badge.png | Out-Null
     if ($found -ge 3) { "three sightings, stopping"; break }
   }
-  if ($i -lt $Rounds) {
-    & $adb -s $Serial shell input swipe 540 1600 540 500 220
+  if ($AllowSwipe -and $i -lt $Rounds) {
+    Invoke-ScoutAdb -s $Serial shell input swipe 540 1600 540 500 220
     Start-Sleep -Milliseconds 2600
   }
 }

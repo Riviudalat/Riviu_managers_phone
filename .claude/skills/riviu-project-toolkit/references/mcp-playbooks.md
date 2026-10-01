@@ -48,13 +48,16 @@ Nguồn: `scripts/riviu_agent_mcp.mjs`, `apps/desktop/src-tauri/src/inspector_co
 
 Đường này cần backend/API loopback đã được bật và token hợp lệ trong môi trường. Không hỏi người dùng dán token vào chat; không đọc secret store/DB để kiếm token khi chưa được phép. Biến môi trường chưa có trong shell không chứng minh token không tồn tại ở nơi khác.
 
-Năm tool đã xác minh trong source: `riviu_devices`, `riviu_observe`, `riviu_tap`, `riviu_record`, `riviu_recording`. Phải đối chiếu danh sách runtime khi dùng; không tự suy thêm swipe/type/install/Flow-run MCP.
+Registry hiện có `riviu_devices`, nhóm legacy Inspector và semantic `riviu_v2_*`.
+Dùng [bản đồ controller](../../riviu-phone-automation/references/control-routes.md)
+để chọn begin/end/observe/tap/type/swipe/press/wait_for/expect/screenshot theo schema.
+Source-declared không đồng nghĩa tool đã expose trong phiên.
 
-- Observe mở/mượn session và lưu artifact host; record ghi DB.
-- Tap resolve selector duy nhất, lưu intent, chụp trước-sau; capture lỗi sau tap nghĩa có thể đã tác động. Giữ trạng thái **chưa xác định**, readback/reconcile qua controller được phép trước; không tự replay tap/type/submit hoặc ép thành failed để retry.
-- UI verified không đồng nghĩa Post/Comment business proof.
-- Ownership conflict thì dừng; không quay sang Mobile MCP/ADB để lách.
-- Swipe/text và Flow có route/API production riêng; chỉ dùng sau khi xác minh source/payload và quyền, không bịa tool.
+- Semantic refs thuộc caller/device/session epoch; không tái dùng sau mutation hoặc observe mới.
+- Tap cần navigation engine cho phép; Post/Send vẫn qua business engine, không qua ref UI.
+- Observe có session/artifact, record có DB write. End nhả sau drain, không cancel effect giữa chừng.
+- Lỗi hậu kiểm sau input là uncertain; chỉ đối soát, không replay để có PASS.
+- Ownership conflict thì dừng, không fallback ADB/Mobile MCP. Flow/install không có MCP tool riêng.
 
 **Ưu tiên bổ sung khi có nhu cầu phone production:** nối adapter này hơn là thêm controller cạnh tranh. Không đăng ký rồi báo sẵn nếu backend/token/tool exposure chưa được xác minh.
 

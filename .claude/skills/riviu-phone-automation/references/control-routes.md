@@ -6,15 +6,33 @@ Các đường dẫn dưới đây tính từ **worktree Riviu hiện tại**, p
 
 Nguồn: `scripts/riviu_agent_mcp.mjs`, `apps/desktop/src-tauri/src/inspector_commands.rs`.
 
-| Tool đã xác minh | Hành vi | Giới hạn |
-|---|---|---|
-| `riviu_devices` | Đọc danh sách device từ `GET /v1/devices` | Vẫn cần backend/API và token; không phải quét bằng controller khác |
-| `riviu_observe` | Chụp mới và trả phần tử qua `POST /v1/inspector/observe` | Có session và ghi artifact host |
-| `riviu_tap` | Resolve selector duy nhất, tap một lần, capture trước-sau | Cần `udid`, `selector.package` và thuộc tính chọn đúng; có thể đã tap dù hậu kiểm lỗi |
-| `riviu_record` | Bật/tắt bản ghi persistent theo thiết bị | Ghi DB; có `udid`, `active`, tên theo schema/handler hiện hành |
-| `riviu_recording` | Đọc các bước đã ghi | Không phải thực thi bản ghi |
+### Semantic v2 (khuyến nghị)
 
-Adapter hiện không expose `riviu_swipe`, `riviu_type`, `riviu_install` hoặc tool chạy Flow. Không bịa các tên đó.
+Nguồn registry là `scripts/riviu_agent_mcp.mjs`; phải đối chiếu tool thực sự expose
+trong phiên, không suy có server/auth từ file.
+
+| Tool | Contract |
+|---|---|
+| `riviu_devices` | Đọc roster qua API Riviu |
+| `riviu_v2_begin`, `riviu_v2_end` | Caller-owned session, không giành máy busy; end drain effect |
+| `riviu_v2_observe` | Semantic nodes, unknown states, opaque refs; observe mới bỏ refs cũ |
+| `riviu_v2_tap` | Fresh unique ref + navigationTarget được engine duyệt; không cấp quyền Post/Send |
+| `riviu_v2_type` | Textbox non-password đã focus; exact readback, không implicit submit/newline |
+| `riviu_v2_swipe` | Vùng scrollable vừa đo, không raw coordinates |
+| `riviu_v2_press` | Back/Home; ACK không là verified |
+| `riviu_v2_wait_for`, `riviu_v2_expect` | Read-only wait/assert; unknown/ambiguous không thỏa expectation |
+| `riviu_v2_screenshot` | Observation rồi ảnh tuần tự, không atomic; bỏ refs |
+
+Idle/ref lifetime hữu hạn (hiện60giây); token thuộc caller/device/session epoch.
+Mutation/lỗi/quan sát mới làm refs mất hiệu lực. `dispatched` khác `verified`; timeout
+sau effect giữ uncertainty, không tự replay. Luôn end khi xong; không đổi caller để né lease.
+
+### Legacy tương thích
+
+`riviu_observe`, `riviu_tap`, `riviu_record`, `riviu_recording` vẫn có cho Inspector/
+recording cũ. Observe có session/artifact, record ghi DB, tap có effect. Không dùng
+legacy để bỏ guard semantic. Adapter không có tool install hoặc chạy Flow; Flow có
+API production riêng. Không bịa tên không có trong runtime tool list.
 
 Endpoint mặc định trong source là loopback, cấu hình qua `RIVIU_API_URL`; auth qua `RIVIU_API_TOKEN`. Token phải đến từ cấu hình hợp lệ đã có; không in giá trị, không hardcode, không gọi endpoint remote. Không khởi server chỉ để kiểm tra skill đã cài.
 

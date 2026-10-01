@@ -2,9 +2,8 @@
 <#
     Driver for the Riviu Manager Tauri 2 desktop app (Windows).
 
-    The app is a WebView2 window created from Rust (tauri.conf.json sets
-    "create": false, lib.rs builds it), so there is no CDP endpoint and no
-    Playwright _electron handle. The only reliable handle is Win32: raise the
+    Debug background mode offers loopback CDP; prefer it for isolated renderer tests.
+    This optional native driver has no Playwright _electron handle. It can raise the
     window by z-order, capture the screen rectangle, and inject real mouse /
     keyboard input. SetForegroundWindow is refused for a non-foreground caller,
     which is why every visual command goes through SetWindowPos(HWND_TOPMOST).
@@ -14,7 +13,7 @@
         -File .claude/skills/run-riviu-managers-phone/driver.ps1 <command> [args]
 
     Commands:
-      launch [--mock]      start `npm run tauri:dev` detached; returns when the window exists
+      launch [--smoke|--live-confirmed]  isolated UI smoke by default; live requires authorization
       wait [seconds]       block until the window reports Responding (default 300)
       status               processes, ports, usbmux, sidecars, python/cargo resolution
       shot <name>          PNG of the app window -> target/run-skill/<name>.png
@@ -25,7 +24,7 @@
       log [lines]          tail the tauri dev log (default 40)
       devices              run the pymobiledevice3 sidecar `list` under a hard timeout
       usbmux               start Apple's usbmux provider and report port 27015
-      stop                 WM_CLOSE the window, then reap the tauri-dev / cmd launcher
+      stop                 WM_CLOSE only the recorded owned app; never force-kill
 
     Screenshots and the dev log land in target/run-skill/ (target/ is gitignored).
 
@@ -48,7 +47,8 @@ $RepoRoot = (Resolve-Path (Join-Path $PSScriptRoot '..\..\..')).Path
 $AppDir   = Join-Path $RepoRoot 'apps\desktop'
 $OutDir   = Join-Path $RepoRoot 'target\run-skill'
 $DevLog   = Join-Path $OutDir 'tauri-dev.log'
-$LauncherPidFile = Join-Path $OutDir 'launcher.pid'
+$OwnerFile = Join-Path $OutDir 'owner.json'
+. (Join-Path $PSScriptRoot 'process-policy.ps1')
 $ProcName = 'riviu-managers-phone'
 $AppTitle = 'Riviu Manager'
 
@@ -193,14 +193,65 @@ function Get-DriverPath {
     return (($parts + $env:PATH) -join ';')
 }
 
-function Get-AppProcess {
-    Get-Process -Name $ProcName -ErrorAction SilentlyContinue |
-        Where-Object { [RiviuWin32]::FindAppWindow([uint32]$_.Id, $AppTitle) -ne [IntPtr]::Zero } |
-        Select-Object -First 1
+function Get-ProcessInventory {
+    @(Get-CimInstance Win32_Process -ErrorAction Stop | ForEach-Object {
+        [pscustomobject]@{
+            Id = [int]$_.ProcessId; ParentId = [int]$_.ParentProcessId; Name = $_.Name
+            Created = if ($_.CreationDate) { ([long]($_.CreationDate.ToUniversalTime().Ticks / 10000)).ToString() } else { '' }
+            ExecutablePath = $_.ExecutablePath
+        }
+    })
+}
+
+function Save-Owner($Record) {
+    $temporary = "$OwnerFile.$([guid]::NewGuid().ToString('N')).tmp"
+    $Record | ConvertTo-Json -Depth 6 | Set-Content -LiteralPath $temporary -Encoding UTF8
+    Move-Item -LiteralPath $temporary -Destination $OwnerFile -Force
 }
 
 function Get-AppProcessAny {
-    Get-Process -Name $ProcName -ErrorAction SilentlyContinue | Select-Object -First 1
+    if (-not (Test-Path -LiteralPath $OwnerFile)) {
+        throw 'No owned application record. Use launch --smoke; do not attach by process name.'
+    }
+    $record = Get-Content -LiteralPath $OwnerFile -Raw | ConvertFrom-Json
+    $actual = Select-RiviuProcess $record (Get-ProcessInventory) $RepoRoot
+    if (-not $actual) { return $null }
+    if (-not $record.App) { $record.App = $actual; Save-Owner $record }
+    $proc = Get-Process -Id $actual.Id -ErrorAction Stop
+    if (([long]($proc.StartTime.ToUniversalTime().Ticks / 10000)).ToString() -cne $actual.Created -or
+        -not [string]::Equals($proc.Path, $actual.ExecutablePath, [StringComparison]::OrdinalIgnoreCase)) {
+        throw 'Application identity changed during lookup.'
+    }
+    return $proc
+}
+
+function Get-AppProcess {
+    $proc = Get-AppProcessAny
+    if ($proc -and [RiviuWin32]::FindAppWindow([uint32]$proc.Id, $AppTitle) -ne [IntPtr]::Zero) { return $proc }
+}
+
+function Assert-OwnedWindow($Window) {
+    $proc = Get-AppProcessAny
+    if (-not $proc -or $proc.Id -ne $Window.Process.Id -or
+        [RiviuWin32]::FindAppWindow([uint32]$proc.Id, $AppTitle) -ne $Window.Handle) {
+        throw 'Window ownership changed; no input or close is allowed.'
+    }
+}
+
+function Assert-InputPoint($Window, [int]$X, [int]$Y) {
+    Assert-OwnedWindow $Window
+    if ($X -lt $Window.Left -or $Y -lt $Window.Top -or
+        $X -ge ($Window.Left + $Window.Width) -or $Y -ge ($Window.Top + $Window.Height)) {
+        throw 'Input is outside the owned window.'
+    }
+    $point = New-Object 'RiviuWin32+POINT'; $point.X = $X; $point.Y = $Y
+    $hit = [RiviuWin32]::GetAncestor([RiviuWin32]::WindowFromPoint($point), [RiviuWin32]::GA_ROOT)
+    if ($hit -ne $Window.Handle) { throw 'Input target is occluded or belongs to another window.' }
+}
+function Assert-CursorTarget($Window) {
+    $point = New-Object 'RiviuWin32+POINT'
+    [void][RiviuWin32]::GetCursorPos([ref]$point)
+    Assert-InputPoint $Window $point.X $point.Y
 }
 
 function Get-AppWindow {
@@ -233,8 +284,11 @@ function Test-AppForeground {
 
 function Invoke-RawClick {
     param([int]$ScreenX, [int]$ScreenY)
+    Assert-InputPoint $script:OperationWindow $ScreenX $ScreenY
     [void][RiviuWin32]::SetCursorPos($ScreenX, $ScreenY)
     Start-Sleep -Milliseconds 250
+    Assert-OwnedWindow $script:OperationWindow
+    Assert-CursorTarget $script:OperationWindow
     [RiviuWin32]::mouse_event([RiviuWin32]::MOUSEEVENTF_LEFTDOWN, 0, 0, 0, [IntPtr]::Zero)
     Start-Sleep -Milliseconds 90
     [RiviuWin32]::mouse_event([RiviuWin32]::MOUSEEVENTF_LEFTUP, 0, 0, 0, [IntPtr]::Zero)
@@ -246,6 +300,7 @@ function Enable-AppActive {
     # first, then the real click lands. Do NOT activate by clicking the target -
     # that double-fires whatever is under it.
     param([Parameter(Mandatory = $true)]$Window)
+    Assert-OwnedWindow $Window
     if (Test-AppForeground -Window $Window) { return }
     Invoke-RawClick -ScreenX ($Window.Left + [int]($Window.Width / 2)) -ScreenY ($Window.Top + 15)
     Start-Sleep -Milliseconds 600
@@ -293,6 +348,8 @@ function Use-RaisedWindow {
         [switch]$AllowOccluded
     )
     $win = Get-AppWindow
+    Assert-OwnedWindow $win
+    $script:OperationWindow = $win
     if ([RiviuWin32]::IsIconic($win.Handle)) {
         Write-Step 'window was minimised - restoring'
         [void][RiviuWin32]::ShowWindow($win.Handle, [RiviuWin32]::SW_RESTORE)
@@ -320,25 +377,9 @@ function Use-RaisedWindow {
     # A wrong screenshot is worse than no screenshot, so prove we are on top.
     $blocker = Get-Occluder -Window $win
     if ($blocker) {
-        Write-Step "occluded by '$($blocker.Title)' at $($blocker.Point) - clicking title bar to raise"
-        Invoke-RawClick -ScreenX ($win.Left + [int]($win.Width / 2)) -ScreenY ($win.Top + 15)
-        Start-Sleep -Milliseconds 900
-        [void][RiviuWin32]::SetWindowPos($win.Handle, $HWND_TOPMOST, 0, 0, 0, 0, [RiviuWin32]::SWP_RAISE)
-        Start-Sleep -Milliseconds 700
-        $blocker = Get-Occluder -Window $win
-        if ($blocker) {
-            if (-not $AllowOccluded) {
-                [void][RiviuWin32]::SetWindowPos($win.Handle, $HWND_NOTOPMOST, 0, 0, 0, 0, [RiviuWin32]::SWP_RAISE)
-                throw ("app window is covered by '{0}' at {1}; refusing to send input to it. " +
-                       'Minimise or move that window and retry.') -f $blocker.Title, $blocker.Point
-            }
-            Write-Step "still covered by '$($blocker.Title)' - capturing with PrintWindow instead of the screen"
-            $win | Add-Member -NotePropertyName Occluded -NotePropertyValue $true -Force
-        }
+        throw 'Owned window is occluded; refusing global input. Use scoped CDP for renderer checks.'
     }
-    if (-not ($win.PSObject.Properties.Name -contains 'Occluded')) {
-        $win | Add-Member -NotePropertyName Occluded -NotePropertyValue $false -Force
-    }
+    Assert-OwnedWindow $win
 
     try { & $Body $win }
     finally {
@@ -366,46 +407,20 @@ function Save-WindowPng {
     $bitmap = New-Object System.Drawing.Bitmap $Window.Width, $Window.Height
     $graphics = [System.Drawing.Graphics]::FromImage($bitmap)
     try {
-        if ($Window.Occluded) {
-            # PW_RENDERFULLCONTENT (2) - asks the window to render itself, so z-order
-            # and whatever is on top of it stop mattering.
-            $hdc = $graphics.GetHdc()
-            try { $ok = [RiviuWin32]::PrintWindow($Window.Handle, $hdc, 2) }
-            finally { $graphics.ReleaseHdc($hdc) }
-            if (-not $ok) { throw 'PrintWindow failed and the window is occluded - move the covering window and retry' }
-            if (Test-BitmapBlank -Bitmap $bitmap) {
-                throw 'PrintWindow returned a blank frame (GPU-composited webview) - move the covering window and retry'
-            }
+        Assert-OwnedWindow $Window
+        # Capture only this HWND; never fall back to desktop pixels.
+        $hdc = $graphics.GetHdc()
+        try { $ok = [RiviuWin32]::PrintWindow($Window.Handle, $hdc, 2) }
+        finally { $graphics.ReleaseHdc($hdc) }
+        if (-not $ok -or (Test-BitmapBlank -Bitmap $bitmap)) {
+            throw 'Owned-window capture unavailable/blank; use scoped CDP, not a desktop fallback.'
         }
-        else {
-            $graphics.CopyFromScreen($Window.Left, $Window.Top, 0, 0,
-                (New-Object System.Drawing.Size($Window.Width, $Window.Height)))
-        }
+        Assert-OwnedWindow $Window
         $bitmap.Save($Path, [System.Drawing.Imaging.ImageFormat]::Png)
     }
     finally { $graphics.Dispose(); $bitmap.Dispose() }
 }
 
-function Get-RegionSignature {
-    # SHA-256 of a small screen patch, used to prove an input actually changed.
-    # Never point this at the device tile: a live MJPEG stream changes every frame.
-    param([Parameter(Mandatory = $true)]$Window, [int]$X, [int]$Y, [int]$W = 280, [int]$H = 32)
-    $left = [math]::Max($Window.Left, $Window.Left + $X - [int]($W / 2))
-    $top  = [math]::Max($Window.Top, $Window.Top + $Y - [int]($H / 2))
-    $w = [math]::Min($W, $Window.Left + $Window.Width - $left)
-    $h = [math]::Min($H, $Window.Top + $Window.Height - $top)
-    if ($w -le 0 -or $h -le 0) { return $null }
-    $bmp = New-Object System.Drawing.Bitmap $w, $h
-    $graphics = [System.Drawing.Graphics]::FromImage($bmp)
-    try {
-        $graphics.CopyFromScreen($left, $top, 0, 0, (New-Object System.Drawing.Size($w, $h)))
-        $stream = New-Object System.IO.MemoryStream
-        $bmp.Save($stream, [System.Drawing.Imaging.ImageFormat]::Png)
-        $sha = [System.Security.Cryptography.SHA256]::Create()
-        return [BitConverter]::ToString($sha.ComputeHash($stream.ToArray()))
-    }
-    finally { $graphics.Dispose(); $bmp.Dispose() }
-}
 
 function Test-PortListening([int]$Port) {
     return [bool](Get-NetTCPConnection -LocalPort $Port -State Listen -ErrorAction SilentlyContinue)
@@ -414,44 +429,70 @@ function Test-PortListening([int]$Port) {
 # --------------------------------------------------------------------- commands
 
 function Invoke-Launch {
-    if (Get-AppProcessAny) { Write-Step 'app already running - use stop first'; return }
-
-    $useMock = $Rest -contains '--mock'
-    if (Test-Path $DevLog) { Remove-Item $DevLog -Force }
-
-    $py = Resolve-Python312
-    if (-not $py) { Write-Warning 'Python 3.12 not found; the pymobiledevice3 sidecar will not work' }
+    $mode = Get-RiviuLaunchMode @($Rest)
+    # Never stop/attach an existing instance to make room for this helper.
+    if (Get-Process -Name $ProcName -ErrorAction SilentlyContinue) {
+        throw 'An app is already running. Leave it untouched; close it explicitly before launching a new instance.'
+    }
+    if (Test-PortListening 5173) { throw 'Port 5173 is in use; refusing an unrelated dev server.' }
+    foreach ($name in @('RIVIU_UI_SMOKE', 'RIVIU_UI_SMOKE_DIR', 'RIVIU_MOCK_DEVICES',
+        'RIVIU_MOCK_DATA_DIR', 'RIVIU_DEV_DATA_DIR', 'RIVIU_DEV_BACKGROUND',
+        'RIVIU_DEV_CDP_PORT', 'RIVIU_DEV_MANUAL_ACCEPTANCE',
+        'WEBVIEW2_ADDITIONAL_BROWSER_ARGUMENTS', 'WEBVIEW2_USER_DATA_FOLDER',
+        'WEBVIEW2_BROWSER_EXECUTABLE_FOLDER', 'WEBVIEW2_RELEASE_CHANNEL_PREFERENCE')) {
+        if ([Environment]::GetEnvironmentVariable($name)) { throw "Clear inherited $name before an explicit launch." }
+    }
+    $runId = [guid]::NewGuid().ToString('N')
+    $runDir = Join-Path $OutDir $runId
+    New-Item -ItemType Directory -Path $runDir | Out-Null
+    $DevLog = Join-Path $runDir 'tauri-dev.log'
     $env:PATH = Get-DriverPath
-    if ($useMock) { $env:RIVIU_MOCK_DEVICES = '1'; Write-Step 'RIVIU_MOCK_DEVICES=1 (fake driver)' }
-
-    Write-Step "python3 -> $((Get-Command python3 -ErrorAction SilentlyContinue).Source)"
-    Write-Step "cargo   -> $((Get-Command cargo -ErrorAction SilentlyContinue).Source)"
-    Write-Step "launching npm run tauri:dev (log: $DevLog)"
-
-    # cmd.exe wrapper keeps the app alive after this PowerShell exits and gives
-    # us a single file with both npm and cargo output.
-    $launcher = Start-Process -FilePath 'cmd.exe' `
-        -ArgumentList '/c', "npm run tauri:dev > `"$DevLog`" 2>&1" `
-        -WorkingDirectory $AppDir -WindowStyle Hidden -PassThru
-    Write-Step "launcher pid=$($launcher.Id)"
-    Set-Content -Path $LauncherPidFile -Value $launcher.Id -Encoding ascii
-
-    # First run compiles ~460 crates; subsequent runs only relink.
+    if ($mode -eq 'smoke') {
+        # The backend, not this script, claims the as-yet nonexistent scratch directory.
+        $env:RIVIU_UI_SMOKE = '1'
+        $env:RIVIU_UI_SMOKE_DIR = Join-Path $runDir 'scratch'
+        $env:RIVIU_MOCK_DEVICES = '1'
+        $env:RIVIU_DEV_BACKGROUND = '1'
+        $listener = [System.Net.Sockets.TcpListener]::new([System.Net.IPAddress]::Loopback, 0)
+        $listener.Start(); $port = $listener.LocalEndpoint.Port; $listener.Stop()
+        $env:RIVIU_DEV_CDP_PORT = [string]$port
+    }
+    Write-Step "launch mode=$mode (log: $DevLog)"
+    try {
+        $launcher = Start-Process -FilePath 'cmd.exe' `
+            -ArgumentList '/c', "npm run tauri:dev > `"$DevLog`" 2>&1" `
+            -WorkingDirectory $AppDir -WindowStyle Hidden -PassThru
+    } finally {
+        if ($mode -eq 'smoke') {
+            foreach ($name in @('RIVIU_UI_SMOKE', 'RIVIU_UI_SMOKE_DIR', 'RIVIU_MOCK_DEVICES', 'RIVIU_DEV_BACKGROUND', 'RIVIU_DEV_CDP_PORT')) {
+                [Environment]::SetEnvironmentVariable($name, $null, 'Process')
+            }
+        }
+    }
+    $identity = @(Get-ProcessInventory | Where-Object { $_.Id -eq $launcher.Id })
+    if ($identity.Count -ne 1 -or -not $identity[0].ExecutablePath) { throw 'Cannot prove launcher identity; do not guess a process to stop.' }
+    $target = if ($env:CARGO_TARGET_DIR) { [IO.Path]::GetFullPath($env:CARGO_TARGET_DIR) } else { Join-Path $RepoRoot 'target' }
+    $record = [pscustomobject]@{
+        Schema = 1; RepoRoot = $RepoRoot; RunId = $runId; Mode = $mode
+        Launcher = $identity[0]; App = $null; Log = $DevLog
+        Scratch = if ($mode -eq 'smoke') { Join-Path $runDir 'scratch' } else { $null }
+        CdpPort = if ($mode -eq 'smoke') { $port } else { $null }
+        ExpectedPaths = @((Join-Path $target 'debug/riviu-managers-phone.exe'), (Join-Path $target 'x86_64-pc-windows-msvc/debug/riviu-managers-phone.exe'))
+    }
+    Save-Owner $record
     for ($i = 0; $i -lt 200; $i++) {
         Start-Sleep -Seconds 3
         if (Get-AppProcess) {
             $win = Get-AppWindow
-            Write-Step ("window up after ~{0}s: pid={1} rect={2},{3} {4}x{5}" -f `
-                (($i + 1) * 3), $win.Process.Id, $win.Left, $win.Top, $win.Width, $win.Height)
+    Assert-OwnedWindow $win
+    $script:OperationWindow = $win
+            Write-Step "owned window pid=$($win.Process.Id); mode=$mode; CDP port=$($record.CdpPort)"
             return
         }
-        if ($launcher.HasExited) {
-            Write-Step "launcher exited early (code $($launcher.ExitCode)); last log lines:"
-            Invoke-Log
-            throw 'tauri dev failed to start'
-        }
+        $launcher.Refresh()
+        if ($launcher.HasExited) { throw "Launcher exited; inspect $DevLog. No automatic retry." }
     }
-    throw 'window did not appear within 600s'
+    throw "Startup deadline exceeded; inspect $DevLog. No process was killed or retried."
 }
 
 function Invoke-Wait {
@@ -506,7 +547,7 @@ function Invoke-Status {
         ForEach-Object { Write-Host "usbmux proc  : AppleMobileDeviceProcess pid=$($_.Id)" }
     Get-CimInstance Win32_Process -Filter "Name='python3.exe' OR Name='python.exe'" -ErrorAction SilentlyContinue |
         Where-Object { $_.CommandLine -like '*riviu_pmd.py*' } |
-        ForEach-Object { Write-Host "sidecar      : pid=$($_.ProcessId) $($_.CommandLine)" }
+        ForEach-Object { Write-Host "sidecar      : pid=$($_.ProcessId) (arguments omitted)" }
 }
 
 function Invoke-Shot {
@@ -555,6 +596,8 @@ function Invoke-RightClick {
         Write-Step "rightclick window($x,$y) -> screen($sx,$sy)"
         [void][RiviuWin32]::SetCursorPos($sx, $sy)
         Start-Sleep -Milliseconds 250
+        Assert-OwnedWindow $script:OperationWindow
+        Assert-CursorTarget $script:OperationWindow
         [RiviuWin32]::mouse_event([RiviuWin32]::MOUSEEVENTF_RIGHTDOWN, 0, 0, 0, [IntPtr]::Zero)
         Start-Sleep -Milliseconds 90
         [RiviuWin32]::mouse_event([RiviuWin32]::MOUSEEVENTF_RIGHTUP, 0, 0, 0, [IntPtr]::Zero)
@@ -590,6 +633,8 @@ function Invoke-MenuShot {
         param($win)
         [void][RiviuWin32]::SetCursorPos($win.Left + $tx, $win.Top + $ty)
         Start-Sleep -Milliseconds 250
+        Assert-OwnedWindow $script:OperationWindow
+        Assert-CursorTarget $script:OperationWindow
         [RiviuWin32]::mouse_event([RiviuWin32]::MOUSEEVENTF_RIGHTDOWN, 0, 0, 0, [IntPtr]::Zero)
         Start-Sleep -Milliseconds 90
         [RiviuWin32]::mouse_event([RiviuWin32]::MOUSEEVENTF_RIGHTUP, 0, 0, 0, [IntPtr]::Zero)
@@ -621,11 +666,15 @@ function Invoke-MenuSearch {
         param($win)
         [void][RiviuWin32]::SetCursorPos($win.Left + $tx, $win.Top + $ty)
         Start-Sleep -Milliseconds 250
+        Assert-OwnedWindow $script:OperationWindow
+        Assert-CursorTarget $script:OperationWindow
         [RiviuWin32]::mouse_event([RiviuWin32]::MOUSEEVENTF_RIGHTDOWN, 0, 0, 0, [IntPtr]::Zero)
         Start-Sleep -Milliseconds 90
         [RiviuWin32]::mouse_event([RiviuWin32]::MOUSEEVENTF_RIGHTUP, 0, 0, 0, [IntPtr]::Zero)
         Start-Sleep -Milliseconds 900
         Write-Step "menusearch tile($tx,$ty) query='$query'"
+        Assert-OwnedWindow $script:OperationWindow
+        if (-not (Test-AppForeground -Window $script:OperationWindow)) { throw "Foreground changed; refusing keys." }
         [System.Windows.Forms.SendKeys]::SendWait($query)
         Start-Sleep -Milliseconds 700
         # The first result sits 88 px below the right-click point: 22 for the device name,
@@ -684,6 +733,8 @@ function Invoke-Scroll {
         $delta = -120 * $notches
         $data = [uint32](([int64]$delta) -band ([int64]4294967295))
         Write-Step "scroll window($x,$y) -> screen($sx,$sy) notches=$notches"
+        Assert-OwnedWindow $script:OperationWindow
+        Assert-CursorTarget $script:OperationWindow
         [RiviuWin32]::mouse_event([uint32]0x0800, 0, 0, $data, [IntPtr]::Zero)
         Start-Sleep -Milliseconds 600
     }
@@ -691,34 +742,7 @@ function Invoke-Scroll {
 }
 
 function Invoke-CtrlScroll {
-    # Ctrl held across a wheel notch — the app's zoom gesture (`wheelWantsZoom` is `ctrlKey`).
-    # A separate `type "^"` cannot do this: SendKeys' modifier applies to the keystroke it
-    # prefixes, not to a mouse event that arrives afterwards.
-    if ($Rest.Count -lt 2) { throw 'usage: driver.ps1 ctrlscroll <x> <y> [notches]  (window-relative; +in/-out)' }
-    $x = [int]$Rest[0]; $y = [int]$Rest[1]
-    $notches = if ($Rest.Count -ge 3) { [int]$Rest[2] } else { 3 }
-    $saved = New-Object 'RiviuWin32+POINT'
-    [void][RiviuWin32]::GetCursorPos([ref]$saved)
-    Use-RaisedWindow -SettleMs 900 -Activate -Body {
-        param($win)
-        $sx = $win.Left + $x; $sy = $win.Top + $y
-        [void][RiviuWin32]::SetCursorPos($sx, $sy)
-        Start-Sleep -Milliseconds 200
-        Write-Step "ctrl+scroll window($x,$y) notches=$notches"
-        [RiviuWin32]::keybd_event([RiviuWin32]::VK_CONTROL, 0, 0, [IntPtr]::Zero)
-        try {
-            # Positive notches zoom IN, so the delta is positive (wheel away from the user);
-            # `stepZoom` reads `deltaY < 0` as in, and the OS reports the opposite sign.
-            $delta = 120 * $notches
-            $data = [uint32](([int64]$delta) -band ([int64]4294967295))
-            [RiviuWin32]::mouse_event([uint32]0x0800, 0, 0, $data, [IntPtr]::Zero)
-            Start-Sleep -Milliseconds 500
-        }
-        finally {
-            [RiviuWin32]::keybd_event([RiviuWin32]::VK_CONTROL, 0, [RiviuWin32]::KEYEVENTF_KEYUP, [IntPtr]::Zero)
-        }
-    }
-    [void][RiviuWin32]::SetCursorPos($saved.X, $saved.Y)
+    throw 'Native modifier-held scroll is unavailable; use scoped CDP on an isolated UI smoke.'
 }
 
 function Invoke-DblClick {
@@ -744,8 +768,12 @@ function Invoke-DblClick {
         # between them, which is well inside GetDoubleClickTime on any setting.
         $dctime = [RiviuWin32]::GetDoubleClickTime()
         Write-Step "double-click interval is ${dctime}ms; sending both clicks with no gap"
+        Assert-OwnedWindow $script:OperationWindow
+        Assert-CursorTarget $script:OperationWindow
         [RiviuWin32]::mouse_event([RiviuWin32]::MOUSEEVENTF_LEFTDOWN, 0, 0, 0, [IntPtr]::Zero)
         [RiviuWin32]::mouse_event([RiviuWin32]::MOUSEEVENTF_LEFTUP, 0, 0, 0, [IntPtr]::Zero)
+        Assert-OwnedWindow $script:OperationWindow
+        Assert-CursorTarget $script:OperationWindow
         [RiviuWin32]::mouse_event([RiviuWin32]::MOUSEEVENTF_LEFTDOWN, 0, 0, 0, [IntPtr]::Zero)
         [RiviuWin32]::mouse_event([RiviuWin32]::MOUSEEVENTF_LEFTUP, 0, 0, 0, [IntPtr]::Zero)
         Start-Sleep -Milliseconds 1200
@@ -754,88 +782,38 @@ function Invoke-DblClick {
 }
 
 function Invoke-Drag {
-    if ($Rest.Count -lt 4) { throw 'usage: driver.ps1 drag <x1> <y1> <x2> <y2> [steps] [stepMs]   (window-relative)' }
-    $x1 = [int]$Rest[0]; $y1 = [int]$Rest[1]; $x2 = [int]$Rest[2]; $y2 = [int]$Rest[3]
-    $steps  = if ($Rest.Count -ge 5) { [int]$Rest[4] } else { 20 }
-    $stepMs = if ($Rest.Count -ge 6) { [int]$Rest[5] } else { 16 }
-    $saved = New-Object 'RiviuWin32+POINT'
-    [void][RiviuWin32]::GetCursorPos([ref]$saved)
-    # One process, like `fill`: a drag split across invocations is a press and a release
-    # with no relationship. And the intermediate moves are the whole point -- `click` only
-    # ever produces pointerdown/pointerup, so it cannot exercise a path at all.
-    Use-RaisedWindow -SettleMs 900 -Activate -Body {
-        param($win)
-        Write-Step "drag window($x1,$y1)->($x2,$y2) in $steps steps of ${stepMs}ms"
-        [void][RiviuWin32]::SetCursorPos(($win.Left + $x1), ($win.Top + $y1))
-        Start-Sleep -Milliseconds 120
-        [RiviuWin32]::mouse_event([RiviuWin32]::MOUSEEVENTF_LEFTDOWN, 0, 0, 0, [IntPtr]::Zero)
-        Start-Sleep -Milliseconds 60
-        for ($i = 1; $i -le $steps; $i++) {
-            $t = $i / $steps
-            # Ease-in-out, so the gesture has a velocity profile rather than a constant one
-            # -- a straight constant drag would pass a test that a real finger would fail.
-            $e = if ($t -lt 0.5) { 2 * $t * $t } else { 1 - [Math]::Pow(-2 * $t + 2, 2) / 2 }
-            $x = [int]($x1 + ($x2 - $x1) * $e)
-            $y = [int]($y1 + ($y2 - $y1) * $e)
-            [void][RiviuWin32]::SetCursorPos(($win.Left + $x), ($win.Top + $y))
-            [RiviuWin32]::mouse_event([RiviuWin32]::MOUSEEVENTF_MOVE, 0, 0, 0, [IntPtr]::Zero)
-            Start-Sleep -Milliseconds $stepMs
-        }
-        [RiviuWin32]::mouse_event([RiviuWin32]::MOUSEEVENTF_LEFTUP, 0, 0, 0, [IntPtr]::Zero)
-        Start-Sleep -Milliseconds 600
-    }
-    [void][RiviuWin32]::SetCursorPos($saved.X, $saved.Y)
+    throw 'Native drag is unavailable; use scoped CDP on an isolated UI smoke.'
+}
+
+function Send-OwnedKeys {
+    param([Parameter(Mandatory = $true)]$Window, [Parameter(Mandatory = $true)][string]$Sequence)
+    Assert-OwnedWindow $Window
+    if (-not (Test-AppForeground -Window $Window)) { throw 'Foreground changed; no keys sent.' }
+    [System.Windows.Forms.SendKeys]::SendWait($Sequence)
+    Write-Step 'Input dispatched once; content omitted. Value is not verified; observe before any retry.'
 }
 
 function Invoke-Fill {
     if ($Rest.Count -lt 3) { throw 'usage: driver.ps1 fill <x> <y> <text>' }
     $x = [int]$Rest[0]; $y = [int]$Rest[1]
-    $text = ($Rest[2..($Rest.Count - 1)] -join ' ')
-    $saved = New-Object 'RiviuWin32+POINT'
-    [void][RiviuWin32]::GetCursorPos([ref]$saved)
-    # click + type must happen in ONE process: between two driver invocations
-    # another app can take focus back and swallow the keystrokes.
+    $text = ConvertTo-RiviuLiteralKeys ($Rest[2..($Rest.Count - 1)] -join ' ')
     Use-RaisedWindow -SettleMs 900 -Activate -Body {
         param($win)
-        # The click that focuses the field loses races on a busy desktop, and
-        # SendKeys then goes nowhere while everything still "succeeds". Prove the
-        # field changed; retry once if it did not.
-        $before = Get-RegionSignature -Window $win -X $x -Y $y
-        for ($attempt = 1; $attempt -le 2; $attempt++) {
-            Invoke-RawClick -ScreenX ($win.Left + $x) -ScreenY ($win.Top + $y)
-            Start-Sleep -Milliseconds 700
-            if (-not (Test-AppForeground -Window $win)) {
-                throw "refusing to type: foreground is '$(Get-ForegroundTitle)', not the app"
-            }
-            Write-Step "fill window($x,$y) <- $text (attempt $attempt)"
-            [System.Windows.Forms.SendKeys]::SendWait($text)
-            Start-Sleep -Milliseconds 1200
-            if ((Get-RegionSignature -Window $win -X $x -Y $y) -ne $before) {
-                Write-Step 'field region changed - text landed'
-                return
-            }
-            Write-Warning "nothing changed around ($x,$y) - click/focus race"
-        }
-        Write-Warning "fill changed nothing after 2 attempts - verify the coordinates with 'shot'"
+        Invoke-RawClick -ScreenX ($win.Left + $x) -ScreenY ($win.Top + $y)
+        Start-Sleep -Milliseconds 700
+        Send-OwnedKeys -Window $win -Sequence $text
     }
-    [void][RiviuWin32]::SetCursorPos($saved.X, $saved.Y)
 }
 
 function Send-AppKeys {
     param([Parameter(Mandatory = $true)][string]$Sequence)
     $win = Get-AppWindow
-    if (-not (Test-AppForeground -Window $win)) {
-        throw ("refusing to send keys: foreground is '{0}', not the app. " +
-               'Use `fill <x> <y> <text>` so the click and the typing share one process.') -f (Get-ForegroundTitle)
-    }
-    Write-Step "keys -> $Sequence"
-    [System.Windows.Forms.SendKeys]::SendWait($Sequence)
-    Start-Sleep -Milliseconds 1200
+    Send-OwnedKeys -Window $win -Sequence $Sequence
 }
 
 function Invoke-Type {
     if (-not $Rest) { throw 'usage: driver.ps1 type <text>' }
-    Send-AppKeys -Sequence ($Rest -join ' ')
+    Send-AppKeys -Sequence (ConvertTo-RiviuLiteralKeys ($Rest -join ' '))
 }
 
 function Invoke-Key {
@@ -844,6 +822,7 @@ function Invoke-Key {
 }
 
 function Invoke-Log {
+    if (Test-Path -LiteralPath $OwnerFile) { $DevLog = (Get-Content -LiteralPath $OwnerFile -Raw | ConvertFrom-Json).Log }
     $lines = 40
     if ($Rest -and $Rest[0] -match '^\d+$') { $lines = [int]$Rest[0] }
     if (-not (Test-Path $DevLog)) { Write-Host "no log at $DevLog"; return }
@@ -901,7 +880,7 @@ function Invoke-Android {
         Write-Warning 'device is UNAUTHORIZED - accept the "Allow USB debugging" prompt on the phone (tick "always allow")'
     }
     if ($lines -match 'offline') {
-        Write-Warning 'device is OFFLINE - replug it, or run: adb kill-server; adb start-server'
+        Write-Warning 'device is OFFLINE - inspect the exact serial, cable, authorization and owner; do not restart the shared ADB server.'
     }
     foreach ($line in ($lines | Where-Object { $_ -match '\sdevice(\s|$)' })) {
         $serial = ($line -split '\s+')[0]
@@ -928,6 +907,8 @@ function Invoke-Occlusion {
         return
     }
     $win = Get-AppWindow
+    Assert-OwnedWindow $win
+    $script:OperationWindow = $win
     $blocker = Get-Occluder -Window $win
     if ($blocker) { Write-Host "OCCLUDED by '$($blocker.Title)' (hwnd=$($blocker.Handle)) at $($blocker.Point)" }
     else { Write-Host "clear - app window owns all sampled points in $($win.Left),$($win.Top) $($win.Width)x$($win.Height)" }
@@ -935,104 +916,21 @@ function Invoke-Occlusion {
 
 function Invoke-Stop {
     $proc = Get-AppProcessAny
-    if ($proc) {
-        $handle = [RiviuWin32]::FindAppWindow([uint32]$proc.Id, $AppTitle)
-        if ($handle -ne [IntPtr]::Zero) {
-            Write-Step "WM_CLOSE -> pid $($proc.Id) (lets the app run its own exit ordering)"
-            [void][RiviuWin32]::PostMessage($handle, [RiviuWin32]::WM_CLOSE, [IntPtr]::Zero, [IntPtr]::Zero)
+    if (-not $proc) { Write-Step 'Recorded app has exited; launcher tree is left untouched.'; return }
+    $win = Get-AppWindow
+    Assert-OwnedWindow $win
+    $script:OperationWindow = $win
+    Assert-OwnedWindow $win
+    Write-Step "WM_CLOSE -> owned pid $($proc.Id)"
+    [void][RiviuWin32]::PostMessage($win.Handle, [RiviuWin32]::WM_CLOSE, [IntPtr]::Zero, [IntPtr]::Zero)
+    for ($i = 0; $i -lt 30; $i++) {
+        Start-Sleep -Seconds 1
+        if (-not (Get-AppProcessAny)) {
+            Write-Step 'Owned app exited. Dev watcher may remain; no launcher or unrelated process was killed.'
+            return
         }
-        for ($i = 0; $i -lt 30; $i++) {
-            if (-not (Get-AppProcessAny)) { Write-Step "app exited after ~$($i)s"; break }
-            Start-Sleep -Seconds 1
-        }
-        $still = Get-AppProcessAny
-        if ($still) { Write-Step "app still up; terminating pid $($still.Id)"; Stop-Process -Id $still.Id -Force }
     }
-    else { Write-Step 'app not running' }
-
-    # Reap the npm/tauri/vite chain. AGENTS.md 2.8 forbids broad kills, so every
-    # candidate must satisfy BOTH a command-line fingerprint AND belong to this
-    # repo - a bare '*vite*' match would take out an unrelated project's dev
-    # server. Preferred source of truth is the launcher's own process tree.
-    $all = @(Get-CimInstance Win32_Process -ErrorAction SilentlyContinue)
-    $byId = @{}
-    foreach ($proc in $all) { $byId[[int]$proc.ProcessId] = $proc }
-
-    # Two different ownership proofs:
-    #  - inside the launcher's process tree, parentage IS the proof, so a name
-    #    allowlist is enough (it keeps conhost/powershell children out).
-    #  - in the fallback scan there is no tree, so the command line must name THIS
-    #    repo; a bare '*vite*' match would kill another project's dev server.
-    # cargo.exe must be in the tree allowlist: `tauri dev` runs the app via
-    # `cargo run --no-default-features --color always --`, whose command line
-    # contains no repo path at all, so the scan can never identify it safely.
-    $treeNames = @('node.exe', 'cmd.exe', 'cargo.exe')
-
-    function Test-TreeCandidate($proc) {
-        if (-not $proc) { return $false }
-        return ($treeNames -contains $proc.Name)
-    }
-
-    function Test-ReapCandidate($proc) {
-        if (-not $proc) { return $false }
-        if ($proc.Name -ne 'node.exe' -and $proc.Name -ne 'cmd.exe') { return $false }
-        if (-not $proc.CommandLine) { return $false }
-        if ($proc.CommandLine -notlike "*$RepoRoot*") { return $false }
-        return ($proc.CommandLine -like '*tauri*' -or $proc.CommandLine -like '*vite*')
-    }
-
-    $targets = New-Object 'System.Collections.Generic.HashSet[int]'
-
-    if (Test-Path $LauncherPidFile) {
-        $rootPid = [int](Get-Content $LauncherPidFile -Raw).Trim()
-        $rootProc = $byId[$rootPid]
-        # PID reuse: only trust the recorded pid if it still looks like our launcher.
-        if (Test-ReapCandidate $rootProc) {
-            [void]$targets.Add($rootPid)
-            $queue = New-Object System.Collections.Queue
-            $queue.Enqueue($rootPid)
-            while ($queue.Count -gt 0) {
-                $current = $queue.Dequeue()
-                foreach ($proc in $all) {
-                    if ([int]$proc.ParentProcessId -ne $current) { continue }
-                    if (-not (Test-TreeCandidate $proc)) { continue }
-                    if ($targets.Add([int]$proc.ProcessId)) { $queue.Enqueue([int]$proc.ProcessId) }
-                }
-            }
-        }
-        else { Write-Step "recorded launcher pid $rootPid no longer matches - falling back to scan" }
-    }
-
-    foreach ($proc in $all) { if (Test-ReapCandidate $proc) { [void]$targets.Add([int]$proc.ProcessId) } }
-
-    foreach ($id in $targets) {
-        $proc = $byId[$id]
-        Write-Step "reaping $($proc.Name) pid=$id"
-        Stop-Process -Id $id -Force -ErrorAction SilentlyContinue
-    }
-    if (Test-Path $LauncherPidFile) { Remove-Item $LauncherPidFile -Force -ErrorAction SilentlyContinue }
-
-    Start-Sleep -Seconds 2
-    # Filter on the python process name too: a shell whose own command line
-    # contains the literal "riviu_pmd.py" (e.g. a grep for it) matches otherwise.
-    $orphans = @(Get-CimInstance Win32_Process -ErrorAction SilentlyContinue |
-        Where-Object { $_.Name -like 'python*' -and $_.CommandLine -like '*riviu_pmd.py*' })
-    if ($orphans.Count -gt 0) {
-        Write-Warning "$($orphans.Count) riviu_pmd.py sidecar(s) still alive: $(($orphans.ProcessId) -join ', ')"
-        Write-Warning 'these are usbmux/relay holders - re-run stop, or kill them by pid after checking the command line'
-    }
-    else { Write-Step 'no riviu_pmd.py sidecars left' }
-
-    # `cargo run` wrappers orphaned by an earlier stop cannot be attributed to this
-    # repo from their command line, so report instead of killing blind (AGENTS.md 2.8).
-    $strays = @(Get-CimInstance Win32_Process -Filter "Name='cargo.exe'" -ErrorAction SilentlyContinue |
-        Where-Object { $_.CommandLine -like '*run*--no-default-features*' -and -not $targets.Contains([int]$_.ProcessId) })
-    if ($strays.Count -gt 0) {
-        Write-Warning ("$($strays.Count) stray 'cargo run' wrapper(s) from a previous tauri dev: " +
-            (($strays.ProcessId) -join ', ') + ' - verify they are this repo, then Stop-Process them')
-    }
-
-    Write-Step "vite :5173 $(if (Test-PortListening 5173) { 'STILL LISTENING' } else { 'closed' })"
+    throw 'Graceful shutdown is still pending. No force kill, launcher reap or device cleanup was performed.'
 }
 
 # ----------------------------------------------------------------------- switch

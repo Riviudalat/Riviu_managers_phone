@@ -58,6 +58,8 @@ def headings(body: str) -> set[str]:
 def links(body: str) -> list[tuple[int, str]]:
     result = []
     fence = ""
+    definitions = {}
+    references = []
     for number, line in enumerate(body.splitlines(), 1):
         opening = FENCE.match(line)
         if opening:
@@ -69,8 +71,18 @@ def links(body: str) -> list[tuple[int, str]]:
             continue
         if fence or line.startswith("    "):
             continue
+        definition = re.match(r'^ {0,3}\[([^]]+)\]:\s*(?:<([^>]+)>|(\S+))', line)
+        if definition:
+            definitions[' '.join(definition.group(1).casefold().split())] = definition.group(2) or definition.group(3)
+            continue
         for match in re.finditer(r'\]\((?:<([^>]+)>|([^\s)]+))(?:\s+"[^"]*")?\)', line):
             result.append((number, match.group(1) or match.group(2)))
+        for match in re.finditer(r'\[([^]]+)\]\[([^]]*)\]', line):
+            references.append((number, ' '.join((match.group(2) or match.group(1)).casefold().split())))
+    for number, label in references:
+        # Unknown labels render as plain text, not links; known definitions are checked.
+        if label in definitions:
+            result.append((number, definitions[label]))
     return result
 
 
@@ -83,7 +95,14 @@ def inspect(root: Path, paths: list[str]) -> list[str]:
         source = root / name
         if not source.is_file():
             continue
-        for number, target in links(source.read_text(encoding="utf-8")):
+        body = source.read_text(encoding="utf-8")
+        current = (name in {"README.md", "AGENTS.md", "docs/README.md", "docs/operator-guide.md", "docs/developer-guide.md"}
+                   or name.startswith(("docs/agents/", "docs/operator/", "docs/development/", ".claude/skills/")))
+        if current:
+            for number, line in enumerate(body.splitlines(), 1):
+                if re.search(r"§\s*9\.\d+", line):
+                    errors.append(f"{name}:{number}: replace historical section shorthand with an explicit source link")
+        for number, target in links(body):
             parts = urlsplit(target)
             if parts.scheme or parts.netloc:
                 continue
@@ -128,12 +147,17 @@ def check_deleted_evidence(root: Path) -> list[str]:
 
 def main() -> int:
     paths = repository_files()
+    if "--include-untracked" in sys.argv:
+        # Review new documentation before staging without changing the user's index.
+        result = subprocess.run(["git", "ls-files", "--others", "--exclude-standard", "-z"], cwd=ROOT, check=True, capture_output=True)
+        paths = sorted(set(paths) | set(result.stdout.decode("utf8").rstrip("\0").split("\0")))
     errors = inspect(ROOT, paths)
     errors.extend(check_deleted_evidence(ROOT))
     if errors:
         print("\n".join(errors), file=sys.stderr)
         return 1
-    print(f"documentation links valid ({sum(path.endswith('.md') for path in paths)} tracked Markdown files)")
+    label = "tracked + new" if "--include-untracked" in sys.argv else "tracked"
+    print(f"documentation links valid ({sum(path.endswith('.md') for path in paths)} {label} Markdown files)")
     return 0
 
 

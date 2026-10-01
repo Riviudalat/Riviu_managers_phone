@@ -13,6 +13,10 @@ npm ci
 npm run tauri:dev
 ```
 
+`tauri:dev` thường dùng DB/credential và lịch vận hành. Khi chỉ kiểm UI, dùng
+[UI smoke cô lập](../../docs/developer-guide.md#smoke-giao-diện-tauri-cô-lập);
+không chỉ đặt mock hoặc mở app thứ hai cạnh controller đang giữ máy.
+
 `npm run dev` chỉ là web frontend. Fixture/mock và smoke Tauri backend thật là hai
 loại bằng chứng riêng. Kiểm tra frontend:
 
@@ -42,6 +46,15 @@ trong [workflow](../../.github/workflows/desktop-ci-cd.yml), không ghim số te
 
 `StreamQualitySection.tsx` còn được test của Android driver đọc như contract UI.
 Đổi giá trị quality cần chạy `cargo test -p riviu-android-driver` từ gốc repo.
+
+## Branding
+
+`public/logo.jpg` là nguồn logo chuẩn dùng bởi UI/favicon, bộ sinh icon Android và
+build tài nguyên WDA. URL frontend vẫn là `/logo.jpg`; Tauri bundle vẫn ánh xạ sang
+`sidecars/wda/logo.jpg`. Giữ nguyên byte khi chỉ đổi đường dẫn: logo được pin trong
+`sidecars/wda/legacy-wda-source-lock.json`. `src-tauri/app-icon.jpg` giữ vai trò nguồn
+icon desktop riêng; không xóa chỉ vì hash trùng. Kiểm bằng
+`python3 -m unittest scripts.test_branding_source -v` từ gốc repo.
 
 ## Quy tắc kiểm thử
 

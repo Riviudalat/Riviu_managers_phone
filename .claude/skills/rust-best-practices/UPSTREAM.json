@@ -1,0 +1,96 @@
+{
+  "repository": "apollographql/skills",
+  "commit": "222dfc07720227bd0f330bd1b45a9741b1c97bee",
+  "schemaVersion": 1,
+  "distribution": "selective-local-adaptation-not-upstream-copy",
+  "reviewedOn": "2026-10-01",
+  "upstreamFilesReviewed": [
+    {
+      "path": "LICENSE",
+      "sha256": "37fe5c19dc6b3904a11dc50b4ac4a2463625ace4d2aa3b8c417c58bd58cfb361",
+      "bytes": 1075,
+      "upstreamPath": "LICENSE"
+    },
+    {
+      "path": "SKILL.md",
+      "sha256": "b1651a95a2c36a8350c033449f52d07eebfdbf08e3bd1d5b22c4b7f55f7aa17c",
+      "bytes": 4405,
+      "upstreamPath": "skills/rust-best-practices/SKILL.md"
+    },
+    {
+      "path": "references/chapter_01.md",
+      "sha256": "def0d5dc6ad2c8e143aed03c888c3f55b7f2b8f245c563e970f8fa951f7d7b52",
+      "bytes": 25569,
+      "upstreamPath": "skills/rust-best-practices/references/chapter_01.md"
+    },
+    {
+      "path": "references/chapter_02.md",
+      "sha256": "3b5d4ad26ce444770a05d91f737cc48417cb5bac94b2ab1587fc8de536bdcbb9",
+      "bytes": 5455,
+      "upstreamPath": "skills/rust-best-practices/references/chapter_02.md"
+    },
+    {
+      "path": "references/chapter_03.md",
+      "sha256": "fd673405cc1b5094d44d59eac4634e35525d7103d34b43178ee37277f392e15f",
+      "bytes": 8789,
+      "upstreamPath": "skills/rust-best-practices/references/chapter_03.md"
+    },
+    {
+      "path": "references/chapter_04.md",
+      "sha256": "5189a1118c41c25426357a14ad4e651e931443f1aefc241ea79689cb694175bf",
+      "bytes": 7104,
+      "upstreamPath": "skills/rust-best-practices/references/chapter_04.md"
+    },
+    {
+      "path": "references/chapter_05.md",
+      "sha256": "fb753a7515e11c1bc84d853d8b6d3442dd810d607f2b153595248d57232b8d38",
+      "bytes": 14694,
+      "upstreamPath": "skills/rust-best-practices/references/chapter_05.md"
+    },
+    {
+      "path": "references/chapter_06.md",
+      "sha256": "cff0a6826a23a9c4337700757cc67f4741aa4be81cd56925601b110752d38534",
+      "bytes": 7039,
+      "upstreamPath": "skills/rust-best-practices/references/chapter_06.md"
+    },
+    {
+      "path": "references/chapter_07.md",
+      "sha256": "be71105ee9123fe2dff6673d85fc854eafd281fbfa6e8778216d3f3a8d0ffaad",
+      "bytes": 7946,
+      "upstreamPath": "skills/rust-best-practices/references/chapter_07.md"
+    },
+    {
+      "path": "references/chapter_08.md",
+      "sha256": "54c1548a28586ebb373fe508ce0d885d78bc83e579aabd89836d2a53f7129a8b",
+      "bytes": 10887,
+      "upstreamPath": "skills/rust-best-practices/references/chapter_08.md"
+    },
+    {
+      "path": "references/chapter_09.md",
+      "sha256": "bdd59af111d402e4385c77e26fa6d53fc113e40ef678a9cf7aaff221e5c21917",
+      "bytes": 11400,
+      "upstreamPath": "skills/rust-best-practices/references/chapter_09.md"
+    }
+  ],
+  "installedFiles": [
+    {
+      "path": "LICENSE",
+      "sha256": "37fe5c19dc6b3904a11dc50b4ac4a2463625ace4d2aa3b8c417c58bd58cfb361"
+    },
+    {
+      "path": "references/review-checklist.md",
+      "sha256": "aa5d9771020e8dbefb004065efa3466c2d15fdb56bb7b89e65321eb357a9e978"
+    },
+    {
+      "path": "SKILL.md",
+      "sha256": "776abe1b5a079c444f525b3f762c8173d2cb3f000f259e1c10a130a835aa5e89"
+    }
+  ],
+  "adaptations": [
+    "Entry and references rewritten as a focused local edition; upstream chapters retained only in ignored review staging, not advertised as installed.",
+    "No allowed-tools, hooks, plugin dependencies, shell scripts, pressure fixtures, installation/update/all-features commands.",
+    "Repo ownership, device-effect permissions, pinned toolchain and verification contracts override generic examples.",
+    "Corrected conditional Send/Sync guidance and omitted incomplete unsafe examples and unsupported newer-toolchain API recommendations."
+  ],
+  "installedHashPolicy": "SHA-256 over installed LF bytes; .gitattributes pins checkout EOL for these two skills."
+}

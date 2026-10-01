@@ -1,4 +1,12 @@
-# Ghi kết quả đăng bài lên Google Sheet
+# Apps Script legacy và Flow Sheet
+
+> **Không phải onboarding Publish mới.** Đăng bài hiện dùng OAuth direct; UI mới
+> không có form webhook/token. Tài liệu này dành deployment Apps Script còn được
+> vận hành hợp lệ và Flow connector legacy. Kết nối OAuth ở Publish không cấu hình
+> webhook cho Flow. Không sửa DB hoặc lấy token Google để lách điều kiện. Xem
+> [hướng dẫn hiện hành](../operator/publish.md).
+
+## Ghi kết quả đăng bài bằng deployment legacy
 
 Mẫu báo cáo nội bộ dùng đúng thứ tự:
 
@@ -20,7 +28,7 @@ cũ `STT | Người air | Ngày | Link | Đối tác | Đối tác 2 | ...` vẫ
 4. Triển khai ứng dụng web với quyền thực thi của người có quyền sửa spreadsheet.
    Dùng URL kết thúc `/exec` và cùng token trong cấu hình Sheet của Riviu Manager.
    Khi cập nhật script, sửa phiên bản của deployment hiện có để giữ URL.
-5. Bật ghi Sheet cho chiến dịch cần báo cáo. Bản cài trên máy khác cần nhập lại URL
+5. Chỉ với client/chiến dịch legacy còn hỗ trợ cấu hình webhook: bật ghi Sheet. Bản cài trên máy khác cần nhập lại URL
    và token trong app; bộ cài không mang tài khoản Google, dữ liệu hay credential
    từ máy phát triển. App gửi hàng đợi đã lưu, không cần giữ trình duyệt đăng nhập
    hoặc dùng chuột.

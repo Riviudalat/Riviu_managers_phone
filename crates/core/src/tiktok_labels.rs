@@ -1927,7 +1927,7 @@ pub const TIKTOK_LABEL_SETS: &[TikTokLabels] = &[
         //
         // 28/08/2026 on ce0517155ab38c390d, the farm's only 46.2.42 phone (surveyed 23/08/2026:
         // eleven `trill` 38.3.2, two `musically` 46.2.1, this one), locale `en`, via
-        // `.claude/skills/run-riviu-managers-phone/hunt_badge_4642.ps1 -ForceStop`. The badge is
+        // `.claude/skills/run-riviu-managers-phone/hunt_badge_4642.ps1 -Serial <approved-serial> -Out <new-absolute-dir> -IsolatedDeviceConfirmed -ForceStop`. The badge is
         // there and it is the same shape: **one** `android.widget.TextView`, `text="Photo"`,
         // `resource-id=com.zhiliaoapp.musically:id/zxh`, `bounds=[277,1544][370,1597]` — inside
         // the y range the 46.2.1 sightings spanned (1332/1566/1698/1704/1887). Nothing else in

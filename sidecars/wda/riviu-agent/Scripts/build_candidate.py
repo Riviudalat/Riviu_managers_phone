@@ -31,7 +31,7 @@ DEFAULT_SOURCE = REPO_ROOT / "target" / "riviu-agent" / "source"
 DEFAULT_DERIVED_DATA = REPO_ROOT / "target" / "riviu-agent" / "derived-data"
 DEFAULT_ARTIFACTS_ROOT = REPO_ROOT / "target" / "riviu-agent" / "artifacts"
 DEFAULT_XCCONFIG = AGENT_ROOT / "Config" / "RiviuAgent.xcconfig"
-BRAND_LOGO = REPO_ROOT / "logo.jpg"
+BRAND_LOGO = REPO_ROOT / "apps" / "desktop" / "public" / "logo.jpg"
 BRAND_ICONSET = REPO_ROOT / "sidecars" / "wda" / "AppIcon.appiconset"
 BRAND_LOCK = REPO_ROOT / "sidecars" / "wda" / "legacy-wda-source-lock.json"
 

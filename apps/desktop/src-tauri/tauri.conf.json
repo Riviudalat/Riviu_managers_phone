@@ -60,7 +60,7 @@
       "../../../sidecars/pymobiledevice3/riviu_pmd.py": "sidecars/pymobiledevice3/riviu_pmd.py",
       "../../../sidecars/signer/requirements.txt": "sidecars/signer/requirements.txt",
       "../../../sidecars/signer/riviu_signer.py": "sidecars/signer/riviu_signer.py",
-      "../../../logo.jpg": "sidecars/wda/logo.jpg",
+      "../public/logo.jpg": "sidecars/wda/logo.jpg",
       "../../../sidecars/wda/AppIcon.appiconset/": "sidecars/wda/AppIcon.appiconset/",
       "../../../sidecars/wda/WebDriverAgent/": "sidecars/wda/WebDriverAgent/",
       "../../../sidecars/wda/build_and_install.py": "sidecars/wda/build_and_install.py",

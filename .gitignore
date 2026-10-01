@@ -184,3 +184,7 @@ docs/re/riviu-agent/**/*.framed
 # Local screenshots, UI mockups and browser-session traces are archived under target/.
 /.playwright-cli/
 /output/
+/apps/desktop/target/
+# Regenerable local Python analysis/test caches, not verification reports.
+.ruff_cache/
+.pytest_cache/

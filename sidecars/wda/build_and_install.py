@@ -29,7 +29,7 @@ RESOURCE_ROOT = Path(__file__).resolve().parent
 SOURCE_TEMPLATE = RESOURCE_ROOT / "WebDriverAgent"
 SOURCE_LOCK = RESOURCE_ROOT / "legacy-wda-source-lock.json"
 PACKAGED_LOGO = RESOURCE_ROOT / "logo.jpg"
-DEVELOPMENT_LOGO = RESOURCE_ROOT.parents[1] / "logo.jpg"
+DEVELOPMENT_LOGO = RESOURCE_ROOT.parents[1] / "apps" / "desktop" / "public" / "logo.jpg"
 LOGO = PACKAGED_LOGO if PACKAGED_LOGO.is_file() else DEVELOPMENT_LOGO
 ICONSET = RESOURCE_ROOT / "AppIcon.appiconset"
 

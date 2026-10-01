@@ -5,9 +5,12 @@ Agent candidate. It does not vendor a generated WDA tree. `Scripts/prepare.py`
 verifies the pinned Appium WebDriverAgent 15.1.4 tarball and applies the ordered,
 hashed patch series into ignored `target/riviu-agent/source/`.
 
-Current gate state: B0/Gate B/Gate C passed on the Mac device. The default
-candidate still advertises four capabilities; a separate text artifact is only
-promoted after the real TikTok comment probe below passes with frame evidence.
+Gate results are historical and artifact-bound, not a current readiness flag.
+`docs/re/riviu-agent/candidate-probes.json` records the earlier device2 four-capability
+PASS. Media candidate reports and the current manifest have separate FAIL/PENDING
+states. Compare exact artifact/source/device/date tuples before interpreting a gate;
+none certifies a newly signed IPA or another phone. The current lock/manifest are
+machine-readable owners, not the digest prose of an old checkpoint.
 
 ## Layout
 
@@ -38,8 +41,8 @@ python -m unittest discover `
 
 The prepared baseline digest must be
 `f40eadb1e1d9872ad5a0574a5146cdbf5e0d04768ccb1f1701b289d50e4ee8f8`.
-The locked post-patch digest is
-`c48950af762890ccd2e2cd64940bfcdf637240367a02179b8da8dfb739416223`.
+The locked post-patch digest and ordered patch set are in `baseline-lock.json`;
+`Scripts/prepare.py` verifies them. Do not copy a historical digest into the lock.
 Preparation rejects any other result before replacing the generated source tree.
 Both digests cover every regular file, including Xcode project/build inputs and
 property lists, plus each file's canonical `0644`/`0755` mode, rather than only
@@ -105,7 +108,7 @@ The generated XCTest host is branded immediately before the final signing pass:
 its outer `Info.plist` contains `CFBundleDisplayName=Riviu Agent`,
 `CFBundleName=Riviu Agent`, and `CFBundleIconName=AppIcon`. Packaging fails if the
 compiled `Assets.car` or rendered `AppIcon*.png` resources are missing. The
-locked repository `logo.jpg`/`AppIcon.appiconset` is compiled into the package,
+locked `apps/desktop/public/logo.jpg` and WDA `AppIcon.appiconset` is compiled into the package,
 so the Home Screen name and orange-R logo are part of the verified candidate IPA.
 Apple development profiles are UDID-bound: build and install one candidate IPA
 per connected device (for example, use a distinct `--artifact-version` for the
@@ -113,26 +116,30 @@ second device); reusing one signed IPA on another UDID is rejected by installd.
 
 ## Real TikTok Comment Probe
 
-The comment check has no default or sample text. It requires a sentence chosen
-for the video currently on screen and an explicit operator confirmation after
-inspecting the sent frame. Placeholder strings such as `Riviu test`, `fixture`,
-and `sample comment` are rejected before any tap.
+This is an isolated-device diagnostic with a **real public Send**, not a UI smoke
+or a production-controller substitute. Read WDA safety and obtain exact device,
+content and effect authorization first. No sample sentence or real serial is supplied.
+Do not run alongside a controller owning the same phone.
+
+Execution requires `--udid`, `--comment-text`, `--candidate-manifest`, fresh absolute
+`--output` and `--frames-dir`, `--isolated-device-confirmed`, and `--allow-send`.
+An exclusive intent is saved before device work. Existing/partial intent refuses
+execution. A timeout/crash is not permission to change directories and Send again.
+
+After execution inspect the saved frames. Exit2 / `PENDING_OPERATOR` is not a live
+PASS. Confirm only the existing evidence, offline:
 
 ```bash
-RIVIU_AGENT_TOKEN="$TOKEN" \
-python3 sidecars/wda/riviu-agent/Scripts/probe_tiktok_comment.py \
-  --udid "$UDID" \
-  --comment-text 'Quán cà phê này dễ thương quá ạ' \
-  --operator-confirmed-comment-visible \
-  --frames-dir docs/re/riviu-agent/tiktok-comment-build2-live \
-  --output docs/re/riviu-agent/tiktok-comment-build2-live.json
+python3 sidecars/wda/riviu-agent/Scripts/probe_tiktok_comment.py   --confirm-evidence "$EVIDENCE_ABSOLUTE_PATH" --run-id "$RECORDED_RUN_ID"   --operator-confirmed-comment-visible
 ```
 
-The build-2 live result is `PASS`; `sent.jpg` visibly contains that comment in
-TikTok's drawer. Promotion writes `sidecars/wda/RiviuAgent-text.ipa` and
-`sidecars/wda/text-manifest.json` with `bundleBuild=2` and `text`. The separate
-Full desktop bundle uses `RIVIU_DEFAULT_AGENT_MODE=full`; the production oracle
-is left unchanged.
+Confirmation checks run/intent/frame hashes and calls no driver, sidecar or network.
+It returns `OPERATOR_CONFIRMED`, **not artifact qualification**. The legacy probe
+cannot attest that the relay's running agent/device matches the local IPA supplied
+by the caller. New promotion through `promote_text_candidate.py` therefore refuses
+this standalone evidence until runtime artifact/device attestation is implemented
+and separately reviewed. Historical evidence is read-only, not upgraded implicitly.
+Do not modify IPA/features/hash to bypass this missing gate.
 
 ## Boundaries
 

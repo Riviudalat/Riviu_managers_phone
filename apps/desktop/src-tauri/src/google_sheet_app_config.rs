@@ -51,7 +51,8 @@ mod tests {
             assert!(config.is_none());
         } else {
             let config = config.unwrap();
-            assert!(config.picker_api_key.is_some() && config.project_number.is_some());
+            config.validate().unwrap();
+            assert!(!config.client_id.is_empty());
             assert!(db.google_oauth_config().unwrap().is_none());
             assert!(db.google_oauth_tokens().unwrap().is_none());
         }

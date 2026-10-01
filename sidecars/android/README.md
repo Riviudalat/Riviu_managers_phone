@@ -1,7 +1,7 @@
 # Bundled Android tools
 
 Binaries that ship inside the installer so a clean machine can drive Android
-phones without an Android SDK. Nothing here is written by this project.
+phones without an Android SDK. Third-party tools and the project-authored Riviu Helper have separate provenance.
 
 Attribution and licence exposure: [`../../NOTICE`](../../NOTICE). Read it before
 touching `win-x86_64/` — the adb entry is recorded there as a **knowingly
@@ -54,7 +54,7 @@ a corrupt bundled adb must not stop an operator whose own adb is fine.
    and therefore pins nothing.
 3. Update the digest and byte count in `../../NOTICE`, and the revision if it
    moved.
-4. `python scripts/collect_desktop_ci_artifacts.py` verifies the tree against
+4. `python scripts/collect_desktop_ci_artifacts.py verify-android-tools` verifies the tree against
    the manifest; CI runs the same check in the `quality` job so a bad digest
    fails in minutes instead of after three 120-minute builds.
 
