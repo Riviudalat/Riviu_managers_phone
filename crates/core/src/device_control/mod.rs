@@ -2335,6 +2335,21 @@ mod tests {
             )));
         }
         assert!(control.current_work_owner("ready").is_none());
+        // A background visit is transient: runtime preflight must wait for its
+        // lease to drain instead of rejecting every requested action immediately.
+        let idle = work.try_acquire("ready", DeviceWorkOwner::IdleSweep).unwrap();
+        let readiness = control.preflight_tiktok_actions("ready", &["feed", "like", "save", "follow"]);
+        tokio::pin!(readiness);
+        tokio::select! {
+            biased;
+            result = &mut readiness => panic!("IdleSweep should yield before preflight settles: {result:?}"),
+            _ = tokio::task::yield_now() => {}
+        }
+        assert_eq!(control.current_work_owner("ready"), Some(DeviceWorkOwner::IdleSweep));
+        drop(idle);
+        assert!(readiness.await.is_ok());
+        assert!(control.current_work_owner("ready").is_none());
+        assert_eq!(driver.session_starts.load(Ordering::SeqCst), 0);
     }
 
     #[tokio::test]

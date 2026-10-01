@@ -49,6 +49,16 @@ const report: PublishPreflightReport = {
 afterEach(cleanup);
 
 describe("publish preflight result", () => {
+  it("keeps every checked machine in one list without pagination", () => {
+    const assignments = Array.from({ length: 12 }, (_, ordinal) => ({
+      ...row, ordinal, udid: `phone-${ordinal + 1}`, bundleId: `bundle-${ordinal + 1}`,
+    }));
+    render(<PublishPreflightResult report={{ ...report, assignments }}
+      machineName={udid => `Máy ${udid.split("-")[1]}`}
+      onRetry={vi.fn()} busy={false} />);
+    expect(screen.getAllByRole("article")).toHaveLength(12);
+    expect(screen.getByRole("article", { name: "Máy 12" })).toBeInTheDocument();
+  });
   it("opens on blocked machines, keeps global blockers visible, and lets the operator inspect passed machines", async () => {
     const passed = (ordinal: number): PublishPreflightAssignmentReport => ({
       ...row,
@@ -79,8 +89,6 @@ describe("publish preflight result", () => {
           issues: [sheetIssue, ...blocked.issues],
         }}
         machineName={(udid) => `Máy ${udid.split("-")[1]}`}
-        page={0}
-        onPage={vi.fn()}
         onRetry={vi.fn()}
         busy={false}
       />,
@@ -96,13 +104,13 @@ describe("publish preflight result", () => {
   });
 
   it("explains an empty passed-machine filter instead of leaving a blank list", async () => {
-    render(<PublishPreflightResult report={report} machineName={() => "Máy 1"} page={0} onPage={vi.fn()} onRetry={vi.fn()} busy={false} />);
+    render(<PublishPreflightResult report={report} machineName={() => "Máy 1"} onRetry={vi.fn()} busy={false} />);
     await userEvent.click(screen.getByRole("button", { name: "Đạt (0)" }));
     expect(screen.getByText("Không có máy trong nhóm này.")).toBeVisible();
   });
   it("shows the blocking link check when all four legacy checks pass",async()=>{
     const issue={code:"link_verification_unmeasured",udid:"phone-1",message:"locale unsupported"};
-    render(<PublishPreflightResult report={{...report,assignments:[{...row,composer:"pass",soundPicker:"pass",issues:[issue],checks:[{id:"link",label:"Nhận diện xác minh liên kết",status:"blocked",reason:issue.message}]}],issues:[issue]}} machineName={()=>"Máy 1"} page={0} onPage={vi.fn()} onRetry={vi.fn()} busy={false}/>);
+    render(<PublishPreflightResult report={{...report,assignments:[{...row,composer:"pass",soundPicker:"pass",issues:[issue],checks:[{id:"link",label:"Nhận diện xác minh liên kết",status:"blocked",reason:issue.message}]}],issues:[issue]}} machineName={()=>"Máy 1"} onRetry={vi.fn()} busy={false}/>);
     await userEvent.click(screen.getByText("Chi tiết kiểm tra"));
     expect(screen.getByText("Nhận diện xác minh liên kết")).toBeVisible();
     expect(screen.getByText("Bị chặn")).toBeVisible();
@@ -114,8 +122,6 @@ describe("publish preflight result", () => {
       <PublishPreflightResult
         report={report}
         machineName={() => "Máy 1 · Đà Lạt"}
-        page={0}
-        onPage={vi.fn()}
         onRetry={retry}
         busy={false}
       />,
@@ -148,8 +154,6 @@ describe("publish preflight result", () => {
           issues: [],
         }}
         machineName={() => "Máy 1"}
-        page={8}
-        onPage={vi.fn()}
         onRetry={vi.fn()}
         busy
       />,

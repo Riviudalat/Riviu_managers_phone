@@ -1,12 +1,13 @@
 import { act, cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import { afterEach, beforeEach, expect, it, vi } from "vitest";
-import { operationDeviceLog, operationGetRun, operationQueryRuns, operationStop, operationStopStatus } from "../../api";
+import { operationDeviceLog, operationGetRun, operationQueryRuns, operationStop, operationStopStatus, publishStartStatus } from "../../api";
+import { observePendingPublishStart } from "./publishStartBridge";
 import type { OperationRunDetail, OperationRunSummary } from "../../types";
 import { OperationProgressCenter } from "./OperationProgressCenter";
 let narrowViewport = false;
 vi.mock("../../useMediaQuery", () => ({ useMediaQuery: () => narrowViewport }));
 
-vi.mock("../../api", () => ({ listDevices:vi.fn(async()=>[]),publishGet:vi.fn(async()=>({assignments:[]})),publishRecoveryCapabilities:vi.fn(async()=>[]),publishRetryAssignment:vi.fn(),publishRetrySheetAssignment:vi.fn(),publishCheckLinks:vi.fn(),publishResumeVerification:vi.fn(),operationQueryRuns: vi.fn(), operationGetRun: vi.fn(), operationDeviceLog: vi.fn(), nurtureSessionStatus: vi.fn(async () => []),operationStop:vi.fn(),operationStopStatus:vi.fn(async()=>null) }));
+vi.mock("../../api", () => ({ publishStartStatus:vi.fn(async()=>null),publishCancelUnacceptedStart:vi.fn(),listDevices:vi.fn(async()=>[]),publishGet:vi.fn(async()=>({assignments:[]})),publishRecoveryCapabilities:vi.fn(async()=>[]),publishRetryAssignment:vi.fn(),publishRetrySheetAssignment:vi.fn(),publishCheckLinks:vi.fn(),publishResumeVerification:vi.fn(),operationQueryRuns: vi.fn(), operationGetRun: vi.fn(), operationDeviceLog: vi.fn(), nurtureSessionStatus: vi.fn(async () => []),operationStop:vi.fn(),operationStopStatus:vi.fn(async()=>null) }));
 const run: OperationRunSummary = { id: "publish:run", sourceId: "run", kind: "publish", title: "Đăng bài", state: "running", targetCount: 2, totalItems: 2, completedItems: 1, issueCount: 0, retryableCount: 0, retryScope: null, createdAt: null, updatedAt: null };
 const detail: OperationRunDetail = { summary: run, items: ["a", "b"].map((udid, i) => ({ id: udid, udid, label: `Bài ${i + 1}`, kind: "assignment", state: i ? "running" : "succeeded", detail: null, errorCode: null, evidence: null, retryable: false })) };
 const labels = new Map([["a", "Máy 2 · Nội dung"], ["b", "Máy 5 · Đăng bài"]]);
@@ -20,6 +21,15 @@ beforeEach(() => {
   vi.mocked(operationQueryRuns).mockResolvedValue({ runs: [run], total: 1, counts: { active: 1, succeeded: 0, attention: 0 }, hasMore: false });
   vi.mocked(operationGetRun).mockResolvedValue(detail);
   vi.mocked(operationDeviceLog).mockResolvedValue({ entries: [{ id: "log", at: "2026-09-07T12:34:56", action: "publish", state: "posting", text: null, detail: null }], truncated: false });
+});
+
+it("opens the new pending start immediately and keeps a status error visible before ACK", async () => {
+  vi.mocked(publishStartStatus).mockRejectedValueOnce(new Error("Chưa đọc được trạng thái lượt đăng"));
+  render(<OperationProgressCenter deviceLabels={labels} />);
+  await act(async () => observePendingPublishStart({ requestId: "new-start", inputKey: "{}", requestedAt: new Date().toISOString() }));
+  expect(screen.getByRole("dialog", { name: "Cửa sổ tiến trình" })).toBeVisible();
+  expect(await screen.findByText("Chưa đọc được trạng thái lượt đăng")).toBeVisible();
+  expect(screen.getByText("Tác vụ: publish-start:new-start")).toBeVisible();
 });
 
 it("stops only the selected operation and waits for a backend cleanup result",async()=>{

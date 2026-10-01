@@ -533,6 +533,7 @@ describe("production publish wizard", () => {
     expect(
       await screen.findByText("Chưa tìm thấy gói bài trong thư mục đã chọn"),
     ).toBeVisible();
+    expect(screen.queryByText("Chi tiết lỗi quét")).toBeNull();
   });
   it("starts only after current preflight and one explicit confirmation carrying Sheet and cleanup", async () => {
     render(<PublishPage devices={devices} selected={[]} onSelectUdids={() => {}} />);

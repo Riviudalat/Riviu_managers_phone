@@ -44,20 +44,25 @@ TikTok không còn chạy. Lỗi đóng không đổi kết quả đăng hoặc 
 
 Trong Đăng bài, thẻ máy hiện ngay bài còn chờ lấy link và nút **Xem bài đang chờ**.
 Kết nối Sheet được tự kiểm khi mở trang hoặc đổi tài khoản/bảng. Kết quả đọc và
-header còn hiệu lực được dùng chung trong năm phút; quyền ghi chưa chứng minh
-được sẽ được ghi rõ và kiểm tại bước chuẩn bị ghi, không tự nâng cấp tab.
-Màn kiểm tra trả tiến độ từng máy và phân trang tám máy. Nút **Đăng N bài công khai**
+header còn hiệu lực được dùng chung trong năm phút. Kết quả kiểm quyền ghi thành
+công cũng được dùng lại trong năm phút cho đúng tài khoản, bảng và đợt báo cáo;
+đổi kết nối, hết hạn hoặc nhận lỗi thì kiểm lại. Xác minh chỉ đọc không thay thế
+bằng chứng quyền ghi. Bấm **Kiểm tra kết nối** luôn làm mới kết quả quyền ghi.
+Màn kiểm tra hiện giai đoạn quét nguồn/Sheet và tiến độ từng máy qua sự kiện
+Tauri; tất cả máy nằm trong danh sách cuộn, không phân trang. Lỗi quét thư mục
+hiện bằng thông báo toast có thể đóng. Nút **Xác nhận đăng công khai N bài**
 là xác nhận cuối cùng, không mở thêm popup xác nhận. Khi backend nhận yêu cầu,
 ứng dụng chuyển về Control Center và ghim đúng lượt đang chuẩn bị. Lỗi nhận yêu
-cầu hiện ngay tại cửa sổ; mất phản hồi được đối soát bằng cùng mã yêu cầu.
+cầu hiện ngay tại cửa sổ theo dõi, mở từ khi gửi yêu cầu; bước đọc trạng thái quá
+15 giây hiện lỗi để đối chiếu cùng mã yêu cầu, không tự tạo lượt đăng khác.
 Trong bảng theo dõi, mỗi máy có tiến độ theo bước, thời gian và nút phục hồi phù
 hợp. **Loại khỏi đợt** chỉ dừng phần việc của assignment đó và chờ nhả máy; bài
 đã gửi vẫn giữ lịch sử, intent và nghĩa vụ lấy link/Sheet. Pending không được
 tính là đã hoàn tất, và thử lại sau Post không tạo thêm Post.
-Khi bấm **Kiểm tra & đăng**, Riviu dừng các tác vụ cũ liên quan trên máy được chọn,
-chờ nhả phiên rồi mới kiểm tra lượt mới. Tác vụ có các bước phụ thuộc nhau được
-dừng theo cả lượt; lịch hẹn chưa chạy không bị hủy. Nuôi/Tương tác thực hiện bước
-chuyển giao này khi bắt đầu. Chỉ chọn máy không dừng tác vụ.
+Khi bấm **Kiểm tra & đăng**, Riviu đọc nội dung, trạng thái và khả năng đăng của
+máy được chọn. Việc chuyển giao tác vụ cũ sang lượt đăng mới diễn ra sau xác nhận.
+Tác vụ có các bước phụ thuộc nhau được dừng theo cả lượt; lịch hẹn chưa chạy không
+bị hủy. Nuôi/Tương tác thực hiện bước chuyển giao này khi bắt đầu.
 Khi xác nhận **Đăng bài**, backend kiểm tra và nhả tác vụ cũ thêm một lần trước
 khi tạo lượt mới, kể cả việc lấy link vừa chạy sau bước kiểm tra. Tiến trình lấy
 link nhận lệnh Dừng giữa các thao tác; thao tác thiết bị đang gửi được chờ hoàn
@@ -65,6 +70,10 @@ tất trước khi nhả phiên. Nếu chưa nhả được máy, lượt mới 
 Bài cũ vẫn giữ kết quả và cảnh báo kiểm tra link; không tự đăng lại. Đóng TikTok
 khi bài còn upload có thể ngắt upload nên kết quả được giữ chưa xác định.
 Không đọc được trạng thái thì chờ kiểm tra lại trước khi đăng.
+Khi Đăng bài hoặc Tương tác đang chuẩn bị/chạy trên máy được chọn, tác vụ nền
+`IdleSweep` không lấy lại máy đó. Tương tác chờ phiên nền đang giữ máy nhả quyền
+trong cửa sổ tối đa chín giây, rồi kiểm tra lại khả năng thao tác. Chủ tác vụ khác
+vẫn được báo riêng; việc chờ không thu hồi phiên hoặc phát lại thao tác công khai.
 Nếu Android cài cả TikTok Global và Trill mà không có gói nào đang mở, **Dừng**
 kiểm và đóng cả hai gói TikTok trên đúng máy trước khi nhả phiên. Khi đã có bằng
 chứng nhả máy của lượt Dừng hiện tại, bài cũ chờ link không khóa vĩnh viễn mục

@@ -1804,16 +1804,28 @@ export function typesafeCheckComment(candidate: string, caption: string | null, 
 
 /** ACK only: background preparation/execution is observed through status and operations. */
 export async function publishStart(request: PublishPreflightRequest, requestId: string, approvedInputDigest: string, preparationId?: string) {
+  return publishReceiptWithinDeadline(
+    invoke<import("./types").PublishStartStatus>("publish_start", { request, requestId, approvedInputDigest, confirmed: true, preparationId: preparationId ?? null }),
+    "Chưa nhận xác nhận bắt đầu. Đang đối chiếu yêu cầu đã gửi.",
+  );
+}
+
+async function publishReceiptWithinDeadline<T>(request: Promise<T>, message: string): Promise<T> {
   let timeout: ReturnType<typeof setTimeout> | undefined;
   try {
     return await Promise.race([
-      invoke<import("./types").PublishStartStatus>("publish_start", { request, requestId, approvedInputDigest, confirmed: true, preparationId: preparationId ?? null }),
-      new Promise<never>((_, reject) => { timeout = setTimeout(() => reject(new Error("Chưa nhận xác nhận bắt đầu. Đang đối chiếu yêu cầu đã gửi.")), 15000); }),
+      request,
+      new Promise<never>((_, reject) => { timeout = setTimeout(() => reject(new Error(message)), 15000); }),
     ]);
   } finally { clearTimeout(timeout); }
 }
 export function publishStartStatus(requestId: string) {
-  return invoke<import("./types").PublishStartStatus | null>("publish_start_status", { requestId });
+  // A stalled read before Start must not leave the confirmation permanently busy.
+  // Timing out observation preserves the pending ID; it never starts another post.
+  return publishReceiptWithinDeadline(
+    invoke<import("./types").PublishStartStatus | null>("publish_start_status", { requestId }),
+    "Chưa đọc được trạng thái lượt đăng sau 15 giây. Giữ nguyên yêu cầu để đối chiếu; chưa tạo lượt mới.",
+  );
 }
 export function publishCancelUnacceptedStart(requestId: string) {
   return invoke<import("./types").PublishStartStatus>("publish_cancel_unaccepted_start", { requestId });

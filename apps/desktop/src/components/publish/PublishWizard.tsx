@@ -65,7 +65,6 @@ export interface PublishWizardProps {
 export function PublishWizard(p: PublishWizardProps) {
   const settingsRef = useRef<HTMLDetailsElement>(null);
   const openSettings = () => { if (settingsRef.current) { settingsRef.current.open = true; settingsRef.current.scrollIntoView({ block: "nearest" }); } };
-  const [checkPage, setCheckPage] = useState(0);
   const [step, setStep] = useState(1),
     [query, setQuery] = useState(""),
     [onlySelected, setOnlySelected] = useState(false);
@@ -780,8 +779,6 @@ export function PublishWizard(p: PublishWizardProps) {
               onExclude={p.onExclude}
               report={p.preflight}
               machineName={(udid) => machineName(udid, p.devices, p.metas)}
-              page={checkPage}
-              onPage={setCheckPage}
               onRetry={() => void p.onPreflight()}
               busy={locked}
             />

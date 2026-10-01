@@ -137,7 +137,7 @@ pub(super) async fn guard_fingerprint(
 }
 
 /// Only public configuration identity is retained. Tokens stay inside the existing
-/// writer check; its result is never cached across preflight/Start invocations.
+/// writer check; every invocation fences any reused proof against this binding.
 pub(super) async fn sheet_binding(
     db: &Arc<Database>,
     enabled: bool,

@@ -281,7 +281,7 @@ pub async fn step(
 }
 
 /// Use the caller's existing feed window for every read and re-check Stop before effects.
-pub(crate) async fn step_before_deadline(
+pub async fn step_before_deadline(
     session: &dyn UiSession,
     labels: TikTokControls,
     spend: &mut LadderSpend,

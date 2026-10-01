@@ -88,7 +88,7 @@ export function GoogleSheetConnection({ onReadyChange }: Props) {
       const verifiedSession = getSheetVerificationSession();
       if (!edited.current && next.active && next.connected && next.phase === "idle" && !next.error
         && verifiedSession?.account === accountKey(next) && sameTarget(target, verifiedSession.target)) {
-        setResult({ ...verifiedSession, message: "Đã kiểm tra trong phiên này; sẽ đối chiếu lại trước khi đăng." });
+        setResult({ ...verifiedSession, message: "Đã xác minh trong phiên này. Kết quả kiểm quyền ghi còn hạn sẽ được dùng cho lượt đăng." });
       }
       // The debounced effect below reads remote evidence or reuses unexpired proof.
       // It never invokes connect or the mutating final writer check.
@@ -264,7 +264,7 @@ export function GoogleSheetConnection({ onReadyChange }: Props) {
   const canCancel = action === "login" || action === "picking";
   const message = error || (action === "picking" ? "Chọn đúng bảng trong cửa sổ Google để cấp quyền." : action === "login" ? "Hoàn tất đăng nhập trong trình duyệt Google."
     : action === "loading" ? "Đang đọc kết nối Google…" : action || autoChecking ? "Đang kiểm tra kết nối…" : verified ? result.message
-      : result?.message || (savedBinding && !isSheetVerificationInvalidated() ? "Đã liên kết Google Sheet; sẽ kiểm tra quyền ghi trước khi đăng."
+      : result?.message || (savedBinding && !isSheetVerificationInvalidated() ? "Đã liên kết Google Sheet. Lượt đăng dùng kết quả kiểm quyền ghi còn hạn của đúng kết nối."
         : status && !status.configured ? "Bản app chưa có cấu hình Google. Mở Thiết lập Google để bổ sung."
         : status?.connected ? "Chưa xác minh kết nối bảng." : "Chưa đăng nhập Google."));
   return <div className="publish-sheet-connection google-sheet-connection" data-google-sheet-focus tabIndex={-1}>

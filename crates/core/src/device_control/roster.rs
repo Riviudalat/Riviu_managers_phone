@@ -55,6 +55,15 @@ impl DeviceControlPlane {
         udid: &str,
         actions: &[&str],
     ) -> anyhow::Result<()> {
+        let _idle = self.defer_idle_work(&[udid.to_owned()], DeviceWorkOwner::Interaction);
+        // Match the existing interaction yield window. Other owners still refuse
+        // immediately; only an idle background lease is allowed to finish.
+        self.work
+            .wait_for_idle_release(
+                udid,
+                tokio::time::Instant::now() + std::time::Duration::from_secs(9),
+            )
+            .await;
         let report = self.tiktok_action_capabilities(udid).await;
         crate::app_automation::require_actions(&report, actions)
     }

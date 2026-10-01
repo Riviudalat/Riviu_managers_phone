@@ -7,6 +7,18 @@
 use super::*;
 
 impl DeviceControlPlane {
+    pub fn defer_idle_work(
+        &self,
+        udids: &[String],
+        owner: DeviceWorkOwner,
+    ) -> crate::DeviceIdleWorkDeferral {
+        self.work.defer_idle_work(udids, owner)
+    }
+
+    pub fn idle_work_deferred(&self, udid: &str) -> bool {
+        self.work.idle_work_deferred(udid)
+    }
+
     pub async fn try_acquire_exclusive(
         &self,
         udid: &str,

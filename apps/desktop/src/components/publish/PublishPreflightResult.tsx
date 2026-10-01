@@ -3,7 +3,6 @@ import type {
   PublishExecutionIssue,
   PublishPreflightReport,
 } from "../../types";
-import { PublishPager } from "./PublishPager";
 import {
   publishPreflightProblem,
   publishPreflightRowPassed,
@@ -14,8 +13,6 @@ export function PublishPreflightResult({
   report,
   machineName,
   bundleName,
-  page,
-  onPage,
   onRetry,
   busy,
   hideRetry = false,
@@ -24,8 +21,6 @@ export function PublishPreflightResult({
   report: PublishPreflightReport;
   machineName: (udid: string) => string;
   bundleName?: (id: string) => string;
-  page: number;
-  onPage: (page: number) => void;
   onRetry: () => void;
   busy: boolean;
   hideRetry?: boolean;
@@ -37,14 +32,8 @@ export function PublishPreflightResult({
   const globalIssues = report.issues.filter((issue) => !issue.udid);
   const currentView = view === "blocked" && !blocked.length ? "all" : view;
   const visibleRows = currentView === "blocked" ? blocked : currentView === "passed" ? passed : [...blocked, ...passed];
-  const pageSize = 8;
-  const currentPage = Math.min(
-    page,
-    Math.max(0, Math.ceil(visibleRows.length / pageSize) - 1),
-  );
   const changeView = (next: "blocked" | "passed" | "all") => {
     setView(next);
-    onPage(0);
   };
   return (
     <>
@@ -103,9 +92,7 @@ export function PublishPreflightResult({
         role="region"
         aria-label="Kết quả kiểm tra từng máy"
       >
-        {visibleRows
-          .slice(currentPage * pageSize, (currentPage + 1) * pageSize)
-          .map((row) => (
+        {visibleRows.map((row) => (
             <article
               className="pw-preflight-device"
               key={row.udid}
@@ -198,15 +185,8 @@ export function PublishPreflightResult({
           ))}
         {!visibleRows.length && <p className="pw-preflight-empty">Không có máy trong nhóm này.</p>}
       </div>
-      <PublishPager
-        label="Kết quả kiểm tra"
-        page={currentPage}
-        size={pageSize}
-        total={visibleRows.length}
-        onPage={onPage}
-      />
       {!report.canExecute && !hideRetry && (
-        <button type="button" disabled={busy} onClick={() => { setView("blocked"); onPage(0); onRetry(); }}>
+        <button type="button" disabled={busy} onClick={() => { setView("blocked"); onRetry(); }}>
           Kiểm tra lại
         </button>
       )}

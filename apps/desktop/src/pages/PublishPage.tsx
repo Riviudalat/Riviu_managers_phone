@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useMemo, useRef, useState, type ReactNode } from "react";
 import type { UnlistenFn } from "@tauri-apps/api/event";
-import { RefreshCw, Search, ListChecks, ArrowUpRight } from "lucide-react";
+import { RefreshCw, Search, ListChecks, ArrowUpRight, CircleAlert, X } from "lucide-react";
 import { AutomationTabs, type AutomationMode } from "../components/AutomationTabs";
 import { PublishQuickSetup as PublishWizard } from "../components/publish/PublishQuickSetup";
 import { PublishSchedulePlanner } from "../components/publish/PublishSchedulePlanner";
@@ -53,6 +53,7 @@ import {
 } from "../components/WorkspacePrimitives";
 import { requestConfirm } from "../confirmStore";
 import { describeError } from "../describeError";
+import { pushToast } from "../toastStore";
 import { orderDevicesByNumber, tileName, tileNumber } from "../deviceNaming";
 import {
   publishScanErrorView,
@@ -565,6 +566,16 @@ export function PublishPage({
   const [scanning, setScanning] = useState(false);
   const busy = operationBusy || scanning;
   const [scanError, setScanError] = useState<PublishScanErrorView | null>(null);
+  const notifyScanError = (cause: unknown) => {
+    const error = publishScanErrorView(cause);
+    setScanError(error);
+    pushToast("error", error.title, error.detail);
+  };
+  useEffect(() => {
+    if (!scanError) return;
+    const timer = window.setTimeout(() => setScanError(null), 8000);
+    return () => window.clearTimeout(timer);
+  }, [scanError]);
   const scanTicket = useRef(0);
   const latestSourceRoot = useRef(sourceRoot);
   const mounted = useRef(true);
@@ -861,7 +872,7 @@ export function PublishPage({
       setManifest(next);
       setBundleIds(restoredForm.bundleIds.filter(id => next.bundles.some(b => b.id === id)));
     }).catch(error => {
-      if (mounted.current && ticket === scanTicket.current) setScanError(publishScanErrorView(error));
+      if (mounted.current && ticket === scanTicket.current) notifyScanError(error);
     }).finally(() => { if (mounted.current && ticket === scanTicket.current) setRestoringForm(false); });
   }, [restoredForm]);
 
@@ -1000,7 +1011,7 @@ export function PublishPage({
       setManifest(null);
       setBundleIds([]);
       setCaptionDrafts({});
-      setScanError(publishScanErrorView(error));
+      notifyScanError(error);
     } finally {
       if (isCurrent()) setScanning(false);
     }
@@ -1348,20 +1359,11 @@ export function PublishPage({
           <StatusNotice tone={notice.tone}>{notice.text}</StatusNotice>
         </div>
       )}
-      {scanError && (
-        <div className="publish-global-notice">
-          <StatusNotice tone="error">
-            <strong>{scanError.title}</strong>
-            {scanError.detail && <p>{scanError.detail}</p>}
-            {scanError.raw !== scanError.title && (
-              <details>
-                <summary>Chi tiết lỗi quét</summary>
-                <code>{scanError.raw}</code>
-              </details>
-            )}
-          </StatusNotice>
-        </div>
-      )}
+      {scanError && <div className="publish-action-toast" role="alert">
+        <CircleAlert size={20} aria-hidden="true" />
+        <div><strong>{scanError.title}</strong>{scanError.detail && <p>{scanError.detail}</p>}</div>
+        <button type="button" className="ghost icon-only" aria-label="Đóng thông báo quét" onClick={() => setScanError(null)}><X size={16} /></button>
+      </div>}
 
       <div className="publish-tab-panel" role="tabpanel" id="publish-panel-schedule" aria-labelledby="publish-tab-schedule" hidden={workspaceTab !== "schedule"}>
         <PublishSchedulePlanner key={sourceRoot}

@@ -385,6 +385,7 @@ pub(crate) async fn run_dispatcher(
 ) {
     let mut tasks = tokio::task::JoinSet::<anyhow::Result<()>>::new();
     let mut owned = HashMap::new();
+    let mut idle_deferrals = HashMap::new();
     let mut completed = DispatchCompletions::default();
     let mut interval = tokio::time::interval(Duration::from_millis(250));
     let mut online = std::collections::HashSet::new();
@@ -475,6 +476,15 @@ pub(crate) async fn run_dispatcher(
                 .into_iter()
                 .filter(|job| acceptance.allows_publish_dispatch(&job.run.campaign_id, &job.udid))
                 .collect::<Vec<_>>();
+            // Queued phones are foreground work too. Keep this scoped priority
+            // through dispatcher ticks and until each worker has released its lease.
+            let needed: std::collections::HashSet<_> = pending.iter().map(|job| job.udid.clone())
+                .chain(owned.values().map(|job: &riviu_core::db::PublishDispatchJob| job.udid.clone()))
+                .collect();
+            idle_deferrals.retain(|udid, _| needed.contains(udid));
+            for udid in needed {
+                idle_deferrals.entry(udid.clone()).or_insert_with(|| control.defer_idle_work(&[udid], DeviceWorkOwner::Script));
+            }
             if pending.is_empty() {
                 return Ok::<_, anyhow::Error>(());
             }

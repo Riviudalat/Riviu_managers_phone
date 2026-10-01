@@ -82,7 +82,7 @@ it("lists assigned machines as awaiting a result while preflight is running with
   const pending = screen.getByRole("region", { name: "Máy đang chờ kết quả kiểm tra" });
   expect(within(pending).getByText("Máy 1 · a")).toBeVisible();
   expect(within(pending).getByText("Máy 2 · b")).toBeVisible();
-  expect(screen.getByRole("button", { name: "Xác nhận đăng 2 bài" })).toBeDisabled();
+  expect(screen.getByRole("button", { name: "Xác nhận đăng công khai 2 bài" })).toBeDisabled();
   view.rerender(<PublishQuickSetup {...p} selectedIds={["one", "two"]} assignments={{ one: "a", two: "b" }} preflightLoading preflightStage="preparing" />);
   expect(screen.getByText("Đang chuẩn bị thiết bị…")).toBeVisible();
   view.rerender(<PublishQuickSetup {...p} selectedIds={["one", "two"]} assignments={{ one: "a", two: "b" }} preflightLoading preflightStage="checking" />);

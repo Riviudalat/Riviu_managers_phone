@@ -154,6 +154,7 @@ async fn open_interaction_context_with_start(
 ) -> Result<InteractionDevice, DeviceControlError> {
     // Resolve before acquiring anything: a phone with no drivable TikTok build should
     // refuse without taking a lease or a capacity slot.
+    let _idle = control.defer_idle_work(&[udid.to_owned()], DeviceWorkOwner::Interaction);
     let target_package = control.resolve_tiktok_package(udid).await?;
     // **A phone the idle sweeper is tidying is busy for a moment, not taken.**
     //
@@ -960,6 +961,7 @@ pub async fn execute_thread_campaign(
     } else {
         request.actor_udids.iter().cloned().collect()
     };
+    let _idle = control.defer_idle_work(&actors.iter().cloned().collect::<Vec<_>>(), DeviceWorkOwner::Interaction);
     for udid in actors {
         if control.reports_element_bounds(&udid) {
             control

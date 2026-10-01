@@ -569,6 +569,7 @@ pub async fn interaction_start_thread(
         &request.actor_udids,
     )?;
     let plan = plan_threads(&request).map_err(interaction_error)?;
+    let _idle = state.control.defer_idle_work(&request.actor_udids, riviu_core::DeviceWorkOwner::Interaction);
     for udid in &request.actor_udids {
         if state.control.reports_element_bounds(udid) {
             state
@@ -623,6 +624,7 @@ pub async fn interaction_start_thread(
     // The concrete hub, because only it can answer a generation-qualified read.
     let frames: Arc<dyn riviu_core::GenerationFrameSource> = Arc::new(state.streams.clone());
     tauri::async_runtime::spawn(async move {
+        let _idle_deferral = _idle;
         let _worker_admission = admission;
         if let Err(error) = execute_thread_campaign(
             db.clone(),

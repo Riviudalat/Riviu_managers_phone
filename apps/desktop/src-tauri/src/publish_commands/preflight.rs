@@ -372,6 +372,9 @@ pub async fn publish_preflight(
     );
     let mut prepared = preparation::CONTEXT
         .scope(context, async {
+            for udid in &request.udids {
+                preparation::progress(udid, "checkingDevices", "queued", 0, None);
+            }
             let guard_before = preparation::guard_fingerprint(&state.db, &request)
                 .await
                 .map_err(err)?;
@@ -449,7 +452,9 @@ pub(super) async fn build_publish_preflight(
     riviu_core::publish::validate_publish_mapping(&request.bundle_ids, &request.udids)
         .map_err(anyhow::Error::new)?;
 
+    preparation::progress("", "scanningSource", "running", 0, None);
     let manifest = scan_preflight_source(&request.source_root).await?;
+    preparation::progress("", "scanningSource", "passed", 4, None);
     preparation::stage(db, "checkingSheet").await?;
     let binding = preparation::sheet_binding(db, request.sheet_enabled).await?;
     let started = Instant::now();
@@ -541,8 +546,8 @@ pub(crate) async fn build_publish_preflight_from_manifest(
 pub(super) type VerifiedSheetChoice =
     Result<Option<riviu_core::publish_sheet::SheetDeliveryTarget>, String>;
 
-/// One fresh writer check per preparation request. A schedule shares this answer
-/// across its slots; the next request rechecks credentials and the actual target.
+/// Reuse only a completed writer check whose authorization/target binding and
+/// five-minute deadline are still current. Delivery retains its remote guards.
 pub(super) async fn verify_sheet_delivery_choice(
     db: &Database,
     enabled: bool,
@@ -556,7 +561,7 @@ pub(super) async fn verify_sheet_delivery_choice(
         let url = db
             .get_setting(riviu_core::publish_sheet::SHEET_URL_SETTING)?
             .unwrap_or_default();
-        let result = crate::google_sheet_commands::check_current(db,&url).await?;
+        let result = crate::google_sheet_commands::check_current_for_publish(db,&url).await?;
         anyhow::ensure!(result.connection_verified, "{}", result.message);
         anyhow::ensure!(
             result.reporting_ready,

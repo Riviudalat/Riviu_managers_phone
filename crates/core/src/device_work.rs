@@ -5,7 +5,7 @@ use std::sync::Arc;
 use parking_lot::Mutex;
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
-use tokio::sync::{OwnedSemaphorePermit, Semaphore};
+use tokio::sync::{Notify, OwnedSemaphorePermit, Semaphore};
 use uuid::Uuid;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -90,6 +90,18 @@ impl DeviceWorkCoordinator {
         let udid = udid.to_string();
         let device = self.state.device(&udid);
         let mut metadata = device.metadata.lock();
+
+        // Foreground preparation is not a lease, but background tidying must not
+        // take the phone again between its checks and its actual acquisition.
+        if owner == DeviceWorkOwner::IdleSweep {
+            if let Some(pending) = metadata.idle_deferrals.first() {
+                return Err(DeviceBusy {
+                    udid,
+                    requested_owner: owner,
+                    current_owner: pending.owner,
+                });
+            }
+        }
 
         if let Some(current_owner) = metadata.busy_owner() {
             return Err(DeviceBusy {
@@ -212,6 +224,51 @@ impl DeviceWorkCoordinator {
             .and_then(|device| device.metadata.lock().busy_owner())
     }
 
+    /// Prevent new background visits on exactly these phones until the guard drops.
+    /// Existing leases remain owned and drain normally; this never revokes a gesture.
+    pub fn defer_idle_work(
+        &self,
+        udids: &[String],
+        owner: DeviceWorkOwner,
+    ) -> DeviceIdleWorkDeferral {
+        let token = Uuid::new_v4();
+        let devices = udids
+            .iter()
+            .map(|udid| {
+                let device = self.state.device(udid);
+                device
+                    .metadata
+                    .lock()
+                    .idle_deferrals
+                    .push(CurrentWork { owner, token });
+                device
+            })
+            .collect();
+        DeviceIdleWorkDeferral { devices, token }
+    }
+
+    pub fn idle_work_deferred(&self, udid: &str) -> bool {
+        self.state
+            .existing_device(udid)
+            .is_some_and(|device| !device.metadata.lock().idle_deferrals.is_empty())
+    }
+
+    /// Observe release of a background lease without acquiring or replacing it.
+    pub async fn wait_for_idle_release(&self, udid: &str, deadline: tokio::time::Instant) -> bool {
+        let device = self.state.device(udid);
+        loop {
+            let changed = device.changed.notified();
+            tokio::pin!(changed);
+            changed.as_mut().enable();
+            if device.metadata.lock().busy_owner() != Some(DeviceWorkOwner::IdleSweep) {
+                return true;
+            }
+            if tokio::time::timeout_at(deadline, changed).await.is_err() {
+                return false;
+            }
+        }
+    }
+
     pub(crate) fn with_idle_device<T>(
         &self,
         udid: &str,
@@ -234,6 +291,24 @@ pub struct DeviceWorkLease {
     token: Uuid,
     _permit: Option<OwnedSemaphorePermit>,
     state: Arc<CoordinatorState>,
+}
+
+/// A scoped priority request, separate from exclusive device ownership.
+pub struct DeviceIdleWorkDeferral {
+    devices: Vec<Arc<PerDeviceState>>,
+    token: Uuid,
+}
+
+impl Drop for DeviceIdleWorkDeferral {
+    fn drop(&mut self) {
+        for device in &self.devices {
+            device
+                .metadata
+                .lock()
+                .idle_deferrals
+                .retain(|work| work.token != self.token);
+        }
+    }
 }
 
 impl DeviceWorkLease {
@@ -276,6 +351,8 @@ impl Drop for DeviceWorkLease {
             metadata.current = None;
         }
         drop(permit);
+        drop(metadata);
+        device.changed.notify_waiters();
     }
 }
 
@@ -301,6 +378,7 @@ impl CoordinatorState {
 struct PerDeviceState {
     semaphore: Arc<Semaphore>,
     metadata: Mutex<DeviceMetadata>,
+    changed: Notify,
 }
 
 impl PerDeviceState {
@@ -308,6 +386,7 @@ impl PerDeviceState {
         Self {
             semaphore: Arc::new(Semaphore::new(1)),
             metadata: Mutex::new(DeviceMetadata::default()),
+            changed: Notify::new(),
         }
     }
 }
@@ -316,6 +395,7 @@ impl PerDeviceState {
 struct DeviceMetadata {
     current: Option<CurrentWork>,
     waiters: VecDeque<WaitingWork>,
+    idle_deferrals: Vec<CurrentWork>,
 }
 
 impl DeviceMetadata {
@@ -397,6 +477,36 @@ mod tests {
             );
             drop(lease);
         }
+    }
+
+    #[test]
+    fn foreground_deferrals_block_only_idle_visits_and_release_independently() {
+        let coordinator = DeviceWorkCoordinator::new();
+        let first = coordinator.defer_idle_work(&["a".into()], DeviceWorkOwner::Script);
+        let second = coordinator.defer_idle_work(&["a".into()], DeviceWorkOwner::Interaction);
+        assert!(coordinator
+            .try_acquire("a", DeviceWorkOwner::IdleSweep)
+            .is_err());
+        assert!(coordinator
+            .try_acquire("other", DeviceWorkOwner::IdleSweep)
+            .is_ok());
+        let foreground = coordinator
+            .try_acquire("a", DeviceWorkOwner::Interaction)
+            .unwrap();
+        assert_eq!(
+            coordinator.current_owner("a"),
+            Some(DeviceWorkOwner::Interaction)
+        );
+        drop(foreground);
+        drop(first);
+        assert!(coordinator
+            .try_acquire("a", DeviceWorkOwner::IdleSweep)
+            .is_err());
+        drop(second);
+        assert!(coordinator
+            .try_acquire("a", DeviceWorkOwner::IdleSweep)
+            .is_ok());
+        assert!(!coordinator.idle_work_deferred("a"));
     }
 
     #[tokio::test]

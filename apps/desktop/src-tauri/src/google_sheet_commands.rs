@@ -22,6 +22,8 @@ static CONNECTION_LOCK: Mutex<()> = Mutex::const_new(());
 mod app_config;
 #[path = "google_sheet_verification.rs"]
 mod verification;
+#[path = "google_sheet_writer_check.rs"]
+mod writer_check;
 pub use verification::GoogleSheetVerification;
 #[cfg(test)]
 #[path = "google_sheet_commands_tests.rs"]
@@ -305,15 +307,19 @@ pub async fn google_sheets_verify_readonly(
     sheet_url: String,
 ) -> Result<GoogleSheetVerification, CommandError> {
     let _admission = state.ensure_accepting_work()?;
-    tokio::time::timeout(
+    let result = tokio::time::timeout(
         std::time::Duration::from_secs(45),
         verification::verify(&state.db, &sheet_url),
     )
     .await
     .map_err(|_| {
         err("Đã hết thời gian xác minh chỉ đọc Google Sheet; kết nối đã lưu được giữ nguyên")
-    })?
-    .map_err(connection_error)
+    })
+    .and_then(|result| result.map_err(connection_error));
+    if result.is_err() {
+        writer_check::invalidate();
+    }
+    result
 }
 #[tauri::command]
 pub async fn google_sheets_configure(
@@ -562,6 +568,27 @@ fn checked_bound_result(
 }
 pub(crate) async fn check_current(db: &Database, url: &str) -> anyhow::Result<SheetCheckResult> {
     let _connection = CONNECTION_LOCK.lock().await;
+    // An explicit operator check always refreshes, and a failed refresh revokes
+    // the previous proof instead of leaving Start with a stale success.
+    writer_check::invalidate();
+    let result = check_current_locked(db, url).await?;
+    writer_check::remember(db, url, &result).await?;
+    Ok(result)
+}
+
+pub(crate) async fn check_current_for_publish(db: &Database, url: &str) -> anyhow::Result<SheetCheckResult> {
+    let _connection = CONNECTION_LOCK.lock().await;
+    if let Some(result) = writer_check::get(db, url).await? {
+        log::info!("publish reuses an unexpired Sheet writer check for the current binding");
+        return Ok(result);
+    }
+    writer_check::invalidate();
+    let result = check_current_locked(db, url).await?;
+    writer_check::remember(db, url, &result).await?;
+    Ok(result)
+}
+
+async fn check_current_locked(db: &Database, url: &str) -> anyhow::Result<SheetCheckResult> {
     if !db.sheet_uses_google_direct()? {
         return riviu_core::publish_sheet::check_sheet(url, &db.publish_sheet_delivery_settings()?)
             .await;
@@ -774,6 +801,10 @@ async fn connect(
         staged_login.then_some(&tokens),
         pending.is_none() && !migrating_legacy,
     )?;
+    drop(session);
+    drop(_token);
+    let url = db.get_setting(riviu_core::publish_sheet::SHEET_URL_SETTING)?.unwrap_or_default();
+    writer_check::remember(db, &url, &result).await?;
     Ok(result)
 }
 fn finish_checked_connection(

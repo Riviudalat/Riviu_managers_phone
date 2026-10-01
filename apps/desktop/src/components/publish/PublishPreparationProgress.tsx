@@ -1,7 +1,6 @@
 import { useEffect, useState } from "react";
 import type { PublishPreflightProgress } from "../../types";
 import { publishStageLabel } from "../../features/operations/publishStartBridge";
-import { PublishPager } from "./PublishPager";
 import { ProgressBar } from "../ProgressBar";
 
 function checksFraction(row?: PublishPreflightProgress): number | null {
@@ -16,10 +15,12 @@ export function PublishPreparationProgress({ udids, progress, startedAt, name }:
   startedAt: number;
   name: (udid: string) => string;
 }) {
-  const [page, setPage] = useState(0);
   const [now, setNow] = useState(() => Date.now());
   useEffect(() => { const timer = window.setInterval(() => setNow(Date.now()), 1000); return () => clearInterval(timer); }, []);
-  const current = Math.min(page, Math.max(0, Math.ceil(udids.length / 8) - 1));
+  const shared = progress[""];
+  const sharedRunning = shared?.state === "running" || shared?.state === "queued";
+  const sharedLabel = shared && ({ checkingSheet: "Kiểm tra kết nối Sheet", staging: "Chuẩn bị nội dung",
+    scanningSource: "Đang quét nội dung" } as Record<string, string>)[shared.stage];
   const finished = udids.filter(id => ["passed", "failed"].includes(progress[id]?.state)).length;
   const passed = udids.filter(id => progress[id]?.state === "passed").length;
   const rows = udids.map(id => progress[id]);
@@ -27,14 +28,18 @@ export function PublishPreparationProgress({ udids, progress, startedAt, name }:
   const completedChecks = rows.reduce((sum, row) => sum + Math.min(row?.completedChecks ?? 0, row?.totalChecks ?? 0), 0);
   const allPassed = udids.length > 0 && passed === udids.length;
   const failed = rows.some(row => row?.state === "failed");
-  const totalFraction = rows.length > 0 && rows.every(row => checksFraction(row) !== null) && totalChecks > 0
+  const totalFraction = !sharedRunning && rows.length > 0 && rows.every(row => checksFraction(row) !== null) && totalChecks > 0
     ? Math.min(allPassed ? 1 : .99, completedChecks / totalChecks) : null;
   return <section className="pw-preflight-pending" aria-label="Chuẩn bị từng máy">
+    {sharedLabel && <div className="pw-preflight-phase" role="status">
+      <div><strong>{sharedLabel}</strong><span>{sharedRunning ? "Đang xử lý" : shared.state === "failed" ? "Cần xử lý" : "Đã kiểm tra"}
+        {` · ${(shared.elapsedMs / 1000).toFixed(1)} giây`}</span>{shared.error && <p role="alert">{shared.error}</p>}</div>
+    </div>}
     <p role="status">Đã kiểm tra {finished}/{udids.length} máy · {passed} đạt · Tổng {Math.max(0, Math.floor((now - startedAt) / 1000))} giây</p>
     <ProgressBar label="Tiến độ kiểm tra toàn bộ máy" fraction={totalFraction} tone={failed ? "failed" : allPassed ? "done" : "run"} />
-    <small>{totalFraction === null ? "Đang chuẩn bị · chưa đủ số đo tổng" : `${completedChecks}/${totalChecks} bước kiểm tra đã xử lý`}</small>
-    <div className="pw-preflight-pending-list">
-      {udids.slice(current * 8, (current + 1) * 8).map(udid => {
+    <small>{sharedRunning ? "Kiểm tra điều kiện chung trước khi kiểm tra máy" : totalFraction === null ? "Đang chuẩn bị · chưa đủ số đo tổng" : `${completedChecks}/${totalChecks} bước kiểm tra đã xử lý`}</small>
+    <div className="pw-preflight-pending-list" role="region" aria-label="Tiến độ từng máy" tabIndex={0}>
+      {udids.map(udid => {
         const row = progress[udid];
         return <div key={udid}>
           <strong>{name(udid)}</strong>
@@ -48,6 +53,5 @@ export function PublishPreparationProgress({ udids, progress, startedAt, name }:
         </div>;
       })}
     </div>
-    <PublishPager label="Chuẩn bị máy" page={current} size={8} total={udids.length} onPage={setPage} />
   </section>;
 }

@@ -322,6 +322,7 @@ pub async fn publish_create_campaign(
         return Ok(prior);
     }
     let handoff_deadline = tokio::time::Instant::now() + Duration::from_secs(125);
+    let _idle = run_at.is_none().then(|| state.control.defer_idle_work(&udids, DeviceWorkOwner::Script));
     let handoff = if confirmed && run_at.is_none() {
         Some(crate::commands::wait_manual_handoff_until(handoff_deadline).await?)
     } else {

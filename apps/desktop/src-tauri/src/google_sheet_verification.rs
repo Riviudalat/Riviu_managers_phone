@@ -95,10 +95,10 @@ pub(super) async fn verify(db: &Database, url: &str) -> anyhow::Result<GoogleShe
             "Đã đọc bảng và header; bấm Kiểm tra kết nối để liên kết bảng với tài khoản này."
         }
         (_, _, _, SheetWritePermission::Unknown) => {
-            "Đã xác minh quyền đọc và header; quyền ghi sẽ được kiểm tra trước khi đăng."
+            "Đã xác minh quyền đọc và header. Quyền ghi sẽ được kiểm tra nếu chưa có kết quả còn hạn."
         }
         (_, _, _, SheetWritePermission::Verified) => {
-            "Đã xác minh quyền truy cập và header; khóa ghi vẫn được kiểm tra trước khi đăng."
+            "Đã xác minh quyền truy cập và header. Lượt đăng dùng kết quả kiểm quyền ghi còn hạn của đúng kết nối."
         }
     }
     .into();
@@ -114,6 +114,9 @@ pub(super) async fn verify(db: &Database, url: &str) -> anyhow::Result<GoogleShe
         "Kết nối Google đã thay đổi trong lúc xác minh; kiểm tra lại"
     );
     let verified_at = chrono::Utc::now().timestamp_millis();
+    if !ready_read || !reporting_ready || !result.connection_verified || write_permission == SheetWritePermission::Denied {
+        writer_check::invalidate();
+    }
     Ok(GoogleSheetVerification {
         result,
         binding: SheetVerificationBinding {

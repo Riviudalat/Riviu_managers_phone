@@ -212,6 +212,17 @@ impl IdleSweeper {
 
     /// One phone, one visit.
     async fn visit(&self, udid: &str) {
+        // A sweep may have queued this visit before foreground work arrived.
+        // Re-check after admission; the coordinator also fences the actual lease.
+        if self.control.idle_work_deferred(udid) {
+            return;
+        }
+        // A cold open can start instrumentation and attach/install the helper.
+        // Optional background tidying must not own that preparation on a new PC.
+        let agent = self.control.cached_agent_status(udid);
+        if !agent.auth_ready || !agent.session_ready {
+            return;
+        }
         // Not `device_lease`: that lends the control overlay's lease when the operator has
         // one open, which is exactly the phone this must not touch. Asking for its own
         // lease means an open overlay refuses us, which is the answer we want.
@@ -241,12 +252,16 @@ impl IdleSweeper {
 
     /// The ladder itself, with this caller's budget around it.
     async fn walk_ladder(&self, udid: &str, session: &dyn riviu_core::UiSession) {
-        let labels = match self.labels_for(udid, session).await {
-            Ok(labels) => labels,
-            Err(refusal) => {
+        let deadline = tokio::time::Instant::now() + Duration::from_secs(9);
+        // Label reads have no effects and may be cancelled. Dispatched gestures
+        // in the ladder drain before the session and its lease are released.
+        let labels = match tokio::time::timeout_at(deadline, self.labels_for(udid, session)).await {
+            Ok(Ok(labels)) => labels,
+            Ok(Err(refusal)) => {
                 self.say_refusal_once(udid, &refusal);
                 return;
             }
+            Err(_) => return,
         };
         self.forget_refusal(udid);
 
@@ -254,8 +269,15 @@ impl IdleSweeper {
         spend.allow_back = self.blind_visits(udid) >= BLIND_VISITS_BEFORE_BACK;
 
         let mut acted = false;
+        let stop = std::sync::atomic::AtomicBool::new(false);
         for _ in 0..STEPS_PER_VISIT {
-            let step = feed_ladder::step(session, labels, &mut spend).await;
+            if self.control.idle_work_deferred(udid) || tokio::time::Instant::now() >= deadline {
+                return;
+            }
+            let step = match feed_ladder::step_before_deadline(session, labels, &mut spend, deadline, &stop).await {
+                Ok(riviu_core::ui_automation::runtime::ReadWaitResult::Ready(step)) => step,
+                _ => return,
+            };
             if step == LadderStep::OnFeed {
                 if acted {
                     self.log.record(udid, "đã đưa máy về feed");
@@ -274,6 +296,9 @@ impl IdleSweeper {
                 return;
             }
             acted = true;
+            if self.control.idle_work_deferred(udid) {
+                return;
+            }
             // The screen is mid-transition after a tap. This is the same 1 s the session
             // ladder waits, for the same reason.
             tokio::time::sleep(Duration::from_secs(1)).await;

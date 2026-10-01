@@ -73,7 +73,8 @@ export function OperationProgressCenter({ deviceLabels }: { deviceLabels: Readon
     const receive = (event: Event) => {
       const next = (event as CustomEvent<PendingPublishStart>).detail;
       setPendingStart(next); setSelectedId(next.status?.operationId ?? null);
-      if (event.type === PUBLISH_START_ACKNOWLEDGED) setExpanded(true);
+      // Show the request immediately, including status-read failures before ACK.
+      setExpanded(true);
       setStartReadError(null);
     };
     // A durable pre-accept rejection retires the marker; the monitor must forget it too,
