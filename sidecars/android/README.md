@@ -85,18 +85,17 @@ The Riviu helper APK (`com.riviu.agent`) **is** bundled too:
 pinned copy here ships. Clipboard on Android 10+ needs it; uiautomator2 must not
 advertise an empty `get_clipboard`.
 
-The branded **Riviu Helper 0.5.0** has a launcher name/icon and a read-only service
-status screen. The desktop prepares the package after each observed Android
-connection, under a Repair lease that keeps the stream. Missing/old packages are
-installed once, then versionCode and launcher are read back. Current/newer packages
-are reused; blocked installation waits for a new connection after the operator
-fixes the device-side permission. Package preparation does not prove service authentication.
-The current development helper client blocks new token provisioning and clipboard/IME
-activation pending secure-bootstrap and recovery qualification; see the
+The branded **Riviu Helper 0.7.0** (versionCode 7) ships as a non-debuggable
+APK with SHA-256 `e9201ea3a3e4f06050b05b641512433aa426979904591bcb2d20421e4a5f05f2`.
+It has a launcher name/icon and a read-only service status screen. The desktop
+prepares missing/old packages under a Repair lease and reads back versionCode and
+launcher; current/newer packages are reused. Blocked installation waits for a new
+connection after the operator fixes the device-side permission.
+Secure provisioning and clipboard/IME qualification are tied to this exact APK
+and the 30 qualified helper canaries. Package preparation alone does not prove
+service authentication. This qualification does not establish durable host-crash
+recovery or universal runtime compatibility on another PC; see the
 [candidate boundaries](../riviu-android-agent/README.md#deployment-and-candidate-qualification).
-The shipped APK remains 0.5.0. The 0.6.0 debug candidate has a separate exact-device
-canary path; qualifying bootstrap/clipboard reads and restoration does not qualify
-normal release provisioning, clipboard writes, crash recovery or every helper feature.
 
 The manifest pins **nine** files. The Layout section above lists them; if that list
 and the manifest ever disagree, the manifest is the one the loader reads.

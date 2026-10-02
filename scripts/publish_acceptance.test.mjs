@@ -990,3 +990,88 @@ test('acceptance needs matching canonical proof, durable receipt and authenticat
   };
   assert.notEqual((await runAcceptance(e.options('observe', ['--campaign-id', 'campaign-fixture']), { invoke: wrong })).exitCode, 0);
 });
+
+// Owns scheduled harness routing, not the production clock or scheduler engine.
+test('schedule reservation freezes scope and lost Start ACK observes deadline cancel and late start without replay', async t => {
+  for (const scenario of ['deadline', 'cancel', 'late-start']) {
+    const e = environment(t), at = '2099-10-03T12:00:00';
+    const opts = (mode, extra = []) => parseArgs(['--mode', mode, '--protocol', 'start',
+      '--report-dir', e.dir, ...base, '--dev-scope', e.devScope, '--run-at', at,
+      '--schedule-case', scenario, ...extra]);
+    const reserved = await runAcceptance(opts('reserve'), { invoke: () => assert.fail('reserve must be offline') });
+    assert.equal(reserved.exitCode, 0, reserved.report.error);
+    const reservation = JSON.parse(fs.readFileSync(path.join(e.dir, 'preflight-request.json'), 'utf8'));
+    const frozen = JSON.parse(fs.readFileSync(e.devScope, 'utf8'));
+    // Root assembles static scope before starting the controller; include a sibling ID/device.
+    frozen.campaignIds = [reservation.requestId, 'approved-sibling'];
+    frozen.deviceIds.push('sibling-phone');
+    frozen.capabilities = { publishVerification: true, sheetDelivery: true, publishCleanup: true, publishSchedule: true };
+    fs.writeFileSync(e.devScope, JSON.stringify(frozen));
+    const frozenBytes = fs.readFileSync(e.devScope);
+    let status, starts = 0, cancels = 0, clock = new Date('2099-10-03T11:59:00').getTime();
+    const invoke = async (command, args) => {
+      if (command === 'publish_start') {
+        starts++;
+        assert.equal(args.requestId, reservation.requestId);
+        assert.equal(args.request.runAt, at);
+        assert.equal(args.confirmed, true);
+        status = { requestId: args.requestId, reservedCampaignId: args.requestId,
+          campaignId: args.requestId, inputDigest: args.approvedInputDigest, state: 'queued', revision: 3 };
+        e.detail.campaign = { ...e.detail.campaign, id: args.requestId, requestId: args.requestId,
+          runAt: at, state: 'scheduled' };
+        e.detail.events = [{ revision: 1, kind: 'created', payloadJson: JSON.stringify({
+          ...args.request, requestId: args.requestId, executionConfirmed: true }) },
+        { revision: 4, kind: 'state', payloadJson: JSON.stringify({ state: 'scheduled' }) }];
+        for (const [i, row] of e.detail.assignments.entries()) Object.assign(row, {
+          campaignId: args.requestId, bundleId: `${args.requestId}:${args.request.bundleIds[i]}`,
+          state: 'scheduled', effectIntent: null, evidenceJson: null, dispatch: null });
+        throw new Error('Start ACK lost after commit');
+      }
+      if (command === 'publish_start_status') return structuredClone(status);
+      if (command === 'publish_get') return structuredClone(e.detail);
+      if (command === 'publish_cancel') {
+        cancels++; e.detail.campaign.state = 'cancelled';
+        e.detail.events.push({ revision: 5, kind: 'state', payloadJson: JSON.stringify({ state: 'cancelled' }) });
+        // Production cancel keeps untouched scheduled assignment rows.
+        throw new Error('Cancel ACK lost after commit');
+      }
+      assert.ok(!['publish_execute', 'publish_create_campaign'].includes(command));
+      return e.invoke(command, args);
+    };
+    const prepared = await runAcceptance(opts('preflight'), { invoke, now: () => clock });
+    assert.equal(prepared.exitCode, 0, prepared.report.error);
+    const submit = opts('submit', ['--confirm', prepared.report.confirmation]);
+    const first = await runAcceptance(submit, { invoke, now: () => clock });
+    assert.equal(first.exitCode, 2, first.report.error);
+    assert.equal(first.report.start, 'ackUnknownNeverReplay');
+    assert.equal(first.report.schedule.revision, 3);
+    assert.equal(first.report.schedule.latestCampaignEventRevision, 4);
+    const deadline = await runAcceptance(opts('observe', ['--wait-seconds', '10', '--poll-seconds', '5']),
+      { invoke, now: () => clock, sleep: async ms => { clock += ms; } });
+    assert.equal(deadline.report.acceptance, 'pendingDeadline');
+    await runAcceptance(submit, { invoke, now: () => clock });
+    assert.equal(starts, 1, 'lost Start ACK is never replayed');
+    if (scenario === 'cancel') {
+      const cancelled = await runAcceptance(opts('cancel', ['--confirm', prepared.report.confirmation]), { invoke, now: () => clock });
+      assert.equal(cancelled.exitCode, 2, 'cancellation must be observed through the due window');
+      assert.equal(cancelled.report.cancel, 'ackUnknownNeverReplay');
+      await runAcceptance(opts('cancel', ['--confirm', prepared.report.confirmation]), { invoke, now: () => clock });
+      assert.equal(cancels, 1, 'lost Cancel ACK is never replayed');
+    } else {
+      // Supply a production startup receipt. The harness does not emulate a scheduler.
+      e.detail.campaign.state = 'missed'; e.detail.campaign.errorCode = scenario === 'deadline' ? 'schedule_capacity_deadline' : 'app_opened_after_deadline';
+      // Native miss_publish_schedule currently increments DB revision without appending an event.
+      e.detail.assignments.forEach(row => { row.state = 'missed'; });
+    }
+    clock = new Date(at).getTime() + 31000;
+    const observed = await runAcceptance(opts('observe'), { invoke, now: () => clock });
+    assert.equal(observed.report.acceptance, scenario === 'cancel' ? 'cancelledNoPublication' : scenario === 'deadline' ? 'deadlineNoPublication' : 'lateStartNoPublication');
+    assert.equal(observed.exitCode, 0, observed.report.error);
+    assert.equal(observed.report.schedule.revision, 3);
+    assert.equal(observed.report.schedule.latestCampaignEventRevision, scenario === 'cancel' ? 5 : 4);
+    e.detail.assignments[0].effectIntent = JSON.stringify({ effectIntent: 'post' });
+    assert.equal((await runAcceptance(opts('observe'), { invoke, now: () => clock })).exitCode, 1);
+    assert.equal(starts, 1);
+    assert.deepEqual(fs.readFileSync(e.devScope), frozenBytes, 'running process scope bytes stay frozen');
+  }
+});

@@ -4,9 +4,9 @@ import { createHash, randomUUID } from 'node:crypto';
 import { pathToFileURL } from 'node:url';
 import { setTimeout as delay } from 'node:timers/promises';
 
-const MODES = ['inspect', 'preflight', 'submit', 'observe'];
+const MODES = ['inspect', 'reserve', 'preflight', 'submit', 'observe', 'cancel'];
 const FLAGS = ['mode', 'protocol', 'report-dir', 'udids', 'source', 'bundle-ids', 'sheet-id', 'sheet-gid',
-  'sheet-disabled', 'real-android', 'dev-scope', 'cdp', 'page-url', 'campaign-id', 'confirm', 'wait-seconds', 'poll-seconds', 'content-snapshot'];
+  'sheet-disabled', 'real-android', 'dev-scope', 'cdp', 'page-url', 'campaign-id', 'confirm', 'wait-seconds', 'poll-seconds', 'content-snapshot', 'run-at', 'schedule-case'];
 const check = (condition, message) => { if (!condition) throw new Error(message); };
 const hash = value => createHash('sha256').update(JSON.stringify(value)).digest('hex');
 const hashBytes = value => createHash('sha256').update(value).digest('hex');
@@ -146,7 +146,7 @@ export function parseArgs(argv) {
     flags[name] = value;
   }
   const mode = flags.mode ?? 'inspect';
-  const protocol = flags.protocol ?? (['preflight', 'submit'].includes(mode) ? 'start' : 'legacy');
+  const protocol = flags.protocol ?? (['reserve', 'preflight', 'submit', 'cancel'].includes(mode) ? 'start' : 'legacy');
   check(['legacy', 'start'].includes(protocol), '--protocol phải là legacy hoặc start');
   check(flags['sheet-disabled'] === undefined || flags['sheet-disabled'] === 'true',
     '--sheet-disabled only accepts the explicit value true');
@@ -170,6 +170,7 @@ export function parseArgs(argv) {
     sheetDisabled, realAndroid: flags['real-android'] === 'true',
     devScope: flags['dev-scope'] ? path.normalize(flags['dev-scope']) : null,
     campaignId: flags['campaign-id'] ?? null, confirm: flags.confirm ?? null,
+    runAt: flags['run-at'] ?? null, scheduleCase: flags['schedule-case'] ?? 'publish',
     waitSeconds: integer(flags['wait-seconds'] ?? '0', 0, 86400, '--wait-seconds'),
     pollSeconds: integer(flags['poll-seconds'] ?? '10', 5, 3600, '--poll-seconds') };
   if (options.pageUrl) {
@@ -182,9 +183,9 @@ export function parseArgs(argv) {
   check(Boolean(options.sheetId) === (options.sheetGid !== null), '--sheet-id và --sheet-gid phải đi cùng nhau');
   check(!options.sheetDisabled || !options.sheetId, '--sheet-disabled true không nhận --sheet-id/--sheet-gid');
   check(!options.campaignId || /^[A-Za-z0-9_-]{1,128}$/.test(options.campaignId), 'Campaign ID không hợp lệ');
-  check(mode === 'submit' ? /^[a-f0-9]{64}$/.test(options.confirm ?? '') : !options.confirm,
+  check(['submit', 'cancel'].includes(mode) ? /^[a-f0-9]{64}$/.test(options.confirm ?? '') : !options.confirm,
     'submit cần --confirm SHA-256 từ preflight; mode khác không nhận --confirm');
-  if (mode === 'submit' || mode === 'preflight') {
+  if (['reserve', 'preflight', 'submit', 'cancel'].includes(mode)) {
     check(options.source && options.bundleIds.length === options.udids.length,
       'preflight/submit cần --source và --bundle-ids một-một với --udids');
     check(!options.sheetDisabled && options.sheetId,
@@ -192,13 +193,28 @@ export function parseArgs(argv) {
     check(options.devScope, 'preflight/submit cần --dev-scope nghiệm thu thủ công');
     check(!options.campaignId, 'Không submit/preflight campaign cũ; dùng observe');
   }
+  check(['publish', 'deadline', 'cancel', 'late-start'].includes(options.scheduleCase), '--schedule-case must be publish, deadline, cancel or late-start');
+  if (options.runAt) {
+    check(protocol === 'start' && /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}$/.test(options.runAt),
+      '--run-at requires local naive YYYY-MM-DDTHH:mm:ss and --protocol start');
+    const at = new Date(options.runAt);
+    check(Number.isFinite(at.getTime()) && localRunAt(at) === options.runAt, '--run-at is not a valid local time');
+    check(options.devScope, 'schedule requires a static --dev-scope');
+  }
+  check(options.runAt || (!flags['schedule-case'] && !['reserve', 'cancel'].includes(mode)), 'reserve/cancel/schedule-case require --run-at');
+  check(mode !== 'cancel' || options.scheduleCase === 'cancel', 'cancel requires schedule-case cancel');
   check(mode === 'observe' || (options.waitSeconds === 0 && flags['poll-seconds'] === undefined),
     'Chỉ observe nhận thời gian chờ; chờ không kích hoạt kiểm tra thiết bị');
   return options;
 }
+function localRunAt(at) {
+  const n = value => String(value).padStart(2, '0');
+  return `${at.getFullYear()}-${n(at.getMonth() + 1)}-${n(at.getDate())}T${n(at.getHours())}:${n(at.getMinutes())}:${n(at.getSeconds())}`;
+}
 function scope(options) {
   return { cdp: options.cdp, pageUrl: options.pageUrl, source: options.source,
     ...(options.protocol === 'start' ? { protocol: 'start' } : {}),
+    ...(options.runAt ? { runAt: options.runAt, scheduleCase: options.scheduleCase } : {}),
     contentSnapshot: options.contentSnapshot, udids: options.udids, bundleIds: options.bundleIds,
     ...(options.realAndroid ? { realAndroid: true } : {}),
     sheetId: options.sheetId, sheetGid: options.sheetGid, ...(options.sheetDisabled ? { sheetDisabled: true } : {}),
@@ -374,6 +390,82 @@ async function readStartAccounts(udids, invoke, validate) {
   return readings;
 }
 
+// Reserve identity offline; root freezes all scope IDs before starting the controller.
+function reserveSchedule(options, { file, report, now }) {
+  check(!read(file('preflight.json')) && !read(file('start-intent.json')), 'Reservation already passed preflight');
+  let reservation = read(file('preflight-request.json'));
+  if (!reservation) {
+    reservation = { requestId: randomUUID(), scopeFingerprint: hash(scope(options)),
+      devScope: { path: options.devScope }, at: new Date(now()).toISOString() };
+    write(file('preflight-request.json'), reservation, true);
+  }
+  check(reservation.scopeFingerprint === hash(scope(options)), 'Reservation mapping or due time changed');
+  report.reservation = reservation; report.acceptance = 'reservedOffline';
+  return { exitCode: 0, report };
+}
+function frozenScheduleScope(options, requestId, binding = null) {
+  const current = readDevScope(options.devScope), policy = current.value;
+  check(exactKeys(policy, ['activationId', 'campaignIds', 'deviceIds', 'capabilities'])
+    && typeof policy.activationId === 'string' && /^[A-Za-z0-9_-]{16,128}$/.test(policy.activationId)
+    && Array.isArray(policy.campaignIds) && policy.campaignIds.includes(requestId)
+    && new Set(policy.campaignIds).size === policy.campaignIds.length
+    && Array.isArray(policy.deviceIds) && options.udids.every(id => policy.deviceIds.includes(id))
+    && new Set(policy.deviceIds).size === policy.deviceIds.length
+    && plainObject(policy.capabilities)
+    && exactKeys(policy.capabilities, ['publishVerification', 'sheetDelivery', 'publishCleanup', 'publishSchedule'])
+    && Object.values(policy.capabilities).every(value => value === true),
+  'Schedule needs static campaignIds/deviceIds and publishSchedule before controller startup');
+  const result = { path: options.devScope, contentHash: hashBytes(current.raw), activationId: policy.activationId };
+  check(!binding || hash(result) === hash(binding), 'Frozen schedule scope changed; refusing IPC');
+  return result;
+}
+function scheduleObservation(detail, approval, startIntent, now) {
+  const runAt = approval.request.runAt;
+  check(detail.campaign.runAt === runAt, 'Campaign due time differs from approved request');
+  check(startIntent.confirmed === true, 'Schedule lacks durable confirmed Start intent');
+  const created = detail.events?.find(event => event.kind === 'created');
+  const persistedRequest = parseEvidence(created?.payloadJson);
+  check(persistedRequest.executionConfirmed === true && persistedRequest.runAt === runAt
+    && persistedRequest.requestId === approval.requestId, 'Schedule created event lacks confirmed execution binding');
+  const revisions = detail.events?.map(event => event.revision);
+  check(revisions?.length && revisions.every(value => Number.isSafeInteger(value) && value > 0),
+    'Schedule lacks campaign event revisions');
+  const dueAtMs = new Date(runAt).getTime();
+  const schedule = { runAt, dueAtMs, timezone: Intl.DateTimeFormat().resolvedOptions().timeZone,
+    latestCampaignEventRevision: Math.max(...revisions), updatedAt: detail.campaign.updatedAt, confirmedStart: true,
+    requestId: approval.requestId, campaignId: detail.campaign.id,
+    clockIntervalMs: 1000, admissionGraceMs: 30000, catchUp: false };
+  if (approval.scope.scheduleCase === 'publish') return { schedule };
+  // Persisted no-effect evidence is not an independent public-profile scan.
+  check(detail.assignments.every(row => !row.effectIntent && !row.evidenceJson
+    && row.dispatch?.startedAtMs == null && ['scheduled', 'queued', 'imported', 'cancelled', 'missed'].includes(row.state)),
+  'Negative schedule case has intent, evidence or started dispatch');
+  const terminal = approval.scope.scheduleCase === 'cancel' ? 'cancelled' : 'missed';
+  const settled = detail.campaign.state === terminal
+    && (terminal === 'cancelled' || detail.assignments.every(row => row.state === terminal));
+  if (terminal === 'missed' && settled) {
+    const reason = approval.scope.scheduleCase === 'deadline' ? 'schedule_capacity_deadline' : 'app_opened_after_deadline';
+    check(detail.campaign.errorCode === reason, 'Missed does not match approved schedule policy');
+  }
+  const passed = settled && now() >= dueAtMs + 31000;
+  return { schedule, acceptance: passed ? (terminal === 'cancelled' ? 'cancelledNoPublication' : approval.scope.scheduleCase === 'deadline' ? 'deadlineNoPublication' : 'lateStartNoPublication') : 'pending',
+    noPublicationEvidence: 'persistedTerminalRowsWithoutIntentEvidenceOrStartedDispatch', exitCode: passed ? 0 : 2 };
+}
+
+function validateStartDetail(detail, approval, options) {
+  check(detail?.campaign?.id === approval.requestId
+    && detail.campaign.requestId === approval.requestId,
+  'Campaign không khớp Start receipt');
+  check(detail.assignments?.length === options.udids.length
+    && new Set(detail.assignments.map(assignment => assignment.id)).size === options.udids.length
+    && detail.assignments.every((assignment, index) =>
+      assignment.campaignId === approval.requestId
+      && assignment.udid === options.udids[index]
+      && assignment.ordinal === index
+      && assignment.bundleId === `${approval.requestId}:${approval.request.bundleIds[index]}`),
+  'Assignments khác mapping bài-máy đã duyệt; không đánh dấu đạt');
+}
+
 async function runStartProtocol(options, { invoke, sleep, now, file, report, currentAccounts }) {
   const prepared = read(file('preflight.json'));
   const startIntent = read(file('start-intent.json'));
@@ -383,6 +475,7 @@ async function runStartProtocol(options, { invoke, sleep, now, file, report, cur
     check(!startIntent, 'Start intent đã tồn tại; chỉ observe bằng đúng requestId');
     let reservation = read(file('preflight-request.json'));
     if (!reservation) {
+      check(!options.runAt, 'Schedule requires offline reserve before controller startup');
       const devScope = inspectDevScope(options.devScope, options.udids);
       reservation = { requestId: randomUUID(), devScope,
         scopeFingerprint: hash(scope(options)), at: new Date(now()).toISOString() };
@@ -392,7 +485,8 @@ async function runStartProtocol(options, { invoke, sleep, now, file, report, cur
       && reservation.devScope?.path === options.devScope
       && /^[a-f0-9-]{36}$/.test(reservation.requestId),
     'Preflight reservation không khớp phạm vi đã đóng băng');
-    const state = validateDevScopeForSubmit(reservation.devScope,
+    const scheduleScope = options.runAt ? frozenScheduleScope(options, reservation.requestId, prepared?.approval?.devScope) : null;
+    const state = scheduleScope ? 'activeForCampaign' : validateDevScopeForSubmit(reservation.devScope,
       { id: reservation.requestId }, options.udids);
     if (state === 'inactiveApproved') {
       activateDevScope(reservation.devScope, reservation.requestId, options.udids);
@@ -401,7 +495,7 @@ async function runStartProtocol(options, { invoke, sleep, now, file, report, cur
       requestId: reservation.requestId };
     const writer = await checkSheet(invoke, options);
     const request = { sourceRoot: options.source, bundleIds: options.bundleIds, udids: options.udids,
-      targetRef: { type: 'explicit', udids: options.udids }, runAt: null,
+      targetRef: { type: 'explicit', udids: options.udids }, runAt: options.runAt ?? null,
       captionOverrides: options.contentSnapshot?.captionOverrides ?? {},
       soundPolicy: options.contentSnapshot?.soundPolicy ?? { kind: 'default' },
       sheetEnabled: true, deleteAfterPublish: true };
@@ -428,7 +522,7 @@ async function runStartProtocol(options, { invoke, sleep, now, file, report, cur
     for (const reading of readings) accounts[reading.udid] = handle(reading.observedHandle);
     check(options.udids.every(id => /^[a-z0-9_.]{1,24}$/.test(handle(accounts[id]))),
       'Chưa có username hợp lệ để xác minh bài đăng');
-    const approval = { scope: scope(options), devScope: reservation.devScope,
+    const approval = { scope: scope(options), devScope: scheduleScope ?? reservation.devScope,
       requestId: reservation.requestId, accounts, metadataAccounts: currentAccounts,
       request, inputDigest: preflight.inputDigest, preparationId: preflight.preparationId,
       sheetDelivery: target, writer };
@@ -441,13 +535,14 @@ async function runStartProtocol(options, { invoke, sleep, now, file, report, cur
   }
   check(prepared && hash(prepared.approval) === prepared.confirmation
     && prepared.approval.scope?.protocol === 'start'
-    && (options.mode !== 'submit'
+    && (!['submit', 'cancel'].includes(options.mode)
       || hash(scope(options)) === hash(prepared.approval.scope)),
   'Không có preflight start khớp phạm vi');
   const approval = prepared.approval, accounts = approval.accounts;
   check(approval.devScope?.path === (options.devScope ?? approval.devScope?.path)
-    && validateDevScopeForSubmit(approval.devScope, { id: approval.requestId },
-      options.udids) === 'activeForCampaign',
+    && (approval.request.runAt
+      ? frozenScheduleScope({ ...options, devScope: approval.devScope.path }, approval.requestId, approval.devScope)
+      : validateDevScopeForSubmit(approval.devScope, { id: approval.requestId }, options.udids) === 'activeForCampaign'),
   'Scope nghiệm thu không còn cấp quyền đúng requestId');
   if (options.mode === 'submit') {
     check(prepared.confirmation === options.confirm, 'Confirmation/preflight không khớp');
@@ -469,7 +564,7 @@ async function runStartProtocol(options, { invoke, sleep, now, file, report, cur
         `Account preflight did not match approved device identity for ${udid}`);
       });
       intent = { confirmation: options.confirm, requestId: approval.requestId,
-        request: approval.request, approvedInputDigest: approval.inputDigest,
+        request: approval.request, ...(approval.request.runAt ? { confirmed: true } : {}), approvedInputDigest: approval.inputDigest,
         preparationId: approval.preparationId, at: new Date(now()).toISOString() };
       write(file('start-intent.json'), intent, true);
       report.start = 'intended';
@@ -494,7 +589,8 @@ async function runStartProtocol(options, { invoke, sleep, now, file, report, cur
       report.start = 'alreadyIntendedObserveOnly';
     }
   } else {
-    check(options.mode === 'observe' && startIntent?.requestId === approval.requestId,
+    check(['observe', 'cancel'].includes(options.mode) && startIntent?.requestId === approval.requestId
+      && startIntent.confirmation === prepared.confirmation && hash(startIntent.request) === hash(approval.request),
       'Observe start cần đúng durable intent');
     check(!options.campaignId || options.campaignId === approval.requestId,
       'Observe start sai campaign ID đã cấp quyền');
@@ -521,22 +617,42 @@ async function runStartProtocol(options, { invoke, sleep, now, file, report, cur
       } else {
         check(status.campaignId === approval.requestId,
           'Campaign ID khác requestId đã cấp quyền; không đánh dấu đạt');
-        const detail = await invoke('publish_get', { campaignId: status.campaignId });
-        check(detail?.campaign?.id === status.campaignId
-          && detail.campaign.requestId === approval.requestId,
-        'Campaign không khớp Start receipt');
-        check(detail.assignments?.length === options.udids.length
-          && new Set(detail.assignments.map(assignment => assignment.id)).size === options.udids.length
-          && detail.assignments.every((assignment, index) =>
-            assignment.campaignId === status.campaignId
-            && assignment.udid === options.udids[index]
-            && assignment.ordinal === index
-            && assignment.bundleId === `${approval.requestId}:${approval.request.bundleIds[index]}`),
-        'Assignments khác mapping bài-máy đã duyệt; không đánh dấu đạt');
+        let detail = await invoke('publish_get', { campaignId: status.campaignId });
+        validateStartDetail(detail, approval, options);
+        if (options.mode === 'cancel') {
+          check(approval.scope.scheduleCase === 'cancel' && options.confirm === prepared.confirmation,
+            'Cancel requires exact confirmation for case cancel');
+          scheduleObservation(detail, approval, startIntent, now);
+          let cancellation = read(file('cancel-intent.json'));
+          if (!cancellation) {
+            check(now() < new Date(approval.request.runAt).getTime(), 'Cancel must precede due time');
+            cancellation = { campaignId: detail.campaign.id, requestId: approval.requestId,
+              confirmation: prepared.confirmation, at: new Date(now()).toISOString() };
+            write(file('cancel-intent.json'), cancellation, true);
+            try {
+              await invoke('publish_cancel', { campaignId: detail.campaign.id });
+              report.cancel = 'acknowledged';
+            } catch (error) { report.cancel = 'ackUnknownNeverReplay'; report.cancelError = String(error); }
+          } else {
+            check(cancellation.campaignId === detail.campaign.id && cancellation.confirmation === prepared.confirmation,
+              'Cancel intent differs from approved campaign');
+            report.cancel = 'alreadyIntendedObserveOnly';
+          }
+          detail = await invoke('publish_get', { campaignId: status.campaignId });
+          validateStartDetail(detail, approval, options);
+        }
         write(file('detail.json'), detail);
         const result = await summarize(detail, options, invoke, accounts);
         Object.assign(report, result);
         exitCode = result.exitCode;
+        if (approval.request.runAt) {
+          const observation = scheduleObservation(detail, approval, startIntent ?? read(file('start-intent.json')), now);
+          check(Number.isSafeInteger(status.revision) && status.revision > 0, 'Schedule lacks current Start receipt revision');
+          observation.schedule.revision = status.revision;
+          observation.schedule.revisionSource = 'publish_start_status';
+          Object.assign(report, observation);
+          if (observation.exitCode !== undefined) exitCode = observation.exitCode;
+        }
       }
     }
     if (options.mode !== 'observe' || exitCode !== 2 || now() >= deadline) break;
@@ -559,6 +675,10 @@ export async function runAcceptance(options, { invoke, sleep = delay, now = Date
   let exitCode = 0;
   try {
     fs.writeFileSync(lock, String(process.pid)); fs.fsyncSync(lock);
+    if (options.mode === 'reserve') {
+      const outcome = reserveSchedule(options, { file, report, now });
+      report = outcome.report; exitCode = outcome.exitCode; return { exitCode, report };
+    }
     const intent = read(file('create-intent.json'));
     const prepared = read(file('preflight.json'));
     if (options.mode === 'submit') {
@@ -575,6 +695,11 @@ export async function runAcceptance(options, { invoke, sleep = delay, now = Date
         && requestFingerprint(intent.args, intent.sheetDisabled === true) === intent.requestFingerprint,
         'Create intent không khớp confirmation/fingerprint');
     }
+    if (options.runAt) {
+      const reservation = read(file('preflight-request.json'));
+      check(reservation?.scopeFingerprint === hash(scope(options)), 'Schedule reservation does not match scope');
+      frozenScheduleScope(options, reservation.requestId, prepared?.approval?.devScope);
+    }
     const devices = await invoke('list_devices');
     const metas = await invoke('list_device_metas');
     report.roster = roster(devices, metas, options.udids);
@@ -588,7 +713,7 @@ export async function runAcceptance(options, { invoke, sleep = delay, now = Date
     const currentAccounts = Object.fromEntries(report.roster.selected.map(r => [r.udid, r.assignedHandle ?? '']));
     const startObserve = options.mode === 'observe' && prepared?.approval?.scope?.protocol === 'start';
     if ((options.protocol === 'start' || startObserve)
-      && ['preflight', 'submit', 'observe'].includes(options.mode)) {
+      && ['preflight', 'submit', 'observe', 'cancel'].includes(options.mode)) {
       const outcome = await runStartProtocol(
         startObserve ? { ...options, protocol: 'start' } : options,
         { invoke, sleep, now, file, report, currentAccounts });
@@ -810,7 +935,7 @@ export async function runAcceptance(options, { invoke, sleep = delay, now = Date
 
 const ALLOWED_IPC = new Set(['list_devices', 'list_device_metas', 'operation_prepare_devices', 'interaction_read_account', 'publish_get', 'google_sheets_status',
   'publish_sheet_readback', 'publish_sheet_check', 'publish_preflight', 'publish_create_campaign',
-  'publish_execute', 'publish_start', 'publish_start_status']);
+  'publish_execute', 'publish_start', 'publish_start_status', 'publish_cancel']);
 export async function connectIPC(options, chromium) {
   const browser = await chromium.connectOverCDP(options.cdp, { timeout: 15000 });
   try {
@@ -854,11 +979,16 @@ if (process.argv[1] && import.meta.url === pathToFileURL(path.resolve(process.ar
     const options = parseArgs(process.argv.slice(2));
     check(options.protocol !== 'legacy' || !['preflight', 'submit'].includes(options.mode),
       'Legacy Create/Execute không còn dùng cho lượt đăng mới; dùng --protocol start');
+    if (options.mode === 'reserve') {
+      const result = await runAcceptance(options, { invoke: () => { throw new Error('Offline reserve must not invoke IPC'); } });
+      console.log(JSON.stringify(result.report, null, 2)); process.exitCode = result.exitCode;
+    } else {
     const { chromium } = await import('../apps/desktop/node_modules/playwright/index.mjs');
     transport = await connectIPC(options, chromium);
     const result = await runAcceptance(options, transport);
     console.log(JSON.stringify(result.report, null, 2));
     process.exitCode = result.exitCode;
+    }
   } catch (error) { console.error(String(error)); process.exitCode = 1; }
   finally { await transport?.close(); }
 }
