@@ -19,10 +19,10 @@ mod tests;
 impl Default for PublishLimits {
     fn default() -> Self {
         Self {
-            transfer: 4,
-            compose: 4,
-            verify: 4,
-            device_total: 8,
+            transfer: 64,
+            compose: 64,
+            verify: 64,
+            device_total: 64,
         }
     }
 }
@@ -41,8 +41,8 @@ impl PublishLimits {
             "transfer" => self.transfer,
             "compose" => self.compose,
             "verify" => self.verify,
-            "cleanup" => 1,
-            "appCompletion" => 4,
+            "cleanup" => self.device_total,
+            "appCompletion" => self.device_total,
             _ => anyhow::bail!("unknown publish work stage"),
         })
     }
@@ -399,8 +399,8 @@ impl Database {
           LEFT JOIN publish_dispatch_turns t ON t.udid=j.udid
           WHERE j.state='queued' AND c.state='posting'
           AND NOT EXISTS(SELECT 1 FROM publish_recovery_state retry WHERE retry.assignment_id=j.assignment_id AND CAST(json_extract(retry.payload,'$.nextRetryAt') AS REAL)>CAST(strftime('%s','now') AS INTEGER)*1000)
-          AND ((j.phase='transfer' AND (SELECT COUNT(*) FROM publish_work_claims WHERE stage='transfer')<CAST(COALESCE((SELECT json_extract(value,'$.transfer') FROM settings WHERE key='publish.dispatch.limits'),4) AS INTEGER))
-            OR (j.phase='compose' AND (SELECT COUNT(*) FROM publish_work_claims WHERE stage='compose')<CAST(COALESCE((SELECT json_extract(value,'$.compose') FROM settings WHERE key='publish.dispatch.limits'),4) AS INTEGER)))
+          AND ((j.phase='transfer' AND (SELECT COUNT(*) FROM publish_work_claims WHERE stage='transfer')<CAST(COALESCE((SELECT json_extract(value,'$.transfer') FROM settings WHERE key='publish.dispatch.limits'),64) AS INTEGER))
+            OR (j.phase='compose' AND (SELECT COUNT(*) FROM publish_work_claims WHERE stage='compose')<CAST(COALESCE((SELECT json_extract(value,'$.compose') FROM settings WHERE key='publish.dispatch.limits'),64) AS INTEGER)))
           AND NOT EXISTS(SELECT 1 FROM publish_work_claims w WHERE w.udid=j.udid)
           AND NOT EXISTS(SELECT 1 FROM publish_dispatch_jobs busy WHERE busy.udid=j.udid
             AND busy.assignment_id<>j.assignment_id AND busy.state IN ('queued','running') AND busy.started_at_ms IS NOT NULL)

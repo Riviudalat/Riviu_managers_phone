@@ -65,8 +65,9 @@ export async function readAndAssignTikTokAccounts(targets: DeviceInfo[], deps: D
   if (pending.length < unique.length) pushToast("info", "Máy đang đọc nick sẽ giữ lượt hiện có");
   pending.forEach(device => accountReads.add(device.udid));
   let savedCount = 0;
+  let refreshDebt = false;
   try {
-    for (const target of pending) {
+    await Promise.all(pending.map(async target => {
       const meta = deps.metaMap.get(target.udid);
       const number = deps.deviceNumbers?.get(target.udid) ?? meta?.number;
       const label = `${number ? `Máy ${number}` : target.udid} · ${tileName(target, meta)}`;
@@ -80,14 +81,27 @@ export async function readAndAssignTikTokAccounts(targets: DeviceInfo[], deps: D
         const saved = await saveDeviceHandle(target.udid, reading.expectedHandle, reading.observedHandle);
         savedCount++;
         pushToast("ok", `${label} · @${saved}`);
-        // Refresh after the saved value is acknowledged. Never substitute stale metadata on error.
+        // Fast phones publish their acknowledged metadata without waiting for
+        // the slowest reader; older responses cannot replace a newer snapshot.
+        const revision = ++accountMetaReadRevision;
         try {
-          const revision = ++accountMetaReadRevision;
           const metas = await listDeviceMetas();
-          if (revision === accountMetaReadRevision) deps.setMetas(metas);
+          if (revision === accountMetaReadRevision) {
+            refreshDebt = false;
+            deps.setMetas(metas);
+          }
+        } catch (error) {
+          if (revision === accountMetaReadRevision) refreshDebt = true;
+          toastError(`Đã lưu nick nhưng chưa cập nhật danh sách · ${label}`, error);
         }
-        catch (error) { toastError(`Đã lưu nick nhưng chưa cập nhật danh sách · ${label}`, error); }
       } catch (error) { toastError(`Đọc/gán nick thất bại · ${label}`, error); }
+    }));
+    if (refreshDebt && savedCount) {
+      const revision = ++accountMetaReadRevision;
+      try {
+        const metas = await listDeviceMetas();
+        if (revision === accountMetaReadRevision) deps.setMetas(metas);
+      } catch (error) { toastError("Đã lưu nick nhưng chưa cập nhật danh sách", error); }
     }
     if (pending.length) pushToast(savedCount === pending.length ? "ok" : "warn", `Đã gán nick TikTok ${savedCount}/${pending.length} máy`);
   } finally { pending.forEach(device => accountReads.delete(device.udid)); }

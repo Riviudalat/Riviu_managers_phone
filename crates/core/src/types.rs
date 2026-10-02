@@ -387,6 +387,23 @@ pub enum StepStatus {
     Uncertain,
 }
 
+impl StepStatus {
+    /// A fleet step is complete only after every requested phone completes it.
+    pub(crate) fn aggregate(states: impl IntoIterator<Item = Self>) -> Self {
+        states
+            .into_iter()
+            .max_by_key(|status| match status {
+                Self::Succeeded => 0,
+                Self::Skipped => 1,
+                Self::Failed => 2,
+                Self::Pending => 3,
+                Self::Running => 4,
+                Self::Uncertain => 5,
+            })
+            .unwrap_or(Self::Pending)
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct JobStepRecord {

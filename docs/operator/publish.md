@@ -9,11 +9,19 @@ chuyển media, thao tác TikTok, xác minh link và tổng lượt điều khi�
 Sau khi đổi giới hạn, kiểm tra lại lịch trước khi lưu; lịch quá tải có cảnh báo.
 
 Đăng ngay và hẹn giờ dùng chung hàng chờ bền vững theo từng bài/máy. Mặc định toàn
-ứng dụng có 4 lượt chuyển media, 4 lượt thao tác TikTok, 4 lượt xác minh liên kết;
-tổng lượt điều khiển thiết bị tối đa 8. Sheet có tối đa 2 request, trong đó tối đa
+ứng dụng cho phép tối đa 64 máy chuyển media, thao tác TikTok và xác minh liên kết
+đồng thời; mỗi máy chỉ có một chủ điều khiển. Cấu hình giới hạn đã lưu trên PC được
+giữ nguyên: chọn **Chạy song song toàn bộ máy** rồi **Lưu giới hạn** để mở toàn bộ
+lượt trên PC đang dùng giới hạn cũ. Lệnh ADB vẫn có giới hạn I/O chung theo bus USB.
+Sheet có tối đa 2 request, trong đó tối đa
 1 request báo tiến độ. Theo dõi hiển thị giai đoạn, thời điểm vào hàng và lý do chờ.
 Sau khi gửi, app trả lượt thao tác TikTok rồi xác minh riêng; retry trước gửi giữ
 nguyên bài dự kiến, retry lấy link hoặc ghi Sheet không gửi bài lần nữa.
+
+Lỗi `copy <tệp ảnh>` nằm ở bước sao chép nội dung trên PC vào thư mục quản lý,
+trước chuyển qua ADB. Thông báo gồm tệp nguồn, tệp đích và lỗi hệ điều hành. Kiểm
+tra tệp còn tồn tại, quyền đọc Downloads và dung lượng/quyền ghi ổ chứa dữ liệu Riviu.
+Không dùng bấm Đăng lại để giải quyết lỗi sao chép sau một kết quả gửi chưa rõ.
 
 Giờ hẹn là lúc bắt đầu xử lý. Bài chưa được cấp lượt trong 30 giây hoặc app mở lại
 sau giờ hẹn được ghi **Lỡ lịch**, không tự đăng bù. Công việc đã bắt đầu đúng cửa

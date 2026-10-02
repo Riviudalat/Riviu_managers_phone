@@ -570,18 +570,11 @@ pub async fn interaction_start_thread(
     )?;
     let plan = plan_threads(&request).map_err(interaction_error)?;
     let _idle = state.control.defer_idle_work(&request.actor_udids, riviu_core::DeviceWorkOwner::Interaction);
-    for udid in &request.actor_udids {
-        if state.control.reports_element_bounds(udid) {
-            state
-                .control
-                .preflight_tiktok_actions(
-                    udid,
-                    &riviu_core::app_automation::interaction_actions(request.actions),
-                )
-                .await
-                .map_err(interaction_error)?;
-        }
-    }
+    let actions = riviu_core::app_automation::interaction_actions(request.actions);
+    let checks = futures_util::future::join_all(request.actor_udids.iter()
+        .filter(|udid| state.control.reports_element_bounds(udid))
+        .map(|udid| state.control.preflight_tiktok_actions(udid, &actions))).await;
+    for checked in checks { checked.map_err(interaction_error)?; }
     // Asked before anything is persisted. The engine checks this too, but by then the row
     // exists and the operator's history fills with campaigns that were Running for a second
     // and then Failed on a missing key — an AI campaign with no key never started, and the

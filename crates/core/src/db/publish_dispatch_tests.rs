@@ -358,6 +358,8 @@ fn publication_survives_retries_and_stale_claims_cannot_finish_new_attempt() {
 #[test]
 fn permits_are_global_across_connections_and_release_by_exact_device() {
     let (db, path, _, _) = fixture();
+    // This case owns configured admission, independent of the default fleet cap.
+    db.set_setting("publish.dispatch.limits", r#"{"transfer":4,"compose":4,"verify":4,"deviceTotal":8}"#).unwrap();
     let other = Database::open(path).unwrap();
     let mut permits = Vec::new();
     for n in 0..4 {

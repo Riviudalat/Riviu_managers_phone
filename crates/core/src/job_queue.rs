@@ -207,49 +207,76 @@ impl JobQueue {
         // `queued` row for work that had actually run, and the job could be picked up again.
         self.persist(&job)?;
 
-        let mut first_error: Option<String> = None;
-
-        for udid in &udids {
-            if self.is_cancelled(job_id) {
-                job.status = JobStatus::Cancelled;
-                job.updated_at = Utc::now();
-                self.persist_outcome(&mut job);
-                return Ok(());
-            }
-
-            let acquire = self
-                .control
-                .acquire_exclusive(udid, DeviceWorkOwner::Script);
-            let cancelled = self.wait_until_cancelled(job_id);
-            tokio::pin!(acquire);
-            tokio::pin!(cancelled);
-            let context = tokio::select! {
-                biased;
-                _ = &mut cancelled => {
-                    job.status = JobStatus::Cancelled;
-                    job.updated_at = Utc::now();
-                    self.persist_outcome(&mut job);
-                    return Ok(());
-                }
-                result = &mut acquire => result?,
-            };
-            self.registry.set_status(udid, DeviceStatus::Busy, None);
-
-            match self.run_on_device(&mut job, &script, udid, context).await {
-                Ok(()) => {
-                    self.registry.set_status(udid, DeviceStatus::Ready, None);
-                }
-                Err(err) => {
+        // Each phone owns one future/lease and its own step sequence. Await all
+        // outcomes so cancellation never abandons a gesture on a sibling phone.
+        let targets = udids.into_iter().collect::<std::collections::BTreeSet<_>>();
+        let _idle = self.control.defer_idle_work(
+            &targets.iter().cloned().collect::<Vec<_>>(),
+            DeviceWorkOwner::Script,
+        );
+        let results = {
+            let template = &job;
+            let script = &script;
+            futures_util::future::join_all(targets.iter().map(|udid| async move {
+                let mut device_job = template.clone();
+                let mut began = false;
+                let result = async {
                     if self.is_cancelled(job_id) {
-                        self.registry.set_status(udid, DeviceStatus::Ready, None);
-                        continue;
+                        anyhow::bail!("cancelled");
                     }
-                    let msg = format!("{err:#}");
-                    first_error.get_or_insert(msg.clone());
-                    self.registry
-                        .set_status(udid, DeviceStatus::Error, Some(msg));
+                    let acquire = self
+                        .control
+                        .acquire_exclusive(udid, DeviceWorkOwner::Script);
+                    tokio::pin!(acquire);
+                    let context = tokio::select! {
+                        biased;
+                        _ = self.wait_until_cancelled(job_id) => anyhow::bail!("cancelled"),
+                        result = &mut acquire => result?,
+                    };
+                    began = true;
+                    self.registry.set_status(udid, DeviceStatus::Busy, None);
+                    self.run_on_device(&mut device_job, script, udid, context)
+                        .await
                 }
-            }
+                .await;
+                for step in &mut device_job.steps {
+                    if step.status == StepStatus::Pending {
+                        step.status = StepStatus::Skipped;
+                    }
+                }
+                match &result {
+                    _ if !began => {}
+                    Err(error) if !self.is_cancelled(job_id) => {
+                        self.registry.set_status(
+                            udid,
+                            DeviceStatus::Error,
+                            Some(format!("{error:#}")),
+                        );
+                    }
+                    _ => {
+                        self.registry.set_status(udid, DeviceStatus::Ready, None);
+                    }
+                }
+                (
+                    device_job,
+                    result.err().map(|error| format!("{udid}: {error:#}")),
+                )
+            }))
+            .await
+        };
+        let first_error = results.iter().find_map(|(_, error)| error.clone());
+        for (index, step) in job.steps.iter_mut().enumerate() {
+            step.status = StepStatus::aggregate(
+                results
+                    .iter()
+                    .map(|(device, _)| device.steps[index].status.clone()),
+            );
+            step.error = results
+                .iter()
+                .find_map(|(device, _)| device.steps[index].error.clone());
+            step.artifact_path = results
+                .iter()
+                .find_map(|(device, _)| device.steps[index].artifact_path.clone());
         }
 
         job.status = if self.is_cancelled(job_id) {
@@ -259,9 +286,19 @@ impl JobQueue {
         } else {
             JobStatus::Succeeded
         };
+        let reporting_debt = results
+            .iter()
+            .filter_map(|(device, _)| device.error.clone())
+            .collect::<Vec<_>>();
         job.error = first_error;
+        for debt in reporting_debt {
+            job.error = Some(match job.error.take() {
+                Some(error) => format!("{error}; {debt}"),
+                None => debt,
+            });
+        }
         job.updated_at = Utc::now();
-        self.persist_outcome(&mut job);
+        self.persist_script_settlement(&mut job);
         Ok(())
     }
 
@@ -474,7 +511,15 @@ impl JobQueue {
             return;
         };
         job.status = JobStatus::Failed;
-        job.error = Some(format!("{error:#}"));
+        for step in &mut job.steps {
+            if step.status == StepStatus::Pending {
+                step.status = StepStatus::Skipped;
+            }
+        }
+        job.error = Some(match job.error.take() {
+            Some(debt) => format!("{debt}; {error:#}"),
+            None => format!("{error:#}"),
+        });
         job.updated_at = Utc::now();
         self.persist_outcome(&mut job);
     }
@@ -496,6 +541,7 @@ impl JobQueue {
         elapsed_ms: u64,
     ) -> anyhow::Result<()> {
         let saved = job.clone();
+        let write_context = format!("script timeline write {udid} step {index}");
         let udid = udid.to_owned();
         let session_id = session_id.to_owned();
         let cancellation = self.cancelled.clone();
@@ -511,8 +557,16 @@ impl JobQueue {
                 );
                 db.save_job_device_step(&saved, &udid, index, &session_id, elapsed_ms)
             })
-            .await?;
-        self.events.emit(AppEvent::JobUpdated { job: job.clone() });
+            .await
+            .with_context(|| write_context)?;
+        // Emit the aggregate committed with this device's own timeline entry.
+        if let Some(aggregate) = self
+            .db
+            .get_job(job.id)
+            .context("script timeline committed; aggregate read failed")?
+        {
+            self.events.emit(AppEvent::JobUpdated { job: aggregate });
+        }
         Ok(())
     }
 
@@ -530,11 +584,36 @@ impl JobQueue {
         {
             tracing::error!("script timeline {}: {error:#}", job.id);
             job.error = Some(format!(
-                "{} (script timeline not persisted: {error})",
+                "{} ({udid} step {index} script timeline reporting failed: {error:#})",
                 job.error.as_deref().unwrap_or_default()
             ));
-            self.persist_outcome(job);
+            // Never save this worker-private step array over its siblings.
+            if let Err(reconcile_error) = self.db.save_job_reporting_error(job) {
+                tracing::error!(
+                    "script reporting reconciliation {}: {reconcile_error:#}",
+                    job.id
+                );
+                job.error = Some(format!(
+                    "{}; reconciliation failed: {reconcile_error:#}",
+                    job.error.as_deref().unwrap_or_default()
+                ));
+            }
+            if let Ok(Some(mut aggregate)) = self.db.get_job(job.id) {
+                aggregate.error = job.error.clone();
+                self.events.emit(AppEvent::JobUpdated { job: aggregate });
+            }
         }
+    }
+
+    fn persist_script_settlement(&self, job: &mut JobRecord) {
+        if let Err(error) = self.db.settle_script_job(job) {
+            tracing::error!("script settlement {}: {error:#}", job.id);
+            job.error = Some(format!(
+                "{}; settlement not persisted: {error:#}",
+                job.error.as_deref().unwrap_or_default()
+            ));
+        }
+        self.events.emit(AppEvent::JobUpdated { job: job.clone() });
     }
 
     /// Report an outcome that already happened, saying so if it could not be stored.
@@ -743,7 +822,17 @@ mod tests {
             .unwrap();
         timeout(Duration::from_secs(2), async {
             loop {
-                if db.get_job(job.id).unwrap().unwrap().steps[0].status == StepStatus::Running {
+                if ["phone-a", "phone-b"].iter().all(|udid| {
+                    db.operation_device_log(
+                        crate::OperationRunKind::Script,
+                        &job.id.to_string(),
+                        udid,
+                    )
+                    .unwrap()
+                    .entries
+                    .iter()
+                    .any(|entry| entry.state == "running")
+                }) {
                     break;
                 }
                 tokio::task::yield_now().await;
@@ -776,15 +865,19 @@ mod tests {
         assert_eq!(detail["stepIndex"], 0);
         assert!(detail["elapsedMs"].as_u64().is_some());
         assert!(detail["sessionId"].is_string());
-        assert!(db
-            .operation_device_log(
+        assert_eq!(
+            db.operation_device_log(
                 crate::OperationRunKind::Script,
                 &job.id.to_string(),
                 "phone-b"
             )
             .unwrap()
             .entries
-            .is_empty());
+            .iter()
+            .map(|entry| entry.state.as_str())
+            .collect::<Vec<_>>(),
+            ["running", "skipped"]
+        );
         assert!(db
             .operation_device_log(
                 crate::OperationRunKind::Script,
@@ -795,6 +888,47 @@ mod tests {
             .entries
             .is_empty());
         control.shutdown_cleanup().await.unwrap();
+        // A failed sibling is recorded on its own row while the group remains
+        // in flight; the last successful sibling must not erase the failure.
+        let mut projection = JobQueue::prepare_job(
+            &AutomationScript {
+                version: 1,
+                name: "mixed device results".into(),
+                steps: vec![ScriptAction::Home],
+            },
+            &["phone-a".into(), "phone-b".into()],
+        );
+        projection.status = JobStatus::Running;
+        projection.steps[0].status = StepStatus::Running;
+        db.save_job_device_step(&projection, "phone-b", 0, "fixture", 0)
+            .unwrap();
+        projection.steps[0].status = StepStatus::Failed;
+        projection.steps[0].error = Some("failed on a".into());
+        projection.steps[0].artifact_path = Some("a-proof.png".into());
+        db.save_job_device_step(&projection, "phone-a", 0, "fixture", 1)
+            .unwrap();
+        assert_eq!(
+            db.get_job(projection.id).unwrap().unwrap().steps[0].status,
+            StepStatus::Running
+        );
+        projection.steps[0].status = StepStatus::Succeeded;
+        projection.steps[0].error = None;
+        projection.steps[0].artifact_path = Some("b-proof.png".into());
+        db.save_job_device_step(&projection, "phone-b", 0, "fixture", 2)
+            .unwrap();
+        assert_eq!(
+            db.get_job(projection.id).unwrap().unwrap().steps[0].status,
+            StepStatus::Failed
+        );
+        let merged = db.get_job(projection.id).unwrap().unwrap();
+        assert!(merged.steps[0]
+            .error
+            .as_deref()
+            .is_some_and(|e| e.contains("phone-a") && e.contains("failed on a")));
+        assert_eq!(
+            merged.steps[0].artifact_path.as_deref(),
+            Some("a-proof.png")
+        );
     }
 
     #[tokio::test]
@@ -823,6 +957,11 @@ mod tests {
             first
                 .save_job_device_step(&job, "fixture-phone", 0, "lost-session", 0)
                 .unwrap();
+            // Model the stale aggregate that an old private-clone fallback left behind.
+            let mut stale = job.clone();
+            stale.steps[0].status = StepStatus::Succeeded;
+            stale.status = JobStatus::Succeeded;
+            first.save_job(&stale).unwrap();
         }
         let db = Arc::new(Database::open(&path).unwrap());
         let events = EventBus::new(16);
@@ -847,6 +986,8 @@ mod tests {
         queue.cancel(job.id);
         queue.shutdown().await.unwrap();
         let after = db.get_job(job.id).unwrap().unwrap();
+        assert_eq!(after.status, JobStatus::Uncertain);
+        assert_eq!(after.steps[0].status, StepStatus::Uncertain);
         let log = db
             .operation_device_log(
                 crate::OperationRunKind::Script,
@@ -888,6 +1029,70 @@ mod tests {
         );
     }
 
+    #[tokio::test]
+    async fn script_reporting_failure_preserves_sibling_intent_and_final_debt() {
+        let root = std::env::temp_dir().join(format!("script-report-debt-{}", Uuid::new_v4()));
+        let path = root.join("jobs.db");
+        let db = Arc::new(Database::open(&path).unwrap());
+        let events = EventBus::new(16);
+        let control = Arc::new(DeviceControlPlane::new(
+            Arc::new(QueueTestDriver::default()),
+            Arc::new(DeviceWorkCoordinator::new()),
+            Arc::new(StreamBudgetManager::new(1).unwrap()),
+        ));
+        let queue = JobQueue::new(
+            db.clone(),
+            events.clone(),
+            DeviceRegistry::new(events),
+            control.clone(),
+            root.join("artifacts"),
+        )
+        .unwrap();
+        let sql = rusqlite::Connection::open(&path).unwrap();
+        sql.execute_batch("CREATE TRIGGER refuse_script_outcome BEFORE INSERT ON operation_device_events WHEN NEW.source_kind='script' AND NEW.state='succeeded' BEGIN SELECT RAISE(FAIL,'fixture outcome write refused'); END;").unwrap();
+        let script = AutomationScript {
+            version: 1,
+            name: "report debt".into(),
+            steps: vec![ScriptAction::Home],
+        };
+        let mut private = JobQueue::prepare_job(&script, &["phone-a".into(), "phone-b".into()]);
+        private.status = JobStatus::Running;
+        private.steps[0].status = StepStatus::Running;
+        db.save_job_device_step(&private, "phone-b", 0, "fixture-b", 0)
+            .unwrap();
+        private.steps[0].status = StepStatus::Succeeded;
+        queue
+            .persist_device_step_outcome(&mut private, "phone-a", 0, "fixture-a", 1)
+            .await;
+        let sibling_status = db.get_job(private.id).unwrap().unwrap().steps[0]
+            .status
+            .clone();
+        let final_job = JobQueue::prepare_job(&script, &["phone-c".into()]);
+        db.save_job(&final_job).unwrap();
+        queue
+            .run_job(final_job.id, script, final_job.udids.clone())
+            .await
+            .unwrap();
+        let saved = db.get_job(final_job.id).unwrap().unwrap();
+        println!(
+            "report regression: sibling={sibling_status:?}; final_error={:?}",
+            saved.error
+        );
+        assert_eq!(
+            sibling_status,
+            StepStatus::Running,
+            "report failure cannot erase the sibling's intent"
+        );
+        assert!(
+            saved.error.as_deref().is_some_and(
+                |e| e.contains("phone-c") && e.contains("fixture outcome write refused")
+            ),
+            "final settlement must retain reporting debt: {:?}",
+            saved.error
+        );
+        control.shutdown_cleanup().await.unwrap();
+    }
+
     struct QueueTestSession;
 
     #[async_trait]
@@ -927,7 +1132,7 @@ mod tests {
         install_only_calls: AtomicUsize,
         session_calls: AtomicUsize,
         stream_calls: AtomicUsize,
-        session_live: AtomicBool,
+        live_sessions: Mutex<std::collections::HashSet<String>>,
     }
 
     impl QueueTestDriver {
@@ -941,11 +1146,8 @@ mod tests {
 
     #[async_trait]
     impl DeviceDriver for QueueTestDriver {
-        async fn repair_agent_install_only(
-            &self,
-            _udid: &str,
-        ) -> anyhow::Result<AgentInstallProof> {
-            if self.session_live.load(Ordering::Acquire) {
+        async fn repair_agent_install_only(&self, udid: &str) -> anyhow::Result<AgentInstallProof> {
+            if self.live_sessions.lock().contains(udid) {
                 anyhow::bail!("install-only readiness requires the prior session to be closed");
             }
             self.install_only_calls.fetch_add(1, Ordering::Relaxed);
@@ -1014,12 +1216,12 @@ mod tests {
                 anyhow::bail!("install-only readiness must precede the UI session");
             }
             self.session_calls.fetch_add(1, Ordering::Relaxed);
-            self.session_live.store(true, Ordering::Release);
+            self.live_sessions.lock().insert(_udid.to_string());
             Ok(Box::new(QueueTestSession))
         }
 
         fn invalidate_ui_session(&self, _udid: &str) {
-            self.session_live.store(false, Ordering::Release);
+            self.live_sessions.lock().remove(_udid);
         }
 
         async fn ensure_stream(&self, _udid: &str) -> anyhow::Result<String> {
@@ -1226,7 +1428,7 @@ mod tests {
         assert_eq!(driver.install_only_calls.load(Ordering::Relaxed), 1);
         assert_eq!(driver.session_calls.load(Ordering::Relaxed), 1);
         assert_eq!(driver.stream_calls.load(Ordering::Relaxed), 0);
-        assert!(!driver.session_live.load(Ordering::Acquire));
+        assert!(driver.live_sessions.lock().is_empty());
         queue.shutdown().await.expect("queue shutdown");
         control.shutdown_cleanup().await.expect("control shutdown");
         let _ = std::fs::remove_dir_all(root);
@@ -1285,8 +1487,15 @@ mod tests {
         .expect("script failure is bounded");
 
         assert_eq!(status, JobStatus::Failed);
+        let settled = queue
+            .list_jobs(10)
+            .unwrap()
+            .into_iter()
+            .find(|row| row.id == job.id)
+            .unwrap();
+        assert_eq!(settled.steps[0].status, StepStatus::Skipped);
         assert_eq!(driver.session_calls.load(Ordering::Relaxed), 1);
-        assert!(!driver.session_live.load(Ordering::Acquire));
+        assert!(driver.live_sessions.lock().is_empty());
         queue.shutdown().await.expect("queue shutdown");
         control.shutdown_cleanup().await.expect("control shutdown");
         let _ = std::fs::remove_dir_all(root);

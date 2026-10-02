@@ -606,13 +606,13 @@ pub(crate) async fn preflight_comment_job(
     udids: &[String],
     settings: &NurtureSettings,
 ) -> CommentPreflight {
-    let mut preflight = CommentPreflight::default();
-    for udid in udids {
+    let results = futures_util::future::join_all(udids.iter().map(|udid| async move {
+        let mut preflight = CommentPreflight::default();
         if control.reports_element_bounds(udid) {
             let actions = riviu_core::app_automation::nurture_actions(settings);
             if let Err(error) = control.preflight_tiktok_actions(udid, &actions).await {
                 preflight.skipped.push(format!("{udid}: {error}"));
-                continue;
+                return preflight;
             }
         }
         if settings.feed_source == riviu_core::types::NurtureFeedSource::Search
@@ -621,11 +621,11 @@ pub(crate) async fn preflight_comment_job(
             preflight
                 .skipped
                 .push(format!("{udid}: lướt từ khóa cần máy Android"));
-            continue;
+            return preflight;
         }
         if !settings.comment_enabled || settings.comment_prob == 0 {
             preflight.ready.push(udid.clone());
-            continue;
+            return preflight;
         }
         let context = match control
             .try_acquire_exclusive(udid, DeviceWorkOwner::Nurture)
@@ -634,7 +634,7 @@ pub(crate) async fn preflight_comment_job(
             Ok(context) => context,
             Err(error) => {
                 preflight.skipped.push(format!("{udid}: {error}"));
-                continue;
+                return preflight;
             }
         };
         match control.preflight_agent(&context).await {
@@ -647,6 +647,13 @@ pub(crate) async fn preflight_comment_job(
             )),
             Err(error) => preflight.skipped.push(format!("{udid}: {error}")),
         }
+        preflight
+    }))
+    .await;
+    let mut preflight = CommentPreflight::default();
+    for result in results {
+        preflight.ready.extend(result.ready);
+        preflight.skipped.extend(result.skipped);
     }
     preflight
 }

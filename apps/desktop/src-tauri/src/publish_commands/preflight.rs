@@ -3,8 +3,8 @@
 use super::*;
 use futures_util::stream::{self, StreamExt};
 
-// Stay below the host ADB admission cap while probing different phones together.
-const PUBLISH_PREFLIGHT_DEVICE_LIMIT: usize = 4;
+// Independent per-device checks; the Android driver owns USB/ADB I/O admission.
+const PUBLISH_PREFLIGHT_DEVICE_LIMIT: usize = 64;
 
 #[derive(Clone)]
 pub(super) struct PreflightDeviceObservation {

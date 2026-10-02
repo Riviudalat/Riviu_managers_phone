@@ -118,9 +118,9 @@ pub async fn install_ipa(
 
 /// Install one signed IPA onto every member of a device group.
 ///
-/// Devices are processed one at a time: each takes its own exclusive Repair
-/// lease, installs, then releases before the next. A single device's failure is
-/// recorded and the batch continues, so one bad device never aborts the fleet.
+/// At most two distinct devices install concurrently, each retaining its own
+/// exclusive Repair lease. Repeated selections install once; failures remain
+/// per device and results retain first-selection order.
 #[tauri::command]
 pub async fn install_ipa_to_group(
     state: State<'_, AppState>,
@@ -150,8 +150,16 @@ pub async fn install_ipa_to_group(
         return Err(CommandError::invalid_argument("group has no devices"));
     }
 
-    let mut results = Vec::with_capacity(group.udids.len());
-    for udid in group.udids {
+    use futures_util::StreamExt;
+
+    let mut seen = std::collections::HashSet::new();
+    let targets = group
+        .udids
+        .into_iter()
+        .filter(|udid| seen.insert(udid.clone()));
+    let state = &*state;
+    let ipa = &ipa;
+    let results = futures_util::stream::iter(targets.map(|udid| async move {
         let outcome = async {
             let context = state
                 .control
@@ -160,7 +168,7 @@ pub async fn install_ipa_to_group(
             state.control.install_app(&context, &ipa).await
         }
         .await;
-        results.push(match outcome {
+        match outcome {
             Ok(()) => GroupInstallResult {
                 udid,
                 ok: true,
@@ -171,8 +179,11 @@ pub async fn install_ipa_to_group(
                 ok: false,
                 error: Some(error.to_string()),
             },
-        });
-    }
+        }
+    }))
+    .buffered(2)
+    .collect()
+    .await;
 
     Ok(results)
 }
@@ -303,6 +314,46 @@ pub async fn import_media(
     import_one_media(&state, &udid, &path).await
 }
 
+/// A serial owns one FIFO queue; independent queues can progress together.
+/// Indexed results restore assignment order even when serials finish out of order.
+async fn run_distribution_queues<T, R, F, Fut>(
+    assignments: Vec<T>,
+    serial: impl Fn(&T) -> &str,
+    concurrency: usize,
+    action: F,
+) -> Vec<R>
+where
+    F: Fn(T) -> Fut,
+    Fut: std::future::Future<Output = R>,
+{
+    use futures_util::StreamExt;
+
+    let mut queues = std::collections::BTreeMap::<String, Vec<(usize, T)>>::new();
+    for (index, item) in assignments.into_iter().enumerate() {
+        queues
+            .entry(serial(&item).to_owned())
+            .or_default()
+            .push((index, item));
+    }
+    let action = &action;
+    let mut results: Vec<_> =
+        futures_util::stream::iter(queues.into_values().map(|queue| async move {
+            let mut results = Vec::with_capacity(queue.len());
+            for (index, item) in queue {
+                results.push((index, action(item).await));
+            }
+            results
+        }))
+        .buffer_unordered(concurrency)
+        .collect::<Vec<_>>()
+        .await
+        .into_iter()
+        .flatten()
+        .collect();
+    results.sort_unstable_by_key(|(index, _)| *index);
+    results.into_iter().map(|(_, result)| result).collect()
+}
+
 /// Push a *different* file into each selected phone's gallery (xiaowei "File Distribution").
 /// Same per-device batch shape as `group_input`/`distribute_text`: a phone that fails is
 /// recorded and the run carries on, never aborting the batch.
@@ -312,13 +363,25 @@ pub async fn distribute_files(
     assignments: Vec<DistributeFileItem>,
 ) -> Result<GroupInputReport, CommandError> {
     let _admission = state.ensure_accepting_work()?;
+    let state = &*state;
+    // Match the existing farm transfer fan-out; lower-level USB admission stays intact.
+    let results = run_distribution_queues(
+        assignments,
+        |item| &item.udid,
+        2,
+        |item| async move {
+            let DistributeFileItem { udid, path } = item;
+            let outcome = import_one_media(state, &udid, &path).await;
+            (udid, outcome)
+        },
+    )
+    .await;
     let mut report = GroupInputReport {
         completed_udids: Vec::new(),
         skipped: Vec::new(),
     };
-    for item in assignments {
-        let DistributeFileItem { udid, path } = item;
-        match import_one_media(&state, &udid, &path).await {
+    for (udid, outcome) in results {
+        match outcome {
             Ok(_) => report.completed_udids.push(udid),
             Err(error) => report.skipped.push(open_failure_skip(udid, error)),
         }
@@ -927,72 +990,88 @@ pub async fn distribute_text(
     assignments: Vec<DistributeTextItem>,
 ) -> Result<GroupInputReport, CommandError> {
     let _admission = state.ensure_accepting_work()?;
+    let state = &*state;
+    let results = run_distribution_queues(
+        assignments,
+        |item| &item.udid,
+        64,
+        |item| async move {
+            let mut report = GroupInputReport {
+                completed_udids: Vec::new(),
+                skipped: Vec::new(),
+            };
+            let DistributeTextItem { udid, text } = item;
+            // Bound for the whole iteration, not consumed here: dropping it early would let the
+            // overlay close mid-gesture and hand this phone to another owner.
+            let overlay_hold = state.overlay_ui_session(&udid).await;
+            let owned = if overlay_hold.is_none() {
+                match state
+                    .control
+                    .open_manual_session(&udid, DeviceWorkOwner::GroupSync)
+                    .await
+                {
+                    Ok(context) => Some(context),
+                    Err(error) => {
+                        report
+                            .skipped
+                            .push(open_failure_skip(udid, CommandError::from(error)));
+                        return report;
+                    }
+                }
+            } else {
+                None
+            };
+            let session = match overlay_hold.as_ref() {
+                Some(hold) => hold.session(),
+                None => match state.control.session(
+                    owned
+                        .as_ref()
+                        .expect("distribute_text opened a session when no overlay is held"),
+                ) {
+                    Ok(session) => session,
+                    Err(error) => {
+                        report
+                            .skipped
+                            .push(open_failure_skip(udid, CommandError::from(error)));
+                        return report;
+                    }
+                },
+            };
+            let action = session.type_text(&text).await;
+            let cleanup = match owned {
+                Some(context) => state.control.close_manual_session(context).err(),
+                None => None,
+            };
+            let udid_for_cleanup = udid.clone();
+            match action {
+                Ok(()) => report.completed_udids.push(udid),
+                Err(error) => report.skipped.push(GroupInputSkip {
+                    udid,
+                    code: "ActionFailed".to_string(),
+                    current_owner: None,
+                    message: Some(error.to_string()),
+                }),
+            }
+            if let Some(error) = cleanup {
+                let error = CommandError::from(error);
+                report.skipped.push(GroupInputSkip {
+                    udid: udid_for_cleanup,
+                    code: "CleanupFailed".to_string(),
+                    current_owner: None,
+                    message: Some(error.message.to_string()),
+                });
+            }
+            report
+        },
+    )
+    .await;
     let mut report = GroupInputReport {
         completed_udids: Vec::new(),
         skipped: Vec::new(),
     };
-    for item in assignments {
-        let DistributeTextItem { udid, text } = item;
-        // Bound for the whole iteration, not consumed here: dropping it early would let the
-        // overlay close mid-gesture and hand this phone to another owner.
-        let overlay_hold = state.overlay_ui_session(&udid).await;
-        let owned = if overlay_hold.is_none() {
-            match state
-                .control
-                .open_manual_session(&udid, DeviceWorkOwner::GroupSync)
-                .await
-            {
-                Ok(context) => Some(context),
-                Err(error) => {
-                    report
-                        .skipped
-                        .push(open_failure_skip(udid, CommandError::from(error)));
-                    continue;
-                }
-            }
-        } else {
-            None
-        };
-        let session = match overlay_hold.as_ref() {
-            Some(hold) => hold.session(),
-            None => match state.control.session(
-                owned
-                    .as_ref()
-                    .expect("distribute_text opened a session when no overlay is held"),
-            ) {
-                Ok(session) => session,
-                Err(error) => {
-                    report
-                        .skipped
-                        .push(open_failure_skip(udid, CommandError::from(error)));
-                    continue;
-                }
-            },
-        };
-        let action = session.type_text(&text).await;
-        let cleanup = match owned {
-            Some(context) => state.control.close_manual_session(context).err(),
-            None => None,
-        };
-        let udid_for_cleanup = udid.clone();
-        match action {
-            Ok(()) => report.completed_udids.push(udid),
-            Err(error) => report.skipped.push(GroupInputSkip {
-                udid,
-                code: "ActionFailed".to_string(),
-                current_owner: None,
-                message: Some(error.to_string()),
-            }),
-        }
-        if let Some(error) = cleanup {
-            let error = CommandError::from(error);
-            report.skipped.push(GroupInputSkip {
-                udid: udid_for_cleanup,
-                code: "CleanupFailed".to_string(),
-                current_owner: None,
-                message: Some(error.message.to_string()),
-            });
-        }
+    for item in results {
+        report.completed_udids.extend(item.completed_udids);
+        report.skipped.extend(item.skipped);
     }
     Ok(report)
 }

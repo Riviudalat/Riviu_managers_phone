@@ -962,16 +962,11 @@ pub async fn execute_thread_campaign(
         request.actor_udids.iter().cloned().collect()
     };
     let _idle = control.defer_idle_work(&actors.iter().cloned().collect::<Vec<_>>(), DeviceWorkOwner::Interaction);
-    for udid in actors {
-        if control.reports_element_bounds(&udid) {
-            control
-                .preflight_tiktok_actions(
-                    &udid,
-                    &crate::app_automation::interaction_actions(request.actions),
-                )
-                .await?;
-        }
-    }
+    let actions = crate::app_automation::interaction_actions(request.actions);
+    let checks = futures_util::future::join_all(actors.iter()
+        .filter(|udid| control.reports_element_bounds(udid))
+        .map(|udid| control.preflight_tiktok_actions(udid, &actions))).await;
+    for checked in checks { checked?; }
     if request.seeding.is_some() {
         // One owner for this campaign; different clusters are independent dependencies,
         // while the existing session/controller remains the only device executor.

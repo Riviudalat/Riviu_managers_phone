@@ -1,0 +1,11 @@
+<!-- Sanitized structural projection of ce021 Global45.7.3/en, c292/db2f discovery. -->
+<hierarchy>
+  <node package="com.zhiliaoapp.musically" class="android.widget.FrameLayout" resource-id="com.zhiliaoapp.musically:id/nrm" displayed="true" clickable="false" enabled="true" bounds="[0,0][1080,2094]">
+    <node package="com.zhiliaoapp.musically" class="android.widget.FrameLayout" resource-id="com.zhiliaoapp.musically:id/wr2" drawing-order="1" displayed="true" clickable="false" enabled="true" bounds="[0,0][1080,2094]">
+      <node package="com.zhiliaoapp.musically" class="android.widget.FrameLayout" resource-id="com.zhiliaoapp.musically:id/hpk" displayed="true" clickable="true" enabled="true" bounds="[0,0][1080,2094]"/>
+    </node>
+    <node package="com.zhiliaoapp.musically" class="android.widget.LinearLayout" resource-id="com.zhiliaoapp.musically:id/nrh" drawing-order="4" displayed="true" clickable="false" enabled="true" bounds="[0,1965][1080,2094]">
+      <node package="com.zhiliaoapp.musically" class="android.widget.FrameLayout" resource-id="com.zhiliaoapp.musically:id/nrb" content-desc="Profile" displayed="true" clickable="true" enabled="true" bounds="[864,1965][1080,2094]"/>
+    </node>
+  </node>
+</hierarchy>

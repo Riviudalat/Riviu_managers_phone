@@ -343,6 +343,7 @@ function PublishHostLimits({ onSaved }: { onSaved: () => void }) {
         }} />
       </label>)}
       {!valid && <p role="alert">Mỗi giới hạn phải là số nguyên từ 1 đến 64.</p>}
+      <button type="button" onClick={() => { setLimits({transfer:64,compose:64,verify:64,deviceTotal:64}); setMessage("Đã chọn chạy song song toàn bộ máy; bấm Lưu giới hạn để áp dụng."); }}>Chạy song song toàn bộ máy</button>
       <button type="button" disabled={!valid} onClick={() => void save()}>Lưu giới hạn</button>
     </fieldset>}
     {error && <button type="button" disabled={busy} onClick={() => void read()}>Đọc lại giới hạn</button>}

@@ -5,7 +5,7 @@ import { pushToast, toastError } from "./toastStore";
 
 import { buildDeviceActions, readAndAssignTikTokAccounts, type DeviceActionDeps } from "./deviceActions";
 import { gateDeviceMenu, isSubmenu, menuLeaves, type DeviceMenuNode } from "./deviceMenu";
-import type { DeviceInfo } from "./types";
+import type { DeviceInfo, DeviceMeta } from "./types";
 
 vi.mock("./api", async importOriginal => ({...await importOriginal<typeof api>(), interactionReadAccount:vi.fn(),saveDeviceHandle:vi.fn(),listDeviceMetas:vi.fn()}));
 vi.mock("./toastStore",()=>({pushToast:vi.fn(),toastError:vi.fn()}));
@@ -84,11 +84,13 @@ describe("buildDeviceActions", () => {
     const first=readAndAssignTikTokAccounts([...d.selectedDevices!],d);
     await readAndAssignTikTokAccounts([a,b],d);
     d.selectedDevices=[device({udid:"c"})];
-    expect(api.interactionReadAccount).toHaveBeenCalledTimes(1);
+    expect(api.interactionReadAccount).toHaveBeenCalledTimes(2);
+    await waitFor(()=>expect(api.saveDeviceHandle).toHaveBeenCalledWith("b","old","nick_b"));
+    expect(api.saveDeviceHandle).not.toHaveBeenCalledWith("a",expect.anything(),expect.anything());
     finish({udid:"a",expectedHandle:"old",observedHandle:"nick_a",status:"mismatch",checkedAt:"",snapshotSha256:"proof"});
     await first;
     expect(api.interactionReadAccount).toHaveBeenCalledTimes(2);
-    expect(api.saveDeviceHandle).toHaveBeenNthCalledWith(2,"b","old","nick_b");
+    expect(api.saveDeviceHandle).toHaveBeenCalledWith("a","old","nick_a");
   });
 
   it("keeps failed or unknown accounts and continues after stale saves and disconnects",async()=>{
@@ -101,6 +103,21 @@ describe("buildDeviceActions", () => {
     expect(api.saveDeviceHandle).toHaveBeenLastCalledWith("d","old","nick_d");
     expect(toastError).toHaveBeenCalledTimes(3);
     expect(pushToast).toHaveBeenLastCalledWith("warn","Đã gán nick TikTok 1/4 máy");
+  });
+
+  it("refreshes acknowledged account saves when the newest concurrent metadata read fails",async()=>{
+    let finish!: (value:DeviceMeta[])=>void;
+    const metas = [{ udid:"b", tiktokHandle:"nick_b" }] as unknown as DeviceMeta[];
+    vi.mocked(api.listDeviceMetas)
+      .mockImplementationOnce(()=>new Promise(resolve=>{finish=resolve;}))
+      .mockRejectedValueOnce(new Error("metadata unavailable"))
+      .mockResolvedValue(metas);
+    const d=deps();
+    const reading=readAndAssignTikTokAccounts([device({udid:"a"}),device({udid:"b"})],d);
+    await waitFor(()=>expect(api.listDeviceMetas).toHaveBeenCalledTimes(2));
+    finish([]);
+    await reading;
+    expect(d.setMetas).toHaveBeenLastCalledWith(metas);
   });
   it("still offers the whole catalog after the move", () => {
     // A guard on the four tests below: every one of them would pass vacuously against an

@@ -1384,6 +1384,46 @@ fn slug(value: &str) -> String {
     out.trim_matches('-').to_string()
 }
 
+fn copy_managed_media(source: &Path, target: &Path) -> anyhow::Result<()> {
+    // Copy bytes through handles rather than copying Windows file attributes.
+    // Downloaded read-only media must not make the managed/transfer copy read-only.
+    let mut input = fs::File::open(source).map_err(|error| {
+        anyhow::anyhow!(
+            "copy {} -> {}: không đọc tệp nguồn ({:?}, os error {:?}): {error}",
+            source.display(),
+            target.display(),
+            error.kind(),
+            error.raw_os_error()
+        )
+    })?;
+    let mut output = fs::File::create(target).map_err(|error| {
+        anyhow::anyhow!(
+            "copy {} -> {}: không tạo tệp đích ({:?}, os error {:?}): {error}",
+            source.display(),
+            target.display(),
+            error.kind(),
+            error.raw_os_error()
+        )
+    })?;
+    std::io::copy(&mut input, &mut output).map_err(|error| {
+        anyhow::anyhow!(
+            "copy {} -> {}: lỗi đọc/ghi dữ liệu ({:?}, os error {:?}): {error}",
+            source.display(),
+            target.display(),
+            error.kind(),
+            error.raw_os_error()
+        )
+    })?;
+    output.sync_all().map_err(|error| {
+        anyhow::anyhow!(
+            "copy {} -> {}: không chốt dữ liệu tệp đích: {error}",
+            source.display(),
+            target.display()
+        )
+    })?;
+    Ok(())
+}
+
 /// Copy a scanned bundle into a managed campaign directory without changing
 /// its logical hashes. The copy is intentionally separate from scanning so a
 /// preview can remain side-effect free.
@@ -1396,7 +1436,7 @@ pub fn copy_bundle_to_managed(
     for image in &bundle.images {
         let source = Path::new(&image.path);
         let target = destination.join(&image.file_name);
-        fs::copy(source, &target).with_context(|| format!("copy {}", source.display()))?;
+        copy_managed_media(source, &target)?;
         let copied =
             fs::read(&target).with_context(|| format!("read copied {}", target.display()))?;
         if sha256_bytes(&copied) != image.sha256 || copied.len() as u64 != image.byte_len {
@@ -1407,7 +1447,7 @@ pub fn copy_bundle_to_managed(
         Some(video) => {
             let source = Path::new(&video.path);
             let target = destination.join(&video.file_name);
-            fs::copy(source, &target).with_context(|| format!("copy {}", source.display()))?;
+            copy_managed_media(source, &target)?;
             let mut copied = fs::File::open(&target)
                 .with_context(|| format!("read copied {}", target.display()))?;
             let mut hasher = Sha256::new();
@@ -1445,6 +1485,28 @@ pub fn copy_bundle_to_managed(
 mod tests {
     use super::*;
     use std::io::Write;
+
+    #[test]
+    fn managed_copy_reports_source_destination_and_windows_cause_in_visible_error() {
+        let root = TempDir::new();
+        let source = root.path().join("set3 19 spotlightv3");
+        fs::create_dir_all(&source).unwrap();
+        write_png(&source.join("01-cover.png"), [12, 34, 56]);
+        fs::write(source.join("caption.txt"), "fixture").unwrap();
+        let manifest = scan_publish_folder(&source, PublishScanOptions::default()).unwrap();
+        fs::remove_file(source.join("01-cover.png")).unwrap();
+        let destination = root.path().join("managed");
+        let error = copy_bundle_to_managed(&manifest.bundles[0], &destination)
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains("01-cover.png"), "{error}");
+        assert!(error.contains("đọc tệp nguồn"), "{error}");
+        assert!(
+            error.contains(&destination.display().to_string()),
+            "{error}"
+        );
+        assert!(error.contains("os error"), "{error}");
+    }
 
     struct TempDir(std::path::PathBuf);
 

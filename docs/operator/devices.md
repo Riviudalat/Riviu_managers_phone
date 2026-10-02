@@ -86,7 +86,9 @@ Mở hoặc đóng bảng không tự bật đồng bộ.
 
 Chuột phải trên ô máy hoặc ngay trên màn hình stream, chọn **Đọc và gán nick TikTok**
 để mở Hồ sơ và lưu username vào danh sách thiết bị. Chuột phải trên một máy đã chọn
-sẽ đọc lần lượt toàn bộ nhóm đang chọn; máy ngoài nhóm chỉ đọc riêng máy đó.
+sẽ đọc đồng thời toàn bộ nhóm đang chọn; máy ngoài nhóm chỉ đọc riêng máy đó.
+Mỗi máy có lượt đọc và lưu riêng. Bấm lại không tạo lượt trùng trên máy còn đang đọc;
+kết quả nhanh được lưu và cập nhật ngay, không chờ máy chậm.
 Username hiện thêm dưới tên máy, không thay số máy, tên máy hay trạng thái.
 Máy đọc lỗi, mất kết nối, username trùng hoặc vừa được sửa sẽ báo riêng và giữ nick cũ;
 các máy còn lại vẫn tiếp tục. Android đang mở điều khiển dùng lại phiên hiện có;
