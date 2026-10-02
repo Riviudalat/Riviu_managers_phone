@@ -1308,8 +1308,8 @@ impl AppState {
         command_admission.start_accepting();
 
         let state = Self {
-            #[cfg(debug_assertions)]
             rehearsal_runs: Arc::new(crate::no_public_runs::Registry::default()),
+            #[cfg(debug_assertions)]
             ui_smoke: false,
             comment_verifications: (!dev_acceptance.automatic_device_workers_frozen()).then(|| {
                 riviu_core::comment_verification::worker::VerificationWorker::start(

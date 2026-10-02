@@ -45,9 +45,9 @@ impl StartupPolicy {
                 anyhow::ensure!(std::env::var_os(name).is_none(), "No-public mode refuses WebView override {name}");
             }
         }
-        if let Some(session) = crate::no_public::Session::from_process()? {
+        if let Some(_session) = crate::no_public::Session::from_process()? {
             #[cfg(debug_assertions)]
-            return Ok(Self::Rehearsal(session));
+            return Ok(Self::Rehearsal(_session));
             #[cfg(not(debug_assertions))]
             anyhow::bail!("no-public rehearsal is debug-only");
         }
