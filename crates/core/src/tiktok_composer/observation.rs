@@ -133,7 +133,10 @@ pub(crate) async fn observe(
             .saturating_duration_since(Instant::now())
             .as_millis()
             .min(MAX_OBSERVATION_BUDGET_MS as u128) as u64;
+        let mut trace = StageDiagnosticOperation::start("observe", &epoch, Some(deadline));
         let result = read(deadline, stop, session.observe(&request)).await;
+        trace.finish(if result.is_ok() { "completed" } else { "error" });
+        drop(trace);
         // A driver repair belongs to the phase owner. Do not accept its fresh proof
         // under an old cursor or replace this typed error with a plain epoch mismatch.
         if result

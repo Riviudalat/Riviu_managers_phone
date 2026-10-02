@@ -952,6 +952,171 @@ enum MultiSelectMode {
     DidNotEngage,
 }
 
+
+/// Caller identities for an optional, bounded diagnostic. Missing queue timing is unknown.
+#[derive(Debug, Clone, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct StageDiagnosticContext {
+    pub request_id: String,
+    pub operation_id: String,
+    pub udid: String,
+    pub queue_wait_ms: Option<u64>,
+}
+
+/// Timing evidence only: never authorizes a target, retries an effect or changes a verdict.
+#[derive(Debug, Clone, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct StageDiagnosticEvent {
+    pub phase: String,
+    pub operation: String,
+    pub selector: Option<String>,
+    pub session_epoch: String,
+    pub started_ms: u64,
+    pub elapsed_ms: u64,
+    pub remaining_budget_ms: Option<u64>,
+    pub remaining_after_ms: Option<u64>,
+    pub outcome: String,
+    pub bounds: Option<[f64; 4]>,
+    pub planner_point: Option<[f64; 2]>,
+    pub enabled: Option<bool>,
+    pub clickable: Option<bool>,
+}
+
+#[derive(Debug, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct StageDiagnostics {
+    pub context: StageDiagnosticContext,
+    pub events: Vec<StageDiagnosticEvent>,
+    pub dropped_events: usize,
+}
+
+struct StageDiagnosticState {
+    report: StageDiagnostics,
+    started: Instant,
+    deadline: Option<Instant>,
+    phase: String,
+}
+tokio::task_local! {
+    static STAGE_DIAGNOSTICS: std::cell::RefCell<StageDiagnosticState>;
+}
+
+/// Opt in around an existing production preparation or scout future. The supplied deadline
+/// is recorded only; the original route retains its own cancellation/deadline/effect gates.
+/// No hierarchy, caption, sound title, account, request body or credential is retained.
+pub async fn with_stage_diagnostics<T>(
+    context: StageDiagnosticContext,
+    deadline: Option<Instant>,
+    work: impl std::future::Future<Output = T>,
+) -> (T, StageDiagnostics) {
+    let state = StageDiagnosticState {
+        report: StageDiagnostics { context, events: Vec::new(), dropped_events: 0 },
+        started: Instant::now(), deadline, phase: "preparation".into(),
+    };
+    STAGE_DIAGNOSTICS.scope(std::cell::RefCell::new(state), async {
+        let result = work.await;
+        let report = STAGE_DIAGNOSTICS.with(|state| {
+            let mut state = state.borrow_mut();
+            StageDiagnostics {
+                context: state.report.context.clone(),
+                events: std::mem::take(&mut state.report.events),
+                dropped_events: state.report.dropped_events,
+            }
+        });
+        (result, report)
+    }).await
+}
+
+/// Used by the production Android transport too, so nested read-chain timings carry the
+/// same request identity. Drop records an interrupted read when its owner cancels it.
+pub struct StageDiagnosticOperation {
+    event: Option<StageDiagnosticEvent>,
+    started: Instant,
+    deadline: Option<Instant>,
+    previous_deadline: Option<Option<Instant>>,
+}
+impl StageDiagnosticOperation {
+    pub fn start(operation: &str, epoch: &str, deadline: Option<Instant>) -> Self {
+        let started = Instant::now();
+        let mut effective_deadline = None;
+        let mut previous_deadline = None;
+        let event = STAGE_DIAGNOSTICS.try_with(|state| {
+            let mut state = state.borrow_mut();
+            previous_deadline = Some(state.deadline);
+            effective_deadline = match (deadline, state.deadline) {
+                (Some(a), Some(b)) => Some(a.min(b)),
+                (a, b) => a.or(b),
+            };
+            state.deadline = effective_deadline;
+            StageDiagnosticEvent {
+                phase: state.phase.clone(), operation: operation.into(), selector: None, session_epoch: epoch.into(),
+                started_ms: started.saturating_duration_since(state.started).as_millis().min(u64::MAX as u128) as u64,
+                elapsed_ms: 0,
+                remaining_budget_ms: effective_deadline.map(|end|
+                    end.saturating_duration_since(started).as_millis().min(u64::MAX as u128) as u64),
+                remaining_after_ms: None,
+                outcome: "interrupted".into(), bounds: None, planner_point: None,
+                enabled: None, clickable: None,
+            }
+        }).ok();
+        Self { event, started, deadline: effective_deadline, previous_deadline }
+    }
+    fn query(&mut self, query: ElementQuery<'_>) {
+        if let Some(event) = &mut self.event {
+            event.selector = Some(match query {
+                ElementQuery::ResourceIdSuffix(value) => format!("resourceIdSuffix:{value}"),
+                ElementQuery::ClassName(value) => format!("class:{value}"),
+                ElementQuery::Semantic(value) => format!("semantic:{value}"),
+                // Do not copy album/caption/account values into timing evidence.
+                ElementQuery::Description { value, .. }
+                    if matches!(value, "Create" | "Next" | "Record video" | "Select multiple") => format!("description:{value}"),
+                ElementQuery::Description { .. } => "description".into(),
+                ElementQuery::Text { .. } => "text".into(),
+            });
+        }
+    }
+    fn target(&mut self, element: &ElementBox, point: Option<[f64; 2]>) {
+        if let Some(event) = &mut self.event {
+            event.bounds = Some([element.x, element.y, element.width, element.height]);
+            event.planner_point = point;
+            event.enabled = Some(element.enabled);
+            event.clickable = Some(element.clickable);
+        }
+    }
+    pub fn finish(&mut self, outcome: &str) {
+        if let Some(event) = &mut self.event { event.outcome = outcome.into(); }
+    }
+}
+impl Drop for StageDiagnosticOperation {
+    fn drop(&mut self) {
+        let Some(mut event) = self.event.take() else { return };
+        event.elapsed_ms = self.started.elapsed().as_millis().min(u64::MAX as u128) as u64;
+        event.remaining_after_ms = self.deadline.map(|end|
+            end.saturating_duration_since(Instant::now()).as_millis().min(u64::MAX as u128) as u64);
+        let _ = STAGE_DIAGNOSTICS.try_with(|state| {
+            let mut state = state.borrow_mut();
+            if let Some(previous) = self.previous_deadline { state.deadline = previous; }
+            if state.report.events.len() < 1024 { state.report.events.push(event); }
+            else { state.report.dropped_events = state.report.dropped_events.saturating_add(1); }
+        });
+    }
+}
+
+/// Nonpublic diagnostic using the very same Create/gallery/selection/Next walk as production.
+/// Stops at the editor and drains the existing leave path; never enters the Post tail.
+#[allow(clippy::too_many_arguments)]
+pub async fn diagnose_to_edit_step(
+    session: &dyn UiSession,
+    plan: ComposerPlan,
+    plan_tap: impl TapPlanner,
+    request: &CarouselRequest<'_>,
+    stop: &AtomicBool,
+    context: StageDiagnosticContext,
+    deadline: Instant,
+) -> (anyhow::Result<ComposerVerdict>, StageDiagnostics) {
+    with_stage_diagnostics(context, Some(deadline),
+        drive_to_edit_step(session, plan, plan_tap, request, stop)).await
+}
+
 pub struct Composer<'a, P: TapPlanner> {
     session: &'a dyn UiSession,
     plan: ComposerPlan,
@@ -997,11 +1162,20 @@ impl<'a, P: TapPlanner> Composer<'a, P> {
         self
     }
 
+    fn emit_progress(&self, progress: PublishProgress) {
+        let _ = STAGE_DIAGNOSTICS.try_with(|state| state.borrow_mut().phase = progress.state().into());
+        (self.progress)(progress);
+    }
+
     async fn tap_inside(&mut self, element: &ElementBox) -> anyhow::Result<()> {
         crate::tiktok_sound::check_wait()?;
         observation::check_session(self.session)?;
         let point = (self.plan_tap)(element);
-        self.session.tap(point).await?;
+        let mut trace = StageDiagnosticOperation::start("tap", &self.session.gui_session_epoch(), None);
+        trace.target(element, Some([point.x, point.y]));
+        let result = self.session.tap(point).await;
+        trace.finish(if result.is_ok() { "completed" } else { "error" });
+        result?;
         crate::tiktok_sound::check_wait()
     }
 
@@ -2192,7 +2366,7 @@ impl<'a, P: TapPlanner> Composer<'a, P> {
             );
         }
         before_post()?;
-        (self.progress)(PublishProgress::SubmittingPost);
+        self.emit_progress(PublishProgress::SubmittingPost);
         if stop.load(Ordering::Relaxed) {
             // The durable intent already exists. Stop prevents this dispatch,
             // but cannot turn that intent into permission to replay Post.
@@ -2202,7 +2376,7 @@ impl<'a, P: TapPlanner> Composer<'a, P> {
             // The tap may have reached the phone before the transport died.
             return Ok(ComposerVerdict::PostNotConfirmed);
         }
-        (self.progress)(PublishProgress::AwaitingPost);
+        self.emit_progress(PublishProgress::AwaitingPost);
         // **Deliberately not passing `stop`.** Cancelling cannot un-publish, and a stop set
         // here would end the wait early and downgrade a good post to `PostNotConfirmed`,
         // which is permanently unclaimable.
@@ -2213,7 +2387,7 @@ impl<'a, P: TapPlanner> Composer<'a, P> {
         // `PostNotConfirmed`, permanently unclaimable, twenty seconds early.
         let back_on_the_feed = self.await_feed(POST_CONFIRM_WINDOW).await;
         Ok(if back_on_the_feed {
-            (self.progress)(PublishProgress::PostSubmitted);
+            self.emit_progress(PublishProgress::PostSubmitted);
             ComposerVerdict::Submitted
         } else {
             ComposerVerdict::PostNotConfirmed
@@ -2837,12 +3011,22 @@ impl<'a, P: TapPlanner> Composer<'a, P> {
             }
             // Only the read is cancellable. Already-dispatched device gestures
             // must drain and are never handed to this helper.
+            let mut trace = StageDiagnosticOperation::start("locate", &epoch, Some(deadline));
+            trace.query(query);
             let observed = read_before_deadline(
                 crate::tiktok_sound::read_sound(self.session.locate(query)),
                 deadline,
                 stop,
             )
             .await;
+            match &observed {
+                Ok(ReadWaitResult::Ready(Some(element))) => { trace.target(element, None); trace.finish("found"); }
+                Ok(ReadWaitResult::Ready(None)) => trace.finish("absentOrAmbiguous"),
+                Ok(ReadWaitResult::Cancelled) => trace.finish("cancelled"),
+                Ok(ReadWaitResult::DeadlineExceeded) => trace.finish("deadline"),
+                Err(_) => trace.finish("error"),
+            }
+            drop(trace);
             if stop.load(Ordering::Relaxed) {
                 return Ok(None);
             }
@@ -3305,7 +3489,7 @@ where
         }
         crate::publish_recovery::step("sound", Some("mediaSelected"))?;
         let visible_pool = sound_policy.pool_size()?.min(5);
-        progress(PublishProgress::OpeningSounds);
+        composer.emit_progress(PublishProgress::OpeningSounds);
         let mut observed = None;
         let mut selected = crate::publish_recovery::stored_sound()?;
         let mut provisional = None;
@@ -3315,6 +3499,7 @@ where
         let mut reopen_network_sheet = false;
         let sound_deadline = crate::tiktok_sound::phase_deadline(Duration::from_secs(180));
         let sound_epoch = session.gui_session_epoch();
+        let mut sound_trace = StageDiagnosticOperation::start("soundStage", &sound_epoch, Some(sound_deadline));
         let chosen = crate::tiktok_sound::with_deadline_budget(stop, sound_deadline, async {
             let deadline = sound_deadline;
             let epoch = session.gui_session_epoch();
@@ -3379,7 +3564,7 @@ where
                         let proposed = provisional.as_ref().context("provisional sound missing")?;
                         let index = current_sound_target_index(proposed, &pool.candidates)?;
                         let recovering = enter_sound_selection_attempt(&mut selection_may_have_landed);
-                        progress(PublishProgress::SelectingSound { title: proposed.title.clone() });
+                        composer.emit_progress(PublishProgress::SelectingSound { title: proposed.title.clone() });
                         let canonical_title = crate::tiktok_sound::choose_provisional_sound(
                             session, sound_plan, pool, index, recovering, &mut provisional_row_proved,
                         ).await?;
@@ -3403,7 +3588,7 @@ where
                     let selection = selected.clone().context("sound selection missing")?;
                     let current_index = current_sound_target_index(&selection, &pool.candidates)?;
                     let recovering = enter_sound_selection_attempt(&mut selection_may_have_landed);
-                    progress(PublishProgress::SelectingSound {
+                    composer.emit_progress(PublishProgress::SelectingSound {
                         title: selection.title.clone(),
                     });
                     if recovering {
@@ -3464,6 +3649,8 @@ where
             }
         })
         .await;
+        sound_trace.finish(if chosen.is_ok() { "confirmed" } else { "error" });
+        drop(sound_trace);
         let chosen = chosen.map_err(|error| {
             if !stop.load(Ordering::Relaxed)
                 && Instant::now() >= sound_deadline
@@ -3485,7 +3672,7 @@ where
             }
             other => other?,
         };
-        progress(PublishProgress::SoundConfirmed {
+        composer.emit_progress(PublishProgress::SoundConfirmed {
             title: selection.title.clone(),
         });
         selection.confirmed = true;
@@ -3617,7 +3804,7 @@ where
         return Ok(ComposerVerdict::PostUnmeasured);
     }
     crate::publish_recovery::step("caption", None)?;
-    (composer.progress)(PublishProgress::OpeningCaption);
+    composer.emit_progress(PublishProgress::OpeningCaption);
     let navigation_epoch = composer.session.gui_session_epoch();
     // Retain the previous attempt's three read windows (arrival probe,
     // editor Next, destination), shared by all retries and their backoff.
@@ -3695,7 +3882,7 @@ where
         return Ok(ComposerVerdict::PostScreenDidNotOpen);
     }
     if !caption.trim().is_empty() {
-        (composer.progress)(PublishProgress::EnteringCaption);
+        composer.emit_progress(PublishProgress::EnteringCaption);
     }
     let bounded_caption = observation::android(composer.plan.package)
         && composer
@@ -3765,7 +3952,7 @@ where
                     }
                     return Ok(Some(ComposerVerdict::CaptionNotConfirmed));
                 }
-                Ok(CaptionOutcome::Typed) => (composer.progress)(PublishProgress::CaptionConfirmed),
+                Ok(CaptionOutcome::Typed) => composer.emit_progress(PublishProgress::CaptionConfirmed),
                 Ok(CaptionOutcome::NothingToSay) => {}
                 Ok(CaptionOutcome::Unmeasured) => return Ok(Some(ComposerVerdict::PostUnmeasured)),
                 Ok(CaptionOutcome::NoField) => return Ok(Some(ComposerVerdict::NoCaptionField)),
@@ -3783,10 +3970,10 @@ where
         return Ok(verdict);
     }
     crate::publish_recovery::step("prePost", Some("captionConfirmed"))?;
-    (composer.progress)(PublishProgress::CheckingBeforePost);
-    composer
-        .post_with_effect_intent(caption, stop, before_post)
-        .await
+    composer.emit_progress(PublishProgress::CheckingBeforePost);
+    // Keep the large pre-Post preparation future on the heap like the media walk.
+    // Its existing intent gate and awaited gesture drain remain in the same child.
+    Box::pin(composer.post_with_effect_intent(caption, stop, before_post)).await
 }
 
 /// Open the composer and enter the gallery — the two taps that stand a phone on its
@@ -3836,18 +4023,18 @@ async fn reach_picker_for_media<P: TapPlanner>(
     request: PickerSelection<'_>,
     stop: &AtomicBool,
 ) -> anyhow::Result<ComposerVerdict> {
-    (composer.progress)(PublishProgress::OpeningComposer);
+    composer.emit_progress(PublishProgress::OpeningComposer);
     if !composer.open(stop).await? {
         return Ok(ComposerVerdict::ComposerDidNotOpen);
     }
-    (composer.progress)(PublishProgress::OpeningGallery);
+    composer.emit_progress(PublishProgress::OpeningGallery);
     if !composer.tap_gallery_entry(request.screen, stop).await? {
         return Ok(ComposerVerdict::NoShutterToAnchorTo);
     }
     if !composer.await_picker(stop).await? {
         return Ok(ComposerVerdict::PickerDidNotOpen);
     }
-    (composer.progress)(PublishProgress::SelectingAlbum);
+    composer.emit_progress(PublishProgress::SelectingAlbum);
     match composer.select_album(request.album, stop).await? {
         AlbumChoice::Confirmed => {}
         AlbumChoice::NotFound => return Ok(ComposerVerdict::AlbumNotFound),
@@ -3923,7 +4110,7 @@ async fn reach_selected_media_edit_step<P: TapPlanner>(
     let Some(grid) = composer.grid(request.screen, stop).await? else {
         return Ok(ComposerVerdict::NoTabsToAnchorTo);
     };
-    (composer.progress)(PublishProgress::SelectingMedia {
+    composer.emit_progress(PublishProgress::SelectingMedia {
         count: request.count,
         video: request.video,
     });
@@ -3962,11 +4149,11 @@ async fn reach_selected_media_edit_step<P: TapPlanner>(
         Selection::MultiSelectDidNotEngage => return Ok(ComposerVerdict::MultiSelectDidNotEngage),
         Selection::Stopped => return Ok(ComposerVerdict::Stopped),
     };
-    (composer.progress)(PublishProgress::MediaSelected {
+    composer.emit_progress(PublishProgress::MediaSelected {
         count: request.count,
         video: request.video,
     });
-    (composer.progress)(PublishProgress::OpeningEditor);
+    composer.emit_progress(PublishProgress::OpeningEditor);
     if !composer.advance_to_edit_step(&next, stop).await? {
         return Ok(ComposerVerdict::EditStepDidNotOpen);
     }
@@ -5682,6 +5869,8 @@ mod tests {
             scene(elements, exit).texted(":id/snr", album)
         };
         let shutter = labelled("Record video", 375.0, 1545.0, 330.0, 330.0);
+        // Arrival is presence, not enabled state; the shutter is not tapped.
+        let shutter = ElementBox { enabled: false, ..shutter };
         let entry = labelled("", 770.0, 1635.0, 210.0, 210.0);
         let session = FakeSession::with(vec![
             scene(
@@ -5726,13 +5915,23 @@ mod tests {
         };
         let stop = AtomicBool::new(false);
         let mut composer = Composer::new(&session, plan, |element: &ElementBox| element.centre());
+        let (result, diagnostics) = with_stage_diagnostics(
+            StageDiagnosticContext { request_id: "request-fixture".into(), operation_id: "operation-fixture".into(),
+                udid: "device-fixture".into(), queue_wait_ms: None },
+            Some(Instant::now() + Duration::from_secs(180)),
+            reach_edit_step(&mut composer, &request, &stop),
+        ).await;
         assert_eq!(
-            reach_edit_step(&mut composer, &request, &stop)
-                .await
-                .expect("no transport error"),
+            result.expect("no transport error"),
             ComposerVerdict::Stopped,
             "the measuring walk must reach the edit step and stop there"
         );
+        assert_eq!(diagnostics.context.request_id, "request-fixture");
+        assert_eq!(diagnostics.context.queue_wait_ms, None);
+        assert_eq!(diagnostics.dropped_events, 0);
+        assert!(diagnostics.events.iter().any(|event| event.operation == "locate" && event.enabled == Some(false)));
+        assert!(diagnostics.events.iter().any(|event| event.operation == "tap" && event.planner_point.is_some()));
+        assert!(diagnostics.events.iter().all(|event| event.phase != "submitting_post"));
         assert_eq!(
             session.on_screen(),
             7,

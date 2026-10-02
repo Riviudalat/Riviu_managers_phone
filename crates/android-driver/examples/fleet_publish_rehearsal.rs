@@ -38,9 +38,11 @@ async fn one(
 ) -> anyhow::Result<()> {
     std::fs::create_dir_all(&out)?;
     let started = std::time::Instant::now();
+    let queue_started = std::time::Instant::now();
     let context = control
         .acquire_exclusive(&serial, riviu_core::DeviceWorkOwner::Script)
         .await?;
+    let queue_wait_ms = queue_started.elapsed().as_millis().min(u64::MAX as u128) as u64;
     let id = format!("fleet-rehearsal-{}", uuid::Uuid::new_v4());
     let mut imported = None;
     let mut package = None;
@@ -142,12 +144,27 @@ async fn one(
             };
             let policy=riviu_core::PublishSoundPolicy::TrendingAny{pool_size:5,seed:2985670833};
             let plan=ComposerPlan::resolve(&labels)?;
+            let diagnostic_context = tiktok_composer::StageDiagnosticContext {
+                request_id: id.clone(), operation_id: format!("{id}:composer"),
+                udid: serial.clone(), queue_wait_ms: Some(queue_wait_ms),
+            };
+            let composer_work = async {
             let outcome=if bundle.video.is_some(){
                 let req=VideoRequest{album:&import,caption:&bundle.caption,screen};
-                tiktok_composer::publish_video_with_sound_effect_intent_and_progress(&session,plan,VideoPickerPlan::resolve(&pkg,&locale,&version).context("video plan")?,sound,&policy,|n:&riviu_core::ElementBox|n.centre(),&req,&stop,intent,&progress).await
+                tiktok_composer::publish_video_with_sound_effect_intent_and_progress(&session,plan,VideoPickerPlan::resolve(&pkg,&locale,&version).context("video plan")?,sound,&policy,tiktok_composer::human_taps(screen),&req,&stop,intent,&progress).await
             }else{
                 let req=CarouselRequest{album:&import,images:bundle.images.len(),caption:&bundle.caption,screen};
-                tiktok_composer::publish_carousel_with_sound_effect_intent_and_progress(&session,plan,sound,&policy,|n:&riviu_core::ElementBox|n.centre(),&req,&stop,intent,&progress).await
+                tiktok_composer::publish_carousel_with_sound_effect_intent_and_progress(&session,plan,sound,&policy,tiktok_composer::human_taps(screen),&req,&stop,intent,&progress).await
+            };
+            outcome
+            };
+            let outcome = if std::env::var_os("RIVIU_REHEARSAL_TRACE").is_some() {
+                let (outcome, diagnostics) = tiktok_composer::with_stage_diagnostics(
+                    diagnostic_context, None, composer_work).await;
+                save(&out, "stage-diagnostics.json", &diagnostics)?;
+                outcome
+            } else {
+                composer_work.await
             };
             capture(&session,&out,"before-post").await;
             anyhow::ensure!(boundary && outcome.is_err(),"composer did not reach verified Post boundary: {outcome:?}");
@@ -187,10 +204,66 @@ async fn one(
     cleanup?;
     Ok(())
 }
+
+// No device is opened and none of these methods is polled by --future-sizes.
+struct FutureSizeSession;
+#[async_trait::async_trait]
+impl UiSession for FutureSizeSession {
+    fn stream_url(&self) -> Option<String> { None }
+    async fn tap(&self, _: riviu_core::types::TapPoint) -> anyhow::Result<()> { anyhow::bail!("unpolled footprint probe") }
+    async fn swipe(&self, _: riviu_core::types::SwipeGesture) -> anyhow::Result<()> { anyhow::bail!("unpolled footprint probe") }
+    async fn type_text(&self, _: &str) -> anyhow::Result<()> { anyhow::bail!("unpolled footprint probe") }
+    async fn home(&self) -> anyhow::Result<()> { anyhow::bail!("unpolled footprint probe") }
+    async fn find_and_tap(&self, _: &str) -> anyhow::Result<()> { anyhow::bail!("unpolled footprint probe") }
+    async fn assert_visible(&self, _: &str) -> anyhow::Result<()> { anyhow::bail!("unpolled footprint probe") }
+}
+fn future_type_size<F, T>(_: F) -> usize
+where F: FnOnce() -> T, T: std::future::Future {
+    // The factory is never invoked: even a huge future needs no stack allocation here.
+    std::mem::size_of::<T>()
+}
+fn future_sizes() -> anyhow::Result<()> {
+    let session = FutureSizeSession;
+    let stop = AtomicBool::new(false);
+    let labels = riviu_core::tiktok_labels::controls_for("com.ss.android.ugc.trill", "en", "38.3.2").context("measured probe labels")?;
+    let plan = ComposerPlan::resolve(&labels)?;
+    let sound = riviu_core::tiktok_sound::SoundPickerPlan::resolve("com.ss.android.ugc.trill", "en", "38.3.2").context("measured sound plan")?;
+    let screen = Screen::new(1080.0, 2220.0).context("measured probe geometry")?;
+    let request = CarouselRequest { album: "TARGET", images: 11, caption: "CAPTION", screen };
+    let mut composer = tiktok_composer::Composer::new(&session, plan, tiktok_composer::human_taps(screen));
+    let request_ref = &request;
+    let stop_ref = &stop;
+    let editor = {
+        let composer_ref = &mut composer;
+        future_type_size(move || tiktok_composer::reach_edit_step(composer_ref, request_ref, stop_ref))
+    };
+    let continuation = {
+        let mut deny = || anyhow::bail!("no Post in footprint probe");
+        let deny_ref = &mut deny;
+        let composer_ref = &mut composer;
+        future_type_size(move || tiktok_composer::continue_from_edit_step_with_effect_intent(composer_ref, "CAPTION", stop_ref, deny_ref))
+    };
+    let publish = {
+        let policy = riviu_core::PublishSoundPolicy::Default;
+        let policy_ref = &policy;
+        let session_ref = &session;
+        let deny = |_: &riviu_core::SoundSelectionEvidence| anyhow::bail!("no Post in footprint probe");
+        let progress = |_: PublishProgress| {};
+        let progress_ref = &progress;
+        future_type_size(move || tiktok_composer::publish_carousel_with_sound_effect_intent_and_progress(
+            session_ref, plan, sound, policy_ref, tiktok_composer::human_taps(screen), request_ref, stop_ref, deny, progress_ref))
+    };
+    println!("{}", serde_json::json!({"polled":false,"constructed":false,"deviceOpened":false,
+        "reachEditStepBytes":editor,"continueFromEditStepBytes":continuation,"publishWrapperBytes":publish,
+        "rustMinStackEnvironment":std::env::var("RUST_MIN_STACK").ok()}));
+    Ok(())
+}
+
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
     rehearsal_trace::install_from_environment()?;
     let args: Vec<_> = std::env::args().skip(1).collect();
+    if args.as_slice() == ["--future-sizes"] { return future_sizes(); }
     if args.len() == 2 && args[0] == "cleanup" {
         let root = PathBuf::from(&args[1]);
         let driver = AndroidDriver::new(&common::repo_config())?;

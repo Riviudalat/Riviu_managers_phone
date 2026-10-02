@@ -645,6 +645,8 @@ impl AgentClient {
         if let Some(body) = body {
             request = request.json(&body);
         }
+        let mut trace = riviu_core::tiktok_composer::StageDiagnosticOperation::start(
+            suffix, &self.session_identity(), Some(tokio::time::Instant::from_std(deadline)));
         let read = async {
             tracing::debug!(serial = %self.serial, transport = "http", route = suffix,
                 "observation read command");
@@ -701,9 +703,11 @@ impl AgentClient {
             );
             Ok(value)
         };
-        tokio::time::timeout_at(tokio::time::Instant::from_std(deadline), read)
+        let result = tokio::time::timeout_at(tokio::time::Instant::from_std(deadline), read)
             .await
-            .map_err(|_| observation_deadline_error())?
+            .map_err(|_| observation_deadline_error())?;
+        trace.finish(if result.is_ok() { "completed" } else { "error" });
+        result
     }
 
     /// Replace a degraded session with a fresh one, in place.
@@ -801,6 +805,8 @@ impl AgentClient {
         // round trip over the adb forward; measured on this fleet it should be 130–280 ms,
         // so anything past half a second is the thing the operator is complaining about and
         // it should be in the log with the device and the route on it.
+        let mut trace = riviu_core::tiktok_composer::StageDiagnosticOperation::start(
+            suffix, &self.session_identity(), request_timeout.map(|timeout| tokio::time::Instant::now() + timeout));
         let started = std::time::Instant::now();
         let request_failure = |phase, source: reqwest::Error| {
             let failure = AgentRequestFailure {
@@ -832,15 +838,16 @@ impl AgentClient {
         let response = request
             .send()
             .await
-            .map_err(|error| request_failure("response_headers", error))?;
+            .map_err(|error| { trace.finish("transportError"); request_failure("response_headers", error) })?;
         let status = response.status();
+        trace.finish("headersReceived");
         // Read as bytes and decode UTF-8 ourselves. The server answers without a
         // charset for some routes. Include body reception in the latency measurement:
         // headers alone do not mean the accessibility result has reached the caller.
         let bytes = response
             .bytes()
             .await
-            .map_err(|error| request_failure("response_body", error))?;
+            .map_err(|error| { trace.finish("transportError"); request_failure("response_body", error) })?;
         let elapsed = started.elapsed();
         if cfg!(debug_assertions) && std::env::var("RIVIU_PUBLISH_REHEARSAL").as_deref() == Ok("1")
         {
@@ -854,6 +861,7 @@ impl AgentClient {
                 "agent call was slow"
             );
         }
+        trace.finish("decodeOrHttpError");
         let text = String::from_utf8_lossy(&bytes);
         let value: Value = serde_json::from_str(&text)
             .with_context(|| format!("agent {suffix} trả về không phải JSON: {text}"))?;
@@ -864,6 +872,7 @@ impl AgentClient {
                 .unwrap_or(text.as_ref());
             return Err(anyhow!("agent {suffix} lỗi {status}: {message}"));
         }
+        trace.finish("completed");
         Ok(value)
     }
 

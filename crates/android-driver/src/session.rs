@@ -208,8 +208,11 @@ impl AndroidUiSession {
         action: &str,
         work: impl std::future::Future<Output = anyhow::Result<T>> + Send,
     ) -> anyhow::Result<T> {
+        let mut diagnostic = riviu_core::tiktok_composer::StageDiagnosticOperation::start(
+            action, &self.gui_session_epoch(), None);
         let started = std::time::Instant::now();
         let result = work.await;
+        diagnostic.finish(if result.is_ok() { "completed" } else { "error" });
         self.record_trace(
             action,
             started,
@@ -613,6 +616,7 @@ impl UiSession for AndroidUiSession {
     }
 
     async fn keyboard_shown(&self) -> anyhow::Result<bool> {
+        self.traced("keyboard_shown", async {
         let epoch = self.gui_session_epoch();
         let dump = tokio::time::timeout(
             std::time::Duration::from_secs(2),
@@ -631,6 +635,7 @@ impl UiSession for AndroidUiSession {
         };
         anyhow::ensure!(values.next().is_none(), "keyboard visibility ambiguous");
         Ok(shown)
+        }).await
     }
 
     async fn press_hardware_key(&self, key: HardwareKey) -> anyhow::Result<()> {
