@@ -1,5 +1,8 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import {
+  attachViewCanvas,
+  detachViewCanvas,
+  viewDiagnostics,
   collectDepartedViews,
   collectPaintReports,
   collectStalledViews,
@@ -127,12 +130,14 @@ describe("paint reports sent to the host watchdog", () => {
     const latest = new Map([
       ["healthy", beat(now, 300, 300)],
       ["stalled", beat(now, 900, 200)],
+      ["detached", beat(now - 30_000, 900, 200)],
     ]);
     const painted = new Map([
       ["healthy", beat(now - 20, 300, 300)],
       ["stalled", beat(now - 30_000, 200, 200)],
+      ["detached", beat(now - 30_000, 200, 200)],
     ]);
-    const reports = collectPaintReports(now, latest, painted);
+    const reports = collectPaintReports(now, latest, painted, new Set(["healthy", "stalled"]));
     expect(reports.map((report) => report.udid).sort()).toEqual(["healthy", "stalled"]);
   });
 
@@ -142,7 +147,7 @@ describe("paint reports sent to the host watchdog", () => {
     // the 291-restart loop with an extra hop in it.
     const latest = new Map([["a", beat(now, 900, 200, 7)]]);
     const painted = new Map([["a", beat(now - 30_000, 200, 200, 7)]]);
-    expect(collectPaintReports(now, latest, painted)[0]).toMatchObject({
+    expect(collectPaintReports(now, latest, painted, new Set(latest.keys()))[0]).toMatchObject({
       generation: 7,
       received: 900,
       frames: 200,
@@ -156,14 +161,14 @@ describe("paint reports sent to the host watchdog", () => {
     // boundary is how a sleeping laptop becomes a fleet-wide restart. Never negative, even
     // if the beat is somehow ahead of `now`.
     const latest = new Map([["a", beat(now + 5_000, 10, 10)]]);
-    expect(collectPaintReports(now, latest, new Map())[0].sincePaintMs).toBe(0);
+    expect(collectPaintReports(now, latest, new Map(), new Set(latest.keys()))[0].sincePaintMs).toBe(0);
   });
 
   it("dates a device that has never painted from its own first beat", () => {
     // `frames === 0` is what tells the host this is a device starting up. The age must not
     // be an invented zero, or a device that never paints at all would look freshly drawn.
     const latest = new Map([["starting", beat(now - 4_000, 5, 0)]]);
-    const report = collectPaintReports(now, latest, new Map())[0];
+    const report = collectPaintReports(now, latest, new Map(), new Set(latest.keys()))[0];
     expect(report.frames).toBe(0);
     expect(report.sincePaintMs).toBe(4_000);
   });
@@ -212,7 +217,7 @@ describe("forgetting devices that left the fleet", () => {
     const stores = memory();
     collectDepartedViews(new Set(["stays"]), stores);
 
-    const reports = collectPaintReports(1_000, stores.latestBeat, stores.lastPaintBeat);
+    const reports = collectPaintReports(1_000, stores.latestBeat, stores.lastPaintBeat, new Set(stores.latestBeat.keys()));
 
     expect(reports.map((report) => report.udid)).toEqual(["stays"]);
   });
@@ -221,5 +226,41 @@ describe("forgetting devices that left the fleet", () => {
     const stores = memory();
     expect(collectDepartedViews(new Set(["stays", "left"]), stores)).toEqual([]);
     expect(stores.live.size).toBe(2);
+  });
+});
+
+
+describe("mounted canvas paint evidence lifecycle", () => {
+  it("keeps a remaining surface but drops historical and queued beats after final detach", () => {
+    let target: { onmessage?: (event: { data: unknown }) => void };
+    class FakeWorker {
+      onmessage?: (event: { data: unknown }) => void;
+      postMessage() {}
+      terminate() {}
+      constructor() { target = this; }
+    }
+    vi.stubGlobal("Worker", FakeWorker);
+    try {
+      const canvas = {} as OffscreenCanvas;
+      attachViewCanvas("mounted", canvas, "tile");
+      attachViewCanvas("mounted", canvas, "overlay");
+      const send = () => target.onmessage?.({ data: {
+        type: "paintBeat", udid: "mounted", generation: 7, received: 900, frames: 200,
+      } });
+      send();
+      detachViewCanvas("mounted", "overlay");
+      expect(viewDiagnostics().mounted.frames).toBe(200);
+      detachViewCanvas("mounted", "tile");
+      expect(viewDiagnostics().mounted).toBeUndefined();
+      send(); // A beat already in flight is not evidence of a mounted renderer.
+      expect(viewDiagnostics().mounted).toBeUndefined();
+      attachViewCanvas("mounted", canvas, "tile");
+      expect(viewDiagnostics().mounted).toBeUndefined();
+      send();
+      expect(viewDiagnostics().mounted.generation).toBe(7);
+      detachViewCanvas("mounted", "tile");
+    } finally {
+      vi.unstubAllGlobals();
+    }
   });
 });

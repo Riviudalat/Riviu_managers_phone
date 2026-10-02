@@ -9,9 +9,10 @@
 # path invents a signature: both sign with the standard debug keystore, and shipping requires
 # pinning bytes + SHA-256 by hand (see README).
 
-param([switch]$Candidate)
+param([switch]$Candidate, [switch]$Production)
 
 $ErrorActionPreference = "Stop"
+if ($Candidate -and $Production) { throw 'Choose Candidate or Production, not both.' }
 $Root = Split-Path -Parent $MyInvocation.MyCommand.Path
 $Root = [IO.Path]::GetFullPath($Root)
 Set-Location $Root
@@ -46,7 +47,7 @@ Write-Host "JAVA_HOME=$JavaHome"
 Write-Host "ANDROID_SDK=$Sdk"
 
 $Gradle = Get-Command gradle -ErrorAction SilentlyContinue
-if ($Gradle -and -not $Candidate) {
+if ($Gradle -and -not $Candidate -and -not $Production) {
     $SdkEscaped = $Sdk.Replace("\", "\\")
     Set-Content -Path (Join-Path $Root "local.properties") -Value "sdk.dir=$SdkEscaped" -Encoding ascii
     & gradle ":app:assembleDebug" --no-daemon
@@ -92,7 +93,7 @@ else {
     }
     Write-Host "version $VersionName ($VersionCode), minSdk $MinSdk, targetSdk $TargetSdk"
 
-    $OutName = if ($Candidate) { "build\candidate" } else { "build-tools-out" }
+    $OutName = if ($Production) { "build\production" } elseif ($Candidate) { "build\candidate" } else { "build-tools-out" }
     $Out = Join-Path $Root $OutName
     if ([IO.Path]::GetFullPath($Out) -ne [IO.Path]::GetFullPath([IO.Path]::Combine($Root, $OutName))) {
         Fail "build output path must remain in the helper workspace"
@@ -119,6 +120,7 @@ else {
     if ($Patched -eq $ManifestText) { Fail "did not find a <manifest> tag to stamp the package onto" }
     Set-Content -Path $Manifest -Value $Patched -Encoding utf8
 
+    $DebugArguments = if ($Production) { @() } else { @('--debug-mode') }
     & $Aapt2 link `
         -o (Join-Path $Out "base.apk") `
         -I $Platform `
@@ -127,7 +129,7 @@ else {
         --target-sdk-version $TargetSdk `
         --version-code $VersionCode `
         --version-name $VersionName `
-        --debug-mode `
+        @DebugArguments `
         --java $Gen `
         (Join-Path $Out "res.zip")
     if ($LASTEXITCODE -ne 0) { Fail "aapt2 link failed with exit $LASTEXITCODE" }

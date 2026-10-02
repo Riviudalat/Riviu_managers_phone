@@ -353,6 +353,27 @@ async function summarize(detail, options, invoke, accounts) {
     urlReadback: { status: allSent && counts.urlReadback === rows.length ? 'matched' : 'pending', reason: 'Cần canonical post proof, receipt đúng revision/epoch và ô Sheet khớp.' } };
 }
 
+// Admission remains owned by interaction_read_account. Bound concurrent reads to
+// one per unique phone, retain input order, and settle every read before failure.
+async function readStartAccounts(udids, invoke, validate) {
+  check(new Set(udids).size === udids.length, 'Duplicate account read device');
+  const readings = new Array(udids.length), failures = new Array(udids.length);
+  let next = 0;
+  await Promise.all(Array.from({ length: Math.min(30, udids.length) }, async () => {
+    while (next < udids.length) {
+      const index = next++, udid = udids[index];
+      try {
+        const reading = await invoke('interaction_read_account', { udid });
+        validate(reading, udid);
+        readings[index] = reading;
+      } catch (error) { failures[index] = { error }; }
+    }
+  }));
+  const failure = failures.find(Boolean);
+  if (failure) throw failure.error;
+  return readings;
+}
+
 async function runStartProtocol(options, { invoke, sleep, now, file, report, currentAccounts }) {
   const prepared = read(file('preflight.json'));
   const startIntent = read(file('start-intent.json'));
@@ -397,15 +418,14 @@ async function runStartProtocol(options, { invoke, sleep, now, file, report, cur
         && a.bundleId === options.bundleIds[i] && a.ordinal === i),
     'Preflight thay đổi mapping đã yêu cầu');
     const accounts = { ...currentAccounts };
-    for (const udid of options.udids.filter(id => !currentAccounts[id])) {
-      const reading = await invoke('interaction_read_account', { udid });
+    const readings = await readStartAccounts(options.udids.filter(id => !currentAccounts[id]), invoke, (reading, udid) => {
       check(reading?.udid === udid && reading.status === 'unassigned'
         && !handle(reading.expectedHandle)
         && /^[a-z0-9_.]{1,24}$/.test(handle(reading.observedHandle))
         && /^[a-f0-9]{64}$/.test(reading.snapshotSha256 ?? ''),
       `Không đọc được username trên máy ${udid}; chưa tạo lượt đăng`);
-      accounts[udid] = handle(reading.observedHandle);
-    }
+    });
+    for (const reading of readings) accounts[reading.udid] = handle(reading.observedHandle);
     check(options.udids.every(id => /^[a-z0-9_.]{1,24}$/.test(handle(accounts[id]))),
       'Chưa có username hợp lệ để xác minh bài đăng');
     const approval = { scope: scope(options), devScope: reservation.devScope,
@@ -440,15 +460,14 @@ async function runStartProtocol(options, { invoke, sleep, now, file, report, cur
     check(hash(writer) === hash(approval.writer), 'Writer/target/epoch đã đổi; không Start');
     let intent = startIntent;
     if (!intent) {
-      for (const udid of options.udids) {
-        const reading = await invoke('interaction_read_account', { udid });
+      await readStartAccounts(options.udids, invoke, (reading, udid) => {
         const assigned = handle(approval.metadataAccounts[udid]);
         check(reading?.udid === udid && reading.status === (assigned ? 'matched' : 'unassigned')
           && handle(reading.expectedHandle) === assigned
           && handle(reading.observedHandle) === handle(accounts[udid])
           && /^[a-f0-9]{64}$/.test(reading.snapshotSha256 ?? ''),
         `Account preflight did not match approved device identity for ${udid}`);
-      }
+      });
       intent = { confirmation: options.confirm, requestId: approval.requestId,
         request: approval.request, approvedInputDigest: approval.inputDigest,
         preparationId: approval.preparationId, at: new Date(now()).toISOString() };
@@ -806,7 +825,22 @@ export async function connectIPC(options, chromium) {
     return {
       invoke: (command, args = {}) => {
         check(ALLOWED_IPC.has(command), 'IPC ngoài phạm vi harness');
-        return page.evaluate(async ({ command, args }) => window.__TAURI_INTERNALS__.invoke(command, args), { command, args });
+        return page.evaluate(async ({ command, args }) => {
+          try {
+            return { ok: true, value: await window.__TAURI_INTERNALS__.invoke(command, args) };
+          } catch (error) {
+            // Never serialize the rejected object or command arguments: both may
+            // carry credentials. CommandError exposes only code and message.
+            const known = error && typeof error.code === 'string' && typeof error.message === 'string';
+            return { ok: false, error: { command,
+              ...(typeof args.udid === 'string' ? { udid: args.udid } : {}),
+              code: known ? error.code : 'ipc_rejected',
+              message: known ? error.message : 'IPC command rejected' } };
+          }
+        }, { command, args }).then(result => {
+          if (!result.ok) throw new Error(JSON.stringify(result.error));
+          return result.value;
+        });
       },
       // For connectOverCDP, close disconnects this client; it does not close the existing app/pages.
       close: () => browser.close(),

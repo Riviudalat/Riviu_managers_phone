@@ -195,11 +195,29 @@ test('new acceptance defaults to Start while historical observe stays readable',
 
 test('start protocol saves intent before Start and only reads status after lost ACK', async t => {
   const e = environment(t);
+  let releaseAccount, accountGate, accountFailure = false, accountSettled = false;
+  const accountStarts = [];
   let status;
   let loseAck = true;
   let statusUnavailable = true;
   const invoke = async (command, args) => {
+    if (command === 'interaction_read_account' && accountGate) {
+      accountStarts.push(args.udid);
+      if (args.udid === 'phone-a') {
+        await accountGate;
+        accountSettled = true;
+      }
+      const reading = await e.invoke(command, args);
+      if (accountFailure && args.udid === 'phone-b') throw new Error('account read refused');
+      return reading;
+    }
+    if (command === 'publish_preflight') {
+      const response = await e.invoke(command, args);
+      response.assignments.forEach((row, i) => { row.udid = args.request.udids[i]; });
+      return response;
+    }
     if (command === 'publish_start') {
+      assert.equal(accountSettled, true, 'Start waits for every account read');
       e.calls.push({ command, args: structuredClone(args) });
       const intent = JSON.parse(fs.readFileSync(path.join(e.dir, 'start-intent.json'), 'utf8'));
       assert.equal(intent.requestId, args.requestId);
@@ -212,6 +230,7 @@ test('start protocol saves intent before Start and only reads status after lost 
       e.detail.campaign.id = args.requestId;
       e.detail.campaign.requestId = args.requestId;
       e.detail.assignments.forEach((a, index) => {
+        a.udid = args.request.udids[index];
         a.campaignId = args.requestId;
         a.bundleId = `${args.requestId}:${args.request.bundleIds[index]}`;
       });
@@ -232,11 +251,41 @@ test('start protocol saves intent before Start and only reads status after lost 
   };
   const preflight = e.options('preflight');
   preflight.protocol = 'start';
+  preflight.udids = ['phone-a', 'phone-b'];
+  const policy = JSON.parse(fs.readFileSync(e.devScope, 'utf8'));
+  policy.deviceIds = preflight.udids;
+  fs.writeFileSync(e.devScope, JSON.stringify(policy));
   const prepared = await runAcceptance(preflight, { invoke });
   assert.equal(prepared.exitCode, 0, prepared.report.error);
   const submit = e.options('submit', ['--confirm', prepared.report.confirmation]);
   submit.protocol = 'start';
-  const first = await runAcceptance(submit, { invoke });
+  submit.udids = preflight.udids;
+  accountGate = new Promise(resolve => { releaseAccount = resolve; });
+  accountFailure = true;
+  let returned = false;
+  const failedRun = runAcceptance(submit, { invoke }).then(result => { returned = true; return result; });
+  await new Promise(resolve => setImmediate(resolve));
+  // Drain the blocked read even when an assertion exposes the serial baseline.
+  const startedWhileBlocked = [...accountStarts];
+  assert.equal(returned, false, 'a failed sibling must drain the slow read before returning');
+  assert.equal(e.calls.some(call => call.command === 'publish_start'), false);
+  releaseAccount();
+  const failed = await failedRun;
+  assert.deepEqual(startedWhileBlocked, ['phone-a', 'phone-b'], 'B starts before slow A resolves');
+  assert.equal(failed.exitCode, 1);
+  assert.equal(accountSettled, true);
+  assert.equal(fs.existsSync(path.join(e.dir, 'start-intent.json')), false);
+  accountFailure = false;
+  accountStarts.length = 0;
+  accountSettled = false;
+  accountGate = new Promise(resolve => { releaseAccount = resolve; });
+  const firstRun = runAcceptance(submit, { invoke });
+  await new Promise(resolve => setImmediate(resolve));
+  assert.deepEqual(accountStarts, ['phone-a', 'phone-b']);
+  assert.equal(e.calls.some(call => call.command === 'publish_start'), false);
+  releaseAccount();
+  const first = await firstRun;
+  accountGate = null;
   assert.equal(first.exitCode, 2, first.report.error);
   assert.equal(first.report.acceptance, 'ackUnknown');
   assert.equal(e.calls.filter(call => call.command === 'publish_start').length, 1);
@@ -247,6 +296,7 @@ test('start protocol saves intent before Start and only reads status after lost 
     || call.command === 'publish_execute'), false);
   assert.equal(second.report.start, 'alreadyIntendedObserveOnly');
   const observe = e.options('observe', ['--campaign-id', status.campaignId]);
+  observe.udids = preflight.udids;
   const observed = await runAcceptance(observe, { invoke });
   assert.equal(observed.exitCode, 2, observed.report.error);
   assert.equal(e.calls.filter(call => call.command === 'publish_start').length, 1);
@@ -259,6 +309,7 @@ test('start protocol saves intent before Start and only reads status after lost 
   const statusReadsBefore = e.calls.filter(call => call.command === 'publish_start_status').length;
   const waiting = e.options('observe', ['--campaign-id', status.campaignId,
     '--wait-seconds', '10', '--poll-seconds', '5']);
+  waiting.udids = preflight.udids;
   const waited = await runAcceptance(waiting, {
     invoke, now: () => clock, sleep: async ms => { clock += ms; },
   });
@@ -767,15 +818,32 @@ test('CDP refuses ambiguous pages and disconnects without touching any page', as
 
 test('CDP adapter only invokes allowlisted production IPC and never starts a browser', async () => {
   const seen = [];
+  let rejected = false;
   const page = { url: () => 'http://tauri.localhost/', evaluate: async (fn, args) => {
     seen.push(args);
-    return args ? { campaign: { id: args.args.campaignId } } : true;
+    if (!args) return true;
+    const previous = globalThis.window;
+    globalThis.window = { __TAURI_INTERNALS__: { invoke: async () => {
+      if (rejected) throw { code: 'pending_publish_guard', message: 'Pending publication requires reconciliation',
+        token: 'secret-token', credentials: { password: 'secret-password' }, details: 'private-details' };
+      return { campaign: { id: args.args.campaignId } };
+    } } };
+    try { return await fn(args); }
+    finally { globalThis.window = previous; }
   } };
   let disconnected = false;
   const chromium = { connectOverCDP: async () => ({ contexts: () => [{ pages: () => [page] }],
     close: async () => { disconnected = true; } }) };
   const ipc = await connectIPC({ cdp: 'http://127.0.0.1:9277' }, chromium);
   assert.deepEqual(await ipc.invoke('publish_get', { campaignId: 'fixture' }), { campaign: { id: 'fixture' } });
+  rejected = true;
+  await assert.rejects(ipc.invoke('interaction_read_account', { udid: 'phone-a', token: 'input-secret' }), error => {
+    const safe = JSON.parse(error.message);
+    assert.deepEqual(safe, { command: 'interaction_read_account', udid: 'phone-a',
+      code: 'pending_publish_guard', message: 'Pending publication requires reconciliation' });
+    assert.doesNotMatch(error.message, /secret|password|credentials|details/);
+    return true;
+  });
   assert.throws(() => ipc.invoke('terminate_app', {}));
   await ipc.close();
   assert.equal(disconnected, true);

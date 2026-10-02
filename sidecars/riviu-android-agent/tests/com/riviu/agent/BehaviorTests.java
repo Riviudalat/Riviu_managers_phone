@@ -169,6 +169,36 @@ public final class BehaviorTests {
         check(!session.recover(), "secure listener recovery bounded");
         check(!BootstrapEnvelope.serverUidAllowed(110123, 110123), "non-user0 UID excluded");
     }
+    private static void binderBootstrap() throws Exception {
+        Class<?> carrier;
+        try { carrier = Class.forName("com.riviu.agent.BootstrapBinderPolicy"); }
+        catch (ClassNotFoundException absent) { throw new AssertionError("release Binder bootstrap carrier missing"); }
+        java.lang.reflect.Method caller = carrier.getDeclaredMethod("callerAllowed", int.class, boolean.class);
+        for (int uid : new int[] { 0, 2000, 1000, 10123, 102000 }) {
+            check((Boolean) caller.invoke(null, uid, true) == (uid == 2000), "only kernel shell UID can bootstrap");
+        }
+        check(!(Boolean) caller.invoke(null, 2000, false), "shell without DUMP refused");
+        java.lang.reflect.Method identity = carrier.getDeclaredMethod("identityAllowed", String.class,
+                String.class, String.class, int.class, int.class, String.class, String.class, boolean.class, boolean.class);
+        String pin = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
+        Object[] exact = { "com.riviu.agent", "com.riviu.agent.AgentService", "android.permission.DUMP",
+                10123, 10123, pin, pin, true, true };
+        check((Boolean) identity.invoke(null, exact), "exact pinned service identity");
+        Object[][] rejected = { { 0, "com.other" }, { 1, "com.riviu.agent.OtherService" },
+                { 2, null }, { 3, 0 }, { 3, 10124 }, { 5, "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb" },
+                { 7, false }, { 8, false } };
+        for (Object[] change : rejected) {
+            Object[] altered = exact.clone(); altered[(Integer) change[0]] = change[1];
+            check(!(Boolean) identity.invoke(null, altered), "unproven service cannot receive credentials");
+        }
+        java.lang.reflect.Method binding = carrier.getDeclaredMethod("sessionMatches", String.class,
+                String.class, String.class, String.class, String.class);
+        check((Boolean) binding.invoke(null, "claim", "-", "-", null, null), "cold claim admitted");
+        check((Boolean) binding.invoke(null, "claim", "-", "-", "instance", "generation"), "lost ACK same-owner claim may reconcile");
+        check(!(Boolean) binding.invoke(null, "release", "instance", "stale", "instance", "generation"), "stale generation cannot release");
+        check(!(Boolean) binding.invoke(null, "release", "-", "-", "instance", "generation"), "unbound release refused");
+        check((Boolean) binding.invoke(null, "release", "instance", "generation", "instance", "generation"), "exact release binding");
+    }
     private static void acceptDeadline() throws Exception {
         final long[] now = { 0 };
         AtomicInteger polls = new AtomicInteger();
@@ -280,10 +310,12 @@ public final class BehaviorTests {
             Clip current;
             Clip writtenOriginal;
             int writes;
-            @Override public Clip read() { return current; }
+            boolean clearSupported = true, failRead, refuseClear;
+            @Override public Clip read() { if (failRead) throw new IllegalStateException("read unavailable"); return current; }
+            public boolean canClear() { return clearSupported; }
             @Override public boolean plain(Clip clip) { return clip != null && clip.plain; }
             @Override public String text(Clip clip) { return clip.text; }
-            @Override public void write(Clip clip) { writes++; writtenOriginal = clip; current = clip; }
+            @Override public void write(Clip clip) { writes++; writtenOriginal = clip; if (clip != null || !refuseClear) current = clip; }
             @Override public boolean equal(Clip a, Clip b) { return a.plain && b.plain && a.text.equals(b.text) && a.label.equals(b.label); }
         }
         Access access = new Access(); ClipboardSnapshots<Clip> snapshots = new ClipboardSnapshots<Clip>(2);
@@ -319,9 +351,42 @@ public final class BehaviorTests {
                 "restore fingerprint binds snapshot ID");
         check(!ClipboardStore.fingerprint("restoreSnapshot", id, "sentinel").equals(ClipboardStore.fingerprint("restoreSnapshot", id, "changed")),
                 "restore fingerprint binds expected marker");
+        ClipboardSnapshots<Clip> emptySnapshots = new ClipboardSnapshots<Clip>(1);
+        check("empty".equals(emptySnapshots.kind(null, access))
+                && "plaintext".equals(emptySnapshots.kind(new Clip("", "plain-empty", true), access))
+                && "unsupported".equals(emptySnapshots.kind(new Clip("sentinel", "rich", false), access)),
+                "successful native read kind distinguishes absent clip from empty string and rich data");
+        String emptyId = emptySnapshots.capture(null, access);
+        check(emptyId != null && emptySnapshots.known(emptyId), "successful empty baseline retains opaque snapshot identity");
+        access.current = new Clip("sentinel", "riviu", true);
+        ClipboardCompare.Result emptyRestored = emptySnapshots.restore(emptyId, "sentinel", access);
+        check(emptyRestored.written && emptyRestored.verified && access.current == null,
+                "empty restore requires exact null readback, never an empty string clip");
+        access.current = new Clip("", "riviu", true);
+        writes = access.writes;
+        check(emptySnapshots.restore(emptyId, "sentinel", access).changed && access.writes == writes,
+                "empty string foreign clip is not empty and cannot authorize clear");
+        access.current = new Clip("sentinel", "rich", false);
+        check(emptySnapshots.restore(emptyId, "sentinel", access).changed && access.writes == writes,
+                "same marker in rich clipboard cannot authorize clear");
+        access.current = null;
+        check(!emptySnapshots.restore(emptyId, "sentinel", access).written && access.writes == writes,
+                "missing current marker cannot authorize clear");
+        access.current = new Clip("sentinel", "riviu", true);
+        access.refuseClear = true;
+        check(!emptySnapshots.restore(emptyId, "sentinel", access).verified,
+                "clear returning without null readback cannot qualify");
+        access.refuseClear = false; access.failRead = true; writes = access.writes;
+        try { emptySnapshots.restore(emptyId, "sentinel", access); throw new AssertionError("failed read"); }
+        catch (IllegalStateException expected) { check(access.writes == writes, "failed read never grants empty restore"); }
+        access.failRead = false; access.clearSupported = false;
+        check(new ClipboardSnapshots<Clip>(1).capture(null, access) == null,
+                "pre-28 clear unavailable cannot retain restorable empty baseline");
+        check(!emptySnapshots.restore(emptyId, "sentinel", access).written && access.writes == writes,
+                "lost clear support cannot dispatch clear");
     }
     public static void main(String[] args) throws Exception {
-        clipboard(); service(); resources(); bootstrap(); auth(); owner(); acceptDeadline(); compareClipboard(); clipboardSnapshots();
+        clipboard(); service(); resources(); bootstrap(); auth(); owner(); binderBootstrap(); acceptDeadline(); compareClipboard(); clipboardSnapshots();
         System.out.println("PASS " + assertions + " behavioral assertions on production Java seams");
     }
 }

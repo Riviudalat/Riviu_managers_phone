@@ -339,9 +339,11 @@ final class HttpServer {
                     result.put("available", value.available).put("plainTextBaseline", value.plainTextBaseline);
                     if (value.available) result.put("text", value.text);
                     if (value.baselineId != null) result.put("baselineId", value.baselineId);
+                    if (value.baselineKind != null) result.put("baselineKind", value.baselineKind);
                 }
                 response.put("result", result);
-            } else if (state == MainThreadJobs.State.FAILED) response.put("error", "clipboard_failed");
+            } else if (state == MainThreadJobs.State.FAILED) response.put("error", "clipboard_failed")
+                    .put("clipboardOperationFailed", true); // Never classify a failed read as empty.
         }
         return response;
     }

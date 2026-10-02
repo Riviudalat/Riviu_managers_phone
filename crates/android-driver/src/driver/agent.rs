@@ -561,6 +561,9 @@ impl AndroidDriver {
             match self.try_attach_helper(udid).await {
                 Ok(helper) => helper,
                 Err(error) => {
+                    if error.is::<crate::riviu_agent::HelperRecoveryRequired>() {
+                        return Err(error).context("prior helper cleanup blocks device operations");
+                    }
                     tracing::warn!(
                         serial = udid,
                         %error,
@@ -589,10 +592,23 @@ impl AndroidDriver {
     ) -> anyhow::Result<Option<crate::riviu_agent::HelperClient>> {
         let _inventory = self.helper_inventory_lock(serial).write_owned().await;
         let cached = self.helpers.lock().get(serial).cloned();
+        let cached = match cached {
+            Some(helper) if helper.is_released().await? => {
+                self.helpers.lock().remove(serial);
+                None
+            }
+            cached => cached,
+        };
         if let Some(helper) = cached {
             if helper.is_alive().await {
                 return Ok(Some(helper));
             }
+            if let Some(reconnected) = helper.reconnect_runtime().await? {
+                self.helpers.lock().insert(serial.to_owned(), reconnected.clone());
+                return Ok(Some(reconnected));
+            }
+            anyhow::ensure!(!helper.cleanup_is_pending(), "helper cleanup pending; retain owner and transport for reconciliation");
+            helper.shutdown().await?;
             self.helpers.lock().remove(serial);
         }
         // **"I could not ask" is not "it is not installed".** This was
@@ -616,7 +632,7 @@ impl AndroidDriver {
             return Ok(None);
         }
         let helper = if self.automatic_setup_allowed {
-            crate::riviu_agent::HelperClient::ensure(self.adb.clone(), serial, self.riviu_agent_apk.as_deref()).await?
+            crate::riviu_agent::HelperClient::ensure_runtime(self.adb.clone(), serial, self.riviu_agent_apk.as_deref(), self.helper_state_dir.as_deref()).await?
         } else {
             crate::riviu_agent::HelperClient::attach_existing(self.adb.clone(), serial).await?
         };

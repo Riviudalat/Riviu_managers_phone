@@ -28,7 +28,7 @@ See [Android contract](../../docs/agents/09-fleet-android.md).
 The manifest in `sidecars/android/` pins **bytes + SHA-256**. Inventing those
 numbers for a file that was never assembled — or pinning a debug APK from a
 local assemble without recording it — is a lie the CI gate exists to catch. The
-current pin is helper **0.5.0 (versionCode 5)**; see root `NOTICE` §2c, which is the copy CI verifies.
+current pin is helper **0.7.0 (versionCode 7)**; see root `NOTICE` §2c, which is the copy CI verifies.
 
 ## Launcher and service status
 
@@ -81,26 +81,32 @@ Precedence is `config → env → bundled`, check the current driver resolver be
 
 ## Deployment and candidate qualification
 
-The shipped APK remains **0.5.0/code5**. Current source builds a **0.6.0/code6
-candidate**, not a qualified replacement. Package identity and signing lineage stay
-`com.riviu.agent`. Building or passing package checks does not authorize installation.
+The shipped production APK is **0.7.0/code7**, with package identity
+`com.riviu.agent` and the existing signing lineage. Package preparation on arrival
+installs or upgrades the helper without starting a session or switching the IME.
+Its success is distinct from authenticated runtime readiness.
 
-The helper client now refuses token-bearing ADB provisioning: passing a session token
-as an `am` argument exposes it in process arguments and possibly transport errors.
-Normal production provisioning remains blocked; the debug-only canary carrier uses
-`run-as com.riviu.agent`, verified package UID and framed stdin, never root or relaxed
-SELinux policy. The server requires its own UID and an actually debuggable APK.
-This carrier is not a release-grade provisioning mechanism. Do not restore the old
-token-in-argv recipe or extract an old controller's token.
-Package-only desktop preparation is distinct from authenticated service readiness.
+Production bootstrap uses the Android shell external-provider API to acquire the
+existing guarded service Binder. Both provider calls and Binder requests require
+kernel UID 2000 and `android.permission.DUMP`. The host verifies the provider,
+package UID, signing certificate, APK digest and bound service identity before
+reading the framed credential from stdin. Tokens never travel through ADB argv,
+files or logs. ADB daemons running as root must first return to standard shell
+mode; root and debug `run-as` are not production fallbacks.
 
-Clipboard activation in ordinary client sessions remains blocked pending durable
-recovery/control-plane qualification. Only the explicit helper-only canary can use
-the owned debug carrier while its admitted device lease and stable fence are held.
-The candidate has named jobs so queued cancellation cannot dispatch late; token
-possession and job settlement do not establish device ownership. No automatic IME
-change is allowed just to make diagnostics green. Never leave the helper as the
-default keyboard or claim restoration from an `ime set` ACK alone.
+Clipboard qualification runs under the device lease and exact runtime owner.
+It preserves a supported plaintext or explicitly proven empty native baseline,
+checks a marker roundtrip, conditionally restores the original snapshot and
+verifies IME restoration. Empty restoration uses `clearPrimaryClip` on Android
+9+ and requires null readback; an unavailable read is never accepted as empty.
+Rich or ambiguous baselines fail before a replacement is written.
+
+Named clipboard jobs retain settlement and prevent expired queued writes from
+dispatching later. Nonsecret durable owner and IME checkpoints fence unresolved
+cleanup. After host restart, loss of the in-memory credential may require explicit
+reconciliation; a checkpoint alone does not authorize a new claim or Post replay.
+Always distinguish helper qualification from successful publication, canonical
+link verification and Sheet delivery. Never leave the helper as the default IME.
 
 `AgentService` is `exported=true` so `adb shell am start-foreground-service`
 can start it. The HTTP server still binds `127.0.0.1` only. `exported=false`

@@ -51,6 +51,13 @@
                 android:value="USB farm helper: brief IME clipboard and MediaStore import" />
         </service>
 
+        <provider
+            android:name=".BootstrapBinderProvider"
+            android:authorities="com.riviu.agent.bootstrap"
+            android:exported="true"
+            android:permission="android.permission.DUMP"
+            android:grantUriPermissions="false" />
+
         <service
             android:name=".RiviuIme"
             android:exported="true"

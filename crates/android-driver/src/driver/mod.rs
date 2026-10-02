@@ -273,6 +273,8 @@ impl Drop for StartClaim<'_> {
 
 #[derive(Debug, Clone)]
 pub struct AndroidDriverConfig {
+    /// Durable driver state supplied by the composition root; no temporary default.
+    pub helper_state_dir: Option<PathBuf>,
     /// False for strict diagnostics: no automatic device setup/recovery;
     /// borrowed runners are not terminated during shutdown.
     pub automatic_setup_allowed: bool,
@@ -333,7 +335,7 @@ pub struct AndroidDriverConfig {
 
 impl Default for AndroidDriverConfig {
     fn default() -> Self {
-        Self { automatic_setup_allowed: true, diagnostic_runner_devices: Vec::new(), adb_path: None, minicap_apk: None, bundled_adb_path: None, bundled_minicap_apk: None, package_java: None, bundletool_jar: None, scrcpy_server: None, bundled_scrcpy_server: None, riviu_agent_apk: None, bundled_riviu_agent_apk: None, agent_server_apk: None, bundled_agent_server_apk: None, agent_test_apk: None, bundled_agent_test_apk: None }
+        Self { helper_state_dir: None, automatic_setup_allowed: true, diagnostic_runner_devices: Vec::new(), adb_path: None, minicap_apk: None, bundled_adb_path: None, bundled_minicap_apk: None, package_java: None, bundletool_jar: None, scrcpy_server: None, bundled_scrcpy_server: None, riviu_agent_apk: None, bundled_riviu_agent_apk: None, agent_server_apk: None, bundled_agent_server_apk: None, agent_test_apk: None, bundled_agent_test_apk: None }
     }
 }
 
@@ -998,6 +1000,7 @@ pub struct AndroidDriver {
     /// checkout has no pinned binary until someone builds
     /// `sidecars/riviu-android-agent`.
     riviu_agent_apk: Option<PathBuf>,
+    helper_state_dir: Option<PathBuf>,
     /// Both halves of the uiautomator2 instrumentation, resolved once at construction.
     agent_apks: Option<(PathBuf, PathBuf)>,
     /// serial -> a live helper client. Same reuse rule as [`Self::agents`]:
@@ -1066,6 +1069,32 @@ impl AndroidDriver {
     /// Helper-only diagnostic preparation; caller retains its admitted device lease.
     pub async fn prepare_helper_canary(&self, serial: &str, report: PathBuf) -> anyhow::Result<crate::riviu_agent::HelperClient> {
         let helper = crate::riviu_agent::HelperClient::prepare_canary(self.adb.clone(), serial, report).await?;
+        self.helpers.lock().insert(serial.into(), helper.clone());
+        Ok(helper)
+    }
+
+    /// Release helper preparation for an admitted caller retaining the device lease.
+    /// The inventory writer serializes installation and acquisition with discovery.
+    pub async fn prepare_helper_runtime(&self, serial: &str) -> anyhow::Result<crate::riviu_agent::HelperClient> {
+        let _inventory = self.helper_inventory_lock(serial).write_owned().await;
+        let cached = self.helpers.lock().get(serial).cloned();
+        let cached = match cached {
+            Some(helper) if helper.is_released().await? => {
+                self.helpers.lock().remove(serial);
+                None
+            }
+            cached => cached,
+        };
+        if let Some(helper) = cached {
+            anyhow::ensure!(helper.is_scoped_canary(), "existing helper has no admitted owner");
+            if helper.is_alive().await { return Ok(helper); }
+            if let Some(reconnected) = helper.reconnect_runtime().await? {
+                self.helpers.lock().insert(serial.into(), reconnected.clone());
+                return Ok(reconnected);
+            }
+            anyhow::bail!("existing debug helper cannot become a release owner");
+        }
+        let helper = crate::riviu_agent::HelperClient::ensure_runtime(self.adb.clone(), serial, self.riviu_agent_apk.as_deref(), self.helper_state_dir.as_deref()).await?;
         self.helpers.lock().insert(serial.into(), helper.clone());
         Ok(helper)
     }
@@ -1386,6 +1415,7 @@ impl AndroidDriver {
             ports: Mutex::new(HashMap::new()),
             forwarded: Mutex::new(HashSet::new()),
             riviu_agent_apk,
+            helper_state_dir: config.helper_state_dir.clone(),
             helpers: Mutex::new(HashMap::new()),
             helper_inventory_locks: Mutex::new(HashMap::new()),
             inventory_cache: Mutex::new(HashMap::new()),

@@ -1,7 +1,7 @@
 //! Install the branded helper on arrival without opening it, switching IME, or starting a session.
 use super::*;
 
-const MIN_LAUNCHER_VERSION: u64 = 5;
+const MIN_LAUNCHER_VERSION: u64 = 7;
 const QUERY_TIMEOUT: Duration = Duration::from_secs(15);
 
 #[derive(Debug, PartialEq, Eq)]
@@ -311,15 +311,15 @@ mod tests {
 
     #[tokio::test]
     async fn installs_missing_and_upgrades_old_helper_once_then_verifies() {
-        for first in [HelperPackage::Missing, HelperPackage::Installed(4)] {
-            let io = fixture(vec![first, HelperPackage::Installed(5)]);
+        for first in [HelperPackage::Missing, HelperPackage::Installed(4), HelperPackage::Installed(5), HelperPackage::Installed(6)] {
+            let io = fixture(vec![first, HelperPackage::Installed(7)]);
             prepare_package(&io).await.unwrap();
             assert_eq!(io.installs.load(Ordering::Relaxed), 1);
         }
     }
     #[tokio::test]
     async fn current_and_newer_helpers_are_not_reinstalled() {
-        for version in [5, 6] {
+        for version in [7, 8] {
             let io = fixture(vec![HelperPackage::Installed(version)]);
             prepare_package(&io).await.unwrap();
             assert_eq!(io.installs.load(Ordering::Relaxed), 0);
@@ -349,7 +349,7 @@ mod tests {
     async fn install_needs_readback_and_a_launcher() {
         let io = fixture(vec![HelperPackage::Missing, HelperPackage::Installed(4)]);
         assert!(prepare_package(&io).await.is_err());
-        let mut io = fixture(vec![HelperPackage::Installed(5)]);
+        let mut io = fixture(vec![HelperPackage::Installed(7)]);
         io.launcher = false;
         assert!(prepare_package(&io).await.is_err());
         assert_eq!(io.installs.load(Ordering::Relaxed), 0);

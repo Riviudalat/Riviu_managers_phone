@@ -4,6 +4,7 @@ import android.content.ClipData;
 import android.content.ClipboardManager;
 import android.content.Context;
 import android.os.Handler;
+import android.os.Build;
 import android.os.Looper;
 
 import java.nio.charset.StandardCharsets;
@@ -19,6 +20,7 @@ final class ClipboardStore {
         final ClipboardCompare.Result comparison;
         boolean plainTextBaseline;
         String baselineId;
+        String baselineKind;
         private Value(boolean available, String text, boolean written, ClipboardCompare.Result comparison) {
             this.available = available;
             this.text = text;
@@ -34,9 +36,16 @@ final class ClipboardStore {
     private final ClipboardSnapshots<ClipData> snapshots = new ClipboardSnapshots<ClipData>(32);
     private final ClipboardSnapshots.Access<ClipData> snapshotAccess = new ClipboardSnapshots.Access<ClipData>() {
         @Override public ClipData read() { return manager().getPrimaryClip(); }
+        @Override public boolean canClear() { return Build.VERSION.SDK_INT >= 28; }
         @Override public boolean plain(ClipData clip) { return plainClip(clip); }
         @Override public String text(ClipData clip) { return clip.getItemAt(0).getText().toString(); }
-        @Override public void write(ClipData original) { manager().setPrimaryClip(original); }
+        @Override public void write(ClipData original) {
+            if (original != null) manager().setPrimaryClip(original);
+            else {
+                if (!canClear()) throw new IllegalStateException("native clipboard clear unavailable");
+                manager().clearPrimaryClip();
+            }
+        }
         @Override public boolean equal(ClipData first, ClipData second) {
             return plainClip(first) && plainClip(second)
                     && first.getItemAt(0).getText().toString().equals(second.getItemAt(0).getText().toString())
@@ -61,10 +70,9 @@ final class ClipboardStore {
                 return Value.written();
             }
             ClipData clip = manager.getPrimaryClip();
-            if (clip == null || clip.getItemCount() == 0) return Value.read(null);
-            CharSequence value = clip.getItemAt(0).coerceToText(context);
-            Value result = Value.read(value == null ? null : value.toString());
+            Value result = Value.read(plainClip(clip) ? clip.getItemAt(0).getText().toString() : null);
             result.plainTextBaseline = plainClip(clip);
+            result.baselineKind = snapshots.kind(clip, snapshotAccess);
             return result;
         }, 5, TimeUnit.SECONDS);
     }
@@ -87,6 +95,8 @@ final class ClipboardStore {
             ClipData original = manager().getPrimaryClip();
             Value value = Value.read(original == null ? null : plainClip(original) ? original.getItemAt(0).getText().toString() : null);
             value.plainTextBaseline = plainClip(original);
+            // Set only after a successful native read; read exceptions remain failed jobs.
+            value.baselineKind = snapshots.kind(original, snapshotAccess);
             value.baselineId = snapshots.capture(original, snapshotAccess);
             return value;
         }, 5, TimeUnit.SECONDS);

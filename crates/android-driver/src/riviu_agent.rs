@@ -28,6 +28,9 @@ use serde_json::{json, Value};
 use crate::adb::{self, AdbProgram};
 use crate::frames;
 
+mod runtime;
+pub use runtime::HelperRecoveryRequired;
+
 /// Package installed on the phone.
 pub const PACKAGE: &str = "com.riviu.agent";
 /// IME id the driver `ime set`s for one clipboard call.
@@ -137,7 +140,51 @@ pub struct HelperClient {
     lifecycle: std::sync::Arc<tokio::sync::Mutex<bool>>,
     pending_clipboard: std::sync::Arc<parking_lot::Mutex<Option<Value>>>,
     canary: Option<CanaryOwner>,
-    clipboard_baseline: std::sync::Arc<parking_lot::Mutex<Option<(String, Vec<u8>)>>>,
+    production_runtime: bool,
+    clipboard_qualified: std::sync::Arc<std::sync::atomic::AtomicBool>,
+    clipboard_baseline: std::sync::Arc<parking_lot::Mutex<Option<ClipboardBaseline>>>,
+}
+
+/// None text is an absent native clip; Some(empty bytes) is a plaintext empty string.
+#[derive(Clone)]
+struct ClipboardBaseline {
+    id: String,
+    text: Option<Vec<u8>>,
+}
+
+impl ClipboardBaseline {
+    fn capture(value: &Value) -> anyhow::Result<Self> {
+        let text = clipboard_read_payload(value, 4096)?;
+        let id = value["baselineId"].as_str().filter(|id| !id.is_empty())
+            .context("clipboard snapshot identity missing; no SET")?.to_owned();
+        Ok(Self { id, text })
+    }
+
+    fn restored(&self, value: &Value) -> bool {
+        value["written"] == true && value["verified"] == true
+            && value["available"] == self.text.is_some()
+    }
+}
+
+/// A successful job must explicitly prove absence; unavailable or malformed reads fail closed.
+fn clipboard_read_payload(value: &Value, limit: usize) -> anyhow::Result<Option<Vec<u8>>> {
+    let kind = match value["baselineKind"].as_str() {
+        Some("empty") => "empty",
+        Some("plaintext") => "plaintext",
+        Some("unsupported") => "unsupported",
+        _ => "unknown",
+    };
+    if kind == "empty" && value["available"] == false && value["plainTextBaseline"] == false
+        && value.get("text").is_none() {
+        return Ok(None);
+    }
+    anyhow::ensure!((kind == "plaintext" || (kind == "unknown" && value.get("baselineKind").is_none())) && value["available"] == true
+        && value["plainTextBaseline"] == true,
+        "supported clipboard baseline unavailable; baselineKind={kind} available={} plainTextBaseline={} snapshotRetained={}; no SET",
+        value["available"] == true, value["plainTextBaseline"] == true, value["baselineId"].as_str().is_some());
+    let text = value["text"].as_str().context("clipboard plaintext missing; empty was not proved")?;
+    anyhow::ensure!(text.len() <= limit, "helper clipboard exceeded read limit");
+    Ok(Some(text.as_bytes().to_vec()))
 }
 
 #[derive(Clone)]
@@ -154,6 +201,20 @@ struct CanaryOwner {
 
 impl HelperClient {
     pub(crate) fn is_scoped_canary(&self) -> bool { self.canary.is_some() && !self.lifecycle.try_lock().map(|closed| *closed).unwrap_or(true) }
+    /// A closed clone is replaceable only after all owned cleanup is proved complete.
+    pub(crate) async fn is_released(&self) -> anyhow::Result<bool> {
+        let closed = self.lifecycle.lock().await;
+        if !*closed { return Ok(false); }
+        anyhow::ensure!(!self.cleanup_is_pending(), "helper cleanup pending; retain released cache for reconciliation");
+        if self.production_runtime {
+            let owner = self.canary.as_ref().context("released runtime owner missing")?;
+            anyhow::ensure!(!owner.report.join("runtime-owner.json").try_exists()?, "helper owner intent retained; no fresh claim");
+        }
+        if let Some(owner) = &self.canary {
+            anyhow::ensure!(!owner.report.join("ime-checkpoint.json").try_exists()?, "helper cleanup checkpoint retained; no fresh claim");
+        }
+        Ok(true)
+    }
     pub(crate) fn cleanup_is_pending(&self) -> bool {
         self.pending_clipboard.lock().is_some() || self.clipboard_baseline.lock().is_some()
     }
@@ -504,13 +565,19 @@ impl HelperClient {
         let temp = owner
             .report
             .join(format!("ime-{}.tmp", uuid::Uuid::new_v4()));
-        let value = json!({"serial":self.serial,"ownerId":owner.owner_id,"serviceInstance":owner.instance,"generation":owner.generation,"pending":self.pending_clipboard.lock().clone()});
+        // Persist only cleanup metadata, never credentials or clipboard contents.
+        let baseline = self.clipboard_baseline.lock().as_ref().map(|saved|
+            json!({"baselineId":saved.id,"baselineKind":if saved.text.is_none() {"empty"} else {"plaintext"},
+                "decodedBytes":saved.text.as_ref().map_or(0, Vec::len),"metadataPreserving":true}));
+        let value = json!({"serial":self.serial,"androidUser":0,"ownerId":owner.owner_id,"serviceInstance":owner.instance,"generation":owner.generation,"pending":self.pending_clipboard.lock().clone(),"baseline":baseline});
+        let bytes = serde_json::to_vec(&value)?;
+        anyhow::ensure!(bytes.len() <= 16 * 1024, "helper cleanup checkpoint exceeds bound");
         use std::io::Write;
         let mut file = std::fs::OpenOptions::new()
             .write(true)
             .create_new(true)
             .open(&temp)?;
-        file.write_all(&serde_json::to_vec(&value)?)?;
+        file.write_all(&bytes)?;
         file.sync_all()?;
         std::fs::rename(temp, path)?;
         Ok(())
@@ -536,8 +603,7 @@ impl HelperClient {
 
     /// Install if needed, enable the IME, start the service, forward, prove `/status`.
     pub async fn ensure(adb: AdbProgram, serial: &str, apk: Option<&Path>) -> anyhow::Result<Self> {
-        // Fail before install/IME mutations until the new bootstrap is qualified.
-        start_service(&adb, serial).await?;
+        // Package preparation is independent of runtime bootstrap qualification.
         if !package_installed(&adb, serial).await? {
             let apk = apk.ok_or_else(|| {
                 anyhow!(
@@ -546,7 +612,12 @@ impl HelperClient {
                 )
             })?;
             install_apk(&adb, serial, apk).await?;
+            anyhow::ensure!(
+                package_installed(&adb, serial).await?,
+                "helper installation on {serial} was not verified; no runtime provisioning"
+            );
         }
+        // Keep service/IME effects blocked until secret-free bootstrap is qualified.
         start_service(&adb, serial).await?;
         enable_ime(&adb, serial).await?;
         let host_port = forward_helper(&adb, serial).await?;
@@ -655,6 +726,8 @@ impl HelperClient {
             lifecycle: Default::default(),
             pending_clipboard: Default::default(),
             canary: None,
+            production_runtime: false,
+            clipboard_qualified: Default::default(),
             clipboard_baseline: Default::default(),
         })
     }
@@ -672,7 +745,11 @@ impl HelperClient {
             return Ok(());
         }
         if let Some(owner) = &self.canary {
-            release_canary_owner(&self.adb, &self.serial, owner).await?;
+            if self.production_runtime {
+                runtime::release(&self.adb, &self.serial, owner).await?;
+            } else {
+                release_canary_owner(&self.adb, &self.serial, owner).await?;
+            }
         }
         let mut failures = Vec::new();
         if let Err(error) = frames::remove_forward(&self.adb, &self.serial, self.host_port).await {
@@ -691,6 +768,9 @@ impl HelperClient {
     }
 
     pub async fn is_alive(&self) -> bool {
+        if self.canary.is_some() && self.require_canary_identity().await.is_err() {
+            return false;
+        }
         self.require_status().await.is_ok()
             && self
                 .describe_apps(&[PACKAGE.to_string()], false)
@@ -716,6 +796,11 @@ impl HelperClient {
             }
         }
         // App-label lookup is an authenticated read, not a clipboard mutation.
+        if self.canary.is_some() && self.require_canary_identity().await.is_err() {
+            health.authenticated = Some(false);
+            health.reason = "ownerStatusUnproved".into();
+            return health;
+        }
         match self.describe_apps(&[PACKAGE.to_string()], false).await {
             Ok(_) => {
                 health.authenticated = Some(true);
@@ -767,6 +852,7 @@ impl HelperClient {
     }
 
     async fn clipboard_job_compare_inner(&self, action: &str, text: Option<&str>, expected: Option<&str>) -> anyhow::Result<Value> {
+        self.require_canary_identity().await.map_err(|_| anyhow!(ClipboardSettledFailure))?;
         let status = self
             .require_status()
             .await
@@ -784,6 +870,13 @@ impl HelperClient {
             .await
             .map_err(|_| anyhow!(ClipboardSettledFailure))?;
         if identity["ok"] != true || identity["nonce"].as_str() != Some(nonce.as_str()) {
+            return Err(anyhow!(ClipboardSettledFailure));
+        }
+        let owner = self.canary.as_ref().ok_or_else(|| anyhow!(ClipboardSettledFailure))?;
+        if identity["ownerId"].as_str() != Some(owner.owner_id.as_str())
+            || identity["serviceInstance"].as_str() != Some(owner.instance.as_str())
+            || identity["ownerGeneration"].as_str() != Some(owner.generation.as_str())
+            || identity["ownership"] != "owned" {
             return Err(anyhow!(ClipboardSettledFailure));
         }
         let instance = identity["serviceInstance"]
@@ -875,20 +968,9 @@ impl HelperClient {
             client
                 .with_ime(|| async {
                     let value = client.clipboard_job("get", None).await?;
-                    anyhow::ensure!(
-                        value["available"] == true,
-                        "clipboard is not readable; empty was not proved"
-                    );
-                    let text = value
-                        .get("text")
-                        .and_then(Value::as_str)
-                        .ok_or_else(|| anyhow!("helper clipboard read did not return text"))?;
-                    let bytes = text.as_bytes();
-                    anyhow::ensure!(
-                        bytes.len() <= maximum_decoded_bytes,
-                        "helper clipboard exceeded read limit"
-                    );
-                    Ok(("plaintext".to_string(), bytes.to_vec()))
+                    let bytes = clipboard_read_payload(&value, maximum_decoded_bytes)?;
+                    // Public read API represents proven absence as zero bytes, never writes it back.
+                    Ok(("plaintext".to_string(), bytes.unwrap_or_default()))
                 })
                 .await
         })
@@ -903,11 +985,7 @@ impl HelperClient {
         tokio::spawn(async move {
             client.with_ime(|| async {
                 let snapshot = client.clipboard_job("snapshot", None).await?;
-                anyhow::ensure!(snapshot["available"] == true && snapshot["plainTextBaseline"] == true, "supported clipboard snapshot unavailable");
-                let id = snapshot["baselineId"].as_str().context("clipboard snapshot ID missing")?.to_owned();
-                let text = snapshot["text"].as_str().context("clipboard snapshot text missing")?.as_bytes().to_vec();
-                anyhow::ensure!(text.len() <= 4096, "clipboard snapshot exceeds budget");
-                *client.clipboard_baseline.lock() = Some((id, text));
+                *client.clipboard_baseline.lock() = Some(ClipboardBaseline::capture(&snapshot)?);
                 Ok(())
             }).await
         }).await.context("clipboard baseline task failed")?
@@ -919,9 +997,9 @@ impl HelperClient {
         let client = self.clone();
         tokio::spawn(async move {
             client.with_ime(|| async {
-                let restored = client.clipboard_job_compare_inner("restoreSnapshot", Some(&saved.0), Some(&expected)).await
+                let restored = client.clipboard_job_compare_inner("restoreSnapshot", Some(&saved.id), Some(&expected)).await
                     .map_err(|_|anyhow!(ClipboardSettlementUnknown))?;
-                if restored["written"] != true || restored["verified"] != true { return Err(anyhow!(ClipboardSettlementUnknown)); }
+                if !saved.restored(&restored) { return Err(anyhow!(ClipboardSettlementUnknown)); }
                 client.clipboard_baseline.lock().take();
                 Ok(())
             }).await
@@ -929,28 +1007,36 @@ impl HelperClient {
     }
 
     pub async fn qualify_clipboard_roundtrip(&self) -> anyhow::Result<()> {
+        if self.production_runtime && self.clipboard_qualified.load(std::sync::atomic::Ordering::Acquire) {
+            self.require_canary_identity().await?;
+            return Ok(());
+        }
         let client = self.clone();
         tokio::spawn(async move {
-            client.with_ime(|| async {
+            client.with_ime_mode(true, || async {
                 let status = client.require_status().await?;
                 anyhow::ensure!(status.features.iter().any(|f|f == "clipboardSnapshotRestore"), "metadata-preserving clipboard restore unsupported");
                 let baseline = client.clipboard_job("snapshot", None).await?;
-                anyhow::ensure!(baseline["available"] == true && baseline["plainTextBaseline"] == true, "supported plaintext clipboard baseline unavailable; no SET");
-                let baseline_id = baseline["baselineId"].as_str().context("clipboard snapshot identity missing")?;
-                anyhow::ensure!(baseline["text"].as_str().is_some_and(|text|text.len() <= 4096), "clipboard baseline exceeds canary budget; no SET");
+                let saved = ClipboardBaseline::capture(&baseline)?;
+                *client.clipboard_baseline.lock() = Some(saved.clone());
+                client.persist_clipboard_checkpoint()?;
                 let marker = format!("riviu-clipboard-sentinel-{}", uuid::Uuid::new_v4().simple());
                 let write = client.clipboard_job("set", Some(&marker)).await;
                 if write.as_ref().err().is_some_and(|e|e.is::<ClipboardSettlementUnknown>()) { return Err(anyhow!(ClipboardSettlementUnknown)); }
                 // Even a failed readback after a settled write still attempts conditional restore.
                 let observed = if write.is_ok() { client.clipboard_job("get", None).await } else { Err(anyhow!(ClipboardSettledFailure)) };
-                let restoration = client.clipboard_job_compare_inner("restoreSnapshot", Some(baseline_id), Some(&marker)).await;
+                let restoration = client.clipboard_job_compare_inner("restoreSnapshot", Some(&saved.id), Some(&marker)).await;
                 let restored = restoration.map_err(|_|anyhow!(ClipboardSettlementUnknown))?;
-                if restored["written"] != true || restored["verified"] != true { return Err(anyhow!(ClipboardSettlementUnknown)); }
+                if !saved.restored(&restored) { return Err(anyhow!(ClipboardSettlementUnknown)); }
+                client.clipboard_baseline.lock().take();
+                client.persist_clipboard_checkpoint()?;
                 write?;
                 let observed = observed?;
                 anyhow::ensure!(observed["text"].as_str() == Some(marker.as_str()), "clipboard marker readback unproved");
                 Ok(())
-            }).await
+            }).await?;
+            client.clipboard_qualified.store(true, std::sync::atomic::Ordering::Release);
+            Ok(())
         }).await.context("clipboard qualification task failed")?
     }
 
@@ -1069,17 +1155,38 @@ impl HelperClient {
         F: FnOnce() -> Fut,
         Fut: std::future::Future<Output = anyhow::Result<T>>,
     {
+        self.with_ime_mode(false, op).await
+    }
+
+    async fn with_ime_mode<F, Fut, T>(&self, qualification_probe: bool, op: F) -> anyhow::Result<T>
+    where
+        F: FnOnce() -> Fut,
+        Fut: std::future::Future<Output = anyhow::Result<T>>,
+    {
         if self.canary.is_none() {
             require_clipboard_qualification()?;
         } else {
             self.require_canary_identity().await?;
+            if self.production_runtime && !qualification_probe
+                && !self.clipboard_qualified.load(std::sync::atomic::Ordering::Acquire) {
+                require_clipboard_qualification()?;
+            }
         }
         let _serial = ime_lock(&self.serial).lock_owned().await;
+        if self.production_runtime {
+            self.require_canary_identity().await?;
+            anyhow::ensure!(self.adb.shell(&self.serial, "am get-current-user").await?.trim() == "0", "clipboard Android user changed; no IME mutation");
+        }
         anyhow::ensure!(
             self.pending_clipboard.lock().is_none(),
             "helper has unresolved clipboard cleanup"
         );
         let status = self.require_status().await?;
+        if self.production_runtime {
+            anyhow::ensure!(status.features.iter().any(|f| f == "secureBootstrapBinderShell")
+                && status.features.iter().any(|f| f == "clipboardSnapshotRestore"),
+                "release clipboard qualification features unavailable; no IME switch");
+        }
         anyhow::ensure!(
             status
                 .features
@@ -1106,6 +1213,7 @@ impl HelperClient {
         );
         self.persist_clipboard_checkpoint()?;
         let outcome = async {
+            self.require_canary_identity().await?;
             if !helper_enabled {
                 enable_ime(&self.adb, &self.serial).await?;
             }
@@ -1129,6 +1237,7 @@ impl HelperClient {
             );
         }
         let restore = async {
+            self.require_canary_identity().await?;
             let current = current_ime(&self.adb, &self.serial).await?;
             if current == IME_ID {
                 set_ime(&self.adb, &self.serial, &previous).await?;
@@ -1147,6 +1256,7 @@ impl HelperClient {
         .await;
         let restore = if restore.is_ok() && !helper_enabled {
             async {
+                self.require_canary_identity().await?;
                 self.adb
                     .shell(&self.serial, &format!("ime disable {IME_ID}"))
                     .await?;
@@ -1168,10 +1278,12 @@ impl HelperClient {
             restore
         };
         if restore.is_ok() {
-            if let Some(owner) = &self.canary {
+            self.pending_clipboard.lock().take();
+            if self.clipboard_baseline.lock().is_some() {
+                self.persist_clipboard_checkpoint()?;
+            } else if let Some(owner) = &self.canary {
                 std::fs::remove_file(owner.report.join("ime-checkpoint.json"))?;
             }
-            self.pending_clipboard.lock().take();
         }
         combine_ime_guard(outcome, restore)
     }
@@ -1240,8 +1352,17 @@ async fn bootstrap_exchange(
 }
 
 fn require_clipboard_qualification() -> anyhow::Result<()> {
-    anyhow::bail!("HelperClipboardNotQualified: durable recovery and control-plane ownership qualification pending; no IME mutation")
+    Err(anyhow!(HelperClipboardNotQualified))
 }
+
+#[derive(Debug)]
+pub struct HelperClipboardNotQualified;
+impl std::fmt::Display for HelperClipboardNotQualified {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("HelperClipboardNotQualified: fresh owner-bound metadata restoration proof required; no IME mutation")
+    }
+}
+impl std::error::Error for HelperClipboardNotQualified {}
 
 #[derive(Debug)]
 struct ClipboardSettledFailure;
@@ -1674,11 +1795,138 @@ mod tests {
     use super::*;
 
     #[tokio::test]
-    async fn secure_provisioning_refuses_before_install_or_ime_effects() {
+    async fn reconnect_rejects_authenticated_helper_with_replaced_owner() {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let server = tokio::spawn(async move {
+            loop {
+                let (mut socket, _) = listener.accept().await.unwrap();
+                let mut request = [0; 4096];
+                let size = socket.read(&mut request).await.unwrap();
+                let request = String::from_utf8_lossy(&request[..size]);
+                let body = if request.starts_with("GET /status ") {
+                    json!({"ok":true,"agentVersion":"0.7.0","protocolVersion":1,"features":["auth"]})
+                } else if request.starts_with("POST /v1/apps/describe ") {
+                    json!({"ok":true,"apps":[]})
+                } else {
+                    json!({"ok":true,"ownership":"owned","ownerId":"replacement","serviceInstance":"replacement","ownerGeneration":"2"})
+                }.to_string();
+                socket.write_all(format!("HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}", body.len()).as_bytes()).await.unwrap();
+            }
+        });
+        let mut client = HelperClient::at(AdbProgram::at(PathBuf::from("never-run-adb")), "fixture-reconnect-owner", port).unwrap();
+        client.canary = Some(CanaryOwner {
+            owner_id: "original".into(), instance: "original".into(), generation: "1".into(),
+            socket: "unused".into(), nonce: "unused".into(), uid: 10001,
+            apk_path: "unused".into(), report: std::env::temp_dir(),
+        });
+        let alive = client.is_alive().await;
+        server.abort();
+        assert!(!alive, "authenticated app labels cannot prove the cached session owner survived reconnect");
+    }
+
+    #[test]
+    fn durable_clipboard_checkpoint_excludes_credentials_and_clipboard_text() {
+        let root = std::env::temp_dir().join(format!("helper-checkpoint-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir(&root).unwrap();
+        let mut client = HelperClient::at(AdbProgram::at(PathBuf::from("never-run-adb")), "fixture-checkpoint", 1).unwrap();
+        client.canary = Some(CanaryOwner { owner_id: "owner".into(), instance: "instance".into(), generation: "1".into(), socket: "unused".into(), nonce: "nonce".into(), uid: 10001, apk_path: "unused".into(), report: root.clone() });
+        *client.pending_clipboard.lock() = Some(json!({"previousIme":"fixture/.Ime","helperWasEnabled":false,"phase":"switching"}));
+        *client.clipboard_baseline.lock() = Some(ClipboardBaseline { id: "baseline-id".into(), text: Some(b"PRIVATE_CLIPBOARD_TEXT".to_vec()) });
+        client.persist_clipboard_checkpoint().unwrap();
+        let text = std::fs::read_to_string(root.join("ime-checkpoint.json")).unwrap();
+        let value: Value = serde_json::from_str(&text).unwrap();
+        assert_eq!(value["baseline"]["baselineId"], "baseline-id");
+        assert_eq!(value["baseline"]["decodedBytes"], 22);
+        assert_eq!(value["baseline"]["baselineKind"], "plaintext");
+        assert_eq!(value["androidUser"], 0);
+        assert!(!text.contains("PRIVATE_CLIPBOARD_TEXT") && !text.contains(&helper_token("fixture-checkpoint")));
+        // A later phase atomically replaces the same persistent record on Windows too.
+        client.pending_clipboard.lock().as_mut().unwrap()["phase"] = json!("submissionPending");
+        client.persist_clipboard_checkpoint().unwrap();
+        let value: Value = serde_json::from_slice(&std::fs::read(root.join("ime-checkpoint.json")).unwrap()).unwrap();
+        assert_eq!(value["pending"]["phase"], "submissionPending");
+        let empty = ClipboardBaseline::capture(&json!({"baselineId":"empty-id","baselineKind":"empty","available":false,"plainTextBaseline":false})).unwrap();
+        let plain_empty = ClipboardBaseline::capture(&json!({"baselineId":"plain-empty-id","baselineKind":"plaintext","available":true,"plainTextBaseline":true,"text":""})).unwrap();
+        assert!(empty.text.is_none());
+        assert_eq!(plain_empty.text, Some(Vec::new()));
+        let null_restored = json!({"written":true,"verified":true,"available":false});
+        let text_restored = json!({"written":true,"verified":true,"available":true});
+        assert!(empty.restored(&null_restored) && !empty.restored(&text_restored));
+        assert!(plain_empty.restored(&text_restored) && !plain_empty.restored(&null_restored));
+        assert!(!empty.restored(&json!({"written":true,"verified":false,"available":false})));
+        assert!(clipboard_read_payload(&json!({"baselineKind":"empty","available":false,"plainTextBaseline":false,"text":""}), 4096).is_err());
+        assert!(ClipboardBaseline::capture(&json!({"baselineId":"unknown","available":false,"plainTextBaseline":false})).is_err());
+        assert!(ClipboardBaseline::capture(&json!({"baselineId":"rich","baselineKind":"unsupported","available":true,"plainTextBaseline":false,"text":"foreign"})).is_err());
+        assert!(ClipboardBaseline::capture(&json!({"baselineKind":"empty","available":false,"plainTextBaseline":false})).is_err());
+        *client.clipboard_baseline.lock() = Some(empty);
+        client.persist_clipboard_checkpoint().unwrap();
+        let value: Value = serde_json::from_slice(&std::fs::read(root.join("ime-checkpoint.json")).unwrap()).unwrap();
+        assert_eq!(value["baseline"]["baselineKind"], "empty");
+        assert_eq!(value["baseline"]["decodedBytes"], 0);
+        assert!(value["baseline"].get("text").is_none());
+        *client.clipboard_baseline.lock() = Some(plain_empty);
+        client.persist_clipboard_checkpoint().unwrap();
+        let value: Value = serde_json::from_slice(&std::fs::read(root.join("ime-checkpoint.json")).unwrap()).unwrap();
+        assert_eq!(value["baseline"]["baselineKind"], "plaintext");
+        assert_eq!(value["baseline"]["decodedBytes"], 0);
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[tokio::test]
+    async fn ensure_installs_missing_helper_once_before_secure_provisioning_refusal() {
+        let root = std::env::temp_dir().join(format!("helper-install-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir(&root).unwrap();
+        let calls = root.join("calls.txt");
+        std::fs::write(&calls, "").unwrap();
+        let apk = root.join("helper.apk");
+        std::fs::write(&apk, b"fixture-apk-not-for-device").unwrap();
+        #[cfg(windows)]
+        let executable = {
+            let path = root.join("fake-adb.cmd");
+            std::fs::write(&path, concat!(
+                "@echo off\r\n",
+                "echo %*>>\"%~dp0calls.txt\"\r\n",
+                "if \"%~3\"==\"install\" (\r\n",
+                "  if exist \"%~dp0refused\" (\r\n",
+                "    echo Failure [INSTALL_FAILED_USER_RESTRICTED]\r\n",
+                "    exit /b 0\r\n",
+                "  )\r\n",
+                "  type nul > \"%~dp0installed\"\r\n",
+                "  echo Success\r\n",
+                "  exit /b 0\r\n",
+                ")\r\n",
+                "if \"%~3\"==\"shell\" (\r\n",
+                "  if exist \"%~dp0installed\" echo package:/data/app/com.riviu.agent/base.apk\r\n",
+                "  exit /b 0\r\n",
+                ")\r\n",
+                "exit /b 97\r\n",
+            )).unwrap();
+            path
+        };
+        #[cfg(not(windows))]
+        let executable = {
+            use std::os::unix::fs::PermissionsExt;
+            let path = root.join("fake-adb");
+            std::fs::write(&path, concat!(
+                "#!/bin/sh\n",
+                "cd -- \"$(dirname -- \"$0\")\" || exit 97\n",
+                "printf '%s\\n' \"$*\" >> calls.txt\n",
+                "case \"$3\" in\n",
+                "install) if [ -f refused ]; then echo 'Failure [INSTALL_FAILED_USER_RESTRICTED]'; else touch installed; echo Success; fi ;;\n",
+                "shell) if [ -f installed ]; then echo package:/data/app/com.riviu.agent/base.apk; fi ;;\n",
+                "*) exit 97 ;;\n",
+                "esac\n",
+            )).unwrap();
+            std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o700)).unwrap();
+            path
+        };
+        let adb = AdbProgram::at(executable);
         let error = HelperClient::ensure(
-            AdbProgram::at(PathBuf::from("never-run-adb")),
+            adb.clone(),
             "fixture-provision",
-            None,
+            Some(&apk),
         )
         .await
         .err()
@@ -1686,6 +1934,41 @@ mod tests {
         assert!(error
             .to_string()
             .contains("HelperSecureProvisioningRequired"));
+        let first = std::fs::read_to_string(&calls).unwrap();
+        let commands: Vec<_> = first.lines().collect();
+        assert_eq!(commands.len(), 3, "must query, install once, then verify before refusing: {first}");
+        assert!(commands[0].contains("pm path com.riviu.agent"));
+        assert!(commands[1].contains("install -r -g"));
+        assert!(commands[1].contains(apk.to_str().unwrap()));
+        assert!(commands[2].contains("pm path com.riviu.agent"));
+        // An already-present package is queried, never installed again.
+        let second = HelperClient::ensure(adb.clone(), "fixture-provision", Some(&apk)).await.err().unwrap();
+        assert!(second.to_string().contains("HelperSecureProvisioningRequired"));
+        let all = std::fs::read_to_string(&calls).unwrap();
+        assert_eq!(all.lines().count(), 4, "existing helper must only be queried: {all}");
+        assert_eq!(all.matches("install -r -g").count(), 1);
+        assert!(!all.contains("ime ") && !all.contains("am start") && !all.contains("forward"));
+        assert!(!all.contains(&helper_token("fixture-provision")), "credential must never enter argv");
+
+        // Missing bundle and platform install refusal must keep their specific diagnostics.
+        std::fs::remove_file(root.join("installed")).unwrap();
+        std::fs::write(&calls, "").unwrap();
+        let missing = HelperClient::ensure(adb.clone(), "fixture-provision", None).await.err().unwrap();
+        assert!(missing.to_string().contains("no helper APK is configured"));
+        let missing_calls = std::fs::read_to_string(&calls).unwrap();
+        assert_eq!(missing_calls.lines().count(), 1);
+        assert!(missing_calls.contains("pm path com.riviu.agent"));
+
+        std::fs::write(&calls, "").unwrap();
+        std::fs::write(root.join("refused"), "").unwrap();
+        let refused = HelperClient::ensure(adb, "fixture-provision", Some(&apk)).await.err().unwrap();
+        assert!(refused.to_string().contains("INSTALL_FAILED_USER_RESTRICTED"));
+        let refused_calls = std::fs::read_to_string(&calls).unwrap();
+        assert_eq!(refused_calls.lines().count(), 2, "refused install must not retry or reach provisioning: {refused_calls}");
+        assert_eq!(refused_calls.matches("install -r -g").count(), 1);
+        assert!(!refused_calls.contains("ime ") && !refused_calls.contains("am start") && !refused_calls.contains("forward"));
+        assert!(!refused_calls.contains(&helper_token("fixture-provision")));
+        std::fs::remove_dir_all(root).unwrap();
     }
 
     #[tokio::test]
@@ -1770,14 +2053,38 @@ mod tests {
 
     #[tokio::test]
     async fn closed_helper_clone_never_dispatches() {
-        let client = HelperClient::at(
+        let mut client = HelperClient::at(
             AdbProgram::at(PathBuf::from("never-run-adb")),
             "fixture-closed",
             1,
         )
         .unwrap();
+        let root = std::env::temp_dir().join(format!("riviu-released-clone-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir(&root).unwrap();
+        client.canary = Some(CanaryOwner {
+            owner_id: "released".into(), instance: "released".into(), generation: "1".into(),
+            socket: "unused".into(), nonce: "unused".into(), uid: 10001,
+            apk_path: "unused".into(), report: root.clone(),
+        });
+        client.production_runtime = true;
+        assert!(!client.is_released().await.unwrap(), "a live owner must remain cached");
         *client.lifecycle.lock().await = true;
         let clone = client.clone();
+        assert!(!clone.is_scoped_canary(), "closed ownership cannot admit a request");
+        assert!(clone.is_released().await.unwrap(), "a clean released clone can be retired");
+        *client.pending_clipboard.lock() = Some(json!({"operationId":"pending"}));
+        assert!(clone.is_released().await.is_err());
+        client.pending_clipboard.lock().take();
+        *client.clipboard_baseline.lock() = Some(ClipboardBaseline { id: "pending".into(), text: None });
+        assert!(clone.is_released().await.is_err());
+        client.clipboard_baseline.lock().take();
+        for filename in ["runtime-owner.json", "ime-checkpoint.json"] {
+            let path = root.join(filename);
+            std::fs::write(&path, b"{}").unwrap();
+            assert!(clone.is_released().await.is_err(), "retained {filename} must fence a fresh claim");
+            std::fs::remove_file(path).unwrap();
+        }
+        assert!(clone.is_released().await.unwrap());
         assert!(clone
             .require_status()
             .await
@@ -1792,6 +2099,7 @@ mod tests {
             .contains("closed"));
         // Repeated shutdown does not spawn the deliberately nonexistent ADB.
         clone.shutdown().await.unwrap();
+        std::fs::remove_dir(root).unwrap();
     }
 
     #[tokio::test]

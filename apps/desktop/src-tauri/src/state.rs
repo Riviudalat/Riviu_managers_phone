@@ -1041,6 +1041,7 @@ impl AppState {
         }
         let view_hub = crate::view_hub::ViewHub::new();
         let android_config = riviu_android_driver::AndroidDriverConfig {
+            helper_state_dir: Some(data.join("driver-state")),
             bundled_adb_path: android_tools.adb_path.clone(),
             bundled_minicap_apk: android_tools.minicap_apk.clone(),
             bundled_scrcpy_server: android_tools.scrcpy_server.clone(),

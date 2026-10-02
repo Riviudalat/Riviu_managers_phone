@@ -11,6 +11,15 @@ import android.os.Build;
 import android.os.IBinder;
 import android.os.Handler;
 import android.os.Looper;
+import android.os.Binder;
+import android.os.Parcel;
+import android.os.RemoteException;
+import android.content.pm.PackageManager;
+import java.nio.charset.StandardCharsets;
+import java.util.Arrays;
+import java.util.concurrent.CountDownLatch;
+import java.util.concurrent.atomic.AtomicBoolean;
+import java.util.concurrent.atomic.AtomicReference;
 import org.json.JSONObject;
 import java.util.concurrent.TimeUnit;
 import android.util.Log;
@@ -36,7 +45,82 @@ public final class AgentService extends Service {
     private final OwnerSession ownership = new OwnerSession();
     private final Handler main = new Handler(Looper.getMainLooper());
     private BootstrapServer bootstrap;
-    private boolean destroyed;
+    private volatile boolean destroyed;
+    private final AtomicBoolean binderPending = new AtomicBoolean();
+    private final Binder bootstrapBinder = new Binder() {
+        @Override protected boolean onTransact(int code, Parcel data, Parcel reply, int flags) throws RemoteException {
+            // Check the kernel caller before reading even the public request metadata.
+            if (!BootstrapBinderPolicy.callerAllowed(Binder.getCallingUid(),
+                    checkCallingPermission("android.permission.DUMP") == PackageManager.PERMISSION_GRANTED)) {
+                throw new SecurityException("bootstrap caller rejected");
+            }
+            if (destroyed || activeService != AgentService.this) throw new SecurityException("bootstrap service unavailable");
+            if ((code != BootstrapBinderPolicy.PROBE && code != BootstrapBinderPolicy.REQUEST)
+                    || reply == null || (flags & IBinder.FLAG_ONEWAY) != 0) return false;
+            data.enforceInterface(BootstrapBinderPolicy.DESCRIPTOR);
+            byte[] bytes = null;
+            boolean admitted = false;
+            final long deadline = System.nanoTime() + TimeUnit.MILLISECONDS.toNanos(4000);
+            try {
+                String nonce = data.readString(), owner = data.readString();
+                String instance = data.readString(), generation = data.readString();
+                RequestAuth.requireId(nonce); RequestAuth.requireId(owner);
+                if (!"-".equals(instance)) RequestAuth.requireId(instance);
+                if (!"-".equals(generation)) RequestAuth.requireId(generation);
+                if ("-".equals(instance) != "-".equals(generation)) throw new IllegalArgumentException();
+                if (code == BootstrapBinderPolicy.PROBE) {
+                    if (data.dataAvail() != 0) throw new IllegalArgumentException();
+                    reply.writeNoException(); reply.writeInt(android.os.Process.myUid());
+                    reply.writeString(nonce); reply.writeString(owner);
+                    reply.writeString(ownership.instance() == null ? "-" : ownership.instance());
+                    reply.writeString(ownership.generation() == null ? "-" : ownership.generation());
+                    return true;
+                }
+                // Reject oversized parcels before allocating credential bytes.
+                if (data.dataAvail() <= 0 || data.dataAvail() > BootstrapEnvelope.MAX_BYTES + 8) throw new IllegalArgumentException();
+                bytes = data.createByteArray();
+                if (bytes == null || bytes.length == 0 || bytes.length > BootstrapEnvelope.MAX_BYTES
+                        || data.dataAvail() != 0) throw new IllegalArgumentException();
+                final JSONObject request = new JSONObject(new String(bytes, StandardCharsets.UTF_8));
+                if (!OwnerSession.bindingMatches(nonce, owner, request.optString("nonce"), request.optString("ownerId"))
+                        || !instance.equals(request.optString("serviceInstance", "-"))
+                        || !generation.equals(request.optString("ownerGeneration", "-"))
+                        || !request.optString("token").matches("[A-Za-z0-9_-]{32,256}")) throw new IllegalArgumentException();
+                if (!binderPending.compareAndSet(false, true)) throw new IllegalStateException();
+                admitted = true;
+                CountDownLatch done = new CountDownLatch(1);
+                AtomicReference<JSONObject> response = new AtomicReference<JSONObject>();
+                if (!main.post(() -> {
+                    if (destroyed || System.nanoTime() - deadline >= 0) { done.countDown(); return; }
+                    if (!BootstrapBinderPolicy.sessionMatches(request.optString("action"), instance, generation,
+                            ownership.instance(), ownership.generation())) {
+                        response.set(bootstrapResponse(request, false, "session_binding_refused")); done.countDown(); return;
+                    }
+                    try { handleBootstrap(request, value -> { response.set(value); done.countDown(); }); }
+                    catch (Exception ignored) {
+                        response.set(bootstrapResponse(request, false, "bootstrap_failed")); done.countDown();
+                    }
+                })) throw new IllegalStateException();
+                long remaining = deadline - System.nanoTime();
+                if (remaining <= 0 || !done.await(remaining, TimeUnit.NANOSECONDS) || response.get() == null
+                        || System.nanoTime() - deadline >= 0) throw new IllegalStateException();
+                reply.writeNoException();
+                reply.writeByteArray(response.get().toString().getBytes(StandardCharsets.UTF_8));
+                return true;
+            } catch (Exception ignored) {
+                // Binder never serializes exceptions/payloads that might contain a token.
+                reply.writeException(new SecurityException("bootstrap_failed")); return true;
+            } finally {
+                if (bytes != null) Arrays.fill(bytes, (byte) 0);
+                if (admitted) binderPending.set(false);
+            }
+        }
+    };
+
+    static IBinder activeBootstrapBinder() {
+        AgentService active = activeService;
+        return active == null || active.destroyed ? null : active.bootstrapBinder;
+    }
 
     static LocalStatus localStatus() {
         AgentService active = activeService;
@@ -229,7 +313,11 @@ public final class AgentService extends Service {
 
     @Override
     public IBinder onBind(Intent intent) {
-        return null;
+        return intent != null && BootstrapBinderPolicy.ACTION.equals(intent.getAction())
+                && intent.getComponent() != null
+                && BootstrapBinderPolicy.PACKAGE.equals(intent.getComponent().getPackageName())
+                && BootstrapBinderPolicy.SERVICE.equals(intent.getComponent().getClassName())
+                ? bootstrapBinder : null;
     }
 
     private Notification notification(boolean running) {

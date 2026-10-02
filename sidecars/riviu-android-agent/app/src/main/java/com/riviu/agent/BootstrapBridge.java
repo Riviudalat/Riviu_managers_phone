@@ -12,6 +12,9 @@ import java.util.concurrent.atomic.AtomicReference;
 public final class BootstrapBridge {
     private BootstrapBridge() {}
     public static void main(String[] args) {
+        if (args.length > 0 && "binder-shell".equals(args[0])) {
+            BootstrapBinderBridge.main(args); return;
+        }
         AtomicReference<LocalSocket> connected = new AtomicReference<LocalSocket>();
         AtomicBoolean finished = new AtomicBoolean();
         Thread deadline = new Thread(() -> {

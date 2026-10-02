@@ -49,6 +49,8 @@ function failPendingExports(reason: string) {
 /// The beat at which each udid last actually drew, and the newest beat of any kind.
 const lastPaintBeat = new Map<string, ViewBeat>();
 const latestBeat = new Map<string, ViewBeat>();
+// Paint evidence belongs to attached canvases, not retained device/status subscriptions.
+const attachedSurfaces = new Map<string, Set<string>>();
 
 /// This module does not restart anything, and that is the design rather than a limitation.
 ///
@@ -185,7 +187,7 @@ export function collectStalledViews(
   return stalled;
 }
 
-/// Everything the host's watchdog needs, for every device this window is tracking.
+/// Everything the host's watchdog needs, for devices with an attached canvas.
 ///
 /// Healthy devices are included deliberately. A report that only ever named broken devices
 /// would leave the host unable to tell "nothing is wrong" from "nobody is reporting", and
@@ -197,9 +199,11 @@ export function collectPaintReports(
   now: number,
   latest: Map<string, ViewBeat>,
   lastPaint: Map<string, ViewBeat>,
+  mountedUdids: ReadonlySet<string>,
 ): ViewPaintReport[] {
   const reports: ViewPaintReport[] = [];
   for (const [udid, beat] of latest) {
+    if (!mountedUdids.has(udid)) continue;
     const recorded = lastPaint.get(udid);
     const painted = recorded?.generation === beat.generation ? recorded : undefined;
     reports.push({
@@ -267,6 +271,7 @@ function retireWorker(reason: string) {
   decodeFailed.clear();
   lastPaintBeat.clear();
   latestBeat.clear();
+  attachedSurfaces.clear();
   for (const udid of affected) emit(udid);
   // Transferred canvases cannot be transferred again. Mounted surfaces must
   // create fresh canvases for the replacement worker.
@@ -323,6 +328,7 @@ function ensureWorker(): Worker | null {
       return;
     }
     if (message.type === "painted" && message.udid) {
+      if (!attachedSurfaces.has(message.udid)) return;
       const next: ViewSize = {
         width: message.width ?? 0,
         height: message.height ?? 0,
@@ -341,6 +347,7 @@ function ensureWorker(): Worker | null {
       return;
     }
     if (message.type === "paintBeat" && message.udid) {
+      if (!attachedSurfaces.has(message.udid)) return;
       const beat: ViewBeat = {
         at: Date.now(),
         generation: message.generation ?? 0,
@@ -474,7 +481,7 @@ function startStallWatch() {
     // fleet from a window that has stopped reporting, and it can only do that if a healthy
     // report is a thing that arrives.
     if (latestBeat.size > 0) {
-      void viewReportPaint(collectPaintReports(now, latestBeat, lastPaintBeat)).catch(() => {
+      void viewReportPaint(collectPaintReports(now, latestBeat, lastPaintBeat, new Set(attachedSurfaces.keys()))).catch(() => {
         // The host is shutting down, or the command is not registered in a harness. Losing a
         // report costs the watchdog its fine rule for a few seconds, not its coarse one.
       });
@@ -518,10 +525,28 @@ export function startViewClient() {
 }
 
 export function attachViewCanvas(udid: string, canvas: OffscreenCanvas, surfaceId: string) {
-  ensureWorker()?.postMessage({ type: "attach", udid, surfaceId, canvas }, [canvas]);
+  const target = ensureWorker();
+  if (!target) return;
+  target.postMessage({ type: "attach", udid, surfaceId, canvas }, [canvas]);
+  let surfaces = attachedSurfaces.get(udid);
+  if (!surfaces) {
+    surfaces = new Set();
+    attachedSurfaces.set(udid, surfaces);
+  }
+  surfaces.add(surfaceId);
 }
 
 export function detachViewCanvas(udid: string, surfaceId: string) {
+  const surfaces = attachedSurfaces.get(udid);
+  surfaces?.delete(surfaceId);
+  if (surfaces?.size === 0) {
+    attachedSurfaces.delete(udid);
+    // Final detach ends this renderer's evidence timeline. Queued beats are ignored above.
+    latestBeat.delete(udid);
+    lastPaintBeat.delete(udid);
+    live.delete(udid);
+    emit(udid);
+  }
   worker?.postMessage({ type: "detach", udid, surfaceId });
 }
 

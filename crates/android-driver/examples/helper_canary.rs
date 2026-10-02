@@ -15,6 +15,7 @@ async fn main() -> anyhow::Result<()> {
             && matches!(
                 args[1].as_str(),
                 "--approved-helper-only"
+                    | "--approved-helper-runtime"
                     | "--probe-helper-only"
                     | "--reconcile-helper-readonly"
                     | "--inspect-helper-owner"
@@ -81,6 +82,10 @@ async fn main() -> anyhow::Result<()> {
     }
     let mut config = common::repo_config();
     config.automatic_setup_allowed = false;
+    if args[1] == "--approved-helper-runtime" {
+        config.helper_state_dir = Some(report.join("runtime-state"));
+        config.riviu_agent_apk = Some(apk.clone());
+    }
     let driver = Arc::new(AndroidDriver::new(&config)?);
     let control = Arc::new(DeviceControlPlane::new(
         driver.clone(),
@@ -359,8 +364,14 @@ async fn main() -> anyhow::Result<()> {
     let work = async {
         driver.install_helper_canary(serial, &apk).await?;
         let package = adb.shell(serial, "dumpsys package com.riviu.agent").await?;
-        ensure!(package.lines().any(|line|line.trim().starts_with("versionCode=6 ")), "candidate version readback mismatched");
-        let helper = driver.prepare_helper_canary(serial, report.clone()).await?;
+        let runtime = args[1] == "--approved-helper-runtime";
+        let version = if runtime { "versionCode=7 " } else { "versionCode=6 " };
+        ensure!(package.lines().any(|line|line.trim().starts_with(version)), "candidate version readback mismatched");
+        let helper = if runtime {
+            driver.prepare_helper_runtime(serial).await?
+        } else {
+            driver.prepare_helper_canary(serial, report.clone()).await?
+        };
         // Read-only clipboard canary: no clipboard replacement or TikTok navigation.
         let read = helper.get_clipboard(4096).await;
         let verify = async {
@@ -374,8 +385,18 @@ async fn main() -> anyhow::Result<()> {
         let released = helper.shutdown().await;
         verify?;
         released.context("owned helper release failed")?;
-        std::fs::write(report.join("receipt.json"), serde_json::to_vec_pretty(&json!({"serial":serial,"candidateInstalled":true,"bootstrapVerified":true,"clipboardReadSucceeded":read.is_ok(),"clipboardBytes":read.as_ref().ok().map(|(_,bytes)|bytes.len()),"clipboardError":read.as_ref().err().map(ToString::to_string),"imeRestored":true,"ownedReleaseVerified":true,"publicEffectsAllowed":false}))?)?;
+        std::fs::write(report.join("receipt.json"), serde_json::to_vec_pretty(&json!({"serial":serial,"runtimeBootstrap":runtime,"candidateInstalled":true,"bootstrapVerified":true,"clipboardReadSucceeded":read.is_ok(),"clipboardBytes":read.as_ref().ok().map(|(_,bytes)|bytes.len()),"clipboardError":read.as_ref().err().map(ToString::to_string),"imeRestored":true,"ownedReleaseVerified":true,"publicEffectsAllowed":false}))?)?;
         read?;
+        if runtime && std::env::var_os("RIVIU_HELPER_VERIFY_REATTACH").as_deref() == Some(std::ffi::OsStr::new("1")) {
+            let second = driver.prepare_helper_runtime(serial).await.context("same-driver released helper reattach failed")?;
+            let second_read = second.get_clipboard(4096).await;
+            let second_release = second.shutdown().await;
+            second_release.context("second owner release failed")?;
+            second_read?;
+            ensure!(adb.shell(serial, "settings get secure default_input_method").await?.trim() == before.trim(), "second owner IME restore mismatch");
+            ensure!(adb.shell(serial, "settings get secure enabled_input_methods").await?.trim() == enabled.trim(), "second owner IME enablement restore mismatch");
+            std::fs::write(report.join("reattach.json"), serde_json::to_vec_pretty(&json!({"serial":serial,"sameDriver":true,"preparedTwice":true,"bothOwnersReleased":true,"imeRestored":true,"publicEffectsAllowed":false}))?)?;
+        }
         Ok::<_,anyhow::Error>(())
     }.await;
     match work {

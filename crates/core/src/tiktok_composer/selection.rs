@@ -1022,13 +1022,14 @@ impl<P: TapPlanner> Composer<'_, P> {
                     if let Some((rows, next)) =
                         read.filter(|(rows, next)| !rows.is_empty() && !next.is_empty())
                     {
-                        let Some(observed) =
+                        if let Some(observed) =
                             visible_selection(rows, &next, screen, &mut grid, count)
-                        else {
-                            trace.reason(SelectionReason::ScrollReadbackUnproven);
-                            return Ok(Selection::NotEnoughSelected);
-                        };
-                        break observed;
+                        {
+                            break observed;
+                        }
+                        // Scroll geometry can still be settling. Reobserve within
+                        // this same window; never replay the swipe or relax proof.
+                        trace.reason(SelectionReason::ScrollReadbackUnproven);
                     }
                     sleep(
                         POLL.min(scroll_deadline.saturating_duration_since(Instant::now())),
@@ -1226,6 +1227,7 @@ mod tests {
         initial_read_delay: Duration,
         partial_initial: bool,
         partial_after_scroll: Mutex<bool>,
+        unproven_after_scroll: Mutex<bool>,
         wrong_after_fifth: bool,
         swipes: Mutex<usize>,
     }
@@ -1250,6 +1252,7 @@ mod tests {
                 initial_read_delay: Duration::ZERO,
                 partial_initial: false,
                 partial_after_scroll: Mutex::new(false),
+                unproven_after_scroll: Mutex::new(false),
                 wrong_after_fifth: false,
                 swipes: Mutex::new(0),
             }
@@ -1378,7 +1381,18 @@ mod tests {
                     xml: r#"<hierarchy><node package="fixture" class="android.widget.TextView" resource-id="fixture:fixture-album-menu" text="album" displayed="true"/></hierarchy>"#.into(),
                 });
             }
-            let rows = self.rows();
+            let mut rows = self.rows();
+            if *self.swipes.lock() > 0 && std::mem::take(&mut *self.unproven_after_scroll.lock()) {
+                // Selected clipped cells retain ordinals/count, but the middle
+                // column has not settled onto the learned translated bottom.
+                for (column, row) in rows[..3].iter_mut().enumerate() {
+                    row.y += 25.0;
+                    row.height -= 25.0;
+                    if column == 1 {
+                        row.height += 4.0;
+                    }
+                }
+            }
             let count = *self.selected.lock();
             if self.taps.lock().len() == 5 {
                 let delay = self.partial_after_fifth.lock().take();
@@ -2032,10 +2046,12 @@ mod tests {
 
     #[tokio::test(start_paused = true)]
     async fn partial_initial_and_scroll_snapshots_recover_without_replaying_selection() {
-        for initial in [true, false] {
+        for mode in ["partial-initial", "partial-scroll", "unproven-scroll"] {
             let mut session = Picker::with_tray(13);
-            session.partial_initial = initial;
-            *session.partial_after_scroll.lock() = !initial;
+            session.partial_initial = mode == "partial-initial";
+            *session.partial_after_scroll.lock() = mode == "partial-scroll";
+            *session.unproven_after_scroll.lock() = mode == "unproven-scroll";
+            let start = Instant::now();
             assert!(
                 matches!(
                     run_picker(&session).await,
@@ -2044,10 +2060,15 @@ mod tests {
                         ..
                     }
                 ),
-                "initial={initial}: exact album with missing controls must be observed again"
+                "mode={mode}: transient missing or unproven controls must be observed again"
             );
             assert_eq!(session.taps.lock().len(), 13);
             assert_eq!(*session.swipes.lock(), 1);
+            assert!(start.elapsed() <= PICKER_WINDOW);
+            if mode == "unproven-scroll" {
+                assert!(!*session.unproven_after_scroll.lock());
+                assert_eq!(session.reads.load(Ordering::Relaxed), 16);
+            }
         }
     }
 
