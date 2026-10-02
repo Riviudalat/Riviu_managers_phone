@@ -2417,6 +2417,15 @@ export interface DeviceHealthReport {
   helperReachable?: boolean | null;
   /** `null` means the question failed — not "absent" (§9.97). */
   helperInstalled?: boolean | null;
+  /** Observed existing connection only; features advertise implementation, not live readiness. */
+  helperHealth?: {
+    serviceReachable: boolean | null;
+    authenticated: boolean | null;
+    agentVersion: string | null;
+    protocolVersion: number | null;
+    advertisedFeatures: string[] | null;
+    reason: string;
+  } | null;
   /** `null` means neither root question could be put; an offline phone is not an unrooted one. */
   root?: DeviceRootStatus | null;
   tiktokPackage?: string | null;

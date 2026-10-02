@@ -79,21 +79,28 @@ To ship it:
 Override at runtime without bundling: `RIVIU_ANDROID_AGENT_APK=<path>`.
 Precedence is `config → env → bundled`, check the current driver resolver before overriding.
 
-## Deployment
+## Deployment and candidate qualification
 
-Normal operation uses the desktop's automatic preparation; no launcher button or
-manual keyboard selection is needed. Package identity remains `com.riviu.agent`, and
-updates retain the existing signing certificate. The following commands describe the
-manual diagnostic path, which is separate from building/verifying the APK:
+The shipped APK remains **0.5.0/code5**. Current source builds a **0.6.0/code6
+candidate**, not a qualified replacement. Package identity and signing lineage stay
+`com.riviu.agent`. Building or passing package checks does not authorize installation.
 
-```powershell
-adb -s <serial> install -r -g app\build\outputs\apk\debug\app-debug.apk
-adb -s <serial> shell ime enable com.riviu.agent/.RiviuIme
-adb -s <serial> shell am start-foreground-service -n com.riviu.agent/.AgentService --es token <session-token>
-```
+The helper client now refuses token-bearing ADB provisioning: passing a session token
+as an `am` argument exposes it in process arguments and possibly transport errors.
+Normal production provisioning remains blocked; the debug-only canary carrier uses
+`run-as com.riviu.agent`, verified package UID and framed stdin, never root or relaxed
+SELinux policy. The server requires its own UID and an actually debuggable APK.
+This carrier is not a release-grade provisioning mechanism. Do not restore the old
+token-in-argv recipe or extract an old controller's token.
+Package-only desktop preparation is distinct from authenticated service readiness.
 
-Do **not** `ime set` this IME and leave it. The driver enables it for one
-clipboard call and restores `settings get secure default_input_method`.
+Clipboard activation in ordinary client sessions remains blocked pending durable
+recovery/control-plane qualification. Only the explicit helper-only canary can use
+the owned debug carrier while its admitted device lease and stable fence are held.
+The candidate has named jobs so queued cancellation cannot dispatch late; token
+possession and job settlement do not establish device ownership. No automatic IME
+change is allowed just to make diagnostics green. Never leave the helper as the
+default keyboard or claim restoration from an `ime set` ACK alone.
 
 `AgentService` is `exported=true` so `adb shell am start-foreground-service`
 can start it. The HTTP server still binds `127.0.0.1` only. `exported=false`
@@ -152,3 +159,29 @@ Push there with `adb push` (from PowerShell or Rust — Git Bash mangles
 version, launcher, packaged icon resources, signing certificate and source boundaries.
 Set `ANDROID_HOME` or `ANDROID_SDK_ROOT` to SDK 34. The check reads the APK and source;
 it never invokes adb or starts an emulator.
+
+For source candidate verification, use the existing local JDK/SDK only:
+
+```powershell
+powershell -NoProfile -File sidecars/riviu-android-agent/build.ps1 -Candidate
+python sidecars/riviu-android-agent/test_behavior.py
+python sidecars/riviu-android-agent/test_helper_package.py --candidate sidecars/riviu-android-agent/build/candidate/riviu-agent.apk
+```
+
+Candidate output includes `provenance.json`; do not promote it by changing manifest
+pins until runtime qualification and artifact review are complete. Behavioral tests
+exercise production scheduling/lifecycle seams, not a real Android Looper/phone.
+
+Candidate-only authenticated endpoints:
+
+- `POST /v1/session/status` with a bounded nonce: service-instance/nonce binding,
+  `ownership=legacy_unproven`, not owner takeover authority.
+- `POST /v1/clipboard/jobs/submit`: instance + request ID + get/set; one-shot submission.
+- `POST /v1/clipboard/jobs/status`, `/cancelQueued`: query the same ID; running is not
+  cancelled, unknown IDs are not permission to resubmit. The named ledger retains
+  at most 128 requests per service instance, then refuses; it is not qualified for
+  continuous long-running sessions without a safe retirement/generation contract.
+
+Public reachability, authenticated reads, advertised features and live qualification
+are separate diagnostic states. Android Publish currently imports media through the
+ADB `publish.rs` path; it does not depend on helper HTTP media import.

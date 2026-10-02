@@ -110,6 +110,25 @@ impl DeviceControlPlane {
             .await
             .map_err(|error| driver_error(lease.udid(), "importPublishMedia", error))
     }
+    pub async fn stage_publish_media_with_ui(
+        &self, context: &UiWithStreamContext, agent_bundle_id: &str, campaign_id: &str, source_root: &Path,
+    ) -> Result<serde_json::Value, DeviceControlError> {
+        let lease = self.validate_stream(context)?;
+        self.driver.stage_publish_media(lease.udid(), agent_bundle_id, campaign_id, source_root).await.map_err(|error| stage_publish_error(lease.udid(), error))
+    }
+    pub async fn prepare_publish_media_with_ui(
+        &self, context: &UiWithStreamContext, campaign_id: &str, manifest_sha256: &str,
+    ) -> Result<serde_json::Value, DeviceControlError> {
+        let lease = self.validate_stream(context)?;
+        self.driver.prepare_publish_media(lease.udid(), campaign_id, manifest_sha256).await.map_err(|error| driver_error(lease.udid(), "preparePublishMedia", error))
+    }
+    pub async fn import_publish_media_with_ui(
+        &self, context: &UiWithStreamContext, campaign_id: &str, manifest_sha256: &str,
+    ) -> Result<serde_json::Value, DeviceControlError> {
+        let lease = self.validate_stream(context)?;
+        self.driver.import_publish_media(lease.udid(), campaign_id, manifest_sha256).await.map_err(|error| driver_error(lease.udid(), "importPublishMedia", error))
+    }
+
     pub async fn cleanup_publish_media(
         &self,
         context: &DeviceExclusiveContext,

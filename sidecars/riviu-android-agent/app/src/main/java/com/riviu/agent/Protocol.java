@@ -9,7 +9,7 @@ import org.json.JSONObject;
  * Changing a field name here without changing that file is a protocol break.
  */
 final class Protocol {
-    static final String AGENT_VERSION = "0.5.0";
+    static final String AGENT_VERSION = "0.6.0";
     static final int PROTOCOL_VERSION = 1;
     static final int PORT = 17980;
     static final int MAX_BODY_BYTES = 64 * 1024;
@@ -33,6 +33,12 @@ final class Protocol {
         features.put("auth");
         // A named home-screen entry with the Riviu icon and a read-only status screen.
         features.put("launcher");
+        features.put("authenticatedSessionStatus");
+        features.put("clipboardJobs");
+        features.put("clipboardCompareSet");
+        features.put("clipboardSnapshotRestore");
+        features.put("secureBootstrap");
+        features.put("secureBootstrapRunAs"); // Debug-canary implementation; not runtime qualification.
         return new JSONObject()
                 .put("ok", true)
                 .put("agentVersion", AGENT_VERSION)

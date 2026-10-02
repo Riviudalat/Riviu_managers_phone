@@ -84,10 +84,20 @@ impl AndroidDriver {
         })?;
 
         let screen = crate::frames::device_screen(&self.adb, serial).await?;
-        let options =
+        let mut options =
             crate::frames::MinicapOptions::for_device(serial, Self::producer_projection(screen));
+        if !self.automatic_setup_allowed {
+            options.socket = format!("riviu-diagnostic-{}", uuid::Uuid::new_v4().simple());
+        }
         // Push before taking a port, so a push failure strands nothing.
-        crate::frames::ensure_apk(&self.adb, serial, &apk).await?;
+        if self.automatic_setup_allowed {
+            crate::frames::ensure_apk(&self.adb, serial, &apk).await?;
+        } else {
+            let local = tokio::fs::read(&apk).await?;
+            let expected = riviu_core::frame_sha256(&local);
+            let observed = self.adb.shell(serial, &format!("sha256sum {}", crate::frames::REMOTE_APK)).await?;
+            anyhow::ensure!(observed.split_whitespace().next() == Some(expected.as_str()), "Diagnostic session refuses minicap staging; existing payload is absent or unverified");
+        }
 
         if readiness == StreamReadiness::DecodedFrame {
             self.refuse_undrivable_screen(serial).await?;
@@ -116,7 +126,11 @@ impl AndroidDriver {
         // per attempt — measured: four stranded forwards to the same socket after
         // a single launch. Only the connect is retried, because minicap binds its
         // socket a beat after `app_process` starts.
-        let host_port = crate::frames::forward(&self.adb, serial, &options.socket).await?;
+        let host_port = if self.automatic_setup_allowed {
+            crate::frames::forward(&self.adb, serial, &options.socket).await?
+        } else {
+            crate::frames::forward_owned(&self.adb, serial, &options.socket).await?
+        };
         let mut connected = None;
         let mut last_error = None;
         for _ in 0..40 {
@@ -308,7 +322,15 @@ impl AndroidDriver {
     ///
     /// An unreadable `dumpsys` is **unknown**, never a refusal — the fleet spans
     /// Android 9 to 15 and they do not print the same bodies.
-    async fn refuse_undrivable_screen(&self, serial: &str) -> anyhow::Result<()> {
+    pub(super) async fn refuse_undrivable_screen(&self, serial: &str) -> anyhow::Result<()> {
+        if !self.automatic_setup_allowed {
+            let power = self.adb.shell(serial, "dumpsys power").await?;
+            let window = self.adb.shell(serial, "dumpsys window").await?;
+            anyhow::ensure!(adb::parse_display_awake(&power) == Some(true)
+                && adb::parse_keyguard_locked(&window) == Some(false),
+                "Diagnostic requires positively awake and unlocked screen; unknown is not safe");
+            return Ok(());
+        }
         if let Ok(power) = self.adb.shell(serial, "dumpsys power").await {
             if adb::parse_display_awake(&power) == Some(false) {
                 anyhow::bail!(

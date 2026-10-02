@@ -11,9 +11,18 @@ impl ExitCoordinator {
         self.0.load(Ordering::Acquire) == 2
     }
 
+    #[cfg(test)]
     pub(crate) fn request(
         &self,
         drain: impl FnOnce() + Send + 'static,
+        exit: impl FnOnce() + Send + 'static,
+    ) -> std::io::Result<bool> {
+        self.request_checked(move || { drain(); true }, exit)
+    }
+
+    pub(crate) fn request_checked(
+        &self,
+        drain: impl FnOnce() -> bool + Send + 'static,
         exit: impl FnOnce() + Send + 'static,
     ) -> std::io::Result<bool> {
         if self
@@ -27,9 +36,14 @@ impl ExitCoordinator {
         let worker = std::thread::Builder::new()
             .name("riviu-graceful-exit".into())
             .spawn(move || {
-                drain();
-                state.store(2, Ordering::Release);
-                exit();
+                if drain() {
+                    state.store(2, Ordering::Release);
+                    exit();
+                } else {
+                    // Preserve the native window/runtime and unresolved ownership.
+                    // A later explicit reconciliation may request a fresh drain.
+                    state.store(0, Ordering::Release);
+                }
             });
         if let Err(error) = worker {
             self.0.store(0, Ordering::Release);
@@ -43,6 +57,20 @@ impl ExitCoordinator {
 mod tests {
     use super::*;
     use std::{sync::mpsc, time::Duration};
+
+    #[test]
+    fn failed_diagnostic_drain_does_not_exit_or_mark_completion() {
+        let gate = ExitCoordinator::default();
+        let (failed, done) = mpsc::channel();
+        assert!(gate.request_checked(move || { failed.send(()).unwrap(); false }, || panic!("unresolved cleanup must not exit")).unwrap());
+        done.recv_timeout(Duration::from_secs(3)).unwrap();
+        for _ in 0..100 {
+            if gate.0.load(Ordering::Acquire) == 0 { break; }
+            std::thread::sleep(Duration::from_millis(1));
+        }
+        assert_eq!(gate.0.load(Ordering::Acquire), 0);
+        assert!(!gate.completed());
+    }
 
     #[test]
     fn native_loop_remains_available_until_drain_finishes_and_duplicate_close_is_coalesced() {

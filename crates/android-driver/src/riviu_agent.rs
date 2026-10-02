@@ -22,7 +22,7 @@ use std::path::{Path, PathBuf};
 use std::time::Duration;
 
 use anyhow::{anyhow, Context};
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 
 use crate::adb::{self, AdbProgram};
@@ -92,6 +92,20 @@ fn helper_token(serial: &str) -> String {
 /// `adb forward` makes reachable.
 const HTTP_TIMEOUT: Duration = Duration::from_secs(10);
 
+fn ime_lock(serial: &str) -> std::sync::Arc<tokio::sync::Mutex<()>> {
+    static LOCKS: std::sync::OnceLock<
+        parking_lot::Mutex<
+            std::collections::HashMap<String, std::sync::Arc<tokio::sync::Mutex<()>>>,
+        >,
+    > = std::sync::OnceLock::new();
+    LOCKS
+        .get_or_init(Default::default)
+        .lock()
+        .entry(serial.into())
+        .or_default()
+        .clone()
+}
+
 /// Installing the helper APK, which is a different order of work entirely.
 ///
 /// `pm install` on the older phones in this fleet verifies and optimises the package, and
@@ -120,11 +134,410 @@ pub struct HelperClient {
     serial: String,
     base: String,
     host_port: u16,
+    lifecycle: std::sync::Arc<tokio::sync::Mutex<bool>>,
+    pending_clipboard: std::sync::Arc<parking_lot::Mutex<Option<Value>>>,
+    canary: Option<CanaryOwner>,
+    clipboard_baseline: std::sync::Arc<parking_lot::Mutex<Option<(String, Vec<u8>)>>>,
+}
+
+#[derive(Clone)]
+struct CanaryOwner {
+    owner_id: String,
+    instance: String,
+    generation: String,
+    socket: String,
+    nonce: String,
+    uid: u32,
+    apk_path: String,
+    report: PathBuf,
 }
 
 impl HelperClient {
+    pub(crate) fn is_scoped_canary(&self) -> bool { self.canary.is_some() && !self.lifecycle.try_lock().map(|closed| *closed).unwrap_or(true) }
+    pub(crate) fn cleanup_is_pending(&self) -> bool {
+        self.pending_clipboard.lock().is_some() || self.clipboard_baseline.lock().is_some()
+    }
+    /// Read-only diagnostic transport using non-secret bytes; no helper service request.
+    pub async fn probe_stdin_transport(adb: &AdbProgram, serial: &str) -> anyhow::Result<()> {
+        let marker = b"riviu-bootstrap-stdin-check".to_vec();
+        let reply = adb
+            .shell_secret_input(serial, "cat", marker.clone(), Duration::from_secs(10))
+            .await?;
+        anyhow::ensure!(
+            reply == marker,
+            "ADB stdin framing transport does not round-trip"
+        );
+        Ok(())
+    }
+
+    /// Inspect existing bootstrap admission with an invalid action; this APK returns identity
+    /// but performs no claim/release for it. Never starts/restarts a service or sends credentials.
+    pub async fn inspect_existing_bootstrap(
+        adb: &AdbProgram,
+        serial: &str,
+        intent: &Value,
+    ) -> anyhow::Result<Value> {
+        let dump = adb.shell(serial, "dumpsys package com.riviu.agent").await?;
+        let uid = dump
+            .lines()
+            .find_map(|line| {
+                line.trim()
+                    .strip_prefix("userId=")
+                    .and_then(|s| s.split_whitespace().next())
+                    .and_then(|s| s.parse::<u32>().ok())
+            })
+            .context("helper UID unavailable")?;
+        let paths = adb.shell(serial, "pm path com.riviu.agent").await?;
+        let apk = paths
+            .lines()
+            .find_map(|line| line.trim().strip_prefix("package:"))
+            .context("helper path unavailable")?;
+        crate::adb::validate_device_path(apk)?;
+        let socket = intent["socket"].as_str().context("scoped socket missing")?;
+        let nonce = intent["nonce"].as_str().context("scoped nonce missing")?;
+        let owner = intent["ownerId"].as_str().context("scoped owner missing")?;
+        anyhow::ensure!(
+            socket.starts_with("riviu-bootstrap-")
+                && socket
+                    .chars()
+                    .all(|c| c.is_ascii_alphanumeric() || c == '-'),
+            "invalid diagnostic socket"
+        );
+        let reply = bootstrap_exchange(adb, serial, apk, socket, uid, json!({"action":"inspect_invalid_readonly","nonce":nonce,"ownerId":owner,"token":"readonly-marker-not-a-credential-0000"})).await?;
+        anyhow::ensure!(
+            reply["nonce"].as_str() == Some(nonce)
+                && reply["ownerId"].as_str() == Some(owner)
+                && reply["ok"] == false
+                && reply["state"] == "invalid_action",
+            "read-only bootstrap identity unavailable"
+        );
+        Ok(reply)
+    }
+
+    /// Opens a new nonce-bound observation socket, not a new owner/token/session.
+    pub async fn inspect_bootstrap_owner_readonly(
+        adb: &AdbProgram,
+        serial: &str,
+    ) -> anyhow::Result<Value> {
+        let dump = adb.shell(serial, "dumpsys package com.riviu.agent").await?;
+        let uid = dump
+            .lines()
+            .find_map(|line| {
+                line.trim()
+                    .strip_prefix("userId=")
+                    .and_then(|s| s.split_whitespace().next())
+                    .and_then(|s| s.parse::<u32>().ok())
+            })
+            .context("helper UID unavailable")?;
+        let paths = adb.shell(serial, "pm path com.riviu.agent").await?;
+        let apk = paths
+            .lines()
+            .find_map(|line| line.trim().strip_prefix("package:"))
+            .context("helper path unavailable")?;
+        crate::adb::validate_device_path(apk)?;
+        let owner = uuid::Uuid::new_v4().simple().to_string();
+        let nonce = uuid::Uuid::new_v4().simple().to_string();
+        let socket = format!("riviu-bootstrap-{owner}");
+        let started_at = std::time::Instant::now();
+        let started = adb.shell_output(serial, &format!("am start-foreground-service -n {SERVICE} --es bootstrapSocket {socket} --es bootstrapNonce {nonce} --es bootstrapOwnerId {owner}"), Duration::from_secs(15)).await?;
+        anyhow::ensure!(
+            started.exit_code == 0
+                && !started.stdout.contains("Error")
+                && !started.stderr.contains("Error"),
+            "owner observation listener rejected"
+        );
+        let start_ms = started_at.elapsed().as_millis();
+        let reply = bootstrap_exchange(adb, serial, apk, &socket, uid, json!({"action":"inspect_invalid_readonly","nonce":nonce,"ownerId":owner,"token":"readonly-marker-not-a-credential-0000"})).await
+            .with_context(||format!("read-only bootstrap failed after service-start {start_ms}ms"))?;
+        anyhow::ensure!(
+            reply["nonce"].as_str() == Some(nonce.as_str())
+                && reply["ownerId"].as_str() == Some(owner.as_str())
+                && reply["ok"] == false
+                && reply["state"] == "invalid_action",
+            "owner observation reply mismatch"
+        );
+        Ok(reply)
+    }
+
+    pub async fn diagnose_bootstrap_readonly(
+        adb: &AdbProgram,
+        serial: &str,
+        jar: &Path,
+        hash: &str,
+    ) -> anyhow::Result<Value> {
+        anyhow::ensure!(
+            riviu_core::frame_sha256(&std::fs::read(jar)?) == hash,
+            "probe jar changed"
+        );
+        let dump = adb.shell(serial, "dumpsys package com.riviu.agent").await?;
+        let uid = dump
+            .lines()
+            .find_map(|line| {
+                line.trim()
+                    .strip_prefix("userId=")
+                    .and_then(|s| s.split_whitespace().next())
+                    .and_then(|s| s.parse::<u32>().ok())
+            })
+            .context("helper UID unavailable")?;
+        let owner = uuid::Uuid::new_v4().simple().to_string();
+        let nonce = uuid::Uuid::new_v4().simple().to_string();
+        let socket = format!("riviu-bootstrap-{owner}");
+        let remote = format!("/data/local/tmp/riviu-probe-{owner}.jar");
+        let absent = adb
+            .shell(serial, &format!("test ! -e {remote} && printf absent"))
+            .await?;
+        anyhow::ensure!(absent == "absent", "probe path already exists");
+        adb.device(
+            serial,
+            &["push", jar.to_str().context("probe path invalid")?, &remote],
+            Duration::from_secs(30),
+        )
+        .await?;
+        let probe = async {
+            let observed = adb.shell(serial, &format!("sha256sum {remote}")).await?;
+            anyhow::ensure!(observed.split_whitespace().next() == Some(hash), "probe device hash mismatched");
+            let marker = b"non-secret-be32-roundtrip";
+            let mut payload = (marker.len() as u32).to_be_bytes().to_vec(); payload.extend(marker);
+            let stdout = adb.shell_secret_input(serial, &format!("CLASSPATH={remote} app_process /system/bin com.riviu.agent.ProbeBootstrap --stdin-only"), payload, Duration::from_secs(12)).await?;
+            anyhow::ensure!(stdout.len() >= 4, "probe stdin frame missing");
+            let input: Value = serde_json::from_slice(&stdout[4..])?;
+            anyhow::ensure!(input["sha256"].as_str() == Some(riviu_core::frame_sha256(marker).as_str()), "BE32 input mismatch");
+            let started = adb.shell_output(serial, &format!("am start-foreground-service -n {SERVICE} --es bootstrapSocket {socket} --es bootstrapNonce {nonce} --es bootstrapOwnerId {owner}"), Duration::from_secs(15)).await?;
+            anyhow::ensure!(started.exit_code == 0, "diagnostic observation listener rejected");
+            let sockets = adb.shell(serial, "cat /proc/net/unix").await?;
+            anyhow::ensure!(sockets.lines().any(|line|line.ends_with(&format!("@{socket}"))), "fresh bootstrap socket absent immediately after service start");
+            let body = serde_json::to_vec(&json!({"action":"inspect_invalidaction","token":"xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx","nonce":nonce,"ownerId":owner}))?;
+            let mut payload = (body.len() as u32).to_be_bytes().to_vec(); payload.extend(body);
+            let reply = adb.shell_secret_input(serial, &format!("CLASSPATH={remote} app_process /system/bin com.riviu.agent.ProbeBootstrap {socket} {uid}"),payload,Duration::from_secs(12)).await?;
+            anyhow::ensure!(reply.len() >= 4, "diagnostic owner frame missing");
+            let value: Value = serde_json::from_slice(&reply[4..])?;
+            anyhow::ensure!(value["ok"] == false && value["state"] == "invalid_action" && value["nonce"].as_str() == Some(nonce.as_str()), "diagnostic owner reply mismatch");
+            Ok::<_,anyhow::Error>(value)
+        }.await;
+        let cleanup = adb
+            .shell(
+                serial,
+                &format!("rm -- {remote}; test ! -e {remote} && printf removed"),
+            )
+            .await?;
+        anyhow::ensure!(cleanup.trim() == "removed", "owned probe cleanup unproved");
+        probe
+    }
+
+    /// Called only by the admitted helper-canary facade while its device lease is held.
+    pub(crate) async fn prepare_canary(
+        adb: AdbProgram,
+        serial: &str,
+        report: PathBuf,
+    ) -> anyhow::Result<Self> {
+        anyhow::ensure!(
+            adb.shell(serial, "id -u").await?.trim() == "2000",
+            "helper bootstrap canary requires ADB shell UID2000; no root fallback"
+        );
+        let package = adb.shell(serial, "dumpsys package com.riviu.agent").await?;
+        let uid = package
+            .lines()
+            .find_map(|line| {
+                line.trim()
+                    .strip_prefix("userId=")
+                    .and_then(|s| s.split_whitespace().next())
+                    .and_then(|s| s.parse::<u32>().ok())
+            })
+            .context("helper package UID unreadable")?;
+        anyhow::ensure!(uid >= 10000 && uid < 100000, "helper package UID invalid");
+        let run_as_uid = adb
+            .shell_output(
+                serial,
+                "run-as com.riviu.agent id -u",
+                Duration::from_secs(10),
+            )
+            .await?;
+        anyhow::ensure!(
+            run_as_uid.exit_code == 0 && run_as_uid.stdout.trim().parse::<u32>().ok() == Some(uid),
+            "debug helper UID carrier unavailable; no root/SELinux fallback"
+        );
+        let path = adb.shell(serial, "pm path com.riviu.agent").await?;
+        let paths: Vec<_> = path
+            .lines()
+            .filter_map(|line| line.trim().strip_prefix("package:"))
+            .collect();
+        anyhow::ensure!(paths.len() == 1, "helper APK path ambiguous");
+        let apk_path = paths[0].to_owned();
+        crate::adb::validate_device_path(&apk_path)?;
+        let owner_id = uuid::Uuid::new_v4().simple().to_string();
+        let nonce = uuid::Uuid::new_v4().simple().to_string();
+        let socket = format!("riviu-bootstrap-{owner_id}");
+        let started = adb.shell_output(serial, &format!("am start-foreground-service -n {SERVICE} --es bootstrapSocket {socket} --es bootstrapNonce {nonce} --es bootstrapOwnerId {owner_id}"), Duration::from_secs(15)).await?;
+        anyhow::ensure!(
+            started.exit_code == 0
+                && !started.stdout.contains("Error")
+                && !started.stderr.contains("Error"),
+            "helper bootstrap start rejected"
+        );
+        let token = helper_token(serial);
+        use std::io::Write;
+        let mut intent = std::fs::OpenOptions::new()
+            .create_new(true)
+            .write(true)
+            .open(report.join("helper-claim-intent.json"))?;
+        intent.write_all(&serde_json::to_vec(&json!({"serial":serial,"ownerId":owner_id,"nonce":nonce,"socket":socket,"state":"beforeClaim","tokenPersisted":false}))?)?;
+        intent.sync_all()?;
+        let body = json!({"action":"claim","nonce":nonce,"ownerId":owner_id,"token":token});
+        let reply = match bootstrap_exchange(&adb, serial, &apk_path, &socket, uid, body).await {
+            Ok(reply) => reply,
+            Err(error) => {
+                // Query protected identity with the SAME in-memory credential, never replay claim.
+                let port = forward_helper(&adb, serial).await?;
+                let probe = Self::at(adb.clone(), serial, port)?;
+                let observed = probe
+                    .post_json("/v1/session/status", json!({"nonce":nonce}))
+                    .await;
+                let removed = frames::remove_forward(&adb, serial, port).await;
+                removed?;
+                let identity = observed
+                    .context("claim lost ACK and identity unavailable; reconciliation required")?;
+                anyhow::ensure!(
+                    identity["ok"] == true
+                        && identity["nonce"].as_str() == Some(nonce.as_str())
+                        && identity["ownerId"].as_str() == Some(owner_id.as_str()),
+                    "claim lost ACK owner not proved"
+                );
+                let recovered = CanaryOwner {
+                    owner_id: owner_id.clone(),
+                    nonce: nonce.clone(),
+                    socket: socket.clone(),
+                    uid,
+                    apk_path: apk_path.clone(),
+                    report: report.clone(),
+                    instance: identity["serviceInstance"]
+                        .as_str()
+                        .context("claim recovery instance missing")?
+                        .into(),
+                    generation: identity["ownerGeneration"]
+                        .as_str()
+                        .context("claim recovery generation missing")?
+                        .into(),
+                };
+                release_canary_owner(&adb, serial, &recovered)
+                    .await
+                    .context("claim lost ACK owner cleanup unresolved")?;
+                return Err(error);
+            }
+        };
+        anyhow::ensure!(
+            reply["ok"] == true
+                && reply["nonce"].as_str() == Some(nonce.as_str())
+                && reply["ownerId"].as_str() == Some(owner_id.as_str())
+                && reply["state"] == "ready",
+            "helper owner claim not proved"
+        );
+        let instance = reply["serviceInstance"]
+            .as_str()
+            .context("helper instance missing")?
+            .to_owned();
+        let generation = reply["ownerGeneration"]
+            .as_str()
+            .context("helper owner generation missing")?
+            .to_owned();
+        uuid::Uuid::parse_str(&instance)?;
+        uuid::Uuid::parse_str(&generation)?;
+        let owner = CanaryOwner {
+            owner_id,
+            instance,
+            generation,
+            socket,
+            nonce,
+            uid,
+            apk_path,
+            report,
+        };
+        let receipt = owner.report.join("helper-owner.json");
+        let persisted = (|| -> anyhow::Result<()> {
+            let mut file = std::fs::OpenOptions::new()
+                .create_new(true)
+                .write(true)
+                .open(&receipt)?;
+            file.write_all(&serde_json::to_vec(&json!({"serial":serial,"ownerId":owner.owner_id,"serviceInstance":owner.instance,"generation":owner.generation,"state":"claimed","tokenPersisted":false}))?)?;
+            file.sync_all()?;
+            Ok(())
+        })();
+        if let Err(error) = persisted {
+            release_canary_owner(&adb, serial, &owner)
+                .await
+                .context("claim receipt failure cleanup unresolved")?;
+            return Err(error);
+        }
+        let host_port = match forward_helper(&adb, serial).await {
+            Ok(port) => port,
+            Err(error) => {
+                release_canary_owner(&adb, serial, &owner)
+                    .await
+                    .context("claim cleanup release unresolved")?;
+                return Err(error);
+            }
+        };
+        let mut client = match Self::at(adb.clone(), serial, host_port) {
+            Ok(client) => client,
+            Err(error) => {
+                release_canary_owner(&adb, serial, &owner).await?;
+                frames::remove_forward(&adb, serial, host_port).await?;
+                return Err(error);
+            }
+        };
+        client.canary = Some(owner);
+        if let Err(error) = client.require_canary_identity().await {
+            client
+                .shutdown()
+                .await
+                .context("claim attach cleanup unresolved")?;
+            return Err(error);
+        }
+        Ok(client)
+    }
+
+    fn persist_clipboard_checkpoint(&self) -> anyhow::Result<()> {
+        let owner = self
+            .canary
+            .as_ref()
+            .context("clipboard checkpoint requires scoped owner")?;
+        let path = owner.report.join("ime-checkpoint.json");
+        let temp = owner
+            .report
+            .join(format!("ime-{}.tmp", uuid::Uuid::new_v4()));
+        let value = json!({"serial":self.serial,"ownerId":owner.owner_id,"serviceInstance":owner.instance,"generation":owner.generation,"pending":self.pending_clipboard.lock().clone()});
+        use std::io::Write;
+        let mut file = std::fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(&temp)?;
+        file.write_all(&serde_json::to_vec(&value)?)?;
+        file.sync_all()?;
+        std::fs::rename(temp, path)?;
+        Ok(())
+    }
+
+    async fn require_canary_identity(&self) -> anyhow::Result<()> {
+        let owner = self.canary.as_ref().context("scoped helper owner absent")?;
+        let nonce = uuid::Uuid::new_v4().simple().to_string();
+        let value = self
+            .post_json("/v1/session/status", json!({"nonce":nonce}))
+            .await?;
+        anyhow::ensure!(
+            value["ok"] == true
+                && value["nonce"].as_str() == Some(nonce.as_str())
+                && value["serviceInstance"].as_str() == Some(owner.instance.as_str())
+                && value["ownerId"].as_str() == Some(owner.owner_id.as_str())
+                && value["ownerGeneration"].as_str() == Some(owner.generation.as_str())
+                && value["ownership"] == "owned",
+            "helper owner identity changed"
+        );
+        Ok(())
+    }
+
     /// Install if needed, enable the IME, start the service, forward, prove `/status`.
     pub async fn ensure(adb: AdbProgram, serial: &str, apk: Option<&Path>) -> anyhow::Result<Self> {
+        // Fail before install/IME mutations until the new bootstrap is qualified.
+        start_service(&adb, serial).await?;
         if !package_installed(&adb, serial).await? {
             let apk = apk.ok_or_else(|| {
                 anyhow!(
@@ -134,8 +547,8 @@ impl HelperClient {
             })?;
             install_apk(&adb, serial, apk).await?;
         }
-        enable_ime(&adb, serial).await?;
         start_service(&adb, serial).await?;
+        enable_ime(&adb, serial).await?;
         let host_port = forward_helper(&adb, serial).await?;
         finish_helper_attach(
             async {
@@ -144,6 +557,27 @@ impl HelperClient {
                 if let Some(apk) = apk {
                     client.upgrade_if_stale(&status, apk).await;
                 }
+                Ok(client)
+            },
+            || frames::remove_forward(&adb, serial, host_port),
+        )
+        .await
+    }
+
+    /// Attach only an already running helper: no install, IME enable or service start.
+    pub async fn attach_existing(adb: AdbProgram, serial: &str) -> anyhow::Result<Self> {
+        anyhow::ensure!(
+            package_installed(&adb, serial).await?,
+            "Diagnostic requires an existing helper package"
+        );
+        let host_port = forward_helper(&adb, serial).await?;
+        finish_helper_attach(
+            async {
+                let client = Self::at(adb.clone(), serial, host_port)?;
+                client.require_status().await?;
+                // /status is intentionally unauthenticated. It cannot prove that this
+                // process owns a token usable for clipboard or native media requests.
+                client.describe_apps(&[PACKAGE.to_string()], false).await?;
                 Ok(client)
             },
             || frames::remove_forward(&adb, serial, host_port),
@@ -218,22 +652,35 @@ impl HelperClient {
             serial: serial.to_string(),
             base: format!("http://127.0.0.1:{host_port}"),
             host_port,
+            lifecycle: Default::default(),
+            pending_clipboard: Default::default(),
+            canary: None,
+            clipboard_baseline: Default::default(),
         })
     }
 
     /// Stop only the helper transport this client established.
     pub async fn shutdown(self) -> anyhow::Result<()> {
+        // A cancelled caller may leave its owned clipboard task draining/restoring.
+        let _serial = ime_lock(&self.serial).lock_owned().await;
+        let mut closed = self.lifecycle.lock().await;
+        anyhow::ensure!(
+            self.pending_clipboard.lock().is_none() && self.clipboard_baseline.lock().is_none(),
+            "helper clipboard cleanup unresolved; retain forward for reconciliation"
+        );
+        if *closed {
+            return Ok(());
+        }
+        if let Some(owner) = &self.canary {
+            release_canary_owner(&self.adb, &self.serial, owner).await?;
+        }
         let mut failures = Vec::new();
         if let Err(error) = frames::remove_forward(&self.adb, &self.serial, self.host_port).await {
             failures.push(format!("remove tcp:{} forward: {error}", self.host_port));
         }
-        if let Err(error) = self
-            .adb
-            .shell(&self.serial, &format!("am force-stop {PACKAGE}"))
-            .await
-        {
-            failures.push(format!("force-stop {PACKAGE}: {error}"));
-        }
+        // Legacy token provisioning has no instance/generation ownership proof.
+        // Never force-stop the package: it can terminate a replacement owner or IME.
+        *closed = failures.is_empty();
         anyhow::ensure!(
             failures.is_empty(),
             "could not shut down Riviu helper transport on {}: {}",
@@ -245,9 +692,46 @@ impl HelperClient {
 
     pub async fn is_alive(&self) -> bool {
         self.require_status().await.is_ok()
+            && self
+                .describe_apps(&[PACKAGE.to_string()], false)
+                .await
+                .is_ok()
+    }
+
+    /// Read only this connection; do not repair, provision or touch the IME.
+    pub async fn health(&self) -> HelperHealth {
+        let mut health = HelperHealth::unobserved();
+        match self.require_status().await {
+            Ok(status) => {
+                health.service_reachable = Some(true);
+                health.agent_version = Some(status.agent_version);
+                health.protocol_version = Some(status.protocol_version);
+                health.advertised_features = Some(status.features);
+                health.reason = "authenticationUnobserved".into();
+            }
+            Err(_) => {
+                health.service_reachable = Some(false);
+                health.reason = "statusUnavailable".into();
+                return health;
+            }
+        }
+        // App-label lookup is an authenticated read, not a clipboard mutation.
+        match self.describe_apps(&[PACKAGE.to_string()], false).await {
+            Ok(_) => {
+                health.authenticated = Some(true);
+                health.reason = "authenticatedReadVerified".into();
+            }
+            Err(_) => {
+                health.authenticated = Some(false);
+                health.reason = "authenticatedReadFailed".into();
+            }
+        }
+        health
     }
 
     async fn require_status(&self) -> anyhow::Result<HelperStatus> {
+        let closed = self.lifecycle.lock().await;
+        anyhow::ensure!(!*closed, "helper connection is closed");
         let response = self
             .http
             .get(format!("{}/status", self.base))
@@ -266,17 +750,119 @@ impl HelperClient {
         parse_status(&body)
     }
 
+    async fn clipboard_job(&self, action: &str, text: Option<&str>) -> anyhow::Result<Value> {
+        self.clipboard_job_inner(action, text)
+            .await
+            .map_err(|error| {
+                if error.is::<ClipboardSettledFailure>() {
+                    error
+                } else {
+                    anyhow!(ClipboardSettlementUnknown)
+                }
+            })
+    }
+
+    async fn clipboard_job_inner(&self, action: &str, text: Option<&str>) -> anyhow::Result<Value> {
+        self.clipboard_job_compare_inner(action, text, None).await
+    }
+
+    async fn clipboard_job_compare_inner(&self, action: &str, text: Option<&str>, expected: Option<&str>) -> anyhow::Result<Value> {
+        let status = self
+            .require_status()
+            .await
+            .map_err(|_| anyhow!(ClipboardSettledFailure))?;
+        if !status
+            .features
+            .iter()
+            .any(|feature| feature == "clipboardJobs")
+        {
+            return Err(anyhow!(ClipboardSettledFailure));
+        }
+        let nonce = uuid::Uuid::new_v4().simple().to_string();
+        let identity = self
+            .post_json("/v1/session/status", json!({"nonce": nonce}))
+            .await
+            .map_err(|_| anyhow!(ClipboardSettledFailure))?;
+        if identity["ok"] != true || identity["nonce"].as_str() != Some(nonce.as_str()) {
+            return Err(anyhow!(ClipboardSettledFailure));
+        }
+        let instance = identity["serviceInstance"]
+            .as_str()
+            .ok_or_else(|| anyhow!(ClipboardSettledFailure))?;
+        let id = uuid::Uuid::new_v4().simple().to_string();
+        let mut body = json!({"serviceInstance":instance,"requestId":id,"action":action});
+        if let Some(text) = text {
+            body[if action == "restoreSnapshot" { "baselineId" } else { "text" }] = json!(text);
+        }
+        if let Some(expected) = expected {
+            body["expectedText"] = json!(expected);
+        }
+        if let Some(ticket) = self.pending_clipboard.lock().as_mut() {
+            ticket["serviceInstance"] = json!(instance);
+            ticket["operationId"] = json!(id);
+            ticket["phase"] = json!("submissionPending");
+        }
+        self.persist_clipboard_checkpoint()
+            .map_err(|_| anyhow!(ClipboardSettledFailure))?;
+        // Send once. A lost submission ACK is reconciled by ID, never resubmitted.
+        let submitted = self.post_json("/v1/clipboard/jobs/submit", body).await;
+        let deadline = tokio::time::Instant::now() + Duration::from_secs(12);
+        let request = json!({"serviceInstance":instance,"requestId":id});
+        let mut value = submitted.ok();
+        loop {
+            if let Some(reply) = value.take() {
+                require_ok(&reply, "clipboard job")?;
+                anyhow::ensure!(
+                    reply["serviceInstance"].as_str() == Some(instance)
+                        && reply["operationId"].as_str() == Some(id.as_str()),
+                    "clipboard job identity mismatch"
+                );
+                match reply["state"].as_str() {
+                    Some("succeeded") => return Ok(reply["result"].clone()),
+                    Some("failed" | "cancelled") => return Err(anyhow!(ClipboardSettledFailure)),
+                    Some("queued" | "running") => {}
+                    _ => anyhow::bail!("clipboard job settlement is unknown"),
+                }
+            }
+            if tokio::time::Instant::now() >= deadline {
+                let cancel = self
+                    .post_json("/v1/clipboard/jobs/cancelQueued", request.clone())
+                    .await?;
+                require_ok(&cancel, "clipboard cancel settlement")?;
+                anyhow::ensure!(cancel["serviceInstance"].as_str() == Some(instance)
+                    && cancel["operationId"].as_str() == Some(id.as_str())
+                    && matches!(cancel["state"].as_str(), Some("cancelled" | "succeeded" | "failed")),
+                    "clipboard job still running or identity changed; settlement required before IME cleanup");
+                return Err(anyhow!(ClipboardSettledFailure));
+            }
+            tokio::time::sleep(Duration::from_millis(100)).await;
+            value = Some(
+                self.post_json("/v1/clipboard/jobs/status", request.clone())
+                    .await?,
+            );
+        }
+    }
+
     pub async fn set_clipboard(&self, content_type: &str, bytes: &[u8]) -> anyhow::Result<()> {
         require_plaintext(content_type)?;
-        let text = std::str::from_utf8(bytes).context("clipboard text is not UTF-8")?;
-        self.with_ime(|| async {
-            let value: Value = self
-                .post_json("/v1/clipboard/set", json!({ "text": text }))
-                .await?;
-            require_ok(&value, "set clipboard")?;
-            Ok(())
+        let text = std::str::from_utf8(bytes)
+            .context("clipboard text is not UTF-8")?
+            .to_owned();
+        let client = self.clone();
+        tokio::spawn(async move {
+            client
+                .with_ime(|| async {
+                    let value = client.clipboard_job("set", Some(&text)).await?;
+                    anyhow::ensure!(
+                        value["written"] == true,
+                        "clipboard write result not verified"
+                    );
+                    Ok(())
+                })
+                .await
         })
         .await
+        .context("clipboard operation task failed")?
     }
 
     pub async fn get_clipboard(
@@ -284,23 +870,88 @@ impl HelperClient {
         maximum_decoded_bytes: usize,
     ) -> anyhow::Result<(String, Vec<u8>)> {
         riviu_core::device_capabilities::validate_clipboard_read_limit(maximum_decoded_bytes)?;
-        self.with_ime(|| async {
-            let value: Value = self.post_json("/v1/clipboard/get", json!({})).await?;
-            require_ok(&value, "get clipboard")?;
-            let text = value
-                .get("text")
-                .and_then(Value::as_str)
-                .ok_or_else(|| anyhow!("helper clipboard get had no text field: {value}"))?;
-            let bytes = text.as_bytes();
-            if bytes.len() > maximum_decoded_bytes {
-                anyhow::bail!(
-                    "helper clipboard is {} bytes, limit is {maximum_decoded_bytes}",
-                    bytes.len()
-                );
-            }
-            Ok(("plaintext".to_string(), bytes.to_vec()))
+        let client = self.clone();
+        tokio::spawn(async move {
+            client
+                .with_ime(|| async {
+                    let value = client.clipboard_job("get", None).await?;
+                    anyhow::ensure!(
+                        value["available"] == true,
+                        "clipboard is not readable; empty was not proved"
+                    );
+                    let text = value
+                        .get("text")
+                        .and_then(Value::as_str)
+                        .ok_or_else(|| anyhow!("helper clipboard read did not return text"))?;
+                    let bytes = text.as_bytes();
+                    anyhow::ensure!(
+                        bytes.len() <= maximum_decoded_bytes,
+                        "helper clipboard exceeded read limit"
+                    );
+                    Ok(("plaintext".to_string(), bytes.to_vec()))
+                })
+                .await
         })
         .await
+        .context("clipboard operation task failed")?
+    }
+
+    /// One owned task keeps baseline contents in memory through settlement/restore.
+    /// Conditional restoration runs on Android's main looper, not a stale host read.
+    pub async fn capture_clipboard_baseline(&self) -> anyhow::Result<()> {
+        let client = self.clone();
+        tokio::spawn(async move {
+            client.with_ime(|| async {
+                let snapshot = client.clipboard_job("snapshot", None).await?;
+                anyhow::ensure!(snapshot["available"] == true && snapshot["plainTextBaseline"] == true, "supported clipboard snapshot unavailable");
+                let id = snapshot["baselineId"].as_str().context("clipboard snapshot ID missing")?.to_owned();
+                let text = snapshot["text"].as_str().context("clipboard snapshot text missing")?.as_bytes().to_vec();
+                anyhow::ensure!(text.len() <= 4096, "clipboard snapshot exceeds budget");
+                *client.clipboard_baseline.lock() = Some((id, text));
+                Ok(())
+            }).await
+        }).await.context("clipboard baseline task failed")?
+    }
+
+    pub async fn restore_clipboard_baseline(&self, expected: &[u8]) -> anyhow::Result<()> {
+        let saved = self.clipboard_baseline.lock().clone().context("clipboard baseline absent")?;
+        let expected = std::str::from_utf8(expected)?.to_owned();
+        let client = self.clone();
+        tokio::spawn(async move {
+            client.with_ime(|| async {
+                let restored = client.clipboard_job_compare_inner("restoreSnapshot", Some(&saved.0), Some(&expected)).await
+                    .map_err(|_|anyhow!(ClipboardSettlementUnknown))?;
+                if restored["written"] != true || restored["verified"] != true { return Err(anyhow!(ClipboardSettlementUnknown)); }
+                client.clipboard_baseline.lock().take();
+                Ok(())
+            }).await
+        }).await.context("clipboard baseline restoration task failed")?
+    }
+
+    pub async fn qualify_clipboard_roundtrip(&self) -> anyhow::Result<()> {
+        let client = self.clone();
+        tokio::spawn(async move {
+            client.with_ime(|| async {
+                let status = client.require_status().await?;
+                anyhow::ensure!(status.features.iter().any(|f|f == "clipboardSnapshotRestore"), "metadata-preserving clipboard restore unsupported");
+                let baseline = client.clipboard_job("snapshot", None).await?;
+                anyhow::ensure!(baseline["available"] == true && baseline["plainTextBaseline"] == true, "supported plaintext clipboard baseline unavailable; no SET");
+                let baseline_id = baseline["baselineId"].as_str().context("clipboard snapshot identity missing")?;
+                anyhow::ensure!(baseline["text"].as_str().is_some_and(|text|text.len() <= 4096), "clipboard baseline exceeds canary budget; no SET");
+                let marker = format!("riviu-clipboard-sentinel-{}", uuid::Uuid::new_v4().simple());
+                let write = client.clipboard_job("set", Some(&marker)).await;
+                if write.as_ref().err().is_some_and(|e|e.is::<ClipboardSettlementUnknown>()) { return Err(anyhow!(ClipboardSettlementUnknown)); }
+                // Even a failed readback after a settled write still attempts conditional restore.
+                let observed = if write.is_ok() { client.clipboard_job("get", None).await } else { Err(anyhow!(ClipboardSettledFailure)) };
+                let restoration = client.clipboard_job_compare_inner("restoreSnapshot", Some(baseline_id), Some(&marker)).await;
+                let restored = restoration.map_err(|_|anyhow!(ClipboardSettlementUnknown))?;
+                if restored["written"] != true || restored["verified"] != true { return Err(anyhow!(ClipboardSettlementUnknown)); }
+                write?;
+                let observed = observed?;
+                anyhow::ensure!(observed["text"].as_str() == Some(marker.as_str()), "clipboard marker readback unproved");
+                Ok(())
+            }).await
+        }).await.context("clipboard qualification task failed")?
     }
 
     pub async fn import_media(
@@ -389,6 +1040,8 @@ impl HelperClient {
     }
 
     async fn post_json(&self, path: &str, body: Value) -> anyhow::Result<Value> {
+        let closed = self.lifecycle.lock().await;
+        anyhow::ensure!(!*closed, "helper connection is closed");
         let response = self
             .http
             .post(format!("{}{path}", self.base))
@@ -400,9 +1053,9 @@ impl HelperClient {
         let status = response.status();
         let text = read_capped(response, path).await?;
         let value: Value = serde_json::from_str(&text)
-            .with_context(|| format!("helper {path} không phải JSON: {text}"))?;
-        if !status.is_success() && value.get("ok") != Some(&Value::Bool(true)) {
-            anyhow::bail!("helper {path} HTTP {status}: {text}");
+            .with_context(|| format!("helper {path} response is not JSON"))?;
+        if !status.is_success() {
+            anyhow::bail!("helper {path} HTTP {status}");
         }
         Ok(value)
     }
@@ -416,16 +1069,219 @@ impl HelperClient {
         F: FnOnce() -> Fut,
         Fut: std::future::Future<Output = anyhow::Result<T>>,
     {
+        if self.canary.is_none() {
+            require_clipboard_qualification()?;
+        } else {
+            self.require_canary_identity().await?;
+        }
+        let _serial = ime_lock(&self.serial).lock_owned().await;
+        anyhow::ensure!(
+            self.pending_clipboard.lock().is_none(),
+            "helper has unresolved clipboard cleanup"
+        );
+        let status = self.require_status().await?;
+        anyhow::ensure!(
+            status
+                .features
+                .iter()
+                .any(|feature| feature == "clipboardJobs"),
+            "helper clipboard settlement is unavailable; no IME switch"
+        );
+        self.describe_apps(&[PACKAGE.to_string()], false).await?;
         let previous = current_ime(&self.adb, &self.serial).await?;
-        set_ime(&self.adb, &self.serial, IME_ID).await?;
-        // The IME service has to become current before ClipboardManager will
-        // answer. 250 ms is a settle, not a proof; `/status` already proved the
-        // process is up. A phone that still returns empty after this is a live
-        // measurement, not something to paper over with a longer sleep.
-        tokio::time::sleep(Duration::from_millis(250)).await;
-        let outcome = op().await;
-        let restore = set_ime(&self.adb, &self.serial, &previous).await;
+        anyhow::ensure!(
+            previous != IME_ID,
+            "previous IME is already the helper; reconciliation required"
+        );
+        let enabled = self
+            .adb
+            .shell(&self.serial, "settings get secure enabled_input_methods")
+            .await?;
+        let helper_enabled = enabled
+            .trim()
+            .split(':')
+            .any(|entry| entry.split(';').next() == Some(IME_ID));
+        *self.pending_clipboard.lock() = Some(
+            json!({"previousIme":previous,"helperWasEnabled":helper_enabled,"phase":"switching"}),
+        );
+        self.persist_clipboard_checkpoint()?;
+        let outcome = async {
+            if !helper_enabled {
+                enable_ime(&self.adb, &self.serial).await?;
+            }
+            set_ime(&self.adb, &self.serial, IME_ID).await?;
+            anyhow::ensure!(
+                current_ime(&self.adb, &self.serial).await? == IME_ID,
+                "helper IME selection was not verified"
+            );
+            // Selection readback is required; this settle is not readiness proof.
+            tokio::time::sleep(Duration::from_millis(250)).await;
+            op().await
+        }
+        .await;
+        if outcome
+            .as_ref()
+            .err()
+            .is_some_and(|error| error.is::<ClipboardSettlementUnknown>())
+        {
+            anyhow::bail!(
+                "clipboard settlement unknown; IME retained for explicit reconciliation, no replay"
+            );
+        }
+        let restore = async {
+            let current = current_ime(&self.adb, &self.serial).await?;
+            if current == IME_ID {
+                set_ime(&self.adb, &self.serial, &previous).await?;
+                anyhow::ensure!(
+                    current_ime(&self.adb, &self.serial).await? == previous,
+                    "previous IME restoration was not verified"
+                );
+            } else {
+                anyhow::ensure!(
+                    current == previous,
+                    "IME changed outside this operation; preserved, reconciliation required"
+                );
+            }
+            Ok(())
+        }
+        .await;
+        let restore = if restore.is_ok() && !helper_enabled {
+            async {
+                self.adb
+                    .shell(&self.serial, &format!("ime disable {IME_ID}"))
+                    .await?;
+                let enabled = self
+                    .adb
+                    .shell(&self.serial, "settings get secure enabled_input_methods")
+                    .await?;
+                anyhow::ensure!(
+                    !enabled
+                        .trim()
+                        .split(':')
+                        .any(|entry| entry.split(';').next() == Some(IME_ID)),
+                    "helper IME enablement restore unverified"
+                );
+                Ok(())
+            }
+            .await
+        } else {
+            restore
+        };
+        if restore.is_ok() {
+            if let Some(owner) = &self.canary {
+                std::fs::remove_file(owner.report.join("ime-checkpoint.json"))?;
+            }
+            self.pending_clipboard.lock().take();
+        }
         combine_ime_guard(outcome, restore)
+    }
+}
+
+async fn release_canary_owner(
+    adb: &AdbProgram,
+    serial: &str,
+    owner: &CanaryOwner,
+) -> anyhow::Result<()> {
+    let output = adb.shell_output(serial, &format!("am start-foreground-service -n {SERVICE} --es bootstrapSocket {} --es bootstrapNonce {} --es bootstrapOwnerId {}", owner.socket, owner.nonce, owner.owner_id), Duration::from_secs(15)).await?;
+    anyhow::ensure!(
+        output.exit_code == 0
+            && !output.stdout.contains("Error")
+            && !output.stderr.contains("Error"),
+        "bootstrap release listener start failed"
+    );
+    let reply = bootstrap_exchange(adb, serial, &owner.apk_path, &owner.socket, owner.uid,
+        json!({"action":"release","nonce":owner.nonce,"ownerId":owner.owner_id,"token":helper_token(serial),"serviceInstance":owner.instance,"ownerGeneration":owner.generation})).await?;
+    anyhow::ensure!(
+        reply["ok"] == true
+            && reply["state"] == "released"
+            && reply["nonce"].as_str() == Some(owner.nonce.as_str())
+            && reply["ownerId"].as_str() == Some(owner.owner_id.as_str())
+            && reply["serviceInstance"].as_str() == Some(owner.instance.as_str())
+            && reply["ownerGeneration"].as_str() == Some(owner.generation.as_str()),
+        "helper owned release unresolved"
+    );
+    std::fs::write(
+        owner.report.join("helper-released.json"),
+        serde_json::to_vec(&reply)?,
+    )?;
+    Ok(())
+}
+
+async fn bootstrap_exchange(
+    adb: &AdbProgram,
+    serial: &str,
+    apk: &str,
+    socket: &str,
+    uid: u32,
+    body: Value,
+) -> anyhow::Result<Value> {
+    let bytes = serde_json::to_vec(&body)?;
+    anyhow::ensure!(bytes.len() <= 4096, "bootstrap envelope too large");
+    let mut payload = (bytes.len() as u32).to_be_bytes().to_vec();
+    payload.extend(bytes);
+    let bridge = format!(
+        "CLASSPATH={} app_process /system/bin com.riviu.agent.BootstrapBridge {socket} {uid}",
+        crate::adb::quote_device_path(apk)
+    );
+    let script = format!(
+        "run-as com.riviu.agent sh -c '{}'",
+        bridge.replace('\'', "'\\''")
+    );
+    let reply = adb
+        .shell_secret_input(serial, &script, payload, Duration::from_secs(12))
+        .await?;
+    anyhow::ensure!(reply.len() >= 4, "bootstrap reply missing");
+    let size = u32::from_be_bytes(reply[..4].try_into()?) as usize;
+    anyhow::ensure!(
+        size <= 4096 && reply.len() == size + 4,
+        "bootstrap reply framing invalid"
+    );
+    serde_json::from_slice(&reply[4..]).context("bootstrap reply invalid")
+}
+
+fn require_clipboard_qualification() -> anyhow::Result<()> {
+    anyhow::bail!("HelperClipboardNotQualified: durable recovery and control-plane ownership qualification pending; no IME mutation")
+}
+
+#[derive(Debug)]
+struct ClipboardSettledFailure;
+impl std::fmt::Display for ClipboardSettledFailure {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str("clipboard job settled without success")
+    }
+}
+impl std::error::Error for ClipboardSettledFailure {}
+
+#[derive(Debug)]
+struct ClipboardSettlementUnknown;
+impl std::fmt::Display for ClipboardSettlementUnknown {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str("clipboard job settlement is unknown")
+    }
+}
+impl std::error::Error for ClipboardSettlementUnknown {}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct HelperHealth {
+    pub service_reachable: Option<bool>,
+    pub authenticated: Option<bool>,
+    pub agent_version: Option<String>,
+    pub protocol_version: Option<u32>,
+    pub advertised_features: Option<Vec<String>>,
+    /// No capability is live-qualified by a health read alone.
+    pub reason: String,
+}
+impl HelperHealth {
+    pub fn unobserved() -> Self {
+        Self {
+            service_reachable: None,
+            authenticated: None,
+            agent_version: None,
+            protocol_version: None,
+            advertised_features: None,
+            reason: "connectionUnobserved".into(),
+        }
     }
 }
 
@@ -714,18 +1570,8 @@ async fn enable_ime(adb: &AdbProgram, serial: &str) -> anyhow::Result<()> {
 /// The token goes as an Intent extra rather than a file or a property: it reaches exactly one
 /// process, leaves nothing behind on the device, and a helper started by anyone *else* — which
 /// an exported service always allows — comes up with no token and therefore serves nothing.
-async fn start_service(adb: &AdbProgram, serial: &str) -> anyhow::Result<()> {
-    let token = helper_token(serial);
-    // Token is hex from `Uuid::simple`, so it needs no quoting; asserted rather than assumed,
-    // because this string is pasted into a device shell command.
-    debug_assert!(token.chars().all(|c| c.is_ascii_hexdigit()));
-    adb.shell(
-        serial,
-        &format!("am start-foreground-service -n {SERVICE} --es token {token}"),
-    )
-    .await
-    .map(|_| ())
-    .with_context(|| format!("start {SERVICE} on {serial}"))
+async fn start_service(_adb: &AdbProgram, _serial: &str) -> anyhow::Result<()> {
+    anyhow::bail!("HelperSecureProvisioningRequired: secret-free bootstrap is not runtime-qualified; token-bearing ADB arguments refused")
 }
 
 async fn current_ime(adb: &AdbProgram, serial: &str) -> anyhow::Result<String> {
@@ -753,43 +1599,20 @@ async fn set_ime(adb: &AdbProgram, serial: &str, ime: &str) -> anyhow::Result<()
 
 async fn forward_helper(adb: &AdbProgram, serial: &str) -> anyhow::Result<u16> {
     let remote = format!("tcp:{DEVICE_PORT}");
-    prune_helper_forwards(adb, serial).await;
-    adb.device(
-        serial,
-        &["forward", "tcp:0", &remote],
-        Duration::from_secs(30),
-    )
-    .await
-    .with_context(|| format!("forward tcp:0 to {remote} on {serial}"))?;
-    let listing = adb
-        .device(serial, &["forward", "--list"], Duration::from_secs(30))
+    let allocated = adb
+        .device(
+            serial,
+            &["forward", "tcp:0", &remote],
+            Duration::from_secs(30),
+        )
         .await
-        .context("list adb forwards")?;
-    frames::parse_forward_port(&listing, serial, &remote).ok_or_else(|| {
-        anyhow!("adb reported no helper forward for {serial} -> {remote}; listing was {listing:?}")
-    })
-}
-
-async fn prune_helper_forwards(adb: &AdbProgram, serial: &str) -> usize {
-    let remote = format!("tcp:{DEVICE_PORT}");
-    let listing = match adb
-        .device(serial, &["forward", "--list"], Duration::from_secs(30))
-        .await
-    {
-        Ok(listing) => listing,
-        Err(_) => return 0,
-    };
-    let stale = frames::parse_forward_ports(&listing, serial, &remote);
-    let mut removed = 0;
-    for port in stale {
-        if frames::remove_forward(adb, serial, port).await.is_ok() {
-            removed += 1;
-        }
-    }
-    if removed > 0 {
-        tracing::info!(serial, removed, "reclaimed stale Riviu helper forwards");
-    }
-    removed
+        .with_context(|| format!("allocate helper forward on {serial}"))?;
+    allocated
+        .trim()
+        .parse::<u16>()
+        .ok()
+        .filter(|port| *port != 0)
+        .ok_or_else(|| anyhow!("ADB did not report the owned helper forward port"))
 }
 
 // Until attach succeeds the driver has no cached client to clean during shutdown.
@@ -849,6 +1672,158 @@ struct StatusWire {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn secure_provisioning_refuses_before_install_or_ime_effects() {
+        let error = HelperClient::ensure(
+            AdbProgram::at(PathBuf::from("never-run-adb")),
+            "fixture-provision",
+            None,
+        )
+        .await
+        .err()
+        .expect("must refuse");
+        assert!(error
+            .to_string()
+            .contains("HelperSecureProvisioningRequired"));
+    }
+
+    #[tokio::test]
+    async fn unqualified_clipboard_never_switches_ime() {
+        let client = HelperClient::at(
+            AdbProgram::at(PathBuf::from("never-run-adb")),
+            "fixture-unqualified",
+            1,
+        )
+        .unwrap();
+        assert!(client
+            .get_clipboard(1024)
+            .await
+            .unwrap_err()
+            .to_string()
+            .contains("HelperClipboardNotQualified"));
+        assert!(client.pending_clipboard.lock().is_none());
+    }
+
+    #[tokio::test]
+    async fn unresolved_clipboard_blocks_shutdown_and_preserves_reconciliation_state() {
+        let client = HelperClient::at(
+            AdbProgram::at(PathBuf::from("never-run-adb")),
+            "fixture-pending",
+            1,
+        )
+        .unwrap();
+        *client.pending_clipboard.lock() = Some(
+            json!({"previousIme":"fixture/.Ime","operationId":"fixture-operation","serviceInstance":"fixture-instance"}),
+        );
+        let clone = client.clone();
+        assert!(clone
+            .shutdown()
+            .await
+            .unwrap_err()
+            .to_string()
+            .contains("unresolved"));
+        assert!(!*client.lifecycle.lock().await);
+        assert_eq!(
+            client.pending_clipboard.lock().as_ref().unwrap()["operationId"],
+            "fixture-operation"
+        );
+    }
+
+    #[tokio::test]
+    async fn public_status_does_not_prove_authenticated_helper_health() {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let server = tokio::spawn(async move {
+            for index in 0..2 {
+                let (mut socket, _) = listener.accept().await.unwrap();
+                let mut request = [0; 4096];
+                let size = socket.read(&mut request).await.unwrap();
+                let request = String::from_utf8_lossy(&request[..size]);
+                let (status, body) = if index == 0 {
+                    assert!(request.starts_with("GET /status "));
+                    (
+                        "200 OK",
+                        r#"{"ok":true,"agentVersion":"0.5.0","protocolVersion":1,"features":["clipboard"]}"#,
+                    )
+                } else {
+                    assert!(request.starts_with("POST /v1/apps/describe "));
+                    ("401 Unauthorized", r#"{"ok":false,"error":"unauthorized"}"#)
+                };
+                socket.write_all(format!("HTTP/1.1 {status}\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}", body.len()).as_bytes()).await.unwrap();
+            }
+        });
+        let client = HelperClient::at(
+            AdbProgram::at(PathBuf::from("never-run-adb")),
+            "fixture-health",
+            port,
+        )
+        .unwrap();
+        let health = client.health().await;
+        assert_eq!(health.service_reachable, Some(true));
+        assert_eq!(health.authenticated, Some(false));
+        assert_eq!(health.reason, "authenticatedReadFailed");
+        assert_eq!(health.advertised_features, Some(vec!["clipboard".into()]));
+        server.await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn closed_helper_clone_never_dispatches() {
+        let client = HelperClient::at(
+            AdbProgram::at(PathBuf::from("never-run-adb")),
+            "fixture-closed",
+            1,
+        )
+        .unwrap();
+        *client.lifecycle.lock().await = true;
+        let clone = client.clone();
+        assert!(clone
+            .require_status()
+            .await
+            .unwrap_err()
+            .to_string()
+            .contains("closed"));
+        assert!(clone
+            .describe_apps(&[PACKAGE.into()], false)
+            .await
+            .unwrap_err()
+            .to_string()
+            .contains("closed"));
+        // Repeated shutdown does not spawn the deliberately nonexistent ADB.
+        clone.shutdown().await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn authenticated_probe_refuses_http_denial_even_with_ok_payload() {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let server = tokio::spawn(async move {
+            let (mut socket, _) = listener.accept().await.unwrap();
+            let mut request = vec![0; 4096];
+            let size = socket.read(&mut request).await.unwrap();
+            let request = String::from_utf8_lossy(&request[..size]);
+            assert!(request.starts_with("POST /v1/apps/describe "));
+            assert!(request.to_ascii_lowercase().contains("x-riviu-token:"));
+            let body = r#"{"ok":true,"apps":[]}"#;
+            socket.write_all(format!(
+                "HTTP/1.1 401 Unauthorized\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}", body.len()
+            ).as_bytes()).await.unwrap();
+        });
+        let client = HelperClient::at(
+            AdbProgram::at(PathBuf::from("never-run-adb")),
+            "fixture-auth",
+            port,
+        )
+        .unwrap();
+        let error = client
+            .describe_apps(&[PACKAGE.into()], false)
+            .await
+            .unwrap_err();
+        assert!(format!("{error:#}").contains("401"));
+        server.await.unwrap();
+    }
 
     #[tokio::test]
     async fn helper_startup_can_finish_after_the_service_start_command_returns() {

@@ -22,6 +22,8 @@ pub(crate) enum StartupPolicy {
     Normal,
     #[cfg(debug_assertions)]
     Smoke(SmokeSession),
+    #[cfg(debug_assertions)]
+    Rehearsal(crate::no_public::Session),
 }
 
 #[cfg(debug_assertions)]
@@ -38,6 +40,17 @@ pub(crate) struct SmokeAttempt {
 
 impl StartupPolicy {
     pub(crate) fn from_environment() -> anyhow::Result<Self> {
+        if std::env::var_os("RIVIU_NO_PUBLIC_REHEARSAL").is_some() {
+            for name in WEBVIEW_ENV_OVERRIDES {
+                anyhow::ensure!(std::env::var_os(name).is_none(), "No-public mode refuses WebView override {name}");
+            }
+        }
+        if let Some(session) = crate::no_public::Session::from_process()? {
+            #[cfg(debug_assertions)]
+            return Ok(Self::Rehearsal(session));
+            #[cfg(not(debug_assertions))]
+            anyhow::bail!("no-public rehearsal is debug-only");
+        }
         Self::from_lookup(cfg!(debug_assertions), |name| std::env::var_os(name))
     }
 
@@ -85,11 +98,21 @@ impl StartupPolicy {
         }
     }
 
+    pub(crate) fn rehearsal(&self) -> Option<&crate::no_public::Session> {
+        match self {
+            #[cfg(debug_assertions)]
+            Self::Rehearsal(session) => Some(session),
+            _ => None,
+        }
+    }
+
     pub(crate) fn is_smoke(&self) -> bool {
         match self {
             Self::Normal => false,
             #[cfg(debug_assertions)]
             Self::Smoke(_) => true,
+            #[cfg(debug_assertions)]
+            Self::Rehearsal(_) => false,
         }
     }
 
@@ -98,6 +121,8 @@ impl StartupPolicy {
             Self::Normal => None,
             #[cfg(debug_assertions)]
             Self::Smoke(session) => Some(session.root.join("logs")),
+            #[cfg(debug_assertions)]
+            Self::Rehearsal(session) => Some(session.root.join("logs")),
         }
     }
 
@@ -106,6 +131,8 @@ impl StartupPolicy {
             Self::Normal => None,
             #[cfg(debug_assertions)]
             Self::Smoke(session) => Some(session.root.join("webview")),
+            #[cfg(debug_assertions)]
+            Self::Rehearsal(session) => Some(session.root.join("webview")),
         }
     }
 
@@ -115,6 +142,8 @@ impl StartupPolicy {
     ) -> anyhow::Result<AppState> {
         match self {
             Self::Normal => AppState::bootstrap(resource_dir).await,
+            #[cfg(debug_assertions)]
+            Self::Rehearsal(session) => AppState::bootstrap_no_public(session.clone()).await,
             #[cfg(debug_assertions)]
             Self::Smoke(session) => {
                 // Each retry gets a new DB, never recovery/import from a failed attempt.
@@ -130,6 +159,9 @@ impl StartupPolicy {
     }
 
     pub(crate) fn check_command(&self, command: &str) -> Result<(), CommandError> {
+        if let Some(session) = self.rehearsal() {
+            return session.check_command(command);
+        }
         if !self.is_smoke() || smoke_read_command(command) {
             return Ok(());
         }
@@ -142,7 +174,7 @@ impl StartupPolicy {
         &self,
         #[cfg_attr(not(debug_assertions), allow(unused_variables))] context: &mut tauri::Context<R>,
     ) -> anyhow::Result<()> {
-        if !self.is_smoke() {
+        if !self.is_smoke() && self.rehearsal().is_none() {
             return Ok(());
         }
         #[cfg(debug_assertions)]

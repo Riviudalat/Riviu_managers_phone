@@ -184,14 +184,23 @@ impl AndroidDriver {
     }
     /// Point a host port at the agent's port on the device.
     async fn forward(&self, serial: &str) -> anyhow::Result<()> {
-        let forward_spec = format!("tcp:{}", self.host_port(serial));
         let device_spec = format!("tcp:{AGENT_DEVICE_PORT}");
+        if !self.automatic_setup_allowed {
+            if self.forwarded.lock().contains(serial) { return Ok(()); }
+            let allocated = self.adb.device(serial, &["forward", "tcp:0", &device_spec], adb::DEFAULT_TIMEOUT).await?;
+            let port = allocated.trim().parse::<u16>().ok().filter(|p|*p != 0).context("diagnostic agent forward allocation missing")?;
+            self.ports.lock().insert(serial.to_owned(), port);
+            self.forwarded.lock().insert(serial.to_owned());
+            return Ok(());
+        }
+        let forward_spec = format!("tcp:{}", self.host_port(serial));
+        let arguments = if self.automatic_setup_allowed {
+            vec!["forward", forward_spec.as_str(), device_spec.as_str()]
+        } else {
+            vec!["forward", "--no-rebind", forward_spec.as_str(), device_spec.as_str()]
+        };
         self.adb
-            .device(
-                serial,
-                &["forward", &forward_spec, &device_spec],
-                adb::DEFAULT_TIMEOUT,
-            )
+            .device(serial, &arguments, adb::DEFAULT_TIMEOUT)
             .await
             .context("open the adb forward to the agent")?;
         self.forwarded.lock().insert(serial.to_string());
@@ -385,7 +394,7 @@ impl AndroidDriver {
     /// alive solely because its `AdbKeyboard` IME is bound; that is not an active instrumentation
     /// and must not block Riviu. ActivityManager exposes the actual owner as an
     /// `ActiveInstrumentation{... {package/runner} ...}` row.
-    fn active_instrumentations(dump: &str, ours: &[&str]) -> Vec<String> {
+    pub(super) fn active_instrumentations(dump: &str, ours: &[&str]) -> Vec<String> {
         let mut active = Vec::new();
         for line in dump
             .lines()
@@ -544,15 +553,21 @@ impl AndroidDriver {
             }
             cache
         };
-        let helper = match self.try_attach_helper(udid).await {
-            Ok(helper) => helper,
-            Err(error) => {
-                tracing::warn!(
-                    serial = udid,
-                    %error,
-                    "Riviu helper is not attached; clipboard stays unsupported"
-                );
-                None
+        let helper = if !self.automatic_setup_allowed {
+            // Never provision under discovery. A helper already admitted by the same
+            // scoped controller can be handed into its leased preparation session.
+            self.helpers.lock().get(udid).filter(|helper| helper.is_scoped_canary()).cloned()
+        } else {
+            match self.try_attach_helper(udid).await {
+                Ok(helper) => helper,
+                Err(error) => {
+                    tracing::warn!(
+                        serial = udid,
+                        %error,
+                        "Riviu helper is not attached; clipboard stays unsupported"
+                    );
+                    None
+                }
             }
         };
         Ok(
@@ -597,15 +612,14 @@ impl AndroidDriver {
             .await
             .with_context(|| format!("không hỏi được máy {serial} xem đã có Riviu helper chưa"))?
             .contains("package:");
-        if !installed && self.riviu_agent_apk.is_none() {
+        if !installed && (!self.automatic_setup_allowed || self.riviu_agent_apk.is_none()) {
             return Ok(None);
         }
-        let helper = crate::riviu_agent::HelperClient::ensure(
-            self.adb.clone(),
-            serial,
-            self.riviu_agent_apk.as_deref(),
-        )
-        .await?;
+        let helper = if self.automatic_setup_allowed {
+            crate::riviu_agent::HelperClient::ensure(self.adb.clone(), serial, self.riviu_agent_apk.as_deref()).await?
+        } else {
+            crate::riviu_agent::HelperClient::attach_existing(self.adb.clone(), serial).await?
+        };
         self.helpers
             .lock()
             .insert(serial.to_string(), helper.clone());
@@ -635,20 +649,11 @@ impl AndroidDriver {
     /// missing rung is a non-installing attach; see the note on [`HelperProbe::reachable`].
     pub async fn helper_probe(&self, serial: &str) -> HelperProbe {
         let cached = self.helpers.lock().get(serial).cloned();
-        // Carried out of the branch below rather than re-derived from the cache, because
-        // the `remove` empties it either way: after that, "nobody had attached" and "the
-        // client we had went quiet" look identical from the outside.
-        let mut reachable = None;
-        if let Some(helper) = cached {
-            if helper.is_alive().await {
-                return HelperProbe {
-                    reachable: Some(true),
-                    installed: Some(true),
-                };
-            }
-            self.helpers.lock().remove(serial);
-            reachable = Some(false);
-        }
+        let health = match cached {
+            Some(helper) => helper.health().await,
+            None => crate::riviu_agent::HelperHealth::unobserved(),
+        };
+        // A diagnostic read never evicts/rekeys the connection it describes.
         let installed = self
             .adb
             .shell(serial, &format!("pm path {}", crate::riviu_agent::PACKAGE))
@@ -656,16 +661,17 @@ impl AndroidDriver {
             .map(|out| out.contains("package:"))
             .ok();
         HelperProbe {
-            reachable,
+            reachable: health.service_reachable,
             installed,
+            health,
         }
     }
 
     /// Make sure the agent is installed, running and forwarded.
     pub(super) async fn ensure_agent(&self, serial: &str) -> anyhow::Result<AgentClient> {
         self.verify_adb_transport(serial).await?;
-        let base = self.agent_base(serial);
         self.forward(serial).await?;
+        let base = self.agent_base(serial);
 
         // Reuse the session we already have. Opening a second one costs the whole
         // fleet: see the note on `Self::agents`.
@@ -678,6 +684,24 @@ impl AndroidDriver {
             // upstream singleton; DELETE schedules asynchronous instrumentation shutdown
             // and can kill the replacement (see AgentClient::recreate_session).
             self.agents.lock().remove(serial);
+        }
+
+        if !self.automatic_setup_allowed {
+            let activity = self.adb.shell(serial, "dumpsys activity").await?;
+            let foreign = Self::active_instrumentations(&activity, &[AGENT_PACKAGE, AGENT_TEST_PACKAGE]);
+            anyhow::ensure!(foreign.is_empty(), "Diagnostic refuses foreign instrumentation: {}", foreign.join(", "));
+            if !AgentClient::is_ready(&base).await {
+                anyhow::ensure!(self.diagnostic_runner_devices.contains(serial), "Diagnostic requires an already running UiAutomator server; no instrumentation setup or restart");
+                anyhow::ensure!(Self::active_instrumentations(&activity, &[]).is_empty(), "installed runner is occupied; no diagnostic restart");
+                for package in [AGENT_PACKAGE, AGENT_TEST_PACKAGE] {
+                    let found = self.adb.shell(serial, &format!("pm path {package}")).await?;
+                    anyhow::ensure!(found.lines().any(|line|line.trim().starts_with("package:")), "diagnostic runner APK absent; no install");
+                }
+                return self.instrument_and_wait(serial, &base).await;
+            }
+            let agent = self.open_and_cache_agent(serial, &base).await?;
+            anyhow::ensure!(agent.is_alive().await, "Diagnostic refuses a blind UiAutomator session; no restart");
+            return Ok(agent);
         }
 
         // A server that answers `/status` usually just needs a fresh session — that is the
@@ -783,6 +807,7 @@ impl AndroidDriver {
             .await
             .with_context(|| format!("không hỏi được máy {serial} xem đã có agent chưa"))?;
         if !installed.contains(AGENT_PACKAGE) {
+            anyhow::ensure!(self.automatic_setup_allowed, "Diagnostic session refuses agent APK installation");
             self.install_agent_apks(serial).await?;
         }
 
@@ -803,6 +828,10 @@ impl AndroidDriver {
     /// Start the runner and wait for a session that can actually read the screen.
     async fn instrument_and_wait(&self, serial: &str, base: &str) -> anyhow::Result<AgentClient> {
         self.refuse_active_foreign_instrumentation(serial).await?;
+        if !self.automatic_setup_allowed {
+            let activity = self.adb.shell(serial, "dumpsys activity").await?;
+            anyhow::ensure!(Self::active_instrumentations(&activity, &[]).is_empty(), "diagnostic runner occupied immediately before startup; no restart");
+        }
         // **Hold this phone's adb queue for the whole startup.** The child outlives the call
         // so it must not hold a global slot, but while `am instrument -w` is taking
         // `UiAutomation` a concurrent gesture that finds the queue free would open a second
@@ -817,12 +846,17 @@ impl AndroidDriver {
         // Everything awaited here is HTTP (`is_ready`, connect, `is_alive`), so the
         // no-adb-under-the-hold rule above still holds.
         if AgentClient::is_ready(base).await {
+            if !self.automatic_setup_allowed {
+                let agent = self.open_and_cache_agent(serial, base).await?;
+                anyhow::ensure!(agent.is_alive().await, "diagnostic existing runner blind; no restart");
+                return Ok(agent);
+            }
             if let Ok(agent) = self.open_and_cache_agent(serial, base).await {
                 if agent.is_alive().await {
                     return Ok(agent);
                 }
-                // Listening but blind: fall through to a clean restart — starting our
-                // own instrumentation replaces it, which is what this function is for.
+                anyhow::ensure!(self.automatic_setup_allowed, "diagnostic runner became blind; no DELETE/restart");
+                // Listening but blind: normal production may recover its runner.
                 let _ = agent.close().await;
                 self.agents.lock().remove(serial);
             }
@@ -985,7 +1019,7 @@ impl AndroidDriver {
 /// Two `Option<bool>`s rather than two `bool`s, and neither `None` means "no": this probe
 /// has two separate ways of not being able to answer, and §9.97 is the record of what it
 /// costs to let either of them render as a negative.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone)]
 pub struct HelperProbe {
     /// `Some(true)`: a client answered `/status` just now. `Some(false)`: the client this
     /// process held has stopped answering — a real silence. `None`: no session has attached
@@ -1002,6 +1036,7 @@ pub struct HelperProbe {
     /// Helper APK installed at all; `None` means the `pm path` question itself failed — not
     /// "absent" (§9.97).
     pub installed: Option<bool>,
+    pub health: crate::riviu_agent::HelperHealth,
 }
 
 #[cfg(test)]

@@ -6,85 +6,126 @@ import android.content.Context;
 import android.os.Handler;
 import android.os.Looper;
 
-import java.util.concurrent.CountDownLatch;
+import java.nio.charset.StandardCharsets;
+import java.security.MessageDigest;
 import java.util.concurrent.TimeUnit;
-import java.util.concurrent.atomic.AtomicReference;
 
-/**
- * Clipboard access for this UID. On Android 10+ a read only succeeds when this
- * app is the current IME (or the focused app). The desktop driver enables this
- * IME for the duration of one request and then restores the previous IME.
- *
- * ClipboardManager must run on a thread that has a Looper. The HTTP accept
- * loop does not — hopping to the main looper is load-bearing, not style.
- */
+/** Main-looper jobs retain settlement, rather than letting an expired queued write run later. */
 final class ClipboardStore {
-    private ClipboardStore() {}
-
-    static void setText(final Context context, final String text) {
-        runOnMain(new Runnable() {
-            @Override
-            public void run() {
-                manager(context).setPrimaryClip(
-                        ClipData.newPlainText("riviu", text == null ? "" : text));
-            }
-        });
-    }
-
-    static String getText(final Context context) {
-        final AtomicReference<String> out = new AtomicReference<String>("");
-        runOnMain(new Runnable() {
-            @Override
-            public void run() {
-                ClipData clip = manager(context).getPrimaryClip();
-                if (clip == null || clip.getItemCount() == 0) {
-                    return;
-                }
-                CharSequence text = clip.getItemAt(0).coerceToText(context);
-                out.set(text == null ? "" : text.toString());
-            }
-        });
-        return out.get();
-    }
-
-    private static ClipboardManager manager(Context context) {
-        ClipboardManager clipboard =
-                (ClipboardManager) context.getSystemService(Context.CLIPBOARD_SERVICE);
-        if (clipboard == null) {
-            throw new IllegalStateException("ClipboardManager is missing");
+    static final class Value {
+        final boolean available;
+        final String text;
+        final boolean written;
+        final ClipboardCompare.Result comparison;
+        boolean plainTextBaseline;
+        String baselineId;
+        private Value(boolean available, String text, boolean written, ClipboardCompare.Result comparison) {
+            this.available = available;
+            this.text = text;
+            this.written = written;
+            this.comparison = comparison;
         }
-        return clipboard;
+        static Value read(String text) { return new Value(text != null, text, false, null); }
+        static Value written() { return new Value(false, null, true, null); }
+        static Value compared(ClipboardCompare.Result result) { return new Value(result.available, null, result.written, result); }
     }
-
-    private static void runOnMain(final Runnable action) {
-        if (Looper.myLooper() == Looper.getMainLooper()) {
-            action.run();
-            return;
+    private final Context context;
+    private final MainThreadJobs jobs;
+    private final ClipboardSnapshots<ClipData> snapshots = new ClipboardSnapshots<ClipData>(32);
+    private final ClipboardSnapshots.Access<ClipData> snapshotAccess = new ClipboardSnapshots.Access<ClipData>() {
+        @Override public ClipData read() { return manager().getPrimaryClip(); }
+        @Override public boolean plain(ClipData clip) { return plainClip(clip); }
+        @Override public String text(ClipData clip) { return clip.getItemAt(0).getText().toString(); }
+        @Override public void write(ClipData original) { manager().setPrimaryClip(original); }
+        @Override public boolean equal(ClipData first, ClipData second) {
+            return plainClip(first) && plainClip(second)
+                    && first.getItemAt(0).getText().toString().equals(second.getItemAt(0).getText().toString())
+                    && java.util.Objects.equals(first.getDescription().getLabel() == null ? null : first.getDescription().getLabel().toString(),
+                            second.getDescription().getLabel() == null ? null : second.getDescription().getLabel().toString());
         }
-        final CountDownLatch done = new CountDownLatch(1);
-        final AtomicReference<RuntimeException> error = new AtomicReference<RuntimeException>();
-        new Handler(Looper.getMainLooper()).post(new Runnable() {
-            @Override
-            public void run() {
-                try {
-                    action.run();
-                } catch (RuntimeException e) {
-                    error.set(e);
-                } finally {
-                    done.countDown();
-                }
+    };
+    ClipboardStore(Context context) {
+        this.context = context;
+        final Handler handler = new Handler(Looper.getMainLooper());
+        jobs = new MainThreadJobs(new MainThreadJobs.Scheduler() {
+            @Override public boolean post(Runnable task) { return handler.post(task); }
+            @Override public void remove(Runnable task) { handler.removeCallbacks(task); }
+        }, System::nanoTime, 128);
+    }
+    MainThreadJobs.Job<Value> submit(String id, boolean set, String text) {
+        String fingerprint = fingerprint(set ? "set" : "get", null, text);
+        return jobs.submit(id, fingerprint, () -> {
+            ClipboardManager manager = manager();
+            if (set) {
+                manager.setPrimaryClip(ClipData.newPlainText("riviu", text));
+                return Value.written();
             }
-        });
+            ClipData clip = manager.getPrimaryClip();
+            if (clip == null || clip.getItemCount() == 0) return Value.read(null);
+            CharSequence value = clip.getItemAt(0).coerceToText(context);
+            Value result = Value.read(value == null ? null : value.toString());
+            result.plainTextBaseline = plainClip(clip);
+            return result;
+        }, 5, TimeUnit.SECONDS);
+    }
+    MainThreadJobs.Job<Value> compareSet(String id, String expectedText, String text) {
+        return jobs.submit(id, fingerprint("compareSet", expectedText, text), () ->
+            Value.compared(ClipboardCompare.apply(new ClipboardCompare.Access() {
+                @Override public String read() {
+                    ClipData clip = manager().getPrimaryClip();
+                    if (clip == null || clip.getItemCount() == 0) return null;
+                    CharSequence value = clip.getItemAt(0).coerceToText(context);
+                    return value == null ? null : value.toString();
+                }
+                @Override public void write(String replacement) {
+                    manager().setPrimaryClip(ClipData.newPlainText("riviu", replacement));
+                }
+            }, expectedText, text)), 5, TimeUnit.SECONDS);
+    }
+    MainThreadJobs.Job<Value> snapshot(String id) {
+        return jobs.submit(id, fingerprint("snapshot", null, null), () -> {
+            ClipData original = manager().getPrimaryClip();
+            Value value = Value.read(original == null ? null : plainClip(original) ? original.getItemAt(0).getText().toString() : null);
+            value.plainTextBaseline = plainClip(original);
+            value.baselineId = snapshots.capture(original, snapshotAccess);
+            return value;
+        }, 5, TimeUnit.SECONDS);
+    }
+    MainThreadJobs.Job<Value> restoreSnapshot(String id, String baselineId, String expectedText) {
+        if (!snapshots.known(baselineId)) throw new IllegalArgumentException("snapshot_unknown");
+        return jobs.submit(id, fingerprint("restoreSnapshot", baselineId, expectedText),
+                () -> Value.compared(snapshots.restore(baselineId, expectedText, snapshotAccess)), 5, TimeUnit.SECONDS);
+    }
+    static boolean plainClip(ClipData clip) {
+        if (clip == null || clip.getItemCount() != 1 || clip.getDescription() == null
+                || clip.getDescription().getMimeTypeCount() != 1
+                || !"text/plain".equals(clip.getDescription().getMimeType(0))) return false;
+        ClipData.Item item = clip.getItemAt(0);
+        CharSequence text = item.getText();
+        return text instanceof String && !(text instanceof android.text.Spanned)
+                && item.getUri() == null && item.getIntent() == null && item.getHtmlText() == null;
+    }
+    MainThreadJobs.Job<?> find(String id) { return jobs.find(id); }
+    int unsettled() { return jobs.unsettled(); }
+    void closeAdmission() { jobs.closeAdmission(); }
+    private ClipboardManager manager() {
+        ClipboardManager manager = (ClipboardManager) context.getSystemService(Context.CLIPBOARD_SERVICE);
+        if (manager == null) throw new IllegalStateException("ClipboardManager unavailable");
+        return manager;
+    }
+    static String fingerprint(String action, String expected, String text) {
         try {
-            if (!done.await(5, TimeUnit.SECONDS)) {
-                throw new IllegalStateException("main-thread clipboard timed out");
-            }
-        } catch (InterruptedException e) {
-            Thread.currentThread().interrupt();
-            throw new IllegalStateException("main-thread clipboard interrupted", e);
-        }
-        if (error.get() != null) {
-            throw error.get();
+            String a = expected == null ? "" : expected;
+            String replacement = text == null ? "" : text;
+            // Length framing makes embedded separators unambiguous and binds BOTH values.
+            byte[] digest = MessageDigest.getInstance("SHA-256").digest(
+                    (action.length() + ":" + action + a.length() + ":" + a + replacement.length() + ":" + replacement)
+                            .getBytes(StandardCharsets.UTF_8));
+            StringBuilder hex = new StringBuilder();
+            for (byte b : digest) hex.append(String.format(java.util.Locale.ROOT, "%02x", b & 255));
+            return hex.toString();
+        } catch (java.security.NoSuchAlgorithmException e) {
+            throw new IllegalStateException("SHA-256 unavailable");
         }
     }
 }

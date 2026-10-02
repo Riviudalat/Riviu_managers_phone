@@ -358,6 +358,7 @@ pub struct AppState {
     pub interaction_artifacts: FlowArtifactStore,
     pub db: Arc<Database>,
     pub gui_service: Arc<crate::gui_service::GuiService>,
+    pub(crate) rehearsal_runs: Arc<crate::no_public_runs::Registry>,
     pub comment_verifications: Option<riviu_core::comment_verification::worker::VerificationWorker>,
     pub(crate) dev_acceptance: crate::dev_acceptance::DevAcceptancePolicy,
     #[cfg(debug_assertions)]
@@ -402,6 +403,9 @@ pub struct AppState {
     background_stopped_notify: Arc<Notify>,
     background_shutdown_error: Arc<RwLock<Option<String>>>,
 }
+
+#[cfg(debug_assertions)]
+fn isolated_admission_enabled(rehearsal_scope: bool) -> bool { rehearsal_scope }
 
 pub(crate) struct CommandAdmissionState {
     accepting_work: AtomicBool,
@@ -788,29 +792,53 @@ impl AppState {
     pub(crate) async fn bootstrap_ui_smoke(
         attempt: crate::ui_smoke::SmokeAttempt,
     ) -> anyhow::Result<Self> {
+        Self::bootstrap_isolated_state(attempt.data, None).await
+    }
+
+    #[cfg(debug_assertions)]
+    pub(crate) async fn bootstrap_no_public(scope: crate::no_public::Session) -> anyhow::Result<Self> {
+        let data = scope.root.join("data");
+        std::fs::create_dir(&data)?;
+        Self::bootstrap_isolated_state(data, Some(scope)).await
+    }
+
+    #[cfg(debug_assertions)]
+    async fn bootstrap_isolated_state(data: PathBuf, scope: Option<crate::no_public::Session>) -> anyhow::Result<Self> {
         let credentials = crate::ui_smoke::memory_credentials();
         let db = Arc::new(
-            Database::open(attempt.data.join("riviu.db"))?
+            Database::open(data.join("riviu.db"))?
                 .with_secrets(Arc::new(KeyringSecrets::new(credentials.clone()))),
         );
-        let artifacts_dir = attempt.data.join("artifacts");
+        let artifacts_dir = data.join("artifacts");
         std::fs::create_dir(&artifacts_dir)?;
         // Direct mock construction does not consult token env, manifests, sidecars or USB.
-        let mock = riviu_ios_driver::MockIosDriver::new();
-        let streams = mock.stream_hub();
-        let control = Arc::new(DeviceControlPlane::new_with_capability_registry(
-            Arc::new(mock),
-            Arc::new(DeviceWorkCoordinator::new()),
-            Arc::new(StreamBudgetManager::new(DEFAULT_DESKTOP_STREAM_CAPACITY)?),
-            Arc::new(DeviceCapabilityRegistry::empty()),
-        ));
-        // The constructor creates an internal cleanup receiver. Join it immediately,
-        // while the only possible backend is the direct mock above. Cached roster/settings
-        // still read normally, but even a missed command gate cannot acquire a device lease.
-        control.shutdown_cleanup().await?;
+        let (control, streams, android) = if scope.is_some() {
+            let root = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../../sidecars");
+            let tools = crate::android_tools::AndroidTools::load_from(&root, SidecarOrigin::RepoCheckout);
+            let config = riviu_android_driver::AndroidDriverConfig {
+                bundled_adb_path: tools.adb_path,
+                bundled_minicap_apk: tools.minicap_apk,
+                bundled_scrcpy_server: tools.scrcpy_server,
+                automatic_setup_allowed: false,
+                diagnostic_runner_devices: scope.as_ref().expect("diagnostic scope").devices.iter().filter(|d|d.allow_installed_runner).map(|d|d.udid.clone()).collect(),
+                ..Default::default()
+            };
+            let driver = riviu_android_driver::detect_driver(&config).await.map_err(anyhow::Error::msg)?;
+            let streams = StreamHub::new();
+            driver.set_frame_sink(Arc::new(streams.clone()));
+            let control = Arc::new(DeviceControlPlane::new( driver.clone(), Arc::new(DeviceWorkCoordinator::new()), Arc::new(StreamBudgetManager::new(2)?)));
+            (control, streams, Some(driver))
+        } else {
+            let mock = riviu_ios_driver::MockIosDriver::new();
+            let streams = mock.stream_hub();
+            let control = Arc::new(DeviceControlPlane::new_with_capability_registry(Arc::new(mock), Arc::new(DeviceWorkCoordinator::new()), Arc::new(StreamBudgetManager::new(DEFAULT_DESKTOP_STREAM_CAPACITY)?), Arc::new(DeviceCapabilityRegistry::empty())));
+            control.shutdown_cleanup().await?;
+            (control, streams, None)
+        };
         let events = EventBus::new(512);
         let registry = DeviceRegistry::new(events.clone());
-        registry.upsert_many(control.list_devices().await?);
+        let roster = control.list_devices().await?;
+        registry.upsert_many(roster.into_iter().filter(|device| scope.as_ref().is_none_or(|scope| scope.devices.iter().any(|entry| entry.udid == device.udid))).collect());
         let jobs = JobQueue::new(
             db.clone(),
             events.clone(),
@@ -842,6 +870,7 @@ impl AppState {
             artifacts_dir.clone(),
         );
         Ok(Self {
+            rehearsal_runs: Arc::new(crate::no_public_runs::Registry::default()),
             ui_smoke: true,
             comment_verifications: None,
             dev_acceptance: crate::dev_acceptance::DevAcceptancePolicy::from_process(),
@@ -849,14 +878,12 @@ impl AppState {
             events,
             control,
             streams,
-            driver_mode: DriverMode::Mock,
-            driver_degraded_reason: Some(
-                "UI smoke: chỉ có thiết bị mock, điều khiển thật bị khóa".into(),
-            ),
+            driver_mode: if scope.is_some() { DriverMode::Pymobiledevice3 } else { DriverMode::Mock },
+            driver_degraded_reason: Some(if scope.is_some() { "No-public rehearsal: Android only; iOS is disabled".into() } else { "UI smoke: mock devices only".into() }),
             driver_list_error: None,
-            android_unavailable_reason: Some("UI smoke: không khởi động Android/USB".into()),
+            android_unavailable_reason: if scope.is_some() { None } else { Some("UI smoke: Android/USB disabled".into()) },
             android_tool_problems: Vec::new(),
-            android: None,
+            android,
             view_hub: crate::view_hub::ViewHub::new(),
             view_paint: crate::view_watchdog::ViewPaintLedger::new(),
             view_recovery: crate::view_watchdog::ViewRecoveryGate::new(),
@@ -867,7 +894,7 @@ impl AppState {
             db: db.clone(),
             gui_service,
             signing: SigningService::with_credentials(
-                attempt.data.join("disabled-sidecars/signer"),
+                data.join("disabled-sidecars/signer"),
                 credentials.clone(),
             ),
             secrets: credentials,
@@ -878,7 +905,7 @@ impl AppState {
             stream_settings: Arc::new(RwLock::new(StreamSettings::default())),
             local_api_runtime: Arc::new(RwLock::new(crate::local_api::LocalApiRuntime::default())),
             artifacts_dir,
-            legacy_wda_bundle: attempt.data.join("disabled-sidecars/absent.ipa"),
+            legacy_wda_bundle: data.join("disabled-sidecars/absent.ipa"),
             nurture: NurtureRuntime::with_database(db),
             nurture_engine,
             orchestration: crate::orchestration_commands::OrchestrationChildRuntime::new(),
@@ -886,7 +913,9 @@ impl AppState {
             overlay_sessions: AsyncMutex::new(HashMap::new()),
             semantic_sessions: Arc::new(parking_lot::Mutex::new(HashMap::new())),
             overlay_gates: AsyncMutex::new(HashMap::new()),
-            command_admission: Arc::new(CommandAdmissionState::new(false)),
+            // Diagnostic scope admits only the typed handlers already constrained by
+            // ingress; UI smoke stays closed to mutating/device commands.
+            command_admission: Arc::new(CommandAdmissionState::new(isolated_admission_enabled(scope.is_some()))),
             background_stop: Arc::new(AtomicBool::new(true)),
             background_stopped: Arc::new(AtomicBool::new(true)),
             background_stopped_notify: Arc::new(Notify::new()),
@@ -908,9 +937,21 @@ impl AppState {
     pub(crate) async fn shutdown_ui_smoke(&self) -> anyhow::Result<()> {
         anyhow::ensure!(self.is_ui_smoke(), "not an isolated UI smoke state");
         self.command_admission.reject_new_work();
+        self.rehearsal_runs.cancel_all();
+        self.rehearsal_runs.drain().await?;
         self.wait_for_mutating_commands().await;
         // No sampler was ever started; this must not wait for a nonexistent task.
-        self.shutdown_background_sampler().await
+        self.shutdown_background_sampler().await?;
+        // Mock cleanup is already closed; a no-public Android state must drain
+        // its real control-plane cleanup worker before process exit.
+        if self.android.is_some() {
+            anyhow::ensure!(self.control.cleanup_quarantine_count() == 0,
+                "diagnostic cleanup quarantined; preserve driver/session credentials for reconciliation");
+            anyhow::ensure!(!self.android.as_ref().is_some_and(|driver|driver.helper_cleanup_pending()),
+                "diagnostic helper cleanup pending; preserve ownership for reconciliation");
+            self.control.shutdown_cleanup().await?;
+        }
+        Ok(())
     }
 
     pub async fn bootstrap(resource_dir: Option<PathBuf>) -> anyhow::Result<Self> {
@@ -1268,6 +1309,7 @@ impl AppState {
 
         let state = Self {
             #[cfg(debug_assertions)]
+            rehearsal_runs: Arc::new(crate::no_public_runs::Registry::default()),
             ui_smoke: false,
             comment_verifications: (!dev_acceptance.automatic_device_workers_frozen()).then(|| {
                 riviu_core::comment_verification::worker::VerificationWorker::start(
@@ -3404,6 +3446,18 @@ mod tests {
     fn mock_startup_never_probes_the_real_android_fleet() {
         assert!(!should_bootstrap_android(true));
         assert!(should_bootstrap_android(false));
+    }
+
+    #[test]
+    #[cfg(debug_assertions)]
+    fn isolated_admission_opens_only_for_typed_rehearsal_scope() {
+        let smoke = Arc::new(CommandAdmissionState::new(isolated_admission_enabled(false)));
+        assert!(smoke.ensure_accepting_work().is_err());
+        let rehearsal = Arc::new(CommandAdmissionState::new(isolated_admission_enabled(true)));
+        let admitted = rehearsal.ensure_accepting_work().expect("typed diagnostic admitted");
+        rehearsal.reject_new_work();
+        assert!(rehearsal.ensure_accepting_work().is_err());
+        drop(admitted);
     }
 
     #[tokio::test]

@@ -90,7 +90,13 @@ status screen. The desktop prepares the package after each observed Android
 connection, under a Repair lease that keeps the stream. Missing/old packages are
 installed once, then versionCode and launcher are read back. Current/newer packages
 are reused; blocked installation waits for a new connection after the operator
-fixes the device-side permission. The helper service still starts only when needed.
+fixes the device-side permission. Package preparation does not prove service authentication.
+The current development helper client blocks new token provisioning and clipboard/IME
+activation pending secure-bootstrap and recovery qualification; see the
+[candidate boundaries](../riviu-android-agent/README.md#deployment-and-candidate-qualification).
+The shipped APK remains 0.5.0. The 0.6.0 debug candidate has a separate exact-device
+canary path; qualifying bootstrap/clipboard reads and restoration does not qualify
+normal release provisioning, clipboard writes, crash recovery or every helper feature.
 
 The manifest pins **nine** files. The Layout section above lists them; if that list
 and the manifest ever disagree, the manifest is the one the loader reads.

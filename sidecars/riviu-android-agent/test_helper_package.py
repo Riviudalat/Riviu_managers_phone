@@ -1,4 +1,5 @@
 """Read-only APK regressions. Requires SDK build-tools; never invokes adb."""
+import argparse
 import hashlib
 import json
 import os
@@ -13,7 +14,9 @@ import zipfile
 
 ROOT = Path(__file__).resolve().parent
 REPO = ROOT.parents[1]
-APK = REPO / "sidecars/android/noarch/riviu-agent.apk"
+SHIPPED_APK = REPO / "sidecars/android/noarch/riviu-agent.apk"
+APK = SHIPPED_APK
+CANDIDATE = False
 ANDROID = "{http://schemas.android.com/apk/res/android}"
 # The installed 0.4.0 helper uses this certificate; a new key would reject upgrades.
 SIGNER_SHA256 = "0ecb2f06620b2d0f2fcc2a71cede204819a20ddcc1210573bc8ab3f4b48ff813"
@@ -33,19 +36,24 @@ class HelperPackageTests(unittest.TestCase):
         if not sdk:
             raise RuntimeError("Set ANDROID_HOME or ANDROID_SDK_ROOT to verify the actual APK")
         candidates = sorted((Path(sdk) / "build-tools").glob("*"), reverse=True)
-        cls.tools = next((path for path in candidates if (path / "aapt.exe").is_file()), None)
-        if cls.tools is None:
+        tools = next((path for path in candidates if (path / "aapt.exe").is_file()), None)
+        if tools is None:
             raise RuntimeError("Android build-tools with aapt/apksigner are required")
+        cls.tools = tools
         cls.badging = run(str(cls.tools / "aapt.exe"), "dump", "badging", str(APK))
         cls.manifest_dump = run(str(cls.tools / "aapt.exe"), "dump", "xmltree", str(APK), "AndroidManifest.xml")
         cls.manifest = ET.parse(ROOT / "app/src/main/AndroidManifest.xml").getroot()
 
     def test_apk_exposes_named_launcher_and_pinned_protocol_version(self) -> None:
         gradle = (ROOT / "app/build.gradle").read_text(encoding="utf-8")
-        version = re.search(r'versionName\s+"([^"]+)"', gradle).group(1)
-        code = re.search(r"versionCode\s+(\d+)", gradle).group(1)
+        version_match = re.search(r'versionName\s+"([^"]+)"', gradle)
+        code_match = re.search(r"versionCode\s+(\d+)", gradle)
+        assert version_match is not None and code_match is not None, "source version required"
+        version = version_match.group(1)
+        code = code_match.group(1)
         protocol = (ROOT / "app/src/main/java/com/riviu/agent/Protocol.java").read_text(encoding="utf-8")
-        self.assertIn(f"name='com.riviu.agent' versionCode='{code}' versionName='{version}'", self.badging)
+        artifact_version, artifact_code = (version, code) if CANDIDATE else ("0.5.0", "5")
+        self.assertIn(f"name='com.riviu.agent' versionCode='{artifact_code}' versionName='{artifact_version}'", self.badging)
         self.assertIn("application-label:'Riviu Helper'", self.badging)
         self.assertIn("launchable-activity: name='com.riviu.agent.MainActivity'", self.badging)
         self.assertIn(f'AGENT_VERSION = "{version}"', protocol)
@@ -54,11 +62,17 @@ class HelperPackageTests(unittest.TestCase):
             dex = archive.read("classes.dex")
             self.assertIn(b"Lcom/riviu/agent/MainActivity;", dex)
             self.assertIn(b"launcher", dex)
-            self.assertIn(version.encode(), dex)
+            self.assertIn(artifact_version.encode(), dex)
+            if CANDIDATE:
+                self.assertRegex(self.manifest_dump, r'android:debuggable[^\n]+0xffffffff')
+                for feature in (b"authenticatedSessionStatus", b"clipboardJobs", b"legacy_unproven", b"secureBootstrapRunAs"):
+                    self.assertIn(feature, dex)
 
     def test_launcher_is_read_only_and_service_access_contract_is_retained(self) -> None:
         application = self.manifest.find("application")
+        assert application is not None, "application required"
         activity = application.find("activity")
+        assert activity is not None, "launcher activity required"
         self.assertEqual(activity.get(ANDROID + "name"), ".MainActivity")
         self.assertEqual(activity.get(ANDROID + "exported"), "true")
         self.assertEqual(application.get(ANDROID + "icon"), "@mipmap/ic_launcher")
@@ -93,7 +107,7 @@ class HelperPackageTests(unittest.TestCase):
             self.assertIn("res/drawable-nodpi-v4/riviu_logo.png", names)
 
     def test_shipped_bytes_match_manifest_and_notice(self) -> None:
-        data = APK.read_bytes()
+        data = SHIPPED_APK.read_bytes()
         digest = hashlib.sha256(data).hexdigest()
         manifest = json.loads((REPO / "sidecars/android/android-tools-manifest.json").read_text(encoding="utf-8"))
         entry = next(item for item in manifest["files"] if item.get("role") == "riviuAgentApk")
@@ -103,6 +117,11 @@ class HelperPackageTests(unittest.TestCase):
         self.assertIn(digest, notice)
         self.assertIn(f"bytes  {len(data)}", notice)
 
+    def test_candidate_permissions_match_shipped_exactly(self) -> None:
+        shipped = run(str(self.tools / "aapt.exe"), "dump", "permissions", str(SHIPPED_APK))
+        candidate = run(str(self.tools / "aapt.exe"), "dump", "permissions", str(APK))
+        self.assertEqual(shipped, candidate)
+
     def test_apk_signature_preserves_upgrade_identity_and_alignment(self) -> None:
         signer = run(str(self.tools / "apksigner.bat"), "verify", "--verbose", "--print-certs", str(APK))
         self.assertIn("Verified using v2 scheme (APK Signature Scheme v2): true", signer)
@@ -111,4 +130,11 @@ class HelperPackageTests(unittest.TestCase):
 
 
 if __name__ == "__main__":
-    unittest.main(verbosity=2)
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--candidate", type=Path)
+    args, remaining = parser.parse_known_args()
+    if args.candidate:
+        APK = args.candidate.resolve()
+        CANDIDATE = True
+        print(f"candidate {APK} bytes={APK.stat().st_size} sha256={hashlib.sha256(APK.read_bytes()).hexdigest()}")
+    unittest.main(argv=[__file__, *remaining], verbosity=2)

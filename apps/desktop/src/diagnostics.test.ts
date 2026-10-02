@@ -67,6 +67,25 @@ describe("normalizeDeviceHealth", () => {
     ]);
   });
 
+  it("does not promote reachable or advertised helper features into authenticated capability", () => {
+    const checks = normalizeDeviceHealth(device, report({ helperHealth: {
+      serviceReachable: true, authenticated: false, agentVersion: "0.5.0", protocolVersion: 1,
+      advertisedFeatures: ["clipboard", "pushMedia"], reason: "authenticatedReadFailed",
+    } }));
+    expect(checks.find(c => c.id === "helperReachable")).toMatchObject({ status: "pass" });
+    expect(checks.find(c => c.id === "helperAuth")).toMatchObject({ status: "warning" });
+    expect(checks.find(c => c.id === "helperFeatures")).toMatchObject({ status: "unknown" });
+  });
+
+  it("authenticated helper read does not qualify clipboard or media", () => {
+    const checks = normalizeDeviceHealth(device, report({ helperHealth: {
+      serviceReachable: true, authenticated: true, agentVersion: "0.6.0", protocolVersion: 1,
+      advertisedFeatures: ["clipboard"], reason: "authenticatedReadVerified",
+    } }));
+    expect(checks.find(c => c.id === "helperAuth")).toMatchObject({ status: "pass" });
+    expect(checks.find(c => c.id === "helperFeatures")).toMatchObject({ status: "unknown" });
+  });
+
   it("keeps unknown answers distinct from a negative answer", () => {
     const checks = normalizeDeviceHealth(device, report({
       agentReadyNow: null,

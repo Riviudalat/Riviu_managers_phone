@@ -26,6 +26,7 @@
 //! Row pitch was ~300 px, and the band below one body reaches the next row's reply
 //! button — which is exactly why "nearest below", not "first found", is load-bearing.
 
+pub mod rehearsal;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
 
@@ -43,6 +44,8 @@ use crate::ui_automation::runtime::{read_before_deadline, ReadWaitResult};
 use anyhow::Context;
 
 mod composer;
+mod draft_cleanup;
+pub use draft_cleanup::DraftCleanup;
 mod exact_target;
 mod mention_token;
 pub(crate) mod replies;
@@ -839,6 +842,8 @@ const COMMENT_AUTHOR_CLASS: &str = "android.widget.Button";
 #[derive(Debug, Clone, PartialEq)]
 pub struct HierarchySendOutcome {
     pub verdict: crate::tiktok_drawer::CommentVerdict,
+    /// Draft settlement is independent of the public Send boundary.
+    pub cleanup: DraftCleanup,
     /// Frame at the moment Send was armed, and after it disarmed. Same two fields the
     /// pixel path fills, from the same source — so a stored evidence row means the same
     /// thing whichever backend wrote it.
@@ -875,6 +880,7 @@ impl HierarchySendOutcome {
     fn interrupted_before_send() -> Self {
         Self {
             verdict: crate::tiktok_drawer::CommentVerdict::SendFlowInterrupted,
+            cleanup: DraftCleanup::NotTyped,
             armed_frame_sha256: String::new(),
             cleared_frame_sha256: String::new(),
             identity: None,
@@ -900,6 +906,11 @@ pub enum HierarchySendFailure {
     AfterEffect(anyhow::Error),
     #[error("hierarchy send lost assignment ownership before the Send tap: {0}")]
     OwnershipLost(anyhow::Error),
+    /// No Send was dispatched, but draft settlement is unresolved and retry is unsafe.
+    #[error("hierarchy draft requires attention ({cleanup:?}) before Send: {error}")]
+    DraftCleanupPending { cleanup: DraftCleanup, error: anyhow::Error },
+    #[error("hierarchy ownership lost; draft attention ({cleanup:?}): {error}")]
+    OwnershipLostWithDraft { cleanup: DraftCleanup, error: anyhow::Error },
 }
 
 impl HierarchySendFailure {
@@ -912,7 +923,7 @@ impl HierarchySendFailure {
     }
 
     pub fn ownership_lost(&self) -> bool {
-        matches!(self, Self::OwnershipLost(_))
+        matches!(self, Self::OwnershipLost(_) | Self::OwnershipLostWithDraft { .. })
     }
 
     fn from_gate(failure: crate::interaction_target::SendFailure) -> Self {
@@ -924,6 +935,8 @@ impl HierarchySendFailure {
                 Self::BeforeEffect(error)
             }
             crate::interaction_target::SendFailure::AfterEffect(error) => Self::AfterEffect(error),
+            crate::interaction_target::SendFailure::DraftCleanupPending { cleanup, error } => Self::DraftCleanupPending { cleanup, error },
+            crate::interaction_target::SendFailure::OwnershipLostWithDraft { cleanup, error } => Self::OwnershipLostWithDraft { cleanup, error },
         }
     }
 }
@@ -935,10 +948,10 @@ impl HierarchySendFailure {
 /// of them can find it again.
 pub const HIERARCHY_LOCATOR_VERSION: &str = "android-hierarchy-v1";
 
-/// Clear an armed composer left by a process that died before crossing its effect gate.
+/// Refuse an armed crash-stale composer whose ownership proof was lost with the process.
 ///
-/// The caller must reopen and re-prove the target after this returns `Ok`: cleanup ends on
-/// the feed, so every pre-cleanup field, row and Reply rectangle is invalid by construction.
+/// This never erases or navigates away from an unknown draft. The caller must reconcile
+/// it before retrying; a disarmed clean baseline may proceed to fresh target proof.
 pub(crate) async fn clear_stale_hierarchy_comment_ui(
     session: &dyn UiSession,
     labels: TikTokControls,
@@ -959,19 +972,13 @@ pub(crate) async fn clear_stale_hierarchy_comment_ui(
         return Ok(());
     }
 
-    let feed_verified = drawer.leave(stop).await;
-    let drawer_closed = session
-        .locate(send_query)
-        .await
-        .map(|send| send.is_none())
-        .unwrap_or(false);
-    if feed_verified && drawer_closed {
-        Ok(())
-    } else {
-        Err(HierarchySendFailure::after(anyhow::anyhow!(
-            "crash-stale hierarchy comment composer cleanup was not verified"
-        )))
-    }
+    // A crashed process did not preserve this draft's session/text proof. Back is not
+    // ownership evidence and may discard a human/new owner's draft; never erase it here.
+    let _ = stop;
+    Err(HierarchySendFailure::DraftCleanupPending {
+        cleanup: DraftCleanup::RefusedDraftChanged,
+        error: anyhow::anyhow!("crash-stale draft ownership unavailable; operator reconciliation required"),
+    })
 }
 
 /// Post a root comment by hierarchy and read it back, leaving the drawer open.
@@ -1063,6 +1070,7 @@ where
 
     let outcome = |verdict, armed: String, cleared: String, identity| HierarchySendOutcome {
         verdict,
+        cleanup: DraftCleanup::NotTyped,
         mention_note: None,
         parent_was_folded: false,
         armed_frame_sha256: armed,
@@ -1111,161 +1119,167 @@ where
     // mean nothing was typed and nothing was tapped; routing either through `?` would send
     // it down the interaction path's after-effect channel, which retires the assignment
     // `Uncertain` — unretryable — for a message that never reached the field. A transport
-    // error is the same story: still before the Send tap, still nothing posted.
-    let typed = match drawer.focus_and_type(&field, text, stop).await {
-        Ok(typed) => typed,
-        Err(_) => {
-            drawer.leave(stop).await;
-            return Ok(outcome(
-                CommentVerdict::SendFlowInterrupted,
-                String::new(),
-                String::new(),
-                None,
-            ));
-        }
-    };
-    if typed != crate::tiktok_drawer::TypedInto::Typed {
-        // Nothing to read back on a refusal, and a drawer left open with a lit draft makes
-        // the next assignment on this phone refuse for the same reason. Interaction does
-        // not close the drawer on its success path (it reads the posted comment out of the
-        // still-open list); a refusal is the opposite case.
-        drawer.leave(stop).await;
-        return Ok(outcome(
-            match typed {
-                crate::tiktok_drawer::TypedInto::SendPreArmed => CommentVerdict::SendPreArmed,
-                _ => CommentVerdict::NoSendControl,
-            },
-            String::new(),
-            String::new(),
-            None,
-        ));
-    }
-    // After the body and before the send: the body is written with `set_text`, which replaces
-    // the whole field, so a token added first would not survive it. See
-    // `append_mentions_by_picker` for why the tags land at the end rather than the front.
-    let mut posted: Option<String> = None;
-    let mention_note = if mentions.is_empty() {
-        None
-    } else {
-        let mention_outcome =
-            match append_mentions_checked(session, screen, mentions, stop, Some(text)).await {
-                Ok(outcome) => outcome,
-                Err(error) => {
-                    let cleaned = drawer.leave(stop).await;
-                    if strict_mentions {
-                        return Err(if cleaned {
-                            HierarchySendFailure::before(error)
-                        } else {
-                            HierarchySendFailure::after(error)
-                        });
-                    }
-                    return Ok(HierarchySendOutcome::interrupted_before_send());
-                }
-            };
-        if strict_mentions && !mention_outcome.all_linked(mentions) {
-            let cleared = drawer.leave(stop).await;
-            let error = anyhow::anyhow!(
-                "Tag chưa được xác nhận: {}",
-                mention_outcome.note().unwrap_or_default()
-            );
-            return Err(if cleared {
-                HierarchySendFailure::before(error)
-            } else {
-                HierarchySendFailure::after(error)
-            });
-        }
-        // Whatever is in the box now is what Send will publish, tags and spacing included.
-        // Read rather than reconstructed: the token's exact spelling and trailing space are
-        // TikTok's to decide, and guessing them is how the read-back missed the first time.
-        posted = match composer_text(session).await {
-            Ok(value) => value.filter(|value| {
-                value.contains(text)
-                    && (!strict_mentions || mention_outcome.matches_composer(value, mentions))
-            }),
+    // error is still pre-Send; typing ACK loss separately requires verified draft settlement.
+    let mut draft_guard = draft_cleanup::DraftGuard::capture(session, labels, text).await;
+    draft_cleanup::ensure_empty_before_typing(session, labels).await.map_err(|cleanup| HierarchySendFailure::DraftCleanupPending {
+        cleanup, error: anyhow::anyhow!("pre-typing empty draft baseline unproved; no text or Send dispatched"),
+    })?;
+    let result = async {
+        let typed = match drawer.focus_and_type(&field, text, stop).await {
+            Ok(typed) => typed,
             Err(_) => {
-                drawer.leave(stop).await;
-                return Ok(HierarchySendOutcome::interrupted_before_send());
+                return Ok(outcome(
+                    CommentVerdict::SendFlowInterrupted,
+                    String::new(),
+                    String::new(),
+                    None,
+                ));
             }
         };
-        if strict_mentions && posted.is_none() {
-            let cleaned = drawer.leave(stop).await;
-            let error = anyhow::anyhow!("Không xác nhận được nội dung sau khi gắn tag");
-            return Err(if cleaned {
-                HierarchySendFailure::before(error)
-            } else {
-                HierarchySendFailure::after(error)
-            });
-        }
-        mention_outcome.note()
-    };
-    // Still before the Send tap: a transport error waiting for the arm posted nothing.
-    let send = match drawer.await_armed(stop).await {
-        Ok(Some(send)) => send,
-        Ok(None) => {
+        if typed != crate::tiktok_drawer::TypedInto::Typed {
+            // Nothing to read back on a refusal, and a drawer left open with a lit draft makes
+            // the next assignment on this phone refuse for the same reason. Interaction does
+            // not close the drawer on its success path (it reads the posted comment out of the
+            // still-open list); a refusal is the opposite case.
             return Ok(outcome(
-                CommentVerdict::NotArmed,
-                String::new(),
-                String::new(),
-                None,
-            ))
-        }
-        Err(_) => {
-            drawer.leave(stop).await;
-            return Ok(outcome(
-                CommentVerdict::SendFlowInterrupted,
+                match typed {
+                    crate::tiktok_drawer::TypedInto::SendPreArmed => CommentVerdict::SendPreArmed,
+                    _ => CommentVerdict::NoSendControl,
+                },
                 String::new(),
                 String::new(),
                 None,
             ));
         }
-    };
-    effect_gate
-        .record_draft(posted.as_deref().unwrap_or(text))
-        .map_err(HierarchySendFailure::before)?;
-    let armed = frame_sha();
-    // Keep the successful gate-to-Send path adjacent: no await or other device operation may
-    // enter between the durable CAS and the public tap.
-    let confirmed = match effect_gate.cross() {
-        Ok(()) => drawer
-            .tap_send_and_confirm_disarm(&send, stop)
-            .await
-            .map_err(HierarchySendFailure::after)?,
-        Err(failure) => {
-            let cleaned = drawer.leave(stop).await;
-            return Err(if cleaned || failure.ownership_lost() {
-                HierarchySendFailure::from_gate(failure)
-            } else {
-                HierarchySendFailure::after(anyhow::anyhow!(
-                    "effect gate failed after typing and comment UI cleanup was not verified: {}",
-                    failure.into_error()
+        // After the body and before the send: the body is written with `set_text`, which replaces
+        // the whole field, so a token added first would not survive it. See
+        // `append_mentions_by_picker` for why the tags land at the end rather than the front.
+        let mut posted: Option<String> = None;
+        let mention_note = if mentions.is_empty() {
+            None
+        } else {
+            let mention_outcome =
+                match append_mentions_checked(session, screen, mentions, stop, Some(text)).await {
+                    Ok(outcome) => outcome,
+                    Err(error) => {
+                        if strict_mentions {
+                            return Err(HierarchySendFailure::before(error));
+                        }
+                        return Ok(HierarchySendOutcome::interrupted_before_send());
+                    }
+                };
+            if strict_mentions && !mention_outcome.all_linked(mentions) {
+                let error = anyhow::anyhow!(
+                    "Tag chưa được xác nhận: {}",
+                    mention_outcome.note().unwrap_or_default()
+                );
+                return Err(HierarchySendFailure::before(error));
+            }
+            // Whatever is in the box now is what Send will publish, tags and spacing included.
+            // Read rather than reconstructed: the token's exact spelling and trailing space are
+            // TikTok's to decide, and guessing them is how the read-back missed the first time.
+            posted = match composer_text(session).await {
+                Ok(value) => value.filter(|value| {
+                    value.contains(text)
+                        && (!strict_mentions || mention_outcome.matches_composer(value, mentions))
+                }),
+                Err(_) => {
+                        return Ok(HierarchySendOutcome::interrupted_before_send());
+                }
+            };
+            if strict_mentions && posted.is_none() {
+                let error = anyhow::anyhow!("Không xác nhận được nội dung sau khi gắn tag");
+                return Err(HierarchySendFailure::before(error));
+            }
+            if let (Some(guard), Some(exact)) = (draft_guard.as_mut(), posted.as_deref()) {
+                if mention_outcome.matches_composer(exact, mentions) { guard.exact_text(exact); }
+            }
+            mention_outcome.note()
+        };
+        // Still before the Send tap: a transport error waiting for the arm posted nothing.
+        let send = match drawer.await_armed(stop).await {
+            Ok(Some(send)) => send,
+            Ok(None) => {
+                return Ok(outcome(
+                    CommentVerdict::NotArmed,
+                    String::new(),
+                    String::new(),
+                    None,
                 ))
-            });
+            }
+            Err(_) => {
+                return Ok(outcome(
+                    CommentVerdict::SendFlowInterrupted,
+                    String::new(),
+                    String::new(),
+                    None,
+                ));
+            }
+        };
+        effect_gate
+            .record_draft(posted.as_deref().unwrap_or(text))
+            .map_err(HierarchySendFailure::before)?;
+        if stop.load(Ordering::Relaxed) {
+            return Err(HierarchySendFailure::before(anyhow::anyhow!("cancelled before Send; settle owned draft")));
         }
-    };
-    let cleared = frame_sha();
-    if !confirmed {
-        // `NotConfirmed` and never retried: the tap went out, so a retry is how a post
-        // ends up with two identical comments on it. The frames are still returned —
-        // they are the only way a person can settle what happened. The tag note rides along
-        // for the same reason: whatever went out, it went out with these tags on it.
-        let mut refused = outcome(CommentVerdict::NotConfirmed, armed, cleared, None);
-        refused.mention_note = mention_note;
-        return Ok(refused);
-    }
+        let armed = frame_sha();
+        // Keep the successful gate-to-Send path adjacent: no await or other device operation may
+        // enter between the durable CAS and the public tap.
+        let confirmed = match effect_gate.cross() {
+            Ok(()) => drawer
+                .tap_send_and_confirm_disarm(&send, stop)
+                .await
+                .map_err(HierarchySendFailure::after)?,
+            Err(failure) => {
+                return Err(HierarchySendFailure::from_gate(failure));
+            }
+        };
+        let cleared = frame_sha();
+        if !confirmed {
+            // `NotConfirmed` and never retried: the tap went out, so a retry is how a post
+            // ends up with two identical comments on it. The frames are still returned —
+            // they are the only way a person can settle what happened. The tag note rides along
+            // for the same reason: whatever went out, it went out with these tags on it.
+            let mut refused = outcome(CommentVerdict::NotConfirmed, armed, cleared, None);
+            refused.mention_note = mention_note;
+            return Ok(refused);
+        }
 
-    // Read the comment back out of the list that is still on screen. A failure here
-    // does not un-send anything, so it downgrades the identity rather than the verdict.
-    //
-    // **Read back what was actually posted, which is not always `text`.** Appending tags puts
-    // `@handle` after the body, so a comment sent with a tag is longer than the string this
-    // function was given — and the read-back matches exactly, by design. Measured 24/08/2026
-    // on the first real tagged send: the comment went out fine and came back unfindable,
-    // which silently costs the identity every reply in the thread needs. `posted` is the
-    // composer's own contents, captured before Send.
-    let identity = read_back_identity(session, posted.as_deref().unwrap_or(text), &cleared).await;
-    let mut sent = outcome(CommentVerdict::Sent, armed, cleared, identity);
-    sent.mention_note = mention_note;
-    Ok(sent)
+        // Read the comment back out of the list that is still on screen. A failure here
+        // does not un-send anything, so it downgrades the identity rather than the verdict.
+        //
+        // **Read back what was actually posted, which is not always `text`.** Appending tags puts
+        // `@handle` after the body, so a comment sent with a tag is longer than the string this
+        // function was given — and the read-back matches exactly, by design. Measured 24/08/2026
+        // on the first real tagged send: the comment went out fine and came back unfindable,
+        // which silently costs the identity every reply in the thread needs. `posted` is the
+        // composer's own contents, captured before Send.
+        let identity = read_back_identity(session, posted.as_deref().unwrap_or(text), &cleared).await;
+        let mut sent = outcome(CommentVerdict::Sent, armed, cleared, identity);
+        sent.mention_note = mention_note;
+        Ok(sent)
+    }.await;
+    finish_draft_settlement(session, labels, draft_guard.as_ref(), drawer.typing_attempted(), effect_gate.crossed(), result).await
+        .map(|(mut outcome, cleanup)| { outcome.cleanup = cleanup; outcome })
+}
+
+async fn finish_draft_settlement<T>(
+    session: &dyn UiSession, labels: TikTokControls, guard: Option<&draft_cleanup::DraftGuard<'_>>,
+    typed: bool, crossed: bool, result: Result<T, HierarchySendFailure>,
+) -> Result<(T, DraftCleanup), HierarchySendFailure> {
+    if crossed { return result.map(|value| (value, DraftCleanup::PublicBoundaryCrossed)); }
+    let lost = result.as_ref().err().is_some_and(HierarchySendFailure::ownership_lost);
+    let cleanup = draft_cleanup::settle(session, labels, guard, typed, lost).await;
+    if lost && !cleanup.retry_safe() {
+        return Err(HierarchySendFailure::OwnershipLostWithDraft {
+            cleanup, error: result.err().map(|e| anyhow::anyhow!(e)).expect("ownership loss has error"),
+        });
+    }
+    if cleanup.retry_safe() { result.map(|value| (value, cleanup)) }
+    else { Err(HierarchySendFailure::DraftCleanupPending {
+        cleanup,
+        error: result.err().map(|e| anyhow::anyhow!(e)).unwrap_or_else(|| anyhow::anyhow!("send stopped before public boundary")),
+    }) }
 }
 
 /// How long to wait for TikTok's mention list to arrive after the handle is typed.
@@ -2435,6 +2449,7 @@ where
     let mut drawer = CommentDrawer::new(session, labels, plan);
     if drawer.send_query().is_none() {
         return Ok(Ok(HierarchySendOutcome {
+            cleanup: DraftCleanup::NotTyped,
             verdict: CommentVerdict::SendUnmeasured,
             // Replies never re-tag: only the opening comment carries the mentions.
             mention_note: None,
@@ -2655,150 +2670,143 @@ where
         Err(_) => return Ok(Ok(HierarchySendOutcome::interrupted_before_send())),
     };
     // Same rule as the opening comment's path: a refusal is a verdict, not a transport
-    // error, and a refused drawer is closed because there is nothing to read back out of it.
-    // A transport error here is still before the Send tap, so it is retryable too.
-    let typed = match drawer.focus_and_type(&field, text, stop).await {
-        Ok(typed) => typed,
-        Err(_) => {
-            drawer.leave(stop).await;
-            return Ok(Ok(HierarchySendOutcome::interrupted_before_send()));
-        }
-    };
-    if typed != crate::tiktok_drawer::TypedInto::Typed {
-        drawer.leave(stop).await;
-        return Ok(Ok(HierarchySendOutcome {
-            verdict: match typed {
-                crate::tiktok_drawer::TypedInto::SendPreArmed => CommentVerdict::SendPreArmed,
-                _ => CommentVerdict::NoSendControl,
-            },
-            // Replies never re-tag: only the opening comment carries the mentions.
-            mention_note: None,
-            parent_was_folded: false,
-            armed_frame_sha256: String::new(),
-            cleared_frame_sha256: String::new(),
-            identity: None,
-        }));
-    }
-    let mention_outcome =
-        match append_mentions_checked(session, screen, mentions, stop, Some(text)).await {
-            Ok(result) => result,
-            Err(error) => {
-                let cleaned = drawer.leave(stop).await;
-                return Err(if cleaned {
-                    HierarchySendFailure::before(error)
-                } else {
-                    HierarchySendFailure::after(error)
-                });
+    // error. Any attempted typing, including a lost ACK, must settle the owned draft
+    // before retry; unknown or changed drafts are never erased.
+    let mut draft_guard = draft_cleanup::DraftGuard::capture(session, labels, text).await;
+    draft_cleanup::ensure_empty_before_typing(session, labels).await.map_err(|cleanup| HierarchySendFailure::DraftCleanupPending {
+        cleanup, error: anyhow::anyhow!("pre-typing empty draft baseline unproved; no text or Send dispatched"),
+    })?;
+    let result = async {
+        let typed = match drawer.focus_and_type(&field, text, stop).await {
+            Ok(typed) => typed,
+            Err(_) => {
+                return Ok(Ok(HierarchySendOutcome::interrupted_before_send()));
             }
         };
-    if strict_mentions && !mention_outcome.all_linked(mentions) {
-        let cleaned = drawer.leave(stop).await;
-        let error = anyhow::anyhow!(
-            "Tag trả lời chưa được xác nhận: {}",
-            mention_outcome.note().unwrap_or_default()
-        );
-        return Err(if cleaned {
-            HierarchySendFailure::before(error)
-        } else {
-            HierarchySendFailure::after(error)
-        });
-    }
-    let posted_text = if mentions.is_empty() {
-        None
-    } else {
-        composer_text(session)
-            .await
-            .map_err(HierarchySendFailure::before)?
-    };
-    if strict_mentions
-        && !posted_text.as_deref().is_some_and(|value| {
-            value.contains(text) && mention_outcome.matches_composer(value, mentions)
-        })
-    {
-        let cleaned = drawer.leave(stop).await;
-        let error = anyhow::anyhow!("Nội dung trả lời thay đổi sau gắn tag");
-        return Err(if cleaned {
-            HierarchySendFailure::before(error)
-        } else {
-            HierarchySendFailure::after(error)
-        });
-    }
-    let mention_note = mention_outcome.note();
-    let send = match drawer.await_armed(stop).await {
-        Ok(Some(send)) => send,
-        Ok(None) => {
+        if typed != crate::tiktok_drawer::TypedInto::Typed {
             return Ok(Ok(HierarchySendOutcome {
-                verdict: CommentVerdict::NotArmed,
+                cleanup: DraftCleanup::NotTyped,
+                verdict: match typed {
+                    crate::tiktok_drawer::TypedInto::SendPreArmed => CommentVerdict::SendPreArmed,
+                    _ => CommentVerdict::NoSendControl,
+                },
                 // Replies never re-tag: only the opening comment carries the mentions.
                 mention_note: None,
-                parent_was_folded: unfolded,
+                parent_was_folded: false,
                 armed_frame_sha256: String::new(),
                 cleared_frame_sha256: String::new(),
                 identity: None,
             }));
         }
-        // Still before the Send tap: retryable, not the ambiguous `after` error.
-        Err(_) => return Ok(Ok(HierarchySendOutcome::interrupted_before_send())),
-    };
-    effect_gate
-        .record_draft(posted_text.as_deref().unwrap_or(text))
-        .map_err(HierarchySendFailure::before)?;
-    let armed = frame_sha();
-    let confirmed = match effect_gate.cross() {
-        Ok(()) => drawer
-            .tap_send_and_confirm_disarm(&send, stop)
-            .await
-            .map_err(HierarchySendFailure::after)?,
-        Err(failure) => {
-            let cleaned = drawer.leave(stop).await;
-            return Err(if cleaned || failure.ownership_lost() {
-                HierarchySendFailure::from_gate(failure)
-            } else {
-                HierarchySendFailure::after(anyhow::anyhow!(
-                    "effect gate failed after typing and reply UI cleanup was not verified: {}",
-                    failure.into_error()
-                ))
-            });
+        let mention_outcome =
+            match append_mentions_checked(session, screen, mentions, stop, Some(text)).await {
+                Ok(result) => result,
+                Err(error) => {
+                    return Err(HierarchySendFailure::before(error));
+                }
+            };
+        if strict_mentions && !mention_outcome.all_linked(mentions) {
+            let error = anyhow::anyhow!(
+                "Tag trả lời chưa được xác nhận: {}",
+                mention_outcome.note().unwrap_or_default()
+            );
+            return Err(HierarchySendFailure::before(error));
         }
-    };
-    let cleared = frame_sha();
-    if !confirmed {
-        return Ok(Ok(HierarchySendOutcome {
-            verdict: CommentVerdict::NotConfirmed,
-            // Replies never re-tag: only the opening comment carries the mentions.
-            mention_note: None,
+        let posted_text = if mentions.is_empty() {
+            None
+        } else {
+            composer_text(session)
+                .await
+                .map_err(HierarchySendFailure::before)?
+        };
+        if strict_mentions
+            && !posted_text.as_deref().is_some_and(|value| {
+                value.contains(text) && mention_outcome.matches_composer(value, mentions)
+            })
+        {
+            let error = anyhow::anyhow!("Nội dung trả lời thay đổi sau gắn tag");
+            return Err(HierarchySendFailure::before(error));
+        }
+        if let (Some(guard), Some(exact)) = (draft_guard.as_mut(), posted_text.as_deref()) {
+            if mention_outcome.matches_composer(exact, mentions) { guard.exact_text(exact); }
+        }
+        let mention_note = mention_outcome.note();
+        let send = match drawer.await_armed(stop).await {
+            Ok(Some(send)) => send,
+            Ok(None) => {
+                return Ok(Ok(HierarchySendOutcome {
+                    cleanup: DraftCleanup::NotTyped,
+                    verdict: CommentVerdict::NotArmed,
+                    // Replies never re-tag: only the opening comment carries the mentions.
+                    mention_note: None,
+                    parent_was_folded: unfolded,
+                    armed_frame_sha256: String::new(),
+                    cleared_frame_sha256: String::new(),
+                    identity: None,
+                }));
+            }
+            // Still before the Send tap: retryable, not the ambiguous `after` error.
+            Err(_) => return Ok(Ok(HierarchySendOutcome::interrupted_before_send())),
+        };
+        effect_gate
+            .record_draft(posted_text.as_deref().unwrap_or(text))
+            .map_err(HierarchySendFailure::before)?;
+        if stop.load(Ordering::Relaxed) {
+            return Err(HierarchySendFailure::before(anyhow::anyhow!("cancelled before Send; settle owned draft")));
+        }
+        let armed = frame_sha();
+        let confirmed = match effect_gate.cross() {
+            Ok(()) => drawer
+                .tap_send_and_confirm_disarm(&send, stop)
+                .await
+                .map_err(HierarchySendFailure::after)?,
+            Err(failure) => {
+                return Err(HierarchySendFailure::from_gate(failure));
+            }
+        };
+        let cleared = frame_sha();
+        if !confirmed {
+            return Ok(Ok(HierarchySendOutcome {
+                cleanup: DraftCleanup::NotTyped,
+                verdict: CommentVerdict::NotConfirmed,
+                // Replies never re-tag: only the opening comment carries the mentions.
+                mention_note: None,
+                parent_was_folded: unfolded,
+                armed_frame_sha256: armed,
+                cleared_frame_sha256: cleared,
+                identity: None,
+            }));
+        }
+        // **Do not press Back unconditionally.** AGENTS.md §9.7 measured "Back from the
+        // composer returns to the comment list with the drawer still open" — but that was
+        // measured *before* Send. Measured after Send, on an SM-N950F on 11/08/2026, sending a
+        // reply already collapses the composer, so the extra Back leaves the **drawer**: the
+        // reply could not be read back, and the still-open drawer that
+        // `publish_evidence_frame` depends on was gone.
+        //
+        // So ask first. The placeholder is the state: in the composer it names the parent, on
+        // the list it is the generic hint. Only a composer gets a Back.
+        if let Ok(Some(placeholder)) = read_placeholder(session).await {
+            let wanted = parent.author_label.trim();
+            if !wanted.is_empty() && placeholder.contains(wanted) {
+                let _ = session.back().await;
+                sleep_poll().await;
+            }
+        }
+        let identity =
+            read_back_identity(session, posted_text.as_deref().unwrap_or(text), &cleared).await;
+        Ok(Ok(HierarchySendOutcome {
+            cleanup: DraftCleanup::NotTyped,
+            verdict: CommentVerdict::Sent,
+            mention_note,
             parent_was_folded: unfolded,
             armed_frame_sha256: armed,
             cleared_frame_sha256: cleared,
-            identity: None,
-        }));
-    }
-    // **Do not press Back unconditionally.** AGENTS.md §9.7 measured "Back from the
-    // composer returns to the comment list with the drawer still open" — but that was
-    // measured *before* Send. Measured after Send, on an SM-N950F on 11/08/2026, sending a
-    // reply already collapses the composer, so the extra Back leaves the **drawer**: the
-    // reply could not be read back, and the still-open drawer that
-    // `publish_evidence_frame` depends on was gone.
-    //
-    // So ask first. The placeholder is the state: in the composer it names the parent, on
-    // the list it is the generic hint. Only a composer gets a Back.
-    if let Ok(Some(placeholder)) = read_placeholder(session).await {
-        let wanted = parent.author_label.trim();
-        if !wanted.is_empty() && placeholder.contains(wanted) {
-            let _ = session.back().await;
-            sleep_poll().await;
-        }
-    }
-    let identity =
-        read_back_identity(session, posted_text.as_deref().unwrap_or(text), &cleared).await;
-    Ok(Ok(HierarchySendOutcome {
-        verdict: CommentVerdict::Sent,
-        mention_note,
-        parent_was_folded: unfolded,
-        armed_frame_sha256: armed,
-        cleared_frame_sha256: cleared,
-        identity,
-    }))
+            identity,
+        }))
+    }.await;
+    finish_draft_settlement(session, labels, draft_guard.as_ref(), drawer.typing_attempted(), effect_gate.crossed(), result).await
+        .map(|(mut result, cleanup)| { if let Ok(outcome) = &mut result { outcome.cleanup = cleanup; } result })
 }
 
 async fn find_script_parent_snapshot(
@@ -5004,36 +5012,18 @@ mod tests {
     }
 
     #[tokio::test(start_paused = true)]
-    async fn a_crash_stale_hierarchy_root_draft_is_discarded_before_the_fresh_retry() {
+    async fn a_crash_stale_hierarchy_root_draft_requires_reconciliation_without_discard() {
         let session = crash_stale_root_retry_session();
-        let stop = AtomicBool::new(false);
-
-        clear_stale_hierarchy_comment_ui(&session, vietnamese(), &stop)
-            .await
-            .expect("verified cleanup lets the caller reopen and re-prove the target");
-        let outcome = send_root_by_hierarchy(
-            &session,
-            vietnamese(),
-            (1080.0, 2400.0),
-            "fresh root",
-            &[],
-            &stop,
-            String::new,
-        )
-        .await
-        .expect("fresh hierarchy root retry");
-
-        assert!(outcome.verdict.is_sent());
-        assert_eq!(session.typed.lock().as_slice(), &["fresh root"]);
-        assert_eq!(
-            *session.backs.lock(),
-            1,
-            "stale composer was discarded once"
-        );
+        let failure = clear_stale_hierarchy_comment_ui(&session, vietnamese(), &AtomicBool::new(false))
+            .await.expect_err("unknown stale draft must not be discarded for a retry");
+        assert!(matches!(failure, HierarchySendFailure::DraftCleanupPending { cleanup: DraftCleanup::RefusedDraftChanged, .. }));
+        assert!(session.typed.lock().is_empty());
+        assert!(session.taps.lock().is_empty());
+        assert_eq!(*session.backs.lock(), 0);
     }
 
     #[tokio::test(start_paused = true)]
-    async fn an_unverified_crash_stale_hierarchy_root_cleanup_is_after_effect() {
+    async fn an_unverified_crash_stale_hierarchy_root_cleanup_requires_draft_attention() {
         let session = DrawerSession::default().with_single(SEND_ID, send_button(true));
 
         let failure =
@@ -5041,7 +5031,7 @@ mod tests {
                 .await
                 .expect_err("an armed draft that cannot be cleared is ambiguous");
 
-        assert!(matches!(failure, HierarchySendFailure::AfterEffect(_)));
+        assert!(matches!(failure, HierarchySendFailure::DraftCleanupPending { .. }));
         assert!(session.typed.lock().is_empty());
         assert!(
             session.taps.lock().is_empty(),
@@ -5063,7 +5053,7 @@ mod tests {
                 .await
                 .expect_err("the drawer must disappear, not merely expose the feed tab behind it");
 
-        assert!(matches!(failure, HierarchySendFailure::AfterEffect(_)));
+        assert!(matches!(failure, HierarchySendFailure::DraftCleanupPending { .. }));
         assert!(session.typed.lock().is_empty());
         assert!(session.taps.lock().is_empty());
     }
@@ -5106,37 +5096,18 @@ mod tests {
     }
 
     #[tokio::test(start_paused = true)]
-    async fn a_crash_stale_hierarchy_reply_draft_is_discarded_before_the_fresh_retry() {
-        let (session, parent) = crash_stale_reply_retry_session();
-        let stop = AtomicBool::new(false);
-
-        clear_stale_hierarchy_comment_ui(&session, vietnamese(), &stop)
-            .await
-            .expect("verified cleanup lets the caller reopen and re-prove the parent");
-        let outcome = send_reply_by_hierarchy(
-            &session,
-            vietnamese(),
-            (1080.0, 2400.0),
-            &parent,
-            "fresh reply",
-            &stop,
-            String::new,
-        )
-        .await
-        .expect("fresh hierarchy reply retry")
-        .expect("parent is re-proved");
-
-        assert!(outcome.verdict.is_sent());
-        assert_eq!(session.typed.lock().as_slice(), &["fresh reply"]);
-        assert_eq!(
-            *session.backs.lock(),
-            2,
-            "one Back discards the stale composer and one collapses the freshly sent reply"
-        );
+    async fn a_crash_stale_hierarchy_reply_draft_requires_reconciliation_without_discard() {
+        let (session, _) = crash_stale_reply_retry_session();
+        let failure = clear_stale_hierarchy_comment_ui(&session, vietnamese(), &AtomicBool::new(false))
+            .await.expect_err("unknown reply draft must not be discarded for a retry");
+        assert!(matches!(failure, HierarchySendFailure::DraftCleanupPending { cleanup: DraftCleanup::RefusedDraftChanged, .. }));
+        assert!(session.typed.lock().is_empty());
+        assert!(session.taps.lock().is_empty());
+        assert_eq!(*session.backs.lock(), 0);
     }
 
     #[tokio::test(start_paused = true)]
-    async fn an_unverified_crash_stale_hierarchy_reply_cleanup_is_after_effect() {
+    async fn an_unverified_crash_stale_hierarchy_reply_cleanup_requires_draft_attention() {
         let session = DrawerSession::default().with_single(SEND_ID, send_button(true));
 
         let failure =
@@ -5144,7 +5115,7 @@ mod tests {
                 .await
                 .expect_err("the reply path must not enter a dirty composer");
 
-        assert!(matches!(failure, HierarchySendFailure::AfterEffect(_)));
+        assert!(matches!(failure, HierarchySendFailure::DraftCleanupPending { .. }));
         assert!(session.typed.lock().is_empty());
         assert!(
             session.taps.lock().is_empty(),
@@ -5178,10 +5149,11 @@ mod tests {
         .expect_err("lost ownership must abort the send");
 
         assert!(failure.ownership_lost());
+        assert!(matches!(failure, HierarchySendFailure::OwnershipLostWithDraft { cleanup: DraftCleanup::RefusedBindingChanged, .. }));
         assert_eq!(calls.load(Ordering::Relaxed), 1);
         assert_eq!(session.taps.lock().len(), 2, "opener + field, never Send");
         assert_eq!(session.typed.lock().as_slice(), &["hello"]);
-        assert_eq!(*session.backs.lock(), 1, "the typed composer is closed");
+        assert_eq!(*session.backs.lock(), 0, "lost owner forbids draft erase/navigation");
     }
 
     #[tokio::test(start_paused = true)]
@@ -5204,9 +5176,9 @@ mod tests {
         .await
         .expect_err("unverified cleanup cannot stay retryable");
 
-        assert!(matches!(failure, HierarchySendFailure::AfterEffect(_)));
+        assert!(matches!(failure, HierarchySendFailure::DraftCleanupPending { .. }));
         assert_eq!(session.taps.lock().len(), 2, "opener + field, never Send");
-        assert_eq!(*session.backs.lock(), 3, "all cleanup attempts were used");
+        assert_eq!(*session.backs.lock(), 0, "unbound draft never navigates or erases");
     }
 
     #[tokio::test(start_paused = true)]
@@ -5251,13 +5223,14 @@ mod tests {
         .expect_err("lost ownership aborts before reply Send");
 
         assert!(failure.ownership_lost());
+        assert!(matches!(failure, HierarchySendFailure::OwnershipLostWithDraft { cleanup: DraftCleanup::RefusedBindingChanged, .. }));
         assert_eq!(
             session.taps.lock().len(),
             3,
             "drawer + Reply + field, never Send"
         );
         assert_eq!(session.typed.lock().as_slice(), &["reply text"]);
-        assert_eq!(*session.backs.lock(), 1, "the reply composer is closed");
+        assert_eq!(*session.backs.lock(), 0, "lost owner forbids draft erase/navigation");
     }
 
     #[test]
@@ -5697,12 +5670,10 @@ mod tests {
 
         let outcome = send_root_with_one_mention(&session)
             .await
-            .expect("a pre-Send transport failure is a retryable outcome");
+            .expect_err("typed/mention draft without ownership readback is not retryable");
 
-        assert_eq!(
-            outcome.verdict,
-            crate::tiktok_drawer::CommentVerdict::SendFlowInterrupted
-        );
+        assert!(matches!(outcome, HierarchySendFailure::DraftCleanupPending { .. }));
+        assert_eq!(*session.backs.lock(), 0, "unknown mention draft must not be erased or navigated away");
         assert_eq!(
             session.tap_attempts.lock().len(),
             2,
@@ -5716,12 +5687,10 @@ mod tests {
 
         let outcome = send_root_with_one_mention(&session)
             .await
-            .expect("a pre-Send transport failure is a retryable outcome");
+            .expect_err("typed/mention draft without ownership readback is not retryable");
 
-        assert_eq!(
-            outcome.verdict,
-            crate::tiktok_drawer::CommentVerdict::SendFlowInterrupted
-        );
+        assert!(matches!(outcome, HierarchySendFailure::DraftCleanupPending { .. }));
+        assert_eq!(*session.backs.lock(), 0, "unknown mention draft must not be erased or navigated away");
         assert_eq!(session.tap_attempts.lock().len(), 2, "Send was untouched");
         assert!(
             session.keyed.lock().is_empty(),
@@ -5735,12 +5704,10 @@ mod tests {
 
         let outcome = send_root_with_one_mention(&session)
             .await
-            .expect("a pre-Send transport failure is a retryable outcome");
+            .expect_err("typed/mention draft without ownership readback is not retryable");
 
-        assert_eq!(
-            outcome.verdict,
-            crate::tiktok_drawer::CommentVerdict::SendFlowInterrupted
-        );
+        assert!(matches!(outcome, HierarchySendFailure::DraftCleanupPending { .. }));
+        assert_eq!(*session.backs.lock(), 0, "unknown mention draft must not be erased or navigated away");
         assert_eq!(session.tap_attempts.lock().len(), 2, "Send was untouched");
         assert_eq!(session.keyed.lock().as_slice(), [" @lt.gi"]);
     }
@@ -5756,12 +5723,10 @@ mod tests {
 
         let outcome = send_root_with_one_mention(&session)
             .await
-            .expect("a pre-Send transport failure is a retryable outcome");
+            .expect_err("typed/mention draft without ownership readback is not retryable");
 
-        assert_eq!(
-            outcome.verdict,
-            crate::tiktok_drawer::CommentVerdict::SendFlowInterrupted
-        );
+        assert!(matches!(outcome, HierarchySendFailure::DraftCleanupPending { .. }));
+        assert_eq!(*session.backs.lock(), 0, "unknown mention draft must not be erased or navigated away");
         assert_eq!(
             session.tap_attempts.lock().len(),
             3,
@@ -5780,12 +5745,10 @@ mod tests {
 
         let outcome = send_root_with_one_mention(&session)
             .await
-            .expect("a pre-Send transport failure is a retryable outcome");
+            .expect_err("typed/mention draft without ownership readback is not retryable");
 
-        assert_eq!(
-            outcome.verdict,
-            crate::tiktok_drawer::CommentVerdict::SendFlowInterrupted
-        );
+        assert!(matches!(outcome, HierarchySendFailure::DraftCleanupPending { .. }));
+        assert_eq!(*session.backs.lock(), 0, "unknown mention draft must not be erased or navigated away");
         assert_eq!(
             session.tap_attempts.lock().len(),
             3,
@@ -5805,12 +5768,10 @@ mod tests {
 
         let outcome = send_root_with_one_mention(&session)
             .await
-            .expect("a pre-Send transport failure is a retryable outcome");
+            .expect_err("typed/mention draft without ownership readback is not retryable");
 
-        assert_eq!(
-            outcome.verdict,
-            crate::tiktok_drawer::CommentVerdict::SendFlowInterrupted
-        );
+        assert!(matches!(outcome, HierarchySendFailure::DraftCleanupPending { .. }));
+        assert_eq!(*session.backs.lock(), 0, "unknown mention draft must not be erased or navigated away");
         assert_eq!(
             session.tap_attempts.lock().len(),
             3,
@@ -5834,12 +5795,10 @@ mod tests {
 
         let outcome = send_root_with_one_mention(&session)
             .await
-            .expect("a pre-Send transport failure is a retryable outcome");
+            .expect_err("typed/mention draft without ownership readback is not retryable");
 
-        assert_eq!(
-            outcome.verdict,
-            crate::tiktok_drawer::CommentVerdict::SendFlowInterrupted
-        );
+        assert!(matches!(outcome, HierarchySendFailure::DraftCleanupPending { .. }));
+        assert_eq!(*session.backs.lock(), 0, "unknown mention draft must not be erased or navigated away");
         assert_eq!(
             session.tap_attempts.lock().len(),
             3,

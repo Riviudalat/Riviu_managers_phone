@@ -1115,6 +1115,8 @@ pub struct DeviceHealthReport {
     pub helper_reachable: Option<bool>,
     /// Helper APK installed; `None` means the question itself failed — not "absent" (§9.97).
     pub helper_installed: Option<bool>,
+    /// Existing connection evidence only; advertised features are not live qualification.
+    pub helper_health: Option<riviu_android_driver::riviu_agent::HelperHealth>,
     /// Root routes, or `None` when neither root question could be put to the phone at all.
     /// A phone that is offline is not a phone that is unrooted.
     pub root: Option<riviu_core::DeviceRootStatus>,
@@ -1169,6 +1171,7 @@ pub async fn device_health(
         adb_version: None,
         helper_reachable: None,
         helper_installed: None,
+        helper_health: None,
         root: None,
         tiktok_package: None,
         tiktok_version: None,
@@ -1206,6 +1209,7 @@ pub async fn device_health(
         let helper = android.helper_probe(&udid).await;
         report.helper_reachable = helper.reachable;
         report.helper_installed = helper.installed;
+        report.helper_health = Some(helper.health);
         if helper.installed.is_none() {
             report.notes.push(
                 "Không hỏi được máy về Riviu helper — chưa với tới được, không phải chưa cài."

@@ -136,6 +136,16 @@ impl DeviceControlPlane {
             .await
             .map_err(|failure| failure.error)
     }
+    /// Diagnostic preparation retains ownership when session setup fails after helper setup.
+    pub async fn start_interaction_session_or_quarantine(
+        &self, context: DeviceExclusiveContext, bundle_id: &str, kind: InteractionSessionKind,
+    ) -> Result<UiSessionContext, DeviceControlError> {
+        match self.try_start_interaction_session(context, bundle_id, kind).await {
+            Ok(session) => Ok(session),
+            Err(failure) => { self.quarantined.push_context(failure.context); Err(failure.error) }
+        }
+    }
+
     pub async fn start_owned_ui_session(
         &self,
         mut context: DeviceExclusiveContext,
@@ -211,6 +221,14 @@ impl DeviceControlPlane {
                 reason: "session context has been consumed",
             })
     }
+    /// Retain a failed helper-canary lease until explicit reconciliation.
+    pub fn quarantine_exclusive_context(&self, context: DeviceExclusiveContext) -> Result<(), DeviceControlError> {
+        let same_plane = context.plane_id == self.plane_id;
+        if !same_plane { return Err(DeviceControlError::InvalidContext { reason: "quarantine context belongs to another plane" }); }
+        self.quarantined.push_context(context);
+        Ok(())
+    }
+
     pub fn close_exclusive_context(
         &self,
         mut context: DeviceExclusiveContext,

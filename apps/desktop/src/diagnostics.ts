@@ -14,6 +14,8 @@ export interface DeviceHealthCheck {
     | "agentCapabilities"
     | "helperInstalled"
     | "helperReachable"
+    | "helperAuth"
+    | "helperFeatures"
     | "root"
     | "geometry"
     | "stream"
@@ -189,6 +191,15 @@ export function normalizeDeviceHealth(
     agentCapabilities,
     helperInstalled,
     helperReachable,
+    ...(report.helperHealth && android ? [
+      check("helperAuth", "Xác thực helper",
+        report.helperHealth.authenticated === true ? "pass" : report.helperHealth.authenticated === false ? "warning" : "unknown",
+        report.helperHealth.authenticated === true ? "Đã xác minh request đọc có token" : report.helperHealth.authenticated === false ? "Request có xác thực chưa đạt" : "Chưa kiểm xác thực",
+        report.helperHealth.reason),
+      check("helperFeatures", "Chức năng helper", "unknown", "Capability công bố — chưa nghiệm thu từng chức năng",
+        [`Version: ${report.helperHealth.agentVersion ?? "chưa rõ"}`, `Protocol: ${report.helperHealth.protocolVersion ?? "chưa rõ"}`,
+          ...(report.helperHealth.advertisedFeatures ?? [])].join("\n")),
+    ] : []),
     root,
     geometry,
     stream,

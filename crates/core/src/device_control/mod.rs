@@ -1047,6 +1047,7 @@ impl Drop for ContextActivityPermit {
 struct QuarantineStore {
     cleanup: Mutex<Vec<DeviceCleanupTicket>>,
     contexts: Mutex<Vec<DeviceExclusiveContext>>,
+    sessions: Mutex<Vec<UiSessionContext>>,
     backgrounds: Mutex<Vec<BackgroundCleanupTicket>>,
     changed: Notify,
 }
@@ -1062,13 +1063,18 @@ impl QuarantineStore {
         self.changed.notify_waiters();
     }
 
+    fn push_session(&self, context: UiSessionContext) {
+        self.sessions.lock().push(context);
+        self.changed.notify_waiters();
+    }
+
     fn push_background(&self, ticket: BackgroundCleanupTicket) {
         self.backgrounds.lock().push(ticket);
         self.changed.notify_waiters();
     }
 
     fn context_activity_count(&self) -> usize {
-        self.cleanup.lock().len() + self.contexts.lock().len()
+        self.cleanup.lock().len() + self.contexts.lock().len() + self.sessions.lock().len()
     }
 
     fn count(&self) -> usize {
@@ -3428,6 +3434,31 @@ mod tests {
             .start_reserved_stream(session, reservation)
             .await
             .expect("stream after session")
+    }
+
+    #[tokio::test]
+    async fn diagnostic_stream_failure_retains_helper_preparation_ownership() {
+        let driver = Arc::new(TestDriver::default());
+        driver.first_frame_observed.store(false, Ordering::SeqCst);
+        let control = control_plane(driver, 1);
+        let exclusive = control.try_acquire_exclusive("fixture-failure", DeviceWorkOwner::Interaction).await.unwrap();
+        let (exclusive, capacity) = control.reserve_ui_capacity(exclusive).await.unwrap();
+        let session = control.start_interaction_session_or_quarantine(exclusive, "com.fixture", InteractionSessionKind::Ordinary).await.unwrap();
+        assert!(control.start_reserved_stream_or_quarantine(session, capacity).await.is_err());
+        assert_eq!(control.cleanup_quarantine_count(), 1);
+        assert!(control.try_acquire_exclusive("fixture-failure", DeviceWorkOwner::Script).await.is_err());
+        assert!(matches!(control.shutdown_cleanup().await, Err(DeviceControlError::CleanupQuarantined { count: 1 })));
+    }
+
+    #[tokio::test]
+    async fn semantic_quarantine_retains_device_and_reports_unresolved_shutdown() {
+        let driver = Arc::new(TestDriver::default());
+        let control = control_plane(driver, 1);
+        let context = streaming_context(&control, "fixture", DeviceWorkOwner::Interaction).await;
+        control.quarantine_ui_context(context).unwrap();
+        assert_eq!(control.cleanup_quarantine_count(), 1);
+        assert!(control.try_acquire_exclusive("fixture", DeviceWorkOwner::Script).await.is_err());
+        assert!(matches!(control.shutdown_cleanup().await, Err(DeviceControlError::CleanupQuarantined { count: 1 })));
     }
 
     #[tokio::test]

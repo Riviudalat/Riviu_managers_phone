@@ -9,6 +9,8 @@
 # path invents a signature: both sign with the standard debug keystore, and shipping requires
 # pinning bytes + SHA-256 by hand (see README).
 
+param([switch]$Candidate)
+
 $ErrorActionPreference = "Stop"
 $Root = Split-Path -Parent $MyInvocation.MyCommand.Path
 $Root = [IO.Path]::GetFullPath($Root)
@@ -44,7 +46,7 @@ Write-Host "JAVA_HOME=$JavaHome"
 Write-Host "ANDROID_SDK=$Sdk"
 
 $Gradle = Get-Command gradle -ErrorAction SilentlyContinue
-if ($Gradle) {
+if ($Gradle -and -not $Candidate) {
     $SdkEscaped = $Sdk.Replace("\", "\\")
     Set-Content -Path (Join-Path $Root "local.properties") -Value "sdk.dir=$SdkEscaped" -Encoding ascii
     & gradle ":app:assembleDebug" --no-daemon
@@ -90,8 +92,9 @@ else {
     }
     Write-Host "version $VersionName ($VersionCode), minSdk $MinSdk, targetSdk $TargetSdk"
 
-    $Out = Join-Path $Root "build-tools-out"
-    if ([IO.Path]::GetFullPath($Out) -ne [IO.Path]::Combine($Root, "build-tools-out")) {
+    $OutName = if ($Candidate) { "build\candidate" } else { "build-tools-out" }
+    $Out = Join-Path $Root $OutName
+    if ([IO.Path]::GetFullPath($Out) -ne [IO.Path]::GetFullPath([IO.Path]::Combine($Root, $OutName))) {
         Fail "build output path must remain in the helper workspace"
     }
     if (Test-Path $Out) { Remove-Item -Recurse -Force $Out }
@@ -124,6 +127,7 @@ else {
         --target-sdk-version $TargetSdk `
         --version-code $VersionCode `
         --version-name $VersionName `
+        --debug-mode `
         --java $Gen `
         (Join-Path $Out "res.zip")
     if ($LASTEXITCODE -ne 0) { Fail "aapt2 link failed with exit $LASTEXITCODE" }
@@ -141,8 +145,11 @@ else {
     & $Javac -parameters -source 8 -target 8 -nowarn -encoding UTF-8 -classpath $Platform -d $Classes @Sources
     if ($LASTEXITCODE -ne 0) { Fail "javac failed with exit $LASTEXITCODE" }
 
-    $ClassFiles = (Get-ChildItem -Recurse $Classes -Filter *.class).FullName
-    & $D8 --lib $Platform --min-api $MinSdk --output $DexDir @ClassFiles
+    # One classes JAR avoids cmd.exe's 8191-character limit in d8.bat for nested/lambda classes.
+    $ClassesJar = Join-Path $Out "classes.jar"
+    & $Jar cf $ClassesJar -C $Classes "."
+    if ($LASTEXITCODE -ne 0) { Fail "class jar failed with exit $LASTEXITCODE" }
+    & $D8 --lib $Platform --min-api $MinSdk --output $DexDir $ClassesJar
     if ($LASTEXITCODE -ne 0) { Fail "d8 failed with exit $LASTEXITCODE" }
 
     $Unsigned = Join-Path $Out "unsigned.apk"
@@ -172,4 +179,25 @@ $Bytes = (Get-Item $Apk).Length
 Write-Host "built $Apk"
 Write-Host "bytes $Bytes"
 Write-Host "sha256 $Hash"
-Write-Host "Pin those numbers in sidecars/android/android-tools-manifest.json (role riviuAgentApk) only after you copy this file to sidecars/android/noarch/riviu-agent.apk."
+if ($Candidate) {
+    $Inputs = @()
+    $InputFiles = @(Get-ChildItem -Recurse (Join-Path $Root "app\src\main") -File)
+    $InputFiles += Get-Item (Join-Path $Root "app\build.gradle"), (Join-Path $Root "build.ps1")
+    foreach ($Input in ($InputFiles | Sort-Object FullName)) {
+        $Inputs += [ordered]@{
+            path = $Input.FullName.Substring($Root.Length + 1).Replace("\", "/")
+            sha256 = (Get-FileHash -Algorithm SHA256 $Input.FullName).Hash.ToLowerInvariant()
+        }
+    }
+    $Provenance = [ordered]@{
+        candidate = "riviu-agent.apk"; bytes = $Bytes; sha256 = $Hash
+        androidJarSha256 = (Get-FileHash -Algorithm SHA256 $Platform).Hash.ToLowerInvariant()
+        javaHome = $JavaHome; sdk = $Sdk; buildTools = $BuildToolsDir.Name
+        inputs = $Inputs
+        qualification = "offline SDK compile and candidate signing only; no runtime/device qualification"
+    }
+    $Provenance | ConvertTo-Json -Depth 5 | Set-Content (Join-Path (Split-Path $Apk -Parent) "provenance.json") -Encoding utf8
+    Write-Host "Candidate only: shipped APK, manifest pins and NOTICE were not changed."
+} else {
+    Write-Host "Pin those numbers in sidecars/android/android-tools-manifest.json (role riviuAgentApk) only after you copy this file to sidecars/android/noarch/riviu-agent.apk."
+}

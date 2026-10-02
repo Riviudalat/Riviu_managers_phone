@@ -636,6 +636,80 @@ impl AdbProgram {
         })
     }
 
+    /// Bounded secret stdin transport. Errors never include payload or child output.
+    pub(crate) async fn shell_secret_input(
+        &self, serial: &str, script: &str, payload: Vec<u8>, timeout: Duration,
+    ) -> anyhow::Result<Vec<u8>> {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        validate_serial(serial)?;
+        anyhow::ensure!(payload.len() <= 4100, "bootstrap input exceeds limit");
+        let _slot = enter_adb_slot(Some(serial), "shell", AdbLane::Interactive).await;
+        let mut command = self.command(Some(serial));
+        command.args(["-s", serial, "shell", "-T", script]);
+        command.stdin(Stdio::piped());
+        let mut child = command.spawn().context("spawn helper bootstrap transport")?;
+        let mut stdin = child.stdin.take().context("bootstrap stdin absent")?;
+        let stdout = child.stdout.take().context("bootstrap stdout absent")?;
+        let stderr = child.stderr.take().context("bootstrap stderr absent")?;
+        let exchange = async {
+            let write = async {
+                let result = stdin.write_all(&payload).await;
+                let mut payload = payload;
+                payload.fill(0);
+                result.context("write helper bootstrap envelope")?;
+                stdin.shutdown().await.context("close bootstrap stdin")?;
+                // shutdown flushes the pipe but does not close ChildStdin on Windows.
+                // The child must receive EOF before the joined stdout read can finish.
+                drop(stdin);
+                Ok::<_, anyhow::Error>(())
+            };
+            let read = async {
+                let mut bytes = Vec::new();
+                stdout.take(4101).read_to_end(&mut bytes).await.context("read bootstrap reply")?;
+                anyhow::ensure!(bytes.len() <= 4100, "bootstrap reply exceeds limit");
+                Ok::<_, anyhow::Error>(bytes)
+            };
+            let drain = async {
+                let mut discarded = Vec::new();
+                stderr.take(8193).read_to_end(&mut discarded).await.context("drain bootstrap diagnostics")?;
+                anyhow::ensure!(discarded.len() <= 8192, "bootstrap diagnostic limit exceeded");
+                let classification = if discarded.windows(b"ClassNotFoundException".len()).any(|w|w == b"ClassNotFoundException") { "classNotFound" }
+                    else if discarded.windows(b"bootstrap_failed".len()).any(|w|w == b"bootstrap_failed") { "bootstrapRefused" }
+                    else if discarded.windows(b"Permission denied".len()).any(|w|w == b"Permission denied") { "permissionDenied" }
+                    else { "noneOrUnclassified" };
+                let stages: Vec<String> = String::from_utf8_lossy(&discarded).lines()
+                    .filter(|line|line.starts_with("probe_stage=") || line.starts_with("probe_failed_stage=") || line.starts_with("probe_errno=") || line.starts_with("probe_peer_uid=") || line.starts_with("probe_expected_uid=") || line.starts_with("probe_causes="))
+                    .filter(|line|line.len() <= 120 && line.chars().all(|c|c.is_ascii_alphanumeric() || "=_,- ".contains(c)))
+                    .map(str::to_owned).collect();
+                discarded.fill(0);
+                Ok::<_, anyhow::Error>(format!("{classification};{}", stages.join(";")))
+            };
+            let (_, reply, classification) = tokio::try_join!(write, read, drain)?;
+            anyhow::ensure!(!reply.is_empty(), "bootstrap produced no reply ({classification})");
+            let status = child.wait().await.context("wait helper bootstrap transport")?;
+            anyhow::ensure!(status.success(), "helper bootstrap transport failed");
+            Ok::<_, anyhow::Error>(reply)
+        };
+        match tokio::time::timeout(timeout, exchange).await {
+            Ok(result) => result,
+            Err(_) => {
+                let _ = child.kill().await;
+                let _ = child.wait().await;
+                anyhow::bail!("helper bootstrap deadline exhausted; reconcile owner before retry")
+            }
+        }
+    }
+
+    /// One exact launcher dispatch for scoped diagnostic navigation; no second launch.
+    pub(crate) async fn launch_foreground_once(&self, serial: &str, package: &str) -> anyhow::Result<()> {
+        let package = validate_package_name(package)?;
+        if self.foreground_package(serial).await.as_deref().is_ok_and(|active| active == package) { return Ok(()); }
+        let resolved = self.shell(serial, &format!("cmd package resolve-activity --brief -a android.intent.action.MAIN -c android.intent.category.LAUNCHER {package}")).await?;
+        let command = foreground_activity_command(package, &resolved)?;
+        self.shell(serial, &command).await?;
+        wait_for_foreground_with(package, Duration::from_secs(20), ||self.foreground_package(serial)).await
+    }
+
     /// Run `adb <args>` and return stdout as text.
     pub async fn run(&self, args: &[&str], timeout: Duration) -> anyhow::Result<String> {
         let bytes = self.run_bytes(args, timeout).await?;
@@ -2389,6 +2463,26 @@ pub fn classify_ls_output(stdout: &str, stderr: &str, exit_code: i32) -> LsOutco
 
 #[cfg(test)]
 mod tests {
+    #[tokio::test]
+    async fn secret_stdin_transport_closes_eof_without_logging_payload() {
+        let root = std::env::temp_dir().join(format!("riviu-stdin-eof-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir(&root).unwrap();
+        #[cfg(windows)] let executable = {
+            let path = root.join("fake-adb.cmd");
+            std::fs::write(&path, "@echo off\r\npowershell.exe -NoProfile -Command \"$s=[Console]::In.ReadToEnd(); [Console]::Out.Write($s)\"\r\n").unwrap(); path
+        };
+        #[cfg(not(windows))] let executable = {
+            use std::os::unix::fs::PermissionsExt;
+            let path = root.join("fake-adb");
+            std::fs::write(&path, "#!/bin/sh\ncat\n").unwrap();
+            std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o700)).unwrap(); path
+        };
+        let input = b"non-secret-eof-marker".to_vec();
+        let result = super::AdbProgram::at(executable).shell_secret_input("fixture-eof", "ignored", input.clone(), std::time::Duration::from_secs(10)).await;
+        std::fs::remove_dir_all(root).unwrap();
+        assert_eq!(result.unwrap(), input);
+    }
+
     #[tokio::test(start_paused = true)]
     async fn foreground_wait_observes_cold_launch_past_old_twelve_read_limit() {
         let started = tokio::time::Instant::now();

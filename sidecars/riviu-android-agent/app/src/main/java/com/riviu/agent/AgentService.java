@@ -9,6 +9,10 @@ import android.content.Intent;
 import android.content.pm.ServiceInfo;
 import android.os.Build;
 import android.os.IBinder;
+import android.os.Handler;
+import android.os.Looper;
+import org.json.JSONObject;
+import java.util.concurrent.TimeUnit;
 import android.util.Log;
 
 /**
@@ -28,6 +32,11 @@ public final class AgentService extends Service {
 
     private HttpServer server;
     private String activeToken;
+    private final ServiceStartPolicy starts = new ServiceStartPolicy();
+    private final OwnerSession ownership = new OwnerSession();
+    private final Handler main = new Handler(Looper.getMainLooper());
+    private BootstrapServer bootstrap;
+    private boolean destroyed;
 
     static LocalStatus localStatus() {
         AgentService active = activeService;
@@ -59,7 +68,7 @@ public final class AgentService extends Service {
     }
 
     /**
-     * Bind the port once a token has been supplied, and rebind if the token changed.
+     * Bind after a legacy token is supplied; never treat a different token as takeover proof.
      *
      * <p>No token, no server. That is the safe direction and it is the point: a helper that any
      * app could start with a bare {@code am start-foreground-service} used to come up serving
@@ -72,16 +81,29 @@ public final class AgentService extends Service {
      */
     @Override
     public int onStartCommand(Intent intent, int flags, int startId) {
-        String token = intent == null ? null : intent.getStringExtra(EXTRA_TOKEN);
-        if (token == null || token.isEmpty()) {
-            Log.w(TAG, "start without a token; the HTTP server stays down");
+        if (intent != null && intent.hasExtra("bootstrapSocket")) {
+            startBootstrap(intent);
             return START_STICKY;
         }
-        if (server != null && token.equals(activeToken)) {
+        if (ownership.owner() != null) return START_STICKY; // Legacy argv can never rekey a secure owner.
+        String token = intent == null ? null : intent.getStringExtra(EXTRA_TOKEN);
+        ServiceStartPolicy.Decision decision = starts.decide(token, activeToken, server != null,
+                server != null && server.isRunning(), server != null && server.hasOutstandingWork());
+        if (decision == ServiceStartPolicy.Decision.WAIT) {
+            // Warm tokenless start preserves the existing session; cold sticky restart stays waiting.
+            if (activeToken == null) localStatus = LocalStatus.WAITING;
+            return START_STICKY;
+        }
+        if (decision == ServiceStartPolicy.Decision.KEEP) return START_STICKY;
+        if (decision == ServiceStartPolicy.Decision.REFUSE_OWNER
+                || decision == ServiceStartPolicy.Decision.REFUSE_BUSY
+                || decision == ServiceStartPolicy.Decision.REFUSE_RECOVERY) {
+            Log.w(TAG, "start refused: existing session requires reconciliation");
             return START_STICKY;
         }
         if (server != null) {
-            server.stop();
+            server.stop(); // Closes admission synchronously; effects drain on their own threads.
+            if (server.hasOutstandingWork()) return START_STICKY;
             server = null;
         }
         HttpServer fresh = new HttpServer(this, Protocol.PORT, token);
@@ -94,14 +116,108 @@ public final class AgentService extends Service {
             if (manager != null) manager.notify(NOTICE_ID, notification(true));
         } catch (Exception error) {
             localStatus = LocalStatus.ERROR;
-            Log.e(TAG, "HTTP bind failed", error);
-            stopSelf();
+            fresh.stop();
+            Log.e(TAG, "HTTP bind failed; session requires reconciliation");
         }
         return START_STICKY;
     }
 
+    private void startBootstrap(Intent intent) {
+        String socket = intent.getStringExtra("bootstrapSocket");
+        String nonce = intent.getStringExtra("bootstrapNonce");
+        String owner = intent.getStringExtra("bootstrapOwnerId");
+        try {
+            RequestAuth.requireId(nonce);
+            RequestAuth.requireId(owner);
+            if (socket == null || !socket.matches("[A-Za-z0-9_.-]{16,100}")) return;
+            // Do not cancel another pending bootstrap or swap its nonce.
+            if (bootstrap != null) return;
+            final BootstrapServer[] ownListener = new BootstrapServer[1];
+            boolean debuggable = (getApplicationInfo().flags & android.content.pm.ApplicationInfo.FLAG_DEBUGGABLE) != 0;
+            if (!debuggable) return; // run-as transport is a debug-canary contract, never a release fallback.
+            ownListener[0] = new BootstrapServer(socket, nonce, owner, debuggable, main, (payload, reply) -> {
+                handleBootstrap(payload, response -> {
+                    // Clear only this one-shot admission BEFORE making its ACK visible. A release
+                    // start immediately after claim ACK cannot hit a stale bootstrap field.
+                    if (bootstrap == ownListener[0]) bootstrap = null;
+                    reply.send(response);
+                });
+            }, () -> { if (bootstrap == ownListener[0]) bootstrap = null; });
+            bootstrap = ownListener[0];
+        } catch (Exception ignored) { Log.w(TAG, "bootstrap listener unavailable"); }
+    }
+
+    private JSONObject bootstrapResponse(JSONObject request, boolean ok, String state) {
+        try {
+            JSONObject response = new JSONObject().put("ok", ok).put("nonce", request.optString("nonce"))
+                    .put("ownerId", request.optString("ownerId")).put("state", state);
+            if (ownership.instance() != null) response.put("serviceInstance", ownership.instance())
+                    .put("ownerGeneration", ownership.generation());
+            if (!ok) response.put("error", state);
+            return response;
+        } catch (Exception e) { return new JSONObject(); }
+    }
+
+    private void handleBootstrap(JSONObject request, BootstrapServer.Reply reply) {
+        if (destroyed) { reply.send(bootstrapResponse(request, false, "service_destroyed")); return; }
+        String owner = request.optString("ownerId");
+        String token = request.optString("token");
+        String action = request.optString("action");
+        if ("claim".equals(action)) {
+            OwnerSession.Claim claim = ownership.claim(owner, token, activeToken != null && ownership.owner() == null);
+            if (claim == OwnerSession.Claim.CONFLICT) {
+                reply.send(bootstrapResponse(request, false, "owner_conflict")); return;
+            }
+            if (claim == OwnerSession.Claim.RESUME && (server == null || !server.isRunning())
+                    && !ownership.recover()) {
+                reply.send(bootstrapResponse(request, false, "reconciliation_required")); return;
+            }
+            if (server != null && !server.isRunning()) {
+                if (server.hasOutstandingWork()) {
+                    reply.send(bootstrapResponse(request, false, "reconciliation_required")); return;
+                }
+                server.stop();
+                server = null;
+            }
+            if (server == null) {
+                HttpServer fresh = new HttpServer(this, Protocol.PORT, token, ownership.instance(), owner, ownership.generation());
+                try { fresh.start(); server = fresh; activeToken = token; }
+                catch (Exception e) {
+                    fresh.stop(); localStatus = LocalStatus.ERROR;
+                    reply.send(bootstrapResponse(request, false, "bind_failed")); return;
+                }
+            }
+            localStatus = LocalStatus.RUNNING;
+            reply.send(bootstrapResponse(request, true, "ready"));
+        } else if ("release".equals(action)) {
+            if (!ownership.release(owner, token, request.optString("serviceInstance", ""))) {
+                reply.send(bootstrapResponse(request, false, "release_refused")); return;
+            }
+            final HttpServer releasing = server;
+            if (releasing != null) releasing.stop();
+            final JSONObject settledReply = bootstrapResponse(request, true, "released");
+            new Thread(() -> {
+                boolean settled = false;
+                try { settled = releasing == null || releasing.awaitSettlement(2500, TimeUnit.MILLISECONDS); }
+                catch (InterruptedException e) { Thread.currentThread().interrupt(); }
+                final boolean safe = settled;
+                main.post(() -> {
+                    if (destroyed || !ownership.finishRelease(safe)) {
+                        localStatus = LocalStatus.ERROR;
+                        reply.send(bootstrapResponse(request, false, "reconciliation_required"));
+                        return;
+                    }
+                    server = null; activeToken = null; localStatus = LocalStatus.WAITING;
+                    reply.send(settledReply);
+                });
+            }, "riviu-owned-release").start();
+        } else reply.send(bootstrapResponse(request, false, "invalid_action"));
+    }
+
     @Override
     public void onDestroy() {
+        destroyed = true;
+        if (bootstrap != null) bootstrap.close();
         if (server != null) {
             server.stop();
             server = null;

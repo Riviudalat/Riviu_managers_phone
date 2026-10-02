@@ -73,6 +73,7 @@ pub(crate) mod observation;
 #[cfg(test)]
 mod preparation_tests;
 mod progress;
+pub mod rehearsal;
 mod selection;
 pub use progress::{PublishProgress, PublishProgressObserver};
 pub use selection::{
@@ -3154,6 +3155,7 @@ where
         before_post,
         progress,
         diagnostics,
+        true,
     ))
     .await
 }
@@ -3256,6 +3258,7 @@ where
         before_post,
         progress,
         diagnostics,
+        true,
     ))
     .await
 }
@@ -3273,6 +3276,7 @@ async fn publish_selected_media_with_sound_effect_intent<P, F>(
     mut before_post: F,
     progress: &PublishProgressObserver<'_>,
     diagnostics: &(dyn Fn(&SelectionDiagnostic) + Send + Sync),
+    leave_on_return: bool,
 ) -> anyhow::Result<(ComposerVerdict, Option<SoundSelectionEvidence>)>
 where
     P: TapPlanner,
@@ -3501,7 +3505,7 @@ where
         Ok((verdict, Some(selection)))
     }
     .await;
-    if !matches!(outcome, Ok((ComposerVerdict::PostNotConfirmed, _))) {
+    if leave_on_return && !matches!(outcome, Ok((ComposerVerdict::PostNotConfirmed, _))) {
         composer.leave_with_stop(stop).await;
     }
     outcome
@@ -4114,6 +4118,10 @@ mod tests {
     use parking_lot::Mutex;
     use std::collections::HashMap;
 
+    mod rehearsal_boundary_tests {
+        include!("tiktok_composer/rehearsal_boundary_tests.rs");
+    }
+
     fn plan() -> ComposerPlan {
         ComposerPlan::resolve(&every_publish_control_measured()).expect("the fixture is complete")
     }
@@ -4619,6 +4627,9 @@ mod tests {
         stuck_at: Option<usize>,
         /// Refuse every Back, so the give-up path is exercised.
         backs_fail: bool,
+        /// A modal sound sheet closes onto the editor's Next-ready state rather
+        /// than the pre-open scene whose only exit was the sound entry.
+        sound_sheet_back_to_next_scene: bool,
         /// Fail the `locate` at this call index, then answer normally.
         ///
         /// An index rather than a flag because *where* the read drops decides what is correct:
@@ -4890,7 +4901,9 @@ mod tests {
                 anyhow::bail!("the agent is not answering");
             }
             let mut at = self.at.lock();
-            *at = at.saturating_sub(1);
+            if self.sound_sheet_back_to_next_scene && self.screens.get(*at).is_some_and(|s|s.elements.contains_key(":id/ta8")) {
+                *at=(*at+1).min(self.screens.len().saturating_sub(1));
+            } else { *at = at.saturating_sub(1); }
             Ok(())
         }
         async fn find_and_tap(&self, _accessibility_id: &str) -> anyhow::Result<()> {
@@ -5340,6 +5353,7 @@ mod tests {
                 |_| panic!("caption failure must precede Post intent"),
                 &|_| {},
                 &|_| {},
+                true,
             ),
         )
         .await;
@@ -5411,6 +5425,7 @@ mod tests {
                 |_| panic!("failed sound must not reach Post"),
                 &|_| {},
                 &|_| {},
+                true,
             ),
         )
         .await;
@@ -5457,6 +5472,7 @@ mod tests {
             |_| anyhow::bail!("Post gate must not be reached"),
             &|_| {},
             &|_| {},
+            true,
         )
         .await
         .unwrap();
@@ -6841,6 +6857,33 @@ mod tests {
             0,
             "a failed write-ahead transition must prevent the Post gesture"
         );
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn rehearsal_full_production_media_sound_caption_reaches_denied_post_boundary() {
+        let mut session=FakeSession::full_walk("riviu-fixture");
+        session.sound_sheet_back_to_next_scene=true;
+        let mut editor=sound_edit_step("Sound A"); editor.elements.insert(":id/c_4".into(),box_at(100.0,100.0)); editor.exit=Some(":id/c_4".into());
+        let sheet=scene(vec![("Recommended",box_at(0.0,0.0)),(":id/ta8",labelled("",0.0,100.0,800.0,200.0)),(":id/title",box_at(100.0,120.0)),(":id/rr5",box_at(100.0,200.0)),(":id/dfu",box_at(500.0,120.0))],None)
+            .texted("Recommended","Recommended").texted(":id/title","Sound A").texted(":id/rr5","Artist A");
+        session.screens.truncate(7);session.screens.extend([editor,sheet]);
+        let mut caption=post_screen(); caption.elements.insert(":id/aun".into(),box_at(20.0,70.0));caption.exit=Some(":id/aun".into());
+        session.screens.extend([sound_edit_step("Sound A"),caption,sound_edit_step("Sound A"),post_screen(),feed()]);
+        let mut reached=0;
+        let result=publish_selected_media_with_sound_effect_intent(&session,plan(),SoundPickerPlan::resolve("com.ss.android.ugc.trill","en","38.3.2").unwrap(),&PublishSoundPolicy::TrendingAny{pool_size:1,seed:1},|r:&ElementBox|r.centre(),PickerSelection{album:"riviu-fixture",count:1,screen:screen(),video:true},"fixture caption",&AtomicBool::new(false),|sound|{assert!(sound.confirmed);reached+=1;anyhow::bail!("rehearsal full path stops before Post");},&|_|{},&|_|{},false).await;
+        assert!(result.is_err(), "expected final denied boundary, result={result:?}, scene={}, taps={:?}, backs={}", *session.at.lock(), session.taps.lock(), *session.backs.lock());
+        assert!(format!("{:#}",result.unwrap_err()).contains("rehearsal full path"));assert_eq!(reached,1);assert_eq!(post_button_taps(&session),0);assert_eq!(session.typed.lock().as_deref(),Some("fixture caption"));
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn rehearsal_production_post_boundary_denies_without_cleanup_side_effects() {
+        let session = FakeSession::full_walk("riviu-fixture");
+        let request = CarouselRequest { album: "riviu-fixture", images: 3, caption: "fixture caption", screen: screen() };
+        let mut composer=Composer::new(&session,plan(),|element:&ElementBox|element.centre());
+        let mut reached=0;
+        let error=drive_with_effect_intent(&mut composer,&request,&AtomicBool::new(false),true,&mut || { reached+=1; anyhow::bail!("no-public rehearsal before Post") }).await.unwrap_err();
+        assert!(error.to_string().contains("no-public rehearsal"));
+        assert_eq!(reached,1); assert_eq!(post_button_taps(&session),0); assert_eq!(*session.backs.lock(),0,"caller must own cleanup after beforePost");
     }
 
     #[tokio::test(start_paused = true)]

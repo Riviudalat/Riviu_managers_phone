@@ -114,6 +114,10 @@ pub(crate) enum SendFailure {
     /// This worker no longer owns the assignment. The winning worker owns the row, so the
     /// loser must leave without changing it and without tapping Send.
     OwnershipLost(anyhow::Error),
+    /// No public Send, but an unsent draft is unresolved. Blocks retry without claiming sent.
+    DraftCleanupPending { cleanup: crate::interaction_hierarchy::DraftCleanup, error: anyhow::Error },
+    /// Preserve primary ownership loss while separately fencing the unsent draft.
+    OwnershipLostWithDraft { cleanup: crate::interaction_hierarchy::DraftCleanup, error: anyhow::Error },
 }
 
 impl SendFailure {
@@ -121,15 +125,22 @@ impl SendFailure {
         matches!(self, Self::AfterEffect(_))
     }
 
+    pub fn blocks_retry(&self) -> bool {
+        self.effect_may_have_gone_out() || self.draft_cleanup_pending()
+    }
+
+    pub fn draft_cleanup_pending(&self) -> bool {
+        matches!(self, Self::DraftCleanupPending { .. } | Self::OwnershipLostWithDraft { .. })
+    }
+
     pub fn ownership_lost(&self) -> bool {
-        matches!(self, Self::OwnershipLost(_))
+        matches!(self, Self::OwnershipLost(_) | Self::OwnershipLostWithDraft { .. })
     }
 
     pub fn into_error(self) -> anyhow::Error {
         match self {
-            Self::BeforeEffect(error) | Self::AfterEffect(error) | Self::OwnershipLost(error) => {
-                error
-            }
+            Self::BeforeEffect(error) | Self::AfterEffect(error) | Self::OwnershipLost(error) => error,
+            Self::DraftCleanupPending { cleanup, error } | Self::OwnershipLostWithDraft { cleanup, error } => error.context(cleanup.reason()),
         }
     }
 
@@ -138,6 +149,7 @@ impl SendFailure {
             Self::BeforeEffect(error) | Self::AfterEffect(error) | Self::OwnershipLost(error) => {
                 format!("{error:#}")
             }
+            Self::DraftCleanupPending { cleanup, error } | Self::OwnershipLostWithDraft { cleanup, error } => format!("{}: {error:#}", cleanup.reason()),
         }
     }
 

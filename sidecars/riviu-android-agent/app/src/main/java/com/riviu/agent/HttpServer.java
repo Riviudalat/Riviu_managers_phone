@@ -16,10 +16,8 @@ import java.net.ServerSocket;
 import java.net.Socket;
 import java.net.SocketTimeoutException;
 import java.nio.charset.StandardCharsets;
-import java.security.MessageDigest;
-import java.util.concurrent.ExecutorService;
-import java.util.concurrent.Executors;
 import java.util.concurrent.TimeUnit;
+import java.util.UUID;
 
 /**
  * Loopback HTTP/1.1 for the helper protocol, authenticated with a shared token.
@@ -49,50 +47,71 @@ final class HttpServer {
     private final int port;
     private final String token;
     private volatile boolean running;
-    private ServerSocket server;
-    private Thread thread;
-    private ExecutorService workers;
+    private volatile ServerSocket server;
+    private volatile Thread thread;
+    private final OwnedRequests workers = new OwnedRequests(WORKER_THREADS, 8);
+    private final ClipboardStore clipboard;
+    private final String serviceInstance;
+    private final String ownerId;
+    private final String ownerGeneration;
+    private boolean closing;
 
     HttpServer(Context context, int port, String token) {
+        this(context, port, token, UUID.randomUUID().toString(), null, null);
+    }
+    HttpServer(Context context, int port, String token, String instance, String owner, String generation) {
+        this.serviceInstance = instance;
+        this.ownerId = owner;
+        this.ownerGeneration = generation;
         this.context = context.getApplicationContext();
         this.port = port;
         this.token = token == null ? "" : token;
+        this.clipboard = new ClipboardStore(this.context);
     }
 
     synchronized void start() throws IOException {
         if (running) {
             return;
         }
+        if (closing) throw new IOException("server closing");
         server = new ServerSocket(port, 8, InetAddress.getByName("127.0.0.1"));
         server.setSoTimeout(1000);
         running = true;
-        workers = Executors.newFixedThreadPool(WORKER_THREADS);
         thread = new Thread(this::acceptLoop, "riviu-helper-http");
         thread.start();
     }
 
     synchronized void stop() {
+        if (closing) return;
+        closing = true;
         running = false;
         if (server != null) {
+            try { server.close(); } catch (IOException ignored) {}
+        }
+        clipboard.closeAdmission();
+        workers.closeAdmission();
+        // No main-looper await: clipboard effects need that same looper to settle.
+        Thread drain = new Thread(() -> {
             try {
-                server.close();
-            } catch (IOException ignored) {
-            }
-            server = null;
+                if (!workers.awaitDrain(10, TimeUnit.SECONDS) || clipboard.unsettled() != 0) {
+                    Log.w(TAG, "HTTP drain remains unsettled; replacement must stay blocked");
+                }
+            } catch (InterruptedException e) { Thread.currentThread().interrupt(); }
+        }, "riviu-helper-drain");
+        drain.start();
+    }
+
+    boolean hasOutstandingWork() {
+        return workers.ownedCount() != 0 || clipboard.unsettled() != 0;
+    }
+    boolean awaitSettlement(long timeout, TimeUnit unit) throws InterruptedException {
+        long deadline = System.nanoTime() + unit.toNanos(timeout);
+        if (!workers.awaitDrain(timeout, unit)) return false;
+        while (clipboard.unsettled() != 0) {
+            if (System.nanoTime() - deadline >= 0) return false;
+            Thread.sleep(10); // Only the dedicated release worker waits, never Android main.
         }
-        if (thread != null) {
-            thread.interrupt();
-            thread = null;
-        }
-        if (workers != null) {
-            workers.shutdownNow();
-            try {
-                workers.awaitTermination(2, TimeUnit.SECONDS);
-            } catch (InterruptedException ignored) {
-                Thread.currentThread().interrupt();
-            }
-            workers = null;
-        }
+        return true;
     }
 
     synchronized boolean isRunning() {
@@ -107,28 +126,15 @@ final class HttpServer {
                 // Served on a worker, not here. On the accept thread, one caller dribbling a
                 // byte every few seconds held the *only* thread and the helper went dark for
                 // the desktop too — a denial of service that cost the attacker nothing.
-                ExecutorService pool = workers;
-                if (pool == null) {
-                    socket.close();
-                    continue;
-                }
-                pool.execute(() -> {
-                    try {
-                        handle(socket);
-                    } catch (IOException error) {
-                        Log.w(TAG, "connection failed", error);
-                    } finally {
-                        try {
-                            socket.close();
-                        } catch (IOException ignored) {
-                        }
-                    }
+                workers.accept(socket, () -> {
+                    try { handle(socket); }
+                    catch (IOException error) { Log.w(TAG, "connection failed"); }
                 });
             } catch (SocketTimeoutException ignored) {
             } catch (IOException error) {
-                if (running) {
-                    Log.w(TAG, "accept failed", error);
-                }
+                if (running) Log.w(TAG, "accept failed");
+                running = false;
+                break;
             }
         }
     }
@@ -180,8 +186,7 @@ final class HttpServer {
         // Before the body is read, and before anything is routed: an unauthorised caller must
         // not be able to make the helper allocate, let alone act. `GET /status` is exempt so the
         // host can still recognise a helper it has not yet handed a token to.
-        boolean statusProbe = "GET".equals(method) && "/status".equals(path);
-        if (!statusProbe && !tokenMatches(presented)) {
+        if (!RequestAuth.allowed(method, path, token, presented)) {
             writeQuiet(out, 401, "unauthorized", "missing or wrong " + TOKEN_HEADER);
             return;
         }
@@ -193,15 +198,22 @@ final class HttpServer {
         try {
             JSONObject response = route(method, path, body);
             write(out, response.optBoolean("ok", false) ? 200 : 400, response);
+        } catch (MainThreadJobs.Pending pending) {
+            try {
+                write(out, 409, Protocol.error(pending.state == MainThreadJobs.State.CANCELLED
+                        ? "clipboard_cancelled" : "settlement_required", "query operation settlement")
+                        .put("operationId", pending.operationId).put("serviceInstance", serviceInstance)
+                        .put("state", pending.state.name().toLowerCase(java.util.Locale.ROOT)));
+            } catch (Exception ignored) {}
         } catch (IllegalArgumentException error) {
             try {
                 write(out, 400, Protocol.error("invalid_argument", error.getMessage()));
             } catch (Exception ignored) {
             }
         } catch (Exception error) {
-            Log.w(TAG, "route failed", error);
+            Log.w(TAG, "route failed");
             try {
-                write(out, 500, Protocol.error("internal", String.valueOf(error.getMessage())));
+                write(out, 500, Protocol.error("internal", "request failed; do not replay an effect"));
             } catch (Exception ignored) {
             }
         }
@@ -218,11 +230,7 @@ final class HttpServer {
      * direction: a helper started without a token is inert rather than open.
      */
     private boolean tokenMatches(String presented) {
-        if (token.isEmpty() || presented == null) {
-            return false;
-        }
-        return MessageDigest.isEqual(
-                presented.getBytes(StandardCharsets.UTF_8), token.getBytes(StandardCharsets.UTF_8));
+        return RequestAuth.tokenMatches(token, presented);
     }
 
     private JSONObject route(String method, String path, byte[] body) throws Exception {
@@ -230,12 +238,27 @@ final class HttpServer {
             return Protocol.status();
         }
         JSONObject json = body.length == 0 ? new JSONObject() : new JSONObject(new String(body, StandardCharsets.UTF_8));
+        if ("POST".equals(method) && "/v1/session/status".equals(path)) {
+            String nonce = json.optString("nonce", "");
+            RequestAuth.requireId(nonce);
+            return Protocol.ok().put("nonce", nonce).put("serviceInstance", serviceInstance)
+                    .put("protocolVersion", Protocol.PROTOCOL_VERSION)
+                    .put("ownership", ownerId == null ? "legacy_unproven" : "owned")
+                    .put("ownerId", ownerId == null ? JSONObject.NULL : ownerId)
+                    .put("ownerGeneration", ownerGeneration == null ? JSONObject.NULL : ownerGeneration)
+                    .put("secureBootstrapAvailable", true).put("secureBootstrapQualified", false);
+        }
+        if ("POST".equals(method) && path.startsWith("/v1/clipboard/jobs/")) {
+            return clipboardJob(path, json);
+        }
         if ("POST".equals(method) && "/v1/clipboard/set".equals(path)) {
-            ClipboardStore.setText(context, json.optString("text", ""));
+            clipboard.submit(null, true, json.optString("text", "")).await(5, TimeUnit.SECONDS);
             return Protocol.ok();
         }
         if ("POST".equals(method) && "/v1/clipboard/get".equals(path)) {
-            return Protocol.ok().put("text", ClipboardStore.getText(context));
+            ClipboardStore.Value value = clipboard.submit(null, false, null).await(5, TimeUnit.SECONDS);
+            if (!value.available) return Protocol.error("clipboard_unavailable", "clipboard is not readable");
+            return Protocol.ok().put("available", true).put("text", value.text);
         }
         if ("POST".equals(method) && "/v1/media/import".equals(path)) {
             return MediaStoreImport.importFile(
@@ -260,6 +283,67 @@ final class HttpServer {
                     json.optInt("iconPx", 0));
         }
         return Protocol.error("not_found", method + " " + path);
+    }
+
+    private JSONObject clipboardJob(String path, JSONObject json) throws Exception {
+        if (!serviceInstance.equals(json.optString("serviceInstance", ""))) {
+            return Protocol.error("instance_mismatch", "service instance changed; reconcile, do not replay");
+        }
+        String id = json.optString("requestId", "");
+        RequestAuth.requireId(id);
+        MainThreadJobs.Job<?> job;
+        if ("/v1/clipboard/jobs/submit".equals(path)) {
+            String action = json.optString("action", "");
+            boolean set = "set".equals(action);
+            boolean compare = "compareSet".equals(action);
+            boolean snapshot = "snapshot".equals(action);
+            boolean restore = "restoreSnapshot".equals(action);
+            if (!set && !compare && !snapshot && !restore && !"get".equals(action)) throw new IllegalArgumentException("invalid clipboard action");
+            if ((set || compare) && !(json.opt("text") instanceof String)) {
+                throw new IllegalArgumentException("write requires text string");
+            }
+            if ((compare || restore) && !(json.opt("expectedText") instanceof String)) {
+                throw new IllegalArgumentException("conditional restore requires expectedText string");
+            }
+            if (restore && !(json.opt("baselineId") instanceof String)) throw new IllegalArgumentException("restore requires baselineId");
+            try {
+                if (snapshot) job = clipboard.snapshot(id);
+                else if (restore) job = clipboard.restoreSnapshot(id, json.getString("baselineId"), json.getString("expectedText"));
+                else if (compare) job = clipboard.compareSet(id, json.getString("expectedText"), json.getString("text"));
+                else job = clipboard.submit(id, set, set ? json.getString("text") : null);
+            }
+            catch (IllegalStateException e) {
+                return Protocol.error("clipboard_ledger_full", "clipboard admission unavailable");
+            }
+        } else if ("/v1/clipboard/jobs/status".equals(path)
+                || "/v1/clipboard/jobs/cancelQueued".equals(path)) {
+            job = clipboard.find(id);
+            if (job == null) return Protocol.error("operation_unknown", "settlement unknown; do not replay");
+        } else return Protocol.error("not_found", "unknown clipboard job endpoint");
+        boolean cancel = "/v1/clipboard/jobs/cancelQueued".equals(path);
+        boolean cancelled = cancel && job.cancelQueued();
+        JSONObject response = Protocol.ok().put("serviceInstance", serviceInstance).put("operationId", job.id);
+        synchronized (job) {
+            MainThreadJobs.State state = job.state();
+            response.put("state", state.name().toLowerCase(java.util.Locale.ROOT));
+            if (cancel) response.put("cancelled", cancelled || state == MainThreadJobs.State.CANCELLED)
+                    .put("settlementRequired", state == MainThreadJobs.State.RUNNING);
+            if (state == MainThreadJobs.State.SUCCEEDED) {
+                ClipboardStore.Value value = (ClipboardStore.Value) job.result();
+                JSONObject result = new JSONObject();
+                if (value.comparison != null) {
+                    result.put("written", value.comparison.written).put("changed", value.comparison.changed)
+                            .put("available", value.comparison.available).put("verified", value.comparison.verified);
+                } else if (value.written) result.put("written", true);
+                else {
+                    result.put("available", value.available).put("plainTextBaseline", value.plainTextBaseline);
+                    if (value.available) result.put("text", value.text);
+                    if (value.baselineId != null) result.put("baselineId", value.baselineId);
+                }
+                response.put("result", result);
+            } else if (state == MainThreadJobs.State.FAILED) response.put("error", "clipboard_failed");
+        }
+        return response;
     }
 
     private static void write(OutputStream out, int status, JSONObject json) throws Exception {

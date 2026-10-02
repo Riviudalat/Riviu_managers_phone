@@ -442,6 +442,25 @@ impl DeviceControlPlane {
             .await
             .map_err(|failure| failure.error)
     }
+    pub async fn start_reserved_stream_or_quarantine(
+        &self, context: UiSessionContext, capacity: UiCapacityReservation,
+    ) -> Result<UiWithStreamContext, DeviceControlError> {
+        match self.start_reserved_stream_internal(context, capacity).await {
+            Ok(context) => Ok(context),
+            Err(mut failure) => {
+                if let Some(context) = failure.context.take() {
+                    self.quarantined.push_session(context);
+                }
+                if let Some(mut failed) = failure.failed_start.take() {
+                    if let Some(mut pending) = failed.pending.take() {
+                        if let Some(ticket) = pending.ticket.take() { self.quarantined.push_cleanup(ticket); }
+                    }
+                }
+                Err(failure.error)
+            }
+        }
+    }
+
     pub(super) async fn start_reserved_stream_internal(
         &self,
         mut context: UiSessionContext,
@@ -604,6 +623,22 @@ impl DeviceControlPlane {
             cleanup,
         })
     }
+    /// Retain unsafe semantic state without dispatching teardown or releasing ownership.
+    /// Quarantine is process-local; the caller must persist its diagnostic receipt first.
+    pub fn quarantine_ui_context(
+        &self,
+        mut context: UiWithStreamContext,
+    ) -> Result<(), DeviceControlError> {
+        let same_plane = context.plane_id == self.plane_id;
+        let owner_quarantine = context.cleanup.quarantined.clone();
+        if let Some(ticket) = context.take_ticket() {
+            // Preserve the ticket even when lifecycle/generation became invalid.
+            // Its originating sink owns the quarantine, including wrong-plane calls.
+            owner_quarantine.push_cleanup(ticket);
+        }
+        if same_plane { Ok(()) } else { Err(DeviceControlError::InvalidContext { reason: "diagnostic context belongs to another plane" }) }
+    }
+
     pub async fn close_ui_context(
         &self,
         mut context: UiWithStreamContext,

@@ -144,7 +144,7 @@ impl CommentVerdict {
             Self::ContextSkipped => "ngữ cảnh không đủ để nói gì",
             Self::SendFlowInterrupted => {
                 "mất kết nối agent TRƯỚC khi bấm Gửi (đang mở drawer / gõ chữ / chờ nút sáng) \
-                 — chưa gõ xong, chưa bấm Gửi, nên thử lại được"
+                 — chưa bấm Gửi; chỉ thử lại sau khi draft đã được xác nhận sạch"
             }
         }
     }
@@ -188,6 +188,7 @@ pub struct CommentDrawer<'a, P: TapPlanner> {
     session: &'a dyn UiSession,
     labels: TikTokControls,
     plan_tap: P,
+    typing_attempted: bool,
 }
 
 enum OpenForPost {
@@ -202,8 +203,11 @@ impl<'a, P: TapPlanner> CommentDrawer<'a, P> {
             session,
             labels,
             plan_tap,
+            typing_attempted: false,
         }
     }
+
+    pub(crate) fn typing_attempted(&self) -> bool { self.typing_attempted }
 
     /// The Send control's query, or `None` when this build never had it measured.
     pub fn send_query(&self) -> Option<ElementQuery<'static>> {
@@ -467,6 +471,7 @@ impl<'a, P: TapPlanner> CommentDrawer<'a, P> {
             !stop.load(Ordering::Relaxed),
             "Comment stopped before typing"
         );
+        self.typing_attempted = true; // A failed ACK does not prove that text did not land.
         self.session.type_text(text).await?;
         Ok(TypedInto::Typed)
     }

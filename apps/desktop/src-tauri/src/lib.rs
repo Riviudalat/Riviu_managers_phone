@@ -1,3 +1,10 @@
+mod no_public_publish_commands;
+mod no_public_inspect;
+mod no_public_owned;
+mod no_public_runs;
+mod no_public_publish;
+mod no_public_interaction;
+mod no_public;
 mod accept_loop;
 mod agent_commands;
 /// Public so the live harness binaries resolve the agent exactly as the app
@@ -300,7 +307,7 @@ pub fn run() {
     }
     let builder = tauri::Builder::default();
     // Production keeps the existing plugins. Smoke never registers updater/dialog.
-    let builder = if policy.is_smoke() {
+    let builder = if policy.is_smoke() || policy.rehearsal().is_some() {
         builder
     } else {
         builder
@@ -434,6 +441,15 @@ pub fn run() {
                 }
             }
             let dispatch: fn(tauri::ipc::Invoke<tauri::Wry>) -> bool = tauri::generate_handler![
+            no_public::no_public_status,
+            no_public::no_public_metadata,
+            no_public::no_public_shutdown,
+            no_public::no_public_reconcile_setup,
+            no_public_inspect::no_public_inspect,
+            no_public::no_public_run_status,
+            no_public::no_public_cancel,
+            no_public_interaction::no_public_prepare_interaction,
+            no_public_publish_commands::no_public_prepare_publish,
             startup_error,
             retry_startup,
             deployment_frontend_ready,
@@ -746,17 +762,35 @@ pub fn run() {
         // Requested exits drain on a worker while the native event loop stays
         // available. Exit remains the fallback for a path without ExitRequested.
         match event {
+            RunEvent::WindowEvent { label, event: tauri::WindowEvent::CloseRequested { api, .. }, .. }
+                if label == "main" && !exit_coordinator.completed() => {
+                api.prevent_close();
+                let drain_handle = handle.clone();
+                let exit_handle = handle.clone();
+                if let Err(error) = exit_coordinator.request_checked(
+                    move || {
+                        log::info!("graceful shutdown started from main close");
+                        let settled = graceful_shutdown_for_requested_exit(&drain_handle);
+                        log::info!("main-close shutdown settled={settled}");
+                        settled
+                    },
+                    move || exit_handle.exit(0),
+                ) {
+                    log::error!("could not start window-close shutdown: {error}");
+                }
+            }
             RunEvent::ExitRequested { api, .. } if !exit_coordinator.completed() => {
                 // Device workers and WebView cleanup may dispatch back to this
                 // native event loop. Blocking it here deadlocks their drain.
                 api.prevent_exit();
                 let drain_handle = handle.clone();
                 let exit_handle = handle.clone();
-                if let Err(error) = exit_coordinator.request(
+                if let Err(error) = exit_coordinator.request_checked(
                     move || {
                         log::info!("graceful shutdown started");
-                        graceful_shutdown(&drain_handle);
-                        log::info!("graceful shutdown completed");
+                        let settled = graceful_shutdown_for_requested_exit(&drain_handle);
+                        log::info!("requested shutdown settled={settled}");
+                        settled
                     },
                     move || exit_handle.exit(0),
                 ) {
@@ -813,6 +847,19 @@ pub fn run_deployment_smoke(args: deployment_check::DeploymentSmokeArgs) -> anyh
 ///
 /// Idempotent by construction: every step is either a flag set to the value it already has
 /// or a shutdown that no-ops once done, so being called from both paths is safe.
+fn graceful_shutdown_for_requested_exit(handle: &tauri::AppHandle) -> bool {
+    if let Some(state) = handle.try_state::<AppState>() {
+        if state.is_ui_smoke() {
+            return match tauri::async_runtime::block_on(state.shutdown_ui_smoke()) {
+                Ok(()) => true,
+                Err(error) => { log::error!("diagnostic shutdown retained for reconciliation: {error:#}"); false }
+            };
+        }
+    }
+    graceful_shutdown(handle);
+    true
+}
+
 pub(crate) fn graceful_shutdown(handle: &tauri::AppHandle) {
     let Some(state) = handle.try_state::<AppState>() else {
         return;

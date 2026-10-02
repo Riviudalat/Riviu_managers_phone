@@ -365,6 +365,16 @@ pub async fn forward(adb: &AdbProgram, serial: &str, socket: &str) -> anyhow::Re
     })
 }
 
+/// Allocate a diagnostic-owned forward without reclaiming any existing listener.
+/// Modern bundled ADB reports the allocated tcp:0 port directly; an unreadable
+/// allocation refuses instead of selecting someone else's port from --list.
+pub async fn forward_owned(adb: &AdbProgram, serial: &str, socket: &str) -> anyhow::Result<u16> {
+    let remote = format!("localabstract:{socket}");
+    let result = adb.device(serial, &["forward", "tcp:0", &remote], Duration::from_secs(30)).await?;
+    result.trim().parse::<u16>().ok().filter(|port| *port != 0)
+        .ok_or_else(|| anyhow!("diagnostic forward allocation did not report its owned port"))
+}
+
 /// Drop a forward we created. An already absent listener meets the cleanup goal;
 /// transport failures do not prove absence and must still reach the caller.
 pub async fn remove_forward(adb: &AdbProgram, serial: &str, port: u16) -> anyhow::Result<()> {

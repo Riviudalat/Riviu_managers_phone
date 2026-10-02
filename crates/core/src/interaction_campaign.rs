@@ -757,7 +757,7 @@ fn send_attempt_has_effect_intent(
         || send_result
             .as_ref()
             .err()
-            .is_some_and(SendFailure::effect_may_have_gone_out)
+            .is_some_and(SendFailure::blocks_retry)
 }
 
 /// What a campaign's own rows say happened, counted once.
@@ -2689,6 +2689,7 @@ async fn run_cohort(
                 deadline_ms: db.conversation_session(&campaign_id)?.map(|s| s.ends_at_ms),
             });
             let mut effect_intent = false;
+            let cleanup_attention = AtomicBool::new(false);
             // The stream this context owns. A frame from any other generation belongs to a
             // producer that has already been torn down and proves nothing about this send.
             let generation = context.stream_proof().generation;
@@ -2737,14 +2738,15 @@ async fn run_cohort(
                 }
                 // A process can die after arming a composer but before the durable effect
                 // gate. The database correctly makes that assignment retryable, but the
-                // phone keeps the draft. Clear that state before opening anything for this
-                // attempt; cleanup returns to the feed, and `open_target` below rebuilds the
-                // target proof (and, for replies, the parent proof) from fresh UI.
+                // phone keeps the draft. An unowned stale draft requires reconciliation,
+                // not blind Back/erase. Only verified clean state can proceed to a fresh
+                // target/parent proof for this attempt.
                 if actions.comment {
                     if let Err(failure) =
                         driver.clear_stale_comment_ui(session.as_ref(), &stop).await
                     {
-                        effect_intent = failure.effect_may_have_gone_out();
+                        cleanup_attention.store(failure.draft_cleanup_pending(), Ordering::Relaxed);
+                        effect_intent = failure.blocks_retry();
                         return Err(failure.into_error());
                     }
                 }
@@ -3004,7 +3006,7 @@ async fn run_cohort(
                         if campaign_is_cancelled(&db,&campaign_id)? {break Err(SendFailure::before(anyhow::anyhow!("Đã dừng trước reply")));}
                         let result=driver.send_reply(session.as_ref(),parent,prepared,&stop,&mut effect_gate,request.like_parent,&mut comment_like).await;
                         let retry=request.seeding.is_some() && attempt<3 && tokio::time::Instant::now()<until && !effect_gate.crossed()
-                            && result.as_ref().err().is_some_and(|e|!e.effect_may_have_gone_out() && (e.detail().contains("parent_not_found")||e.detail().contains("comment_not_visible")));
+                            && result.as_ref().err().is_some_and(|e|!e.blocks_retry() && (e.detail().contains("parent_not_found")||e.detail().contains("comment_not_visible")));
                         if !retry {break result;}
                         let proof=driver.open_target(session.as_ref(),target).await?;
                         if !target_proof_authorizes_public_effect(proof){break Err(SendFailure::before(anyhow::anyhow!("Refresh chưa xác minh đúng bài")));}
@@ -3014,6 +3016,7 @@ async fn run_cohort(
                         .send_root(session.as_ref(), prepared, &stop, &mut effect_gate)
                         .await
                 };
+                cleanup_attention.store(send_result.as_ref().err().is_some_and(SendFailure::draft_cleanup_pending), Ordering::Relaxed);
                 // The evidence blob below is only written on the paths that settle, and a heart
                 // tapped just before a refused send would be lost there. One log line makes a
                 // like that really happened findable either way — the like itself is not undone
@@ -3026,8 +3029,8 @@ async fn run_cohort(
                 }
                 // A driver can prove that retry is unsafe even when the CAS itself failed:
                 // after typing, an unverified composer cleanup leaves the next attempt able
-                // to publish stale text. Preserve the driver's AfterEffect classification so
-                // that path settles Uncertain. OwnershipLost is deliberately not included;
+                // to publish stale text. DraftCleanupPending blocks retry independently from
+                // public effect classification and settles attention as Uncertain. OwnershipLost is deliberately not included;
                 // its sibling owns the row and the match below leaves it untouched.
                 effect_intent = send_attempt_has_effect_intent(effect_gate.crossed(), &send_result);
                 let comment_crossed = effect_gate.crossed();
@@ -3038,18 +3041,8 @@ async fn run_cohort(
                 let sent = match send_result {
                     Ok(sent) => sent,
                     Err(failure) if failure.ownership_lost() => {
-                        let _ = settle_claimed_action(
-                            db.as_ref(),
-                            id,
-                            crate::InteractionActionKind::Comment,
-                            comment_claim_revision,
-                            None,
-                            ActionSettlement {
-                                state: crate::InteractionActionState::FailedBeforeEffect,
-                                evidence: serde_json::json!({"phase":"effectGate","verdict":"ownershipLost"}),
-                                error: Some("comment ownership lost before Send".to_owned()),
-                            },
-                        );
+                        // The winner owns every action/assignment row. No arm, settle or retry
+                        // from this loser; cleanup attention is carried separately to device quarantine.
                         return Ok::<Option<serde_json::Value>, anyhow::Error>(None);
                     }
                     Err(failure) => {
@@ -3086,6 +3079,9 @@ async fn run_cohort(
                                 evidence: serde_json::json!({
                                     "phase": if comment_crossed { "afterSendBoundary" } else if effect_intent { "typedCleanupUnverified" } else { "beforeSendBoundary" },
                                     "arrival": proof.as_str(),
+                                    "publicSendBoundaryCrossed": comment_crossed,
+                                    "publicEffectMayHaveGoneOut": failure.effect_may_have_gone_out(),
+                                    "draftCleanupPending": matches!(failure, SendFailure::DraftCleanupPending { .. }),
                                 }),
                                 error: Some(detail),
                             },
@@ -3162,13 +3158,19 @@ async fn run_cohort(
                 generation,
                 watermark,
             );
-            let cleanup = control.complete_app_session(context, &opened_package).await;
+            let draft_cleanup_attention = cleanup_attention.load(Ordering::Relaxed);
+            let cleanup = if draft_cleanup_attention {
+                control.quarantine_ui_context(context)
+                    .map(|()| crate::device_control::AppCompletionDisposition::Deferred)
+            } else {
+                control.complete_app_session(context, &opened_package).await
+            };
             let cleanup_evidence = match &cleanup {
                 Ok(crate::device_control::AppCompletionDisposition::ProcessAbsent(proof)) => {
                     serde_json::json!({"state":"processAbsent","proof":proof})
                 }
                 Ok(crate::device_control::AppCompletionDisposition::Deferred) => {
-                    serde_json::json!({"state":"deferred","reason":"device_work_pending"})
+                    serde_json::json!({"state":"deferred","reason":if draft_cleanup_attention {"draft_cleanup_unverified_quarantined"} else {"device_work_pending"}})
                 }
                 Err(error) => serde_json::json!({"state":"failed","error":error.to_string()}),
             };
@@ -3300,10 +3302,9 @@ async fn run_cohort(
                         Some(&failure_detail),
                         None,
                     )?;
-                    // Especially here. `Uncertain` means the Send tap went out
-                    // and its confirmation did not arrive, so whether the
-                    // comment posted can only be settled by looking — and this
-                    // path used to write no artifact at all.
+                    // Retain evidence for either an unconfirmed Send or an unresolved
+                    // pre-Send draft. The typed failure records whether the public
+                    // boundary crossed; Uncertain alone never claims a comment posted.
                     if let Some((path, sha)) = publish_evidence_frame(
                         &artifacts,
                         evidence,
@@ -3818,7 +3819,7 @@ impl HierarchyTargetDriver<'_> {
     /// `NotConfirmed` is the only one where a Send tap went out**. So `NotConfirmed` is
     /// the single `AfterEffect` case, and every other refusal — deliberately not listed
     /// here one by one, because two additions have already outgrown such a list — provably
-    /// never tapped Send and must stay retryable. A new verdict that CAN follow a Send tap
+    /// never tapped Send; retry additionally requires verified draft settlement. A new verdict that CAN follow a Send tap
     /// belongs beside `NotConfirmed` above, not in the `_` arm.
     fn finish(
         outcome: crate::interaction_hierarchy::HierarchySendOutcome,
@@ -3830,6 +3831,7 @@ impl HierarchyTargetDriver<'_> {
             let error = anyhow::anyhow!("{}", outcome.verdict.reason());
             return Err(match outcome.verdict {
                 CommentVerdict::NotConfirmed => SendFailure::AfterEffect(error),
+                _ if !outcome.cleanup.retry_safe() => SendFailure::DraftCleanupPending { cleanup: outcome.cleanup, error },
                 _ => SendFailure::BeforeEffect(error),
             });
         }
@@ -3860,6 +3862,12 @@ fn map_hierarchy_send_failure(
         }
         crate::interaction_hierarchy::HierarchySendFailure::OwnershipLost(error) => {
             SendFailure::lost_ownership(error)
+        }
+        crate::interaction_hierarchy::HierarchySendFailure::DraftCleanupPending { cleanup, error } => {
+            SendFailure::DraftCleanupPending { cleanup, error }
+        }
+        crate::interaction_hierarchy::HierarchySendFailure::OwnershipLostWithDraft { cleanup, error } => {
+            SendFailure::OwnershipLostWithDraft { cleanup, error }
         }
     }
 }
@@ -4221,6 +4229,7 @@ mod tests {
     ) {
         (
             crate::interaction_hierarchy::HierarchySendOutcome {
+                cleanup: crate::interaction_hierarchy::DraftCleanup::NotTyped,
                 verdict,
                 armed_frame_sha256: "armed".into(),
                 cleared_frame_sha256: "cleared".into(),
@@ -4254,6 +4263,30 @@ mod tests {
             !failure.effect_may_have_gone_out(),
             "the campaign must write Failed so this assignment remains retryable"
         );
+    }
+
+    #[test]
+    fn hierarchy_draft_attention_blocks_retry_without_claiming_public_send() {
+        let (mut outcome, prepared) = classification_fixture(crate::tiktok_drawer::CommentVerdict::NotArmed);
+        outcome.cleanup = crate::interaction_hierarchy::DraftCleanup::RefusedDraftChanged;
+        let Err(failure) = HierarchyTargetDriver::finish(outcome, &prepared) else { panic!("pending draft must not succeed") };
+        assert!(!failure.effect_may_have_gone_out());
+        assert!(failure.blocks_retry());
+        assert!(failure.detail().contains("draft_cleanup_foreign_or_changed"));
+        let result = Err(failure);
+        assert!(send_attempt_has_effect_intent(false, &result), "assignment must retain attention despite zero public Send");
+    }
+
+    #[test]
+    fn hierarchy_lost_owner_with_draft_preserves_winner_and_device_attention() {
+        let failure = map_hierarchy_send_failure(crate::interaction_hierarchy::HierarchySendFailure::OwnershipLostWithDraft {
+            cleanup: crate::interaction_hierarchy::DraftCleanup::RefusedBindingChanged,
+            error: anyhow::anyhow!("CAS loser"),
+        });
+        assert!(failure.ownership_lost());
+        assert!(failure.draft_cleanup_pending());
+        assert!(failure.blocks_retry());
+        assert!(!failure.effect_may_have_gone_out());
     }
 
     /// `NotConfirmed` is the only hierarchy verdict on the far side of the effect line.
@@ -4293,13 +4326,13 @@ mod tests {
 
     #[test]
     fn unverified_post_typing_cleanup_marks_the_assignment_uncertain() {
-        let cleanup_failed = Err::<SendOutcome, _>(SendFailure::after(anyhow::anyhow!(
-            "typed composer cleanup was not verified"
-        )));
-        assert!(
-            send_attempt_has_effect_intent(false, &cleanup_failed),
-            "AfterEffect must settle Uncertain even when the gate CAS never crossed"
-        );
+        let cleanup_failed = Err::<SendOutcome, _>(SendFailure::DraftCleanupPending {
+            cleanup: crate::interaction_hierarchy::DraftCleanup::FailedReadback,
+            error: anyhow::anyhow!("typed composer cleanup was not verified"),
+        });
+        assert!(send_attempt_has_effect_intent(false, &cleanup_failed),
+            "draft attention must block retry even when public gate never crossed");
+        assert!(!cleanup_failed.as_ref().err().unwrap().effect_may_have_gone_out());
 
         let retryable = Err::<SendOutcome, _>(SendFailure::before(anyhow::anyhow!(
             "typed composer was verified clean"

@@ -271,8 +271,13 @@ impl Drop for StartClaim<'_> {
     }
 }
 
-#[derive(Debug, Clone, Default)]
+#[derive(Debug, Clone)]
 pub struct AndroidDriverConfig {
+    /// False for strict diagnostics: no automatic device setup/recovery;
+    /// borrowed runners are not terminated during shutdown.
+    pub automatic_setup_allowed: bool,
+    /// Exact diagnostic devices approved to start installed UiAutomator; never restart/install.
+    pub diagnostic_runner_devices: Vec<String>,
     /// Explicit developer-build path to `adb`. Debug builds fall back to
     /// `RIVIU_ADB_PATH`, `ANDROID_SDK_ROOT`/`ANDROID_HOME`, `PATH`, then
     /// [`Self::bundled_adb_path`]. Production builds ignore this field.
@@ -324,6 +329,12 @@ pub struct AndroidDriverConfig {
     pub agent_test_apk: Option<PathBuf>,
     /// The test APK shipped inside the installer. Lowest priority.
     pub bundled_agent_test_apk: Option<PathBuf>,
+}
+
+impl Default for AndroidDriverConfig {
+    fn default() -> Self {
+        Self { automatic_setup_allowed: true, diagnostic_runner_devices: Vec::new(), adb_path: None, minicap_apk: None, bundled_adb_path: None, bundled_minicap_apk: None, package_java: None, bundletool_jar: None, scrcpy_server: None, bundled_scrcpy_server: None, riviu_agent_apk: None, bundled_riviu_agent_apk: None, agent_server_apk: None, bundled_agent_server_apk: None, agent_test_apk: None, bundled_agent_test_apk: None }
+    }
 }
 
 /// One running minicap feed, owned so a second `ensure_stream` reuses it and a
@@ -869,6 +880,8 @@ fn select_preferred_tiktok_package(
 }
 
 pub struct AndroidDriver {
+    automatic_setup_allowed: bool,
+    diagnostic_runner_devices: HashSet<String>,
     trace: Mutex<Option<riviu_core::ui_automation::trace::TraceRecorder>>,
     gui_reasoner: Mutex<Option<riviu_core::ui_automation::SharedReasoner>>,
     adb: AdbProgram,
@@ -1050,6 +1063,39 @@ impl AndroidDriver {
         self.adb.path().display().to_string()
     }
 
+    /// Helper-only diagnostic preparation; caller retains its admitted device lease.
+    pub async fn prepare_helper_canary(&self, serial: &str, report: PathBuf) -> anyhow::Result<crate::riviu_agent::HelperClient> {
+        let helper = crate::riviu_agent::HelperClient::prepare_canary(self.adb.clone(), serial, report).await?;
+        self.helpers.lock().insert(serial.into(), helper.clone());
+        Ok(helper)
+    }
+
+    /// Before-session reconciliation only: no transport, runner or semantic helper state.
+    pub async fn prove_diagnostic_setup_idle(&self, serial: &str) -> anyhow::Result<()> {
+        anyhow::ensure!(!self.agents.lock().contains_key(serial) && !self.helpers.lock().contains_key(serial), "cached diagnostic session/helper retained");
+        anyhow::ensure!(!self.forwarded.lock().contains(serial), "owned diagnostic forward retained");
+        anyhow::ensure!(!self.streams.lock().await.contains_key(serial), "owned diagnostic stream retained");
+        let activity = self.adb.shell(serial, "dumpsys activity").await?;
+        anyhow::ensure!(Self::active_instrumentations(&activity, &[]).is_empty(), "instrumentation still active; no setup reconciliation");
+        for package in [AGENT_PACKAGE, AGENT_TEST_PACKAGE] {
+            anyhow::ensure!(self.pid_of(serial, package).await?.is_none(), "UiAutomator process still active");
+        }
+        Ok(())
+    }
+
+    pub fn settle_diagnostic_setup_reservation(&self, serial: &str) { self.interaction.clear(serial); }
+
+    pub fn helper_cleanup_pending(&self) -> bool {
+        self.helpers.lock().values().any(|helper| helper.cleanup_is_pending())
+    }
+
+    /// Candidate update without automatic runtime permission grants.
+    pub async fn install_helper_canary(&self, serial: &str, apk: &Path) -> anyhow::Result<()> {
+        let output = self.adb.device(serial, &["install", "-r", apk.to_str().context("candidate APK path invalid")?], Duration::from_secs(300)).await?;
+        anyhow::ensure!(output.lines().any(|line|line.trim() == "Success"), "helper candidate install not confirmed");
+        Ok(())
+    }
+
     /// The origin retained at driver selection time. Re-resolving it later would let a
     /// changed environment make diagnostics describe a binary this driver never used.
     pub fn adb_origin(&self) -> &'static str {
@@ -1108,6 +1154,7 @@ impl AndroidDriver {
             before.stderr.trim()
         );
         let missing = missing_tiktok_runtime_permissions(&before.stdout)?;
+        anyhow::ensure!(self.automatic_setup_allowed || missing.is_empty(), "Diagnostic session refuses automatic permission grants");
         if !missing.is_empty() {
             let current_user = self.adb.shell(serial, "am get-current-user").await?;
             anyhow::ensure!(
@@ -1303,6 +1350,8 @@ impl AndroidDriver {
             )
         };
         Self {
+            automatic_setup_allowed: config.automatic_setup_allowed,
+            diagnostic_runner_devices: config.diagnostic_runner_devices.iter().cloned().collect(),
             adb,
             adb_origin,
             minicap_apk,
@@ -1581,17 +1630,23 @@ impl DeviceDriver for AndroidDriver {
             .helpers
             .lock()
             .drain()
-            .map(|(_, helper)| helper)
             .collect::<Vec<_>>();
         let forwarded = self.forwarded.lock().drain().collect::<Vec<_>>();
         let ports = self.ports.lock().clone();
         let mut failures = Vec::new();
 
-        let mut owned_serials = agents
-            .iter()
-            .map(|(serial, _)| serial.clone())
-            .collect::<std::collections::BTreeSet<_>>();
+        let mut owned_serials = if self.automatic_setup_allowed {
+            agents.iter().map(|(serial, _)| serial.clone())
+                .collect::<std::collections::BTreeSet<_>>()
+        } else {
+            std::collections::BTreeSet::new()
+        };
         for (serial, agent) in agents {
+            if !self.automatic_setup_allowed {
+                // The diagnostic did not launch this runner. DELETE schedules
+                // Appium server termination, so detach only its own forward below.
+                continue;
+            }
             match tokio::time::timeout(Duration::from_secs(5), agent.close()).await {
                 Ok(Ok(())) => {}
                 result => {
@@ -1640,8 +1695,10 @@ impl DeviceDriver for AndroidDriver {
         }
         self.ports.lock().clear();
 
-        for helper in helpers {
-            if let Err(error) = helper.shutdown().await {
+        for (serial, helper) in helpers {
+            if let Err(error) = helper.clone().shutdown().await {
+                // Retain exact owner/instance/baseline/forward proof for reconciliation.
+                self.helpers.lock().insert(serial, helper);
                 failures.push(error.to_string());
             }
         }
@@ -1960,6 +2017,10 @@ impl DeviceDriver for AndroidDriver {
     }
 
     async fn launch_app(&self, udid: &str, bundle_id: &str) -> anyhow::Result<()> {
+        if !self.automatic_setup_allowed {
+            self.refuse_undrivable_screen(udid).await?;
+            return self.adb.launch_foreground_once(udid, bundle_id).await;
+        }
         if riviu_core::tiktok_target::is_measured_android_tiktok(bundle_id) {
             let guard = self.screen_guard_state(udid).await?;
             if guard.locked == Some(true) {
@@ -2498,7 +2559,25 @@ impl DeviceDriver for AndroidDriver {
             return Err(error.context("TikTok permission preflight failed"));
         }
 
+        if !self.automatic_setup_allowed {
+            let preflight = async {
+                self.refuse_undrivable_screen(udid).await?;
+                let active = self.adb.foreground_package(udid).await?;
+                anyhow::ensure!(active == bundle_id, "Diagnostic requires the approved app already foreground; no launch, Back or unlock");
+                Ok::<_,anyhow::Error>(())
+            }.await;
+            if let Err(error) = preflight {
+                self.interaction.record_stopped(udid, generation);
+                return Err(error);
+            }
+        }
         let session = self.open_session(udid).await?;
+        if !self.automatic_setup_allowed {
+            let active = riviu_core::driver::UiSession::active_app_bundle(&session).await?;
+            anyhow::ensure!(active == bundle_id, "Diagnostic foreground changed during session creation");
+            self.interaction.complete_session(&reservation)?;
+            return Ok(Box::new(session));
+        }
         riviu_core::driver::UiSession::launch_app_foreground(&session, &bundle_id).await?;
 
         let deadline = std::time::Instant::now() + FOREGROUND_PROOF_TIMEOUT;
@@ -2800,6 +2879,9 @@ pub async fn detect_driver(config: &AndroidDriverConfig) -> Result<Arc<AndroidDr
         refusals.join("; ")
     ))
 }
+
+#[cfg(test)]
+mod borrowed_shutdown_tests;
 
 #[cfg(test)]
 mod tests {
