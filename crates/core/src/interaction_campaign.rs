@@ -35,6 +35,18 @@ use std::collections::HashMap;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
+// Freeze only the owned inputs needed by the short storage closure. The body cannot await
+// a device operation, and the writer permit is released before the caller continues.
+macro_rules! interaction_mutation {
+    ($database:expr, $stage:literal, [$($capture:ident),*], |$db:ident| $body:expr) => {{
+        $(let $capture = $capture.to_owned();)*
+        interaction_write(&$database, $stage, move |$db| {
+            $(let $capture = &$capture;)*
+            $body
+        }).await
+    }};
+}
+
 /// The package travels with the context because every caller needs it again: the
 /// arrival check compares it against `active_app_bundle()`, and it is per device —
 /// the iOS bundle and Android's two regional builds are three different ids.
@@ -510,7 +522,7 @@ async fn gather_target_evidence(
             None
         }
     };
-    file_target_context(db, campaign_id, target, looked_up.as_ref());
+    file_target_context(db, campaign_id, target, looked_up.as_ref()).await;
 
     let caption = web.and_then(|context| context.caption.clone());
     let slide_total = web
@@ -627,7 +639,7 @@ async fn gather_target_evidence(
 /// **A failed lookup is filed too, and that is the point.** "This target has no caption
 /// because TikTok blocks this IP" and "this target has no caption because nobody looked" are
 /// the same empty column otherwise, and only one of them is worth an operator's attention.
-fn file_target_context(
+async fn file_target_context(
     db: &Arc<crate::db::Database>,
     campaign_id: &str,
     target: &crate::ResolvedTikTokTarget,
@@ -637,7 +649,9 @@ fn file_target_context(
     let Some(json) = crate::InteractionTargetNote::context_json(looked_up) else {
         return;
     };
-    if let Err(error) = db.record_interaction_target_context(campaign_id, &target.target_key, &json)
+    if let Err(error) =
+        interaction_mutation!(db, "target_context", [campaign_id, target, json], |db| db
+            .record_interaction_target_context(campaign_id, &target.target_key, &json))
     {
         tracing::warn!(
             "interaction {}: không ghi được ghi chú web: {error}",
@@ -660,12 +674,13 @@ fn file_target_context(
 /// in the preparation loop had just closed. Caught by an adversarial re-read of the claim
 /// "a retry cannot overwrite a Succeeded state", which was true of the loop and false here.
 fn fail_whole_target(
-    db: &Arc<crate::db::Database>,
+    db: &crate::db::Database,
     plan: &crate::ThreadPlan,
     assignment_ids: &HashMap<(String, u8), String>,
     protected: &std::collections::HashSet<String>,
     target: &crate::ResolvedTikTokTarget,
     error_code: &str,
+    scope: Option<&std::collections::HashSet<String>>,
 ) -> anyhow::Result<()> {
     for assignment in plan
         .assignments
@@ -676,6 +691,9 @@ fn fail_whole_target(
         else {
             continue;
         };
+        if scope.is_some_and(|scope| !scope.contains(id)) {
+            continue;
+        }
         if protected.contains(id) {
             // Fast path: the snapshot already knew this one was settled. Cheap and keeps the
             // common case out of a write — but it is NOT the guard. The snapshot is stale by
@@ -713,6 +731,76 @@ fn protected_assignment_ids(
         })
         .map(|assignment| assignment.id.clone())
         .collect()
+}
+
+// Async storage closures finish before any device await.
+async fn interaction_write<T, F>(
+    db: &Arc<crate::db::Database>,
+    stage: &'static str,
+    action: F,
+) -> anyhow::Result<T>
+where
+    T: Send + 'static,
+    F: FnOnce(&crate::db::Database) -> anyhow::Result<T> + Send + 'static,
+{
+    db.storage_write(action).await.map_err(|error| {
+        let busy = error.downcast_ref::<rusqlite::Error>().is_some_and(|error| {
+            matches!(error, rusqlite::Error::SqliteFailure(code, _) if matches!(
+                code.code, rusqlite::ErrorCode::DatabaseBusy | rusqlite::ErrorCode::DatabaseLocked
+            ))
+        }) || error.to_string().starts_with("StorageBusy:");
+        let code = if busy {
+            "StorageBusy"
+        } else {
+            "InteractionStorage"
+        };
+        error.context(format!("{code}: interaction stage={stage}"))
+    })
+}
+
+async fn claim_preparation(db: &Arc<crate::db::Database>, id: &str) -> anyhow::Result<Option<i64>> {
+    let id = id.to_owned();
+    interaction_write(db, "claim_preparation", move |db| {
+        db.claim_interaction_assignment_for_send(&id)
+    })
+    .await
+}
+
+async fn prepare_claimed_assignment(
+    db: &Arc<crate::db::Database>,
+    id: &str,
+    ownership_revision: i64,
+    prepared: &PreparedThreadMessage,
+) -> anyhow::Result<Option<i64>> {
+    let assignment_id = id.to_owned();
+    let message = prepared.clone();
+    let result = interaction_write(db, "prepare_assignment", move |db| {
+        db.prepare_interaction_assignment(&assignment_id, ownership_revision, &message)
+    })
+    .await;
+    match result {
+        Ok(revision) => Ok(revision),
+        Err(primary) => {
+            // A failed prepare has not armed a device effect. Release exactly its old claim,
+            // never a sibling, replacement revision, or independently armed action.
+            let claims = vec![(id.to_owned(), ownership_revision)];
+            let code = if primary.to_string().starts_with("StorageBusy:") {
+                "StorageBusy: interaction stage=prepare_assignment"
+            } else {
+                "InteractionStorage: interaction stage=prepare_assignment"
+            };
+            match interaction_write(db, "release_failed_prepare", move |db| {
+                db.release_owned_interaction_preparations(&claims, code)
+            })
+            .await
+            {
+                Ok(_) => Err(primary),
+                Err(cleanup) => {
+                    Err(primary.context(format!("prepare claim release failed: {cleanup:#}")))
+                }
+            }
+        }
+    }
 }
 
 type ClaimedPreparedMessage = (String, PreparedThreadMessage, i64);
@@ -986,11 +1074,16 @@ pub async fn execute_thread_campaign(
     }
     if let Some(script) = request.scripted_conversation.as_ref() {
         let token = uuid::Uuid::new_v4().to_string();
-        let session = match db.claim_conversation_session(
-            &campaign_id,
-            script,
-            &token,
-            chrono::Utc::now().timestamp_millis(),
+        let session = match interaction_mutation!(
+            db,
+            "claim_conversation",
+            [campaign_id, script, token],
+            |db| db.claim_conversation_session(
+                &campaign_id,
+                script,
+                &token,
+                chrono::Utc::now().timestamp_millis(),
+            )
         ) {
             Ok(session) => session,
             Err(error)
@@ -1491,11 +1584,13 @@ async fn join_campaign(
             )),
             _ => first_error.as_ref().map(|error| format!("{error:#}")),
         };
-        let _ = db.settle_interaction_campaign_if_running(
-            &campaign_id,
-            final_state,
-            reason.as_deref(),
-        )?;
+        let _ =
+            interaction_mutation!(db, "settle_campaign", [campaign_id, reason], |db| db
+                .settle_interaction_campaign_if_running(
+                    &campaign_id,
+                    final_state,
+                    reason.as_deref(),
+                ))?;
     }
     events.emit(AppEvent::InteractionUpdated {
         campaign_id,
@@ -1679,6 +1774,59 @@ fn settle_claimed_action(
         .context("interaction action disappeared after settlement")
 }
 
+async fn claim_action_async(
+    db: &Arc<crate::db::Database>,
+    id: &str,
+    kind: crate::InteractionActionKind,
+) -> anyhow::Result<ActionClaim> {
+    let id = id.to_owned();
+    interaction_write(db, "claim_action", move |db| {
+        claim_action_or_reuse_terminal(db, &id, kind)
+    })
+    .await
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn settle_action_async(
+    db: &Arc<crate::db::Database>,
+    id: &str,
+    kind: crate::InteractionActionKind,
+    claim_revision: i64,
+    armed_revision: Option<i64>,
+    settlement: ActionSettlement,
+) -> anyhow::Result<crate::PublicActionResult> {
+    let id = id.to_owned();
+    interaction_write(db, "settle_action", move |db| {
+        settle_claimed_action(db, &id, kind, claim_revision, armed_revision, settlement)
+    })
+    .await
+}
+
+async fn claim_seeded_action(
+    db: &Arc<crate::db::Database>,
+    id: &str,
+    kind: crate::InteractionActionKind,
+    quota: Option<u8>,
+) -> anyhow::Result<bool> {
+    let Some(quota) = quota else { return Ok(true) };
+    let id = id.to_owned();
+    interaction_write(db, "claim_seeded_action", move |db| {
+        db.claim_seeding_action(&id, kind, quota)
+    })
+    .await
+}
+
+async fn claim_comment_action(
+    db: &Arc<crate::db::Database>,
+    id: &str,
+) -> anyhow::Result<Option<i64>> {
+    let id = id.to_owned();
+    interaction_write(db, "claim_comment", move |db| {
+        db.claim_interaction_action(&id, crate::InteractionActionKind::Comment)
+    })
+    .await
+}
+
 fn failed_action_may_have_crossed_effect(
     db: &crate::db::Database,
     assignment_id: &str,
@@ -1769,7 +1917,7 @@ fn like_result_note(result: &crate::PublicActionResult) -> String {
 }
 
 async fn execute_like_action(
-    db: &crate::db::Database,
+    db: &Arc<crate::db::Database>,
     assignment_id: &str,
     driver: &dyn TargetDriver,
     session: &dyn crate::UiSession,
@@ -1777,7 +1925,7 @@ async fn execute_like_action(
 ) -> anyhow::Result<crate::PublicActionResult> {
     use crate::tiktok_like::LikeVerdict;
     use crate::{InteractionActionKind as Kind, InteractionActionState as State};
-    let claim_revision = match claim_action_or_reuse_terminal(db, assignment_id, Kind::Like)? {
+    let claim_revision = match claim_action_async(db, assignment_id, Kind::Like).await? {
         ActionClaim::Owned(revision) => revision,
         ActionClaim::Reused(result) => return Ok(result),
     };
@@ -1785,7 +1933,7 @@ async fn execute_like_action(
         Ok(proof) => proof,
         Err(error) => {
             let detail = format!("target re-proof before Like failed: {error:#}");
-            return settle_claimed_action(
+            return settle_action_async(
                 db,
                 assignment_id,
                 Kind::Like,
@@ -1796,11 +1944,12 @@ async fn execute_like_action(
                     evidence: serde_json::json!({"phase":"targetProof"}),
                     error: Some(detail),
                 },
-            );
+            )
+            .await;
         }
     };
     if !target_proof_authorizes_public_effect(proof) {
-        return settle_claimed_action(
+        return settle_action_async(
             db,
             assignment_id,
             Kind::Like,
@@ -1815,7 +1964,8 @@ async fn execute_like_action(
                 }),
                 error: Some("Like bị dừng vì chưa xác định được đúng bài/tác giả".into()),
             },
-        );
+        )
+        .await;
     }
     let armed_revision = std::sync::Mutex::new(None);
     let mut gate = ActionEffectGate::new(|| {
@@ -1847,7 +1997,7 @@ async fn execute_like_action(
             (state, "failed", Some(error.to_string()))
         }
     };
-    settle_claimed_action(
+    settle_action_async(
         db,
         assignment_id,
         Kind::Like,
@@ -1859,11 +2009,12 @@ async fn execute_like_action(
             error,
         },
     )
+    .await
 }
 
 #[allow(clippy::too_many_arguments)]
 async fn execute_share_action(
-    db: &crate::db::Database,
+    db: &Arc<crate::db::Database>,
     id: &str,
     driver: &dyn TargetDriver,
     session: &dyn crate::UiSession,
@@ -1872,7 +2023,7 @@ async fn execute_share_action(
     seed: u64,
 ) -> anyhow::Result<crate::PublicActionResult> {
     use crate::{InteractionActionKind as K, InteractionActionState as S};
-    let revision = match claim_action_or_reuse_terminal(db, id, K::Share)? {
+    let revision = match claim_action_async(db, id, K::Share).await? {
         ActionClaim::Owned(r) => r,
         ActionClaim::Reused(r) => return Ok(r),
     };
@@ -1888,7 +2039,7 @@ async fn execute_share_action(
     let handle = match selected {
         Ok(Some(h)) => h,
         Ok(None) => {
-            return settle_claimed_action(
+            return settle_action_async(
                 db,
                 id,
                 K::Share,
@@ -1900,9 +2051,10 @@ async fn execute_share_action(
                     error: None,
                 },
             )
+            .await
         }
         Err(e) => {
-            return settle_claimed_action(
+            return settle_action_async(
                 db,
                 id,
                 K::Share,
@@ -1914,6 +2066,7 @@ async fn execute_share_action(
                     error: Some(format!("{e:#}")),
                 },
             )
+            .await
         }
     };
     let armed = std::sync::Mutex::new(None);
@@ -1945,7 +2098,7 @@ async fn execute_share_action(
         ),
     };
     let armed_revision = *armed.lock().expect("share revision");
-    settle_claimed_action(
+    settle_action_async(
         db,
         id,
         K::Share,
@@ -1956,18 +2109,18 @@ async fn execute_share_action(
             evidence: serde_json::json!({"recipient":handle,"postId":target.content_id,"verdict":verdict}),
             error,
         },
-    )
+    ).await
 }
 
 async fn execute_save_action(
-    db: &crate::db::Database,
+    db: &Arc<crate::db::Database>,
     assignment_id: &str,
     driver: &dyn TargetDriver,
     session: &dyn crate::UiSession,
     target: &crate::ResolvedTikTokTarget,
 ) -> anyhow::Result<crate::PublicActionResult> {
     use crate::{InteractionActionKind as Kind, InteractionActionState as State, SaveVerdict};
-    let claim_revision = match claim_action_or_reuse_terminal(db, assignment_id, Kind::Save)? {
+    let claim_revision = match claim_action_async(db, assignment_id, Kind::Save).await? {
         ActionClaim::Owned(revision) => revision,
         ActionClaim::Reused(result) => return Ok(result),
     };
@@ -1975,7 +2128,7 @@ async fn execute_save_action(
         Ok(proof) => proof,
         Err(error) => {
             let detail = format!("target re-proof before Save failed: {error:#}");
-            return settle_claimed_action(
+            return settle_action_async(
                 db,
                 assignment_id,
                 Kind::Save,
@@ -1986,11 +2139,12 @@ async fn execute_save_action(
                     evidence: serde_json::json!({"phase":"targetProof"}),
                     error: Some(detail),
                 },
-            );
+            )
+            .await;
         }
     };
     if !target_proof_authorizes_public_effect(proof) {
-        return settle_claimed_action(
+        return settle_action_async(
             db,
             assignment_id,
             Kind::Save,
@@ -2005,7 +2159,8 @@ async fn execute_save_action(
                 }),
                 error: Some("Lưu bị dừng vì chưa xác định được đúng bài/tác giả".into()),
             },
-        );
+        )
+        .await;
     }
     let armed_revision = std::sync::Mutex::new(None);
     let mut gate = ActionEffectGate::new(|| {
@@ -2030,7 +2185,7 @@ async fn execute_save_action(
         | SaveVerdict::UncertainAfterEffect => State::Uncertain,
     };
     let error = evidence.error.clone();
-    settle_claimed_action(
+    settle_action_async(
         db,
         assignment_id,
         Kind::Save,
@@ -2042,10 +2197,11 @@ async fn execute_save_action(
             error,
         },
     )
+    .await
 }
 
 async fn execute_follow_action(
-    db: &crate::db::Database,
+    db: &Arc<crate::db::Database>,
     assignment_id: &str,
     driver: &dyn TargetDriver,
     session: &dyn crate::UiSession,
@@ -2053,7 +2209,7 @@ async fn execute_follow_action(
     account: &str,
 ) -> anyhow::Result<crate::PublicActionResult> {
     use crate::{InteractionActionKind as Kind, InteractionActionState as State};
-    let revision = match claim_action_or_reuse_terminal(db, assignment_id, Kind::Follow)? {
+    let revision = match claim_action_async(db, assignment_id, Kind::Follow).await? {
         ActionClaim::Owned(r) => r,
         ActionClaim::Reused(r) => return Ok(r),
     };
@@ -2062,7 +2218,7 @@ async fn execute_follow_action(
         .as_ref()
         .is_ok_and(|p| target_proof_authorizes_public_effect(*p))
     {
-        return settle_claimed_action(
+        return settle_action_async(
             db,
             assignment_id,
             Kind::Follow,
@@ -2073,7 +2229,8 @@ async fn execute_follow_action(
                 evidence: serde_json::json!({"phase":"targetProof"}),
                 error: Some("Follow target post not proved".into()),
             },
-        );
+        )
+        .await;
     }
     let armed_revision = std::sync::Mutex::new(None);
     let mut gate = ActionEffectGate::new(|| {
@@ -2110,7 +2267,7 @@ async fn execute_follow_action(
         ),
     };
     let armed = *armed_revision.lock().expect("follow revision mutex");
-    settle_claimed_action(
+    settle_action_async(
         db,
         assignment_id,
         Kind::Follow,
@@ -2121,7 +2278,7 @@ async fn execute_follow_action(
             evidence: serde_json::json!({"verdict":verdict,"author":target.author,"arrival":"identified"}),
             error,
         },
-    )
+    ).await
 }
 
 fn save_action_evidence(
@@ -2183,12 +2340,17 @@ async fn run_cohort(
     // Backfill action rows lazily for campaigns created before migration 21. New campaigns
     // already have them; INSERT OR IGNORE keeps this restart-safe.
     for assignment in &detail.assignments {
-        db.ensure_interaction_action_runs(
-            &campaign_id,
-            &assignment.id,
-            request.seeding.as_ref().map_or(request.actions, |s| {
-                s.actions_for(&request, assignment.ordinal)
-            }),
+        interaction_mutation!(
+            db,
+            "ensure_actions",
+            [campaign_id, assignment, request],
+            |db| db.ensure_interaction_action_runs(
+                &campaign_id,
+                &assignment.id,
+                request.seeding.as_ref().map_or(request.actions, |s| {
+                    s.actions_for(&request, assignment.ordinal)
+                }),
+            )
         )?;
     }
     let protected = protected_assignment_ids(&detail.assignments);
@@ -2331,13 +2493,27 @@ async fn run_cohort(
             {
                 Ok(evidence) => evidence,
                 Err(error) => {
-                    fail_whole_target(
-                        &db,
-                        &plan,
-                        &assignment_ids,
-                        &protected,
-                        target,
-                        &format!("target_evidence_unavailable: {error}"),
+                    let failure_detail = format!("target_evidence_unavailable: {error}");
+                    interaction_mutation!(
+                        db,
+                        "fail_target",
+                        [
+                            plan,
+                            assignment_ids,
+                            protected,
+                            target,
+                            failure_detail,
+                            only_assignments
+                        ],
+                        |db| fail_whole_target(
+                            &db,
+                            &plan,
+                            &assignment_ids,
+                            &protected,
+                            target,
+                            &failure_detail,
+                            only_assignments.as_ref(),
+                        )
                     )?;
                     notify(&events, &campaign_id);
                     failed += request.message_count as usize;
@@ -2397,7 +2573,7 @@ async fn run_cohort(
             // moves it out of an idle state into `preparing` only if no other worker is on it
             // or has already delivered it; a lost claim means someone else owns this
             // assignment, so skip it rather than race.
-            let Some(ownership_revision) = db.claim_interaction_assignment_for_send(id)? else {
+            let Some(ownership_revision) = claim_preparation(&db, id).await? else {
                 continue;
             };
             if !request.actions.comment
@@ -2471,15 +2647,20 @@ async fn run_cohort(
                                 target.target_key,
                                 assignment.ordinal
                             );
-                            let settled = db.settle_owned_interaction_assignment(
-                                id,
-                                ownership_revision,
-                                ThreadMessageState::Failed,
-                                Some(&format!(
-                                    "ai_comment_unavailable: ordinal {} — {detail}",
-                                    assignment.ordinal
-                                )),
-                                None,
+                            let settled = interaction_mutation!(
+                                db,
+                                "settle_assignment",
+                                [id, detail, assignment],
+                                |db| db.settle_owned_interaction_assignment(
+                                    id,
+                                    ownership_revision,
+                                    ThreadMessageState::Failed,
+                                    Some(&format!(
+                                        "ai_comment_unavailable: ordinal {} — {detail}",
+                                        assignment.ordinal
+                                    )),
+                                    None,
+                                )
                             )?;
                             if settled {
                                 notify(&events, &campaign_id);
@@ -2532,11 +2713,17 @@ async fn run_cohort(
             // target-wide failure can take the row out of `preparing` while this worker is
             // drafting; in that case do not emit Ready and, most importantly, do not enqueue
             // text that this worker no longer owns for a later device send.
-            let Some(ownership_revision) =
-                db.prepare_interaction_assignment(id, ownership_revision, &prepared)?
-            else {
-                continue;
-            };
+            let ownership_revision =
+                match prepare_claimed_assignment(&db, id, ownership_revision, &prepared).await {
+                    Ok(Some(revision)) => revision,
+                    Ok(None) => continue,
+                    Err(error) => {
+                        tracing::warn!("interaction assignment {id}: {error:#}");
+                        failed += 1;
+                        notify(&events, &campaign_id);
+                        continue;
+                    }
+                };
             notify(&events, &campaign_id);
             prepared_messages.push((id.clone(), prepared, ownership_revision));
         }
@@ -2609,10 +2796,15 @@ async fn run_cohort(
             // already gone out, and aborting between it and its confirmation
             // would manufacture `Uncertain`, which blocks retry. One in-flight
             // message finishing is the correct cost of stopping.
-            if let Some(released) = release_cancelled_preparations_if_needed(
-                &db,
-                &campaign_id,
-                &prepared_messages[index..],
+            if let Some(released) = interaction_mutation!(
+                db,
+                "release_cancelled",
+                [campaign_id, prepared_messages],
+                |db| release_cancelled_preparations_if_needed(
+                    &db,
+                    &campaign_id,
+                    &prepared_messages[index..],
+                )
             )? {
                 if released > 0 {
                     notify(&events, &campaign_id);
@@ -2652,12 +2844,18 @@ async fn run_cohort(
             {
                 Ok(context) => context,
                 Err(error) => {
-                    db.settle_owned_interaction_assignment(
-                        id,
-                        *ownership_revision,
-                        ThreadMessageState::Failed,
-                        Some(&format!("{error}")),
-                        None,
+                    let failure_detail = format!("{error}");
+                    interaction_mutation!(
+                        db,
+                        "settle_assignment",
+                        [id, ownership_revision, failure_detail],
+                        |db| db.settle_owned_interaction_assignment(
+                            id,
+                            *ownership_revision,
+                            ThreadMessageState::Failed,
+                            Some(&failure_detail),
+                            None,
+                        )
                     )?;
                     notify(&events, &campaign_id);
                     failed += 1;
@@ -2716,7 +2914,7 @@ async fn run_cohort(
                     let labels=crate::tiktok_labels::controls_for_runtime(&opened_package,&language,&version).context("Chưa nhận diện TikTok trên máy")?;
                     let account=crate::tiktok_share::observe_publish_account(session.as_ref(),&labels).await?;
                     anyhow::ensure!(account.eq_ignore_ascii_case(role.username.trim_start_matches('@')),"Tài khoản trên máy không khớp vai {}",role.role_id);
-                    db.record_observed_interaction_account(&prepared.actor_udid,&account)?;
+                    interaction_mutation!(db, "observed_account", [prepared, account], |db| db.record_observed_interaction_account(&prepared.actor_udid,&account))?;
                 } else if request.actions.any() && session.supports_accessibility_readback() {
                     let language=session.ui_language().await.context("Chưa đọc được ngôn ngữ TikTok")?;
                     let version=session.app_version(&opened_package).await.context("Chưa đọc được phiên bản TikTok")?;
@@ -2726,7 +2924,7 @@ async fn run_cohort(
                         let expected=request.seeding.as_ref().and_then(|s|s.expected_accounts.get(&prepared.actor_udid)).cloned().unwrap_or(db.get_device_meta(&prepared.actor_udid)?.handle);
                         anyhow::ensure!(!expected.is_empty()&&account.eq_ignore_ascii_case(expected.trim().trim_start_matches('@')), "Tài khoản trên máy không khớp nick đã gán; chưa tương tác");
                     }
-                    db.record_observed_interaction_account(&prepared.actor_udid,&account)?;
+                    interaction_mutation!(db, "observed_account", [prepared, account], |db| db.record_observed_interaction_account(&prepared.actor_udid,&account))?;
                 }
                 if actions.comment && request.mention_parent && prepared.parent_ordinal.is_some() {
                     anyhow::ensure!(!prepared.mentions.is_empty(),"Chưa xác định username của người được trả lời; chưa gửi bình luận");
@@ -2761,9 +2959,9 @@ async fn run_cohort(
                         tokio::time::sleep(Duration::from_millis(100)).await;
                     }
                 }
-                if actions.like && request.seeding.as_ref().map_or(Ok(true),|s|db.claim_seeding_action(id,crate::InteractionActionKind::Like,s.like_count))? {
+                if actions.like && claim_seeded_action(&db,id,crate::InteractionActionKind::Like,request.seeding.as_ref().map(|s|s.like_count)).await? {
                     let action = match execute_like_action(
-                        db.as_ref(),
+                        &db,
                         id,
                         driver.as_ref(),
                         session.as_ref(),
@@ -2790,9 +2988,9 @@ async fn run_cohort(
                         anyhow::bail!(reason);
                     }
                 }
-                if actions.save && request.seeding.as_ref().map_or(Ok(true),|s|db.claim_seeding_action(id,crate::InteractionActionKind::Save,s.save_count))? {
+                if actions.save && claim_seeded_action(&db,id,crate::InteractionActionKind::Save,request.seeding.as_ref().map(|s|s.save_count)).await? {
                     let action = match execute_save_action(
-                        db.as_ref(),
+                        &db,
                         id,
                         driver.as_ref(),
                         session.as_ref(),
@@ -2820,8 +3018,8 @@ async fn run_cohort(
                     }
                 }
 
-                if actions.share && request.seeding.as_ref().map_or(Ok(true),|s|db.claim_seeding_action(id,crate::InteractionActionKind::Share,s.share_count))? {
-                    let action=match execute_share_action(db.as_ref(),id,driver.as_ref(),session.as_ref(),target,&opened_package,request.seeding.as_ref().map_or(0,|s|s.seed)).await {
+                if actions.share && claim_seeded_action(&db,id,crate::InteractionActionKind::Share,request.seeding.as_ref().map(|s|s.share_count)).await? {
+                    let action=match execute_share_action(&db,id,driver.as_ref(),session.as_ref(),target,&opened_package,request.seeding.as_ref().map_or(0,|s|s.seed)).await {
                         Ok(action)=>action,
                         Err(error)=>{effect_intent|=failed_action_may_have_crossed_effect(db.as_ref(),id,crate::InteractionActionKind::Share);return Err(error);}
                     };
@@ -2831,7 +3029,7 @@ async fn run_cohort(
                 }
                 if actions.follow {
                     let account=db.get_device_meta(&prepared.actor_udid)?.handle;
-                    let action=match execute_follow_action(db.as_ref(),id,driver.as_ref(),session.as_ref(),target,&account).await {
+                    let action=match execute_follow_action(&db,id,driver.as_ref(),session.as_ref(),target,&account).await {
                         Ok(action)=>action,
                         Err(error)=>{effect_intent |= failed_action_may_have_crossed_effect(db.as_ref(),id,crate::InteractionActionKind::Follow);return Err(error);}
                     };
@@ -2844,11 +3042,10 @@ async fn run_cohort(
                 // A missing reply parent prevents only Comment. Like and Save above remain
                 // independent desired-state actions and retain their own outcomes.
                 if let Some(broke_at) = skipped_parent_at {
-                    let comment_claim = db
-                        .claim_interaction_action(id, crate::InteractionActionKind::Comment)?
+                    let comment_claim = claim_comment_action(&db, id).await?
                         .context("Comment action không còn ở trạng thái có thể claim")?;
-                    let comment_result = settle_claimed_action(
-                        db.as_ref(),
+                    let comment_result = settle_action_async(
+                        &db,
                         id,
                         crate::InteractionActionKind::Comment,
                         comment_claim,
@@ -2863,7 +3060,7 @@ async fn run_cohort(
                                 "parent_identity_not_confirmed_at_ordinal_{broke_at}"
                             )),
                         },
-                    )?;
+                    ).await?;
                     action_results.push(comment_result);
                     return Ok::<Option<serde_json::Value>, anyhow::Error>(Some(
                         serde_json::json!({
@@ -2891,13 +3088,12 @@ async fn run_cohort(
                 // preceding Like/Save action may have changed the hierarchy or card rail.
                 let proof = driver.open_target(session.as_ref(), target).await?;
                 if !target_proof_authorizes_public_effect(proof) {
-                    let Some(comment_claim_revision) = db
-                        .claim_interaction_action(id, crate::InteractionActionKind::Comment)?
+                    let Some(comment_claim_revision) = claim_comment_action(&db, id).await?
                     else {
                         anyhow::bail!("Comment action không còn ở trạng thái có thể claim");
                     };
-                    let comment_result = settle_claimed_action(
-                        db.as_ref(),
+                    let comment_result = settle_action_async(
+                        &db,
                         id,
                         crate::InteractionActionKind::Comment,
                         comment_claim_revision,
@@ -2915,7 +3111,7 @@ async fn run_cohort(
                                 target.author
                             )),
                         },
-                    )?;
+                    ).await?;
                     action_results.push(comment_result);
                     return Ok::<Option<serde_json::Value>, anyhow::Error>(Some(
                         serde_json::json!({
@@ -2944,8 +3140,7 @@ async fn run_cohort(
                     .find(|action| action.kind == crate::InteractionActionKind::Like)
                     .map(like_result_note);
 
-                let Some(comment_claim_revision) = db
-                    .claim_interaction_action(id, crate::InteractionActionKind::Comment)?
+                let Some(comment_claim_revision) = claim_comment_action(&db, id).await?
                 else {
                     anyhow::bail!("Comment action không còn ở trạng thái có thể claim");
                 };
@@ -2987,7 +3182,7 @@ async fn run_cohort(
                 if session.supports_accessibility_readback() {
                     let account=request.scripted_conversation.as_ref().and_then(|s|s.role_bindings.iter().find(|r|r.udid==prepared.actor_udid).map(|r|r.username.clone())).unwrap_or(db.get_device_meta(&prepared.actor_udid)?.handle);
                     let verification=crate::comment_verification::VerificationContext{target:target.clone(),device_id:prepared.actor_udid.clone(),account,text:prepared.text.clone(),mentions:prepared.mentions.clone(),parent:parent_identity.clone(),root:prepared.root_identity.clone()};
-                    db.prepare_comment_verification(id,&verification)?;
+                    interaction_mutation!(db, "prepare_comment_verification", [id, verification], |db| db.prepare_comment_verification(id,&verification))?;
                     let draft_db=db.clone();let draft_id=id.clone();
                     effect_gate.record_draft_with(move |text|{let mut context=verification.clone();context.text=text.into();draft_db.prepare_comment_verification(&draft_id,&context)});
                 }
@@ -3017,10 +3212,10 @@ async fn run_cohort(
                 // like that really happened findable either way — the like itself is not undone
                 // by the reply failing.
                 if let Some(note) = comment_like.as_deref() {
-                    let _ = db.log_op(
+                    let _ = interaction_mutation!(db, "operation_log", [prepared, target, note], |db| db.log_op(
                         "interaction.comment_like",
                         &format!("{} {} {note}", prepared.actor_udid, target.target_key),
-                    );
+                    ));
                 }
                 // A driver can prove that retry is unsafe even when the CAS itself failed:
                 // after typing, an unverified composer cleanup leaves the next attempt able
@@ -3047,12 +3242,12 @@ async fn run_cohort(
                         // could publish stale text even though the Send gate never ran. Keep
                         // the durable action row aligned with the assignment's Uncertain state.
                         if effect_intent && comment_armed.is_none() {
-                            comment_armed = db.arm_interaction_action(
+                            comment_armed = interaction_mutation!(db, "record_unverified_draft", [id], |db| db.arm_interaction_action(
                                 id,
                                 crate::InteractionActionKind::Comment,
                                 comment_claim_revision,
                                 "typed_comment_cleanup_unverified",
-                            )?;
+                            ))?;
                             anyhow::ensure!(
                                 comment_armed.is_some(),
                                 "lost Comment action ownership while recording typed effect"
@@ -3063,8 +3258,8 @@ async fn run_cohort(
                         } else {
                             crate::InteractionActionState::FailedBeforeEffect
                         };
-                        settle_claimed_action(
-                            db.as_ref(),
+                        settle_action_async(
+                            &db,
                             id,
                             crate::InteractionActionKind::Comment,
                             comment_claim_revision,
@@ -3080,12 +3275,12 @@ async fn run_cohort(
                                 }),
                                 error: Some(detail),
                             },
-                        )?;
+                        ).await?;
                         return Err(failure.into_error());
                     }
                 };
-                let comment_result = settle_claimed_action(
-                    db.as_ref(),
+                let comment_result = settle_action_async(
+                    &db,
                     id,
                     crate::InteractionActionKind::Comment,
                     comment_claim_revision,
@@ -3099,7 +3294,7 @@ async fn run_cohort(
                         }),
                         error: None,
                     },
-                )?;
+                ).await?;
                 action_results.push(comment_result);
                 if let Some(parent) = parent_identity.as_ref() {
                     Ok::<Option<serde_json::Value>, anyhow::Error>(Some(serde_json::json!({
@@ -3169,20 +3364,26 @@ async fn run_cohort(
                 }
                 Err(error) => serde_json::json!({"state":"failed","error":error.to_string()}),
             };
-            let _ = db.add_interaction_artifact(
-                &campaign_id,
-                &target.target_key,
-                Some(id),
-                "tiktok-cleanup",
-                &cleanup_evidence.to_string(),
-                "",
-                None,
+            let _ = interaction_mutation!(
+                db,
+                "artifact",
+                [campaign_id, target, id, cleanup_evidence],
+                |db| db.add_interaction_artifact(
+                    &campaign_id,
+                    &target.target_key,
+                    Some(id),
+                    "tiktok-cleanup",
+                    &cleanup_evidence.to_string(),
+                    "",
+                    None,
+                )
             );
             if let Err(error) = &cleanup {
-                let _ = db.log_op(
+                let cleanup_detail = format!("{}: {error}", prepared.actor_udid);
+                let _ = interaction_mutation!(db, "operation_log", [cleanup_detail], |db| db.log_op(
                     "interaction.cleanup.failed",
-                    &format!("{}: {error}", prepared.actor_udid),
-                );
+                    &cleanup_detail,
+                ));
             }
             if effect_claim_lost {
                 if let Err(error) = &cleanup {
@@ -3208,30 +3409,41 @@ async fn run_cohort(
                                 format!("Hành động đã xác nhận; chưa tắt sạch TikTok: {error}")
                             })
                         });
-                    let settled = db.settle_owned_interaction_assignment(
-                        id,
-                        *ownership_revision,
-                        if evidence_json
-                            .get("commentVerificationPending")
-                            .and_then(|v| v.as_bool())
-                            .unwrap_or(false)
-                        {
-                            ThreadMessageState::Uncertain
-                        } else if skipped_parent_at.is_some() {
-                            ThreadMessageState::SkippedParent
-                        } else {
-                            ThreadMessageState::Succeeded
-                        },
-                        if evidence_json
-                            .get("commentVerificationPending")
-                            .and_then(|v| v.as_bool())
-                            .unwrap_or(false)
-                        {
-                            Some("comment_verification_pending")
-                        } else {
-                            terminal_note.as_deref()
-                        },
-                        Some(&evidence_text),
+                    let settled = interaction_mutation!(
+                        db,
+                        "settle_assignment",
+                        [
+                            id,
+                            ownership_revision,
+                            evidence_json,
+                            terminal_note,
+                            evidence_text
+                        ],
+                        |db| db.settle_owned_interaction_assignment(
+                            id,
+                            *ownership_revision,
+                            if evidence_json
+                                .get("commentVerificationPending")
+                                .and_then(|v| v.as_bool())
+                                .unwrap_or(false)
+                            {
+                                ThreadMessageState::Uncertain
+                            } else if skipped_parent_at.is_some() {
+                                ThreadMessageState::SkippedParent
+                            } else {
+                                ThreadMessageState::Succeeded
+                            },
+                            if evidence_json
+                                .get("commentVerificationPending")
+                                .and_then(|v| v.as_bool())
+                                .unwrap_or(false)
+                            {
+                                Some("comment_verification_pending")
+                            } else {
+                                terminal_note.as_deref()
+                            },
+                            Some(&evidence_text),
+                        )
                     )?;
                     if !settled {
                         tracing::warn!(
@@ -3264,14 +3476,27 @@ async fn run_cohort(
                     // 13/08/2026: a digest that looks like evidence next to a `relative_path`
                     // of NULL and no bytes anywhere. A row that stored nothing must say so.
                     let artifact_sha = saved.as_ref().map(|(_, sha)| sha.as_str()).unwrap_or("");
-                    let _ = db.add_interaction_artifact(
-                        &campaign_id,
-                        &target.target_key,
-                        Some(id),
-                        artifact_kind,
-                        &evidence_text,
-                        artifact_sha,
-                        saved.as_ref().map(|(path, _)| path.as_str()),
+                    let _ = interaction_mutation!(
+                        db,
+                        "artifact",
+                        [
+                            campaign_id,
+                            target,
+                            id,
+                            evidence_text,
+                            artifact_kind,
+                            artifact_sha,
+                            saved
+                        ],
+                        |db| db.add_interaction_artifact(
+                            &campaign_id,
+                            &target.target_key,
+                            Some(id),
+                            artifact_kind,
+                            &evidence_text,
+                            artifact_sha,
+                            saved.as_ref().map(|(path, _)| path.as_str()),
+                        )
                     )?;
                     if skipped_parent_at.is_none() {
                         if let Some(identity) =
@@ -3290,12 +3515,17 @@ async fn run_cohort(
                 Err(error) => {
                     let state = assignment_state_after_failure(effect_intent);
                     let failure_detail = format!("{error:#}");
-                    let _ = db.settle_owned_interaction_assignment(
-                        id,
-                        *ownership_revision,
-                        state,
-                        Some(&failure_detail),
-                        None,
+                    let _ = interaction_mutation!(
+                        db,
+                        "settle_assignment",
+                        [id, ownership_revision, failure_detail],
+                        |db| db.settle_owned_interaction_assignment(
+                            id,
+                            *ownership_revision,
+                            state,
+                            Some(&failure_detail),
+                            None,
+                        )
                     )?;
                     // Retain evidence for either an unconfirmed Send or an unresolved
                     // pre-Send draft. The typed failure records whether the public
@@ -3307,14 +3537,19 @@ async fn run_cohort(
                         id,
                         &prepared.actor_udid,
                     ) {
-                        let _ = db.add_interaction_artifact(
-                            &campaign_id,
-                            &target.target_key,
-                            Some(id),
-                            "comment-failure-evidence",
-                            &serde_json::json!({ "error": failure_detail }).to_string(),
-                            &sha,
-                            Some(&path),
+                        let _ = interaction_mutation!(
+                            db,
+                            "artifact",
+                            [campaign_id, target, id, failure_detail, sha, path],
+                            |db| db.add_interaction_artifact(
+                                &campaign_id,
+                                &target.target_key,
+                                Some(id),
+                                "comment-failure-evidence",
+                                &serde_json::json!({ "error": failure_detail }).to_string(),
+                                &sha,
+                                Some(&path),
+                            )
                         );
                     }
                     failed += 1;
@@ -4474,19 +4709,7 @@ mod tests {
             }
         }
 
-        #[test]
-        fn whole_target_failure_uses_the_active_claim_guard_in_sql() {
-            let campaign = include_str!("interaction_campaign.rs");
-            assert!(campaign
-                .contains("fail_interaction_assignment_unless_active_or_settled(id, error_code)"));
 
-            let db = include_str!("db/interaction.rs");
-            let start = db
-                .find("pub fn fail_interaction_assignment_unless_active_or_settled")
-                .expect("target-wide guarded update exists");
-            let body = &db[start..];
-            assert!(body.contains("state NOT IN ('preparing','sending','succeeded','uncertain')"));
-        }
     }
 
     mod cancelled_preparations {
@@ -4521,6 +4744,206 @@ mod tests {
                 like_parent: false,
                 post_dwell_seconds: None,
             }
+        }
+
+        #[tokio::test]
+        async fn interaction_preparation_waits_for_admitted_sqlite_writer() {
+            let path =
+                std::env::temp_dir().join(format!("interaction-writer-{}.db", Uuid::new_v4()));
+            let db = Arc::new(crate::db::Database::open(&path).unwrap());
+            let request = request();
+            let plan = plan_threads(&request).unwrap();
+            let campaign = db.create_interaction_campaign(&request, &plan).unwrap();
+            let rows = db
+                .get_interaction_campaign(&campaign)
+                .unwrap()
+                .unwrap()
+                .assignments;
+            let (locked_tx, locked_rx) = tokio::sync::oneshot::channel();
+            let (release_tx, release_rx) = std::sync::mpsc::channel();
+            let writer_db = db.clone();
+            let writer_path = path.clone();
+            let writer = tokio::spawn(async move {
+                writer_db.storage_write(move |_| {
+                    let conn = rusqlite::Connection::open(writer_path)?;
+                    conn.execute_batch("BEGIN IMMEDIATE; UPDATE interaction_campaigns SET updated_at=updated_at;")?;
+                    locked_tx.send(()).unwrap();
+                    release_rx.recv_timeout(Duration::from_secs(20)).unwrap();
+                    conn.execute_batch("COMMIT")?;
+                    Ok(())
+                }).await
+            });
+            locked_rx.await.unwrap();
+            let mut claim = Box::pin(claim_preparation(&db, &rows[0].id));
+            let first_poll = futures_util::poll!(claim.as_mut());
+            release_tx.send(()).unwrap();
+            writer.await.unwrap().unwrap();
+            assert!(
+                first_poll.is_pending(),
+                "interaction bypassed the admitted writer: {first_poll:?}"
+            );
+            let revision = claim.await.unwrap().unwrap();
+            assert!(db
+                .begin_interaction_assignment_send(&rows[0].id, revision, "fixture_effect")
+                .unwrap());
+            let detail = db.get_interaction_campaign(&campaign).unwrap().unwrap();
+            assert_eq!(detail.assignments[0].state, ThreadMessageState::Sending);
+            assert_eq!(detail.assignments[1].state, ThreadMessageState::Queued);
+            assert!(
+                db.claim_interaction_assignment_for_send(&rows[1].id)
+                    .unwrap()
+                    .is_some(),
+                "unsent sibling remains continuable by its original ID"
+            );
+            drop(db);
+            std::fs::remove_file(path).unwrap();
+        }
+
+        #[tokio::test]
+        async fn target_failure_settles_only_frozen_unsent_scope() {
+            let path = std::env::temp_dir().join(format!("interaction-target-scope-{}.db", Uuid::new_v4()));
+            let db = Arc::new(crate::db::Database::open(&path).unwrap());
+            let request = request();
+            let plan = plan_threads(&request).unwrap();
+            let campaign = db.create_interaction_campaign(&request, &plan).unwrap();
+            let rows = db.get_interaction_campaign(&campaign).unwrap().unwrap().assignments;
+            db.claim_interaction_assignment_for_send(&rows[2].id).unwrap().unwrap();
+            let ids = rows.iter().map(|row| ((row.target_key.clone(), row.ordinal), row.id.clone())).collect();
+            let scope = std::collections::HashSet::from([rows[0].id.clone(), rows[2].id.clone()]);
+            let target = request.targets[0].clone();
+            interaction_write(&db, "fixture_target_failure", move |db| {
+                fail_whole_target(db, &plan, &ids, &std::collections::HashSet::new(), &target, "fixture_evidence_failure", Some(&scope))
+            }).await.unwrap();
+            let detail = db.get_interaction_campaign(&campaign).unwrap().unwrap();
+            assert_eq!(detail.assignments[0].state, ThreadMessageState::Failed);
+            assert_eq!(detail.assignments[1].state, ThreadMessageState::Queued, "unsent sibling outside the frozen scope is not collateral");
+            assert_eq!(detail.assignments[2].state, ThreadMessageState::Preparing, "SQL protects a live claim even with a stale empty snapshot");
+            assert!(claim_preparation(&db, &rows[1].id).await.unwrap().is_some());
+            drop(db);
+            std::fs::remove_file(path).unwrap();
+        }
+
+        #[tokio::test]
+        async fn prepare_database_failure_releases_only_unsent_owner_and_retains_action_results() {
+            use crate::{InteractionActionKind as Kind, InteractionActionState as State};
+            let path = std::env::temp_dir()
+                .join(format!("interaction-prepare-fault-{}.db", Uuid::new_v4()));
+            let db = Arc::new(crate::db::Database::open(&path).unwrap());
+            let mut request = request();
+            request.actions.like = true;
+            request.actions.save = true;
+            request.actions.follow = true;
+            let plan = plan_threads(&request).unwrap();
+            let campaign = db.create_interaction_campaign(&request, &plan).unwrap();
+            db.update_interaction_campaign_state(&campaign, ThreadCampaignState::Running, None)
+                .unwrap();
+            let rows = db
+                .get_interaction_campaign(&campaign)
+                .unwrap()
+                .unwrap()
+                .assignments;
+            let revision = db
+                .claim_interaction_assignment_for_send(&rows[0].id)
+                .unwrap()
+                .unwrap();
+            // Independently confirmed actions are durable even when the remaining draft fails.
+            for kind in [Kind::Like, Kind::Save, Kind::Follow] {
+                let claim = db
+                    .claim_interaction_action(&rows[0].id, kind)
+                    .unwrap()
+                    .unwrap();
+                let armed = db
+                    .arm_interaction_action(&rows[0].id, kind, claim, "fixture_confirmed")
+                    .unwrap()
+                    .unwrap();
+                assert!(db
+                    .settle_interaction_action(
+                        &rows[0].id,
+                        kind,
+                        armed,
+                        State::Confirmed,
+                        Some("{}"),
+                        None
+                    )
+                    .unwrap());
+            }
+            let confirmed = db.list_interaction_action_runs(&rows[0].id).unwrap();
+            let pending_revision = db
+                .claim_interaction_assignment_for_send(&rows[2].id)
+                .unwrap()
+                .unwrap();
+            let save = db
+                .claim_interaction_action(&rows[2].id, Kind::Save)
+                .unwrap()
+                .unwrap();
+            db.arm_interaction_action(&rows[2].id, Kind::Save, save, "fixture_pending")
+                .unwrap()
+                .unwrap();
+            let injector = rusqlite::Connection::open(&path).unwrap();
+            injector.execute_batch(&format!(
+                "CREATE TRIGGER fail_owned_preparation BEFORE UPDATE OF prepared_json ON interaction_assignments WHEN NEW.id='{}' BEGIN SELECT RAISE(FAIL,'forced prepare write failure'); END;", rows[0].id
+            )).unwrap();
+            let prepared = PreparedThreadMessage::new(&plan.assignments[0], "draft");
+            let error = prepare_claimed_assignment(&db, &rows[0].id, revision, &prepared)
+                .await
+                .unwrap_err();
+            assert!(format!("{error:#}").contains("forced prepare write failure"));
+            assert!(error.to_string().contains("stage=prepare_assignment"));
+            let claims = vec![(rows[2].id.clone(), pending_revision)];
+            assert_eq!(
+                interaction_write(&db, "fixture_release", move |db| db
+                    .release_owned_interaction_preparations(&claims, "fixture_failure"))
+                .await
+                .unwrap(),
+                0
+            );
+            let detail = db.get_interaction_campaign(&campaign).unwrap().unwrap();
+            assert_eq!(detail.assignments[0].state, ThreadMessageState::Failed);
+            assert_eq!(detail.assignments[1].state, ThreadMessageState::Queued);
+            assert_eq!(detail.assignments[2].state, ThreadMessageState::Preparing);
+            assert_eq!(
+                detail.assignments[2]
+                    .actions
+                    .iter()
+                    .find(|a| a.kind == Kind::Save)
+                    .unwrap()
+                    .state,
+                State::Armed
+            );
+            for prior in confirmed.iter().filter(|a| a.state == State::Confirmed) {
+                let ActionClaim::Reused(result) = claim_action_async(&db, &rows[0].id, prior.kind)
+                    .await
+                    .unwrap()
+                else {
+                    panic!("confirmed action cannot be claimed again")
+                };
+                assert_eq!(
+                    (result.state, result.revision),
+                    (prior.state, prior.revision)
+                );
+            }
+            let retry = claim_preparation(&db, &rows[0].id).await.unwrap().unwrap();
+            injector
+                .execute_batch("DROP TRIGGER fail_owned_preparation")
+                .unwrap();
+            assert!(
+                prepare_claimed_assignment(&db, &rows[0].id, revision, &prepared)
+                    .await
+                    .unwrap()
+                    .is_none(),
+                "stale revision cannot enqueue a draft"
+            );
+            assert!(
+                prepare_claimed_assignment(&db, &rows[0].id, retry, &prepared)
+                    .await
+                    .unwrap()
+                    .is_some(),
+                "same original assignment ID remains continuable"
+            );
+            assert!(claim_preparation(&db, &rows[1].id).await.unwrap().is_some());
+            drop(injector);
+            drop(db);
+            std::fs::remove_file(path).unwrap();
         }
 
         #[test]
@@ -5491,34 +5914,6 @@ mod boundary_tests {
         assert!(conditional.contains("notify(&events, &campaign_id)"));
         assert!(conditional.contains("failed += 1;"));
         assert!(conditional.contains("continue;"));
-    }
-
-    /// A worker that loses `preparing` between claim and persistence must not reach Send.
-    ///
-    /// `run_cohort` needs real devices, so pin the small but safety-critical wiring here: the
-    /// conditional DB write is checked and its losing branch leaves before enqueueing the
-    /// prepared message.
-    #[test]
-    fn the_runner_does_not_enqueue_a_draft_after_losing_its_prepare_claim() {
-        let source = include_str!("interaction_campaign.rs");
-        let start = source
-            .find("async fn run_cohort(")
-            .expect("the runner still exists");
-        let runner = &source[start..];
-        let prepare = runner
-            .find("db.prepare_interaction_assignment")
-            .expect("the runner persists prepared text");
-        let enqueue = runner[prepare..]
-            .find("prepared_messages.push")
-            .map(|offset| prepare + offset)
-            .expect("the runner enqueues prepared text");
-        let boundary = &runner[prepare..enqueue];
-        assert!(
-            boundary.contains("db.prepare_interaction_assignment")
-                && boundary.contains("else {")
-                && boundary.contains("continue;"),
-            "a conditional prepare loser currently falls through into the send queue:\n{boundary}"
-        );
     }
 
     /// The DB effect CAS travels into the driver and is crossed at the final instruction

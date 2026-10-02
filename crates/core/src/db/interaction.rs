@@ -592,7 +592,14 @@ impl Database {
             released += transaction.execute(
                 "UPDATE interaction_assignments \
                  SET state='failed',error_code=?1,effect_intent=NULL,revision=revision+1,updated_at=?2 \
-                 WHERE id=?3 AND state='preparing' AND revision=?4",
+                 WHERE id=?3 AND state='preparing' AND revision=?4
+                   AND effect_intent IS NULL
+                   AND NOT EXISTS (
+                       SELECT 1 FROM tiktok_action_runs AS action
+                       WHERE action.assignment_id=interaction_assignments.id
+                         AND (action.state IN ('armed','uncertain')
+                              OR (action.effect_intent IS NOT NULL AND action.state NOT IN ('confirmed','no_op')))
+                   )",
                 params![error_code, now, assignment_id, ownership_revision],
             )?;
         }

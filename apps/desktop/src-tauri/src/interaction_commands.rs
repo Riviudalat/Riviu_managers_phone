@@ -590,13 +590,16 @@ pub async fn interaction_start_thread(
             "chưa cấu hình AI API key — dùng bình luận thủ công hoặc nhập key trong Nuôi TT",
         ));
     }
+    let start_request = request.clone();
+    let start_plan = plan.clone();
     let campaign_id = state
         .db
-        .create_interaction_campaign(&request, &plan)
-        .map_err(CommandError::operation)?;
-    state
-        .db
-        .update_interaction_campaign_state(&campaign_id, ThreadCampaignState::Running, None)
+        .storage_write(move |db| {
+            let id = db.create_interaction_campaign(&start_request, &start_plan)?;
+            db.update_interaction_campaign_state(&id, ThreadCampaignState::Running, None)?;
+            Ok(id)
+        })
+        .await
         .map_err(CommandError::operation)?;
     state.events.emit(AppEvent::InteractionUpdated {
         campaign_id: campaign_id.clone(),
@@ -643,7 +646,12 @@ pub async fn interaction_start_thread(
             // off the campaign's own totals, and stomping that is how a run with real posted
             // comments under it got filed as a total loss. See
             // `Database::fail_interaction_campaign_unless_settled`.
-            let _ = db.fail_interaction_campaign_unless_settled(&campaign_id, &detail);
+            let failed_id = campaign_id.clone();
+            let _ = db
+                .storage_write(move |db| {
+                    db.fail_interaction_campaign_unless_settled(&failed_id, &detail)
+                })
+                .await;
             events.emit(AppEvent::InteractionUpdated {
                 campaign_id,
                 revision: revision(),
@@ -805,7 +813,7 @@ pub fn interaction_cancel(
 }
 
 #[tauri::command]
-pub fn interaction_retry(
+pub async fn interaction_retry(
     state: State<'_, AppState>,
     campaign_id: String,
     assignment_ids: Option<Vec<String>>,
@@ -877,9 +885,13 @@ pub fn interaction_retry(
             "chưa cấu hình AI API key — dùng bình luận thủ công hoặc nhập key trong Nuôi TT",
         ));
     }
+    let retry_id = campaign_id.clone();
     state
         .db
-        .update_interaction_campaign_state(&campaign_id, ThreadCampaignState::Running, None)
+        .storage_write(move |db| {
+            db.update_interaction_campaign_state(&retry_id, ThreadCampaignState::Running, None)
+        })
+        .await
         .map_err(CommandError::operation)?;
     let db = state.db.clone();
     let control = state.control.clone();
@@ -912,7 +924,12 @@ pub fn interaction_retry(
             let detail = format!("{error:#}");
             log::error!("interaction campaign thất bại: {detail}");
             // Same reason as the start path: keep a terminal verdict, record the reason.
-            let _ = db.fail_interaction_campaign_unless_settled(&worker_id, &detail);
+            let failed_id = worker_id.clone();
+            let _ = db
+                .storage_write(move |db| {
+                    db.fail_interaction_campaign_unless_settled(&failed_id, &detail)
+                })
+                .await;
             // The start path has always emitted here; retry did not, so a retry that died in
             // the worker left the Monitor showing "Đang chạy" until something else happened
             // to refresh it. The state write above is invisible without this.
@@ -1101,11 +1118,11 @@ mod tests {
             ("interaction_preview_thread", "plan_threads(&request)"),
             (
                 "interaction_start_thread",
-                "create_interaction_campaign(&request, &plan)",
+                "create_interaction_campaign(&start_request, &start_plan)",
             ),
             (
                 "interaction_retry",
-                "update_interaction_campaign_state(&campaign_id",
+                "update_interaction_campaign_state(&retry_id",
             ),
         ] {
             let start = source
