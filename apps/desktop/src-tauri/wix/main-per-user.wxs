@@ -69,10 +69,11 @@
         <Property Id="ARPURLUPDATEINFO" Value="{{homepage}}"/>
         {{/if}}
 
-        <Property Id="INSTALLDIR">
+        <Property Id="RIVIU_PREVIOUS_INSTALLDIR">
           <RegistrySearch Id="PrevInstallDirNoName" Root="HKCU" Key="Software\\{{manufacturer}}\\{{product_name}}" Type="raw" />
           <RegistrySearch Id="PrevInstallDirWithName" Root="HKCU" Key="Software\\{{manufacturer}}\\{{product_name}}" Name="InstallDir" Type="raw" />
         </Property>
+        <SetProperty Id="INSTALLDIR" Value="[RIVIU_PREVIOUS_INSTALLDIR]" After="AppSearch" Sequence="both">NOT INSTALLDIR AND RIVIU_PREVIOUS_INSTALLDIR</SetProperty>
 
         <Property Id="WIXUI_EXITDIALOGOPTIONALCHECKBOXTEXT" Value="!(loc.LaunchApp)" />
         <Property Id="WIXUI_EXITDIALOGOPTIONALCHECKBOX" Value="1"/>
