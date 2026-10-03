@@ -1232,10 +1232,15 @@ pub async fn choose_and_confirm_sound(
             if selected_pool.selected_index == Some(index) {
                 break;
             }
-            anyhow::ensure!(
-                Instant::now() < deadline,
-                "selected sound row not confirmed before closing picker"
-            );
+            check_wait()?;
+            if Instant::now() >= deadline {
+                return Err(anyhow::anyhow!("selected sound row not confirmed before closing picker")
+                    .context(crate::publish_recovery::RecoveryFailure::new(
+                        "sound_selection_readback_unavailable",
+                        crate::publish_recovery::FailureKind::Retryable,
+                        format!("Selected sound '{}' by '{}' has no confirmed readback; fresh preparation required before Post", candidate.title, candidate.artist),
+                    )));
+            }
             tokio::time::sleep(POLL).await;
         }
         check_wait()?;

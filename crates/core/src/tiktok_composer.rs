@@ -3616,7 +3616,8 @@ where
                         break Err(error)
                     }
                     Err(error) => {
-                        if crate::publish_recovery::describe(&error).kind
+                        if crate::publish_recovery::requires_fresh_preparation(&error)
+                            || crate::publish_recovery::describe(&error).kind
                             != crate::publish_recovery::FailureKind::Retryable
                         {
                             break Err(error);
@@ -3656,6 +3657,7 @@ where
                 && Instant::now() >= sound_deadline
                 && session.gui_session_epoch() == sound_epoch
                 && !error.is::<crate::driver::SessionEpochChanged>()
+                && !crate::publish_recovery::requires_fresh_preparation(&error)
                 && crate::publish_recovery::describe(&error).kind
                     == crate::publish_recovery::FailureKind::Retryable
             {

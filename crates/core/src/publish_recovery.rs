@@ -243,6 +243,17 @@ pub fn describe(error: &anyhow::Error) -> RecoveryFailure {
     }
     RecoveryFailure::legacy(format!("{error:#}"))
 }
+
+/// These observations invalidate the local prepared targets. Only the admitted
+/// controller may start fresh account/media preparation within its retry budget.
+pub(crate) fn requires_fresh_preparation(error: &anyhow::Error) -> bool {
+    matches!(
+        describe(error).code.as_str(),
+        "publish_observation_session_repaired"
+            | "editor_observation_invalidated"
+            | "sound_selection_readback_unavailable"
+    )
+}
 pub fn classify(message: &str) -> FailureKind {
     let s = message.to_lowercase();
     // Specific refusals always win over words such as timeout in an error chain.
@@ -419,7 +430,7 @@ async fn retry_inner(
     if stop.load(Ordering::Acquire)
         || failure.kind != FailureKind::Retryable
         // This repair needs fresh admitted account/session proof, not a local loop.
-        || failure.code == "publish_observation_session_repaired"
+        || requires_fresh_preparation(error)
     {
         return Ok(false);
     }

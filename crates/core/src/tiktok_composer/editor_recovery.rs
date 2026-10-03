@@ -199,6 +199,21 @@ pub(super) async fn observe(
         {
             Ok(ReadWaitResult::Ready(snapshot)) => snapshot,
             Err(error) if transient_read(&error) => {
+                if stop.load(Ordering::Relaxed) || Instant::now() >= deadline {
+                    return Ok(false);
+                }
+                let current_epoch = session.gui_session_epoch();
+                if current_epoch != epoch {
+                    // The failed legacy read may have recreated the driver session.
+                    // Preserve that unavailable read, never reuse the prior target or
+                    // claim the driver's stronger fresh-foreground repair proof.
+                    let message = format!("Editor observation invalidated by an unavailable read; previous epoch={epoch}, current epoch={current_epoch}: {error:#}");
+                    return Err(error.context(crate::publish_recovery::RecoveryFailure::new(
+                        "editor_observation_invalidated",
+                        crate::publish_recovery::FailureKind::Retryable,
+                        message,
+                    )));
+                }
                 previous = None;
                 sleep(
                     POLL.min(deadline.saturating_duration_since(Instant::now())),
@@ -213,10 +228,15 @@ pub(super) async fn observe(
         if stop.load(Ordering::Relaxed) || Instant::now() >= deadline {
             return Ok(false);
         }
-        anyhow::ensure!(
-            epoch == session.gui_session_epoch(),
-            "editor recovery session replaced"
-        );
+        let current_epoch = session.gui_session_epoch();
+        if epoch != current_epoch {
+            return Err(anyhow::anyhow!("editor recovery session replaced")
+                .context(crate::publish_recovery::RecoveryFailure::new(
+                    "editor_observation_invalidated",
+                    crate::publish_recovery::FailureKind::Retryable,
+                    format!("Editor read generation {} changed session; previous epoch={epoch}, current epoch={current_epoch}; discard prior targets and prepare afresh", snapshot.generation),
+                )));
+        }
         if snapshot.generation == 0 {
             previous = None;
             sleep(
