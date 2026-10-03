@@ -28,6 +28,12 @@ có thể khác theo chế độ chạy. Không dùng APPDATA override để gi�
    không xóa lock vì chờ lâu. Campaign cũ không tự chuyển sang target mới.
 6. Nghiệm thu giới hạn trên đúng PC; mở app thành công chưa chứng minh phone/Sheet.
 
+Trước khi cập nhật bằng bộ cài NSIS, đóng Riviu và chờ tiến trình kết thúc sau khi
+nhả thiết bị. Bộ cài từ chối khi Riviu vẫn chạy, kể cả cài im lặng; không tự kill
+controller để tiếp tục. Khi nâng cấp, bộ cài thay riêng runtime iOS đã đóng gói
+trong thư mục cài để tránh giữ dependency cũ; DB, credential và media vận hành
+không thuộc thư mục được thay.
+
 ## Sao lưu
 
 - Dừng nhận việc mới, chờ worker/lease drain và đóng app đúng quy trình. Ghi version,
