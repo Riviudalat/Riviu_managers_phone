@@ -343,12 +343,12 @@ function PublishHostLimits({ onSaved }: { onSaved: () => void }) {
         }} />
       </label>)}
       {!valid && <p role="alert">Mỗi giới hạn phải là số nguyên từ 1 đến 64.</p>}
-      <button type="button" onClick={() => { setLimits({transfer:64,compose:64,verify:64,deviceTotal:64}); setMessage("Đã chọn chạy song song toàn bộ máy; bấm Lưu giới hạn để áp dụng."); }}>Chạy song song toàn bộ máy</button>
+      <button type="button" onClick={() => { setLimits({transfer:64,compose:4,verify:4,deviceTotal:64}); setMessage("Đã chọn tối đa 64 máy, 4 phiên TikTok và 4 lượt xác minh; bấm Lưu giới hạn để áp dụng."); }}>Tối đa 64 máy, 4 phiên TikTok</button>
       <button type="button" disabled={!valid} onClick={() => void save()}>Lưu giới hạn</button>
     </fieldset>}
     {error && <button type="button" disabled={busy} onClick={() => void read()}>Đọc lại giới hạn</button>}
     {message && <p role="status">{message}</p>}
-    <p>Giảm giới hạn chỉ áp dụng khi cấp lượt mới. Mở lại Riviu sau khi đổi lượt xác minh để cập nhật số phiên xác minh.</p>
+    <p>Máy đã chuyển media có thể chờ lượt thao tác TikTok; đang xếp hàng chưa có nghĩa đã bấm Đăng. Giới hạn mới áp dụng khi cấp lượt mới, phiên đang chạy tiếp tục hoàn tất.</p>
   </details>;
 }
 

@@ -20,8 +20,8 @@ impl Default for PublishLimits {
     fn default() -> Self {
         Self {
             transfer: 64,
-            compose: 64,
-            verify: 64,
+            compose: 4,
+            verify: 4,
             device_total: 64,
         }
     }
@@ -387,6 +387,31 @@ impl Database {
         Ok(())
     }
 
+    /// Foreground scope, not admission: queued journeys retain priority through
+    /// phase-capacity waits and recovery backoff. Live workers are also retained
+    /// by the dispatcher until their device calls have drained.
+    pub fn foreground_publish_dispatch_devices(
+        &self,
+        local_now_ms: i64,
+    ) -> anyhow::Result<Vec<(String, String)>> {
+        let connection = self.dispatch_conn()?;
+        let conn = connection.lock();
+        let mut statement = conn.prepare("SELECT DISTINCT j.campaign_id,j.udid
+          FROM publish_dispatch_jobs j
+          JOIN publish_pipeline_runs r ON r.campaign_id=j.campaign_id AND r.token=j.run_token
+          JOIN publish_campaigns c ON c.id=j.campaign_id
+          JOIN publish_assignments a ON a.id=j.assignment_id AND a.campaign_id=j.campaign_id
+          WHERE j.state IN ('queued','running') AND c.state='posting'
+          AND NOT EXISTS(SELECT 1 FROM publish_exclude_requests e WHERE e.assignment_id=j.assignment_id)
+          AND (j.started_at_ms IS NOT NULL OR j.deadline_ms IS NULL OR j.deadline_ms>=?1)
+          AND (j.state='running' OR (a.effect_intent IS NULL
+            AND a.state NOT IN ('cancelled','missed','uncertain','succeeded','verifying')))")?;
+        let rows = statement
+            .query_map([local_now_ms], |r| Ok((r.get(0)?, r.get(1)?)))?
+            .collect::<Result<_, _>>()?;
+        Ok(rows)
+    }
+
     pub fn pending_publish_dispatch(
         &self,
         limit: usize,
@@ -400,7 +425,7 @@ impl Database {
           WHERE j.state='queued' AND c.state='posting'
           AND NOT EXISTS(SELECT 1 FROM publish_recovery_state retry WHERE retry.assignment_id=j.assignment_id AND CAST(json_extract(retry.payload,'$.nextRetryAt') AS REAL)>CAST(strftime('%s','now') AS INTEGER)*1000)
           AND ((j.phase='transfer' AND (SELECT COUNT(*) FROM publish_work_claims WHERE stage='transfer')<CAST(COALESCE((SELECT json_extract(value,'$.transfer') FROM settings WHERE key='publish.dispatch.limits'),64) AS INTEGER))
-            OR (j.phase='compose' AND (SELECT COUNT(*) FROM publish_work_claims WHERE stage='compose')<CAST(COALESCE((SELECT json_extract(value,'$.compose') FROM settings WHERE key='publish.dispatch.limits'),64) AS INTEGER)))
+            OR (j.phase='compose' AND (SELECT COUNT(*) FROM publish_work_claims WHERE stage='compose')<CAST(COALESCE((SELECT json_extract(value,'$.compose') FROM settings WHERE key='publish.dispatch.limits'),4) AS INTEGER)))
           AND NOT EXISTS(SELECT 1 FROM publish_work_claims w WHERE w.udid=j.udid)
           AND NOT EXISTS(SELECT 1 FROM publish_dispatch_jobs busy WHERE busy.udid=j.udid
             AND busy.assignment_id<>j.assignment_id AND busy.state IN ('queued','running') AND busy.started_at_ms IS NOT NULL)

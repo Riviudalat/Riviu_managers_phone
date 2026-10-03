@@ -476,9 +476,14 @@ pub(crate) async fn run_dispatcher(
                 .into_iter()
                 .filter(|job| acceptance.allows_publish_dispatch(&job.run.campaign_id, &job.udid))
                 .collect::<Vec<_>>();
-            // Queued phones are foreground work too. Keep this scoped priority
-            // through dispatcher ticks and until each worker has released its lease.
-            let needed: std::collections::HashSet<_> = pending.iter().map(|job| job.udid.clone())
+            // Admission is capacity-filtered; foreground priority must also cover
+            // queued journeys waiting for a phase slot or recovery backoff.
+            // Owned workers retain priority even after cancellation until release.
+            let needed: std::collections::HashSet<_> = db
+                .foreground_publish_dispatch_devices(now)?
+                .into_iter()
+                .filter(|(campaign, udid)| acceptance.allows_publish_dispatch(campaign, udid))
+                .map(|(_, udid)| udid)
                 .chain(owned.values().map(|job: &riviu_core::db::PublishDispatchJob| job.udid.clone()))
                 .collect();
             idle_deferrals.retain(|udid, _| needed.contains(udid));
