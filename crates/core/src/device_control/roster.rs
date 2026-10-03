@@ -216,6 +216,24 @@ impl DeviceControlPlane {
             })?;
         Ok(negotiated)
     }
+    pub async fn prepare_helper_maintenance(&self, context: &DeviceExclusiveContext, maintenance_id: &str, effect_intent: serde_json::Value) -> Result<serde_json::Value, DeviceControlError> {
+        let lease = self.validate_exclusive(context)?;
+        if context.owner() != DeviceWorkOwner::Repair {
+            return Err(driver_error(lease.udid(), "prepareHelperMaintenance", anyhow::anyhow!("Repair lease required")));
+        }
+        self.driver.prepare_helper_maintenance(lease.udid(), maintenance_id, effect_intent).await
+            .map_err(|error| driver_error(lease.udid(), "prepareHelperMaintenance", error))
+    }
+
+    pub async fn execute_helper_maintenance(&self, context: &DeviceExclusiveContext, plan: serde_json::Value, operator_authorized: bool, observation_only: bool) -> Result<serde_json::Value, DeviceControlError> {
+        let lease = self.validate_exclusive(context)?;
+        if context.owner() != DeviceWorkOwner::Repair {
+            return Err(driver_error(lease.udid(), "executeHelperMaintenance", anyhow::anyhow!("Repair lease required")));
+        }
+        self.driver.execute_helper_maintenance(lease.udid(), plan, operator_authorized, observation_only).await
+            .map_err(|error| driver_error(lease.udid(), "executeHelperMaintenance", error))
+    }
+
     pub async fn repair_agent_install_only(
         &self,
         context: &DeviceExclusiveContext,

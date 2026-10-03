@@ -58,6 +58,152 @@ fn pending_checkpoint(path: &Path, serial: &str) -> anyhow::Result<Option<Value>
     Ok(Some(value))
 }
 
+// Response data is never copied into diagnostics. Only fixed protocol codes and
+// binding booleans survive a failed claim, so a later resume can explain its fence.
+fn claim_state(value: &Value) -> &'static str {
+    match value.as_str() {
+        Some("ready") => "ready",
+        Some("owner_conflict") => "owner_conflict",
+        Some("reconciliation_required") => "reconciliation_required",
+        Some("bind_failed") => "bind_failed",
+        Some("session_binding_refused") => "session_binding_refused",
+        Some("bootstrap_failed") => "bootstrap_failed",
+        Some("service_destroyed") => "service_destroyed",
+        Some("invalid_action") => "invalid_action",
+        _ => "unrecognized",
+    }
+}
+
+fn claim_diagnostic(identity: &Value, owner: &CanaryOwner, reply: &'static str) -> Value {
+    json!({
+        "reply": reply,
+        "state": claim_state(&identity["state"]),
+        "ok": identity["ok"] == true,
+        "nonceMatched": identity["nonce"].as_str() == Some(owner.nonce.as_str()),
+        "ownerMatched": identity["ownerId"].as_str() == Some(owner.owner_id.as_str()),
+        "ready": identity["state"] == "ready",
+        "owned": identity["ownership"] == "owned",
+        "instancePresent": identity["serviceInstance"].as_str().is_some_and(|v| !v.is_empty() && v != "-"),
+        "generationPresent": identity["ownerGeneration"].as_str().is_some_and(|v| !v.is_empty() && v != "-"),
+    })
+}
+
+fn claim_diagnostic_text(diagnostic: &Value) -> String {
+    let reply = match diagnostic["reply"].as_str() {
+        Some("binder") => "binder",
+        Some("protectedStatus") => "protectedStatus",
+        _ => "unobserved",
+    };
+    format!("reply={reply} state={} ok={} nonceMatched={} ownerMatched={} ready={} owned={} instancePresent={} generationPresent={}",
+        claim_state(&diagnostic["state"]), diagnostic["ok"] == true,
+        diagnostic["nonceMatched"] == true, diagnostic["ownerMatched"] == true,
+        diagnostic["ready"] == true, diagnostic["owned"] == true,
+        diagnostic["instancePresent"] == true, diagnostic["generationPresent"] == true)
+}
+
+fn persist_claim_diagnostic(owner: &CanaryOwner, serial: &str, diagnostic: Value) -> anyhow::Result<()> {
+    let path = owner.report.join("runtime-owner.json");
+    let mut bytes = Vec::new();
+    std::fs::File::open(&path)?.take(CHECKPOINT_LIMIT + 1).read_to_end(&mut bytes)?;
+    anyhow::ensure!(bytes.len() as u64 <= CHECKPOINT_LIMIT, "helper owner record exceeds bound");
+    let mut record: Value = serde_json::from_slice(&bytes)?;
+    anyhow::ensure!(record["serial"].as_str() == Some(serial) && record["androidUser"] == 0
+        && record["ownerId"].as_str() == Some(owner.owner_id.as_str())
+        && record["nonce"].as_str() == Some(owner.nonce.as_str()) && record["state"] == "claimPending",
+        "helper owner diagnostic identity mismatch");
+    record["claimDiagnostic"] = diagnostic;
+    if owner.instance != "-" && owner.generation != "-" {
+        record["serviceInstance"] = json!(owner.instance);
+        record["ownerGeneration"] = json!(owner.generation);
+    }
+    let bytes = serde_json::to_vec(&record)?;
+    anyhow::ensure!(bytes.len() as u64 <= CHECKPOINT_LIMIT, "helper owner diagnostic exceeds bound");
+    let temporary = owner.report.join(format!("runtime-owner-{}.tmp", uuid::Uuid::new_v4().simple()));
+    let mut file = std::fs::OpenOptions::new().write(true).create_new(true).open(&temporary)?;
+    file.write_all(&bytes)?;
+    file.sync_all()?;
+    drop(file);
+    std::fs::rename(temporary, path)?;
+    Ok(())
+}
+
+const OWNER_CREDENTIAL_STORE: &str = "os-vault-v1";
+
+fn owner_credential_name(serial: &str, owner_id: &str) -> anyhow::Result<String> {
+    anyhow::ensure!((16..=128).contains(&owner_id.len())
+        && owner_id.bytes().all(|b| b.is_ascii_alphanumeric() || b"_-".contains(&b)),
+        "helper credential owner identity invalid");
+    Ok(format!("android-helper-owner-v1:{}:{owner_id}", riviu_core::frame_sha256(serial.as_bytes())))
+}
+
+fn owner_record(state: &Path, serial: &str) -> anyhow::Result<Value> {
+    let mut bytes = Vec::new();
+    std::fs::File::open(state.join("runtime-owner.json"))?
+        .take(CHECKPOINT_LIMIT + 1).read_to_end(&mut bytes)?;
+    anyhow::ensure!(bytes.len() as u64 <= CHECKPOINT_LIMIT, HelperRecoveryRequired);
+    let value: Value = serde_json::from_slice(&bytes)?;
+    anyhow::ensure!(value["serial"].as_str() == Some(serial) && value["androidUser"] == 0
+        && value["state"] == "claimPending", HelperRecoveryRequired);
+    Ok(value)
+}
+
+async fn create_owner_credential(serial: &str, owner_id: &str) -> anyhow::Result<std::sync::Arc<str>> {
+    let name = owner_credential_name(serial, owner_id)?;
+    tokio::task::spawn_blocking(move || {
+        let store = riviu_signing::CredentialStore::system().map_err(|_| anyhow!("helper OS credential store unavailable"))?;
+        anyhow::ensure!(store.app_secret(&name).map_err(|_| anyhow!("helper OS credential lookup failed"))?.is_none(),
+            "helper owner credential account already exists; no replacement");
+        let token = format!("{}{}", uuid::Uuid::new_v4().simple(), uuid::Uuid::new_v4().simple());
+        store.set_app_secret(&name, &token).map_err(|_| anyhow!("helper OS credential save failed"))?;
+        anyhow::ensure!(store.app_secret(&name).map_err(|_| anyhow!("helper OS credential readback failed"))?.as_deref() == Some(token.as_str()),
+            "helper OS credential readback unproved; no claim");
+        Ok::<std::sync::Arc<str>, anyhow::Error>(token.into())
+    }).await.map_err(|_| anyhow!("helper OS credential worker failed"))?
+}
+
+async fn load_owner_credential(serial: &str, record: &Value) -> anyhow::Result<std::sync::Arc<str>> {
+    let owner_id = record["ownerId"].as_str().context("helper credential owner missing")?;
+    let name = owner_credential_name(serial, owner_id)?;
+    match record["tokenPersisted"].as_bool() {
+        Some(true) => {
+            anyhow::ensure!(record["credentialStore"].as_str() == Some(OWNER_CREDENTIAL_STORE), HelperRecoveryRequired);
+            tokio::task::spawn_blocking(move || {
+                let store = riviu_signing::CredentialStore::system().map_err(|_| anyhow!("helper OS credential store unavailable"))?;
+                let token = store.app_secret(&name).map_err(|_| anyhow!("helper OS credential read failed"))?
+                    .ok_or_else(|| anyhow!("helper owner credential missing; no replacement or claim"))?;
+                anyhow::ensure!((32..=256).contains(&token.len())
+                    && token.bytes().all(|b| b.is_ascii_alphanumeric() || b"_-".contains(&b)),
+                    "helper owner credential invalid; no replacement or claim");
+                Ok::<std::sync::Arc<str>, anyhow::Error>(token.into())
+            }).await.map_err(|_| anyhow!("helper OS credential worker failed"))?
+        },
+        Some(false) => existing_helper_token(serial).map(std::sync::Arc::from)
+            .ok_or_else(|| anyhow!("legacy helper owner credential lost with process; no replacement or claim")),
+        None => Err(anyhow!("helper owner credential record malformed; no replacement or claim")),
+    }
+}
+
+async fn retire_owner_credential(serial: &str, owner: &CanaryOwner) -> anyhow::Result<()> {
+    // Keep the owner journal as a cold-retry anchor until vault retirement succeeds.
+    let receipt = bounded_json(&release_path(owner))?;
+    anyhow::ensure!(receipt["state"] == "released" && receipt["serial"] == serial
+        && receipt["androidUser"] == 0 && receipt["ownerId"] == owner.owner_id
+        && receipt["serviceInstance"] == owner.instance && receipt["ownerGeneration"] == owner.generation,
+        HelperRecoveryRequired);
+    anyhow::ensure!(!owner.report.join("ime-checkpoint.json").try_exists()?, "helper credential retirement waits for cleanup records");
+    if owner.report.join("runtime-owner.json").try_exists()? {
+        anyhow::ensure!(owner_record(&owner.report, serial)? == receipt["ownerRecord"], HelperRecoveryRequired);
+    }
+    let name = owner_credential_name(serial, &owner.owner_id)?;
+    tokio::task::spawn_blocking(move || {
+        let store = riviu_signing::CredentialStore::system().map_err(|_| anyhow!("released helper OS credential store unavailable"))?;
+        store.set_app_secret(&name, "").map_err(|_| anyhow!("helper owner released; OS credential retirement failed"))?;
+        anyhow::ensure!(store.app_secret(&name).map_err(|_| anyhow!("released helper OS credential readback failed"))?.is_none(),
+            "helper owner released; OS credential retirement unproved");
+        Ok::<(), anyhow::Error>(())
+    }).await.map_err(|_| anyhow!("released helper OS credential worker failed"))?
+}
+
 async fn checked_shell(adb: &AdbProgram, serial: &str, command: &str) -> anyhow::Result<String> {
     let output = adb.shell_output(serial, command, Duration::from_secs(15)).await?;
     anyhow::ensure!(output.exit_code == 0 && output.stderr.trim().is_empty(), "helper runtime inventory unavailable");
@@ -102,29 +248,411 @@ pub(super) async fn exchange(adb: &AdbProgram, serial: &str, owner: &CanaryOwner
     serde_json::from_slice(&reply[4..]).context("Binder bootstrap reply invalid")
 }
 
-pub(super) async fn release(adb: &AdbProgram, serial: &str, owner: &CanaryOwner) -> anyhow::Result<()> {
-    let reply = exchange(adb, serial, owner, json!({"action":"release","nonce":owner.nonce,"ownerId":owner.owner_id,"token":helper_token(serial),"serviceInstance":owner.instance,"ownerGeneration":owner.generation})).await?;
-    anyhow::ensure!(reply["ok"] == true && reply["state"] == "released" && reply["nonce"].as_str() == Some(owner.nonce.as_str()) && reply["ownerId"].as_str() == Some(owner.owner_id.as_str()) && reply["serviceInstance"].as_str() == Some(owner.instance.as_str()) && reply["ownerGeneration"].as_str() == Some(owner.generation.as_str()), "exact helper owner release unresolved");
-    match std::fs::remove_file(owner.report.join("runtime-owner.json")) {
-        Ok(()) => {},
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {},
-        Err(error) => return Err(error.into()),
+// A write-ahead intent prevents replay even when the release ACK or receipt write is lost.
+fn release_path(owner: &CanaryOwner) -> PathBuf {
+    owner.report.join(format!("release-{}.json", owner.owner_id))
+}
+
+fn durable_json(path: &Path, value: &Value) -> anyhow::Result<()> {
+    let temporary = path.with_extension(format!("{}.tmp", uuid::Uuid::new_v4().simple()));
+    let mut file = std::fs::OpenOptions::new().write(true).create_new(true).open(&temporary)?;
+    let bytes = serde_json::to_vec(value)?;
+    anyhow::ensure!(bytes.len() as u64 <= CHECKPOINT_LIMIT, "helper durable receipt exceeds bound");
+    file.write_all(&bytes)?;
+    file.sync_all()?;
+    drop(file);
+    std::fs::rename(temporary, path)?;
+    Ok(())
+}
+
+fn bounded_json(path: &Path) -> anyhow::Result<Value> {
+    let mut bytes = Vec::new();
+    std::fs::File::open(path)?.take(CHECKPOINT_LIMIT + 1).read_to_end(&mut bytes)?;
+    anyhow::ensure!(bytes.len() as u64 <= CHECKPOINT_LIMIT, HelperRecoveryRequired);
+    Ok(serde_json::from_slice(&bytes)?)
+}
+
+pub(super) async fn release(adb: &AdbProgram, serial: &str, owner: &CanaryOwner, token: &str, host_port: Option<u16>) -> anyhow::Result<()> {
+    let path = release_path(owner);
+    if path.try_exists()? {
+        let receipt = bounded_json(&path)?;
+        anyhow::ensure!(receipt["serial"] == serial && receipt["androidUser"] == 0
+            && receipt["ownerId"] == owner.owner_id && receipt["serviceInstance"] == owner.instance
+            && receipt["ownerGeneration"] == owner.generation && receipt["state"] == "released",
+            "helper release intent unresolved or identity changed; no repeat RELEASE");
+        return Ok(());
     }
+    let record = owner_record(&owner.report, serial)?;
+    anyhow::ensure!(record["ownerId"].as_str() == Some(owner.owner_id.as_str()), HelperRecoveryRequired);
+    for (field, expected) in [("serviceInstance", &owner.instance), ("ownerGeneration", &owner.generation)] {
+        if let Some(recorded) = record[field].as_str().filter(|v| !v.is_empty() && *v != "-") {
+            anyhow::ensure!(recorded == expected.as_str(), "release epoch differs from durable owner");
+        }
+    }
+    let mut intent = json!({"serial":serial,"androidUser":0,"ownerId":owner.owner_id,
+        "serviceInstance":owner.instance,"ownerGeneration":owner.generation,"nonce":owner.nonce,
+        "hostPort":host_port,"state":"releasePending","ownerRecord":record});
+    let mut file = std::fs::OpenOptions::new().write(true).create_new(true).open(&path)?;
+    file.write_all(&serde_json::to_vec(&intent)?)?;
+    file.sync_all()?;
+    drop(file);
+    let reply = exchange(adb, serial, owner, json!({"action":"release","nonce":owner.nonce,"ownerId":owner.owner_id,"token":token,"serviceInstance":owner.instance,"ownerGeneration":owner.generation})).await?;
+    anyhow::ensure!(reply["ok"] == true && reply["state"] == "released" && reply["nonce"].as_str() == Some(owner.nonce.as_str()) && reply["ownerId"].as_str() == Some(owner.owner_id.as_str()) && reply["serviceInstance"].as_str() == Some(owner.instance.as_str()) && reply["ownerGeneration"].as_str() == Some(owner.generation.as_str()), "exact helper owner release unresolved");
+    intent["state"] = json!("released");
+    durable_json(&path, &intent)?;
+    // Keep the exact durable settlement after journal retirement and forward retries.
+    Ok(())
+}
+
+pub(super) async fn remove_owned_forward(adb: &AdbProgram, serial: &str, port: u16) -> anyhow::Result<()> {
+    let list = adb.device(serial, &["forward", "--list"], Duration::from_secs(10)).await?;
+    let local = format!("tcp:{port}");
+    let remote = format!("tcp:{DEVICE_PORT}");
+    let mut present = false;
+    for line in list.lines().filter(|line| !line.trim().is_empty()) {
+        let fields: Vec<_> = line.split_whitespace().collect();
+        anyhow::ensure!(fields.len() == 3, "forward inventory malformed; preserve release settlement");
+        if fields[1] == local {
+            anyhow::ensure!(fields[0] == serial && fields[2] == remote,
+                "released helper forward was reassigned; preserve replacement");
+            present = true;
+        }
+    }
+    if present { frames::remove_forward(adb, serial, port).await?; }
+    Ok(())
+}
+
+pub(super) async fn finish_release(serial: &str, owner: &CanaryOwner) -> anyhow::Result<()> {
+    let receipt = bounded_json(&release_path(owner))?;
+    anyhow::ensure!(receipt["state"] == "released" && receipt["serial"] == serial
+        && receipt["ownerId"] == owner.owner_id && receipt["serviceInstance"] == owner.instance
+        && receipt["ownerGeneration"] == owner.generation, HelperRecoveryRequired);
+    anyhow::ensure!(!owner.report.join("ime-checkpoint.json").try_exists()?, HelperRecoveryRequired);
+    let path = owner.report.join("runtime-owner.json");
+    if path.try_exists()? {
+        let current = owner_record(&owner.report, serial)?;
+        anyhow::ensure!(current == receipt["ownerRecord"], HelperRecoveryRequired);
+    }
+    if receipt["ownerRecord"]["tokenPersisted"] == true {
+        retire_owner_credential(serial, owner).await?;
+    }
+    if path.try_exists()? { std::fs::remove_file(path)?; }
+    Ok(())
+}
+
+fn journal_bytes(path: &Path) -> anyhow::Result<Option<Vec<u8>>> {
+    let file = match std::fs::File::open(path) {
+        Ok(file) => file,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+        Err(error) => return Err(error.into()),
+    };
+    let mut bytes = Vec::new();
+    file.take(CHECKPOINT_LIMIT + 1).read_to_end(&mut bytes)?;
+    anyhow::ensure!(bytes.len() as u64 <= CHECKPOINT_LIMIT, HelperRecoveryRequired);
+    Ok(Some(bytes))
+}
+
+async fn maintenance_process(adb: &AdbProgram, serial: &str) -> anyhow::Result<String> {
+    let output = adb.shell_output(serial, "pidof com.riviu.agent", Duration::from_secs(10)).await?;
+    anyhow::ensure!(output.stderr.trim().is_empty()
+        && ((output.exit_code == 0 && !output.stdout.trim().is_empty()) || (output.exit_code == 1 && output.stdout.trim().is_empty())),
+        "helper process observation unavailable");
+    let pids = output.stdout.trim();
+    anyhow::ensure!(pids.len() <= 128 && pids.bytes().all(|b| b.is_ascii_digit() || b.is_ascii_whitespace()),
+        "helper process observation invalid");
+    Ok(pids.to_owned())
+}
+
+fn finish_maintenance(state: &Path, archive: &Path, plan: &Value) -> anyhow::Result<()> {
+    let owner_id = plan["oldOwnerId"].as_str().context("maintenance owner missing")?;
+    owner_credential_name(plan["serial"].as_str().context("maintenance serial missing")?, owner_id)?;
+    let expected = ["runtime-owner.json".to_owned(), "ime-checkpoint.json".to_owned(), format!("release-{owner_id}.json")];
+    let journals = plan["journalHashes"].as_object().context("maintenance journal hashes missing")?;
+    anyhow::ensure!(journals.len() == expected.len() && expected.iter().all(|name| journals.contains_key(name)), HelperRecoveryRequired);
+    let active = state.join("maintenance-active.json");
+    if active.try_exists()? {
+        anyhow::ensure!(bounded_json(&active)?["plan"] == *plan, HelperRecoveryRequired);
+    }
+    // Prove every surviving byte before retiring any; archived effects remain unresolved forever.
+    for name in &expected {
+        let hash = &journals[name];
+        if !hash.is_null() {
+            let saved = journal_bytes(&archive.join(name))?.context("maintenance archive missing")?;
+            anyhow::ensure!(hash.as_str() == Some(riviu_core::frame_sha256(&saved).as_str()), HelperRecoveryRequired);
+        }
+        if let Some(bytes) = journal_bytes(&state.join(name))? {
+            anyhow::ensure!(hash.as_str() == Some(riviu_core::frame_sha256(&bytes).as_str()), HelperRecoveryRequired);
+        }
+    }
+    for name in &expected {
+        if !journals[name].is_null() && state.join(name).try_exists()? { std::fs::remove_file(state.join(name))?; }
+    }
+    if active.try_exists()? { std::fs::remove_file(active)?; }
     Ok(())
 }
 
 impl HelperClient {
+    /// Observation only. The caller supplies the existing effect identity, never a retry ID.
+    pub(crate) async fn prepare_maintenance(adb: &AdbProgram, serial: &str, apk: Option<&Path>, root: Option<&Path>, maintenance_id: &str, effect_intent: Value) -> anyhow::Result<Value> {
+        let state = state_path(root.context("helper state directory missing")?, serial)?;
+        anyhow::ensure!(!state.join("maintenance-active.json").try_exists()?, HelperRecoveryRequired);
+        Self::observe_maintenance(adb, serial, apk, root, maintenance_id, effect_intent).await
+    }
+
+    // Inventory only: callers retain the active-intent fence and decide whether dispatch is allowed.
+    async fn observe_maintenance(adb: &AdbProgram, serial: &str, apk: Option<&Path>, root: Option<&Path>, maintenance_id: &str, effect_intent: Value) -> anyhow::Result<Value> {
+        anyhow::ensure!((16..=128).contains(&maintenance_id.len())
+            && maintenance_id.bytes().all(|b| b.is_ascii_alphanumeric() || b"_-".contains(&b)),
+            "invalid helper maintenanceId");
+        anyhow::ensure!(effect_intent.as_object().is_some_and(|v| !v.is_empty())
+            && serde_json::to_vec(&effect_intent)?.len() <= 4096, "existing effect identity required");
+        let state = state_path(root.context("helper state directory missing")?, serial)?;
+        let record = owner_record(&state, serial)?;
+        let owner_id = record["ownerId"].as_str().context("old helper owner missing")?;
+        owner_credential_name(serial, owner_id)?;
+        anyhow::ensure!(checked_shell(adb, serial, "id -u").await?.trim() == "2000"
+            && checked_shell(adb, serial, "am get-current-user").await?.trim() == "0", HelperRecoveryRequired);
+        let (version, uid, installed_path) = inventory(adb, serial).await?;
+        let bundled_hash = riviu_core::frame_sha256(&std::fs::read(apk.context("bundled helper missing")?)?);
+        let installed_hash = checked_shell(adb, serial, &format!("sha256sum {}", crate::adb::quote_device_path(&installed_path))).await?
+            .split_whitespace().next().context("installed helper hash missing")?.to_owned();
+        // Only the recorded trusted package or the current trusted bundle may be superseded.
+        anyhow::ensure!(installed_hash.len() == 64 && installed_hash.bytes().all(|b| b.is_ascii_hexdigit())
+            && (record["apkSha256"].as_str() == Some(installed_hash.as_str()) || installed_hash == bundled_hash),
+            "maintenance helper APK provenance changed");
+        let boot_ime = current_ime(adb, serial).await?;
+        validate_ime_id(&boot_ime)?;
+        anyhow::ensure!(boot_ime != IME_ID, "maintenance cannot guess or restore a lost boot IME");
+        let boot_id = checked_shell(adb, serial, "cat /proc/sys/kernel/random/boot_id").await?.trim().to_owned();
+        anyhow::ensure!(!boot_id.is_empty() && boot_id.len() <= 128, "maintenance boot identity missing");
+        let process = maintenance_process(adb, serial).await?;
+        let mut journals = serde_json::Map::new();
+        for name in ["runtime-owner.json".to_owned(), "ime-checkpoint.json".to_owned(), format!("release-{owner_id}.json")] {
+            let bytes = journal_bytes(&state.join(&name))?;
+            journals.insert(name, bytes.as_ref().map(|b| json!(riviu_core::frame_sha256(b))).unwrap_or(Value::Null));
+        }
+        Ok(json!({"schema":1,"maintenanceId":maintenance_id,"serial":serial,"androidUser":0,
+            "bundledApkSha256":bundled_hash,"installedApkSha256":installed_hash,"installedApkPath":installed_path,
+            "packageUid":uid,"packageVersion":version,"certificateSha256":CERT_SHA256,
+            "oldOwnerId":owner_id,"oldServiceInstance":record["serviceInstance"],"oldOwnerGeneration":record["ownerGeneration"],
+            "oldClaimNonce":record["nonce"],"journalHashes":journals,"bootIme":boot_ime,"bootId":boot_id,
+            "observedProcess":process,"effectIntent":effect_intent,"disposition":"operatorAuthorizedSupersession",
+            "exactReleaseProved":false,"clipboardRestorationProved":false}))
+    }
+
+    /// Explicit maintenance only; never called by automatic install/admission/resume.
+    pub(crate) async fn execute_maintenance(adb: &AdbProgram, serial: &str, apk: Option<&Path>, root: Option<&Path>, plan: Value, operator_authorized: bool, observation_only: bool) -> anyhow::Result<Value> {
+        anyhow::ensure!(operator_authorized, "operator authorization required for helper supersession");
+        let state = state_path(root.context("helper state directory missing")?, serial)?;
+        let id = plan["maintenanceId"].as_str().context("maintenanceId missing")?;
+        anyhow::ensure!((16..=128).contains(&id.len()) && id.bytes().all(|b| b.is_ascii_alphanumeric() || b"_-".contains(&b)), "invalid maintenanceId");
+        anyhow::ensure!(plan["serial"] == serial && plan["androidUser"] == 0, HelperRecoveryRequired);
+        let archive = state.join("maintenance").join(id);
+        let active = state.join("maintenance-active.json");
+        let receipt_path = archive.join("receipt.json");
+        if receipt_path.try_exists()? {
+            let receipt = bounded_json(&receipt_path)?;
+            anyhow::ensure!(receipt["plan"] == plan && receipt["state"] == "superseded", HelperRecoveryRequired);
+            finish_maintenance(&state, &archive, &plan)?;
+            return Ok(receipt);
+        }
+        let reconciling = active.try_exists()?;
+        if reconciling {
+            let intent = bounded_json(&active)?;
+            anyhow::ensure!(intent["state"] == "supersessionPending" && intent["plan"] == plan,
+                "maintenance active plan changed; no replay or retirement");
+        }
+        let mut observed = Self::observe_maintenance(adb, serial, apk, root, id, plan["effectIntent"].clone()).await?;
+        if reconciling || observation_only {
+            anyhow::ensure!(observed["observedProcess"] == "", "maintenance effect unresolved; process present; no replay");
+            // Process disappearance is the only permitted change; retain the original plan verbatim.
+            observed["observedProcess"] = plan["observedProcess"].clone();
+        }
+        anyhow::ensure!(observed == plan, "helper maintenance binding changed; no replay or retirement");
+        if !reconciling { std::fs::create_dir_all(&archive)?; }
+        let journals = plan["journalHashes"].as_object().context("maintenance journal binding missing")?;
+        for (name, hash) in journals {
+            if hash.is_null() {
+                anyhow::ensure!(journal_bytes(&archive.join(name))?.is_none(), HelperRecoveryRequired);
+                continue;
+            }
+            let bytes = journal_bytes(&state.join(name))?.context("maintenance journal disappeared")?;
+            anyhow::ensure!(hash.as_str() == Some(riviu_core::frame_sha256(&bytes).as_str()), HelperRecoveryRequired);
+            let saved = archive.join(name);
+            if saved.try_exists()? {
+                anyhow::ensure!(journal_bytes(&saved)?.as_ref() == Some(&bytes), HelperRecoveryRequired);
+            } else {
+                anyhow::ensure!(!reconciling, "maintenance archive missing; reconciliation fenced");
+                let mut file = std::fs::OpenOptions::new().write(true).create_new(true).open(&saved)?;
+                file.write_all(&bytes)?;
+                file.sync_all()?;
+            }
+        }
+        if !reconciling {
+            let intent = json!({"state":"supersessionPending","plan":plan});
+            let mut file = std::fs::OpenOptions::new().write(true).create_new(true).open(&active)?;
+            file.write_all(&serde_json::to_vec(&intent)?)?;
+            file.sync_all()?;
+            drop(file);
+        }
+        // An active intent never grants replay authority, even if the earlier dispatch is unknown.
+        let stop_dispatched = !reconciling && !observation_only && !plan["observedProcess"].as_str().context("process binding missing")?.is_empty();
+        if stop_dispatched {
+            checked_shell(adb, serial, "am force-stop --user 0 com.riviu.agent").await?;
+        }
+        let mut settled = Self::observe_maintenance(adb, serial, apk, root, id, plan["effectIntent"].clone()).await?;
+        anyhow::ensure!(settled["observedProcess"] == "", "superseded helper process still present");
+        settled["observedProcess"] = plan["observedProcess"].clone();
+        anyhow::ensure!(settled == plan, "maintenance binding changed; settlement unresolved");
+        let stop_disposition = if reconciling { "alreadyAbsentOnReconciliationPriorDispatchUnknown" }
+            else if observation_only { "alreadyAbsentObservationOnlyPriorDispatchUnknown" }
+            else if stop_dispatched { "dispatched" } else { "alreadyAbsent" };
+        let receipt = json!({"state":"superseded","plan":plan,"exactReleaseProved":false,
+            "clipboardRestorationProved":false,"oldObligations":"archivedUnresolved","packageProcessAbsent":true,
+            "stopDispatchedThisAttempt":stop_dispatched,"stopDisposition":stop_disposition});
+        durable_json(&receipt_path, &receipt)?;
+        finish_maintenance(&state, &archive, &plan)?;
+        Ok(receipt)
+    }
+
+    /// A durable release (including an unresolved intent) fences authenticated reconnect.
+    pub(crate) async fn settle_released_runtime(&self) -> anyhow::Result<bool> {
+        if !self.production_runtime { return Ok(false); }
+        let owner = self.canary.as_ref().context("runtime owner missing")?;
+        if !release_path(owner).try_exists()? { return Ok(false); }
+        self.clone().shutdown().await?;
+        self.is_released().await
+    }
+
+    async fn settle_runtime_release(adb: &AdbProgram, serial: &str, state: &Path) -> anyhow::Result<()> {
+        if !state.join("runtime-owner.json").try_exists()? { return Ok(()); }
+        let record = owner_record(state, serial)?;
+        let owner_id = record["ownerId"].as_str().context("helper owner missing")?;
+        owner_credential_name(serial, owner_id)?;
+        let path = state.join(format!("release-{owner_id}.json"));
+        if !path.try_exists()? { return Ok(()); }
+        let receipt = bounded_json(&path)?;
+        anyhow::ensure!(receipt["state"] == "released" && receipt["ownerRecord"] == record
+            && receipt["serial"] == serial && receipt["androidUser"] == 0,
+            "helper release pending; retain exact intent, no replay");
+        let owner = CanaryOwner { owner_id: owner_id.into(),
+            instance: receipt["serviceInstance"].as_str().context("release instance missing")?.into(),
+            generation: receipt["ownerGeneration"].as_str().context("release generation missing")?.into(),
+            nonce: receipt["nonce"].as_str().context("release nonce missing")?.into(),
+            socket: String::new(), uid: 0, apk_path: String::new(), report: state.into() };
+        if let Some(port) = receipt["hostPort"].as_u64() {
+            let port = u16::try_from(port)?;
+            anyhow::ensure!(port > 0, HelperRecoveryRequired);
+            remove_owned_forward(adb, serial, port).await?;
+        }
+        finish_release(serial, &owner).await
+    }
+
+    pub(crate) async fn fence_package_preparation(adb: &AdbProgram, serial: &str, root: Option<&Path>) -> anyhow::Result<()> {
+        let state = state_path(root.context("helper durable state directory missing")?, serial)?;
+        anyhow::ensure!(!state.join("maintenance-active.json").try_exists()?, HelperRecoveryRequired);
+        Self::settle_runtime_release(adb, serial, &state).await?;
+        anyhow::ensure!(!state.join("runtime-owner.json").try_exists()?
+            && pending_checkpoint(&state, serial)?.is_none(), HelperRecoveryRequired);
+        Ok(())
+    }
+
+    /// Read-only admission proof for the cached owner and its exact durable record.
+    /// A warm resume rotates the request nonce; live health checks the service epoch.
+    pub(crate) fn validate_runtime_owner_record(&self, state: &Path) -> anyhow::Result<()> {
+        anyhow::ensure!(self.production_runtime, HelperRecoveryRequired);
+        let owner = self.canary.as_ref().ok_or_else(|| anyhow!(HelperRecoveryRequired))?;
+        anyhow::ensure!(owner.report == state, HelperRecoveryRequired);
+        anyhow::ensure!(!release_path(owner).try_exists()?
+            && !state.join("maintenance-active.json").try_exists()?, HelperRecoveryRequired);
+        let mut bytes = Vec::new();
+        std::fs::File::open(state.join("runtime-owner.json"))?
+            .take(CHECKPOINT_LIMIT + 1).read_to_end(&mut bytes)?;
+        anyhow::ensure!(bytes.len() as u64 <= CHECKPOINT_LIMIT, HelperRecoveryRequired);
+        let record: Value = serde_json::from_slice(&bytes)?;
+        anyhow::ensure!(record["serial"].as_str() == Some(self.serial.as_str()) && record["androidUser"] == 0
+            && record["ownerId"].as_str() == Some(owner.owner_id.as_str()) && record["state"] == "claimPending",
+            HelperRecoveryRequired);
+        Ok(())
+    }
+
+    /// Authenticate a previously admitted owner after desktop restart without
+    /// claiming, qualifying clipboard, switching IME, or adding a cached client.
+    pub(crate) async fn verify_runtime_owner_readiness(adb: AdbProgram, serial: &str, apk: Option<&Path>, state: &Path) -> anyhow::Result<()> {
+        let result = async {
+            anyhow::ensure!(pending_checkpoint(state, serial)?.is_none(), "helper cleanup record pending");
+            let record = owner_record(state, serial)?;
+            anyhow::ensure!(record["tokenPersisted"] == true
+                && record["credentialStore"].as_str() == Some(OWNER_CREDENTIAL_STORE),
+                "helper cold readiness requires exact persisted owner credential");
+            let metadata = |field: &str| -> anyhow::Result<String> {
+                let value = record[field].as_str().context("helper owner epoch field missing")?;
+                anyhow::ensure!((16..=128).contains(&value.len())
+                    && value.bytes().all(|b| b.is_ascii_alphanumeric() || b"_-".contains(&b)),
+                    "helper owner epoch field invalid");
+                Ok(value.into())
+            };
+            let owner_id = metadata("ownerId")?;
+            anyhow::ensure!(!state.join(format!("release-{owner_id}.json")).try_exists()?
+                && !state.join("maintenance-active.json").try_exists()?, HelperRecoveryRequired);
+            let instance = metadata("serviceInstance")?;
+            let generation = metadata("ownerGeneration")?;
+            anyhow::ensure!(checked_shell(&adb, serial, "id -u").await?.trim() == "2000"
+                && checked_shell(&adb, serial, "am get-current-user").await?.trim() == "0",
+                "helper cold readiness device user unproved");
+            let hash = riviu_core::frame_sha256(&std::fs::read(apk.context("bundled helper missing for cold readiness")?)?);
+            let (version, uid, apk_path) = inventory(&adb, serial).await?;
+            anyhow::ensure!(version >= MIN_VERSION && record["apkSha256"].as_str() == Some(hash.as_str())
+                && matches_bundle(&adb, serial, &apk_path, &hash).await?, "helper cold readiness APK binding unproved");
+            let token = load_owner_credential(serial, &record).await?;
+            let owner = CanaryOwner { owner_id, instance, generation,
+                nonce: uuid::Uuid::new_v4().simple().to_string(), socket: String::new(), uid, apk_path, report: state.into() };
+            let port = forward_helper(&adb, serial).await?;
+            let observed = async {
+                let mut client = Self::at_with_token(adb.clone(), serial, port, token)?;
+                client.production_runtime = true;
+                client.canary = Some(owner.clone());
+                client.require_canary_identity().await
+            }.await;
+            // Read-only qualification never releases the live helper owner.
+            let cleanup = frames::remove_forward(&adb, serial, port).await;
+            match (observed, cleanup) {
+                (Ok(()), Ok(())) => {},
+                (Err(error), Ok(())) => return Err(error),
+                (Ok(()), Err(error)) => return Err(error).context("cold readiness owned forward cleanup unproved"),
+                (Err(error), Err(cleanup)) => return Err(error).context(format!("cold readiness owned forward cleanup unproved ({cleanup:#})")),
+            }
+            anyhow::ensure!(pending_checkpoint(state, serial)?.is_none(), "helper cleanup changed during cold readiness");
+            let current = owner_record(state, serial)?;
+            anyhow::ensure!(current["ownerId"].as_str() == Some(owner.owner_id.as_str())
+                && current["serviceInstance"].as_str() == Some(owner.instance.as_str())
+                && current["ownerGeneration"].as_str() == Some(owner.generation.as_str())
+                && current["apkSha256"] == record["apkSha256"]
+                && current["tokenPersisted"] == true && current["credentialStore"] == record["credentialStore"],
+                "helper owner record changed during cold readiness");
+            Ok::<(), anyhow::Error>(())
+        }.await;
+        result.map_err(|error| anyhow!(HelperRecoveryRequired)
+            .context(format!("helper cold readiness unproved; no claim ({error:#})")))
+    }
+
     /// Called under the driver's inventory writer and the caller's control lease.
     pub(crate) async fn ensure_runtime(adb: AdbProgram, serial: &str, apk: Option<&Path>, state_dir: Option<&Path>) -> anyhow::Result<Self> {
         let state = state_path(state_dir.context("helper durable state directory missing")?, serial)?;
+        anyhow::ensure!(!state.join("maintenance-active.json").try_exists()?, HelperRecoveryRequired);
+        Self::settle_runtime_release(&adb, serial, &state).await?;
         // Recovery precedes any installation, service restart or owner claim.
         if let Some(checkpoint) = pending_checkpoint(&state, serial).map_err(|_| anyhow!(HelperRecoveryRequired))? {
-            Self::recover_runtime_checkpoint(adb.clone(), serial, &state, checkpoint).await.map_err(|_| anyhow!(HelperRecoveryRequired))?;
+            Self::recover_runtime_checkpoint(adb.clone(), serial, &state, checkpoint).await.map_err(|error| {
+                anyhow!(HelperRecoveryRequired).context(format!("helper pending cleanup unresolved ({error:#})"))
+            })?;
         }
         // A prior failed claim/attach is never replaced by a new claim. Its credential
         // may have died with the host process; explicit owner reconciliation is required.
         if state.join("runtime-owner.json").try_exists()? {
-            return Self::resume_runtime_owner(adb, serial, apk, &state).await;
+            return Self::resume_runtime_owner(adb, serial, apk, &state).await.map_err(|error| {
+                anyhow!(HelperRecoveryRequired).context(format!("helper owner resume unresolved ({error:#})"))
+            });
         }
         let apk = apk.context("compatible bundled helper APK missing")?;
         let hash = riviu_core::frame_sha256(&std::fs::read(apk)?);
@@ -144,79 +672,110 @@ impl HelperClient {
             owner_id: uuid::Uuid::new_v4().simple().to_string(), nonce: uuid::Uuid::new_v4().simple().to_string(),
             instance: "-".into(), generation: "-".into(), socket: String::new(), uid, apk_path, report: state,
         };
-        let mut intent = std::fs::OpenOptions::new().write(true).create_new(true).open(owner.report.join("runtime-owner.json"))?;
-        intent.write_all(&serde_json::to_vec(&json!({"serial":serial,"androidUser":0,"ownerId":owner.owner_id,"nonce":owner.nonce,"apkSha256":hash,"state":"claimPending","tokenPersisted":false}))?)?;
-        intent.sync_all()?;
-        // Tokenless foreground startup keeps the owned service alive after the bridge unbinds.
-        let started = adb.shell_output(serial, &format!("am start-foreground-service -n {SERVICE}"), Duration::from_secs(15)).await?;
-        anyhow::ensure!(started.exit_code == 0 && !started.stdout.contains("Error") && !started.stderr.contains("Error"), "release helper foreground start refused");
-        let body = json!({"action":"claim","nonce":owner.nonce,"ownerId":owner.owner_id,"token":helper_token(serial),"serviceInstance":"-","ownerGeneration":"-"});
-        // Claim is sent exactly once. Any lost ACK uses this same credential and owner.
-        let claimed = exchange(&adb, serial, &owner, body).await;
-        // If a proved claim precedes a transport failure, release only that exact owner.
-        if let Ok(identity) = &claimed {
-            if identity["ok"] == true && identity["nonce"].as_str() == Some(owner.nonce.as_str()) && identity["ownerId"].as_str() == Some(owner.owner_id.as_str()) && identity["state"] == "ready" {
-                owner.instance = identity["serviceInstance"].as_str().context("helper claim instance missing")?.into();
-                owner.generation = identity["ownerGeneration"].as_str().context("helper claim generation missing")?.into();
+        // Read back durable credentials before recording or dispatching the claim.
+        let token = create_owner_credential(serial, &owner.owner_id).await.map_err(|error| {
+            anyhow!(HelperRecoveryRequired).context(format!("helper owner credential preparation unproved; no claim ({error:#})"))
+        })?;
+        let attempt = async {
+            let mut intent = std::fs::OpenOptions::new().write(true).create_new(true).open(owner.report.join("runtime-owner.json"))?;
+            intent.write_all(&serde_json::to_vec(&json!({"serial":serial,"androidUser":0,"ownerId":owner.owner_id,"nonce":owner.nonce,"apkSha256":hash,"state":"claimPending","tokenPersisted":true,"credentialStore":OWNER_CREDENTIAL_STORE}))?)?;
+            intent.sync_all()?;
+            drop(intent);
+            // Tokenless foreground startup keeps the owned service alive after the bridge unbinds.
+            let started = adb.shell_output(serial, &format!("am start-foreground-service -n {SERVICE}"), Duration::from_secs(15)).await?;
+            anyhow::ensure!(started.exit_code == 0 && !started.stdout.contains("Error") && !started.stderr.contains("Error"), "release helper foreground start refused");
+            let body = json!({"action":"claim","nonce":owner.nonce,"ownerId":owner.owner_id,"token":token.as_ref(),"serviceInstance":"-","ownerGeneration":"-"});
+            // Claim is sent exactly once. Any lost ACK uses this same credential and owner.
+            let claimed = exchange(&adb, serial, &owner, body).await;
+            // If a proved claim precedes a transport failure, release only that exact owner.
+            if let Ok(identity) = &claimed {
+                if identity["ok"] == true && identity["nonce"].as_str() == Some(owner.nonce.as_str()) && identity["ownerId"].as_str() == Some(owner.owner_id.as_str()) && identity["state"] == "ready" {
+                    owner.instance = identity["serviceInstance"].as_str().filter(|v| !v.is_empty() && *v != "-").context("helper claim instance missing")?.into();
+                    owner.generation = identity["ownerGeneration"].as_str().filter(|v| !v.is_empty() && *v != "-").context("helper claim generation missing")?.into();
+                }
+                // Diagnostics must not orphan a successfully proved service owner.
+                if let Err(error) = persist_claim_diagnostic(&owner, serial, claim_diagnostic(identity, &owner, "binder")) {
+                    if owner.instance != "-" && owner.generation != "-" {
+                        release(&adb, serial, &owner, token.as_ref(), None).await.context("claim diagnostic failed; exact-owner release unresolved")?;
+                    }
+                    return Err(error);
+                }
             }
-        }
-        let port = match forward_helper(&adb, serial).await {
-            Ok(port) => port,
-            Err(error) => {
-                if owner.instance != "-" { release(&adb, serial, &owner).await?; }
-                return Err(error);
-            }
-        };
-        let mut client = match Self::at(adb.clone(), serial, port) {
-            Ok(client) => client,
-            Err(error) => {
-                if owner.instance != "-" { release(&adb, serial, &owner).await?; }
+            let port = match forward_helper(&adb, serial).await {
+                Ok(port) => port,
+                Err(error) => {
+                    if owner.instance != "-" { release(&adb, serial, &owner, token.as_ref(), None).await?; }
+                    return Err(error);
+                }
+            };
+            let mut client = match Self::at_with_token(adb.clone(), serial, port, token.clone()) {
+                Ok(client) => client,
+                Err(error) => {
+                    if owner.instance != "-" { release(&adb, serial, &owner, token.as_ref(), Some(port)).await?; }
+                    frames::remove_forward(&adb, serial, port).await?;
+                    return Err(error);
+                }
+            };
+            client.production_runtime = true;
+            let attach = async {
+                let (identity, reply) = match claimed {
+                    Ok(value) => (value, "binder"),
+                    Err(bootstrap_error) => {
+                        match client.post_json("/v1/session/status", json!({"nonce":owner.nonce})).await {
+                            Ok(value) => (value, "protectedStatus"),
+                            Err(status_error) => {
+                                // Transport and JSON parser errors contain no payload/token bytes.
+                                // Preserve the first failure instead of hiding it behind reconciliation.
+                                return Err(bootstrap_error).context(format!(
+                                    "claim ACK lost; protected owner status unavailable ({status_error:#}); no reclaim"
+                                ));
+                            }
+                        }
+                    },
+                };
+                let diagnostic = claim_diagnostic(&identity, &owner, reply);
+                let description = claim_diagnostic_text(&diagnostic);
+                let owner_proved = identity["ok"] == true && identity["nonce"].as_str() == Some(owner.nonce.as_str()) && identity["ownerId"].as_str() == Some(owner.owner_id.as_str()) && (identity["state"] == "ready" || identity["ownership"] == "owned");
+                if !owner_proved {
+                    if reply == "protectedStatus" { persist_claim_diagnostic(&owner, serial, diagnostic)?; }
+                    anyhow::bail!("helper claim owner not proved: {description}");
+                }
+                owner.instance = identity["serviceInstance"].as_str().filter(|s| !s.is_empty() && *s != "-").context("helper instance missing")?.into();
+                owner.generation = identity["ownerGeneration"].as_str().filter(|s| !s.is_empty() && *s != "-").context("helper generation missing")?.into();
+                client.canary = Some(owner.clone());
+                // Existing attach cleanup now owns this proved identity if diagnostic I/O fails.
+                if reply == "protectedStatus" { persist_claim_diagnostic(&owner, serial, diagnostic)?; }
+                await_helper_ready(|| async { client.require_canary_identity().await?; let status = client.require_status().await?; anyhow::ensure!(status.features.iter().any(|f| f == "secureBootstrapBinderShell") && REQUIRED_FEATURES.iter().all(|required| status.features.iter().any(|f| f == required)), "release helper features missing"); Ok(()) }).await?;
+                client.qualify_clipboard_roundtrip().await?;
+                Ok::<(), anyhow::Error>(())
+            }.await;
+            if let Err(error) = attach {
+                if client.cleanup_is_pending() {
+                    return Err(anyhow!(HelperRecoveryRequired)).context("helper qualification cleanup pending; owner and forward retained");
+                }
+                if client.canary.is_some() { release(&adb, serial, &owner, token.as_ref(), Some(port)).await.context("failed attach exact-owner release unresolved")?; }
                 frames::remove_forward(&adb, serial, port).await?;
                 return Err(error);
             }
-        };
-        client.production_runtime = true;
-        let attach = async {
-            let identity = match claimed {
-                Ok(value) => value,
-                Err(bootstrap_error) => {
-                    match client.post_json("/v1/session/status", json!({"nonce":owner.nonce})).await {
-                        Ok(value) => value,
-                        Err(status_error) => {
-                            // Transport and JSON parser errors contain no payload/token bytes.
-                            // Preserve the first failure instead of hiding it behind reconciliation.
-                            return Err(bootstrap_error).context(format!(
-                                "claim ACK lost; protected owner status unavailable ({status_error:#}); no reclaim"
-                            ));
-                        }
-                    }
-                },
-            };
-            anyhow::ensure!(identity["ok"] == true && identity["nonce"].as_str() == Some(owner.nonce.as_str()) && identity["ownerId"].as_str() == Some(owner.owner_id.as_str()) && (identity["state"] == "ready" || identity["ownership"] == "owned"), "helper claim owner not proved");
-            owner.instance = identity["serviceInstance"].as_str().filter(|s| !s.is_empty() && *s != "-").context("helper instance missing")?.into();
-            owner.generation = identity["ownerGeneration"].as_str().filter(|s| !s.is_empty() && *s != "-").context("helper generation missing")?.into();
-            client.canary = Some(owner.clone());
-            await_helper_ready(|| async { client.require_canary_identity().await?; let status = client.require_status().await?; anyhow::ensure!(status.features.iter().any(|f| f == "secureBootstrapBinderShell") && REQUIRED_FEATURES.iter().all(|required| status.features.iter().any(|f| f == required)), "release helper features missing"); Ok(()) }).await?;
-            client.qualify_clipboard_roundtrip().await?;
-            Ok::<(), anyhow::Error>(())
+            Ok::<Self, anyhow::Error>(client)
         }.await;
-        if let Err(error) = attach {
-            if client.cleanup_is_pending() {
-                return Err(anyhow!(HelperRecoveryRequired)).context("helper qualification cleanup pending; owner and forward retained");
-            }
-            if client.canary.is_some() { release(&adb, serial, &owner).await.context("failed attach exact-owner release unresolved")?; }
-            frames::remove_forward(&adb, serial, port).await?;
-            return Err(error);
+        match attempt {
+            Ok(client) => Ok(client),
+            Err(error) => {
+                // An initial rejected claim is as unresolved as the next resume. Never
+                // expose a UI-only session while its helper owner intent still fences it.
+                if owner.report.join("runtime-owner.json").try_exists().unwrap_or(true) {
+                    return Err(anyhow!(HelperRecoveryRequired))
+                        .context(format!("helper claim pending; owner intent retained ({error:#})"));
+                }
+                Err(error)
+            },
         }
-        Ok(client)
     }
 
     async fn resume_runtime_owner(adb: AdbProgram, serial: &str, apk: Option<&Path>, state: &Path) -> anyhow::Result<Self> {
-        let mut bytes = Vec::new();
-        std::fs::File::open(state.join("runtime-owner.json"))?.take(CHECKPOINT_LIMIT + 1).read_to_end(&mut bytes)?;
-        anyhow::ensure!(bytes.len() as u64 <= CHECKPOINT_LIMIT, HelperRecoveryRequired);
-        let record: Value = serde_json::from_slice(&bytes)?;
-        anyhow::ensure!(record["serial"].as_str() == Some(serial) && record["androidUser"] == 0, HelperRecoveryRequired);
+        let record = owner_record(state, serial)?;
+        let token = load_owner_credential(serial, &record).await?;
         anyhow::ensure!(checked_shell(&adb, serial, "id -u").await?.trim() == "2000" && checked_shell(&adb, serial, "am get-current-user").await?.trim() == "0", HelperRecoveryRequired);
         let hash = riviu_core::frame_sha256(&std::fs::read(apk.context("bundled helper unavailable for resume")?)?);
         let (version, uid, apk_path) = inventory(&adb, serial).await?;
@@ -224,20 +783,39 @@ impl HelperClient {
         let owner_id = record["ownerId"].as_str().context("pending claim owner missing")?.to_owned();
         let nonce = uuid::Uuid::new_v4().simple().to_string();
         let port = forward_helper(&adb, serial).await?;
-        let mut client = Self::at(adb.clone(), serial, port)?;
+        let mut client = Self::at_with_token(adb.clone(), serial, port, token.clone())?;
         client.production_runtime = true;
         let proof = async {
-            // The same in-memory credential only. No claim, restart, install or action replay.
+            // The exact recorded owner's credential only. No claim, restart, install or action replay.
             let value = client.post_json("/v1/session/status", json!({"nonce":nonce})).await?;
             anyhow::ensure!(value["ok"] == true && value["nonce"].as_str() == Some(nonce.as_str()) && value["ownerId"].as_str() == Some(owner_id.as_str()) && value["ownership"] == "owned", HelperRecoveryRequired);
+            for field in ["serviceInstance", "ownerGeneration"] {
+                let observed = value[field].as_str().filter(|v| !v.is_empty() && *v != "-")
+                    .context("resumed helper epoch missing")?;
+                if let Some(expected) = record[field].as_str().filter(|v| !v.is_empty() && *v != "-") {
+                    anyhow::ensure!(observed == expected, "persisted helper epoch changed; no adoption");
+                } else {
+                    anyhow::ensure!(record[field].is_null() || record[field] == "-", HelperRecoveryRequired);
+                }
+            }
             client.canary = Some(CanaryOwner { owner_id, nonce, instance: value["serviceInstance"].as_str().context("owner instance missing")?.into(), generation: value["ownerGeneration"].as_str().context("owner generation missing")?.into(), socket: String::new(), uid, apk_path, report: state.into() });
+            let mut persisted = record.clone();
+            persisted["serviceInstance"] = value["serviceInstance"].clone();
+            persisted["ownerGeneration"] = value["ownerGeneration"].clone();
+            anyhow::ensure!(owner_record(state, serial)? == record, HelperRecoveryRequired);
+            durable_json(&state.join("runtime-owner.json"), &persisted)?;
             client.require_canary_identity().await?;
             client.qualify_clipboard_roundtrip().await?;
             Ok::<(), anyhow::Error>(())
         }.await;
-        if proof.is_err() {
-            if !client.cleanup_is_pending() { frames::remove_forward(&adb, serial, port).await?; }
-            return Err(anyhow!(HelperRecoveryRequired));
+        if let Err(error) = proof {
+            let diagnostic = claim_diagnostic_text(&record["claimDiagnostic"]);
+            if !client.cleanup_is_pending() {
+                frames::remove_forward(&adb, serial, port).await
+                    .with_context(|| format!("helper owner resume cleanup unresolved; initial {diagnostic}"))?;
+            }
+            return Err(anyhow!(HelperRecoveryRequired))
+                .context(format!("helper owner resume unproved; initial {diagnostic} ({error:#})"));
         }
         Ok(client)
     }
@@ -268,8 +846,11 @@ impl HelperClient {
         let (_, uid, apk_path) = inventory(&adb, serial).await?;
         let field = |name: &str| checkpoint[name].as_str().map(str::to_owned).context("pending cleanup owner metadata missing");
         let owner = CanaryOwner { owner_id: field("ownerId")?, instance: field("serviceInstance")?, generation: field("generation")?, nonce: uuid::Uuid::new_v4().simple().to_string(), socket: String::new(), uid, apk_path, report: state.into() };
+        let record = owner_record(state, serial)?;
+        anyhow::ensure!(record["ownerId"].as_str() == Some(owner.owner_id.as_str()), HelperRecoveryRequired);
+        let token = load_owner_credential(serial, &record).await?;
         let port = forward_helper(&adb, serial).await?;
-        let mut client = Self::at(adb.clone(), serial, port)?;
+        let mut client = Self::at_with_token(adb.clone(), serial, port, token.clone())?;
         client.canary = Some(owner.clone());
         client.production_runtime = true;
         let result = async {
@@ -295,12 +876,13 @@ impl HelperClient {
                 let enabled = adb.shell(serial, "settings get secure enabled_input_methods").await?;
                 anyhow::ensure!(!enabled.trim().split(':').any(|entry| entry.split(';').next() == Some(IME_ID)), "pending IME enablement restore unverified");
             }
-            release(&adb, serial, &owner).await?;
             std::fs::remove_file(state.join("ime-checkpoint.json"))?;
+            release(&adb, serial, &owner, token.as_ref(), Some(port)).await?;
             Ok::<(), anyhow::Error>(())
         }.await;
         let cleanup = frames::remove_forward(&adb, serial, port).await;
         result?;
-        cleanup
+        cleanup?;
+        finish_release(serial, &owner).await
     }
 }

@@ -111,7 +111,14 @@ impl ScreenCache {
     }
 }
 
+#[derive(Default)]
+struct SessionInputState {
+    sealed: bool,
+    unknown: bool,
+}
+
 pub struct AndroidUiSession {
+    input_gate: tokio::sync::Mutex<SessionInputState>,
     trace: Option<riviu_core::ui_automation::trace::TraceRecorder>,
     trace_sequence: AtomicU64,
     gui_scope: parking_lot::Mutex<Option<riviu_core::ui_automation::GuiScope>>,
@@ -136,6 +143,7 @@ pub struct AndroidUiSession {
 impl AndroidUiSession {
     pub fn new(agent: AgentClient, adb: AdbProgram, serial: String, screen: (f64, f64)) -> Self {
         Self {
+            input_gate: Default::default(),
             trace: None,
             trace_sequence: AtomicU64::new(0),
             agent,
@@ -211,7 +219,25 @@ impl AndroidUiSession {
         let mut diagnostic = riviu_core::tiktok_composer::StageDiagnosticOperation::start(
             action, &self.gui_session_epoch(), None);
         let started = std::time::Instant::now();
+        // A dropped/erroring request cannot certify that Android finished a gesture.
+        // Keep unknown set until a successful response; recovery never resets it.
+        let mut input = if action == "keyboard_shown" {
+            None
+        } else {
+            Some(self.input_gate.lock().await)
+        };
+        let previous_unknown = input.as_ref().is_some_and(|state| state.unknown);
+        if let Some(state) = input.as_mut() {
+            anyhow::ensure!(!state.sealed, "session input sealed for owner maintenance");
+            state.unknown = true;
+        }
         let result = work.await;
+        if result.is_ok() {
+            if let Some(state) = input.as_mut() {
+                state.unknown = previous_unknown;
+            }
+        }
+        drop(input);
         diagnostic.finish(if result.is_ok() { "completed" } else { "error" });
         self.record_trace(
             action,
@@ -380,10 +406,29 @@ fn to_locator(locator: &QualifiedElementLocator) -> Locator {
 
 #[async_trait]
 impl UiSession for AndroidUiSession {
+    async fn verify_owned_cleanup_ready(
+        &self,
+        udid: &str,
+        session_epoch: &str,
+    ) -> anyhow::Result<riviu_core::driver::OwnedSessionCleanupProof> {
+        anyhow::ensure!(udid == self.serial && self.gui_session_epoch() == session_epoch,
+            "retained session serial/epoch changed");
+        let mut input = self.input_gate.lock().await;
+        input.sealed = true;
+        anyhow::ensure!(!input.unknown, "session gesture settlement unknown; retain quarantine");
+        let helper = self.helper.as_ref().context("retained helper identity missing")?;
+        let proof = helper.verify_owned_cleanup_ready(udid, session_epoch).await?;
+        anyhow::ensure!(self.gui_session_epoch() == session_epoch,
+            "retained session epoch changed during cleanup proof");
+        Ok(proof)
+    }
+
     async fn observe(
         &self,
         request: &riviu_core::ui_automation::ObservationRequest,
     ) -> anyhow::Result<riviu_core::ui_automation::UiObservation> {
+        let input = self.input_gate.lock().await;
+        anyhow::ensure!(!input.sealed, "session sealed for owner maintenance");
         self.observe_bounded(request).await
     }
 
@@ -391,6 +436,8 @@ impl UiSession for AndroidUiSession {
         &self,
         request: &riviu_core::ui_automation::ObservationRequest,
     ) -> anyhow::Result<riviu_core::ui_automation::UiObservation> {
+        let input = self.input_gate.lock().await;
+        anyhow::ensure!(!input.sealed, "session sealed for owner maintenance");
         self.observe_without_recovery_bounded(request).await
     }
 
@@ -585,7 +632,7 @@ impl UiSession for AndroidUiSession {
             .helper
             .as_ref()
             .ok_or_else(|| anyhow!(crate::riviu_agent::clipboard_unavailable(&self.serial)))?;
-        helper.set_clipboard(content_type, bytes).await
+        self.traced("set_clipboard", helper.set_clipboard(content_type, bytes)).await
     }
 
     async fn get_clipboard(
@@ -596,7 +643,7 @@ impl UiSession for AndroidUiSession {
             .helper
             .as_ref()
             .ok_or_else(|| anyhow!(crate::riviu_agent::clipboard_unavailable(&self.serial)))?;
-        helper.get_clipboard(maximum_decoded_bytes).await
+        self.traced("get_clipboard", helper.get_clipboard(maximum_decoded_bytes)).await
     }
 
     /// True, and measured rather than assumed: the text is read back off the
@@ -650,13 +697,14 @@ impl UiSession for AndroidUiSession {
     /// A secure PIN is deliberately left alone — this is a screen on/off for the fleet, not
     /// a lock-screen bypass, so a PIN-protected phone wakes to its own lock screen.
     async fn set_locked(&self, locked: bool) -> anyhow::Result<()> {
-        if locked {
-            self.agent.press_key(KEYCODE_SLEEP).await
-        } else {
-            self.agent.press_key(KEYCODE_WAKEUP).await?;
-            let _ = self.agent.press_key(KEYCODE_MENU).await;
-            Ok(())
-        }
+        self.traced("set_locked", async {
+            if locked {
+                self.agent.press_key(KEYCODE_SLEEP).await
+            } else {
+                self.agent.press_key(KEYCODE_WAKEUP).await?;
+                self.agent.press_key(KEYCODE_MENU).await
+            }
+        }).await
     }
 
     /// Find by `content-desc`, then touch it like a finger would.
@@ -706,9 +754,7 @@ impl UiSession for AndroidUiSession {
     }
 
     async fn launch_app_foreground(&self, bundle_id: &str) -> anyhow::Result<()> {
-        self.adb
-            .launch_foreground_checked(&self.serial, bundle_id)
-            .await
+        self.traced("launch_app_foreground", self.adb.launch_foreground_checked(&self.serial, bundle_id)).await
     }
 
     /// `am force-stop` and then launch, which on this platform is a real restart.
@@ -718,13 +764,11 @@ impl UiSession for AndroidUiSession {
     /// card no matter how many times it is launched, and comes back with a new one after
     /// being stopped. Measured on ce051715081fe20f03, 18/08/2026.
     async fn restart_app(&self, bundle_id: &str) -> anyhow::Result<()> {
-        let package = crate::adb::validate_package_name(bundle_id)?;
-        // A force-stop on a package that is not running is not an error, so this needs no
-        // check first.
-        self.adb
-            .shell(&self.serial, &format!("am force-stop {package}"))
-            .await?;
-        self.launch_app_foreground(bundle_id).await
+        self.traced("restart_app", async {
+            let package = crate::adb::validate_package_name(bundle_id)?;
+            self.adb.shell(&self.serial, &format!("am force-stop {package}")).await?;
+            self.adb.launch_foreground_checked(&self.serial, bundle_id).await
+        }).await
     }
 
     async fn active_app_bundle(&self) -> anyhow::Result<String> {
@@ -733,6 +777,7 @@ impl UiSession for AndroidUiSession {
     /// Android has a first-class intent for this, so unlike the iOS side it
     /// needs no capability negotiation.
     async fn open_url(&self, url: &str) -> anyhow::Result<()> {
+        self.traced("open_url", async {
         self.adb
             .shell(
                 &self.serial,
@@ -743,6 +788,7 @@ impl UiSession for AndroidUiSession {
             )
             .await
             .map(|_| ())
+        }).await
     }
 
     /// The same intent, but pinned to one app and carrying `BROWSABLE`.
@@ -761,6 +807,7 @@ impl UiSession for AndroidUiSession {
     /// The package is validated, not trusted: it is interpolated into a command a real
     /// shell on the phone runs, the same rule as everywhere else in this crate.
     async fn open_url_in_app(&self, url: &str, bundle_id: &str) -> anyhow::Result<()> {
+        self.traced("open_url_in_app", async {
         let package = crate::adb::validate_package_name(bundle_id)?;
         self.adb
             .shell(
@@ -773,9 +820,11 @@ impl UiSession for AndroidUiSession {
             )
             .await
             .map(|_| ())
+        }).await
     }
 
     async fn reopen_url_in_app(&self, url: &str, bundle_id: &str) -> anyhow::Result<()> {
+        self.traced("reopen_url_in_app", async {
         let package = crate::adb::validate_package_name(bundle_id)?;
         // Android 9 / SM-G950F ce12171c4b37d62705, 14/09: a VIEW delivered to
         // retained SplashActivity ignored two photo URLs. NEW_TASK|CLEAR_TASK
@@ -786,6 +835,7 @@ impl UiSession for AndroidUiSession {
             "target navigation task was refused"
         );
         Ok(())
+        }).await
     }
 
     async fn read_text(

@@ -30,6 +30,7 @@ impl Database {
         }
         let now = Utc::now().to_rfc3339();
         let token = Uuid::new_v4().to_string();
+        let admitted_at = chrono::Local::now().naive_local();
         let changed=tx.execute("UPDATE publish_campaigns SET state='posting',error_code=NULL,revision=revision+1,updated_at=?2
             WHERE id=?1 AND state IN ('queued','scheduled','ready','imported','failed_before_dispatch','verifying')
             AND NOT EXISTS(SELECT 1 FROM publish_start_requests s WHERE s.campaign_id=?1 AND s.state='uncertain')
@@ -39,7 +40,7 @@ impl Database {
             AND NOT EXISTS(SELECT 1 FROM publish_pipeline_runs r WHERE r.campaign_id=?1)
             AND NOT EXISTS(SELECT 1 FROM publish_assignments a WHERE a.campaign_id=?1 AND a.state IN ('posting','uncertain'))
             AND EXISTS(SELECT 1 FROM publish_assignments a WHERE a.campaign_id=?1 AND a.effect_intent IS NULL AND a.state IN ('queued','scheduled','ready','imported','failed_before_dispatch'))",
-            params![campaign_id,now,chrono::Local::now().naive_local().format("%Y-%m-%dT%H:%M:%S").to_string()])?;
+            params![campaign_id,now,admitted_at.format("%Y-%m-%dT%H:%M:%S").to_string()])?;
         if changed == 0 {
             return Ok(None);
         }
@@ -54,6 +55,7 @@ impl Database {
                 token: token.clone(),
             },
             Utc::now().timestamp_millis(),
+            admitted_at,
         )?;
         tx.execute("UPDATE publish_start_requests SET state='queued',stage='queued',revision=revision+1,updated_at=?2
             WHERE campaign_id=?1 AND state='preparing'",params![campaign_id,now])?;

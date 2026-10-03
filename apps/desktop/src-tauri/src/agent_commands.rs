@@ -14,6 +14,218 @@ use tauri::State;
 use crate::command_error::CommandError;
 use crate::state::AppState;
 
+#[derive(Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct HelperMaintenancePlan {
+    pub maintenance_id: String,
+    pub udid: String,
+    pub submitted: Vec<riviu_core::db::HelperMaintenanceSubmittedBinding>,
+}
+
+#[derive(Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+enum HelperMaintenancePhase {
+    Prepared,
+    ExecutionStarted,
+    Settled,
+}
+
+#[derive(Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct PreparedHelperMaintenance {
+    public: HelperMaintenancePlan,
+    driver_plan: serde_json::Value,
+    prepared_at_ms: i64,
+    phase: HelperMaintenancePhase,
+}
+
+// Full snapshots and exact driver plans stay durable and off IPC. Retain settled
+// entries too: supersession never erases the previous maintenance identity.
+fn maintenance_key(udid: &str) -> String {
+    format!("helper.maintenance.ledger:{udid}")
+}
+
+fn load_maintenance_ledger(
+    db: &riviu_core::db::Database,
+    udid: &str,
+) -> Result<Vec<PreparedHelperMaintenance>, CommandError> {
+    db.get_setting(&maintenance_key(udid))
+        .map_err(|_| CommandError::operation("cannot read helper maintenance ledger"))?
+        .map(|raw| serde_json::from_str(&raw)
+            .map_err(|_| CommandError::operation("invalid helper maintenance ledger; retained unchanged")))
+        .transpose()
+        .map(|ledger| ledger.unwrap_or_default())
+}
+
+async fn save_maintenance_ledger(
+    state: &AppState,
+    udid: &str,
+    ledger: &[PreparedHelperMaintenance],
+) -> Result<(), CommandError> {
+    let key = maintenance_key(udid);
+    let raw = serde_json::to_string(ledger).map_err(err)?;
+    state.db.storage_write(move |db| db.set_setting(&key, &raw)).await
+        .map_err(|_| CommandError::operation("cannot persist helper maintenance phase; do not redispatch"))
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct HelperMaintenancePending {
+    pub plan: HelperMaintenancePlan,
+    pub observation_only: bool,
+}
+
+#[tauri::command]
+pub fn agent_helper_maintenance_pending(
+    state: State<'_, AppState>,
+    udid: String,
+) -> Result<Option<HelperMaintenancePending>, CommandError> {
+    let _admission = state.ensure_accepting_work()?;
+    Ok(load_maintenance_ledger(&state.db, &udid)?.into_iter()
+        .find(|entry| entry.phase != HelperMaintenancePhase::Settled)
+        .map(|entry| HelperMaintenancePending {
+            observation_only: entry.phase != HelperMaintenancePhase::Prepared,
+            plan: entry.public,
+        }))
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct HelperMaintenanceReceipt {
+    pub maintenance_id: String,
+    pub udid: String,
+    pub state: &'static str,
+    pub records_retained: bool,
+    pub exact_release_proved: bool,
+    pub clipboard_restoration_proved: bool,
+    pub old_obligations: &'static str,
+    pub package_process_absent: bool,
+}
+
+#[tauri::command]
+pub async fn agent_helper_maintenance_prepare(
+    state: State<'_, AppState>,
+    udid: String,
+) -> Result<HelperMaintenancePlan, CommandError> {
+    let _admission = state.ensure_accepting_work()?;
+    if udid.trim().is_empty() {
+        return Err(CommandError::invalid_argument("a device serial is required"));
+    }
+    let context = state.control
+        .try_acquire_exclusive(&udid, DeviceWorkOwner::Repair)
+        .await?;
+    let mut ledger = load_maintenance_ledger(&state.db, &udid)?;
+    if ledger.iter().any(|entry| entry.phase != HelperMaintenancePhase::Settled) {
+        return Err(CommandError::code("HelperMaintenancePending",
+            "Kế hoạch cũ chưa giải quyết; đọc pending và chỉ quan sát cùng maintenanceId."));
+    }
+    let submitted = state.db.helper_maintenance_submitted_bindings(&udid)
+        .map_err(|_| CommandError::operation("cannot freeze submitted publication bindings"))?;
+    let plan = HelperMaintenancePlan {
+        maintenance_id: uuid::Uuid::new_v4().to_string(),
+        udid,
+        submitted,
+    };
+    use sha2::{Digest, Sha256};
+    let snapshot = serde_json::to_vec(&plan.submitted).map_err(err)?;
+    let effect_intent = serde_json::json!({
+        "maintenanceId": plan.maintenance_id,
+        "udid": plan.udid,
+        "submittedCount": plan.submitted.len(),
+        "submittedSetSha256": format!("{:x}", Sha256::digest(&snapshot)),
+    });
+    let driver_plan = state.control
+        .prepare_helper_maintenance(&context, &plan.maintenance_id, effect_intent)
+        .await
+        .map_err(|_| CommandError::code("HelperMaintenancePrepareFailed",
+            "Không chuẩn bị được helper; chưa thực hiện khôi phục."))?;
+    ledger.push(PreparedHelperMaintenance {
+        public: plan.clone(),
+        driver_plan,
+        prepared_at_ms: chrono::Utc::now().timestamp_millis(),
+        phase: HelperMaintenancePhase::Prepared,
+    });
+    save_maintenance_ledger(&state, &plan.udid, &ledger).await?;
+    Ok(plan)
+}
+
+#[tauri::command]
+pub async fn agent_helper_maintenance_execute(
+    state: State<'_, AppState>,
+    plan: HelperMaintenancePlan,
+    confirmed: bool,
+    reconcile_only: Option<bool>,
+) -> Result<HelperMaintenanceReceipt, CommandError> {
+    let _admission = state.ensure_accepting_work()?;
+    if !confirmed {
+        return Err(CommandError::code("HelperMaintenanceConfirmationRequired",
+            "Cần xác nhận rõ ràng trước khi khôi phục helper."));
+    }
+    let context = state.control
+        .try_acquire_exclusive(&plan.udid, DeviceWorkOwner::Repair)
+        .await?;
+    let mut ledger = load_maintenance_ledger(&state.db, &plan.udid)?;
+    let index = ledger.iter().position(|entry| entry.public.maintenance_id == plan.maintenance_id)
+        .ok_or_else(|| CommandError::code("HelperMaintenancePlanMissing",
+            "Không có kế hoạch bền vững cho maintenanceId này; không thực thi."))?;
+    if ledger[index].public != plan {
+        return Err(CommandError::code("HelperMaintenancePlanChanged",
+            "Kế hoạch không khớp bản đã lưu; không chấp nhận thay đổi danh tính."));
+    }
+    let current = state.db.helper_maintenance_submitted_bindings(&plan.udid)
+        .map_err(|_| CommandError::operation("cannot recheck submitted publication bindings"))?;
+    if current != ledger[index].public.submitted {
+        // Only redacted DB identities/revisions/hashes, never raw intent or driver metadata.
+        let expected = &ledger[index].public.submitted;
+        let offset = expected.iter().zip(&current).position(|(a, b)| a != b)
+            .unwrap_or(expected.len().min(current.len()));
+        return Err(CommandError::code("HelperMaintenanceBindingsChanged", format!(
+            "maintenanceId={} stale submitted binding at index {}: expected={}, current={}; giữ nguyên kế hoạch, không tạo effect mới",
+            plan.maintenance_id, offset,
+            serde_json::to_string(&expected.get(offset)).map_err(err)?,
+            serde_json::to_string(&current.get(offset)).map_err(err)?,
+        )));
+    }
+    let observation_only = reconcile_only.unwrap_or(false)
+        || ledger[index].phase != HelperMaintenancePhase::Prepared;
+    // Persist BEFORE awaiting the driver. A crash here may prevent the initial
+    // effect, but can never authorize a second stop after an uncertain dispatch.
+    if ledger[index].phase == HelperMaintenancePhase::Prepared {
+        ledger[index].phase = HelperMaintenancePhase::ExecutionStarted;
+        save_maintenance_ledger(&state, &plan.udid, &ledger).await?;
+    }
+    let prepared = &ledger[index];
+    let receipt = state.control
+        .execute_helper_maintenance(&context, prepared.driver_plan.clone(), confirmed, observation_only)
+        .await
+        .map_err(|_| CommandError::code("HelperMaintenanceExecutionUnproved",
+            "Khôi phục helper chưa được chứng minh; giữ bản ghi cũ, không tự thử lại."))?;
+    // Validate the exact driver contract, then expose only nonsecret summary fields.
+    // The receipt's plan contains owner/nonce/journal metadata and stays off IPC.
+    if receipt["plan"] != prepared.driver_plan
+        || receipt["state"] != "superseded"
+        || receipt["exactReleaseProved"] != false
+        || receipt["clipboardRestorationProved"] != false
+        || receipt["oldObligations"] != "archivedUnresolved"
+        || receipt["packageProcessAbsent"] != true
+    {
+        return Err(CommandError::code("HelperMaintenanceReceiptUnproved",
+            "Biên nhận helper không khớp kế hoạch; không tự chạy lại hoặc báo đã khôi phục."));
+    }
+    ledger[index].phase = HelperMaintenancePhase::Settled;
+    save_maintenance_ledger(&state, &plan.udid, &ledger).await?;
+    Ok(HelperMaintenanceReceipt {
+        maintenance_id: plan.maintenance_id,
+        udid: plan.udid,
+        state: "superseded",
+        records_retained: true,
+        exact_release_proved: false,
+        clipboard_restoration_proved: false,
+        old_obligations: "archivedUnresolved",
+        package_process_absent: true,
+    })
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
 pub struct AgentRuntimeView {

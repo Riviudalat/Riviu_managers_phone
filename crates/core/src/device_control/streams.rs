@@ -556,6 +556,9 @@ impl DeviceControlPlane {
                     .take()
                     .expect("validated context has a session"),
                 expected_generation: Some(handoff_generation),
+                recorded_package: None,
+                recovery_process: None,
+                recovery_stop: None,
             }),
             cleanup: cleanup.clone(),
         };
@@ -639,6 +642,24 @@ impl DeviceControlPlane {
         if same_plane { Ok(()) } else { Err(DeviceControlError::InvalidContext { reason: "diagnostic context belongs to another plane" }) }
     }
 
+    /// Record the original target package at the semantic quarantine boundary.
+    /// This still makes no claim about draft restoration or historical intent.
+    pub fn quarantine_ui_context_for_app(
+        &self,
+        mut context: UiWithStreamContext,
+        package: &str,
+    ) -> Result<(), DeviceControlError> {
+        let same_plane = context.plane_id == self.plane_id;
+        let owner_quarantine = context.cleanup.quarantined.clone();
+        if let Some(mut ticket) = context.take_ticket() {
+            ticket.recorded_package = Some(package.to_owned());
+            owner_quarantine.push_cleanup(ticket);
+        }
+        if same_plane { Ok(()) } else {
+            Err(DeviceControlError::InvalidContext { reason: "diagnostic context belongs to another plane" })
+        }
+    }
+
     pub async fn close_ui_context(
         &self,
         mut context: UiWithStreamContext,
@@ -682,11 +703,18 @@ impl DeviceControlPlane {
         let _shutdown_guard = self.shutdown_gate.lock().await;
         if self.lifecycle.phase() == ControlPlanePhase::Stopped {
             let count = self.cleanup_quarantine_count();
-            return if count == 0 {
-                Ok(())
-            } else {
-                Err(DeviceControlError::CleanupQuarantined { count })
-            };
+            if count > 0 {
+                return Err(DeviceControlError::CleanupQuarantined { count });
+            }
+            // A stopped worker does not prove a previous driver cleanup succeeded.
+            // Retry the exact retained helper owner before permitting another exit.
+            return self.driver.shutdown_owned_processes().await.map_err(|error| {
+                DeviceControlError::Driver {
+                    udid: "control-plane".to_string(),
+                    operation: "shutdownOwnedProcesses",
+                    message: error.to_string(),
+                }
+            });
         }
         let drain_rx = {
             let _background_guard = self.background_gate.lock();
@@ -719,6 +747,14 @@ impl DeviceControlPlane {
                 _ = lifecycle_changed => {}
                 _ = quarantine_changed => {}
             }
+        }
+
+        // A quarantine is an unresolved obligation, not permission to tear down
+        // its worker/helper/session. Remain ShuttingDown so only explicit retained
+        // maintenance can reconcile it; ordinary admission is still closed.
+        let count = self.cleanup_quarantine_count();
+        if count > 0 {
+            return Err(DeviceControlError::CleanupQuarantined { count });
         }
 
         let (ack_tx, ack_rx) = oneshot::channel();

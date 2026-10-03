@@ -725,52 +725,49 @@ async fn prove_sound_entry_xml(
 ) -> anyhow::Result<ElementBox> {
     let deadline = phase_deadline(SOUND_WINDOW);
     let mut previous: Option<(u64, ElementBox)> = None;
-    let (generation, entry) = loop {
+    let mut stable = 0usize;
+    loop {
         check_wait()?;
-        anyhow::ensure!(
-            session.gui_session_epoch() == epoch
-                && read_sound(session.active_app_bundle()).await? == plan.package,
-            "sound app/session changed before opening picker"
-        );
+        anyhow::ensure!(session.gui_session_epoch() == epoch
+            && read_sound(session.active_app_bundle()).await? == plan.package,
+            "sound app/session changed before opening picker");
         let source = read_sound(session.hierarchy_source_snapshot()).await?;
-        let tree = crate::ui_automation::tree::Tree::parse(source.clone())?;
+        let tree = crate::ui_automation::tree::Tree::parse(source)?;
         let current = unique_sound_entry(&tree, plan.package, &[plan.entry_id]);
+        // No entry tap has been armed. A changing editor can be observed again
+        // inside this same phase budget; it never authorizes a stale target.
         if let Some(button) = current {
-            if previous
-                .as_ref()
-                .is_some_and(|(generation, old)| source.generation > *generation && old == &button)
-            {
-                break (source.generation, button);
+            let matched = previous.as_ref().is_some_and(|(generation, old)|
+                tree.generation > *generation && old == &button);
+            stable = if matched { stable + 1 } else { 1 };
+            if let Some((_, old)) = &previous {
+                if !matched {
+                    tracing::info!(serial=?session.gui_scope().map(|scope|scope.device_id),
+                        session=%epoch, generation=tree.generation,
+                        geometry_unchanged=old.x==button.x && old.y==button.y
+                            && old.width==button.width && old.height==button.height,
+                        description_unchanged=old.description==button.description,
+                        remaining_ms=deadline.saturating_duration_since(Instant::now()).as_millis() as u64,
+                        "sound entry observation changed before dispatch");
+                }
             }
-            previous = Some((source.generation, button));
+            previous = Some((tree.generation, button.clone()));
+            if stable >= 3 {
+                check_wait()?;
+                anyhow::ensure!(session.gui_session_epoch() == epoch
+                    && read_sound(session.active_app_bundle()).await? == plan.package,
+                    "sound app/session changed before opening picker");
+                return Ok(button);
+            }
         } else {
             previous = None;
+            stable = 0;
         }
-        anyhow::ensure!(
-            Instant::now() < deadline,
-            "sound entry unavailable without screenshot; no Post was sent"
-        );
+        anyhow::ensure!(Instant::now() < deadline,
+            crate::publish_recovery::retryable_error("sound_entry_observation_changed",
+                "sound entry did not stabilize before tap; no Post was sent"));
         tokio::time::sleep(POLL).await;
-    };
-    check_wait()?;
-    anyhow::ensure!(
-        session.gui_session_epoch() == epoch
-            && read_sound(session.active_app_bundle()).await? == plan.package,
-        "sound app/session changed before opening picker"
-    );
-    let fresh = read_sound(session.hierarchy_source_snapshot()).await?;
-    let tree = crate::ui_automation::tree::Tree::parse(fresh)?;
-    anyhow::ensure!(
-        session.gui_session_epoch() == epoch
-            && read_sound(session.active_app_bundle()).await? == plan.package,
-        "sound app/session changed before opening picker"
-    );
-    anyhow::ensure!(
-        tree.generation > generation
-            && unique_sound_entry(&tree, plan.package, &[plan.entry_id]).as_ref() == Some(&entry),
-        "sound entry changed before tap; no Post was sent"
-    );
-    Ok(entry)
+    }
 }
 
 /// Observe a sheet that this attempt may already have opened. This path never
@@ -810,6 +807,14 @@ pub(crate) async fn recover_frozen_sound_pool(
         recent::recover(session, plan, selection),
     )
     .await
+    .map_err(|error| {
+        if error.is::<recent::SessionChanged>() {
+            crate::publish_recovery::retryable_error(
+                "sound_recent_observation_invalidated",
+                "Recent recovery observation session changed; prepare fresh without replaying selection",
+            ).context(error)
+        } else { error }
+    })
     .context("frozen sound Recent recovery did not finish within its observation budget")
 }
 
@@ -1178,80 +1183,183 @@ pub async fn choose_and_confirm_sound(
     index: usize,
 ) -> anyhow::Result<()> {
     let plan = pool.effective_plan.unwrap_or(plan);
-    if pool.visual {
-        return visual::choose(session, plan, pool, index).await;
-    }
-    let candidate = pool
-        .candidates
-        .get(index)
-        .context("sound selection index is outside the observed pool")?;
-    let fresh = observe_sound_pool(session, plan, pool.maximum_visible).await?;
-    let target = reproof_target(pool, &fresh, index)?;
-    if fresh.selected_index != Some(index) {
-        sound_tap(session, target.centre())
-            .await
-            .context("select observed sound")?;
-    }
-    if plan.closes_with_back() {
-        // The measured Android sheet selects inline; Back closes only that sheet.
-        // Prove the same pool remains before dismissing it, then prove the editor chip.
-        let deadline = phase_deadline(READBACK_WINDOW);
-        let mut recovered = false;
-        loop {
-            let observation = if selection_recovery::measured(plan) {
-                snapshot::observe_after_selection(session, plan, pool.maximum_visible).await
-            } else {
-                observe_sound_pool(session, plan, pool.maximum_visible).await
-            };
-            let selected_pool = match observation {
-                Ok(pool) => pool,
-                Err(error)
-                    if transient_sound_read(&error) && selection_recovery::measured(plan) =>
-                {
-                    // Some measured builds close the inline sheet themselves after
-                    // selection. An exact, stable editor chip proves completion;
-                    // otherwise the still-open sheet must be proven before Back.
-                    let editor = tokio::time::timeout_at(
-                        phase_deadline(READBACK_WINDOW),
-                        selection_recovery::confirm_editor(session, plan, &candidate.title),
-                    )
-                    .await;
-                    check_wait()?;
-                    if matches!(editor, Ok(Ok(()))) {
-                        return Ok(());
+    let serial = session.gui_scope().map(|scope| scope.device_id);
+    let epoch = session.gui_session_epoch();
+    let row_summary = |target: &ElementBox| serde_json::json!({
+        "x": target.x, "y": target.y, "w": target.width, "h": target.height,
+        "enabled": target.enabled, "clickable": target.clickable,
+    });
+    let trace_row = |phase: &'static str, observed: Option<&ObservedSoundPool>,
+                     deadline: Option<Instant>, observation_ok: Option<bool>, observation: u8| {
+        let row_target = observed.and_then(|p| p.target(index)).map(&row_summary);
+        let boxes = observed.map(|p| p.targets.iter().take(5).map(&row_summary).collect::<Vec<_>>())
+            .unwrap_or_default();
+        let candidate_identity_equal = pool.candidates.get(index).is_some()
+            && observed.is_some_and(|p| p.candidates.get(index) == pool.candidates.get(index));
+        let remaining_phase_ms = deadline.map(|end| end.saturating_duration_since(Instant::now())
+            .as_millis().min(u64::MAX as u128) as u64);
+        let remaining_global_ms = SOUND_BUDGET.try_with(|budget| budget.deadline
+            .saturating_duration_since(Instant::now()).as_millis().min(u64::MAX as u128) as u64).ok();
+        tracing::info!(serial=?serial, session=%epoch, package=plan.package,
+            phase, selectedIndex=?observed.and_then(|p| p.selected_index), targetIndex=index,
+            candidateIdentityEqual=candidate_identity_equal,
+            rowTarget=%row_target.unwrap_or(serde_json::Value::Null),
+            poolTargets=%serde_json::Value::Array(boxes), poolCount=?observed.map(|p|p.candidates.len()),
+            observation, observationOk=?observation_ok,
+            remainingPhaseMs=?remaining_phase_ms, remainingGlobalMs=?remaining_global_ms,
+            "sound row selection observation");
+    };
+    let mut phase = "preRow";
+    let mut readback_deadline = None;
+    let outcome = async {
+        if pool.visual {
+            phase = "visualRow";
+            return visual::choose(session, plan, pool, index).await;
+        }
+        let candidate = pool
+            .candidates
+            .get(index)
+            .context("sound selection index is outside the observed pool")?;
+        let fresh = observe_sound_pool(session, plan, pool.maximum_visible).await?;
+        trace_row("preRow", Some(&fresh), None, Some(true), 0);
+        let target = reproof_target(pool, &fresh, index)?;
+        if fresh.selected_index != Some(index) {
+            phase = "rowDispatch";
+            trace_row(phase, Some(&fresh), None, None, 0);
+            let row_result = sound_tap(session, target.centre()).await;
+            phase = "rowAck";
+            trace_row(phase, Some(&fresh), None, Some(row_result.is_ok()), 0);
+            row_result.context("select observed sound")?;
+        }
+        if plan.closes_with_back() {
+            // The measured Android sheet selects inline; Back closes only that sheet.
+            // Prove the same pool remains before dismissing it, then prove the editor chip.
+            let deadline = phase_deadline(READBACK_WINDOW);
+            readback_deadline = Some(deadline);
+            let mut recovered = false;
+            let mut network_observation_used = false;
+            let mut post_row_observations = 0u8;
+            loop {
+                phase = "postRow";
+                let observation = if selection_recovery::measured(plan) {
+                    snapshot::observe_after_selection(session, plan, pool.maximum_visible).await
+                } else {
+                    observe_sound_pool(session, plan, pool.maximum_visible).await
+                };
+                if post_row_observations < 2 {
+                    post_row_observations += 1;
+                    trace_row(phase, observation.as_ref().ok(), Some(deadline),
+                        Some(observation.is_ok()), post_row_observations);
+                }
+                let selected_pool = match observation {
+                    Ok(pool) => pool,
+                    Err(error)
+                        if transient_sound_read(&error) && selection_recovery::measured(plan) =>
+                    {
+                        // Some measured builds close the inline sheet themselves after
+                        // selection. An exact, stable editor chip proves completion;
+                        // otherwise the still-open sheet must be proven before Back.
+                        phase = "editorFallback";
+                        let editor = tokio::time::timeout_at(
+                            phase_deadline(READBACK_WINDOW),
+                            selection_recovery::confirm_editor(session, plan, &candidate.title),
+                        )
+                        .await;
+                        check_wait()?;
+                        if matches!(editor, Ok(Ok(()))) {
+                            return Ok(());
+                        }
+                        phase = "sheetFallback";
+                        selection_recovery::prove_sheet(session, plan)
+                            .await
+                            .with_context(|| format!("sound selection read unavailable: {error}"))?;
+                        recovered = true;
+                        break;
                     }
-                    selection_recovery::prove_sheet(session, plan)
-                        .await
-                        .with_context(|| format!("sound selection read unavailable: {error}"))?;
-                    recovered = true;
+                    Err(error) => return Err(error),
+                };
+                reproof_target(pool, &selected_pool, index)?;
+                if selected_pool.selected_index == Some(index) {
                     break;
                 }
-                Err(error) => return Err(error),
-            };
-            reproof_target(pool, &selected_pool, index)?;
-            if selected_pool.selected_index == Some(index) {
-                break;
+                // SM-G955F/Trill 38.3.2/en, 03/10/2026: a row contact ACK
+                // leaves the sheet unselected while Android displays its exact
+                // "No internet connection" toast. Observe this device condition
+                // once inside the existing readback budget; never retap the row.
+                if !network_observation_used
+                    && MEASURED_SOUND_PICKERS.iter().any(|measured|
+                        measured.version == "38.3.2" && measured.language == "en"
+                            && measured.plan == plan)
+                    && Instant::now() < deadline
+                {
+                    network_observation_used = true;
+                    phase = "postRowNetworkObservation";
+                    let network_unavailable = tokio::time::timeout_at(deadline, async {
+                        check_wait()?;
+                        anyhow::ensure!(session.gui_session_epoch() == epoch,
+                            "sound session changed before network observation");
+                        anyhow::ensure!(read_sound(session.active_app_bundle()).await? == plan.package,
+                            "sound app changed before network observation");
+                        let source = read_sound(session.hierarchy_source_snapshot()).await?;
+                        anyhow::ensure!(session.gui_session_epoch() == epoch,
+                            "sound session changed during network observation");
+                        let tree = crate::ui_automation::tree::Tree::parse(source)?;
+                        anyhow::ensure!(read_sound(session.active_app_bundle()).await? == plan.package
+                            && session.gui_session_epoch() == epoch,
+                            "sound app/session changed during network observation");
+                        check_wait()?;
+                        Ok::<bool, anyhow::Error>(tree.nodes.iter().any(|node|
+                            node.attr("package") == "com.android.settings"
+                                && node.attr("class") == "android.widget.Toast"
+                                && node.attr("text") == "No internet connection"
+                                && node.attr("displayed") == "true"))
+                    }).await.map_err(|_| crate::publish_recovery::observation_deadline())??;
+                    if network_unavailable {
+                        return Err(anyhow::Error::new(crate::publish_recovery::RecoveryFailure::new(
+                            "sound_network_unavailable",
+                            crate::publish_recovery::FailureKind::Terminal,
+                            "Máy báo không có kết nối Internet khi chọn nhạc; chưa bấm Đăng. Kiểm tra kết nối mạng rồi Thử lại.",
+                        )));
+                    }
+                    phase = "postRow";
+                }
+                check_wait()?;
+                if Instant::now() >= deadline {
+                    return Err(anyhow::anyhow!("selected sound row not confirmed before closing picker")
+                        .context(crate::publish_recovery::RecoveryFailure::new(
+                            "sound_selection_readback_unavailable",
+                            crate::publish_recovery::FailureKind::Retryable,
+                            format!("Selected sound '{}' by '{}' has no confirmed readback; fresh preparation required before Post", candidate.title, candidate.artist),
+                        )));
+                }
+                tokio::time::sleep(POLL).await;
             }
             check_wait()?;
-            if Instant::now() >= deadline {
-                return Err(anyhow::anyhow!("selected sound row not confirmed before closing picker")
-                    .context(crate::publish_recovery::RecoveryFailure::new(
-                        "sound_selection_readback_unavailable",
-                        crate::publish_recovery::FailureKind::Retryable,
-                        format!("Selected sound '{}' by '{}' has no confirmed readback; fresh preparation required before Post", candidate.title, candidate.artist),
-                    )));
+            phase = "closePicker";
+            session.back().await.context("close inline sound picker")?;
+            if recovered {
+                phase = "editorReadback";
+                return selection_recovery::confirm_editor(session, plan, &candidate.title).await;
             }
-            tokio::time::sleep(POLL).await;
         }
-        check_wait()?;
-        session.back().await.context("close inline sound picker")?;
-        if recovered {
-            return selection_recovery::confirm_editor(session, plan, &candidate.title).await;
-        }
+        phase = "editorReadback";
+        confirm_sound(session, plan, &candidate.title)
+            .await
+            .context("initial sound selection readback")
+    }.await;
+    if let Err(error) = &outcome {
+        let failure = crate::publish_recovery::describe(error);
+        let remaining_phase_ms = readback_deadline.map(|end: Instant| end
+            .saturating_duration_since(Instant::now()).as_millis().min(u64::MAX as u128) as u64);
+        let remaining_global_ms = SOUND_BUDGET.try_with(|budget| budget.deadline
+            .saturating_duration_since(Instant::now()).as_millis().min(u64::MAX as u128) as u64).ok();
+        tracing::warn!(serial=?serial, session=%epoch, currentSession=%session.gui_session_epoch(),
+            package=plan.package, phase, targetIndex=index, visual=pool.visual,
+            failureCode=%failure.code, failureKind=failure.kind.as_str(),
+            remainingPhaseMs=?remaining_phase_ms, remainingGlobalMs=?remaining_global_ms,
+            "sound row selection returned an error");
     }
-    confirm_sound(session, plan, &candidate.title)
-        .await
-        .context("initial sound selection readback")
+    outcome
 }
 
 fn reproof_target<'a>(

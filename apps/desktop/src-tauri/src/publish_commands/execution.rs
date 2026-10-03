@@ -2064,6 +2064,109 @@ pub(super) struct ConfirmedAssignmentLink {
     pub diagnostic: serde_json::Value,
 }
 
+fn bind_metadata_candidate(
+    db: &Database,
+    assignment: &riviu_core::PublishAssignmentRecord,
+    bundle: &riviu_core::PublishBundle,
+    captured: riviu_core::publish_submission::CapturedMetadataCandidate,
+) -> anyhow::Result<riviu_core::publish_submission::PendingMetadataCandidate> {
+    use riviu_core::publish_submission::*;
+    let raw = assignment.effect_intent.as_deref().context("frozen intent missing")?;
+    let intent: PublishSubmissionProof = serde_json::from_str(raw)?;
+    intent.validate()?;
+    anyhow::ensure!(intent.bundle_id == bundle.id && intent.caption_sha256 == frame_sha256(bundle.caption.as_bytes())
+        && captured.normalized_caption_sha256 == normalized_caption_sha256(&bundle.caption)
+        && normalize_publish_account(&intent.expected_account)? == normalize_publish_account(&captured.expected_account)?
+        && intent.submitted_at == captured.submitted_at, "candidate differs from frozen intent");
+    let prepared = db.publish_attempt_opened_at(&assignment.campaign_id, &assignment.udid, &intent.submitted_at)?;
+    anyhow::ensure!(prepared == captured.prepared_at, "candidate preparation window changed");
+    Ok(PendingMetadataCandidate {
+        schema_version: 1,
+        campaign_id: assignment.campaign_id.clone(), assignment_id: assignment.id.clone(),
+        bundle_id: bundle.id.clone(), intent_sha256: frame_sha256(raw.as_bytes()),
+        caption_sha256: intent.caption_sha256, captured,
+    })
+}
+
+fn attach_pending_metadata_candidate(
+    db: &Database,
+    assignment: &riviu_core::PublishAssignmentRecord,
+    bundle: &riviu_core::PublishBundle,
+    diagnostic: &mut serde_json::Value,
+) -> anyhow::Result<()> {
+    if let Some(captured) = diagnostic.get("capturedMetadataCandidate") {
+        let captured = serde_json::from_value(captured.clone())?;
+        diagnostic["pendingMetadataCandidate"] = serde_json::to_value(bind_metadata_candidate(db, assignment, bundle, captured)?)?;
+    }
+    Ok(())
+}
+
+/// Returns None only for legacy evidence without a typed candidate. Invalid typed
+/// evidence fails closed instead of silently falling back to a different phone post.
+async fn capture_pending_metadata(
+    db: &Database,
+    assignment: &riviu_core::PublishAssignmentRecord,
+    bundle: &riviu_core::PublishBundle,
+    observer: Option<&riviu_core::db::PendingPublishVerification>,
+) -> anyhow::Result<Option<ConfirmedAssignmentLink>> {
+    use riviu_core::publish_submission::*;
+    let evidence: serde_json::Value = assignment.evidence_json.as_deref()
+        .map(serde_json::from_str).transpose()?.unwrap_or_default();
+    let value = evidence.get("verificationDiagnostic").and_then(|d| d.get("pendingMetadataCandidate"))
+        .or_else(|| evidence.get("post").and_then(|post| post.get("verificationDiagnostic"))
+            .and_then(|d| d.get("pendingMetadataCandidate")));
+    let Some(value) = value else { return Ok(None); };
+    let mut pending: PendingMetadataCandidate = serde_json::from_value(value.clone())?;
+    // Same authorization used by phone observation, before and after external IO.
+    let authorize = || {
+        if super::verification_restart::shared_debt(db, assignment)? {
+            super::verification_restart::authorize(db, assignment, observer)
+        } else {
+            super::verification_restart::authorize_restart(db, assignment, observer)
+        }
+    };
+    authorize()?;
+    let lookup = async {
+        let bound = bind_metadata_candidate(db, assignment, bundle, pending.captured.clone())?;
+        anyhow::ensure!(pending.schema_version == bound.schema_version, "metadata candidate schema unsupported");
+        anyhow::ensure!(pending.campaign_id == bound.campaign_id && pending.assignment_id == bound.assignment_id
+            && pending.bundle_id == bound.bundle_id && pending.intent_sha256 == bound.intent_sha256
+            && pending.caption_sha256 == bound.caption_sha256, "pending candidate owner or intent changed");
+        let other_urls = db.other_publish_post_urls(&assignment.id)?;
+        riviu_core::tiktok_share::VerificationCapture::verify_metadata_candidate(
+            &pending.captured, &bundle.caption, &other_urls).await
+    }.await;
+    authorize()?;
+    pending.captured.metadata = match lookup {
+        Ok(attempt) => attempt,
+        Err(_) => MetadataAttempt {
+            state: MetadataAttemptState::Rejected, stage: MetadataDiagnostic::CandidateBinding,
+            attempts: pending.captured.metadata.attempts.saturating_add(1),
+            checked_at: chrono::Utc::now().to_rfc3339(), http_status: None,
+        },
+    };
+    if db.other_publish_post_urls(&assignment.id)?.contains(&pending.captured.canonical_url) {
+        pending.captured.metadata.state = MetadataAttemptState::Rejected;
+        pending.captured.metadata.stage = MetadataDiagnostic::CandidateBinding;
+    }
+    let verified = matches!(pending.captured.metadata.state, MetadataAttemptState::Verified);
+    let code = if matches!(pending.captured.metadata.state, MetadataAttemptState::Unavailable) {
+        "metadataUnavailable"
+    } else { "metadataIdentityMismatch" };
+    let diagnostic = serde_json::json!({
+        "stage":"candidatePublicMetadata", "pendingMetadataCandidate":pending,
+        "reasonCode":if verified { "verified" } else { code },
+    });
+    if verified {
+        Ok(Some(ConfirmedAssignmentLink { url: pending.captured.canonical_url, diagnostic }))
+    } else {
+        Err(super::verification::VerificationObservation {
+            code, reason: "Đã giữ liên kết ứng viên; dữ liệu công khai chưa xác minh đúng bài đã gửi".into(),
+            diagnostic: Some(diagnostic),
+        }.into())
+    }
+}
+
 pub(super) async fn capture_confirmed_assignment_link(
     db: &Database,
     control: &DeviceControlPlane,
@@ -2088,6 +2191,9 @@ pub(super) async fn capture_confirmed_assignment_link(
         !bundle.caption.trim().is_empty(),
         "caption missing for own-post proof"
     );
+    if let Some(captured) = capture_pending_metadata(db, assignment, bundle, observer).await? {
+        return Ok(captured);
+    }
     // This remains a verification-only session. A submitted Android receipt
     // restarts its exact TikTok package here; no composer or Post is reachable.
     let context = control
@@ -2238,6 +2344,7 @@ pub(super) async fn capture_confirmed_assignment_link(
             }
         }
         let mut diagnostic = serde_json::to_value(&capture.diagnostic).unwrap_or_default();
+        attach_pending_metadata_candidate(db, assignment, bundle, &mut diagnostic)?;
         if let Some(proof) = restart_proof { diagnostic["appRestart"] = proof; }
         capture
             .outcome
@@ -4036,7 +4143,13 @@ pub(super) async fn post_through_the_composer(
                 );
             };
             let identity = riviu_core::tiktok_share::SubmissionIdentity {
-                prepared_at: None,
+                prepared_at: match db.publish_attempt_opened_at(campaign_id, udid, &submitted_at) {
+                    Ok(prepared) => prepared,
+                    Err(error) => {
+                        evidence["linkCaptureReason"] = serde_json::json!(error.to_string());
+                        return PostOutcome::Submitted(evidence);
+                    }
+                },
                 account: expected_account,
                 submitted_at,
             };
@@ -4074,6 +4187,18 @@ pub(super) async fn post_through_the_composer(
             .await;
             evidence["verificationDiagnostic"] =
                 serde_json::to_value(&capture.diagnostic).unwrap_or_default();
+            if capture.diagnostic.captured_metadata_candidate.is_some() {
+                let attached = (|| -> anyhow::Result<()> {
+                    let current = db.get_publish_assignment_detail(campaign_id, assignment_id)?
+                        .and_then(|detail| detail.assignments.into_iter().find(|row| row.id == assignment_id))
+                        .context("submitted assignment missing")?;
+                    attach_pending_metadata_candidate(db, &current, bundle, &mut evidence["verificationDiagnostic"])
+                })();
+                if let Err(error) = attached {
+                    evidence["linkCaptureReason"] = serde_json::json!(error.to_string());
+                    return PostOutcome::Submitted(evidence);
+                }
+            }
             let reason = capture.diagnostic.reason_code.message();
             let mut outcome = settle_submission_capture(evidence, capture.outcome, progress).await;
             if let PostOutcome::Submitted(ref mut value) = outcome {

@@ -395,7 +395,8 @@ async fn verify_pending_assignment_inner(
         Some(candidate),
     )
     .await;
-    drop(permit);
+    // Keep the work permit through the existing CAS/outbox or diagnostic commit.
+    let _permit = permit;
     match capture {
         Ok(captured) => {
             let link = captured.url;
@@ -410,6 +411,7 @@ async fn verify_pending_assignment_inner(
             let expanded =
                 evidence["verificationDiagnostic"]["stage"] == "expandedPhotoPublicProof";
             let video_public = evidence["verificationDiagnostic"]["stage"] == "videoPublicProof";
+            let candidate_public = evidence["verificationDiagnostic"]["stage"] == "candidatePublicMetadata";
             let post = if evidence.get("post").is_some() {
                 &mut evidence["post"]
             } else {
@@ -417,7 +419,9 @@ async fn verify_pending_assignment_inner(
             };
             post["publicationVerified"] = serde_json::json!(true);
             post["state"] = serde_json::json!("posted");
-            post["verificationMethod"] = if video_public {
+            post["verificationMethod"] = if candidate_public {
+                serde_json::json!("candidateCanonicalPublicMetadata")
+            } else if video_public {
                 serde_json::json!("videoCanonicalPublicMetadata")
             } else if expanded {
                 serde_json::json!("expandedPhotoCaptionCanonicalPublicMetadata")

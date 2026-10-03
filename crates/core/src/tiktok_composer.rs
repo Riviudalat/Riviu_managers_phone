@@ -1101,6 +1101,91 @@ impl Drop for StageDiagnosticOperation {
     }
 }
 
+// Only the final sound reproof return leg installs this context. Logging never
+// changes the wait budget or wraps a device gesture in a cancellable timeout.
+struct FinalReproofReturnContext {
+    serial: Option<String>,
+    session: String,
+    started: Instant,
+    deadline: Instant,
+}
+
+tokio::task_local! {
+    static FINAL_REPROOF_RETURN: FinalReproofReturnContext;
+}
+
+struct FinalReproofPhaseTiming {
+    active: bool,
+    phase: &'static str,
+    started: Instant,
+    outcome: &'static str,
+    error_kind: Option<&'static str>,
+    error_code: Option<&'static str>,
+}
+
+impl FinalReproofPhaseTiming {
+    fn start(phase: &'static str) -> Self {
+        let timing = Self {
+            active: FINAL_REPROOF_RETURN.try_with(|_| ()).is_ok(),
+            phase,
+            started: Instant::now(),
+            outcome: "interrupted",
+            error_kind: None,
+            error_code: None,
+        };
+        timing.emit("start");
+        timing
+    }
+
+    fn finish<T>(&mut self, result: &anyhow::Result<T>, success: &'static str) {
+        if !self.active {
+            return;
+        }
+        self.outcome = if result.is_ok() { success } else { "error" };
+        if let Err(error) = result {
+            let failure = crate::publish_recovery::describe(error);
+            self.error_kind = Some(failure.kind.as_str());
+            // Never log an error message or a caller-supplied recovery code.
+            self.error_code = Some(match failure.code.as_str() {
+                "sound_load_timeout" => "sound_load_timeout",
+                "sound_cancelled" => "sound_cancelled",
+                "publish_observation_deadline" => "publish_observation_deadline",
+                "publish_observation_transient" => "publish_observation_transient",
+                "publish_observation_session_repaired" => "publish_observation_session_repaired",
+                "publish_action_outcome_unknown" => "publish_action_outcome_unknown",
+                _ => "other",
+            });
+        }
+    }
+
+    fn emit(&self, event: &'static str) {
+        if !self.active {
+            return;
+        }
+        let _ = FINAL_REPROOF_RETURN.try_with(|context| {
+            let now = Instant::now();
+            tracing::info!(
+                serial = ?context.serial, session = %context.session,
+                phase = self.phase, event,
+                phase_elapsed_ms = now.saturating_duration_since(self.started).as_millis() as u64,
+                elapsed_ms = now.saturating_duration_since(context.started).as_millis() as u64,
+                remaining_ms = context.deadline.saturating_duration_since(now).as_millis() as u64,
+                budget_exhausted = now >= context.deadline,
+                outcome = if event == "start" { "pending" } else { self.outcome },
+                error_kind = self.error_kind, error_code = self.error_code,
+                "final sound return timing"
+            );
+        });
+    }
+}
+
+impl Drop for FinalReproofPhaseTiming {
+    fn drop(&mut self) {
+        // Covers early returns and a dropped read without claiming a gesture ACK.
+        self.emit("result");
+    }
+}
+
 /// Nonpublic diagnostic using the very same Create/gallery/selection/Next walk as production.
 /// Stops at the editor and drains the existing leave path; never enters the Post tail.
 #[allow(clippy::too_many_arguments)]
@@ -1173,7 +1258,12 @@ impl<'a, P: TapPlanner> Composer<'a, P> {
         let point = (self.plan_tap)(element);
         let mut trace = StageDiagnosticOperation::start("tap", &self.session.gui_session_epoch(), None);
         trace.target(element, Some([point.x, point.y]));
-        let result = self.session.tap(point).await;
+        let result = {
+            let mut timing = FinalReproofPhaseTiming::start("nextTapDispatch");
+            let result = self.session.tap(point).await;
+            timing.finish(&result, "ackDrained");
+            result
+        };
         trace.finish(if result.is_ok() { "completed" } else { "error" });
         result?;
         crate::tiktok_sound::check_wait()
@@ -1969,10 +2059,22 @@ impl<'a, P: TapPlanner> Composer<'a, P> {
             return Ok(false);
         };
         let (post, edit_next) = (tail.post_button, tail.edit_next);
-        let Some(next) = self
-            .await_condition(COMPOSER_WINDOW, edit_next, stop, |_| true)
-            .await?
-        else {
+        let next = {
+            let mut timing = FinalReproofPhaseTiming::start("nextLocate");
+            let result = self
+                .await_condition(COMPOSER_WINDOW, edit_next, stop, |_| true)
+                .await;
+            timing.finish(
+                &result,
+                if result.as_ref().is_ok_and(|next| next.is_some()) {
+                    "found"
+                } else {
+                    "notFoundOrStopped"
+                },
+            );
+            result
+        };
+        let Some(next) = next? else {
             return Ok(false);
         };
         let epoch = self.session.gui_session_epoch();
@@ -2026,9 +2128,21 @@ impl<'a, P: TapPlanner> Composer<'a, P> {
                 Err(error) => return Err(tap_error.unwrap_or(error)),
             }
         }
-        let arrived = self
-            .await_condition_until(arrival_deadline, post, stop, |_| true)
-            .await;
+        let arrived = {
+            let mut timing = FinalReproofPhaseTiming::start("captionPostArrival");
+            let result = self
+                .await_condition_until(arrival_deadline, post, stop, |_| true)
+                .await;
+            timing.finish(
+                &result,
+                if result.as_ref().is_ok_and(|post| post.is_some()) {
+                    "found"
+                } else {
+                    "notFoundOrStopped"
+                },
+            );
+            result
+        };
         if stop.load(Ordering::Relaxed) {
             return Ok(false);
         }
@@ -2283,7 +2397,28 @@ impl<'a, P: TapPlanner> Composer<'a, P> {
                     Box::pin(confirm_sound(self.session, sound_plan, &expected_title)).await?;
                     if sound_plan.post_back_query().is_some() {
                         mark("returnToCaption");
-                        if !Box::pin(self.advance_to_post_screen(stop)).await? {
+                        let context = FinalReproofReturnContext {
+                            serial: self.session.gui_scope().map(|scope| scope.device_id),
+                            session: reproof_epoch.clone(),
+                            started,
+                            deadline: reproof_deadline.context("sound reproof deadline missing")?,
+                        };
+                        let returned = FINAL_REPROOF_RETURN
+                            .scope(context, async {
+                                let mut timing = FinalReproofPhaseTiming::start("returnToCaption");
+                                let result = Box::pin(self.advance_to_post_screen(stop)).await;
+                                timing.finish(
+                                    &result,
+                                    if result.as_ref().is_ok_and(|arrived| *arrived) {
+                                        "arrived"
+                                    } else {
+                                        "notArrivedOrStopped"
+                                    },
+                                );
+                                result
+                            })
+                            .await;
+                        if !returned? {
                             // Failure to observe a transition is not a proved
                             // caption mismatch. Keep the unchanged deadline and
                             // let the pre-effect recovery owner classify it.

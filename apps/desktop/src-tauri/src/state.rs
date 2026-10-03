@@ -409,6 +409,7 @@ fn isolated_admission_enabled(rehearsal_scope: bool) -> bool { rehearsal_scope }
 
 pub(crate) struct CommandAdmissionState {
     accepting_work: AtomicBool,
+    cleanup_maintenance_allowed: AtomicBool,
     in_flight: AtomicUsize,
     changed: Notify,
 }
@@ -457,6 +458,7 @@ impl CommandAdmissionState {
     pub(crate) fn new(accepting_work: bool) -> Self {
         Self {
             accepting_work: AtomicBool::new(accepting_work),
+            cleanup_maintenance_allowed: AtomicBool::new(false),
             in_flight: AtomicUsize::new(0),
             changed: Notify::new(),
         }
@@ -483,7 +485,23 @@ impl CommandAdmissionState {
         })
     }
 
+    fn ensure_cleanup_maintenance(self: &Arc<Self>) -> Result<CommandAdmission, CommandError> {
+        if self.accepting_work.load(Ordering::Acquire) {
+            return self.ensure_accepting_work();
+        }
+        if !self.cleanup_maintenance_allowed.load(Ordering::Acquire) {
+            return Err(CommandError::application_shutting_down());
+        }
+        self.in_flight.fetch_add(1, Ordering::AcqRel);
+        if !self.cleanup_maintenance_allowed.load(Ordering::Acquire) {
+            self.finish_one();
+            return Err(CommandError::application_shutting_down());
+        }
+        Ok(CommandAdmission { state: self.clone() })
+    }
+
     fn reject_new_work(&self) {
+        self.cleanup_maintenance_allowed.store(false, Ordering::Release);
         self.accepting_work.store(false, Ordering::Release);
         self.changed.notify_waiters();
     }
@@ -1605,6 +1623,16 @@ impl AppState {
 
     pub(crate) fn ensure_accepting_work(&self) -> Result<CommandAdmission, CommandError> {
         self.command_admission.ensure_accepting_work()
+    }
+
+    /// Only an exact retained-session maintenance command may enter after a
+    /// refused close. It is counted in the same drain as ordinary commands.
+    pub(crate) fn ensure_cleanup_maintenance(&self) -> Result<CommandAdmission, CommandError> {
+        self.command_admission.ensure_cleanup_maintenance()
+    }
+
+    pub(crate) fn allow_quarantined_maintenance(&self) {
+        self.command_admission.cleanup_maintenance_allowed.store(true, Ordering::Release);
     }
 
     pub(crate) fn reject_new_work(&self) {

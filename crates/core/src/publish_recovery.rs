@@ -252,6 +252,8 @@ pub(crate) fn requires_fresh_preparation(error: &anyhow::Error) -> bool {
         "publish_observation_session_repaired"
             | "editor_observation_invalidated"
             | "sound_selection_readback_unavailable"
+            | "sound_entry_observation_changed"
+            | "sound_recent_observation_invalidated"
     )
 }
 pub fn classify(message: &str) -> FailureKind {

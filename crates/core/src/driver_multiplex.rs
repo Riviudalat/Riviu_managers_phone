@@ -232,6 +232,14 @@ impl DeviceDriver for MultiplexDriver {
             .await
     }
 
+    async fn prepare_helper_maintenance(&self, udid: &str, maintenance_id: &str, effect_intent: serde_json::Value) -> anyhow::Result<serde_json::Value> {
+        self.route(udid)?.prepare_helper_maintenance(udid, maintenance_id, effect_intent).await
+    }
+
+    async fn execute_helper_maintenance(&self, udid: &str, plan: serde_json::Value, operator_authorized: bool, observation_only: bool) -> anyhow::Result<serde_json::Value> {
+        self.route(udid)?.execute_helper_maintenance(udid, plan, operator_authorized, observation_only).await
+    }
+
     async fn repair_agent_install_only(&self, udid: &str) -> anyhow::Result<AgentInstallProof> {
         self.route(udid)?.repair_agent_install_only(udid).await
     }

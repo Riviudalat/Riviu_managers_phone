@@ -22,6 +22,8 @@ interface Props {
   onStart: () => void | Promise<void>;
   onStop: () => void;
   onInstall: () => void | Promise<void>;
+  onHelperMaintenance?: () => void | Promise<void>;
+  onQuarantineMaintenance?: () => void | Promise<void>;
   onRefresh: () => void | Promise<void>;
   onGroupTools: () => void;
   onGroups: () => void;
@@ -41,6 +43,8 @@ export function ProfileToolbar({
   onStart,
   onStop,
   onInstall,
+  onHelperMaintenance,
+  onQuarantineMaintenance,
   onRefresh,
   onGroupTools,
   onGroups,
@@ -204,6 +208,18 @@ export function ProfileToolbar({
             try { await onInstall(); } catch (error) { toastError("Sửa agent thất bại", error); }
           }} title={`Cài hoặc khôi phục Riviu Agent cho ${scope}`}>
             <Wrench size={16} aria-hidden="true" />Sửa Riviu Agent
+          </button>
+          <button type="button" className="tb-btn" disabled={!canBatch || !onHelperMaintenance} onClick={async (event) => {
+            event.currentTarget.closest("details")?.removeAttribute("open");
+            try { await onHelperMaintenance?.(); } catch (error) { toastError("Khôi phục helper thất bại", error); }
+          }} title="Chuẩn bị và xác nhận khôi phục helper trên các máy Android đang kết nối trong phạm vi">
+            <Wrench size={16} aria-hidden="true" />Khôi phục helper
+          </button>
+          <button type="button" className="tb-btn" disabled={!canBatch || !onQuarantineMaintenance} onClick={async (event) => {
+            event.currentTarget.closest("details")?.removeAttribute("open");
+            try { await onQuarantineMaintenance?.(); } catch (error) { toastError("Khôi phục phiên điều khiển thất bại", error); }
+          }} title="Khôi phục phiên TikTok được giữ lại trên các máy Android đang kết nối trong phạm vi; kế hoạch đã gửi chỉ được tra cứu">
+            <Wrench size={16} aria-hidden="true" />Khôi phục phiên điều khiển
           </button>
         </div>
       </details>

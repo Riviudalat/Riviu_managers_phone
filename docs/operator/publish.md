@@ -9,8 +9,8 @@ chuyển media, thao tác TikTok, xác minh link và tổng lượt điều khi�
 Sau khi đổi giới hạn, kiểm tra lại lịch trước khi lưu; lịch quá tải có cảnh báo.
 
 Đăng ngay và hẹn giờ dùng chung hàng chờ bền vững theo từng bài/máy. Mặc định toàn
-ứng dụng cho phép tối đa 64 máy chuyển media, thao tác TikTok và xác minh liên kết
-đồng thời; mỗi máy chỉ có một chủ điều khiển. Cấu hình giới hạn đã lưu trên PC được
+ứng dụng cho phép 64 lượt chuyển media, 4 lượt thao tác TikTok và 4 lượt xác minh
+liên kết, với tổng tối đa 64 máy; mỗi máy chỉ có một chủ điều khiển. Cấu hình giới hạn đã lưu trên PC được
 giữ nguyên: chọn **Chạy song song toàn bộ máy** rồi **Lưu giới hạn** để mở toàn bộ
 lượt trên PC đang dùng giới hạn cũ. Lệnh ADB vẫn có giới hạn I/O chung theo bus USB.
 Sheet có tối đa 2 request, trong đó tối đa
@@ -23,10 +23,11 @@ trước chuyển qua ADB. Thông báo gồm tệp nguồn, tệp đích và l�
 tra tệp còn tồn tại, quyền đọc Downloads và dung lượng/quyền ghi ổ chứa dữ liệu Riviu.
 Không dùng bấm Đăng lại để giải quyết lỗi sao chép sau một kết quả gửi chưa rõ.
 
-Giờ hẹn là lúc bắt đầu xử lý. Bài chưa được cấp lượt trong 30 giây hoặc app mở lại
-sau giờ hẹn được ghi **Lỡ lịch**, không tự đăng bù. Công việc đã bắt đầu đúng cửa
-sổ tiếp tục, và bài đã gửi vẫn được xác minh. Kiểm tra lịch cảnh báo số bài cùng
-thời điểm vượt số lượt chuyển media đang cấu hình.
+Giờ hẹn là lúc ứng dụng nhận đợt đăng vào hàng chờ. Đợt được nhận trong 30 giây
+được xử lý theo giới hạn đã lưu; các máy còn chờ lượt không bị ghi Lỡ lịch chỉ vì
+hết lượt chạy đồng thời. Đợt chưa được nhận trong cửa sổ đó hoặc app mở lại sau
+giờ hẹn được ghi **Lỡ lịch**, không tự đăng bù. Bài đã gửi vẫn được xác minh.
+Lịch đông máy có thể bắt đầu thao tác ở từng máy muộn hơn giờ hẹn.
 
 Mỗi bài dự kiến trên một tài khoản có `publicationId` cố định; các lần thử có
 `attemptId` riêng. Mỗi bài chỉ chiếm một dòng Sheet. Sau khi mở đợt báo cáo mới,
@@ -489,3 +490,8 @@ app kiểm theo lịch hiện có; không đóng TikTok hoặc gửi lại để
 Canary Rust cũ chỉ dùng cô lập để khảo sát/rehearsal, Sheet tắt và thiếu worker đầy
 đủ; không dùng làm chứng cứ nghiệm thu OAuth end-to-end. Không chạy nó song song
 Riviu trên cùng điện thoại hoặc nhập DB thử vào dữ liệu đang vận hành.
+
+Khi đã giữ được liên kết ứng viên của đúng bài đã gửi, lượt xác minh tiếp theo
+kiểm tra dữ liệu công khai trước. TikTok chưa cung cấp đủ dữ liệu thì app giữ
+bài chờ kiểm tra; liên kết ứng viên chưa được ghi là bài thành công hoặc ghi
+Sheet. Lượt chưa có ứng viên tiếp tục dùng luồng quan sát TikTok có giới hạn.

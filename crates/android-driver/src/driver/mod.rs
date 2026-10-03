@@ -1079,7 +1079,7 @@ impl AndroidDriver {
         let _inventory = self.helper_inventory_lock(serial).write_owned().await;
         let cached = self.helpers.lock().get(serial).cloned();
         let cached = match cached {
-            Some(helper) if helper.is_released().await? => {
+            Some(helper) if helper.settle_released_runtime().await? || helper.is_released().await? => {
                 self.helpers.lock().remove(serial);
                 None
             }
@@ -2178,6 +2178,22 @@ impl DeviceDriver for AndroidDriver {
     /// when they are missing and restarts the instrumentation when the server has gone
     /// blind — and it starts no UI session and no producer, which is what the install-only
     /// contract asks for.
+    async fn prepare_helper_maintenance(&self, udid: &str, maintenance_id: &str, effect_intent: serde_json::Value) -> anyhow::Result<serde_json::Value> {
+        let _inventory = self.helper_inventory_lock(udid).write_owned().await;
+        anyhow::ensure!(self.automatic_setup_allowed, "maintenance disabled in diagnostic mode");
+        anyhow::ensure!(!self.helpers.lock().contains_key(udid), "live helper owner must settle normally");
+        crate::riviu_agent::HelperClient::prepare_maintenance(&self.adb, udid,
+            self.riviu_agent_apk.as_deref(), self.helper_state_dir.as_deref(), maintenance_id, effect_intent).await
+    }
+
+    async fn execute_helper_maintenance(&self, udid: &str, plan: serde_json::Value, operator_authorized: bool, observation_only: bool) -> anyhow::Result<serde_json::Value> {
+        let _inventory = self.helper_inventory_lock(udid).write_owned().await;
+        anyhow::ensure!(self.automatic_setup_allowed, "maintenance disabled in diagnostic mode");
+        anyhow::ensure!(!self.helpers.lock().contains_key(udid), "live helper owner must settle normally");
+        crate::riviu_agent::HelperClient::execute_maintenance(&self.adb, udid,
+            self.riviu_agent_apk.as_deref(), self.helper_state_dir.as_deref(), plan, operator_authorized, observation_only).await
+    }
+
     async fn repair_agent_install_only(
         &self,
         udid: &str,
@@ -2264,6 +2280,19 @@ impl DeviceDriver for AndroidDriver {
         campaign_id: &str,
         source_root: &Path,
     ) -> anyhow::Result<serde_json::Value> {
+        // The control plane retains the exclusive transfer/UI lease here. Qualify the
+        // owned helper and its clipboard restoration before copying any media, rather
+        // than discovering an unresolved owner only when the composer opens.
+        if self.automatic_setup_allowed {
+            let helper = self.prepare_helper_runtime(udid).await?;
+            anyhow::ensure!(
+                !helper.cleanup_is_pending(),
+                crate::riviu_agent::HelperRecoveryRequired
+            );
+            // An already cached diagnostic owner is not clipboard qualification.
+            // A qualified production owner only re-proves its protected identity here.
+            helper.qualify_clipboard_roundtrip().await?;
+        }
         crate::publish::stage(&self.adb, udid, campaign_id, source_root).await
     }
 
@@ -2484,6 +2513,53 @@ impl DeviceDriver for AndroidDriver {
     }
 
     async fn verify_automation_readiness(&self, udid: &str) -> anyhow::Result<()> {
+        // This stays read-only: no helper claim, repair, session or IME transition.
+        // A healthy cached owner keeps runtime-owner.json until its exact release;
+        // the journal alone therefore cannot classify that owner as stranded.
+        {
+            let _inventory = self.helper_inventory_lock(udid).read_owned().await;
+            let helper = self.helpers.lock().get(udid).cloned();
+            anyhow::ensure!(
+                helper.as_ref().is_none_or(|helper| !helper.cleanup_is_pending()),
+                crate::riviu_agent::HelperRecoveryRequired
+            );
+            if let Some(root) = &self.helper_state_dir {
+                let state = root
+                    .join("helper-runtime")
+                    .join(riviu_core::frame_sha256(udid.as_bytes()));
+                anyhow::ensure!(
+                    !state.join("ime-checkpoint.json").try_exists()?
+                        && !state.join("maintenance-active.json").try_exists()?,
+                    crate::riviu_agent::HelperRecoveryRequired
+                );
+                if state.join("runtime-owner.json").try_exists()? {
+                    if let Some(helper) = &helper {
+                        anyhow::ensure!(
+                            helper.is_scoped_canary(),
+                            crate::riviu_agent::HelperRecoveryRequired
+                        );
+                        helper.validate_runtime_owner_record(&state)?;
+                        // health authenticates this cache's owner, instance and generation.
+                        // It proves no clipboard operation and never retires the journal.
+                        anyhow::ensure!(
+                            helper.health().await.authenticated == Some(true),
+                            crate::riviu_agent::HelperRecoveryRequired
+                        );
+                    } else {
+                        // A cold host may still prove its exact prior owner with the vault.
+                        // This only reads protected status; the leased staging path performs
+                        // runtime resume and clipboard qualification before any media copy.
+                        crate::riviu_agent::HelperClient::verify_runtime_owner_readiness(
+                            self.adb.clone(),
+                            udid,
+                            self.riviu_agent_apk.as_deref(),
+                            &state,
+                        )
+                        .await?;
+                    }
+                }
+            }
+        }
         let screen = self.screen_guard_state(udid).await?;
         anyhow::ensure!(
             screen.locked == Some(false),

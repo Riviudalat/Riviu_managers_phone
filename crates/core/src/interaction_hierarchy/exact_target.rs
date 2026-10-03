@@ -137,12 +137,15 @@ async fn open_target(
                 Err(error)
                     if error.downcast_ref::<TargetLinkMismatch>().is_some()
                         && !redispatched
-                        && target_package == "com.zhiliaoapp.musically"
-                        && matches!(labels.resource_version(), Some("46.0.41" | "45.7.3")) =>
+                        && ((target_package == "com.zhiliaoapp.musically"
+                            && matches!(labels.resource_version(), Some("46.0.41" | "45.7.3")))
+                            || (target_package == "com.ss.android.ugc.trill"
+                                && labels.resource_version() == Some("38.3.2"))) =>
                 {
-                    // 46.0.41/en-US can retain a normal feed card after a VIEW intent,
-                    // not only a LIVE placeholder. Its copied different post ID proves
-                    // the intent was not consumed. Re-dispatch only the pinned URL once.
+                    // Measured Global and Trill 38.3.2 can retain a normal feed
+                    // card after VIEW. A copied different post ID proves this
+                    // arrival missed the target. Reopen only the pinned URL once;
+                    // all public actions still require the exact canonical proof.
                     ensure_not_cancelled(stop)?;
                     session
                         .reopen_url_in_app(&expected.normalized_url, target_package)

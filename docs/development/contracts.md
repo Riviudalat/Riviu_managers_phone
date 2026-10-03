@@ -819,7 +819,10 @@ pipeline vẫn kiểm tại nút Đăng. Worker đã lỗi sau effect chỉ chuy
 lưu ở `publish.dispatch.limits` theo database máy chủ, mỗi giá trị từ 1 đến 64.
 Giảm giới hạn chặn cấp lượt mới đến khi số đang chạy xuống mức mới; không cắt request
 thiết bị đang thực hiện. Worker đọc lại giới hạn verify ở vòng điều phối tiếp theo; phiên đang chạy được hoàn tất.
-Lịch quá 30 giây được CAS sang missed khi chưa bắt đầu; shutdown giữ hàng chưa chạy
+Đợt hẹn giờ chỉ được claim trong cửa sổ 30 giây theo giờ máy chủ. Cohort được
+claim đúng giờ không có deadline theo công suất cho từng assignment; started_at_ms
+chỉ được ghi khi thực sự dispatch. Cohort chưa được nhận đúng cửa sổ vẫn CAS sang
+missed; các deadline của lịch cũ không được viết lại. Shutdown giữ hàng chưa chạy
 và restart không tự phát lại effect đã có intent. Trước migration40→41 tạo và đọc
 lại bản sao SQLite `pre-publication-v40.db`.
 

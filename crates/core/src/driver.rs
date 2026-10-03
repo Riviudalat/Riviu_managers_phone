@@ -65,6 +65,20 @@ pub struct AppProcessState {
     pub running: bool,
 }
 
+/// Current retained-session cleanup readiness, not historical draft restoration.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct OwnedSessionCleanupProof {
+    pub udid: String,
+    pub session_epoch: String,
+    pub helper_owner_id: String,
+    pub helper_instance: String,
+    pub helper_generation: String,
+    pub input_sealed: bool,
+    pub clipboard_pending: bool,
+    pub baseline_pending: bool,
+}
+
 /// What a media export found on the phone, and what of it actually landed.
 ///
 /// Both numbers, because one of them alone is a sentence with no meaning. `pull_media`
@@ -330,6 +344,16 @@ pub trait DeviceDriver: Send + Sync {
             unsupported("setNegotiatedInteractionCapabilities")
         }
     }
+    /// Read-only preparation; preserve the caller's existing effect identity verbatim.
+    async fn prepare_helper_maintenance(&self, _udid: &str, _maintenance_id: &str, _effect_intent: serde_json::Value) -> anyhow::Result<serde_json::Value> {
+        unsupported("prepareHelperMaintenance")
+    }
+
+    /// Explicit operator-authorized supersession, distinct from release/restoration.
+    async fn execute_helper_maintenance(&self, _udid: &str, _plan: serde_json::Value, _operator_authorized: bool, _observation_only: bool) -> anyhow::Result<serde_json::Value> {
+        unsupported("executeHelperMaintenance")
+    }
+
     async fn repair_agent_install_only(&self, _udid: &str) -> anyhow::Result<AgentInstallProof> {
         unsupported("repairAgentInstallOnly")
     }
@@ -762,6 +786,17 @@ pub trait UiSession: Send + Sync {
         _request: &crate::ui_automation::ObservationRequest,
     ) -> anyhow::Result<crate::ui_automation::UiObservation> {
         unsupported("ui_observation_without_recovery")
+    }
+
+    /// Seal new session input and prove current owned helper cleanup readiness.
+    /// This never clears drafts/clipboard, claims a helper, or authorizes public replay.
+    /// Implementations retain a seal on unknown/cancelled input; unsupported fails closed.
+    async fn verify_owned_cleanup_ready(
+        &self,
+        _udid: &str,
+        _session_epoch: &str,
+    ) -> anyhow::Result<OwnedSessionCleanupProof> {
+        unsupported("verifyOwnedCleanupReady")
     }
 
     fn set_gui_scope(&self, _scope: crate::ui_automation::GuiScope) {}

@@ -88,8 +88,26 @@ async fn observe_preflight_device(
             .as_ref()
             .filter(|entry| entry.readiness_at.elapsed() < preparation::READINESS_TTL)
         {
-            preparation::progress(udid, "checkingDevices", "running", 4, None);
-            return entry.observation.clone();
+            // A claim/cleanup journal can change without a roster event. Recheck the
+            // cheap read-only readiness guard even while metadata remains cached.
+            let mut observation = entry.observation.clone();
+            observation.readiness_error = control
+                .verify_automation_readiness(udid)
+                .await
+                .err()
+                .map(|error| error.to_string());
+            preparation::progress(
+                udid,
+                "checkingDevices",
+                if observation.readiness_error.is_some() {
+                    "failed"
+                } else {
+                    "running"
+                },
+                4,
+                observation.readiness_error.clone(),
+            );
+            return observation;
         }
     }
     let transport_error = control
@@ -417,9 +435,7 @@ pub async fn publish_preflight(
         let releasing = row.issues.iter().any(owed);
         row.issues.retain(|issue| !owed(issue));
         if releasing {
-            let old_link = row.checks.iter().find(|check| check.id == "oldPostLink").cloned();
-            row.checks = riviu_core::ui_automation::checks::publish_checks(row);
-            if let Some(old_link) = old_link { row.checks.push(old_link); }
+            refresh_preflight_checks(row);
         }
     }
     // Backend verdict, not a UI hint: a refused start or an unreleasable owner means
@@ -434,6 +450,32 @@ pub async fn publish_preflight(
         start_block,
         needs_release,
     })
+}
+
+/// Build the same proof-aware checks for refresh and post-release handoff.
+/// Transfer capability alone never qualifies authenticated helper/clipboard runtime.
+fn refresh_preflight_checks(row: &mut riviu_core::PublishPreflightAssignmentReport) {
+    let old_link = row.checks.iter().find(|check| check.id == "oldPostLink").cloned();
+    row.checks = riviu_core::ui_automation::checks::publish_checks(row);
+    if let Some(helper) = row.checks.iter_mut().find(|check| check.id == "helper") {
+        helper.label = "Helper và chuyển nội dung".into();
+        if let Some(issue) = row
+            .issues
+            .iter()
+            .find(|issue| issue.code == "device_not_ready")
+        {
+            helper.status = riviu_core::ui_automation::CheckStatus::Blocked;
+            helper.reason = Some(issue.message.clone());
+        } else if helper.status == riviu_core::ui_automation::CheckStatus::Pass {
+            // Native transfer support is not authenticated helper/clipboard proof.
+            // The existing leased transfer path qualifies those before its first copy.
+            helper.status = riviu_core::ui_automation::CheckStatus::Unknown;
+            helper.reason = Some("Kiểm tra helper và khôi phục clipboard trước khi chuyển nội dung; chưa đăng bài".into());
+        }
+    }
+    if let Some(old_link) = old_link {
+        row.checks.push(old_link);
+    }
 }
 
 pub(super) async fn build_publish_preflight(
@@ -691,7 +733,7 @@ pub(super) async fn build_publish_preflight_from_manifest_with_sheet(
         observations.push(observation);
     }
     for row in &mut assignments {
-        row.checks = riviu_core::ui_automation::checks::publish_checks(row);
+        refresh_preflight_checks(row);
         let guard = guards
             .get(&row.udid)
             .with_context(|| format!("thiếu snapshot guard cho máy {}", row.udid))?;
@@ -1728,10 +1770,13 @@ pub async fn publish_readiness(
     state: State<'_, AppState>,
     udids: Vec<String>,
 ) -> Result<Vec<DevicePublishReadiness>, CommandError> {
-    let mut out = Vec::with_capacity(udids.len());
-    for udid in udids {
-        let readiness = readiness_of(&state.control, &udid).await.into();
-        out.push(DevicePublishReadiness { udid, readiness });
-    }
+    let control = &state.control;
+    // Reuse preflight's bounded, request-ordered collector. Futures stay in this
+    // command (no detached tasks); each device keeps its own failure verdict.
+    let out = collect_bounded_device_observations(udids.into_iter().map(|udid| async move {
+        let readiness = readiness_of(control, &udid).await.into();
+        DevicePublishReadiness { udid, readiness }
+    }))
+    .await;
     Ok(out)
 }

@@ -3073,9 +3073,6 @@ async fn run_cohort(
 
                 if !actions.comment {
                     let aggregate = crate::aggregate_interaction_actions(&action_results);
-                    if aggregate == crate::InteractionRunAggregate::Failed {
-                        anyhow::bail!("mọi public action đều thất bại trước effect");
-                    }
                     return Ok::<Option<serde_json::Value>, anyhow::Error>(Some(
                         serde_json::json!({
                             "actions": action_results,
@@ -3350,7 +3347,7 @@ async fn run_cohort(
             );
             let draft_cleanup_attention = cleanup_attention.load(Ordering::Relaxed);
             let cleanup = if draft_cleanup_attention {
-                control.quarantine_ui_context(context)
+                control.quarantine_ui_context_for_app(context, &opened_package)
                     .map(|()| crate::device_control::AppCompletionDisposition::Deferred)
             } else {
                 control.complete_app_session(context, &opened_package).await
@@ -3400,10 +3397,54 @@ async fn run_cohort(
                     let skipped_parent_at = evidence_json
                         .get("skippedParentAt")
                         .and_then(|value| value.as_u64());
+                    let action_aggregate = evidence_json.get("aggregate").and_then(|value| {
+                        serde_json::from_value::<crate::InteractionRunAggregate>(value.clone()).ok()
+                    });
+                    let comment_pending = evidence_json
+                        .get("commentVerificationPending")
+                        .and_then(|value| value.as_bool())
+                        .unwrap_or(false);
+                    let assignment_state = if comment_pending {
+                        ThreadMessageState::Uncertain
+                    } else if skipped_parent_at.is_some() {
+                        ThreadMessageState::SkippedParent
+                    } else if actions.comment {
+                        ThreadMessageState::Succeeded
+                    } else {
+                        match action_aggregate {
+                            Some(crate::InteractionRunAggregate::Uncertain) => {
+                                ThreadMessageState::Uncertain
+                            }
+                            Some(
+                                crate::InteractionRunAggregate::Partial
+                                | crate::InteractionRunAggregate::Failed,
+                            ) => ThreadMessageState::Failed,
+                            Some(crate::InteractionRunAggregate::Done) => {
+                                ThreadMessageState::Succeeded
+                            }
+                            None => ThreadMessageState::Uncertain,
+                        }
+                    };
+                    let aggregate_note = match action_aggregate {
+                        Some(crate::InteractionRunAggregate::Partial) => {
+                            Some("public_actions_partial".to_owned())
+                        }
+                        Some(crate::InteractionRunAggregate::Uncertain) => {
+                            Some("public_actions_uncertain".to_owned())
+                        }
+                        Some(crate::InteractionRunAggregate::Failed) => {
+                            Some("public_actions_failed".to_owned())
+                        }
+                        None if !actions.comment => {
+                            Some("public_actions_aggregate_missing".to_owned())
+                        }
+                        _ => None,
+                    };
                     let terminal_note = skipped_parent_at
                         .map(|ordinal| {
                             format!("parent_identity_not_confirmed_at_ordinal_{ordinal}")
                         })
+                        .or(aggregate_note)
                         .or_else(|| {
                             cleanup.as_ref().err().map(|error| {
                                 format!("Hành động đã xác nhận; chưa tắt sạch TikTok: {error}")
@@ -3415,29 +3456,16 @@ async fn run_cohort(
                         [
                             id,
                             ownership_revision,
-                            evidence_json,
+                            assignment_state,
+                            comment_pending,
                             terminal_note,
                             evidence_text
                         ],
                         |db| db.settle_owned_interaction_assignment(
                             id,
                             *ownership_revision,
-                            if evidence_json
-                                .get("commentVerificationPending")
-                                .and_then(|v| v.as_bool())
-                                .unwrap_or(false)
-                            {
-                                ThreadMessageState::Uncertain
-                            } else if skipped_parent_at.is_some() {
-                                ThreadMessageState::SkippedParent
-                            } else {
-                                ThreadMessageState::Succeeded
-                            },
-                            if evidence_json
-                                .get("commentVerificationPending")
-                                .and_then(|v| v.as_bool())
-                                .unwrap_or(false)
-                            {
+                            *assignment_state,
+                            if *comment_pending {
                                 Some("comment_verification_pending")
                             } else {
                                 terminal_note.as_deref()
@@ -3506,6 +3534,8 @@ async fn run_cohort(
                         {
                             identities.insert(prepared.ordinal, identity);
                         }
+                    }
+                    if assignment_state == ThreadMessageState::Succeeded {
                         succeeded += 1;
                     } else {
                         failed += 1;

@@ -247,11 +247,18 @@ impl AndroidDriver {
     /// holds the writer, so a slow package install never queues an entire fleet scan.
     pub async fn ensure_helper_installed(&self, serial: &str) -> anyhow::Result<()> {
         let _inventory = self.helper_inventory_lock(serial).write_owned().await;
-        let result = prepare_package(&AdbHelperPackage {
+        let result = async {
+            anyhow::ensure!(self.automatic_setup_allowed, "helper setup disabled in diagnostic mode");
+            anyhow::ensure!(!self.helpers.lock().contains_key(serial),
+                "live helper owner retained; package preparation requires owner settlement");
+            crate::riviu_agent::HelperClient::fence_package_preparation(
+                &self.adb, serial, self.helper_state_dir.as_deref()).await?;
+            prepare_package(&AdbHelperPackage {
             driver: self,
             serial,
         })
-        .await;
+            .await
+        }.await;
         let mut errors = self.helper_setup_errors.lock();
         match &result {
             Ok(()) => {

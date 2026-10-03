@@ -7,6 +7,7 @@ mod no_public_interaction;
 mod no_public;
 mod accept_loop;
 mod agent_commands;
+mod agent_quarantine_commands;
 /// Public so the live harness binaries resolve the agent exactly as the app
 /// does. Duplicating the token/manifest choice is how the two drift apart.
 pub mod agent_runtime;
@@ -459,6 +460,13 @@ pub fn run() {
             agent_commands::agent_preflight,
             agent_commands::agent_repair,
             agent_commands::agent_bulk_repair,
+            agent_commands::agent_helper_maintenance_prepare,
+            agent_commands::agent_helper_maintenance_execute,
+            agent_commands::agent_helper_maintenance_pending,
+            agent_quarantine_commands::agent_quarantine_snapshot,
+            agent_quarantine_commands::agent_quarantine_prepare,
+            agent_quarantine_commands::agent_quarantine_execute,
+            agent_quarantine_commands::agent_quarantine_receipt,
             commands::list_devices,
             google_sheet_commands::google_sheets_status,
             google_sheet_commands::google_sheets_verify_readonly,
@@ -797,7 +805,11 @@ pub fn run() {
                     log::error!("could not start graceful shutdown: {error}");
                 }
             }
-            RunEvent::Exit if !exit_coordinator.completed() => graceful_shutdown(handle),
+            RunEvent::Exit if !exit_coordinator.completed() => {
+                if let Err(error) = graceful_shutdown(handle) {
+                    log::error!("exit fallback cleanup unresolved: {error:#}");
+                }
+            },
             _ => {}
         }
     });
@@ -856,19 +868,21 @@ fn graceful_shutdown_for_requested_exit(handle: &tauri::AppHandle) -> bool {
             };
         }
     }
-    graceful_shutdown(handle);
-    true
+    match graceful_shutdown(handle) {
+        Ok(()) => true,
+        Err(error) => {
+            log::error!("shutdown retained for reconciliation: {error:#}");
+            false
+        }
+    }
 }
 
-pub(crate) fn graceful_shutdown(handle: &tauri::AppHandle) {
+pub(crate) fn graceful_shutdown(handle: &tauri::AppHandle) -> anyhow::Result<()> {
     let Some(state) = handle.try_state::<AppState>() else {
-        return;
+        return Ok(());
     };
     if state.is_ui_smoke() {
-        if let Err(error) = tauri::async_runtime::block_on(state.shutdown_ui_smoke()) {
-            log::error!("UI smoke shutdown failed: {error:#}");
-        }
-        return;
+        return tauri::async_runtime::block_on(state.shutdown_ui_smoke());
     }
     {
         state.reject_new_work();
@@ -890,22 +904,21 @@ pub(crate) fn graceful_shutdown(handle: &tauri::AppHandle) {
         tauri::async_runtime::block_on(state.close_all_overlay_sessions());
         tauri::async_runtime::block_on(state.shutdown_android_views());
         let control = state.control.clone();
-        if let Err(error) = tauri::async_runtime::block_on(state.shutdown_background_sampler()) {
-            log::error!("background sampler shutdown failed: {error:#}");
-        }
-        if let Err(error) = tauri::async_runtime::block_on(state.flows.shutdown()) {
-            log::error!("Flow runtime shutdown failed: {error:#}");
-        }
-        if let Err(error) = tauri::async_runtime::block_on(state.jobs.shutdown()) {
-            log::error!("job queue shutdown failed: {error:#}");
-        }
+        tauri::async_runtime::block_on(state.shutdown_background_sampler())?;
+        tauri::async_runtime::block_on(state.flows.shutdown())?;
+        tauri::async_runtime::block_on(state.jobs.shutdown())?;
         // Every owner has drained; the plane still accepts leases until `shutdown_cleanup`.
         tauri::async_runtime::block_on(exit_tiktok::close_tiktok_on_exit(
             control.clone(),
             state.db.clone(),
         ));
         if let Err(error) = tauri::async_runtime::block_on(control.shutdown_cleanup()) {
-            log::error!("device cleanup shutdown failed: {error}");
+            if matches!(&error, riviu_core::DeviceControlError::CleanupQuarantined { .. }) {
+                // The plane kept its cleanup worker and helpers alive. Open only
+                // tracked maintenance; Post, schedules and interactions stay closed.
+                state.allow_quarantined_maintenance();
+            }
+            return Err(error.into());
         }
         if let Some(android) = &state.android {
             if let Err(error) = tauri::async_runtime::block_on(android.flush_traces()) {
@@ -913,6 +926,7 @@ pub(crate) fn graceful_shutdown(handle: &tauri::AppHandle) {
             }
         }
     }
+    Ok(())
 }
 
 #[cfg(test)]

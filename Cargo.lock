@@ -3487,6 +3487,7 @@ dependencies = [
  "rand 0.8.7",
  "reqwest 0.12.28",
  "riviu-core",
+ "riviu-signing",
  "serde",
  "serde_json",
  "tokio",
@@ -3529,7 +3530,7 @@ dependencies = [
 
 [[package]]
 name = "riviu-deployment-checker"
-version = "0.2.71"
+version = "0.2.72"
 dependencies = [
  "anyhow",
  "dirs",
@@ -3567,7 +3568,7 @@ dependencies = [
 
 [[package]]
 name = "riviu-managers-phone"
-version = "0.2.71"
+version = "0.2.72"
 dependencies = [
  "anyhow",
  "apk-info",

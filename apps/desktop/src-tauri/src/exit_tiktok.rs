@@ -116,34 +116,7 @@ pub(crate) async fn close_tiktok_on_exit(control: Arc<DeviceControlPlane>, db: A
 }
 
 async fn close_device(control: &DeviceControlPlane, udid: &str) -> DeviceClose {
-    let result = DeviceClose::new(udid);
-    // Read before any lease: an unreadable inventory is unknown, not "nothing installed".
-    // The deadline bounds only lease-free reads; nothing holding a lease is ever dropped.
-    let inventory =
-        match tokio::time::timeout(INVENTORY_DEADLINE, control.list_installed_apps(udid)).await {
-            Ok(inventory) => inventory.map_err(|error| error.to_string()),
-            Err(_) => Err("hết thời gian đọc danh sách app".into()),
-        };
-    let packages = match inventory {
-        Ok(apps) => {
-            let mut packages: Vec<String> = apps
-                .into_iter()
-                .map(|app| app.bundle_id)
-                .filter(|package| riviu_core::tiktok_target::is_measured_android_tiktok(package))
-                .collect();
-            packages.sort();
-            packages.dedup();
-            packages
-        }
-        Err(error) => {
-            return result.with(
-                CloseStatus::Unknown,
-                format!("không đọc được danh sách app: {error}"),
-            )
-        }
-    };
-    let mut result = result;
-    result.packages = packages.clone();
+    let mut result = DeviceClose::new(udid);
     // Exit is an operator-level close, so it takes a ManualControl lease: IdleSweep's
     // pending-publication guard would leave TikTok running on exactly the phones that owe a
     // link. Stopping the app deletes no DB intent, receipt or link debt; the next launch's
@@ -154,7 +127,71 @@ async fn close_device(control: &DeviceControlPlane, udid: &str) -> DeviceClose {
             return result.with(CloseStatus::Failed, format!("không nhận được máy: {error}"))
         }
     };
-    let outcome = stop_and_prove(control, &context, &packages).await;
+    let outcome = async {
+        // Read raw package inventory under the same lease. The label-enriched app list
+        // may attach/provision a helper, which must never happen during shutdown.
+        // Only this non-mutating read is deadline-bound; dispatched stops still drain.
+        let listing = match tokio::time::timeout(
+            INVENTORY_DEADLINE,
+            control.device_shell(&context, "cmd package list packages --user 0"),
+        )
+        .await
+        {
+            Ok(listing) => listing.map_err(|error| {
+                (
+                    CloseStatus::Unknown,
+                    format!("không đọc được danh sách app: {error}"),
+                )
+            })?,
+            Err(_) => {
+                return Err((
+                    CloseStatus::Unknown,
+                    "hết thời gian đọc danh sách app".into(),
+                ))
+            }
+        };
+        if listing.exit_code != 0 || !listing.stderr.trim().is_empty() {
+            return Err((
+                CloseStatus::Unknown,
+                format!(
+                    "danh sách app không đọc được (exit {}): {}",
+                    listing.exit_code,
+                    listing.stderr.trim()
+                ),
+            ));
+        }
+        let mut packages = Vec::new();
+        let mut rows = 0;
+        for line in listing.stdout.lines().map(str::trim).filter(|line| !line.is_empty()) {
+            let Some(package) = line.strip_prefix("package:").filter(|package| {
+                !package.is_empty()
+                    && package
+                        .bytes()
+                        .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'.' | b'_'))
+            }) else {
+                return Err((
+                    CloseStatus::Unknown,
+                    "danh sách app trả về dòng không đọc được".into(),
+                ));
+            };
+            rows += 1;
+            if riviu_core::tiktok_target::is_measured_android_tiktok(package) {
+                packages.push(package.to_owned());
+            }
+        }
+        if rows == 0 {
+            return Err((
+                CloseStatus::Unknown,
+                "danh sách app không có dòng gói".into(),
+            ));
+        }
+        packages.sort();
+        packages.dedup();
+        result.packages = packages.clone();
+        stop_and_prove(control, &context, &packages).await
+    }
+    .await;
+    // Inventory failures and all stop/proof outcomes release the acquired context here.
     let released = control.close_exclusive_context(context);
     let mut result = match outcome {
         Ok(remaining) if remaining.is_empty() => {

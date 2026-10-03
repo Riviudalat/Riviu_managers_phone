@@ -34,6 +34,34 @@ controller để tiếp tục. Khi nâng cấp, bộ cài thay riêng runtime iO
 trong thư mục cài để tránh giữ dependency cũ; DB, credential và media vận hành
 không thuộc thư mục được thay.
 
+### Phiên Riviu Helper trên Android
+
+Credential của phiên helper được lưu trong kho credential hệ điều hành, gắn với
+đúng điện thoại và owner. Kho này thuộc PC và tài khoản hệ điều hành đang chạy;
+copy DB hoặc đăng nhập Orca trên PC khác không chuyển credential helper.
+
+Trước khi chuyển điện thoại sang PC khác, đóng Riviu ở PC cũ và chờ hoàn tất
+việc nhả phiên. Nếu có `HelperRecoveryRequired`, giữ journal và bằng chứng của
+lượt chưa rõ; cần đối soát hoặc bảo trì có chủ đích. Không xóa journal rồi coi
+như phiên cũ đã khôi phục clipboard hoặc nhả owner.
+
+Danh sách app chỉ dùng phiên helper đã được xác minh để đọc nhãn và biểu tượng.
+Việc liệt kê app hoặc đóng Riviu không tự nhận phiên helper mới. Luồng đăng
+kiểm helper và clipboard trong quyền điều khiển của máy trước khi chuyển ảnh.
+
+
+### Phiên điều khiển còn được giữ
+
+Khi máy bị giữ bởi một lượt tương tác đã kết thúc, chọn máy ở trang Thiết bị,
+mở **Bảo trì → Khôi phục phiên điều khiển**. Ứng dụng chuẩn bị đúng phiên trước
+khi xác nhận. Thao tác xác nhận dừng phiên TikTok được giữ và nhả quyền điều khiển;
+nó giữ nguyên kết quả chưa rõ của bản nháp hoặc bài đã gửi.
+
+Nếu mất phản hồi, bấm lại thao tác bảo trì chỉ tra cứu kế hoạch cũ. Không đăng lại
+bài hoặc xóa nhật ký để giải phóng máy. Khi việc đóng ứng dụng chưa hoàn tất vì
+phiên còn được giữ, ứng dụng cho phép bảo trì phiên đó; các lượt đăng và tương tác
+mới vẫn dừng. Sau khi bảo trì có biên nhận, đóng ứng dụng lại để hoàn tất.
+
 ## Sao lưu
 
 - Dừng nhận việc mới, chờ worker/lease drain và đóng app đúng quy trình. Ghi version,

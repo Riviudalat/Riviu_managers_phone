@@ -2,6 +2,7 @@
 use super::*;
 use anyhow::Context;
 use hierarchy::Tree;
+use crate::publish_submission::MetadataDiagnostic;
 
 fn normalize(text: &str) -> String {
     text.split_whitespace().collect::<Vec<_>>().join(" ")
@@ -15,6 +16,36 @@ impl std::fmt::Display for MatchedPhotoCopyFailure {
     }
 }
 impl std::error::Error for MatchedPhotoCopyFailure {}
+
+/// External availability is distinct from a phone/clipboard read failure.
+/// Caption, author and content-ID validation still reject through their existing path.
+#[derive(Debug, thiserror::Error)]
+#[error("TikTok public metadata unavailable (stage={stage:?}, HTTP status={http_status:?})")]
+pub(super) struct PublicMetadataUnavailable {
+    pub(super) stage: MetadataDiagnostic,
+    pub(super) http_status: Option<u16>,
+}
+
+#[derive(Debug, thiserror::Error)]
+#[error("canonical candidate awaits public metadata")]
+pub(super) struct CapturedMetadataFailure(pub crate::publish_submission::CapturedMetadataCandidate);
+
+fn retain_metadata_candidate(error: anyhow::Error, canonical: &str, caption: &str,
+    identity: &SubmissionIdentity) -> anyhow::Error {
+    use crate::publish_submission::*;
+    let Some(unavailable) = error.downcast_ref::<PublicMetadataUnavailable>() else { return error; };
+    let Ok(post_id) = validate_photo_identity(canonical, identity) else { return error; };
+    let now = chrono::Utc::now().to_rfc3339();
+    let captured = CapturedMetadataCandidate {
+        canonical_url: canonical.into(), post_id, expected_account: identity.account.clone(),
+        normalized_caption_sha256: normalized_caption_sha256(caption),
+        prepared_at: identity.prepared_at.clone(), submitted_at: identity.submitted_at.clone(),
+        captured_at: now.clone(), provenance: MetadataCandidateProvenance::MeasuredViewerClipboard,
+        metadata: MetadataAttempt { state: MetadataAttemptState::Unavailable, attempts: 1,
+            checked_at: now, stage: unavailable.stage, http_status: unavailable.http_status },
+    };
+    error.context(CapturedMetadataFailure(captured))
+}
 
 /// A durable other-assignment claim is negative evidence, never proof of a new post.
 #[derive(Debug, thiserror::Error)]
@@ -133,7 +164,7 @@ fn exclude_other_publication(
     Ok(())
 }
 
-fn validate_photo_identity(
+pub(super) fn validate_photo_identity(
     canonical: &str,
     identity: &SubmissionIdentity,
 ) -> anyhow::Result<String> {
@@ -352,14 +383,15 @@ pub(super) async fn capture_expanded_photo_link_counted(
     validate_public_link(&canonical, caption, identity)
         .await
         .map_err(|error| {
-            MatchedPhotoCopyFailure(LinkCapture::ReadFailed(format!(
-                "public metadata for {canonical}: {error:#}"
-            )))
+            let detail = format!("public metadata for {canonical}: {error:#}");
+            // Preserve the existing search/failure wrapper and the typed external cause.
+            retain_metadata_candidate(error, &canonical, caption, identity)
+                .context(MatchedPhotoCopyFailure(LinkCapture::ReadFailed(detail)))
         })?;
     Ok(canonical)
 }
 
-async fn validate_public_link(
+pub(super) async fn validate_public_link(
     canonical: &str,
     caption: &str,
     identity: &SubmissionIdentity,
@@ -373,23 +405,27 @@ async fn validate_public_link(
     let client = reqwest::Client::builder()
         .timeout(Duration::from_secs(15))
         .redirect(reqwest::redirect::Policy::none())
-        .build()?;
+        .build().map_err(|_| PublicMetadataUnavailable { stage: MetadataDiagnostic::RequestConfig, http_status: None })?;
     let mut response = client
         .get("https://www.tiktok.com/oembed")
         .query(&[("url", video_url.as_str())])
         .send()
-        .await?
-        .error_for_status()?;
-    anyhow::ensure!(
-        response.content_length().is_none_or(|size| size <= 262144),
-        "oembed too large"
-    );
+        .await.map_err(|error| PublicMetadataUnavailable { stage: MetadataDiagnostic::Request, http_status: error.status().map(|status| status.as_u16()) })?
+        .error_for_status().map_err(|error| PublicMetadataUnavailable { stage: MetadataDiagnostic::HttpStatus, http_status: error.status().map(|status| status.as_u16()) })?;
+    let status = Some(response.status().as_u16());
+    if !response.content_length().is_none_or(|size| size <= 262144) {
+        return Err(PublicMetadataUnavailable { stage: MetadataDiagnostic::BodyLimit, http_status: status }.into());
+    }
     let mut bytes = Vec::new();
-    while let Some(chunk) = response.chunk().await? {
-        anyhow::ensure!(bytes.len() + chunk.len() <= 262144, "oembed too large");
+    while let Some(chunk) = response.chunk().await
+        .map_err(|_| PublicMetadataUnavailable { stage: MetadataDiagnostic::BodyRead, http_status: status })? {
+        if bytes.len() + chunk.len() > 262144 {
+            return Err(PublicMetadataUnavailable { stage: MetadataDiagnostic::BodyLimit, http_status: status }.into());
+        }
         bytes.extend_from_slice(&chunk);
     }
-    let embed: serde_json::Value = serde_json::from_slice(&bytes)?;
+    let embed: serde_json::Value = serde_json::from_slice(&bytes)
+        .map_err(|_| PublicMetadataUnavailable { stage: MetadataDiagnostic::ResponseParse, http_status: status })?;
     validate_public_metadata(&embed, caption, &identity.account, &id)?;
     Ok(())
 }
@@ -481,9 +517,10 @@ pub(super) async fn capture_visible_video_link_counted(
     validate_public_link(&canonical, caption, identity)
         .await
         .map_err(|error| {
-            MatchedPhotoCopyFailure(LinkCapture::ReadFailed(format!(
-                "public metadata for {canonical}: {error:#}"
-            )))
+            let detail = format!("public metadata for {canonical}: {error:#}");
+            // Preserve the existing search/failure wrapper and the typed external cause.
+            retain_metadata_candidate(error, &canonical, caption, identity)
+                .context(MatchedPhotoCopyFailure(LinkCapture::ReadFailed(detail)))
         })?;
     Ok(canonical)
 }

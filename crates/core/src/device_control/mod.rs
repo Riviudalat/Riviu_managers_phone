@@ -66,6 +66,8 @@ pub enum DeviceControlError {
     BackgroundStreamTransitionBusy { udid: String },
     #[error("{count} device cleanup ticket(s) remain quarantined")]
     CleanupQuarantined { count: usize },
+    #[error("Interaction quarantine recovery refused: {reason}")]
+    QuarantineRecovery { reason: String },
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -130,6 +132,7 @@ pub struct DeviceControlPlane {
     clean_start_guard: Mutex<Option<Arc<CleanStartGuard>>>,
     app_completion_handler: Mutex<Option<Arc<AppCompletionHandler>>>,
     app_binding_resolver: Mutex<Option<Arc<DeviceAppBindingResolver>>>,
+    recovery_ledger_guard: Arc<Mutex<Option<Arc<InteractionRecoveryLedgerGuard>>>>,
 }
 
 type CleanStartGuard = dyn Fn(&str) -> Result<(), String> + Send + Sync;
@@ -137,6 +140,11 @@ type AppCompletionHandler = dyn Fn(&str, &str) -> Result<(), String> + Send + Sy
 pub type DeviceAppBindingFuture =
     Pin<Box<dyn Future<Output = Result<Option<String>, String>> + Send + 'static>>;
 pub type DeviceAppBindingResolver = dyn Fn(&str, &str) -> DeviceAppBindingFuture + Send + Sync;
+pub type InteractionRecoveryLedgerFuture =
+    Pin<Box<dyn Future<Output = Result<(), String>> + Send + 'static>>;
+/// Desktop validates exact persisted evidence and no active campaign; never a DB mutation.
+pub type InteractionRecoveryLedgerGuard =
+    dyn Fn(InteractionQuarantineRecoveryRequest) -> InteractionRecoveryLedgerFuture + Send + Sync;
 
 /// A completed phone task may release its session before other tasks allow app closure.
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
@@ -151,6 +159,11 @@ mod leases;
 mod roster;
 mod sessions;
 mod streams;
+pub use sessions::{
+    InteractionQuarantineSnapshot, InteractionQuarantineRecoveryRequest,
+    InteractionQuarantineRecoveryPlan, InteractionQuarantineRecoveryReceipt,
+    InteractionRecoveryStreamStopProof,
+};
 
 impl DeviceControlPlane {
     pub fn new(
@@ -178,6 +191,7 @@ impl DeviceControlPlane {
         let operation_locks = Arc::new(DeviceOperationLocks::default());
         let capacity_gate = Arc::new(tokio::sync::Mutex::new(()));
         let lifecycle = Arc::new(ControlPlaneLifecycle::default());
+        let recovery_ledger_guard = Arc::new(Mutex::new(None));
         let cleanup_handle = tokio::spawn(run_cleanup_worker(
             cleanup_rx,
             driver.clone(),
@@ -188,6 +202,7 @@ impl DeviceControlPlane {
             operation_locks.clone(),
             capacity_gate.clone(),
             cleanup_tx.clone(),
+            recovery_ledger_guard.clone(),
         ));
 
         Self {
@@ -207,6 +222,7 @@ impl DeviceControlPlane {
             clean_start_guard: Mutex::new(None),
             app_completion_handler: Mutex::new(None),
             app_binding_resolver: Mutex::new(None),
+            recovery_ledger_guard,
         }
     }
 
@@ -700,6 +716,9 @@ impl UiWithStreamContext {
             reservation: self.reservation.take()?,
             session: self.session.take()?,
             expected_generation: Some(self.start_proof.generation),
+            recorded_package: None,
+            recovery_process: None,
+            recovery_stop: None,
         })
     }
 }
@@ -718,6 +737,9 @@ struct DeviceCleanupTicket {
     reservation: ForegroundStreamReservation,
     session: Arc<dyn UiSession>,
     expected_generation: Option<u64>,
+    recorded_package: Option<String>,
+    recovery_process: Option<ProcessAbsenceProof>,
+    recovery_stop: Option<StreamStopProof>,
 }
 
 impl DeviceCleanupTicket {
@@ -896,6 +918,18 @@ impl Drop for ReservedUiCapacity {
 }
 
 enum WorkerCommand {
+    PrepareInteractionRecovery {
+        plane_id: Uuid,
+        activity: ContextActivityPermit,
+        request: InteractionQuarantineRecoveryRequest,
+        response: oneshot::Sender<Result<InteractionQuarantineRecoveryPlan, DeviceControlError>>,
+    },
+    ExecuteInteractionRecovery {
+        plane_id: Uuid,
+        activity: ContextActivityPermit,
+        plan_id: Uuid,
+        response: oneshot::Sender<Result<InteractionQuarantineRecoveryReceipt, DeviceControlError>>,
+    },
     Park {
         context: DeviceExclusiveContext,
         response: oneshot::Sender<Result<DeviceExclusiveContext, DeviceControlError>>,
@@ -1000,6 +1034,24 @@ impl ControlPlaneLifecycle {
         }
     }
 
+    /// Only explicit retained-session maintenance may enter after admission closes.
+    /// Registration is serialized with shutdown's final checks by shutdown_gate.
+    fn register_retained_maintenance(
+        self: &Arc<Self>,
+    ) -> Result<ContextActivityPermit, DeviceControlError> {
+        let mut state = self.state.lock();
+        match state.phase {
+            ControlPlanePhase::Running | ControlPlanePhase::ShuttingDown => {
+                state.outstanding += 1;
+                Ok(ContextActivityPermit {
+                    lifecycle: self.clone(),
+                    active: true,
+                })
+            }
+            ControlPlanePhase::Stopped => Err(DeviceControlError::ControlPlaneStopped),
+        }
+    }
+
     fn begin_shutdown(&self) {
         let mut state = self.state.lock();
         if state.phase == ControlPlanePhase::Running {
@@ -1049,6 +1101,8 @@ struct QuarantineStore {
     contexts: Mutex<Vec<DeviceExclusiveContext>>,
     sessions: Mutex<Vec<UiSessionContext>>,
     backgrounds: Mutex<Vec<BackgroundCleanupTicket>>,
+    recovery_plans: Mutex<HashMap<Uuid, InteractionQuarantineRecoveryPlan>>,
+    recovery_receipts: Mutex<HashMap<Uuid, InteractionQuarantineRecoveryReceipt>>,
     changed: Notify,
 }
 
@@ -1171,11 +1225,88 @@ async fn run_cleanup_worker(
     operation_locks: Arc<DeviceOperationLocks>,
     capacity_gate: Arc<tokio::sync::Mutex<()>>,
     cleanup_tx: mpsc::UnboundedSender<WorkerCommand>,
+    recovery_ledger_guard: Arc<Mutex<Option<Arc<InteractionRecoveryLedgerGuard>>>>,
 ) {
     let mut tasks = tokio::task::JoinSet::new();
     while let Some(command) = rx.recv().await {
         while tasks.try_join_next().is_some() {}
         match command {
+            WorkerCommand::PrepareInteractionRecovery {
+                plane_id,
+                activity,
+                request,
+                response,
+            } => {
+                let ledger_guard = recovery_ledger_guard.lock().clone();
+                let driver = driver.clone();
+                let work = work.clone();
+                let streams = streams.clone();
+                let quarantined = quarantined.clone();
+                let operation_locks = operation_locks.clone();
+                tasks.spawn(async move {
+                    let _activity = activity;
+                    let _operation = operation_locks.lock_one(&request.udid).await;
+                    sessions::prepare_recovery(
+                        &driver,
+                        &work,
+                        &streams,
+                        &quarantined,
+                        plane_id,
+                        request,
+                        ledger_guard,
+                        response,
+                    )
+                    .await;
+                });
+            }
+            WorkerCommand::ExecuteInteractionRecovery {
+                plane_id,
+                activity,
+                plan_id,
+                response,
+            } => {
+                let ledger_guard = recovery_ledger_guard.lock().clone();
+                let driver = driver.clone();
+                let work = work.clone();
+                let streams = streams.clone();
+                let quarantined = quarantined.clone();
+                let operation_locks = operation_locks.clone();
+                tasks.spawn(async move {
+                    let _activity = activity;
+                    if let Some(receipt) =
+                        quarantined.recovery_receipts.lock().get(&plan_id).cloned()
+                    {
+                        let _ = response.send(Ok(receipt));
+                        return;
+                    }
+                    let udid = quarantined
+                        .recovery_plans
+                        .lock()
+                        .get(&plan_id)
+                        .map(|plan| plan.binding.udid.clone());
+                    let Some(udid) = udid else {
+                        // Success publishes its receipt before removing the plan. Recheck
+                        // after plan lookup to cover a concurrent/lost-ACK completion.
+                        let receipt = quarantined.recovery_receipts.lock().get(&plan_id).cloned();
+                        let result = receipt
+                            .ok_or_else(|| sessions::recovery_error("unknown recovery plan"));
+                        let _ = response.send(result);
+                        return;
+                    };
+                    let _operation = operation_locks.lock_one(&udid).await;
+                    sessions::execute_recovery(
+                        &driver,
+                        &work,
+                        &streams,
+                        &quarantined,
+                        plane_id,
+                        plan_id,
+                        ledger_guard,
+                        response,
+                    )
+                    .await;
+                });
+            }
             WorkerCommand::Park { context, response } => {
                 let driver = driver.clone();
                 let streams = streams.clone();

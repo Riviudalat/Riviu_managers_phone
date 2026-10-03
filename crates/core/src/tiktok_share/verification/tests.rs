@@ -144,6 +144,7 @@ fn short_ellipsized_caption_requests_expansion_without_accepting_a_prefix() {
         public_link: None,
         trace_nonce: [0; 16],
         diagnostic: VerificationDiagnostic {
+            captured_metadata_candidate: None,
             publication_evidence: None,
             expanded_photo_error: None,
             candidate_trace: Vec::new(),
@@ -222,6 +223,7 @@ fn earlier_copied_photo_is_a_rejected_old_candidate_not_an_unresolved_caption() 
         public_link: None,
         trace_nonce: [0; 16],
         diagnostic: VerificationDiagnostic {
+            captured_metadata_candidate: None,
             publication_evidence: None,
             contract_version: 1,
             package: PACKAGE.into(),
@@ -339,6 +341,7 @@ async fn comments_recovery_observes_post_before_grid_and_never_backs_from_compos
             public_link: None,
             trace_nonce: [0; 16],
             diagnostic: VerificationDiagnostic {
+            captured_metadata_candidate: None,
                 publication_evidence: None,
                 candidate_trace: Vec::new(),
                 contract_version: 1,
@@ -1568,6 +1571,7 @@ fn a_changed_post_snapshot_cannot_combine_prior_caption_with_new_time() {
         public_link: None,
         trace_nonce: [0; 16],
         diagnostic: VerificationDiagnostic {
+            captured_metadata_candidate: None,
             publication_evidence: None,
             expanded_photo_error: None,
             candidate_trace: Vec::new(),

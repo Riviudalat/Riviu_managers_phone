@@ -993,8 +993,8 @@ impl AndroidDriver {
     /// to name them on every listing buys nothing. They keep their package names, which is
     /// what every row showed before this existed.
     ///
-    /// Best effort throughout: a phone with no helper keeps its package names and says so
-    /// once in the log rather than failing the listing.
+    /// Listing is lease-free and read-only. Only an already owned helper may enrich it;
+    /// an unobserved connection keeps package names without installing or claiming anything.
     pub(super) async fn name_apps_with_helper(
         &self,
         serial: &str,
@@ -1016,20 +1016,23 @@ impl AndroidDriver {
             }
         }
 
-        let helper = match self.try_attach_helper(serial).await {
-            Ok(Some(helper)) => helper,
-            Ok(None) => {
-                tracing::info!(
-                    serial,
-                    "không có Riviu helper — danh sách app chỉ có tên gói, không có nhãn/icon"
-                );
-                return;
-            }
-            Err(error) => {
-                tracing::warn!(serial, %error, "không gắn được helper để đọc nhãn app");
-                return;
-            }
+        // Discovery must never acquire a native helper owner or change IME/service state.
+        // Reuse a qualified connection only; provision belongs to an owned action path.
+        let _inventory = self.helper_inventory_lock(serial).read_owned().await;
+        let helper = self.helpers.lock().get(serial).cloned();
+        let Some(helper) = helper.filter(|helper| {
+            helper.is_scoped_canary() && !helper.cleanup_is_pending()
+        }) else {
+            tracing::debug!(
+                serial,
+                "chưa có phiên helper đã xác minh để đọc nhãn app; giữ tên gói, nhãn/icon chưa quan sát"
+            );
+            return;
         };
+        if helper.health().await.authenticated != Some(true) {
+            tracing::warn!(serial, "phiên helper chưa chứng minh quyền đọc nhãn app; giữ tên gói");
+            return;
+        }
         let described = match helper.describe_apps(&wanted, true).await {
             Ok(rows) => rows,
             Err(error) => {

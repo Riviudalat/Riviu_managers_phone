@@ -11,6 +11,15 @@ import {
 } from "react";
 import {
   agentBulkRepair,
+  agentHelperMaintenancePrepare,
+  agentHelperMaintenancePending,
+  agentHelperMaintenanceExecute,
+  type HelperMaintenancePlan,
+  agentQuarantineSnapshot,
+  agentQuarantinePrepare,
+  agentQuarantineExecute,
+  agentQuarantineReceipt,
+  type InteractionQuarantinePlan,
   agentListStatuses,
   deploymentFrontendReady,
   listDeviceWorkStates,
@@ -129,6 +138,9 @@ type NavigationIntent =
 type PendingNavigation = NavigationIntent & { settle: (activated: boolean) => void };
 
 function App() {
+  const helperMaintenanceRunning = useRef(false);
+  const quarantineMaintenanceRunning = useRef(false);
+  const [quarantinePending, setQuarantinePending] = useState<Map<string, InteractionQuarantinePlan>>(() => new Map());
   const [page, setPage] = useState<PageId>("control");
   const [operationSource, setOperationSource] = useState<OperationSourceRef>();
   useEffect(() => {
@@ -936,6 +948,174 @@ function App() {
                   }
                 }}
                 onStop={() => setSelected([])}
+                onHelperMaintenance={async () => {
+                  if (helperMaintenanceRunning.current) {
+                    pushToast("warn", "Helper đang được bảo trì", "Chờ lượt hiện tại kết thúc; không chạy lặp.");
+                    return;
+                  }
+                  const targets = devices.filter((device) =>
+                    device.platform === "android" && device.status !== "disconnected"
+                    && (!selected.length || selected.includes(device.udid)));
+                  if (!targets.length) {
+                    pushToast("warn", "Chưa có máy Android kết nối", "Chọn máy đang kết nối để khôi phục helper.");
+                    return;
+                  }
+                  helperMaintenanceRunning.current = true;
+                  // At most two serials in flight; every device retains its own activity result.
+                  const bounded = async <T,>(items: T[], action: (item: T) => Promise<void>) => {
+                    let next = 0;
+                    await Promise.all(Array.from({ length: Math.min(2, items.length) }, async () => {
+                      while (next < items.length) {
+                        const item = items[next++];
+                        await action(item);
+                      }
+                    }));
+                  };
+                  const plans: HelperMaintenancePlan[] = [];
+                  const observationOnly = new Set<string>();
+                  try {
+                    await bounded(targets, async (device) => {
+                      pushToast("info", `Helper · ${device.udid}`, "Đang chuẩn bị phạm vi bảo trì.");
+                      try {
+                        const pending = await agentHelperMaintenancePending(device.udid);
+                        if (pending) {
+                          plans.push(pending.plan);
+                          if (pending.observationOnly) observationOnly.add(pending.plan.maintenanceId);
+                          pushToast("info", `Helper · ${device.udid}`, pending.observationOnly
+                            ? "Đang đối soát phiên cũ; không dừng helper lần nữa."
+                            : "Kế hoạch chưa chạy đang chờ xác nhận.");
+                        } else {
+                          plans.push(await agentHelperMaintenancePrepare(device.udid));
+                        }
+                      } catch (error) {
+                        toastError(`Không chuẩn bị được helper · ${device.udid}`, error);
+                      }
+                    });
+                    if (!plans.length) return;
+                    const proceed = await requestConfirm({
+                      title: `Khôi phục helper trên ${plans.length} máy Android?`,
+                      message: `Phạm vi: ${plans.map((plan) => plan.udid).join(", ")}. ${observationOnly.size} kế hoạch cũ chỉ được quan sát, không dừng lại tiến trình. Clipboard cũ có thể không chứng minh được khôi phục; bản ghi cũ được giữ nguyên, không đăng lại bài. App sẽ kiểm tra lại helper trước khi chạy công việc mới.`,
+                      confirmLabel: "Khôi phục helper",
+                    });
+                    if (!proceed) {
+                      for (const plan of plans) pushToast("info", `Helper · ${plan.udid}`, "Đã hủy trước thực thi.");
+                      return;
+                    }
+                    await bounded(plans, async (plan) => {
+                      try {
+                        const receipt = await agentHelperMaintenanceExecute(plan, true, observationOnly.has(plan.maintenanceId));
+                        pushToast("warn", `Helper · ${receipt.udid}`, "Đã kết thúc phiên helper cũ và giữ bản ghi. Chưa xác nhận clipboard cũ đã khôi phục; app sẽ kiểm tra phiên mới trước khi chạy.");
+                      } catch (error) {
+                        toastError(`Khôi phục helper chưa hoàn tất · ${plan.udid}`, error);
+                      }
+                    });
+                  } finally {
+                    helperMaintenanceRunning.current = false;
+                  }
+                }}
+                onQuarantineMaintenance={async () => {
+                  if (quarantineMaintenanceRunning.current) {
+                    pushToast("warn", "Đang khôi phục phiên điều khiển", "Chờ lượt hiện tại kết thúc; không chạy lặp.");
+                    return;
+                  }
+                  const targets = devices.filter((device) =>
+                    device.platform === "android" && device.status !== "disconnected"
+                    && (!selected.length || selected.includes(device.udid)));
+                  if (!targets.length) {
+                    pushToast("warn", "Chưa có máy Android kết nối", "Chọn máy đang kết nối để khôi phục phiên điều khiển.");
+                    return;
+                  }
+                  quarantineMaintenanceRunning.current = true;
+                  const bounded = async <T,>(items: T[], action: (item: T) => Promise<void>) => {
+                    let next = 0;
+                    await Promise.all(Array.from({ length: Math.min(2, items.length) }, async () => {
+                      while (next < items.length) await action(items[next++]);
+                    }));
+                  };
+                  const plans: InteractionQuarantinePlan[] = [];
+                  const reconcile = async (plan: InteractionQuarantinePlan) => {
+                    pushToast("info", `Phiên điều khiển · ${plan.binding.udid}`, `Chỉ tra cứu kế hoạch ${plan.planId}; không thực thi lại.`);
+                    const receipt = await agentQuarantineReceipt(plan.planId);
+                    if (!receipt) {
+                      pushToast("warn", `Phiên điều khiển · ${plan.binding.udid}`,
+                        `Chưa có kết quả cho kế hoạch ${plan.planId}. Bấm lại Bảo trì chỉ tra cứu kế hoạch này; không thực thi lại, không đăng lại bài.`);
+                      return;
+                    }
+                    acceptReceipt(plan, receipt.plan);
+                  };
+                  const acceptReceipt = (plan: InteractionQuarantinePlan, received: InteractionQuarantinePlan) => {
+                    if (received.planId !== plan.planId || received.binding.udid !== plan.binding.udid) {
+                      throw new Error("Biên nhận không khớp kế hoạch đã xác nhận; giữ nguyên trạng thái chưa rõ.");
+                    }
+                    setQuarantinePending((pending) => {
+                      const next = new Map(pending);
+                      next.delete(plan.binding.udid);
+                      return next;
+                    });
+                    pushToast("warn", `Phiên điều khiển · ${plan.binding.udid}`,
+                      "Đã dừng phiên TikTok được giữ lại và nhả quyền điều khiển. Bản nháp và kết quả bấm Đăng (Post) trước đó vẫn chưa được xác minh; không đăng lại bài.");
+                  };
+                  try {
+                    await bounded(targets, async (device) => {
+                      try {
+                        const pending = quarantinePending.get(device.udid);
+                        if (pending) {
+                          // A sent plan is observation-only from now on, even if lookup returns null.
+                          await reconcile(pending);
+                          return;
+                        }
+                        pushToast("info", `Phiên điều khiển · ${device.udid}`, "Đang chuẩn bị phạm vi khôi phục; chưa ghi lên điện thoại.");
+                        const snapshots = await agentQuarantineSnapshot(device.udid);
+                        if (!snapshots.length) {
+                          pushToast("info", `Phiên điều khiển · ${device.udid}`, "Không có phiên được giữ lại cần khôi phục; bỏ qua máy này.");
+                          return;
+                        }
+                        if (snapshots.length !== 1) {
+                          throw new Error(`Có ${snapshots.length} phiên được giữ lại; không thể chọn một phiên an toàn, không thực thi.`);
+                        }
+                        const plan = await agentQuarantinePrepare(device.udid);
+                        if (plan.binding.udid !== device.udid || snapshots[0].udid !== device.udid) {
+                          throw new Error("Kế hoạch không khớp máy đã chọn; không thực thi.");
+                        }
+                        plans.push(plan);
+                      } catch (error) {
+                        toastError(`Chưa khôi phục phiên điều khiển · ${device.udid}`, error);
+                      }
+                    });
+                    if (!plans.length) return;
+                    const proceed = await requestConfirm({
+                      title: `Khôi phục phiên điều khiển trên ${plans.length} máy Android?`,
+                      message: `Phạm vi đã chuẩn bị: ${plans.map((plan) => `${plan.binding.udid} · ${plan.package} (hết hạn ${new Date(plan.expiresAtMs).toLocaleTimeString("vi-VN")})`).join(", ")}. Chuẩn bị không ghi lên điện thoại. Xác nhận sẽ dừng phiên TikTok được giữ lại và nhả quyền điều khiển. Bản nháp và kết quả bấm Đăng (Post) trước đó vẫn chưa được xác minh; không đăng lại bài. Nếu mất phản hồi, chỉ tra cứu đúng kế hoạch cũ, không tự chạy lại.`,
+                      confirmLabel: "Dừng phiên và nhả điều khiển",
+                      danger: true,
+                    });
+                    if (!proceed) {
+                      for (const plan of plans) pushToast("info", `Phiên điều khiển · ${plan.binding.udid}`, "Đã hủy trước thực thi; không ghi lên điện thoại.");
+                      return;
+                    }
+                    await bounded(plans, async (plan) => {
+                      if (Date.now() >= plan.expiresAtMs) {
+                        pushToast("warn", `Phiên điều khiển · ${plan.binding.udid}`, "Kế hoạch đã hết hạn; không thực thi. Cần chuẩn bị và xác nhận lượt mới.");
+                        return;
+                      }
+                      // Save identity before sending: an IPC error never grants permission to replay.
+                      setQuarantinePending((pending) => new Map(pending).set(plan.binding.udid, plan));
+                      try {
+                        const receipt = await agentQuarantineExecute(plan.planId);
+                        acceptReceipt(plan, receipt.plan);
+                      } catch (error) {
+                        toastError(`Khôi phục chưa rõ kết quả · ${plan.binding.udid}`, error);
+                        try {
+                          await reconcile(plan);
+                        } catch (lookupError) {
+                          toastError(`Không tra được kế hoạch ${plan.planId} · ${plan.binding.udid}`, lookupError);
+                        }
+                      }
+                    });
+                  } finally {
+                    quarantineMaintenanceRunning.current = false;
+                  }
+                }}
                 onInstall={async () => {
                   const targets = selected.length
                     ? selected

@@ -63,18 +63,17 @@ fn upgrade_attempts() -> &'static parking_lot::Mutex<std::collections::HashSet<S
 /// Header the helper's shared token travels in. Mirrors `HttpServer.TOKEN_HEADER`.
 pub const TOKEN_HEADER: &str = "X-Riviu-Token";
 
-/// The token this process uses for one phone, minted on first use.
-///
-/// Per **serial**, not one for the fleet: a token is only as contained as the thing that holds
-/// it, and a helper on one phone has no business being able to answer for another. Per
-/// **process**, not persisted: it lives as long as the desktop does, so there is nothing on
-/// either disk to steal, and a restart simply re-provisions.
-fn helper_token(serial: &str) -> String {
+fn helper_tokens() -> &'static parking_lot::Mutex<std::collections::HashMap<String, String>> {
     static TOKENS: std::sync::OnceLock<
         parking_lot::Mutex<std::collections::HashMap<String, String>>,
     > = std::sync::OnceLock::new();
-    let tokens = TOKENS.get_or_init(Default::default);
-    let mut tokens = tokens.lock();
+    TOKENS.get_or_init(Default::default)
+}
+
+/// Legacy/debug credentials remain per-serial RAM state. Production owners use
+/// an immutable client credential persisted under their exact identity in the OS vault.
+fn helper_token(serial: &str) -> String {
+    let mut tokens = helper_tokens().lock();
     tokens
         .entry(serial.to_string())
         .or_insert_with(|| {
@@ -85,6 +84,12 @@ fn helper_token(serial: &str) -> String {
             )
         })
         .clone()
+}
+
+// Old non-persisted intents may reuse only an existing process credential.
+// Never manufacture a replacement while resuming an unresolved owner.
+fn existing_helper_token(serial: &str) -> Option<String> {
+    helper_tokens().lock().get(serial).cloned()
 }
 
 /// One helper request, over `adb forward` to loopback on the phone.
@@ -133,6 +138,7 @@ const MAX_RESPONSE_BYTES: usize = 8 * 1024 * 1024;
 #[derive(Clone)]
 pub struct HelperClient {
     http: reqwest::Client,
+    token: std::sync::Arc<str>,
     adb: AdbProgram,
     serial: String,
     base: String,
@@ -217,6 +223,79 @@ impl HelperClient {
     }
     pub(crate) fn cleanup_is_pending(&self) -> bool {
         self.pending_clipboard.lock().is_some() || self.clipboard_baseline.lock().is_some()
+    }
+
+    /// Read only the retained protected owner under the same IME/lifecycle locks
+    /// as clipboard settlement. No claim, release, IME switch, or restoration.
+    pub(crate) async fn verify_owned_cleanup_ready(
+        &self,
+        serial: &str,
+        session_epoch: &str,
+    ) -> anyhow::Result<riviu_core::driver::OwnedSessionCleanupProof> {
+        anyhow::ensure!(
+            serial == self.serial && !session_epoch.is_empty(),
+            "helper cleanup serial/session binding missing"
+        );
+        let _serial = ime_lock(&self.serial).lock_owned().await;
+        let closed = self.lifecycle.lock().await;
+        anyhow::ensure!(
+            !*closed && self.production_runtime,
+            "retained production helper unavailable"
+        );
+        anyhow::ensure!(
+            !self.cleanup_is_pending(),
+            "helper clipboard/baseline cleanup unresolved"
+        );
+        let owner = self
+            .canary
+            .as_ref()
+            .context("retained helper owner missing")?;
+        let checkpoint = owner.report.join("ime-checkpoint.json");
+        if checkpoint.try_exists()? {
+            let bytes = std::fs::read(checkpoint)?;
+            anyhow::ensure!(
+                bytes.len() <= 16 * 1024,
+                "helper cleanup checkpoint exceeds bound"
+            );
+            let saved: Value = serde_json::from_slice(&bytes)?;
+            anyhow::ensure!(
+                saved["serial"].as_str() == Some(serial)
+                    && saved["androidUser"] == 0
+                    && saved["ownerId"].as_str() == Some(owner.owner_id.as_str())
+                    && saved["serviceInstance"].as_str() == Some(owner.instance.as_str())
+                    && saved["generation"].as_str() == Some(owner.generation.as_str())
+                    && saved.get("pending").is_some_and(Value::is_null)
+                    && saved.get("baseline").is_some_and(Value::is_null),
+                "helper durable cleanup unresolved or identity changed"
+            );
+        }
+        let nonce = uuid::Uuid::new_v4().simple().to_string();
+        let value = self
+            .post_json_open("/v1/session/status", json!({"nonce":nonce}))
+            .await?;
+        anyhow::ensure!(
+            value["ok"] == true
+                && value["nonce"].as_str() == Some(nonce.as_str())
+                && value["serviceInstance"].as_str() == Some(owner.instance.as_str())
+                && value["ownerId"].as_str() == Some(owner.owner_id.as_str())
+                && value["ownerGeneration"].as_str() == Some(owner.generation.as_str())
+                && value["ownership"] == "owned",
+            "helper owner identity changed"
+        );
+        anyhow::ensure!(
+            !self.cleanup_is_pending(),
+            "helper cleanup changed during owner proof"
+        );
+        Ok(riviu_core::driver::OwnedSessionCleanupProof {
+            udid: serial.to_owned(),
+            session_epoch: session_epoch.to_owned(),
+            helper_owner_id: owner.owner_id.clone(),
+            helper_instance: owner.instance.clone(),
+            helper_generation: owner.generation.clone(),
+            input_sealed: true,
+            clipboard_pending: false,
+            baseline_pending: false,
+        })
     }
     /// Read-only diagnostic transport using non-secret bytes; no helper service request.
     pub async fn probe_stdin_transport(adb: &AdbProgram, serial: &str) -> anyhow::Result<()> {
@@ -713,12 +792,17 @@ impl HelperClient {
     }
 
     fn at(adb: AdbProgram, serial: &str, host_port: u16) -> anyhow::Result<Self> {
+        Self::at_with_token(adb, serial, host_port, helper_token(serial).into())
+    }
+
+    fn at_with_token(adb: AdbProgram, serial: &str, host_port: u16, token: std::sync::Arc<str>) -> anyhow::Result<Self> {
         let http = reqwest::Client::builder()
             .timeout(HTTP_TIMEOUT)
             .build()
             .context("dựng HTTP client cho Riviu helper")?;
         Ok(Self {
             http,
+            token,
             adb,
             serial: serial.to_string(),
             base: format!("http://127.0.0.1:{host_port}"),
@@ -746,14 +830,19 @@ impl HelperClient {
         }
         if let Some(owner) = &self.canary {
             if self.production_runtime {
-                runtime::release(&self.adb, &self.serial, owner).await?;
+                runtime::release(&self.adb, &self.serial, owner, self.token.as_ref(), Some(self.host_port)).await?;
             } else {
                 release_canary_owner(&self.adb, &self.serial, owner).await?;
             }
         }
         let mut failures = Vec::new();
-        if let Err(error) = frames::remove_forward(&self.adb, &self.serial, self.host_port).await {
+        if let Err(error) = runtime::remove_owned_forward(&self.adb, &self.serial, self.host_port).await {
             failures.push(format!("remove tcp:{} forward: {error}", self.host_port));
+        }
+        if failures.is_empty() && self.production_runtime {
+            if let Some(owner) = &self.canary {
+                runtime::finish_release(&self.serial, owner).await?;
+            }
         }
         // Legacy token provisioning has no instance/generation ownership proof.
         // Never force-stop the package: it can terminate a replacement owner or IME.
@@ -820,7 +909,7 @@ impl HelperClient {
         let response = self
             .http
             .get(format!("{}/status", self.base))
-            .header(TOKEN_HEADER, helper_token(&self.serial))
+            .header(TOKEN_HEADER, self.token.as_ref())
             .send()
             .await
             .with_context(|| format!("GET {}/status", self.base))?;
@@ -1128,10 +1217,15 @@ impl HelperClient {
     async fn post_json(&self, path: &str, body: Value) -> anyhow::Result<Value> {
         let closed = self.lifecycle.lock().await;
         anyhow::ensure!(!*closed, "helper connection is closed");
+        self.post_json_open(path, body).await
+    }
+
+    /// Caller holds the lifecycle lock; avoid re-entering it for owner status.
+    async fn post_json_open(&self, path: &str, body: Value) -> anyhow::Result<Value> {
         let response = self
             .http
             .post(format!("{}{path}", self.base))
-            .header(TOKEN_HEADER, helper_token(&self.serial))
+            .header(TOKEN_HEADER, self.token.as_ref())
             .json(&body)
             .send()
             .await

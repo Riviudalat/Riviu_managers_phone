@@ -145,6 +145,7 @@ pub enum VerificationReason {
     IdentityMissing,
     WrongApp,
     ReadFailed,
+    MetadataUnavailable,
     StaleSnapshot,
     ProfileUnavailable,
     NavigationBudgetExhausted,
@@ -190,6 +191,7 @@ impl VerificationReason {
             Self::IdentityMissing => "submissionIdentityMissing",
             Self::WrongApp => "wrongApp",
             Self::ReadFailed => "readFailed",
+            Self::MetadataUnavailable => "metadataUnavailable",
             Self::StaleSnapshot => "staleSnapshot",
             Self::ProfileUnavailable => "profileUnavailable",
             Self::NavigationBudgetExhausted => "navigationBudgetExhausted",
@@ -236,6 +238,7 @@ impl VerificationReason {
             Self::IdentityMissing => "Thiếu bằng chứng tài khoản hoặc thời điểm trước Đăng; chưa xác minh liên kết.",
             Self::WrongApp => "Ứng dụng đang mở khác bản TikTok của lượt đăng; chưa điều hướng để lấy liên kết.",
             Self::ReadFailed => "Đọc màn hình xác minh thất bại; giữ nguyên bài và chờ lần kiểm tra tiếp theo.",
+            Self::MetadataUnavailable => "Đã đọc được liên kết nhưng chưa đủ dữ liệu công khai của TikTok để xác minh bài; giữ nguyên bài và chờ lượt xác minh tiếp theo.",
             Self::StaleSnapshot => "Ảnh chụp cây giao diện không mới hơn lần đọc trước; chưa dùng dữ liệu này để thao tác.",
             Self::ProfileUnavailable => "Hết thời gian chờ tab Hồ sơ xuất hiện; chưa tìm được đường đến bài đã gửi.",
             Self::NavigationBudgetExhausted => "Đã dùng hết ba bước phục hồi màn hình; chưa đến được hồ sơ để lấy liên kết.",
@@ -286,6 +289,8 @@ pub struct VerificationPublicationEvidence {
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct VerificationDiagnostic {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub captured_metadata_candidate: Option<crate::publish_submission::CapturedMetadataCandidate>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub publication_evidence: Option<VerificationPublicationEvidence>,
     pub contract_version: u32,
@@ -445,6 +450,44 @@ fn candidate_budget_exhausted(
 pub struct VerificationCapture {
     pub outcome: OwnPostLink,
     pub diagnostic: VerificationDiagnostic,
+}
+
+impl VerificationCapture {
+    /// Reuse the phone verifier's metadata contract without opening a phone session.
+    pub async fn verify_metadata_candidate(
+        captured: &crate::publish_submission::CapturedMetadataCandidate,
+        caption: &str,
+        other_publication_urls: &[String],
+    ) -> anyhow::Result<crate::publish_submission::MetadataAttempt> {
+        use crate::publish_submission::*;
+        let identity = SubmissionIdentity {
+            account: captured.expected_account.clone(),
+            prepared_at: captured.prepared_at.clone(),
+            submitted_at: captured.submitted_at.clone(),
+        };
+        let parsed = url::Url::parse(&captured.canonical_url)?;
+        anyhow::ensure!(parsed.scheme() == "https"
+            && super::canonical_post_path(&parsed).as_deref() == Some(captured.canonical_url.as_str()),
+            "candidate is not canonical");
+        anyhow::ensure!(!other_publication_urls.contains(&captured.canonical_url), "candidate belongs to another publication");
+        anyhow::ensure!(super::photo_proof::validate_photo_identity(&captured.canonical_url, &identity)? == captured.post_id,
+            "candidate post ID changed");
+        anyhow::ensure!(normalized_caption_sha256(caption) == captured.normalized_caption_sha256,
+            "candidate caption changed");
+        let captured_at = chrono::DateTime::parse_from_rfc3339(&captured.captured_at)?;
+        let submitted_at = chrono::DateTime::parse_from_rfc3339(&captured.submitted_at)?;
+        anyhow::ensure!(captured_at >= submitted_at && captured_at <= chrono::Utc::now(), "candidate capture time invalid");
+        let result = super::photo_proof::validate_public_link(&captured.canonical_url, caption, &identity).await;
+        let (state, stage, http_status) = match result {
+            Ok(()) => (MetadataAttemptState::Verified, MetadataDiagnostic::PublicMetadata, None),
+            Err(error) => match error.downcast_ref::<super::photo_proof::PublicMetadataUnavailable>() {
+                Some(error) => (MetadataAttemptState::Unavailable, error.stage, error.http_status),
+                None => (MetadataAttemptState::Rejected, MetadataDiagnostic::MetadataIdentity, None),
+            },
+        };
+        Ok(MetadataAttempt { state, stage, http_status,
+            attempts: captured.metadata.attempts.saturating_add(1), checked_at: chrono::Utc::now().to_rfc3339() })
+    }
 }
 
 #[derive(Debug, PartialEq, Eq)]
@@ -664,7 +707,18 @@ fn remember_candidate(
     candidate: &mut Option<(String, VerificationDiagnostic)>,
     proof: (String, VerificationDiagnostic),
 ) -> Result<(), VerificationReason> {
-    if candidate.is_some() {
+    if let Some((canonical, prior_proof)) = candidate.as_ref() {
+        // A shifted grid can expose the same post twice. Coalesce only exact
+        // canonical identities after both observations passed public metadata proof.
+        if canonical == &proof.0
+            && matches!(
+                prior_proof.stage,
+                "videoPublicProof" | "expandedPhotoPublicProof"
+            )
+            && matches!(proof.1.stage, "videoPublicProof" | "expandedPhotoPublicProof")
+        {
+            return Ok(());
+        }
         return Err(VerificationReason::MultipleMatchingPosts);
     }
     *candidate = Some(proof);
@@ -731,6 +785,9 @@ impl Capture<'_> {
     }
 
     fn matched_photo_failure(&mut self, error: &anyhow::Error) -> Option<VerificationReason> {
+        if let Some(candidate) = error.downcast_ref::<super::photo_proof::CapturedMetadataFailure>() {
+            self.diagnostic.captured_metadata_candidate = Some(candidate.0.clone());
+        }
         if error.is::<super::photo_proof::OtherPublication>() {
             return Some(VerificationReason::OtherPublication);
         }
@@ -748,6 +805,9 @@ impl Capture<'_> {
             LinkCapture::AmbiguousCopyRow => VerificationReason::CopyAmbiguous,
             LinkCapture::ClipboardUnwritable(_) => VerificationReason::ClipboardUnwritable,
             LinkCapture::NotAPostLink(_) => VerificationReason::ClipboardNotPostLink,
+            LinkCapture::ReadFailed(_) if error.is::<super::photo_proof::PublicMetadataUnavailable>() => {
+                VerificationReason::MetadataUnavailable
+            }
             LinkCapture::ReadFailed(_) => VerificationReason::ReadFailed,
             _ => VerificationReason::ShareUnavailable,
         })
@@ -1290,6 +1350,13 @@ impl Capture<'_> {
             self.other_publication_urls,
         )
         .await;
+        // Retain a copied candidate even if the metadata request consumed the
+        // remaining phone-search window. The next lookup needs no phone session.
+        if let Err(error) = &result {
+            if error.is::<super::photo_proof::CapturedMetadataFailure>() {
+                self.matched_photo_failure(error);
+            }
+        }
         if self.expired() {
             return Err(VerificationReason::SearchBudgetExhausted);
         }
@@ -1309,6 +1376,11 @@ impl Capture<'_> {
                         self.other_publication_urls,
                     )
                     .await;
+                    if let Err(error) = &photo {
+                        if error.is::<super::photo_proof::CapturedMetadataFailure>() {
+                            self.matched_photo_failure(error);
+                        }
+                    }
                     if self.expired() {
                         return Err(VerificationReason::SearchBudgetExhausted);
                     }
@@ -1591,6 +1663,7 @@ impl Capture<'_> {
                                     | VerificationReason::CopyBudgetExhausted
                                     | VerificationReason::ShareUnavailable
                                     | VerificationReason::ReadFailed
+                                    | VerificationReason::MetadataUnavailable
                             ) {
                                 return Err(reason);
                             }
@@ -1735,6 +1808,7 @@ pub async fn capture_submission_link_excluding(
         public_link: None,
         trace_nonce: *uuid::Uuid::new_v4().as_bytes(),
         diagnostic: VerificationDiagnostic {
+            captured_metadata_candidate: None,
             publication_evidence: None,
             contract_version: CONTRACT_VERSION,
             package: plan.labels.package().into(),
@@ -1785,6 +1859,7 @@ pub async fn capture_submission_link_excluding(
                     OwnPostLink::Sheet(LinkCapture::CopyDidNotLand)
                 }
                 VerificationReason::Processing => OwnPostLink::ReadFailed(reason.message().into()),
+                VerificationReason::MetadataUnavailable => OwnPostLink::SubmissionUnverified,
                 VerificationReason::ClipboardUnreadable => {
                     OwnPostLink::Sheet(LinkCapture::ReadFailed("Không đọc được clipboard".into()))
                 }

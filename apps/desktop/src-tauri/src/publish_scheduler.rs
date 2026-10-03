@@ -5,7 +5,7 @@ pub(crate) fn capacity_warning(
     limits: riviu_core::db::PublishLimits,
 ) -> Option<String> {
     let starts = limits.transfer.min(limits.device_total);
-    (jobs>starts).then(||format!("{at}: {jobs} bài cùng giờ, tối đa {starts} lượt chuyển media đồng thời. Bài chưa được cấp lượt sau 30 giây sẽ Lỡ lịch; nên giãn giờ."))
+    (jobs>starts).then(||format!("{at}: {jobs} bài cùng giờ, tối đa {starts} lượt chuyển media đồng thời. Đợt được nhận trong 30 giây sẽ chờ lượt; máy bắt đầu muộn hơn giờ hẹn. Nên giãn giờ để giảm thời gian chờ."))
 }
 #[cfg(test)]
 mod tests {

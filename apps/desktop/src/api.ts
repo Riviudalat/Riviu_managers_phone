@@ -728,6 +728,78 @@ export async function agentBulkRepair(udids: string[]) {
   return invoke<AgentStatus[]>("agent_bulk_repair", { udids });
 }
 
+export interface HelperMaintenancePlan {
+  maintenanceId: string;
+  udid: string;
+  submitted: Array<{
+    assignmentId: string;
+    campaignId: string;
+    publicationId: string | null;
+    assignmentRevision: number;
+    campaignRevision: number;
+    state: string;
+    campaignState: string;
+    intentSha256: string | null;
+  }>;
+}
+
+export interface HelperMaintenanceReceipt {
+  maintenanceId: string;
+  udid: string;
+  state: "superseded";
+  recordsRetained: boolean;
+  exactReleaseProved: false;
+  clipboardRestorationProved: boolean;
+  oldObligations: "archivedUnresolved";
+  packageProcessAbsent: true;
+}
+
+export function agentHelperMaintenancePrepare(udid: string) {
+  return invoke<HelperMaintenancePlan>("agent_helper_maintenance_prepare", { udid });
+}
+
+export function agentHelperMaintenancePending(udid: string) {
+  return invoke<{ plan: HelperMaintenancePlan; observationOnly: boolean } | null>("agent_helper_maintenance_pending", { udid });
+}
+
+export function agentHelperMaintenanceExecute(plan: HelperMaintenancePlan, confirmed: boolean, reconcileOnly = false) {
+  return invoke<HelperMaintenanceReceipt>("agent_helper_maintenance_execute", { plan, confirmed, reconcileOnly });
+}
+
+// UI projections only; native owns the full binding and validates prepared identity.
+export interface InteractionQuarantineSnapshot {
+  udid: string;
+}
+
+export interface InteractionQuarantinePlan {
+  planId: string;
+  binding: { udid: string };
+  package: string;
+  expiresAtMs: number;
+}
+
+export interface InteractionQuarantineReceipt {
+  plan: InteractionQuarantinePlan;
+}
+
+export function agentQuarantineSnapshot(udid: string) {
+  return invoke<InteractionQuarantineSnapshot[]>("agent_quarantine_snapshot", { udid });
+}
+
+export function agentQuarantinePrepare(udid: string) {
+  return invoke<InteractionQuarantinePlan>("agent_quarantine_prepare", { udid });
+}
+
+/** Send a confirmed prepared ID once; never retry an uncertain mutation. */
+export function agentQuarantineExecute(planId: string) {
+  return invoke<InteractionQuarantineReceipt>("agent_quarantine_execute", { planId, confirmed: true });
+}
+
+/** Read-only reconciliation by exact ID, including after a lost execute ACK. */
+export function agentQuarantineReceipt(planId: string) {
+  return invoke<InteractionQuarantineReceipt | null>("agent_quarantine_receipt", { planId });
+}
+
 export async function driverMode() {
   return invoke<string>("driver_mode");
 }

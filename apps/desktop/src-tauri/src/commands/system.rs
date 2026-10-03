@@ -382,7 +382,11 @@ pub async fn update_install(
     let worker = std::thread::Builder::new()
         .name("riviu-updater-install".into())
         .spawn(move || {
-            crate::graceful_shutdown(&handle);
+            crate::graceful_shutdown(&handle).map_err(|_| {
+                tauri_plugin_updater::Error::Io(std::io::Error::other(
+                    "helper cleanup chưa hoàn tất; không chạy installer",
+                ))
+            })?;
             update.install(bytes)
         })
         .map_err(|error| format!("không tạo được luồng cài đặt: {error}"))?;

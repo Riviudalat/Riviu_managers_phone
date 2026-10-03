@@ -175,6 +175,7 @@ fn ordered_controls(
     mut rows: Vec<ElementBox>,
     screen: Screen,
     bottom: f64,
+    wanted: usize,
 ) -> Option<Vec<ElementBox>> {
     if rows.is_empty() {
         return None;
@@ -190,6 +191,51 @@ fn ordered_controls(
         .any(|p| p[0].x == p[1].x && p[0].y == p[1].y)
     {
         return None;
+    }
+    // A footer may clip the last row's selectors without hiding them from XML.
+    // Prove its columns and pitch against two full preceding rows before
+    // excluding it. Never turn the missing height into a tap rectangle.
+    let offset = rows.first()?.description.as_deref().unwrap_or("").trim();
+    let offset = if offset.is_empty() {
+        0
+    } else {
+        offset.parse::<usize>().ok()?.checked_sub(1)?
+    };
+    // Even an untappable footer is evidence of extra album entries.
+    if offset.checked_add(rows.len())? > wanted {
+        return None;
+    }
+    let last_y = rows.last()?.y;
+    let last_start = rows.iter().position(|row| row.y == last_y)?;
+    if last_start > 0 {
+        let previous_y = rows[last_start - 1].y;
+        let previous_start = rows.iter().position(|row| row.y == previous_y)?;
+        if previous_start > 0 {
+            let above_y = rows[previous_start - 1].y;
+            let above_start = rows.iter().position(|row| row.y == above_y)?;
+            let above = &rows[above_start..previous_start];
+            let previous = &rows[previous_start..last_start];
+            let footer = &rows[last_start..];
+            if above.len() == previous.len()
+                && footer.len() == previous.len()
+                && previous_y - above_y > 1.0
+                && ((last_y - previous_y) - (previous_y - above_y)).abs()
+                    <= ROW_PITCH_TOLERANCE
+                && above.iter().zip(previous).zip(footer).all(|((a, p), f)| {
+                    a.x == p.x
+                        && a.width == p.width
+                        && a.height == p.height
+                        && f.x == p.x
+                        && f.width == p.width
+                        && f.height > 0.0
+                        && f.height < p.height
+                        && f.height == footer[0].height
+                        && f.description.as_deref().unwrap_or("").trim().is_empty()
+                })
+            {
+                rows.truncate(last_start);
+            }
+        }
     }
     Some(rows)
 }
@@ -442,7 +488,7 @@ fn visible_selection(
     {
         return None;
     }
-    let mut rows = ordered_controls(rows, screen, next.y)?;
+    let mut rows = ordered_controls(rows, screen, next.y, grid.wanted)?;
     // Trill 38.3.2, phones 2/3, 15/09/2026: after selecting 12 of 13 photos,
     // the scrolled top row (ordinals 4..6) is clipped from 63px to 8px.
     // Only discard that already-selected prefix after proving its original
@@ -825,7 +871,7 @@ impl<P: TapPlanner> Composer<'_, P> {
             trace.reason(SelectionReason::NextControlAmbiguous);
             return Ok(Selection::NotEnoughSelected);
         };
-        let Some(initial) = ordered_controls(initial, screen, next_button.y) else {
+        let Some(initial) = ordered_controls(initial, screen, next_button.y, wanted) else {
             trace.reason(SelectionReason::InitialBoundsInvalid);
             return Ok(Selection::NotEnoughSelected);
         };

@@ -355,6 +355,7 @@ impl Database {
         conn: &Connection,
         run: &PublishPipelineRun,
         now: i64,
+        admitted_at: chrono::NaiveDateTime,
     ) -> anyhow::Result<()> {
         let raw: Option<String> = conn.query_row(
             "SELECT run_at FROM publish_campaigns WHERE id=?1",
@@ -365,9 +366,22 @@ impl Database {
             .map(|v| {
                 chrono::NaiveDateTime::parse_from_str(&v, "%Y-%m-%dT%H:%M:%S")
                     .or_else(|_| chrono::NaiveDateTime::parse_from_str(&v, "%Y-%m-%dT%H:%M"))
-                    .map(|v| v.and_utc().timestamp_millis() + 30_000)
+                    .map(|at| {
+                        // The campaign claim is the schedule admission boundary.
+                        // An on-time accepted cohort keeps waiting for its stage
+                        // capacity; waiting never manufactures a started timestamp.
+                        // Late resumed runs retain their original per-job deadline.
+                        let on_time = admitted_at >= at
+                            && admitted_at.signed_duration_since(at).num_milliseconds() <= 30_000;
+                        if on_time {
+                            None
+                        } else {
+                            Some(at.and_utc().timestamp_millis() + 30_000)
+                        }
+                    })
             })
-            .transpose()?;
+            .transpose()?
+            .flatten();
         let rows: Vec<(String,String,String,String)> = conn.prepare(
             "SELECT id,publication_id,udid,state FROM publish_assignments WHERE campaign_id=?1
              AND effect_intent IS NULL AND state IN ('queued','scheduled','ready','imported','failed_before_dispatch')")?

@@ -4,6 +4,77 @@ use serde::{Deserialize, Serialize};
 
 pub const VERIFICATION_CONTRACT_VERSION: u32 = 1;
 
+/// A copied link is a lookup candidate, never publication or Sheet authority.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CapturedMetadataCandidate {
+    pub canonical_url: String,
+    pub post_id: String,
+    pub expected_account: String,
+    pub normalized_caption_sha256: String,
+    pub prepared_at: Option<String>,
+    pub submitted_at: String,
+    pub captured_at: String,
+    pub provenance: MetadataCandidateProvenance,
+    pub metadata: MetadataAttempt,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub enum MetadataCandidateProvenance {
+    MeasuredViewerClipboard,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub enum MetadataAttemptState {
+    Unavailable,
+    Rejected,
+    Verified,
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub enum MetadataDiagnostic {
+    RequestConfig,
+    Request,
+    HttpStatus,
+    BodyLimit,
+    BodyRead,
+    ResponseParse,
+    CandidateBinding,
+    MetadataIdentity,
+    PublicMetadata,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct MetadataAttempt {
+    pub state: MetadataAttemptState,
+    pub attempts: u64,
+    pub checked_at: String,
+    pub stage: MetadataDiagnostic,
+    pub http_status: Option<u16>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PendingMetadataCandidate {
+    pub schema_version: u32,
+    pub campaign_id: String,
+    pub assignment_id: String,
+    pub bundle_id: String,
+    pub intent_sha256: String,
+    pub caption_sha256: String,
+    pub captured: CapturedMetadataCandidate,
+}
+
+pub fn normalized_caption_sha256(caption: &str) -> String {
+    use sha2::Digest;
+    let normalized = caption.split_whitespace().collect::<Vec<_>>().join(" ");
+    format!("{:x}", sha2::Sha256::digest(normalized.as_bytes()))
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
 pub struct PublishVerificationBuild {
