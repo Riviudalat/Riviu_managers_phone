@@ -1660,6 +1660,10 @@ fn trust_reading_for_roster(reading: &crate::adb::DeviceListReading) -> Result<(
 
 #[async_trait]
 impl DeviceDriver for AndroidDriver {
+    async fn read_active_app_bundle(&self, udid: &str) -> anyhow::Result<String> {
+        self.adb.foreground_package(udid).await
+    }
+
     async fn shutdown_owned_processes(&self) -> anyhow::Result<()> {
         let agents = self.agents.lock().drain().collect::<Vec<_>>();
         let helpers = self
@@ -3025,6 +3029,82 @@ mod borrowed_shutdown_tests;
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A recorder at the real ADB process boundary. It accepts only foreground reads on
+    /// this fixture serial; session setup, launch, force-stop and input cannot pass.
+    struct ForegroundAdbFixture {
+        root: PathBuf,
+        executable: PathBuf,
+    }
+    impl ForegroundAdbFixture {
+        fn new(stdout: &str, stderr: &str, exit_code: i32) -> Self {
+            let root = std::env::temp_dir().join(format!("riviu-active-app-{}", uuid::Uuid::new_v4()));
+            std::fs::create_dir(&root).unwrap();
+            std::fs::write(root.join("stdout.txt"), stdout).unwrap();
+            std::fs::write(root.join("stderr.txt"), stderr).unwrap();
+            let executable = root.join(if cfg!(windows) { "adb-fixture.cmd" } else { "adb-fixture.sh" });
+            #[cfg(windows)]
+            let script = format!(
+                "@echo off\r\nif not \"%~1\"==\"-s\" exit /b 9\r\nif not \"%~2\"==\"fixture-active-read\" exit /b 9\r\nif not \"%~3\"==\"shell\" exit /b 9\r\n>>\"%~dp0calls.txt\" echo \"%~4\"\r\ntype \"%~dp0stdout.txt\"\r\n>&2 type \"%~dp0stderr.txt\"\r\nexit /b {exit_code}\r\n"
+            );
+            #[cfg(not(windows))]
+            let script = format!(
+                "#!/bin/sh\n[ \"$1\" = '-s' ] && [ \"$2\" = 'fixture-active-read' ] && [ \"$3\" = 'shell' ] || exit 9\nfixture_root=$(dirname \"$0\")\nprintf '\"%s\"\\n' \"$4\" >> \"$fixture_root/calls.txt\"\ncat \"$fixture_root/stdout.txt\"\ncat \"$fixture_root/stderr.txt\" >&2\nexit {exit_code}\n"
+            );
+            std::fs::write(&executable, script).unwrap();
+            #[cfg(unix)]
+            {
+                use std::os::unix::fs::PermissionsExt;
+                std::fs::set_permissions(&executable, std::fs::Permissions::from_mode(0o700)).unwrap();
+            }
+            Self { root, executable }
+        }
+        fn calls(&self) -> Vec<String> {
+            std::fs::read_to_string(self.root.join("calls.txt"))
+                .unwrap_or_default().lines().map(|line| line.trim_matches('"').to_owned()).collect()
+        }
+    }
+    impl Drop for ForegroundAdbFixture {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_dir_all(&self.root);
+        }
+    }
+
+    #[tokio::test]
+    async fn device_driver_active_app_read_uses_foreground_resolver_without_a_session() {
+        for (stdout, stderr, exit_code, expected) in [
+            ("mCurrentFocus=Window{a u0 com.ss.android.ugc.trill/MainActivity}\n", "", 0, Some("com.ss.android.ugc.trill")),
+            ("mCurrentFocus=Window{a u0 com.zhiliaoapp.musically/MainActivity}\n", "", 0, Some("com.zhiliaoapp.musically")),
+            ("mCurrentFocus=Window{a u0 com.android.chrome/MainActivity}\n", "", 0, Some("com.android.chrome")),
+            ("mCurrentFocus=Window{a u0 StatusBar}\n", "", 0, None),
+            ("mCurrentFocus=null\n", "", 0, None),
+            ("", "", 0, None),
+            ("", "device offline\n", 1, None),
+        ] {
+            let fixture = ForegroundAdbFixture::new(stdout, stderr, exit_code);
+            let driver = AndroidDriver::with_adb(
+                AdbProgram::at(fixture.executable.clone()), adb::AdbOrigin::Configured,
+                &AndroidDriverConfig { automatic_setup_allowed: false, ..Default::default() },
+            );
+            let boundary: &dyn DeviceDriver = &driver;
+            let result = boundary.read_active_app_bundle("fixture-active-read").await;
+            if let Some(expected) = expected {
+                assert_eq!(result.expect("unique foreground must read without creating a session"), expected);
+                assert_eq!(fixture.calls(), ["dumpsys window | grep mCurrentFocus"]);
+            } else {
+                let error = format!("{:#}", result.expect_err("unknown or failed foreground cannot prove recovery package"));
+                assert!(error.contains("could not read the foreground package"), "{error}");
+                if exit_code != 0 { assert!(error.contains("device offline"), "{error}"); }
+                assert_eq!(fixture.calls(), [
+                    "dumpsys window | grep mCurrentFocus",
+                    "dumpsys window windows | grep mCurrentFocus",
+                    "dumpsys window displays | grep mCurrentFocus",
+                ]);
+            }
+            assert!(driver.agents.lock().is_empty() && driver.helpers.lock().is_empty());
+            assert!(driver.ports.lock().is_empty() && driver.forwarded.lock().is_empty());
+        }
+    }
 
     #[tokio::test]
     async fn dual_package_foreground_probe_handles_plain_windows_and_displays() {

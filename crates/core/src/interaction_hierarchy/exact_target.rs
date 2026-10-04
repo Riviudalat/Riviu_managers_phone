@@ -137,6 +137,7 @@ async fn open_target(
                 Err(error)
                     if error.downcast_ref::<TargetLinkMismatch>().is_some()
                         && !redispatched
+                        && Instant::now() >= deadline
                         && ((target_package == "com.zhiliaoapp.musically"
                             && matches!(labels.resource_version(), Some("46.0.41" | "45.7.3")))
                             || (target_package == "com.ss.android.ugc.trill"
@@ -144,8 +145,9 @@ async fn open_target(
                 {
                     // Measured Global and Trill 38.3.2 can retain a normal feed
                     // card after VIEW. A copied different post ID proves this
-                    // arrival missed the target. Reopen only the pinned URL once;
-                    // all public actions still require the exact canonical proof.
+                    // arrival missed the target only after the original loading window.
+                    // A wrong card during loading must not restart an in-flight VIEW.
+                    // Reopen the pinned URL once; public actions still need exact proof.
                     ensure_not_cancelled(stop)?;
                     session
                         .reopen_url_in_app(&expected.normalized_url, target_package)
@@ -725,7 +727,11 @@ mod tests {
         let mismatch = error.downcast_ref::<TargetLinkMismatch>().unwrap();
         assert_eq!(mismatch.expected_url, TARGET_URL);
         assert_eq!(mismatch.observed_url, WRONG_URL);
-        assert_eq!(session.opens.lock().len(), 1);
+        // The measured fallback may reopen this exact pinned link once, after waiting.
+        assert_eq!(*session.opens.lock(), vec![
+            (TARGET_URL.into(), PACKAGE.into()),
+            (TARGET_URL.into(), PACKAGE.into()),
+        ]);
         assert!(session.navigation_taps.load(Ordering::Relaxed) >= 4);
     }
 

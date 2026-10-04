@@ -118,19 +118,8 @@ fn state(
         generation,
     })
 }
-fn empty(value: &State) -> bool {
-    (value.text.is_empty()
-        || (value.hint
-            && [
-                "add comment...",
-                "add comment…",
-                "add comment",
-                "thêm bình luận...",
-                "thêm bình luận…",
-                "thêm bình luận",
-            ]
-            .contains(&value.text.trim().to_lowercase().as_str())))
-        && !value.armed
+fn empty_with_hint(value: &State, expected_hint: Option<&str>) -> bool {
+    crate::tiktok_drawer::empty_draft(&value.text, value.hint, value.armed, expected_hint)
 }
 
 /// Pre-typing identity reads cannot authorize cleanup after session/assignment changes.
@@ -145,6 +134,7 @@ pub(super) struct DraftGuard<'a> {
     caption: String,
     generation: u64,
     text: String,
+    expected_hint: Option<String>,
 }
 fn scope_identity(session: &dyn UiSession) -> Option<(String, Option<String>, String)> {
     session
@@ -163,6 +153,22 @@ async fn bounded<T>(
 pub(super) async fn ensure_empty_before_typing(
     session: &dyn UiSession,
     labels: TikTokControls,
+) -> Result<(), DraftCleanup> {
+    ensure_empty_before_typing_with_hint(session, labels, None).await
+}
+
+pub(super) async fn ensure_empty_before_typing_for_reply(
+    session: &dyn UiSession,
+    labels: TikTokControls,
+    expected_hint: &str,
+) -> Result<(), DraftCleanup> {
+    ensure_empty_before_typing_with_hint(session, labels, Some(expected_hint)).await
+}
+
+async fn ensure_empty_before_typing_with_hint(
+    session: &dyn UiSession,
+    labels: TikTokControls,
+    expected_hint: Option<&str>,
 ) -> Result<(), DraftCleanup> {
     if !session.supports_accessibility_readback() {
         return Ok(());
@@ -185,7 +191,10 @@ pub(super) async fn ensure_empty_before_typing(
     if session.gui_session_epoch() != epoch || scope_identity(session) != scope {
         return Err(DraftCleanup::RefusedBindingChanged);
     }
-    if !empty(&baseline) {
+    if !baseline.focused {
+        return Err(DraftCleanup::FailedReadback);
+    }
+    if !empty_with_hint(&baseline, expected_hint) {
         return Err(DraftCleanup::RefusedDraftChanged);
     }
     Ok(())
@@ -196,6 +205,22 @@ impl<'a> DraftGuard<'a> {
         session: &'a dyn UiSession,
         labels: TikTokControls,
         text: &str,
+    ) -> Option<Self> {
+        Self::capture_with_hint(session, labels, text, None).await
+    }
+    pub(super) async fn capture_for_reply(
+        session: &'a dyn UiSession,
+        labels: TikTokControls,
+        text: &str,
+        expected_hint: &str,
+    ) -> Option<Self> {
+        Self::capture_with_hint(session, labels, text, Some(expected_hint)).await
+    }
+    async fn capture_with_hint(
+        session: &'a dyn UiSession,
+        labels: TikTokControls,
+        text: &str,
+        expected_hint: Option<&str>,
     ) -> Option<Self> {
         let deadline = Instant::now() + Duration::from_secs(4);
         let epoch = session.gui_session_epoch();
@@ -225,7 +250,8 @@ impl<'a> DraftGuard<'a> {
             labels,
         )
         .ok()?;
-        if !empty(&baseline)
+        if !baseline.focused
+            || !empty_with_hint(&baseline, expected_hint)
             || session.gui_session_epoch() != epoch
             || scope_identity(session) != scope
         {
@@ -240,6 +266,7 @@ impl<'a> DraftGuard<'a> {
             caption,
             generation: baseline.generation,
             text: text.into(),
+            expected_hint: expected_hint.map(str::to_owned),
         })
     }
     pub(super) fn exact_text(&mut self, text: &str) {
@@ -297,7 +324,7 @@ impl<'a> DraftGuard<'a> {
         if before.generation <= self.generation {
             return DraftCleanup::FailedReadback;
         }
-        if empty(&before) {
+        if empty_with_hint(&before, self.expected_hint.as_deref()) {
             return DraftCleanup::ClearedAndVerified;
         }
         if before.hint || !before.focused || before.text != self.text {
@@ -320,7 +347,7 @@ impl<'a> DraftGuard<'a> {
         if after.generation <= before.generation {
             return DraftCleanup::FailedReadback;
         }
-        if empty(&after) {
+        if empty_with_hint(&after, self.expected_hint.as_deref()) {
             DraftCleanup::ClearedAndVerified
         } else if dispatched.is_err() {
             DraftCleanup::FailedClear

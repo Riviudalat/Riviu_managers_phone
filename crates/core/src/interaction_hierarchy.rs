@@ -1120,21 +1120,21 @@ where
     // it down the interaction path's after-effect channel, which retires the assignment
     // `Uncertain` — unretryable — for a message that never reached the field. A transport
     // error is still pre-Send; typing ACK loss separately requires verified draft settlement.
+    // The collapsed root field has no Send until focus expands it. Focus once, then prove
+    // the empty composer; never tap its old geometry again after that proof.
+    match drawer.focus_field(&field, stop, None).await {
+        Ok(true) => {}
+        Ok(false) => return Ok(outcome(CommentVerdict::NoSendControl, String::new(), String::new(), None)),
+        Err(error) => return focus_failure_before_typing(error),
+    }
     let mut draft_guard = draft_cleanup::DraftGuard::capture(session, labels, text).await;
     draft_cleanup::ensure_empty_before_typing(session, labels).await.map_err(|cleanup| HierarchySendFailure::DraftCleanupPending {
         cleanup, error: anyhow::anyhow!("pre-typing empty draft baseline unproved; no text or Send dispatched"),
     })?;
     let result = async {
-        let typed = match drawer.focus_and_type(&field, text, stop).await {
+        let typed = match drawer.type_focused(text, stop, None).await {
             Ok(typed) => typed,
-            Err(_) => {
-                return Ok(outcome(
-                    CommentVerdict::SendFlowInterrupted,
-                    String::new(),
-                    String::new(),
-                    None,
-                ));
-            }
+            Err(error) => return focus_failure_before_typing(error),
         };
         if typed != crate::tiktok_drawer::TypedInto::Typed {
             // Nothing to read back on a refusal, and a drawer left open with a lit draft makes
@@ -1261,6 +1261,18 @@ where
     }.await;
     finish_draft_settlement(session, labels, draft_guard.as_ref(), drawer.typing_attempted(), effect_gate.crossed(), result).await
         .map(|(mut outcome, cleanup)| { outcome.cleanup = cleanup; outcome })
+}
+
+fn focus_failure_before_typing(error: anyhow::Error) -> Result<HierarchySendOutcome, HierarchySendFailure> {
+    use crate::tiktok_drawer::FocusedDraftFailure;
+    let cleanup = match error.downcast_ref::<FocusedDraftFailure>() {
+        Some(FocusedDraftFailure::BindingChanged) => DraftCleanup::RefusedBindingChanged,
+        Some(FocusedDraftFailure::ReadUnproved) => DraftCleanup::FailedReadback,
+        Some(FocusedDraftFailure::DraftChanged) => DraftCleanup::RefusedDraftChanged,
+        None => return Ok(HierarchySendOutcome::interrupted_before_send()),
+    };
+    // No text from this run was attempted, but a foreign/unknown current draft still blocks retry.
+    Err(HierarchySendFailure::DraftCleanupPending { cleanup, error })
 }
 
 async fn finish_draft_settlement<T>(
@@ -2672,16 +2684,21 @@ where
     // Same rule as the opening comment's path: a refusal is a verdict, not a transport
     // error. Any attempted typing, including a lost ACK, must settle the owned draft
     // before retry; unknown or changed drafts are never erased.
-    let mut draft_guard = draft_cleanup::DraftGuard::capture(session, labels, text).await;
-    draft_cleanup::ensure_empty_before_typing(session, labels).await.map_err(|cleanup| HierarchySendFailure::DraftCleanupPending {
+    match drawer.focus_field(&field, stop, Some(&placeholder)).await {
+        Ok(true) => {}
+        Ok(false) => return Ok(Err(ReplyRefusal::NoComposer)),
+        Err(error) => return focus_failure_before_typing(error).map(Ok),
+    }
+    // This exact hint already passed the parent check. A root hint, literal draft text,
+    // or a hint for another parent cannot authorize typing or settle this reply's clear.
+    let mut draft_guard = draft_cleanup::DraftGuard::capture_for_reply(session, labels, text, &placeholder).await;
+    draft_cleanup::ensure_empty_before_typing_for_reply(session, labels, &placeholder).await.map_err(|cleanup| HierarchySendFailure::DraftCleanupPending {
         cleanup, error: anyhow::anyhow!("pre-typing empty draft baseline unproved; no text or Send dispatched"),
     })?;
     let result = async {
-        let typed = match drawer.focus_and_type(&field, text, stop).await {
+        let typed = match drawer.type_focused(text, stop, Some(&placeholder)).await {
             Ok(typed) => typed,
-            Err(_) => {
-                return Ok(Ok(HierarchySendOutcome::interrupted_before_send()));
-            }
+            Err(error) => return focus_failure_before_typing(error).map(Ok),
         };
         if typed != crate::tiktok_drawer::TypedInto::Typed {
             return Ok(Ok(HierarchySendOutcome {

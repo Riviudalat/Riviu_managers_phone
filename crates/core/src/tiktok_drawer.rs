@@ -189,6 +189,44 @@ pub struct CommentDrawer<'a, P: TapPlanner> {
     labels: TikTokControls,
     plan_tap: P,
     typing_attempted: bool,
+    focused_binding: Option<FocusBinding>,
+}
+
+struct FocusedComposer {
+    generation: u64,
+    text: String,
+    hint: bool,
+    send: ElementBox,
+}
+
+struct FocusBinding {
+    epoch: String,
+    scope: Option<(String, Option<String>, String)>,
+    composer: Option<FocusedComposer>,
+}
+
+#[derive(Debug, thiserror::Error)]
+pub(crate) enum FocusedDraftFailure {
+    #[error("Comment composer binding changed")]
+    BindingChanged,
+    #[error("Comment composer state unproved")]
+    ReadUnproved,
+    #[error("Comment composer draft changed")]
+    DraftChanged,
+}
+
+pub(crate) fn empty_draft(text: &str, hint: bool, armed: bool, expected_hint: Option<&str>) -> bool {
+    if let Some(expected) = expected_hint {
+        return hint && text == expected && !armed;
+    }
+    (text.is_empty() || (hint && [
+        "add comment...", "add comment…", "add comment",
+        "thêm bình luận...", "thêm bình luận…", "thêm bình luận",
+    ].contains(&text.trim().to_lowercase().as_str()))) && !armed
+}
+
+fn scope_identity(session: &dyn UiSession) -> Option<(String, Option<String>, String)> {
+    session.gui_scope().map(|scope| (scope.run_id, scope.assignment_id, scope.device_id))
 }
 
 enum OpenForPost {
@@ -204,6 +242,7 @@ impl<'a, P: TapPlanner> CommentDrawer<'a, P> {
             labels,
             plan_tap,
             typing_attempted: false,
+            focused_binding: None,
         }
     }
 
@@ -453,10 +492,7 @@ impl<'a, P: TapPlanner> CommentDrawer<'a, P> {
         text: &str,
         stop: &AtomicBool,
     ) -> anyhow::Result<TypedInto> {
-        anyhow::ensure!(
-            !stop.load(Ordering::Relaxed),
-            "Comment stopped before focus"
-        );
+        anyhow::ensure!(!stop.load(Ordering::Relaxed), "Comment stopped before focus");
         self.tap_inside(field).await?;
         let Some(send) = self.send_query() else {
             return Ok(TypedInto::NoSendControl);
@@ -464,6 +500,112 @@ impl<'a, P: TapPlanner> CommentDrawer<'a, P> {
         let Some(button) = self.await_element(DRAWER_WINDOW, send, stop).await? else {
             return Ok(TypedInto::NoSendControl);
         };
+        if button.enabled {
+            return Ok(TypedInto::SendPreArmed);
+        }
+        anyhow::ensure!(!stop.load(Ordering::Relaxed), "Comment stopped before typing");
+        self.typing_attempted = true;
+        self.session.type_text(text).await?;
+        Ok(TypedInto::Typed)
+    }
+
+    /// Focus once and retain its owner and field state for the subsequent empty-draft proof.
+    /// A visible Send control alone cannot prove that text will target this composer.
+    pub(crate) async fn focus_field(
+        &mut self,
+        field: &ElementBox,
+        stop: &AtomicBool,
+        expected_hint: Option<&str>,
+    ) -> anyhow::Result<bool> {
+        self.focused_binding = None;
+        anyhow::ensure!(
+            !stop.load(Ordering::Relaxed),
+            "Comment stopped before focus"
+        );
+        let epoch = self.session.gui_session_epoch();
+        let scope = scope_identity(self.session);
+        if self.session.supports_accessibility_readback() && epoch.is_empty() {
+            return Err(FocusedDraftFailure::BindingChanged.into());
+        }
+        self.tap_inside(field).await?;
+        let Some(query) = self.send_query() else {
+            return Ok(false);
+        };
+        if !self.session.supports_accessibility_readback() {
+            // Legacy backends retain their single Send lookup in type_focused.
+            if self.session.gui_session_epoch() != epoch || scope_identity(self.session) != scope {
+                return Err(FocusedDraftFailure::BindingChanged.into());
+            }
+            self.focused_binding = Some(FocusBinding { epoch, scope, composer: None });
+            return Ok(true);
+        }
+        let deadline = Instant::now() + DRAWER_WINDOW;
+        let mut retried = false;
+        loop {
+            let result = read_before_deadline(self.read_focused_composer(query, expected_hint, true), deadline, stop).await;
+            if self.session.gui_session_epoch() != epoch || scope_identity(self.session) != scope {
+                return Err(FocusedDraftFailure::BindingChanged.into());
+            }
+            match result {
+                Ok(ReadWaitResult::Ready(Some(composer))) => {
+                    self.focused_binding = Some(FocusBinding { epoch, scope, composer: Some(composer) });
+                    return Ok(true);
+                }
+                Ok(ReadWaitResult::Ready(None)) => {}
+                Ok(ReadWaitResult::Cancelled | ReadWaitResult::DeadlineExceeded) => return Ok(false),
+                Err(error) if !retried && crate::driver::classify_read_failure(&error)
+                    == crate::driver::ReadFailureKind::Transient => {
+                    retried = true;
+                }
+                Err(error) => return Err(error),
+            }
+            sleep(DRAWER_POLL.min(deadline.saturating_duration_since(Instant::now())), stop).await;
+        }
+    }
+
+    async fn read_focused_composer(&self, query: ElementQuery<'_>, expected_hint: Option<&str>, waiting_for_focus: bool) -> anyhow::Result<Option<FocusedComposer>> {
+        if self.session.active_app_bundle().await? != self.labels.package() {
+            return Err(FocusedDraftFailure::BindingChanged.into());
+        }
+        snapshot_focused_composer(self.session.hierarchy_source_snapshot().await?, self.labels.package(), query, expected_hint, waiting_for_focus)
+    }
+
+    /// Re-prove the same focused field in a newer snapshot, without re-tapping stale geometry.
+    /// The caller has already checked that its captured text/hint is the expected empty draft.
+    pub(crate) async fn type_focused(&mut self, text: &str, stop: &AtomicBool, expected_hint: Option<&str>) -> anyhow::Result<TypedInto> {
+        let binding = self.focused_binding.take()
+            .ok_or_else(|| anyhow::anyhow!("Comment focus baseline unavailable"))?;
+        let bound = || self.session.gui_session_epoch() == binding.epoch
+            && scope_identity(self.session) == binding.scope;
+        if !bound() { return Err(FocusedDraftFailure::BindingChanged.into()); }
+        let Some(query) = self.send_query() else {
+            return Ok(TypedInto::NoSendControl);
+        };
+        let button = if let Some(baseline) = binding.composer.as_ref() {
+            let observed = match read_before_deadline(
+                self.read_focused_composer(query, expected_hint, false), Instant::now() + DRAWER_WINDOW, stop,
+            ).await? {
+                ReadWaitResult::Ready(value) => value,
+                ReadWaitResult::Cancelled | ReadWaitResult::DeadlineExceeded => None,
+            };
+            if !bound() { return Err(FocusedDraftFailure::BindingChanged.into()); }
+            let Some(observed) = observed else { return Ok(TypedInto::NoSendControl); };
+            if observed.generation <= baseline.generation {
+                return Err(FocusedDraftFailure::ReadUnproved.into());
+            }
+            if !empty_draft(&observed.text, observed.hint, observed.send.enabled, expected_hint)
+                || observed.text != baseline.text || observed.hint != baseline.hint
+            {
+                return Err(FocusedDraftFailure::DraftChanged.into());
+            }
+            observed.send
+        } else {
+            let Some(button) = self.await_element(DRAWER_WINDOW, query, stop).await? else {
+                return Ok(TypedInto::NoSendControl);
+            };
+            button
+        };
+        if !bound() { return Err(FocusedDraftFailure::BindingChanged.into()); }
         if button.enabled {
             return Ok(TypedInto::SendPreArmed);
         }
@@ -663,6 +805,63 @@ impl<'a, P: TapPlanner> CommentDrawer<'a, P> {
             .await;
         }
     }
+}
+
+fn snapshot_focused_composer(
+    snapshot: crate::HierarchySourceSnapshot,
+    package: &str,
+    query: ElementQuery<'_>,
+    expected_hint: Option<&str>,
+    waiting_for_focus: bool,
+) -> anyhow::Result<Option<FocusedComposer>> {
+    let generation = snapshot.generation;
+    let send = snapshot_send_control(snapshot.clone(), package, query)
+        .map_err(|_| FocusedDraftFailure::ReadUnproved)?;
+    let tree = crate::ui_automation::tree::Tree::parse(snapshot)
+        .map_err(|_| FocusedDraftFailure::ReadUnproved)?;
+    let fields = tree.matching(package, ElementQuery::ClassName(EDIT_TEXT));
+    if !fields.iter().all(|index| matches!(tree.nodes[*index].attr("focused"), "true" | "false")) {
+        return Err(FocusedDraftFailure::ReadUnproved.into());
+    }
+    let focused: Vec<_> = fields.iter().copied()
+        .filter(|index| tree.nodes[*index].attr("focused") == "true").collect();
+    let index = match focused.as_slice() {
+        [index] => index,
+        [] if fields.len() == 1 => &fields[0],
+        _ => return Err(FocusedDraftFailure::ReadUnproved.into()),
+    };
+    let node = &tree.nodes[*index];
+    if node.visibility() != Some(true) || node.attr("enabled") != "true"
+        || node.attr("password") == "true"
+    {
+        return Err(FocusedDraftFailure::ReadUnproved.into());
+    }
+    let hint = match node.attribute("showing-hint") {
+        Some("true") => true,
+        Some("false") => false,
+        _ => return Err(FocusedDraftFailure::ReadUnproved.into()),
+    };
+    let text = node.attribute("text")
+        .ok_or(FocusedDraftFailure::ReadUnproved)?.to_owned();
+    let Some(send) = send else {
+        // A drained focus tap may precede keyboard expansion. Only a known empty,
+        // unfocused field may keep waiting; missing Send never authorizes typing.
+        if waiting_for_focus && focused.is_empty() && empty_draft(&text, hint, false, expected_hint) {
+            return Ok(None);
+        }
+        return Err(FocusedDraftFailure::ReadUnproved.into());
+    };
+    if focused.is_empty() {
+        // A no-focus refusal is retryable only while the one current field is proved empty.
+        if !empty_draft(&text, hint, send.enabled, expected_hint) {
+            return Err(FocusedDraftFailure::DraftChanged.into());
+        }
+        if !waiting_for_focus {
+            return Err(FocusedDraftFailure::ReadUnproved.into());
+        }
+        return Ok(None);
+    }
+    Ok(Some(FocusedComposer { generation, text, hint, send }))
 }
 
 /// Keep identity, geometry and the arm/disarm bit from one fresh source. Android

@@ -3530,7 +3530,7 @@ dependencies = [
 
 [[package]]
 name = "riviu-deployment-checker"
-version = "0.2.72"
+version = "0.2.73"
 dependencies = [
  "anyhow",
  "dirs",
@@ -3568,7 +3568,7 @@ dependencies = [
 
 [[package]]
 name = "riviu-managers-phone"
-version = "0.2.72"
+version = "0.2.73"
 dependencies = [
  "anyhow",
  "apk-info",
