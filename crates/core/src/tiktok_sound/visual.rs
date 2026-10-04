@@ -5,6 +5,77 @@ use base64::Engine;
 use sha2::{Digest, Sha256};
 use unicode_normalization::{char::is_combining_mark, UnicodeNormalization};
 
+// Scoped only to the existing pool observation. No extra reads or effect permission;
+// production tracing retains the binding even without opt-in stage diagnostics.
+struct VisualSoundDiagnostics {
+    scope: Option<crate::ui_automation::GuiScope>,
+    epoch: String,
+    started: Instant,
+    deadline: Instant,
+    generation: u64,
+    request_id: Option<String>,
+    observation_id: Option<String>,
+    vietnamese_request_id: Option<String>,
+    vietnamese_observation_id: Option<String>,
+    selected_tab: Option<usize>,
+    tab_bounds: Vec<[u32; 4]>,
+    saw_hot: bool,
+    same_unselected_tabs: Option<bool>,
+    navigation_attempts: u32,
+    rejection: Option<&'static str>,
+    rejection_events: u8,
+}
+tokio::task_local! {
+    static VISUAL_SOUND_DIAGNOSTICS: std::cell::RefCell<VisualSoundDiagnostics>;
+}
+impl VisualSoundDiagnostics {
+    fn emit(&self, phase: &'static str, acknowledged: Option<bool>) {
+        let now = Instant::now();
+        let remaining_effective_budget_ms = SOUND_BUDGET.try_with(|budget| budget.deadline
+            .saturating_duration_since(now).as_millis().min(u64::MAX as u128) as u64).ok();
+        macro_rules! emit {
+            ($level:expr) => {
+                tracing::event!($level,
+                    serial=?self.scope.as_ref().map(|scope| scope.device_id.as_str()),
+                    runId=?self.scope.as_ref().map(|scope| scope.run_id.as_str()),
+                    assignmentId=?self.scope.as_ref().and_then(|scope| scope.assignment_id.as_deref()),
+                    session=%self.epoch, captureGeneration=self.generation,
+                    requestId=?self.request_id, observationId=?self.observation_id,
+                    vietnameseRequestId=?self.vietnamese_request_id,
+                    vietnameseObservationId=?self.vietnamese_observation_id,
+                    selectedTabIndex=?self.selected_tab, tabBounds=?self.tab_bounds,
+                    sawHot=self.saw_hot, sameUnselectedTabs=?self.same_unselected_tabs,
+                    navigationAttempts=self.navigation_attempts, rejection=?self.rejection,
+                    rejectionEvents=self.rejection_events, phase, acknowledged=?acknowledged,
+                    elapsedMs=now.saturating_duration_since(self.started).as_millis().min(u64::MAX as u128) as u64,
+                    remainingPhaseMs=self.deadline.saturating_duration_since(now).as_millis().min(u64::MAX as u128) as u64,
+                    remainingEffectiveBudgetMs=?remaining_effective_budget_ms,
+                    "visual sound observation diagnostic"
+                );
+            };
+        }
+        if matches!(phase, "rejectionChanged" | "timeout" | "observationError") {
+            emit!(tracing::Level::WARN);
+        } else {
+            emit!(tracing::Level::INFO);
+        }
+    }
+
+    fn reject(&mut self, reason: &'static str) {
+        self.rejection = Some(reason);
+        // A flickering sheet cannot turn the bounded polling loop into log spam.
+        // Final timeout still retains the latest rejection after this cap.
+        if self.rejection_events < 16 {
+            self.rejection_events += 1;
+            self.emit("rejectionChanged", None);
+        }
+    }
+}
+
+fn visual_diagnostic(update: impl FnOnce(&mut VisualSoundDiagnostics)) {
+    let _ = VISUAL_SOUND_DIAGNOSTICS.try_with(|state| update(&mut state.borrow_mut()));
+}
+
 async fn tap_native_image(session: &dyn UiSession, point: crate::TapPoint) -> anyhow::Result<()> {
     tap_native_image_armed(session, point, &mut || {}).await
 }
@@ -15,7 +86,13 @@ async fn tap_native_image_armed(
 ) -> anyhow::Result<()> {
     check_wait()?;
     before_tap();
-    session.tap_image(point.x, point.y, 1080., 2220.).await?;
+    visual_diagnostic(|state| {
+        state.navigation_attempts += 1;
+        state.emit("nativeHotDispatch", None);
+    });
+    let result = session.tap_image(point.x, point.y, 1080., 2220.).await;
+    visual_diagnostic(|state| state.emit("nativeHotAck", Some(result.is_ok())));
+    result?;
     check_wait()
 }
 
@@ -306,6 +383,19 @@ async fn capture_sheet(
     plan: SoundPickerPlan,
     generation: u64,
 ) -> anyhow::Result<(image::RgbImage, Vec<OcrLine>, Vec<OcrRect>, String)> {
+    visual_diagnostic(|state| {
+        state.generation = generation;
+        state.request_id = None;
+        state.observation_id = None;
+        state.vietnamese_request_id = None;
+        state.vietnamese_observation_id = None;
+        state.selected_tab = None;
+        state.tab_bounds.clear();
+        state.same_unselected_tabs = None;
+        if generation <= 2 {
+            state.emit("captureStart", None);
+        }
+    });
     check_wait()?;
     let epoch = session.gui_session_epoch();
     anyhow::ensure!(!epoch.is_empty(), "visual sound session missing");
@@ -341,6 +431,14 @@ async fn capture_sheet(
         languages: vec!["vi".into(), "en".into()],
         min_confidence: 0.9,
     };
+    visual_diagnostic(|state| {
+        state.epoch = epoch.clone();
+        state.request_id = Some(request.request_id.clone());
+        state.observation_id = Some(request.observation_id.clone());
+        if generation <= 2 {
+            state.emit("ocrRequest", None);
+        }
+    });
     let reasoner = session
         .gui_reasoner()
         .context("visual sound local OCR missing")?;
@@ -353,6 +451,11 @@ async fn capture_sheet(
     .await?;
     response.validate_binding(&request)?;
     let tabs = selection_recovery::tabs(&response).unwrap_or_default();
+    visual_diagnostic(|state| {
+        state.selected_tab = selected_tab(&image, &tabs);
+        state.tab_bounds = tabs.iter().take(4)
+            .map(|rect| [rect.x, rect.y, rect.width, rect.height]).collect();
+    });
     let mut lines = response.lines;
     if tabs.len() == 4
         && !network_unavailable(&lines, &tabs)
@@ -364,6 +467,10 @@ async fn capture_sheet(
         vietnamese_request.request_id = uuid::Uuid::new_v4().to_string();
         vietnamese_request.observation_id = uuid::Uuid::new_v4().to_string();
         vietnamese_request.languages = vec!["vi".into()];
+        visual_diagnostic(|state| {
+            state.vietnamese_request_id = Some(vietnamese_request.request_id.clone());
+            state.vietnamese_observation_id = Some(vietnamese_request.observation_id.clone());
+        });
         if let Ok(vietnamese) = read_sound(reasoner.ocr(vietnamese_request.clone())).await {
             if vietnamese.validate_binding(&vietnamese_request).is_ok() {
                 enrich_title_lines(&mut lines, &vietnamese.lines);
@@ -495,7 +602,34 @@ async fn observe_inner(
     navigate: bool,
     saw_hot: &AtomicBool,
 ) -> anyhow::Result<ObservedSoundPool> {
+    let started = Instant::now();
     let deadline = phase_deadline(Duration::from_secs(60));
+    let diagnostics = VisualSoundDiagnostics {
+        scope: session.gui_scope(), epoch: session.gui_session_epoch(), started, deadline,
+        generation: 0, request_id: None, observation_id: None,
+        vietnamese_request_id: None, vietnamese_observation_id: None,
+        selected_tab: None, tab_bounds: Vec::new(), navigation_attempts: 0,
+        saw_hot: saw_hot.load(Ordering::Relaxed), same_unselected_tabs: None,
+        rejection: None, rejection_events: 0,
+    };
+    VISUAL_SOUND_DIAGNOSTICS.scope(std::cell::RefCell::new(diagnostics), async {
+        let result = observe_loop(session, plan, maximum, navigate, saw_hot, deadline).await;
+        if result.is_err() {
+            visual_diagnostic(|state| state.emit(
+                if Instant::now() >= deadline { "timeout" } else { "observationError" }, None));
+        }
+        result
+    }).await
+}
+
+async fn observe_loop(
+    session: &dyn UiSession,
+    plan: SoundPickerPlan,
+    maximum: usize,
+    navigate: bool,
+    saw_hot: &AtomicBool,
+    deadline: Instant,
+) -> anyhow::Result<ObservedSoundPool> {
     let mut prior: Option<(String, ObservedSoundPool)> = None;
     let mut navigation_attempts = 0;
     let mut unselected_tabs: Option<(String, usize, Vec<OcrRect>)> = None;
@@ -509,11 +643,13 @@ async fn observe_inner(
         generation += 1;
         let (img, lines, tabs, epoch) = capture(session, plan, generation).await?;
         if tabs.len() != 4 {
+            visual_diagnostic(|state| {
+                if generation <= 2 {
+                    state.emit("captureComplete", None);
+                }
+            });
             if last_rejection != Some("tabs_unreadable") {
-                tracing::warn!(
-                    reason = "tabs_unreadable",
-                    "visual sound row proof is incomplete"
-                );
+                visual_diagnostic(|state| state.reject("tabs_unreadable"));
                 last_rejection = Some("tabs_unreadable");
             }
             prior = None;
@@ -530,6 +666,13 @@ async fn observe_inner(
                 .is_some_and(|(before_epoch, before_selected, before)| {
                     before_epoch == &epoch && Some(*before_selected) == selected && before == &tabs
                 });
+        visual_diagnostic(|state| {
+            state.saw_hot = saw_hot.load(Ordering::Relaxed);
+            state.same_unselected_tabs = Some(same_unselected_tabs);
+            if generation <= 2 {
+                state.emit("captureComplete", None);
+            }
+        });
         unselected_tabs = selected
             .filter(|index| *index != 0)
             .map(|index| (epoch.clone(), index, tabs.clone()));
@@ -542,6 +685,7 @@ async fn observe_inner(
             && navigation_attempts < 2
             && (navigation_attempts == 0 || same_unselected_tabs)
         {
+            visual_diagnostic(|state| state.emit("navigationProofStart", None));
             let point = selection_recovery::prove_sheet(session, plan).await?;
             anyhow::ensure!(Instant::now() < deadline, "Hot navigation deadline expired");
             if navigation_attempts == 0 {
@@ -563,7 +707,13 @@ async fn observe_inner(
                 );
                 check_wait()?;
                 anyhow::ensure!(Instant::now() < deadline, "Hot recovery deadline expired");
-                session.tap(point).await?;
+                visual_diagnostic(|state| {
+                    state.navigation_attempts += 1;
+                    state.emit("contactHotDispatch", None);
+                });
+                let result = session.tap(point).await;
+                visual_diagnostic(|state| state.emit("contactHotAck", Some(result.is_ok())));
+                result?;
                 check_wait()?;
                 crate::publish_recovery::note_read(
                     "sound",
@@ -580,6 +730,15 @@ async fn observe_inner(
         }
         match pool_from_image(&img, &lines, &tabs, plan, maximum) {
             Ok(pool) => {
+                if last_rejection.is_some() {
+                    visual_diagnostic(|state| {
+                        state.rejection = None;
+                        if state.rejection_events < 16 {
+                            state.rejection_events += 1;
+                            state.emit("rejectionCleared", None);
+                        }
+                    });
+                }
                 last_rejection = None;
                 if prior
                     .as_ref()
@@ -592,7 +751,7 @@ async fn observe_inner(
             Err(error) => {
                 let reason = visual_rejection_code(&error);
                 if last_rejection != Some(reason) {
-                    tracing::warn!(reason, "visual sound row proof is incomplete");
+                    visual_diagnostic(|state| state.reject(reason));
                     last_rejection = Some(reason);
                 }
                 prior = None;

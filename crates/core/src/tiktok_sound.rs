@@ -818,6 +818,42 @@ pub(crate) async fn recover_frozen_sound_pool(
     .context("frozen sound Recent recovery did not finish within its observation budget")
 }
 
+// Passive parent-route timings use the enclosing phase budget, never a new timeout.
+struct SoundRouteDiagnostics {
+    scope: Option<crate::ui_automation::GuiScope>,
+    epoch: String,
+    deadline: Option<Instant>,
+    events: u8,
+}
+impl SoundRouteDiagnostics {
+    fn emit(
+        &mut self,
+        route: &'static str,
+        phase: &'static str,
+        started: Instant,
+        outcome: &'static str,
+        error: Option<&anyhow::Error>,
+    ) {
+        if self.events >= 8 {
+            return;
+        }
+        self.events += 1;
+        let now = Instant::now();
+        let error_code = error.map(|error| crate::publish_recovery::describe(error).code);
+        tracing::info!(
+            serial=?self.scope.as_ref().map(|scope| scope.device_id.as_str()),
+            runId=?self.scope.as_ref().map(|scope| scope.run_id.as_str()),
+            assignmentId=?self.scope.as_ref().and_then(|scope| scope.assignment_id.as_deref()),
+            session=%self.epoch, route, phase, outcome, errorCode=?error_code,
+            elapsedMs=now.saturating_duration_since(started).as_millis().min(u64::MAX as u128) as u64,
+            remainingPhaseMs=?self.deadline.map(|deadline| deadline.saturating_duration_since(now)
+                .as_millis().min(u64::MAX as u128) as u64),
+            phaseBudgetSource="enclosingSoundBudget",
+            "sound observation route diagnostic"
+        );
+    }
+}
+
 async fn observe_measured_sound_pool(
     session: &dyn UiSession,
     plan: SoundPickerPlan,
@@ -831,11 +867,20 @@ async fn observe_measured_sound_pool(
     );
     let epoch = session.gui_session_epoch();
     anyhow::ensure!(!epoch.is_empty(), "sound sheet session missing");
+    let mut diagnostics = SoundRouteDiagnostics {
+        scope: session.gui_scope(), epoch: epoch.clone(),
+        deadline: SOUND_BUDGET.try_with(|budget| budget.deadline).ok(), events: 0,
+    };
     // The measured 45.7.3 sheet can expose a complete Hot hierarchy even
     // when local OCR is unavailable. Require two fresh, stable XML pools from
     // this same app/session before returning; an incomplete root falls back
     // to the existing visual route and never authorizes a row tap.
+    let started = Instant::now();
+    diagnostics.emit("directXml", "start", started, "pending", None);
     let direct = snapshot::observe_direct(session, plan, maximum).await;
+    diagnostics.emit("directXml", "finish", started,
+        match &direct { Ok(Some(_)) => "ready", Ok(None) => "unavailable", Err(_) => "error" },
+        direct.as_ref().err());
     match direct {
         Ok(Some(pool)) => {
             return checked_measured_sound_observation(session, plan, &epoch, Ok(pool)).await;
@@ -843,7 +888,11 @@ async fn observe_measured_sound_pool(
         Err(error) if error.is::<SoundStopped>() => return Err(error),
         _ => checked_measured_sound_observation(session, plan, &epoch, Ok(())).await?,
     }
+    let started = Instant::now();
+    diagnostics.emit("visual", "start", started, "pending", None);
     let visual = visual::observe_initial(session, plan, maximum).await;
+    diagnostics.emit("visual", "finish", started,
+        if visual.is_ok() { "ready" } else { "error" }, visual.as_ref().err());
     match checked_measured_sound_observation(session, plan, &epoch, visual).await {
         Ok(pool) => return Ok(pool),
         Err(error) if error.is::<visual::VisualSoundPoolUnavailable>() => {}
@@ -851,12 +900,16 @@ async fn observe_measured_sound_pool(
             if error.is::<crate::driver::ScreenshotReadUnavailable>()
                 || error.is::<OcrReadUnavailable>() =>
         {
+            let started = Instant::now();
+            diagnostics.emit("xmlOnly", "start", started, "pending", None);
             let pool = async {
                 snapshot::select_section_tab_xml_only(session, plan).await?;
                 snapshot::observe_xml_only(session, plan, maximum).await
             }
             .await
             .with_context(|| format!("independent sound XML proof after {error:#}"));
+            diagnostics.emit("xmlOnly", "finish", started,
+                if pool.is_ok() { "ready" } else { "error" }, pool.as_ref().err());
             crate::publish_recovery::note_read(
                 "sound",
                 "measuredXmlAfterImageUnavailable",
@@ -871,20 +924,27 @@ async fn observe_measured_sound_pool(
 
     // If the direct XML probe failed to stabilize, OCR must prove the same
     // sheet before a later XML read can take over.
-    let sheet = selection_recovery::prove_sheet(session, plan).await;
-    checked_measured_sound_observation(session, plan, &epoch, sheet).await?;
-    let pool = tokio::time::timeout(
-        Duration::from_secs(45),
-        snapshot::observe(session, plan, maximum),
-    )
-    .await
-    .map_err(|_| {
-        crate::publish_recovery::retryable_error(
-            "sound_hierarchy_unavailable",
-            "TikTok chưa cung cấp hàng nhạc ổn định sau khi OCR không đọc được; chưa bấm Đăng",
+    let started = Instant::now();
+    diagnostics.emit("lateXml", "start", started, "pending", None);
+    let pool = async {
+        let sheet = selection_recovery::prove_sheet(session, plan).await;
+        checked_measured_sound_observation(session, plan, &epoch, sheet).await?;
+        let pool = tokio::time::timeout(
+            Duration::from_secs(45),
+            snapshot::observe(session, plan, maximum),
         )
-    })?;
-    checked_measured_sound_observation(session, plan, &epoch, pool).await
+        .await
+        .map_err(|_| {
+            crate::publish_recovery::retryable_error(
+                "sound_hierarchy_unavailable",
+                "TikTok chưa cung cấp hàng nhạc ổn định sau khi OCR không đọc được; chưa bấm Đăng",
+            )
+        })?;
+        checked_measured_sound_observation(session, plan, &epoch, pool).await
+    }.await;
+    diagnostics.emit("lateXml", "finish", started,
+        if pool.is_ok() { "ready" } else { "error" }, pool.as_ref().err());
+    pool
 }
 
 async fn checked_measured_sound_observation<T>(

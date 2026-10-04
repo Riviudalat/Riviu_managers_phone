@@ -1008,6 +1008,10 @@ pub struct AndroidDriver {
     helpers: Mutex<HashMap<String, crate::riviu_agent::HelperClient>>,
     helper_inventory_locks: Mutex<HashMap<String, Arc<tokio::sync::RwLock<()>>>>,
     inventory_cache: Mutex<HashMap<String, DeviceInfo>>,
+    /// Optional metadata freshness, never roster or agent-readiness authority.
+    inventory_metadata_at: Mutex<HashMap<String, std::time::Instant>>,
+    /// Coalesce inventory callers only; helper setup retains its per-device writer.
+    inventory_scan_lock: tokio::sync::Mutex<()>,
     helper_setup_errors: Mutex<HashMap<String, String>>,
     helper_inventory_snapshot: Mutex<Option<Vec<DeviceInfo>>>,
     /// serial -> app names and icons the helper already described, keyed on the exact set of
@@ -1419,6 +1423,8 @@ impl AndroidDriver {
             helpers: Mutex::new(HashMap::new()),
             helper_inventory_locks: Mutex::new(HashMap::new()),
             inventory_cache: Mutex::new(HashMap::new()),
+            inventory_metadata_at: Mutex::new(HashMap::new()),
+            inventory_scan_lock: tokio::sync::Mutex::new(()),
             helper_setup_errors: Mutex::new(HashMap::new()),
             helper_inventory_snapshot: Mutex::new(None),
             app_descriptions: Mutex::new(HashMap::new()),
@@ -1746,6 +1752,10 @@ impl DeviceDriver for AndroidDriver {
     }
 
     async fn list_devices(&self) -> anyhow::Result<Vec<DeviceInfo>> {
+        // Acquire before discovery so a queued caller reads a new roster, not a
+        // pre-lock snapshot. Successful enrichment from the prior caller is reused.
+        let started = std::time::Instant::now();
+        let _inventory_scan = self.inventory_scan_lock.lock().await;
         // Read until two consecutive `adb devices` agree. A single reading is
         // not evidence: a server that is restarting answers one call and reports
         // a different fleet on the next, and `DeviceRegistry::upsert_many`
@@ -1775,6 +1785,11 @@ impl DeviceDriver for AndroidDriver {
         // 3-second scan, a restarting server does not. A *partial* unsettled list still
         // passes through, as before — showing some of the fleet beats hiding it.
         if let Err(reason) = trust_reading_for_roster(&reading) {
+            tracing::info!(
+                cached = 0usize, probed = 0usize, offline = 0usize, setup_busy = 0usize,
+                roster_rejected = true, elapsed_ms = started.elapsed().as_millis() as u64,
+                "Android inventory metadata enrichment"
+            );
             anyhow::bail!("{reason}");
         }
         if let Some(reason) = reading.failure.as_deref() {
@@ -1799,11 +1814,18 @@ impl DeviceDriver for AndroidDriver {
         // TikTok build may have been installed or removed -- or the display resolution
         // changed under us, which is the one stale-screen case an aspect-ratio check cannot
         // see, because `wm size 1080x2220` keeps the shape and moves the numbers.
+        let _inventory_scan = self.inventory_scan_lock.lock().await;
+        self.inventory_metadata_at.lock().remove(udid);
+        self.inventory_cache.lock().remove(udid);
         self.tiktok_packages.lock().remove(udid);
         self.invalidate_screen(udid);
         let mut device = probe_device(self.adb.clone(), udid.to_string(), None).await;
+        let metadata_complete = device.last_error.is_none()
+            && !device.os_version.is_empty()
+            && !device.model.is_empty()
+            && device.battery.is_some();
         device.wda_ready = self.agent_ready(udid).await;
-        if device.wda_ready {
+        if device.wda_ready && metadata_complete {
             device.status = DeviceStatus::Ready;
         }
         Ok(device)

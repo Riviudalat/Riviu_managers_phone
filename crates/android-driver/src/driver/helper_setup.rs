@@ -3,6 +3,7 @@ use super::*;
 
 const MIN_LAUNCHER_VERSION: u64 = 7;
 const QUERY_TIMEOUT: Duration = Duration::from_secs(15);
+const INVENTORY_METADATA_TTL: Duration = Duration::from_secs(15);
 
 #[derive(Debug, PartialEq, Eq)]
 enum HelperPackage {
@@ -135,8 +136,7 @@ impl AndroidDriver {
         self.helper_inventory_snapshot.lock().clone()
     }
 
-    /// Merge live probes with rows reserved by package setup, preserving the ADB order.
-    /// The probe seam lets regression tests exercise this same path without a device.
+    /// Merge optional enrichment with fresh roster states under the inventory caller lock.
     pub(super) async fn inventory_from_reading<F, Fut>(
         &self,
         reading: adb::DeviceListReading,
@@ -146,6 +146,7 @@ impl AndroidDriver {
         F: FnMut(AdbProgram, String, Option<String>) -> Fut,
         Fut: std::future::Future<Output = DeviceInfo> + Send + 'static,
     {
+        let started = std::time::Instant::now();
         let lines = reading.devices;
         let serial_order: HashMap<_, _> = lines
             .iter()
@@ -161,70 +162,130 @@ impl AndroidDriver {
             self.inventory_cache
                 .lock()
                 .retain(|serial, _| connected.contains(serial));
+            self.inventory_metadata_at
+                .lock()
+                .retain(|serial, _| connected.contains(serial));
             self.helper_setup_errors
                 .lock()
                 .retain(|serial, _| connected.contains(serial));
         }
 
-        // Fan out: the fleet is 16 phones and every one of them costs a round
-        // trip we would otherwise pay in series.
-        let mut inflight = Vec::new();
+        // Metadata is optional and bounded; every row's connection comes from this
+        // reading. Keep parallel cold probes and the existing package-setup reader.
+        // JoinSet aborts owned read-only probes if this scan is cancelled.
+        // Raw JoinHandles would detach and outlive the inventory caller lock.
+        let mut inflight = tokio::task::JoinSet::new();
+        let mut probe_fallbacks = HashMap::new();
         let mut unreachable_devices = Vec::new();
         let mut cached_devices = Vec::new();
+        let mut cached = 0usize;
+        let mut probed = 0usize;
+        let mut setup_busy = 0usize;
         for line in lines {
             match line.state {
                 AdbDeviceState::Device => {
                     let Ok(guard) = self.helper_inventory_lock(&line.serial).try_read_owned()
                     else {
-                        let cached = self
+                        let mut device = self
                             .inventory_cache
                             .lock()
                             .get(&line.serial)
                             .cloned()
                             .unwrap_or_else(|| {
                                 let mut device = unusable_device(
-                                    &line.serial,
-                                    line.model,
-                                    AdbDeviceState::Device,
+                                    &line.serial, line.model, AdbDeviceState::Device,
                                 );
-                                device.status = DeviceStatus::Connected;
                                 device.last_error = None;
                                 device
                             });
-                        cached_devices.push(cached);
+                        // A writer reserves setup, not a ready agent. Never carry a
+                        // prior capability/status into this fresh connected row.
+                        device.status = DeviceStatus::Connected;
+                        device.wda_ready = false;
+                        setup_busy += 1;
+                        cached_devices.push((device, None));
                         continue;
                     };
+                    let fresh = self
+                        .inventory_metadata_at
+                        .lock()
+                        .get(&line.serial)
+                        .is_some_and(|at| at.elapsed() < INVENTORY_METADATA_TTL);
+                    let known = if fresh {
+                        self.inventory_cache.lock().get(&line.serial).cloned()
+                    } else {
+                        None
+                    };
+                    if let Some(mut device) = known {
+                        device.status = DeviceStatus::Connected;
+                        device.wda_ready = false;
+                        cached += 1;
+                        cached_devices.push((device, Some(guard)));
+                        continue;
+                    }
+                    let mut fallback = unusable_device(
+                        &line.serial, line.model.clone(), AdbDeviceState::Device,
+                    );
+                    fallback.status = DeviceStatus::Error;
+                    fallback.last_error = Some("Đọc thông tin máy bị gián đoạn".into());
                     let probe = probe(self.adb.clone(), line.serial, line.model);
-                    inflight.push(tokio::spawn(async move { (probe.await, guard) }));
+                    probed += 1;
+                    probe_fallbacks.insert(fallback.udid.clone(), fallback);
+                    inflight.spawn(async move {
+                        (probe.await, std::time::Instant::now(), guard)
+                    });
                 }
-                // **Report it, do not hide it**, and that now covers every state rather
-                // than one of them. A phone whose USB-debugging prompt has not been
-                // accepted is a normal fleet state with an obvious fix; so is one that has
-                // gone `offline` because its cable or hub dropped, or because it is
-                // mid-reboot. Dropping those from the list makes them look unplugged, which
-                // is the one thing they are not — adb can see them, and it can say why.
-                //
-                // `offline` in particular was silently discarded, so a phone that lost its
-                // connection simply vanished from the grid with no row and no reason.
-                state => unreachable_devices.push(unusable_device(&line.serial, line.model, state)),
+                // Explicit unreachable states invalidate even an unsettled reading;
+                // absence alone needs the stable successful scan above.
+                state => {
+                    self.inventory_metadata_at.lock().remove(&line.serial);
+                    self.inventory_cache.lock().remove(&line.serial);
+                    unreachable_devices.push(unusable_device(&line.serial, line.model, state));
+                }
             }
         }
 
-        let mut devices = Vec::with_capacity(inflight.len() + unreachable_devices.len());
-        for handle in inflight {
-            let Ok((mut device, _guard)) = handle.await else {
+        let offline = unreachable_devices.len();
+        let mut devices = Vec::with_capacity(
+            inflight.len() + cached_devices.len() + unreachable_devices.len(),
+        );
+        while let Some(result) = inflight.join_next().await {
+            let Ok((mut device, observed_at, _guard)) = result else {
                 continue;
             };
+            probe_fallbacks.remove(&device.udid);
+            // Keep raw metadata separate from live readiness and setup errors.
+            // Partial or failed enrichment is displayed, but never buys a TTL.
+            let metadata_complete = device.last_error.is_none()
+                && !device.os_version.is_empty()
+                && !device.model.is_empty()
+                && device.battery.is_some();
+            if metadata_complete {
+                self.inventory_metadata_at.lock().insert(device.udid.clone(), observed_at);
+            } else {
+                self.inventory_metadata_at.lock().remove(&device.udid);
+            }
+            self.inventory_cache.lock().insert(device.udid.clone(), device.clone());
             device.wda_ready = self.agent_ready(&device.udid).await;
-            if device.wda_ready {
+            if device.wda_ready && metadata_complete {
                 device.status = DeviceStatus::Ready;
             }
-            self.inventory_cache
-                .lock()
-                .insert(device.udid.clone(), device.clone());
             devices.push(device);
         }
-        devices.extend(cached_devices);
+        for (serial, fallback) in probe_fallbacks {
+            self.inventory_metadata_at.lock().remove(&serial);
+            self.inventory_cache.lock().remove(&serial);
+            devices.push(fallback);
+        }
+        for (mut device, guard) in cached_devices {
+            if let Some(_guard) = guard {
+                device.wda_ready = self.agent_ready(&device.udid).await;
+                if device.wda_ready && device.last_error.is_none() {
+                    device.status = DeviceStatus::Ready;
+                }
+            }
+            devices.push(device);
+        }
         devices.extend(unreachable_devices);
         devices.sort_by_key(|device| {
             serial_order
@@ -240,6 +301,11 @@ impl AndroidDriver {
         if reading.stable && reading.failure.is_none() {
             *self.helper_inventory_snapshot.lock() = Some(devices.clone());
         }
+        tracing::info!(
+            cached, probed, offline, setup_busy,
+            enrichment_elapsed_ms = started.elapsed().as_millis() as u64,
+            "Android inventory metadata enrichment"
+        );
         devices
     }
 
