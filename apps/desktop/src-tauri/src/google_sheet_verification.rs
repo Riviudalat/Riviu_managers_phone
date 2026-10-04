@@ -69,7 +69,9 @@ pub(super) async fn verify(db: &Database, url: &str) -> anyhow::Result<GoogleShe
         check.reporting_ready && check.writer_schema_version == Some(2) && ready_read;
     let epoch = check.reporting_epoch.clone();
     let mut result = if let Some(connection) = bound {
-        checked_bound_result(check, connection)?
+        checked_bound_result(check, connection).map_err(|error| {
+            writer_check::invalidate(); error
+        })?
     } else {
         checked_result(check, "")?
     };
@@ -114,7 +116,7 @@ pub(super) async fn verify(db: &Database, url: &str) -> anyhow::Result<GoogleShe
         "Kết nối Google đã thay đổi trong lúc xác minh; kiểm tra lại"
     );
     let verified_at = chrono::Utc::now().timestamp_millis();
-    if !ready_read || !reporting_ready || !result.connection_verified || write_permission == SheetWritePermission::Denied {
+    if !ready_read || !reporting_ready || bound.is_none() || write_permission == SheetWritePermission::Denied {
         writer_check::invalidate();
     }
     Ok(GoogleSheetVerification {

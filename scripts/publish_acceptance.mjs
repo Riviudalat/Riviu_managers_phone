@@ -242,7 +242,7 @@ function roster(devices, metas, udids) {
     selected: udids.map(udid => rows.find(r => r.udid === udid) ?? { udid, number: null, status: 'absent' }),
     excluded: rows.filter(r => !udids.includes(r.udid)).map(r => ({ ...r, reason: 'notRequested' })) };
 }
-async function checkSheet(invoke, options) {
+async function checkSheet(invoke, options, approvedWriter = null, now = Date.now) {
   const status = await invoke('google_sheets_status');
   const url = `https://docs.google.com/spreadsheets/d/${options.sheetId}/edit#gid=${options.sheetGid}`;
   let activeTarget = null;
@@ -258,13 +258,42 @@ async function checkSheet(invoke, options) {
   check(status.connected === true && status.active === true && status.writerId
     && activeTarget?.spreadsheetId === options.sheetId && activeTarget?.sheetGid === options.sheetGid,
   'OAuth direct chưa sẵn sàng hoặc sai writer/Sheet');
+  if (options.protocol === 'start') {
+    check(status.accountId && status.clientId
+      && Number.isSafeInteger(status.authorizationGeneration) && status.authorizationGeneration >= 0
+      && status.reportingEpoch && status.phase === 'idle', 'Sheet OAuth binding chưa sẵn sàng');
+    const binding = { accountId: status.accountId, clientId: status.clientId,
+      authorizationGeneration: status.authorizationGeneration, writerId: status.writerId,
+      spreadsheetId: activeTarget.spreadsheetId, sheetGid: activeTarget.sheetGid,
+      reportingEpoch: status.reportingEpoch };
+    if (approvedWriter) {
+      check(Number.isFinite(approvedWriter.verifiedAt) && Number.isFinite(approvedWriter.expiresAt)
+        && approvedWriter.expiresAt === approvedWriter.verifiedAt + 300_000
+        && now() >= approvedWriter.verifiedAt && now() < approvedWriter.expiresAt
+        && hash(binding) === hash(approvedWriter.binding),
+      'Writer/target/epoch/OAuth proof hết hạn hoặc đã đổi; không Start');
+      return approvedWriter;
+    }
+  }
   // This command may persist validated connection settings. Never called by inspect/observe.
   const result = await invoke('publish_sheet_check', { sheetUrl: url });
   check(result.connectionVerified === true && result.reportingReady === true && result.reportingEpoch
     && result.spreadsheetId === options.sheetId && result.sheetGid === options.sheetGid,
   'Sheet check chưa xác minh đúng target/epoch hoặc đang reset');
-  return { writerId: status.writerId, spreadsheetId: result.spreadsheetId,
+  const writer = { writerId: status.writerId, spreadsheetId: result.spreadsheetId,
     sheetGid: result.sheetGid, reportingEpoch: result.reportingEpoch };
+  if (options.protocol === 'start') {
+    // The permission probe is authoritative at preflight; submit only rebinds
+    // local status. publish_start retains the final native permission gate.
+    const verifiedAt = now();
+    writer.binding = { accountId: status.accountId, clientId: status.clientId,
+      authorizationGeneration: status.authorizationGeneration, writerId: writer.writerId,
+      spreadsheetId: writer.spreadsheetId, sheetGid: writer.sheetGid,
+      reportingEpoch: writer.reportingEpoch };
+    writer.verifiedAt = verifiedAt;
+    writer.expiresAt = verifiedAt + 300_000;
+  }
+  return writer;
 }
 function validateCampaign(campaign, intent) {
   check(campaign?.id && campaign.requestId === intent.args.requestId, 'Create receipt sai requestId/campaign');
@@ -493,7 +522,7 @@ async function runStartProtocol(options, { invoke, sleep, now, file, report, cur
     }
     report.devScope = { ...reservation.devScope, state: 'activeForRequest',
       requestId: reservation.requestId };
-    const writer = await checkSheet(invoke, options);
+    const writer = await checkSheet(invoke, options, null, now);
     const request = { sourceRoot: options.source, bundleIds: options.bundleIds, udids: options.udids,
       targetRef: { type: 'explicit', udids: options.udids }, runAt: options.runAt ?? null,
       captionOverrides: options.contentSnapshot?.captionOverrides ?? {},
@@ -551,7 +580,7 @@ async function runStartProtocol(options, { invoke, sleep, now, file, report, cur
     'Preflight thiếu Sheet hoặc cleanup bắt buộc');
     check(options.udids.every(id => handle(approval.metadataAccounts[id]) === currentAccounts[id]),
       'Nick gán đã đổi sau preflight; không Start');
-    const writer = await checkSheet(invoke, options);
+    const writer = await checkSheet(invoke, options, approval.writer, now);
     check(hash(writer) === hash(approval.writer), 'Writer/target/epoch đã đổi; không Start');
     let intent = startIntent;
     if (!intent) {

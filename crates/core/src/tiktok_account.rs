@@ -449,6 +449,87 @@ pub async fn observe_own_account(
     Ok(result)
 }
 
+/// Shared measured negative consent action for navigation and header recovery.
+pub(crate) async fn decline_profile_facebook_consent(
+    session: &dyn UiSession,
+    labels: TikTokControls,
+    tree: &Tree,
+    deadline: Option<tokio::time::Instant>,
+) -> anyhow::Result<bool> {
+    let epoch = session.gui_session_epoch();
+    let decline = |tree: &Tree| {
+        let button = crate::app_automation::dialogs::decline_facebook_permission(tree, labels)?;
+        let dialogs = tree.matching(
+            labels.package(),
+            ElementQuery::Description {
+                value: "Dialog",
+                exact: true,
+            },
+        );
+        let [dialog] = dialogs.as_slice() else {
+            return None;
+        };
+        let positives = tree.matching(
+            labels.package(),
+            ElementQuery::Text {
+                value: "OK",
+                exact: true,
+            },
+        );
+        let [positive] = positives.as_slice() else {
+            return None;
+        };
+        let negatives = tree.matching(
+            labels.package(),
+            ElementQuery::Text {
+                value: "Don\u{2019}t allow",
+                exact: true,
+            },
+        );
+        let [negative] = negatives.as_slice() else {
+            return None;
+        };
+        (tree.inside(*positive, *dialog)
+            && tree.inside(*negative, *dialog)
+            && tree.nodes[*positive].attr("class") == "android.widget.Button"
+            && tree.nodes[*positive]
+                .rect()
+                .is_some_and(|r| r.enabled && r.clickable))
+        .then_some(button)
+    };
+    let Some(button) = decline(tree) else {
+        return Ok(false);
+    };
+    let fresh = account_snapshot(session, labels).await?;
+    if let Some(diagnostic) = blocker_diagnostic(&fresh, labels) {
+        return Err(diagnostic.into_error());
+    }
+    let current = decline(&fresh);
+    anyhow::ensure!(
+        current.as_ref().is_some_and(|r| r.x == button.x
+            && r.y == button.y
+            && r.width == button.width
+            && r.height == button.height)
+            && fresh.generation > tree.generation
+            && session.gui_session_epoch() == epoch
+            && session.active_app_bundle().await? == labels.package(),
+        "profile_facebook_decline_stale"
+    );
+    anyhow::ensure!(
+        session
+            .gui_scope()
+            .and_then(|scope| scope.deadline_ms)
+            .is_none_or(|end| chrono::Utc::now().timestamp_millis() < end),
+        "profile_facebook_decline_deadline"
+    );
+    anyhow::ensure!(
+        deadline.is_none_or(|end| tokio::time::Instant::now() < end),
+        "profile_facebook_decline_deadline"
+    );
+    session.tap(button.centre()).await?;
+    Ok(true)
+}
+
 /// Read the own header, recovering a collapsed profile only inside its observed
 /// scroll container. The S8 Trill 38.3.2 snapshots from 14/09 show Edit profile
 /// still visible while :id/mjf/@handle is above the viewport after grid browsing.
@@ -456,12 +537,24 @@ pub async fn restore_own_profile_header(
     session: &dyn UiSession,
     labels: TikTokControls,
 ) -> anyhow::Result<Option<String>> {
+    // Facebook consent can arrive after the Profile tap. Decline it once before
+    // attempting header recovery; a tap ACK is not account or dismissal proof.
+    let mut facebook_decline_used = false;
     for attempt in 0..=3 {
-        refuse_account_blocker(session, labels).await?;
+        let tree = account_snapshot(session, labels).await?;
+        if let Some(diagnostic) = blocker_diagnostic(&tree, labels) {
+            return Err(diagnostic.into_error());
+        }
+        if facebook_decline_used
+            && crate::app_automation::dialogs::decline_facebook_permission(&tree, labels).is_some()
+        {
+            anyhow::bail!("profile_facebook_decline_unconfirmed");
+        }
+        if decline_profile_facebook_consent(session, labels, &tree, None).await? {
+            facebook_decline_used = true;
+            continue;
+        }
         if let Some(dismiss) = labels.label(crate::tiktok_labels::TikTokControl::DialogDismiss) {
-            let tree = crate::ui_automation::tree::Tree::parse(
-                session.hierarchy_source_snapshot().await?,
-            )?;
             let controls = tree.matching(labels.package(), dismiss.to_query());
             if let [index] = controls.as_slice() {
                 let button = tree.nodes[*index]

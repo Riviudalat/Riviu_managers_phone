@@ -17,3 +17,5 @@ cục bộ ở `.agents/skills/typesafe-ai/SKILL.md`; cách cài và phạm vi �
 Bỏ qua mục đó có thể làm hỏng thiết bị thật.
 
 Không ghi nhật ký thay đổi vào kho tài liệu này; cập nhật README hoặc hướng dẫn sản phẩm khi hành vi người dùng đổi.
+
+Nghiệm thu Publish/thiết bị: đọc [hợp đồng bàn giao](docs/agents/agent-runbook.md#nghiệm-thu-publish-và-bàn-giao). Ghim media root, serial–bài, binary/hash và owner; giữ máy bị chặn trong mẫu số. Khi task giao ROOT quyền Cargo/controller/ADB/phone/DB/Sheet/commit/push, worker chỉ sửa file được giao. Không suy source PASS thành phone PASS, đoán ownership hoặc phát lại Post/Send mất ACK.

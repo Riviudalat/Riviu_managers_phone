@@ -647,7 +647,7 @@ pub(crate) async fn run_dispatcher(
                                 .iter()
                                 .find(|r| r.id == a.id && r.effect_intent.is_none())
                             {
-                                let _ = runtime.advance(
+                                if runtime.advance(
                                     row,
                                     &mut revision,
                                     row.state.clone(),
@@ -657,7 +657,11 @@ pub(crate) async fn run_dispatcher(
                                         &serde_json::json!({"message":format!("{error:#}")})
                                             .to_string(),
                                     ),
-                                );
+                                ).is_ok() {
+                                    runtime.progress(row, progress::PublishProgress::FailedBeforePost {
+                                        reason: format!("{}: chuyển ảnh/video thất bại: {error:#}", row.udid),
+                                    });
+                                }
                             }
                         }
                     }

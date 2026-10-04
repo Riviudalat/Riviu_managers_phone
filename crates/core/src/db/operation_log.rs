@@ -93,8 +93,17 @@ impl Database {
                 JOIN interaction_assignments i ON i.id=a.assignment_id AND i.campaign_id=a.campaign_id
                 WHERE a.campaign_id=?1 AND i.actor_udid=?2",
             OperationRunKind::Publish => "
-                SELECT CAST(sequence AS TEXT),recorded_at,action,state,text,detail
-                FROM operation_device_events WHERE source_kind='publish' AND source_id=?1 AND udid=?2",
+                SELECT CAST(e.sequence AS TEXT),e.recorded_at,e.action,e.state,e.text,
+                  CASE WHEN json_valid(a.evidence_json)
+                    AND json_type(a.evidence_json,'$.message')='text'
+                  THEN a.error_code || ': ' || json_extract(a.evidence_json,'$.message')
+                  ELSE e.detail END
+                FROM operation_device_events e
+                LEFT JOIN publish_assignments a ON e.action='publish'
+                  AND a.campaign_id=e.source_id AND a.udid=e.udid
+                  AND a.updated_at=e.recorded_at AND a.state=e.state
+                  AND a.error_code=e.detail
+                WHERE e.source_kind='publish' AND e.source_id=?1 AND e.udid=?2",
             OperationRunKind::Flow => "
                 SELECT a.id,a.updated_at,a.action_kind,a.state,NULL,a.error_json
                 FROM flow_node_attempts a JOIN flow_device_runs d ON d.id=a.device_run_id

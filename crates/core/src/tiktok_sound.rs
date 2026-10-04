@@ -807,15 +807,20 @@ pub(crate) async fn recover_frozen_sound_pool(
         recent::recover(session, plan, selection),
     )
     .await
-    .map_err(|error| {
-        if error.is::<recent::SessionChanged>() {
-            crate::publish_recovery::retryable_error(
-                "sound_recent_observation_invalidated",
-                "Recent recovery observation session changed; prepare fresh without replaying selection",
-            ).context(error)
-        } else { error }
-    })
+    .map_err(classify_recent_observation_error)
     .context("frozen sound Recent recovery did not finish within its observation budget")
+}
+
+fn classify_recent_observation_error(error: anyhow::Error) -> anyhow::Error {
+    if error.is::<recent::SessionChanged>() {
+        error.context(crate::publish_recovery::RecoveryFailure::new(
+            "sound_recent_observation_invalidated",
+            crate::publish_recovery::FailureKind::Retryable,
+            "Recent recovery observation session changed; prepare fresh without replaying selection",
+        ))
+    } else {
+        error
+    }
 }
 
 // Passive parent-route timings use the enclosing phase budget, never a new timeout.
@@ -1143,7 +1148,8 @@ async fn observe_sound_pool(
     if recent::measured(plan) && plan.section_label == "Recent" {
         return tokio::time::timeout(Duration::from_secs(30), recent::observe(session, plan))
             .await
-            .context("Recent sound rows timed out")?;
+            .context("Recent sound rows timed out")?
+            .map_err(classify_recent_observation_error);
     }
     if plan.snapshot_layout().is_some() {
         return snapshot::observe(session, plan, maximum_visible).await;
@@ -1688,7 +1694,7 @@ mod tests {
             let xml = if n == 1 {
                 "<hierarchy/>".into()
             } else {
-                let bounds = if self.slow_trill == Some("changed-entry") && n >= 4 {
+                let bounds = if self.slow_trill == Some("changed-entry") && n >= 4 && n.is_multiple_of(2) {
                     "[700,100][900,216]"
                 } else {
                     "[350,100][720,216]"

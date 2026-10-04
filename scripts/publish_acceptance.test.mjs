@@ -64,6 +64,7 @@ function environment(t) {
         { udid: 'excluded', platform: 'android', status: 'disconnected', name: 'Off' }];
       case 'list_device_metas': return [{ udid: 'phone-a', number: 42, handle: 'fixture' }, { udid: 'phone-b', number: 7, handle: 'fixture' }, { udid: 'metadata-only', number: 99 }];
       case 'google_sheets_status': return { configured: true, connected: true, active: true, writerId: 'writer-fixture',
+        accountId: 'account-fixture', authorizationGeneration: 1, reportingEpoch: 'epoch-1',
         selectedFileId: 'sheet_fixture', sheetUrl: 'https://docs.google.com/spreadsheets/d/sheet_fixture/edit#gid=0',
         phase: 'idle', pickerConfigured: true, clientId: 'fixture-client' };
       case 'publish_sheet_check': return { sheetUrl: args.sheetUrl, spreadsheetId: 'sheet_fixture', sheetGid: 0,
@@ -260,6 +261,30 @@ test('start protocol saves intent before Start and only reads status after lost 
   const submit = e.options('submit', ['--confirm', prepared.report.confirmation]);
   submit.protocol = 'start';
   submit.udids = preflight.udids;
+  for (const change of [{ writerId: 'other' }, { reportingEpoch: 'epoch-2' },
+    { accountId: 'other' }, { authorizationGeneration: 2 }]) {
+    const refused = await runAcceptance(submit, { invoke: async (command, args) => {
+      const result = await invoke(command, args);
+      return command === 'google_sheets_status' ? { ...result, ...change } : result;
+    } });
+    assert.equal(refused.exitCode, 1, JSON.stringify(change));
+    assert.equal(fs.existsSync(path.join(e.dir, 'start-intent.json')), false);
+    assert.equal(e.calls.some(call => call.command === 'publish_start'), false);
+  }
+  assert.equal(e.calls.filter(call => call.command === 'publish_sheet_check').length, 1,
+    'preflight supplies the only writer permission check');
+  const saved = JSON.parse(fs.readFileSync(path.join(e.dir, 'preflight.json'), 'utf8'));
+  const expired = await runAcceptance(submit, { invoke, now: () => saved.approval.writer.expiresAt });
+  assert.equal(expired.exitCode, 1);
+  assert.equal(fs.existsSync(path.join(e.dir, 'start-intent.json')), false);
+  const unbound = structuredClone(saved);
+  delete unbound.approval.writer.binding;
+  unbound.confirmation = createHash('sha256').update(JSON.stringify(unbound.approval)).digest('hex');
+  fs.writeFileSync(path.join(e.dir, 'preflight.json'), JSON.stringify(unbound));
+  const missing = await runAcceptance({ ...submit, confirm: unbound.confirmation }, { invoke });
+  assert.equal(missing.exitCode, 1);
+  assert.equal(fs.existsSync(path.join(e.dir, 'start-intent.json')), false);
+  fs.writeFileSync(path.join(e.dir, 'preflight.json'), JSON.stringify(saved));
   accountGate = new Promise(resolve => { releaseAccount = resolve; });
   accountFailure = true;
   let returned = false;
@@ -288,6 +313,8 @@ test('start protocol saves intent before Start and only reads status after lost 
   accountGate = null;
   assert.equal(first.exitCode, 2, first.report.error);
   assert.equal(first.report.acceptance, 'ackUnknown');
+  assert.equal(e.calls.filter(call => call.command === 'publish_sheet_check').length, 1,
+    'preflight plus submit perform one writer permission check total');
   assert.equal(e.calls.filter(call => call.command === 'publish_start').length, 1);
   const second = await runAcceptance(submit, { invoke });
   assert.equal(second.exitCode, 2, second.report.error);

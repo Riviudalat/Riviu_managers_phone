@@ -546,6 +546,7 @@ pub async fn navigate_own_profile(
     spend.allow_back = true;
     let deadline = tokio::time::Instant::now() + Duration::from_secs(15);
     let mut security_close_used = false;
+    let mut facebook_decline_used = false;
     let tab = loop {
         anyhow::ensure!(
             session.active_app_bundle().await? == labels.package(),
@@ -593,6 +594,17 @@ pub async fn navigate_own_profile(
                 }
             }
             return Err(diagnostic.into_error());
+        }
+        if facebook_decline_used
+            && crate::app_automation::dialogs::decline_facebook_permission(&tree, *labels).is_some()
+        {
+            anyhow::bail!("profile_facebook_decline_unconfirmed");
+        }
+        if crate::tiktok_account::decline_profile_facebook_consent(
+            session, *labels, &tree, Some(deadline),
+        ).await? {
+            facebook_decline_used = true;
+            continue;
         }
         if let Some(tab) = session.locate(profile.to_query()).await? {
             break tab;

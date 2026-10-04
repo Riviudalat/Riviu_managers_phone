@@ -2454,6 +2454,12 @@ impl<'a, P: TapPlanner> Composer<'a, P> {
             if stop.load(Ordering::Relaxed) {
                 return Ok(ComposerVerdict::Stopped);
             }
+            if let Err(error) = &reproof {
+                crate::publish_recovery::note_read(
+                    "prePost", phase, 1, "failed",
+                    Some(&format!("elapsedMs={}; {error:#}", started.elapsed().as_millis())),
+                );
+            }
             reproof?;
         }
         // Resolve after all sound/continuity reads even without a sound policy.
@@ -2472,6 +2478,12 @@ impl<'a, P: TapPlanner> Composer<'a, P> {
                 found = result.as_ref().is_ok_and(|button| button.is_some()),
                 error = ?result.as_ref().err().map(|error| format!("{error:#}")),
                 "final sound reproof before cleanup");
+            if let Err(error) = &result {
+                crate::publish_recovery::note_read(
+                    "prePost", "finalPostButton", 1, "failed",
+                    Some(&format!("elapsedMs={}; {error:#}", started.elapsed().as_millis())),
+                );
+            }
             result?
         } else {
             Box::pin(self.await_final_post_button(caption, stop)).await?
@@ -2760,6 +2772,12 @@ impl<'a, P: TapPlanner> Composer<'a, P> {
             elapsed_ms = started.elapsed().as_millis() as u64,
             error = ?result.as_ref().err().map(|error| format!("{error:#}")),
             "sound editor navigation before fresh proof");
+        if let Err(error) = &result {
+            crate::publish_recovery::note_read(
+                "prePost", phase, 1, "failed",
+                Some(&format!("elapsedMs={}; {error:#}", started.elapsed().as_millis())),
+            );
+        }
         result
     }
 

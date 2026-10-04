@@ -40,7 +40,7 @@ fn export_operation_trace(
     use sha2::Digest;
     let detail = read_operation_run_from(db, live, operation_id)?
         .ok_or_else(|| CommandError::invalid_argument("operation no longer exists"))?;
-    let logs = read_operation_device_log(db, live, operation_id, udid)?;
+    let mut logs = read_operation_device_log(db, live, operation_id, udid)?;
     let root = artifacts_root.canonicalize().map_err(err)?;
     let mut observations = riviu_core::ui_automation::trace::read_run(
         &root.join("traces"),
@@ -117,6 +117,76 @@ fn export_operation_trace(
             });
         }
     }
+    // Assignment evidence is persisted inline, not a filesystem path. Export only
+    // this device's diagnostic projection; never borrow unscoped/sibling rows.
+    if detail.summary.kind == riviu_core::OperationRunKind::Publish {
+        for row in detail.items.iter().filter(|row| {
+            row.kind == riviu_core::OperationRunItemKind::Assignment
+                && row.udid.as_deref() == Some(udid)
+        }) {
+            let Some(evidence) = row.evidence.as_deref().and_then(persisted_trace_evidence) else {
+                continue;
+            };
+            let bytes = serde_json::to_vec(&serde_json::json!({
+                "runId": operation_id,
+                "sourceId": detail.summary.source_id,
+                "deviceId": udid,
+                "assignmentId": row.id,
+                "evidence": evidence,
+            }))
+            .map_err(err)?;
+            if bytes.len() > 256 * 1024 {
+                continue;
+            }
+            let sha256 = format!("{:x}", sha2::Sha256::digest(&bytes));
+            // Keep the bounded diagnostic body in the exported trace too: a
+            // copied log must remain useful without local artifact paths.
+            logs.entries.push(riviu_core::OperationDeviceLogEntry {
+                id: format!("assignmentEvidence:{}:{sha256}", row.id),
+                at: detail.summary.updated_at.clone(),
+                action: "assignmentEvidence".into(),
+                state: "persisted".into(),
+                text: Some("Bằng chứng chẩn đoán của lượt đăng".into()),
+                detail: Some(String::from_utf8(bytes.clone()).map_err(err)?),
+            });
+            let directory = root.join("trace-exports").join("assignment-evidence");
+            std::fs::create_dir_all(&directory).map_err(err)?;
+            let directory = directory.canonicalize().map_err(err)?;
+            if !directory.starts_with(&root) {
+                return Err(CommandError::invalid_argument(
+                    "evidence directory escaped root",
+                ));
+            }
+            let path = directory.join(format!("{sha256}.json"));
+            match std::fs::OpenOptions::new()
+                .write(true)
+                .create_new(true)
+                .open(&path)
+            {
+                Ok(mut file) => {
+                    use std::io::Write;
+                    file.write_all(&bytes).map_err(err)?;
+                    file.sync_all().map_err(err)?;
+                }
+                Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {}
+                Err(error) => return Err(err(error)),
+            }
+            let path = path.canonicalize().map_err(err)?;
+            if !path.starts_with(&directory)
+                || std::fs::metadata(&path).map_err(err)?.len() != bytes.len() as u64
+                || std::fs::read(&path).map_err(err)? != bytes
+            {
+                return Err(CommandError::invalid_argument(
+                    "evidence artifact identity mismatch",
+                ));
+            }
+            artifacts.push(TraceArtifact {
+                path: path.to_string_lossy().into_owned(),
+                sha256,
+                bytes: bytes.len() as u64,
+            });
+        }
+    }
     artifacts.sort_by(|a, b| a.path.cmp(&b.path));
     artifacts.dedup_by(|a, b| a.path == b.path);
     let sessions = observations
@@ -157,6 +227,126 @@ fn export_operation_trace(
         sha256: artifact.sha256,
         bytes: artifact.size,
     })
+}
+
+// Bounded, allowlisted projection: raw intent, captions, credentials and helper
+// envelopes are never copied. priorEvidenceJson may be an object or JSON string.
+fn persisted_trace_evidence(raw: &str) -> Option<serde_json::Value> {
+    const MAX_BYTES: usize = 256 * 1024;
+    if raw.len() > MAX_BYTES {
+        return None;
+    }
+    fn project(value: &serde_json::Value, depth: usize) -> Option<serde_json::Value> {
+        if depth == 0 {
+            return None;
+        }
+        let mut fields = serde_json::Map::new();
+        for key in [
+            "selectionDiagnostic",
+            "message",
+            "mediaStage",
+            "nativePrepare",
+            "nativeImport",
+        ] {
+            if let Some(value) = value.get(key).and_then(|v| bounded_trace_value(v, 8)) {
+                fields.insert(key.to_owned(), value);
+            }
+        }
+        // Android staging evidence can be the top-level persisted value.
+        if value.get("manifestSha256").is_some() {
+            if let Some(stage) = bounded_trace_value(value, 8) {
+                fields.insert("mediaStage".into(), stage);
+            }
+        }
+        if let Some(prior) = value.get("priorEvidenceJson") {
+            let parsed = if let Some(raw) = prior.as_str() {
+                (raw.len() <= MAX_BYTES)
+                    .then(|| serde_json::from_str::<serde_json::Value>(raw).ok())
+                    .flatten()
+            } else {
+                Some(prior.clone())
+            };
+            if let Some(prior) = parsed.as_ref().and_then(|prior| project(prior, depth - 1)) {
+                fields.insert("priorEvidenceJson".into(), prior);
+            }
+        }
+        (!fields.is_empty()).then_some(serde_json::Value::Object(fields))
+    }
+    let value = serde_json::from_str::<serde_json::Value>(raw).ok()?;
+    project(&value, 8)
+}
+
+fn bounded_trace_value(value: &serde_json::Value, depth: usize) -> Option<serde_json::Value> {
+    use serde_json::Value;
+    if depth == 0 {
+        return None;
+    }
+    match value {
+        Value::String(s) => (s.len() <= 8192).then(|| value.clone()),
+        Value::Array(values) if values.len() <= 128 => values
+            .iter()
+            .map(|v| bounded_trace_value(v, depth - 1))
+            .collect::<Option<Vec<_>>>()
+            .map(Value::Array),
+        Value::Array(_) => None,
+        Value::Object(values) => {
+            let mut out = serde_json::Map::new();
+            for (key, value) in values {
+                if matches!(
+                    key.as_str(),
+                    "stage"
+                        | "reasonCode"
+                        | "expectedCount"
+                        | "lastVerifiedCount"
+                        | "observedOrdinals"
+                        | "nextCount"
+                        | "albumMatches"
+                        | "scrollCount"
+                        | "viewport"
+                        | "snapshotGeneration"
+                        | "snapshotSha256"
+                        | "selectorBounds"
+                        | "nextBounds"
+                        | "artifacts"
+                        | "artifactWriteFailed"
+                        | "x"
+                        | "y"
+                        | "width"
+                        | "height"
+                        | "role"
+                        | "generation"
+                        | "sha256"
+                        | "xmlPath"
+                        | "screenshotPath"
+                        | "xml_path"
+                        | "screenshot_path"
+                        | "ok"
+                        | "udid"
+                        | "campaignId"
+                        | "fileCount"
+                        | "manifestSha256"
+                        | "manifestBytes"
+                        | "readback"
+                        | "hiddenFromMediaStore"
+                        | "reusedImport"
+                        | "value"
+                        | "state"
+                        | "importId"
+                        | "files"
+                        | "error"
+                        | "code"
+                        | "message"
+                        | "chain"
+                ) {
+                    if let Some(value) = bounded_trace_value(value, depth - 1) {
+                        out.insert(key.clone(), value);
+                    }
+                }
+            }
+            (!out.is_empty()).then_some(Value::Object(out))
+        }
+        _ => Some(value.clone()),
+    }
 }
 
 use std::collections::BTreeMap;

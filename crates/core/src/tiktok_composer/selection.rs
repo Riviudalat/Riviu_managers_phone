@@ -217,15 +217,15 @@ fn ordered_controls(
             let previous = &rows[previous_start..last_start];
             let footer = &rows[last_start..];
             if above.len() == previous.len()
-                && footer.len() == previous.len()
+                && footer.len() <= previous.len()
                 && previous_y - above_y > 1.0
                 && ((last_y - previous_y) - (previous_y - above_y)).abs()
                     <= ROW_PITCH_TOLERANCE
-                && above.iter().zip(previous).zip(footer).all(|((a, p), f)| {
-                    a.x == p.x
-                        && a.width == p.width
-                        && a.height == p.height
-                        && f.x == p.x
+                && above.iter().zip(previous).all(|(a, p)| {
+                    a.x == p.x && a.width == p.width && a.height == p.height
+                })
+                && previous.iter().zip(footer).all(|(p, f)| {
+                    f.x == p.x
                         && f.width == p.width
                         && f.height > 0.0
                         && f.height < p.height
