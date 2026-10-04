@@ -207,10 +207,21 @@ fn short_ellipsized_caption_requests_expansion_without_accepting_a_prefix() {
     assert!(session.actions.lock().is_empty());
 }
 
-#[test]
-fn earlier_copied_photo_is_a_rejected_old_candidate_not_an_unresolved_caption() {
-    let session = Session::default();
-    let plan = plan();
+#[tokio::test(start_paused = true)]
+async fn earlier_copied_photo_is_a_rejected_old_candidate_not_an_unresolved_caption() {
+    let session = Session {
+        trill: true,
+        page: Mutex::new("post"),
+        current_tile: Mutex::new(1),
+        other_caption_same_but_old: true,
+        video_surface: true,
+        rendered_caption: Some(format!(
+            "{}...",
+            CAPTION.chars().take(35).collect::<String>()
+        )),
+        ..Default::default()
+    };
+    let plan = PublishVerificationPlan::for_build(TRILL, "en", "38.3.2").unwrap();
     let identity = identity();
     let mut capture = Capture {
         session: &session,
@@ -226,9 +237,9 @@ fn earlier_copied_photo_is_a_rejected_old_candidate_not_an_unresolved_caption() 
             captured_metadata_candidate: None,
             publication_evidence: None,
             contract_version: 1,
-            package: PACKAGE.into(),
+            package: TRILL.into(),
             locale: "en".into(),
-            version: "46.2.1".into(),
+            version: "38.3.2".into(),
             stage: "postProof",
             reason_code: VerificationReason::CaptionMissing,
             snapshot_generation: 1,
@@ -249,6 +260,28 @@ fn earlier_copied_photo_is_a_rejected_old_candidate_not_an_unresolved_caption() 
             candidate_trace: Vec::new(),
         },
     };
+    let mut copy_attempts = 0;
+    let visible_error = super::super::photo_proof::capture_visible_video_link_counted(
+        &session,
+        TRILL,
+        CAPTION,
+        &identity,
+        &mut copy_attempts,
+        &[],
+    )
+    .await
+    .expect_err("a measured older viewer must remain a rejected candidate");
+    assert_eq!(
+        copy_attempts, 0,
+        "a measured older viewer must be rejected before Share/Copy"
+    );
+    assert!(session.actions.lock().is_empty());
+    assert!(session.writes.lock().is_empty());
+    assert_eq!(
+        capture.matched_photo_failure(&visible_error),
+        Some(VerificationReason::SubmissionTooOld)
+    );
+
     let error = anyhow::Error::new(super::super::photo_proof::EarlierPublication);
     assert_eq!(
         capture.matched_photo_failure(&error),

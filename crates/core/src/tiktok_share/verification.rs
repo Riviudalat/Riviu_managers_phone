@@ -791,7 +791,9 @@ impl Capture<'_> {
         if error.is::<super::photo_proof::OtherPublication>() {
             return Some(VerificationReason::OtherPublication);
         }
-        if error.is::<super::photo_proof::EarlierPublication>() {
+        if error.is::<super::photo_proof::EarlierPublication>()
+            || error.is::<super::photo_proof::VisibleEarlierPublication>()
+        {
             self.diagnostic.expanded_photo_error = Some(error.to_string());
             return Some(VerificationReason::SubmissionTooOld);
         }

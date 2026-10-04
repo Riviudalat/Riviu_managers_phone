@@ -68,6 +68,58 @@ pub(super) struct PhotoCarouselViewer;
 #[error("copied post ID predates the recorded preparation window")]
 pub(super) struct EarlierPublication;
 
+/// A measured coarse relative label excludes an older viewer before any Copy.
+/// This is negative evidence only; publication still needs full public metadata.
+#[derive(Debug, thiserror::Error)]
+#[error("visible post time predates the recorded preparation window")]
+pub(super) struct VisibleEarlierPublication;
+
+fn visible_post_predates_preparation(
+    tree: &Tree,
+    package: &str,
+    version: &str,
+    identity: &SubmissionIdentity,
+    now: chrono::DateTime<chrono::Utc>,
+) -> bool {
+    if package != "com.ss.android.ugc.trill" || version != "38.3.2" {
+        return false;
+    }
+    let times = tree.matching(package, ElementQuery::ResourceIdSuffix(":id/qrp"));
+    let [time] = times.as_slice() else {
+        return false;
+    };
+    let Some((age, precision)) = relative_post_age(tree.nodes[*time].attr("text")) else {
+        return false;
+    };
+    // Keep minute/second labels on their existing ambiguity and metadata path.
+    if precision < 3600 {
+        return false;
+    }
+    let Ok(submitted) = chrono::DateTime::parse_from_rfc3339(&identity.submitted_at) else {
+        return false;
+    };
+    let prepared = match identity.prepared_at.as_deref() {
+        Some(value) => match chrono::DateTime::parse_from_rfc3339(value) {
+            Ok(value) => value,
+            Err(_) => return false,
+        },
+        None => submitted,
+    };
+    if prepared > submitted
+        || submitted - prepared > chrono::Duration::minutes(30)
+        || submitted > now
+    {
+        return false;
+    }
+    let Some(age) = chrono::Duration::try_seconds(age) else {
+        return false;
+    };
+    // Use the newest end of the rounded interval in the existing host-clock
+    // domain. A straddling interval never excludes a matching candidate.
+    now.checked_sub_signed(age)
+        .is_some_and(|newest| newest < prepared)
+}
+
 fn measured_global_photo_viewer(tree: &Tree, package: &str, version: &str) -> bool {
     if package != "com.zhiliaoapp.musically" || version != "45.7.3" {
         return false;
@@ -470,6 +522,9 @@ pub(super) async fn capture_visible_video_link_counted(
             && session.active_app_bundle().await? == package,
         "video viewer observation expired or foreground changed"
     );
+    if visible_post_predates_preparation(&tree, package, &version, identity, chrono::Utc::now()) {
+        return Err(VisibleEarlierPublication.into());
+    }
     let captured =
         super::read_through_sheet_counted(session, share, &mut opened, copy_attempts).await;
     if opened {

@@ -929,7 +929,14 @@ impl AdbProgram {
             .await
             .is_ok_and(|p| p == package)
         {
-            return Ok(());
+            // Focus can outlive the process after force-stop; only a checked main
+            // PID permits the warm-launch fast path. Read failures are not absence.
+            let process = self
+                .shell_output(serial, &format!("pidof {package}"), DEFAULT_TIMEOUT)
+                .await?;
+            if checked_pidof(&process)?.is_some() {
+                return Ok(());
+            }
         }
         let launch_receipt = self
             .shell(
@@ -2481,6 +2488,66 @@ mod tests {
         let result = super::AdbProgram::at(executable).shell_secret_input("fixture-eof", "ignored", input.clone(), std::time::Duration::from_secs(10)).await;
         std::fs::remove_dir_all(root).unwrap();
         assert_eq!(result.unwrap(), input);
+    }
+
+    /// A stale focus record after force-stop is not a live main process.
+    #[tokio::test]
+    async fn checked_foreground_requires_live_main_pid_before_skipping_launch() {
+        for (case, pid, launches, succeeds) in [
+            ("absent", "", 1, true),
+            ("warm", "22849", 0, true),
+            ("malformed", "not-a-pid", 0, false),
+        ] {
+            let root = std::env::temp_dir().join(format!("riviu-foreground-pid-{case}-{}", uuid::Uuid::new_v4()));
+            std::fs::create_dir(&root).unwrap();
+            std::fs::write(root.join("pid.txt"), pid).unwrap();
+            #[cfg(windows)]
+            let executable = {
+                let path = root.join("fake-adb.cmd");
+                std::fs::write(&path, concat!(
+                    "@echo off\r\nsetlocal\r\nset \"script=%~4\"\r\n",
+                    "if \"%~1\" neq \"-s\" exit /b 90\r\nif \"%~3\" neq \"shell\" exit /b 91\r\n",
+                    "if \"%script:~0,7%\"==\"dumpsys\" goto focus\r\n",
+                    "if \"%script:~0,5%\"==\"pidof\" goto pid\r\n",
+                    "if \"%script:~0,6%\"==\"monkey\" goto launch\r\n",
+                    ">>\"%~dp0unexpected.txt\" echo unexpected\r\nexit /b 92\r\n",
+                    ":focus\r\n>>\"%~dp0calls.txt\" echo focus\r\n",
+                    "echo mCurrentFocus=Window{123 u0 app.test/.MainActivity}\r\nexit /b 0\r\n",
+                    ":pid\r\n>>\"%~dp0calls.txt\" echo pid\r\n",
+                    "if exist \"%~dp0launched.txt\" (echo 22849 & exit /b 0)\r\n",
+                    "set \"pid=\"\r\nset /p pid=<\"%~dp0pid.txt\"\r\n",
+                    "if not defined pid exit /b 1\r\necho %pid%\r\nexit /b 0\r\n",
+                    ":launch\r\n>>\"%~dp0calls.txt\" echo launch\r\n",
+                    ">\"%~dp0launched.txt\" echo launched\r\necho Events injected: 1\r\nexit /b 0\r\n",
+                )).unwrap();
+                path
+            };
+            #[cfg(not(windows))]
+            let executable = {
+                use std::os::unix::fs::PermissionsExt;
+                let path = root.join("fake-adb");
+                std::fs::write(&path, concat!(
+                    "#!/bin/sh\ncd -- \"$(dirname -- \"$0\")\" || exit 90\n",
+                    "[ \"$1\" = -s ] && [ \"$3\" = shell ] || exit 91\ncase \"$4\" in\n",
+                    "dumpsys*) echo focus >> calls.txt; echo 'mCurrentFocus=Window{123 u0 app.test/.MainActivity}';;\n",
+                    "pidof*) echo pid >> calls.txt; if [ -f launched.txt ]; then echo 22849; else pid=$(cat pid.txt); [ -n \"$pid\" ] || exit 1; echo \"$pid\"; fi;;\n",
+                    "monkey*) echo launch >> calls.txt; echo launched > launched.txt; echo 'Events injected: 1';;\n",
+                    "*) echo unexpected >> unexpected.txt; exit 92;;\nesac\n",
+                )).unwrap();
+                std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o700)).unwrap();
+                path
+            };
+            let result = super::AdbProgram::at(executable)
+                .launch_foreground_checked("fixture-foreground-pid", "app.test").await;
+            let calls = std::fs::read_to_string(root.join("calls.txt")).unwrap_or_default();
+            let unexpected = root.join("unexpected.txt").exists();
+            std::fs::remove_dir_all(root).unwrap();
+            assert!(!unexpected, "{case}: unexpected ADB command");
+            assert_eq!(result.is_ok(), succeeds, "{case}: {result:?}; calls={calls:?}");
+            assert_eq!(calls.lines().filter(|call| *call == "launch").count(), launches,
+                "{case}: matching focus without a main PID must not skip launch; calls={calls:?}");
+            assert!(calls.lines().any(|call| call == "pid"), "{case}: main PID was not read; calls={calls:?}");
+        }
     }
 
     #[tokio::test(start_paused = true)]

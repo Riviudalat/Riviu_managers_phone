@@ -140,6 +140,14 @@ Không khẳng định defect cũ còn tồn tại khi candidate đã có fix. R
 hash, admission và queued rows sau +30s cùng gate late-resume/deadline/no-effect;
 không tăng cửa 30s hoặc stagger cohort để thay chứng nhận same-runAt.
 
+Sau force-stop Android, focus có thể còn trỏ vào activity cũ. Focus đúng không thay
+proof PID chính đang chạy; giữ exit/stdout/stderr của pidof và lỗi parser. Khi lấy
+link hết ngân sách, đối chiếu candidate trace: có thể đã tìm đúng bài nhưng còn
+đang loại bài cũ cùng caption. Nhãn giờ/ngày dùng để loại bài cũ trên snapshot mới
+không thay canonical/public metadata, kiểm bài trùng hay CAS. Giữ các nhãn thiếu,
+trùng hoặc không rõ trên luồng xác minh cũ; đo lệch clock đúng serial khi đối chiếu
+timestamp Android với host, không lấy clock của máy khác làm bằng chứng.
+
 Mẫu số cố định theo roster: blocked/offline/helper-recovery/missing proof vẫn còn
 hàng với lý do riêng. Máy 1–10 immediate, 11–20 cùng runAt là 20 nghĩa vụ, không là
 hai wave 20 máy. PASS cần 20 bài public đúng media/caption/account/time, canonical
