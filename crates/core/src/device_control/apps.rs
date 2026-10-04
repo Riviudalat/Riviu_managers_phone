@@ -129,6 +129,24 @@ impl DeviceControlPlane {
         self.driver.import_publish_media(lease.udid(), campaign_id, manifest_sha256).await.map_err(|error| driver_error(lease.udid(), "importPublishMedia", error))
     }
 
+    pub fn supports_publish_photo_order(&self, udid: &str) -> bool {
+        self.driver.supports_publish_photo_order(udid)
+    }
+    pub async fn ensure_publish_photo_order<'a>(
+        &self, context: impl Into<DeviceLeaseRef<'a>>, import_id: &str, images: &[crate::PublishImage],
+    ) -> Result<serde_json::Value, DeviceControlError> {
+        let lease = self.validate_leased(context.into())?;
+        self.driver.ensure_publish_photo_order(lease.udid(), import_id, images).await
+            .map_err(|error| driver_error(lease.udid(), "ensurePublishPhotoOrder", error))
+    }
+    pub async fn ensure_publish_photo_order_with_ui(
+        &self, context: &UiWithStreamContext, import_id: &str, images: &[crate::PublishImage],
+    ) -> Result<serde_json::Value, DeviceControlError> {
+        let lease = self.validate_stream(context)?;
+        self.driver.ensure_publish_photo_order(lease.udid(), import_id, images).await
+            .map_err(|error| driver_error(lease.udid(), "ensurePublishPhotoOrder", error))
+    }
+
     pub async fn cleanup_publish_media(
         &self,
         context: &DeviceExclusiveContext,

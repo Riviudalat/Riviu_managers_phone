@@ -1,6 +1,6 @@
 //! Rehearse one isolated album. Sound selection is reversible; Post is blocked by callback.
 use anyhow::Context;
-use riviu_android_driver::AndroidDriver;
+use riviu_android_driver::{AdbProgram, AndroidDriver};
 use riviu_core::driver::{DeviceDriver, UiSession};
 use riviu_core::tiktok_composer::{
     reach_edit_step, reach_picker, CarouselRequest, Composer, ComposerPlan, ComposerVerdict,
@@ -8,9 +8,10 @@ use riviu_core::tiktok_composer::{
 };
 use riviu_core::tiktok_labels::{controls_for, TikTokControl};
 use std::{
+    fs::{FileTimes, OpenOptions},
     path::PathBuf,
     sync::{atomic::AtomicBool, Arc},
-    time::Duration,
+    time::{Duration, UNIX_EPOCH},
 };
 
 #[path = "common/mod.rs"]
@@ -37,6 +38,53 @@ async fn capture(session: &dyn UiSession, out: &std::path::Path, name: &str) -> 
     Ok(())
 }
 
+async fn capture_media_store(
+    adb: &AdbProgram,
+    serial: &str,
+    out: &std::path::Path,
+    imported: &serde_json::Value,
+) -> anyhow::Result<()> {
+    let album = imported["albumId"].as_str().context("import album ID")?;
+    let resolved_album = album.replacen("/sdcard", "/storage/emulated/0", 1);
+    let refs = imported["mediaRefs"].as_array().context("import media refs")?;
+    let mut rows = Vec::with_capacity(refs.len());
+    for media in refs {
+        anyhow::ensure!(media["collection"] == "images", "expected image MediaStore row");
+        let id = media["id"].as_str().context("image MediaStore ID")?;
+        anyhow::ensure!(id.parse::<u64>().is_ok(), "non-numeric image MediaStore ID");
+        let path = media["path"].as_str().context("image MediaStore path")?;
+        anyhow::ensure!(
+            path.starts_with(&format!("{album}/"))
+                || path.starts_with(&format!("{resolved_album}/")),
+            "image outside imported album"
+        );
+        let command = format!(
+            "content query --uri content://media/external/images/media/{id} --projection _id:_data:date_added:date_modified:datetaken 2>&1"
+        );
+        let receipt = match adb.shell_output(serial, &command, Duration::from_secs(15)).await {
+            Ok(response) => serde_json::json!({
+                "exitCode": response.exit_code,
+                "stdout": response.stdout,
+                "stderr": response.stderr,
+            }),
+            Err(error) => serde_json::json!({"error": format!("{error:#}")}),
+        };
+        rows.push(serde_json::json!({
+            "importId": imported["importId"],
+            "albumId": album,
+            "expectedId": id,
+            "expectedPath": path,
+            "command": command,
+            "receipt": receipt,
+        }));
+    }
+    std::fs::write(
+        out.join("media-store-after-import.json"),
+        serde_json::to_vec_pretty(&rows)?,
+    )?;
+    Ok(())
+}
+
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
     let args: Vec<_> = std::env::args().skip(1).collect();
@@ -54,7 +102,42 @@ async fn main() -> anyhow::Result<()> {
     );
     let staged = out.join("staged");
     riviu_core::copy_bundle_to_managed(bundle, &staged)?;
-    let driver = Arc::new(AndroidDriver::new(&common::repo_config())?);
+    if let Some(mode) = std::env::var_os("RIVIU_SCOUT_PRESERVE_SOURCE_MTIME") {
+        anyhow::ensure!(mode == "1", "RIVIU_SCOUT_PRESERVE_SOURCE_MTIME must be 1 when set");
+        let mut times = Vec::with_capacity(bundle.images.len());
+        for image in &bundle.images {
+            let source_modified = std::fs::metadata(&image.path)?.modified()?;
+            let target = staged.join(&image.file_name);
+            OpenOptions::new()
+                .write(true)
+                .open(&target)?
+                .set_times(FileTimes::new().set_modified(source_modified))?;
+            let staged_modified = std::fs::metadata(&target)?.modified()?;
+            anyhow::ensure!(
+                staged_modified == source_modified,
+                "staged mtime differs from source for {}",
+                image.file_name
+            );
+            times.push(serde_json::json!({
+                "fileName": image.file_name,
+                "sourceModifiedUnixNs": source_modified.duration_since(UNIX_EPOCH)?.as_nanos().to_string(),
+                "stagedModifiedUnixNs": staged_modified.duration_since(UNIX_EPOCH)?.as_nanos().to_string(),
+            }));
+        }
+        std::fs::write(out.join("source-mtime.json"), serde_json::to_vec_pretty(&times)?)?;
+    }
+    let helper_state_dir = PathBuf::from(
+        std::env::var_os("RIVIU_SCOUT_HELPER_STATE_DIR")
+            .context("RIVIU_SCOUT_HELPER_STATE_DIR is required")?,
+    );
+    anyhow::ensure!(
+        helper_state_dir.is_absolute() && helper_state_dir.is_dir(),
+        "RIVIU_SCOUT_HELPER_STATE_DIR must be an existing absolute directory"
+    );
+    let mut config = common::repo_config();
+    config.helper_state_dir = Some(helper_state_dir);
+    let adb = AdbProgram::resolve(config.adb_path.as_deref(), config.bundled_adb_path.as_deref())?;
+    let driver = Arc::new(AndroidDriver::new(&config)?);
     let control = riviu_core::DeviceControlPlane::new(
         driver.clone(),
         Arc::new(riviu_core::DeviceWorkCoordinator::new()),
@@ -74,6 +157,46 @@ async fn main() -> anyhow::Result<()> {
         let imported=driver.import_publish_media(serial,&id,sha).await?;
         anyhow::ensure!(imported["files"].as_u64()==Some(bundle.images.len() as u64),"import count mismatch");
         std::fs::write(out.join("import.json"),serde_json::to_vec_pretty(&imported)?)?;
+        capture_media_store(&adb, serial, &out, &imported).await?;
+        if std::env::var("RIVIU_SCOUT_REPROVE_ORDER").as_deref() == Ok("1") {
+            let own_import = imported["importId"].as_str().context("import ID")?;
+            let refs = imported["mediaRefs"].as_array().context("media refs")?;
+            let mut reset = Vec::new();
+            for (index, image) in bundle.images.iter().enumerate() {
+                let name = riviu_android_driver::publish::sanitise_id(&image.file_name);
+                let row = refs.iter().find(|row| row["path"].as_str().is_some_and(|path| path.ends_with(&format!("/{name}")))).context("exact scoped image")?;
+                let id = row["id"].as_str().context("row ID")?;
+                anyhow::ensure!(id.parse::<u64>().is_ok(), "numeric ID");
+                let seconds = 1791052152u64 + u64::from(index >= 8);
+                let command = format!("content update --uri content://media/external/images/media/{id} --bind datetaken:l:{} --bind date_modified:l:{seconds} 2>&1", seconds * 1000);
+                let output = adb.shell_output(serial, &command, Duration::from_secs(15)).await?;
+                anyhow::ensure!(output.exit_code == 0, "scoped metadata setup failed");
+                reset.push(serde_json::json!({"command":command,"stdout":output.stdout,"stderr":output.stderr,"exitCode":output.exit_code}));
+            }
+            std::fs::write(out.join("resume-metadata-setup.json"),serde_json::to_vec_pretty(&reset)?)?;
+            capture_media_store(&adb, serial, &out, &imported).await?;
+            std::fs::rename(out.join("media-store-after-import.json"),out.join("media-store-before-reproof.json"))?;
+            let mut wrong = bundle.images.clone();
+            wrong[0].sha256 = "0".repeat(64);
+            let rejected = control.ensure_publish_photo_order(&lease, own_import, &wrong).await;
+            anyhow::ensure!(rejected.is_err(), "wrong frozen hash accepted");
+            std::fs::write(out.join("wrong-hash-rejection.json"),serde_json::to_vec_pretty(&serde_json::json!({"error":rejected.err().map(|e|e.to_string()),"publicPost":false}))?)?;
+            capture_media_store(&adb, serial, &out, &imported).await?;
+            let before:serde_json::Value=serde_json::from_slice(&std::fs::read(out.join("media-store-before-reproof.json"))?)?;
+            let after:serde_json::Value=serde_json::from_slice(&std::fs::read(out.join("media-store-after-import.json"))?)?;
+            anyhow::ensure!(before==after,"wrong hash changed metadata");
+            std::fs::rename(out.join("media-store-after-import.json"),out.join("media-store-after-rejection.json"))?;
+            let started=std::time::Instant::now();
+            let repaired=control.ensure_publish_photo_order(&lease, own_import, &bundle.images).await?;
+            let repaired_ms=started.elapsed().as_millis();
+            anyhow::ensure!(repaired["photoOrder"]["repaired"]==true,"drift not repaired");
+            let started=std::time::Instant::now();
+            let unchanged=control.ensure_publish_photo_order(&lease, own_import, &bundle.images).await?;
+            let unchanged_ms=started.elapsed().as_millis();
+            anyhow::ensure!(unchanged["photoOrder"]["repaired"]==false,"correct order rewritten");
+            std::fs::write(out.join("resume-reproof.json"),serde_json::to_vec_pretty(&serde_json::json!({"repaired":repaired,"unchanged":unchanged,"repairMs":repaired_ms,"unchangedMs":unchanged_ms,"publicPost":false}))?)?;
+            capture_media_store(&adb, serial, &out, &imported).await?;
+        }
         driver.terminate_app(serial,&package).await?;
         driver.launch_app(serial,&package).await?;
         let session=driver.open_session(serial).await?;

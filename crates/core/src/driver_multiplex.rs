@@ -497,6 +497,16 @@ impl DeviceDriver for MultiplexDriver {
             .await
     }
 
+    fn supports_publish_photo_order(&self, udid: &str) -> bool {
+        self.route(udid).is_ok_and(|driver| driver.supports_publish_photo_order(udid))
+    }
+
+    async fn ensure_publish_photo_order(
+        &self, udid: &str, import_id: &str, images: &[crate::PublishImage],
+    ) -> anyhow::Result<serde_json::Value> {
+        self.route(udid)?.ensure_publish_photo_order(udid, import_id, images).await
+    }
+
     async fn pull_media(
         &self,
         udid: &str,

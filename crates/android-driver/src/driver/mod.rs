@@ -2341,6 +2341,17 @@ impl DeviceDriver for AndroidDriver {
         crate::publish::import(&self.adb, udid, campaign_id, manifest_sha256).await
     }
 
+    fn supports_publish_photo_order(&self, _udid: &str) -> bool { true }
+
+    async fn ensure_publish_photo_order(
+        &self,
+        udid: &str,
+        import_id: &str,
+        images: &[riviu_core::PublishImage],
+    ) -> anyhow::Result<serde_json::Value> {
+        crate::publish::ensure_photo_order(&self.adb, udid, import_id, images).await
+    }
+
     async fn cleanup_publish_media(
         &self,
         udid: &str,

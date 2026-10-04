@@ -1130,7 +1130,8 @@ fn read_file_retry(path: &Path) -> std::io::Result<Vec<u8>> {
     }
 }
 
-fn natural_cmp(left: &str, right: &str) -> Ordering {
+/// Shared filename order for scanned bundles and Android's imported photo album.
+pub fn natural_cmp(left: &str, right: &str) -> Ordering {
     let left_key = natural_key(left);
     let right_key = natural_key(right);
     left_key.cmp(&right_key).then_with(|| left.cmp(right))

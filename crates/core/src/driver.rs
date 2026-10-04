@@ -669,6 +669,14 @@ pub trait DeviceDriver: Send + Sync {
     ) -> anyhow::Result<serde_json::Value> {
         unsupported("importPublishMedia")
     }
+    /// Reprove and repair only the ordering metadata of an existing photo import.
+    /// Implementations must verify the frozen image bytes before changing metadata.
+    fn supports_publish_photo_order(&self, _udid: &str) -> bool { false }
+    async fn ensure_publish_photo_order(
+        &self, _udid: &str, _import_id: &str, _images: &[crate::PublishImage],
+    ) -> anyhow::Result<serde_json::Value> {
+        unsupported("ensurePublishPhotoOrder")
+    }
     /// Remove only the photo assets created for a verified campaign.
     async fn cleanup_publish_media(
         &self,

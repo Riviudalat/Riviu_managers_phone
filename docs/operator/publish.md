@@ -23,6 +23,13 @@ trước chuyển qua ADB. Thông báo gồm tệp nguồn, tệp đích và l�
 tra tệp còn tồn tại, quyền đọc Downloads và dung lượng/quyền ghi ổ chứa dữ liệu Riviu.
 Không dùng bấm Đăng lại để giải quyết lỗi sao chép sau một kết quả gửi chưa rõ.
 
+Trước khi chọn ảnh trên Android, Riviu đọc lại album đã tải, đối chiếu tên, dung
+lượng và hash với nội dung đã chốt. Nếu thứ tự thời gian ảnh bị lệch, ứng dụng
+sửa metadata của đúng album rồi đọc xác nhận; không tải ảnh hoặc tạo album lại.
+Kiểm tra này áp dụng cả lượt mới và lượt thử lại trước Đăng. Nếu ảnh thiếu, thừa
+hoặc byte ảnh đã đổi, lượt đăng dừng trước bộ chọn ảnh để người vận hành kiểm tra.
+Bài đã gửi và lượt chưa rõ kết quả không được đăng lại để sửa thứ tự.
+
 Giờ hẹn là lúc ứng dụng nhận đợt đăng vào hàng chờ. Đợt được nhận trong 30 giây
 được xử lý theo giới hạn đã lưu; các máy còn chờ lượt không bị ghi Lỡ lịch chỉ vì
 hết lượt chạy đồng thời. Đợt chưa được nhận trong cửa sổ đó hoặc app mở lại sau

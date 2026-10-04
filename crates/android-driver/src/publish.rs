@@ -47,7 +47,7 @@
 //!   pattern would have deleted somebody else's file.
 
 use std::path::Path;
-use std::time::Duration;
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use anyhow::{anyhow, Context};
 use serde_json::{json, Value};
@@ -389,6 +389,157 @@ fn validate_imported_rows(
         names.len()
     );
     Ok(())
+}
+
+async fn order_imported_images(
+    adb: &AdbProgram,
+    serial: &str,
+    rows: &[MediaRow],
+    directory: &str,
+) -> anyhow::Result<Value> {
+    let mut ordered = rows.iter().collect::<Vec<_>>();
+    ordered.sort_by(|left, right| {
+        let left_name = left.data.rsplit('/').next().unwrap_or(&left.data);
+        let right_name = right.data.rsplit('/').next().unwrap_or(&right.data);
+        riviu_core::natural_cmp(left_name, right_name)
+    });
+    let ordered = ordered.into_iter().cloned().collect::<Vec<_>>();
+    set_photo_order(adb, serial, &ordered, directory).await
+}
+
+async fn set_photo_order(
+    adb: &AdbProgram,
+    serial: &str,
+    ordered: &[MediaRow],
+    directory: &str,
+) -> anyhow::Result<Value> {
+    let base = SystemTime::now().duration_since(UNIX_EPOCH)?.as_secs();
+    let mut expected = Vec::with_capacity(ordered.len());
+    for (index, row) in ordered.iter().enumerate() {
+        let offset = u64::try_from(index)?.checked_mul(2).context("photo order overflow")?;
+        let modified = base.checked_sub(offset).context("photo order before epoch")?;
+        let taken = modified.checked_mul(1000).context("photo date overflow")?;
+        let command = format!(
+            "content update --uri {IMAGES_URI}/{} --bind datetaken:l:{taken} --bind date_modified:l:{modified} 2>&1",
+            row.id
+        );
+        let output = adb.shell(serial, &command).await.context("set photo order")?;
+        if let Some(detail) = content_error(&output) {
+            anyhow::bail!("photo order update failed for {}: {detail}", row.id);
+        }
+        expected.push(json!({
+            "id": row.id,
+            "path": row.data,
+            "name": row.data.rsplit('/').next().context("photo filename")?,
+            "datetaken": taken,
+            "dateModified": modified,
+        }));
+    }
+
+    let observed = photo_order_readback(adb, serial, directory).await?;
+    anyhow::ensure!(
+        observed.len() == expected.len()
+            && expected.iter().all(|want| observed.iter().any(|got| got == want)),
+        "photo order readback mismatch: expected {expected:?}, observed {observed:?}"
+    );
+    Ok(json!({"version": 1, "order": expected}))
+}
+
+async fn photo_order_readback(adb: &AdbProgram, serial: &str, directory: &str) -> anyhow::Result<Vec<Value>> {
+    let output = adb
+        .shell(serial, &media_query(MediaCollection::Images, "_id:_data:datetaken:date_modified"))
+        .await
+        .context("read photo order")?;
+    if let Some(detail) = content_error(&output) {
+        anyhow::bail!("photo order readback failed: {detail}");
+    }
+    if let Some(line) = unreadable_query_line(&output) {
+        anyhow::bail!("photo order readback unreadable: {line}");
+    }
+    let mut observed = Vec::new();
+    for line in output.lines() {
+        let parsed = parse_media_rows(line);
+        let Some(row) = parsed.first() else { continue };
+        if !row.data.starts_with(&format!("{}/", canonical_media_path(directory)))
+            && !row.data.starts_with(&format!("{directory}/"))
+        {
+            continue;
+        }
+        let field = |name: &str| -> anyhow::Result<u64> {
+            let prefix = format!("{name}=");
+            let value = line
+                .split(',')
+                .map(str::trim)
+                .find_map(|part| part.strip_prefix(prefix.as_str()))
+                .with_context(|| format!("photo order readback missing {name} for {}", row.id))?;
+            value.parse::<u64>().with_context(|| format!("invalid {name} for {}", row.id))
+        };
+        observed.push(json!({
+            "id": row.id,
+            "path": row.data,
+            "name": row.data.rsplit('/').next().context("photo filename")?,
+            "datetaken": field("datetaken")?,
+            "dateModified": field("date_modified")?,
+        }));
+    }
+    Ok(observed)
+}
+
+pub async fn ensure_photo_order(
+    adb: &AdbProgram,
+    serial: &str,
+    import_id: &str,
+    images: &[riviu_core::PublishImage],
+) -> anyhow::Result<Value> {
+    validate_shell_id(import_id)?;
+    anyhow::ensure!(import_id.starts_with("riviu-") && !images.is_empty(), "invalid photo import scope");
+    let directory = import_dir(import_id);
+    let rows = media_rows_under(adb, serial, &directory).await?;
+    anyhow::ensure!(rows.len() == images.len(), "photo album membership count changed");
+    let mut ordered = Vec::with_capacity(images.len());
+    let mut names = std::collections::BTreeSet::new();
+    for image in images {
+        let name = sanitise_id(&image.file_name);
+        validate_shell_id(&name)?;
+        anyhow::ensure!(names.insert(name.clone()), "duplicate sanitized photo name");
+        let expected_path = format!("{directory}/{name}");
+        let matched = rows.iter().filter(|row| {
+            row.collection == MediaCollection::Images
+                && canonical_media_path(&row.data) == canonical_media_path(&expected_path)
+        }).collect::<Vec<_>>();
+        anyhow::ensure!(matched.len() == 1, "photo album membership changed for {name}");
+        let row = (*matched[0]).clone();
+        ordered.push(row);
+    }
+    for (image, row) in images.iter().zip(&ordered) {
+        let remote = &row.data;
+        verify_staged_file(remote, image.byte_len, &image.sha256, |script| async move {
+            adb.shell_output(serial, &script, crate::adb::DEFAULT_TIMEOUT).await
+        }).await.context("reprove imported photo bytes")?;
+    }
+
+    // Existing metadata is not enough until all image bytes and album membership are re-proved.
+    let observed = photo_order_readback(adb, serial, &directory).await?;
+    let already_ordered = observed.len() == ordered.len() && ordered.iter().enumerate().all(|(index, row)| {
+        let current = observed.iter().find(|value| value["id"] == row.id && value["path"] == row.data);
+        current.and_then(|value| value["dateModified"].as_u64()).is_some_and(|modified| {
+            current.and_then(|value| value["datetaken"].as_u64()) == modified.checked_mul(1000)
+                && (index == 0 || observed.iter().find(|value| value["id"] == ordered[index - 1].id)
+                    .and_then(|value| value["dateModified"].as_u64())
+                    .is_some_and(|previous| previous >= modified.saturating_add(2)))
+        })
+    });
+    let proof = if already_ordered {
+        let order = ordered.iter().map(|row| {
+            observed.iter().find(|value| value["id"] == row.id).cloned().expect("checked above")
+        }).collect::<Vec<_>>();
+        json!({"version": 1, "order": order, "repaired": false})
+    } else {
+        let mut proof = set_photo_order(adb, serial, &ordered, &directory).await?;
+        proof["repaired"] = json!(true);
+        proof
+    };
+    Ok(json!({"importId": import_id, "photoOrder": proof, "files": images.len()}))
 }
 
 fn checked_pending_column(stdout: &str) -> anyhow::Result<bool> {
@@ -1142,10 +1293,8 @@ pub async fn import(
     // the `mediaIds` in the evidence are in a stable, meaningful order rather than
     // whatever `content query` happened to return.
     //
-    // **This does not decide the carousel's order.** The picker was measured to list an
-    // album newest-first, and what a carousel actually uses is the order the cells are
-    // *tapped*. Establishing that is the post path's job, and the post path does not
-    // exist yet — so no claim is made here beyond determinism.
+    // The photo-order step below assigns distinct MediaStore sort timestamps after
+    // visibility is established; this path sort only stabilizes receipt and updates.
     rows.sort_by(|left, right| {
         left.data
             .cmp(&right.data)
@@ -1228,6 +1377,12 @@ pub async fn import(
         "absent"
     };
 
+    let photo_order = if rows.iter().all(|row| row.collection == MediaCollection::Images) {
+        Some(order_imported_images(adb, serial, &rows, &visible).await?)
+    } else {
+        None
+    };
+
     Ok(json!({
         "campaignId": campaign_id,
         "importId": id,
@@ -1238,6 +1393,7 @@ pub async fn import(
         // either phone this was measured on.
         "scanBroadcast": scanned,
         "pendingModel": pending_model,
+        "photoOrder": photo_order,
         // The visible directory is what a gallery shows as an album, so it is the
         // closest Android has to the iOS `Riviu-<importId>` album.
         "albumId": visible,

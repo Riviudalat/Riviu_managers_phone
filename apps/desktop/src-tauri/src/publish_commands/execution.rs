@@ -2827,6 +2827,60 @@ async fn post_one_assignment_owned(
             cleanup,
         ));
     }
+    if matches!(bundle.media_kind, riviu_core::PublishMediaKind::Image)
+        && control.supports_publish_photo_order(&assignment.udid)
+    {
+        let order_result = async {
+            anyhow::ensure!(
+                assignment.effect_intent.is_none()
+                    && matches!(assignment.state, riviu_core::PublishCampaignState::Imported | riviu_core::PublishCampaignState::FailedBeforeDispatch),
+                "photo order repair is only allowed before Post"
+            );
+            let current = || -> anyhow::Result<()> {
+                anyhow::ensure!(
+                    run.map_or(Ok(true), |r| db.publish_pipeline_current(r))?
+                        && !db.publish_assignment_excluded(&assignment.id)?,
+                    "publish stopped before photo order verification"
+                );
+                Ok(())
+            };
+            current()?;
+            let evidence: serde_json::Value = serde_json::from_str(
+                assignment.evidence_json.as_deref().context("missing import evidence")?
+            )?;
+            let native = evidence.get("nativeImport").context("missing native import")?;
+            let native = native.get("value").unwrap_or(native);
+            let stage = evidence.get("mediaStage").context("missing media stage")?;
+            let stage = stage.get("value").unwrap_or(stage);
+            let hash = stage["manifestSha256"].as_str().context("missing media manifest hash")?;
+            anyhow::ensure!(hash.len() == 64 && hash.bytes().all(|b| b.is_ascii_hexdigit()), "invalid media manifest hash");
+            let scope = device_campaign_id(campaign_id, assignment.ordinal);
+            anyhow::ensure!(
+                import == format!("riviu-{scope}-{}", &hash[..12])
+                    && native["importId"].as_str() == Some(import.as_str())
+                    && native["campaignId"].as_str() == Some(scope.as_str())
+                    && native["files"].as_u64() == Some(bundle.images.len() as u64),
+                "photo import does not belong to this assignment"
+            );
+            let proof = control.ensure_publish_photo_order_with_ui(
+                &context, &import, &bundle.images,
+            ).await?;
+            current()?;
+            log::info!("publish photo order verified assignment={} repaired={}",
+                assignment.id, proof["photoOrder"]["repaired"]);
+            Ok::<_, anyhow::Error>(())
+        }.await;
+        if let Err(error) = order_result {
+            let cleanup = finish_import_with_policy(
+                control, context, &assignment.udid, &import, &cleanup_policy, false,
+            ).await;
+            return finish(fold_cleanup_into(
+                PostOutcome::NothingPublished(format!(
+                    "{}: chưa xác minh được thứ tự ảnh trước Đăng ({error:#})", assignment.udid
+                )), cleanup,
+            ));
+        }
+    }
     let mut effect_claimed = false;
     let mut claim_refused = false;
     let mut submitted_at = None;
