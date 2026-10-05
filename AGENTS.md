@@ -1,21 +1,52 @@
-# Cửa vào cho agent
+# Repository Guidelines
 
-Đọc [`README.md`](README.md) trước. Hướng dẫn sản phẩm:
+## Project Structure & Module Organization
 
-- [`docs/operator-guide.md`](docs/operator-guide.md) — quy trình vận hành và xử lý lỗi
-- [`docs/developer-guide.md`](docs/developer-guide.md) — hợp đồng phát triển và cổng kiểm
-- [`docs/agents/README.md`](docs/agents/README.md) — ràng buộc kỹ thuật còn hiệu lực
-- [`docs/agent-toolkit-setup.md`](docs/agent-toolkit-setup.md) — thiết lập và chọn skill/MCP; điểm vào điều phối là [`riviu-project-toolkit`](.claude/skills/riviu-project-toolkit/SKILL.md)
+Read [README.md](README.md), [the developer guide](docs/developer-guide.md), and [agent contracts](docs/agents/README.md) first.
 
-Khi làm phần AI của dự án (phân loại, xếp hạng, trích xuất hoặc kiểm nội dung),
-dùng skill `typesafe-ai` và đọc tài liệu TypeSafe hiện hành theo skill. Bản Codex
-cục bộ ở `.agents/skills/typesafe-ai/SKILL.md`; cách cài và phạm vi áp dụng nằm trong
-[`hướng dẫn bộ công cụ`](docs/agent-toolkit-setup.md#typesafe-cho-codex).
+- `apps/desktop/src/`: React/TypeScript UI; `api.ts` owns frontend IPC.
+- `apps/desktop/src-tauri/`: Rust/Tauri commands and lifecycle.
+- `crates/`: core, SQLite, device ownership, Android/iOS drivers, scripting, signing, and deployment checks.
+- `sidecars/`: runtimes, device agents, and tools. `scripts/` contains verification and packaging tooling.
+- UI unit tests sit beside source; browser scenarios live in `apps/desktop/e2e/`. Rust tests live in crate modules or `tests/`. Product documentation lives in `docs/`.
 
-**Trước khi sửa WDA / thiết bị iOS:** đọc hết
-[`docs/agents/02-wda-doc-truoc-khi-sua.md`](docs/agents/02-wda-doc-truoc-khi-sua.md).
-Bỏ qua mục đó có thể làm hỏng thiết bị thật.
+## Build, Test, and Development Commands
 
-Không ghi nhật ký thay đổi vào kho tài liệu này; cập nhật README hoặc hướng dẫn sản phẩm khi hành vi người dùng đổi.
+Use pinned toolchains and lockfiles; do not mix package managers. From the repository root:
 
-Nghiệm thu Publish/thiết bị: đọc [hợp đồng bàn giao](docs/agents/agent-runbook.md#nghiệm-thu-publish-và-bàn-giao). Ghim media root, serial–bài, binary/hash và owner; giữ máy bị chặn trong mẫu số. Khi task giao ROOT quyền Cargo/controller/ADB/phone/DB/Sheet/commit/push, worker chỉ sửa file được giao. Không suy source PASS thành phone PASS, đoán ownership hoặc phát lại Post/Send mất ACK.
+```powershell
+npm ci --prefix apps/desktop
+cargo fmt --all -- --check
+cargo test --locked -p riviu-core -- --test-threads=1
+cargo clippy --locked -p riviu-core --all-targets -- -D warnings
+```
+
+These install dependencies, check formatting, test core, and run Clippy. From `apps/desktop`:
+
+```powershell
+npm run dev                 # Frontend development server
+npm run tauri:dev           # Native app; may operate real devices/schedules
+npm run lint               # Oxlint
+npm test                   # Vitest
+npx tsc -b --pretty false   # TypeScript checks
+npm run build              # Frontend build with provenance
+npm run test:e2e            # Playwright browser scenarios
+```
+
+Follow [the release runbook](docs/development/build-release.md) for installers; frontend builds do not qualify packaged runtimes.
+
+## Coding Style & Naming Conventions
+
+Match neighboring code: two-space TypeScript indentation, double-quoted strings, PascalCase components/types, and camelCase functions. Rust uses rustfmt, four-space indentation, snake_case functions/modules, and PascalCase types. Keep IPC typed and device ownership in the existing control plane.
+
+## Testing Guidelines
+
+Use `test-audit` before writing, changing, or reviewing tests. Prefer one owner test per observable contract; extend existing cases. Regression tests must fail before the fix for the intended reason. Avoid test-only production seams and unnecessary tests for documentation or renames. Name frontend tests `*.test.ts`/`*.test.tsx`; use Rust `#[test]`/`#[tokio::test]`. Run focused checks first. Distinguish browser mocks, native smoke, real-device, and installer evidence.
+
+## Commit & Pull Request Guidelines
+
+Follow history: `fix(publish): preserve retry identity`. Keep commits scoped. Describe behavior changes, verification commands/results, existing failures, and unverified scope; link relevant issues and attach screenshots for UI changes. CI requires manual dispatch. Update product documentation rather than adding changelog entries here.
+
+## Device & Agent Constraints
+
+Keep credentials and operational logs outside Git. Preserve ownership, cancellation, and uncertain outcomes; never replay unconfirmed Post/Send. Read [WDA safety](docs/agents/02-wda-doc-truoc-khi-sua.md) before iOS changes. For AI changes, use `typesafe-ai` and its current documentation. Respect coordinator-assigned file and execution scope.
