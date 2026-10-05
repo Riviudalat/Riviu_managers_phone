@@ -56,6 +56,23 @@ Bảng tệp căn trái tên, giữ khung gọn khi tải và có chuyển độ
 
 ### Riviu Helper trên Android
 
+**Đã kết nối · Chưa kiểm tra điều khiển** chỉ xác nhận máy có kết nối; ảnh preview
+hoặc trạng thái USB không chứng minh helper đã hoạt động. Android chỉ hiện **Sẵn sàng**
+khi bản ghi phiên hiện tại xác nhận điều khiển và helper đã được kết nối. Mỗi chức năng
+vẫn kiểm tra điều kiện riêng trước khi chạy; giao diện chỉ đọc bản ghi đã có, không tự
+mở phiên kiểm tra trên toàn bộ máy lúc khởi động. Mất bản ghi hoặc lỗi đọc giữ trạng thái
+chưa kiểm tra, không suy thành sẵn sàng.
+
+Khi hiện **Cần khôi phục helper**, rê vào trạng thái để đọc lý do hoặc mở màn hình
+điều khiển để xem thông báo đầy đủ. Bấm **Khôi phục helper** ngay trên đúng ô máy,
+hàng thiết bị hoặc thông báo lỗi trong cửa sổ điều khiển. Lối vào này chỉ chuẩn bị
+kế hoạch cho máy bị lỗi, không dùng phạm vi nhiều máy đang chọn. Đọc phạm vi và
+xác nhận trước khi thực thi; phiên đang thuộc controller khác vẫn được bảo vệ.
+Kế hoạch cũ đã thực thi chỉ được đối soát, không dừng helper lần nữa. Bản ghi và
+nghĩa vụ chưa rõ vẫn được giữ; khôi phục không tự đăng/gửi lại, không xác nhận clipboard
+cũ đã được khôi phục và không tự biến máy thành sẵn sàng. **Bảo trì → Khôi phục helper**
+vẫn dùng phạm vi đã chọn; **Sửa Riviu Agent** là thao tác riêng.
+
 Khi phát hiện điện thoại Android đã cho phép gỡ lỗi USB, Riviu Manager tự kiểm tra
 **Riviu Helper** và cài app nếu thiếu, hoặc cập nhật bản cũ chưa có biểu tượng. App
 hiển thị tên **Riviu Helper** cùng logo Riviu trong danh sách ứng dụng. Mở app để xem

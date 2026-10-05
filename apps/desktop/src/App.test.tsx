@@ -20,6 +20,9 @@ vi.mock("./components/Sidebar",()=>({Sidebar:({onPage}:{onPage:(page:PageId)=>vo
 vi.mock("./api", () => ({
   agentBulkRepair: vi.fn(async () => []),
   agentListStatuses: vi.fn(async () => []),
+  agentHelperMaintenancePending: vi.fn(async () => null),
+  agentHelperMaintenancePrepare: vi.fn(),
+  agentHelperMaintenanceExecute: vi.fn(),
   // Both fleet-health probes are mocked explicitly. `driverDegradedReason` was absent
   // and survived only because the call site wraps it in `.catch` — an unmocked export is
   // `undefined`, so calling it throws synchronously and would have surfaced as a boot
@@ -355,7 +358,7 @@ describe("device group scope", () => {
     await waitFor(() => expect(screen.getByText("Redmi")).toBeInTheDocument());
     await userEvent.click(screen.getByTitle("Danh sách"));
 
-    const row = screen.getByRole("row", { name: /Máy 1, Redmi, Sẵn sàng/ });
+    const row = screen.getByRole("row", { name: /Máy 1, Redmi, Đã kết nối/ });
     row.focus();
     await userEvent.keyboard("{Enter}");
     expect(screen.getByRole("checkbox", { name: "Chọn Máy 1" })).toBeChecked();
@@ -367,6 +370,64 @@ describe("device group scope", () => {
 });
 
 describe("device operational identity", () => {
+  it.each([false, true])("keeps transport-ready Android unknown without helper proof (preflight=%s)", async (preflight) => {
+    const api = await import("./api");
+    vi.mocked(api.listDevices).mockResolvedValue([androidPhone]);
+    vi.mocked(api.listDeviceWorkStates).mockResolvedValue([]);
+    vi.mocked(api.agentListStatuses).mockResolvedValue(preflight ? [{
+      udid: androidPhone.udid, state: "ready", artifactId: "uiautomator", artifactVersion: "1",
+      bundleId: "io.appium.uiautomator2.server", protocolVersion: 1, features: [], installedVersion: "1",
+      installedBuild: null, authReady: true, mjpegReady: true, sessionReady: true, message: null,
+    }] : []);
+    render(<App />);
+    const tile = await screen.findByTestId("device-tile");
+    expect(await within(tile).findByText("Đã kết nối · Chưa kiểm tra điều khiển")).toBeVisible();
+    expect(within(tile).queryByText("Sẵn sàng")).toBeNull();
+    expect(api.deviceControlBegin).not.toHaveBeenCalled();
+    expect(api.agentHelperMaintenancePrepare).not.toHaveBeenCalled();
+    vi.mocked(api.agentListStatuses).mockResolvedValue([]);
+  });
+
+  it("offers confirmed helper recovery only for the cached blocked device", async () => {
+    const api = await import("./api");
+    const other = { ...androidPhone, udid: "unaffected", name: "Máy khác" };
+    const plan = { maintenanceId: "retained-plan", udid: androidPhone.udid, submitted: [] };
+    vi.mocked(api.listDevices).mockResolvedValue([androidPhone, other]);
+    vi.mocked(api.listDeviceWorkStates).mockResolvedValue([]);
+    vi.mocked(api.agentListStatuses).mockResolvedValue([{
+      udid: androidPhone.udid, state: "error", artifactId: "helper", artifactVersion: "1",
+      bundleId: "com.riviu.helper", protocolVersion: 1, features: [], installedVersion: "1",
+      installedBuild: null, authReady: false, mjpegReady: false, sessionReady: false,
+      message: "HelperRecoveryRequired: owner_conflict",
+    }]);
+    vi.mocked(api.agentHelperMaintenancePending).mockResolvedValue({ plan, observationOnly: true });
+    vi.mocked(api.agentHelperMaintenanceExecute).mockResolvedValue({
+      maintenanceId: plan.maintenanceId, udid: plan.udid, state: "superseded", recordsRetained: true,
+      exactReleaseProved: false, clipboardRestorationProved: false, oldObligations: "archivedUnresolved",
+      packageProcessAbsent: true,
+    });
+    try {
+      render(<App />);
+      const tile = await screen.findByRole("row", { name: /Redmi, Cần khôi phục helper/ });
+      expect(within(tile).queryByText("Sẵn sàng")).toBeNull();
+      await userEvent.click(within(tile).getByRole("button", { name: "Khôi phục helper" }));
+      const confirm = await screen.findByRole("alertdialog");
+      expect(within(confirm).getByText(/Phạm vi: 10969614/)).toBeVisible();
+      expect(api.agentHelperMaintenancePending).toHaveBeenCalledExactlyOnceWith(androidPhone.udid);
+      expect(api.agentHelperMaintenancePrepare).not.toHaveBeenCalled();
+      expect(api.agentHelperMaintenanceExecute).not.toHaveBeenCalled();
+      await clickConfirmation("Khôi phục helper");
+      await waitFor(() => expect(api.agentHelperMaintenanceExecute).toHaveBeenCalledExactlyOnceWith(plan, true, true));
+      expect(api.deviceControlBegin).not.toHaveBeenCalled();
+      await userEvent.click(screen.getByTitle("Danh sách"));
+      const row = await screen.findByRole("row", { name: /Redmi, Cần khôi phục helper/ });
+      expect(within(row).getByRole("button", { name: "Khôi phục helper" })).toBeVisible();
+    } finally {
+      vi.mocked(api.agentListStatuses).mockResolvedValue([]);
+      vi.mocked(api.agentHelperMaintenancePending).mockResolvedValue(null);
+    }
+  });
+
   it("shows the active work owner in the summary and keeps technical identity in details", async () => {
     const api = await import("./api");
     vi.mocked(api.listDevices).mockResolvedValue([androidPhone]);
@@ -407,7 +468,7 @@ describe("device operational identity", () => {
     vi.mocked(api.listDeviceWorkStates).mockResolvedValue([]);
     await userEvent.click(within(alert).getByRole("button", { name: "Thử lại" }));
 
-    expect(await within(tile).findByText("Sẵn sàng")).toBeVisible();
+    expect(await within(tile).findByText("Đã kết nối · Chưa kiểm tra điều khiển")).toBeVisible();
     await waitFor(() =>
       expect(screen.queryByText("Chưa đọc được tác vụ")).not.toBeInTheDocument(),
     );

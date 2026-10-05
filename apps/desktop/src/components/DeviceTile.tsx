@@ -35,6 +35,7 @@ interface Props {
   onSelect: (udid: string, additive: boolean) => void;
   onOpen: (udid: string) => void;
   onPrepare: (udid: string) => void;
+  onHelperMaintenance?: (udid: string) => void;
   /** Right-click. The tile owns no menu itself; the page places one. */
   onContextMenu?: (udid: string, x: number, y: number) => void;
 }
@@ -53,6 +54,7 @@ function DeviceTileInner({
   onSelect,
   onOpen,
   onPrepare,
+  onHelperMaintenance,
 }: Props) {
   const operational = providedOperational ?? deviceOperationalView(device, null);
   const displayName = name ?? device.name;
@@ -151,9 +153,16 @@ function DeviceTileInner({
             {displayName}
           </span>
           {username && <span className="dev-phone-handle" title={`@${username}`}>@{username}</span>}
-          <span className={`dev-phone-status is-${operational.kind}`}>
+          <span className={`dev-phone-status is-${operational.kind}`} title={operational.reason}>
             {operationalLabel}
           </span>
+          {operational.helperRecovery && onHelperMaintenance && (
+            <button type="button" className="link" title={operational.reason} style={{ pointerEvents: "auto" }}
+              onDoubleClick={event => event.stopPropagation()}
+              onClick={event => { event.stopPropagation(); onHelperMaintenance(device.udid); }}>
+              Khôi phục helper
+            </button>
+          )}
         </div>
       </div>
 

@@ -5,7 +5,7 @@ import {
   deviceOperationalView,
   deviceWorkOwnerLabel,
 } from "./deviceWork";
-import type { DeviceInfo } from "./types";
+import type { AgentStatus, DeviceInfo } from "./types";
 
 const readyDevice: DeviceInfo = {
   udid: "serial-should-stay-private",
@@ -41,8 +41,8 @@ describe("device operational status", () => {
   });
 
   it.each([
-    [{ status: "ready", wdaReady: false }, "ready", "Sẵn sàng", "ok"],
-    [{ status: "connected", wdaReady: true }, "ready", "Sẵn sàng", "ok"],
+    [{ status: "ready", wdaReady: false }, "connected", "Đã kết nối · Chưa kiểm tra điều khiển", "info"],
+    [{ status: "connected", wdaReady: true }, "connected", "Đã kết nối · Chưa kiểm tra điều khiển", "info"],
     [{ status: "busy", wdaReady: false }, "busy", "Bận", "warn"],
     [{ status: "error", wdaReady: false }, "warning", "Cần xem", "warn"],
     [{ status: "disconnected", wdaReady: false }, "offline", "Ngoại tuyến", "info"],
@@ -67,6 +67,20 @@ describe("device operational status", () => {
       ownerLabel: "Nuôi TikTok",
       tone: "info",
     });
+  });
+
+  it("requires helper attachment proof and applies it to the same fleet filter", () => {
+    const agent: AgentStatus = {
+      udid: readyDevice.udid, state: "ready", artifactId: "helper", artifactVersion: "1",
+      bundleId: "com.riviu.helper", protocolVersion: 1, features: ["helperReady"],
+      installedVersion: "1", installedBuild: null, authReady: true, mjpegReady: false,
+      sessionReady: true, message: null,
+    };
+    expect(deviceOperationalView(readyDevice, null, "known", agent).kind).toBe("ready");
+    expect(deviceMatchesFleetFilter(readyDevice, null, 1, "Máy A", "", "ready", "known", agent)).toBe(true);
+    expect(deviceOperationalView(readyDevice, null, "known", { ...agent, features: [] }).kind).toBe("connected");
+    expect(deviceOperationalView(readyDevice, null, "known", { ...agent, sessionReady: false }).kind).toBe("connected");
+    expect(deviceOperationalView({ ...readyDevice, platform: "ios" }, null).kind).toBe("ready");
   });
 
   it.each([

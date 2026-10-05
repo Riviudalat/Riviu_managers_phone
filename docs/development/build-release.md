@@ -51,6 +51,13 @@ Các script có `--help`; đối số cụ thể theo invocation trong workflow 
 Không bỏ bước để “build được trước”, không tái sinh manifest pin từ input bất kỳ
 để làm hash gate xanh. Đừng xóa toàn target; đó còn là nơi giữ evidence và rollback.
 
+`npm run build` ghi `dist/frontend-provenance.json` sau khi TypeScript và Vite cùng
+thành công. Khi nhúng frontend, Cargo kiểm lại hash đầu vào và các asset trong dist;
+thiếu hoặc lệch biên nhận thì phải build frontend lại. Không chép một dist cũ từ
+checkout khác để vượt bước này. Kiểm tra chỉ đọc biên nhận, không chạy Vite lần hai;
+devUrl và cargo check không nhúng frontend không cần dist. Biên nhận này chứng minh
+nguồn và asset khớp nhau, không thay kiểm tra giao diện/native hay thiết bị thật.
+
 ## macOS và phạm vi hỗ trợ
 
 CI có arm64/x64, runtime Python native theo kiến trúc và mapping resource bảo toàn

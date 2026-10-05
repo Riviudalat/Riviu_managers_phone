@@ -1081,26 +1081,32 @@ impl AndroidDriver {
     /// The inventory writer serializes installation and acquisition with discovery.
     pub async fn prepare_helper_runtime(&self, serial: &str) -> anyhow::Result<crate::riviu_agent::HelperClient> {
         let _inventory = self.helper_inventory_lock(serial).write_owned().await;
-        let cached = self.helpers.lock().get(serial).cloned();
-        let cached = match cached {
-            Some(helper) if helper.settle_released_runtime().await? || helper.is_released().await? => {
-                self.helpers.lock().remove(serial);
-                None
+        let result: anyhow::Result<crate::riviu_agent::HelperClient> = async {
+            let cached = self.helpers.lock().get(serial).cloned();
+            let cached = match cached {
+                Some(helper) if helper.settle_released_runtime().await? || helper.is_released().await.context(crate::riviu_agent::HelperRecoveryRequired)? => {
+                    self.helpers.lock().remove(serial);
+                    None
+                }
+                cached => cached,
+            };
+            if let Some(helper) = cached {
+                anyhow::ensure!(helper.is_scoped_canary(), crate::riviu_agent::HelperRecoveryRequired);
+                anyhow::ensure!(!helper.cleanup_is_pending(), crate::riviu_agent::HelperRecoveryRequired);
+                if helper.is_alive().await { return Ok(helper); }
+                if let Some(reconnected) = helper.reconnect_runtime().await? {
+                    self.helpers.lock().insert(serial.into(), reconnected.clone());
+                    return Ok(reconnected);
+                }
+                anyhow::bail!("existing debug helper cannot become a release owner");
             }
-            cached => cached,
-        };
-        if let Some(helper) = cached {
-            anyhow::ensure!(helper.is_scoped_canary(), "existing helper has no admitted owner");
-            if helper.is_alive().await { return Ok(helper); }
-            if let Some(reconnected) = helper.reconnect_runtime().await? {
-                self.helpers.lock().insert(serial.into(), reconnected.clone());
-                return Ok(reconnected);
-            }
-            anyhow::bail!("existing debug helper cannot become a release owner");
-        }
-        let helper = crate::riviu_agent::HelperClient::ensure_runtime(self.adb.clone(), serial, self.riviu_agent_apk.as_deref(), self.helper_state_dir.as_deref()).await?;
-        self.helpers.lock().insert(serial.into(), helper.clone());
-        Ok(helper)
+            let helper = crate::riviu_agent::HelperClient::ensure_runtime(self.adb.clone(), serial, self.riviu_agent_apk.as_deref(), self.helper_state_dir.as_deref()).await?;
+            self.helpers.lock().insert(serial.into(), helper.clone());
+            Ok(helper)
+        }.await;
+        self.publish_helper_status(serial, result.as_ref().ok(),
+            result.as_ref().err().is_some_and(|error| error.is::<crate::riviu_agent::HelperRecoveryRequired>()));
+        result
     }
 
     /// Before-session reconciliation only: no transport, runner or semantic helper state.
@@ -1736,8 +1742,10 @@ impl DeviceDriver for AndroidDriver {
         self.ports.lock().clear();
 
         for (serial, helper) in helpers {
+            self.publish_helper_status(&serial, None, false);
             if let Err(error) = helper.clone().shutdown().await {
                 // Retain exact owner/instance/baseline/forward proof for reconciliation.
+                self.publish_helper_status(&serial, None, true);
                 self.helpers.lock().insert(serial, helper);
                 failures.push(error.to_string());
             }
@@ -2135,11 +2143,13 @@ impl DeviceDriver for AndroidDriver {
     }
 
     fn cached_agent_status(&self, udid: &str) -> riviu_core::AgentStatus {
-        self.agent_statuses
-            .lock()
-            .get(udid)
-            .cloned()
-            .unwrap_or_else(|| riviu_core::AgentStatus::unknown(udid))
+        let helper = self.helpers.lock().get(udid).cloned();
+        let mut status = self.agent_statuses.lock().get(udid).cloned()
+            .unwrap_or_else(|| riviu_core::AgentStatus::unknown(udid));
+        if !helper.is_some_and(|value| value.cached_runtime_ready()) {
+            status.features.retain(|feature| feature != "helperReady");
+        }
+        status
     }
 
     /// Bring the agent up, prove it can see, and record what was found.
@@ -3029,6 +3039,24 @@ mod borrowed_shutdown_tests;
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn cached_agent_status_drops_helper_ready_without_retained_helper() {
+        let driver = AndroidDriver::with_adb(
+            AdbProgram::at(PathBuf::from("never-run-adb")),
+            adb::AdbOrigin::Configured,
+            &AndroidDriverConfig { automatic_setup_allowed: false, ..Default::default() },
+        );
+        let serial = "fixture-helper-status";
+        let mut status = driver.agent_status_for(serial, riviu_core::AgentState::Ready, None, None);
+        status.features.push("helperReady".into());
+        driver.agent_statuses.lock().insert(serial.into(), status);
+        let observed = driver.cached_agent_status(serial);
+        assert_eq!(observed.state, riviu_core::AgentState::Ready, "UiAutomator proof is independent");
+        assert!(!observed.features.iter().any(|feature| feature == "helperReady"),
+            "detached helper must not retain a qualification marker");
+    }
+
 
     /// A recorder at the real ADB process boundary. It accepts only foreground reads on
     /// this fixture serial; session setup, launch, force-stop and input cannot pass.

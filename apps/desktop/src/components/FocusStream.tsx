@@ -18,7 +18,7 @@ import {
   operationPrepareDevices,
 } from "../api";
 import { Smartphone, Pin, PinOff, GripVertical, ArrowLeftRight, Volume2, Volume1, Image, Power, PackagePlus, ImageUp, FolderDown, TerminalSquare, TextCursorInput, Keyboard, Bell, RotateCcw, ScanLine } from "lucide-react";
-import { describeError } from "../describeError";
+import { describeError, helperRecoveryMessage } from "../describeError";
 import { createLiveDragGroup, liveTap, type LiveDragGroup } from "../liveDrag";
 
 import { InstalledApps } from "./InstalledApps";
@@ -74,6 +74,8 @@ function canHandoffControl(reason: string): boolean {
 }
 
 function controlFailureMessage(udid: string, reason: string): string {
+  const helper = helperRecoveryMessage(reason);
+  if (helper) return helper;
   const owner = controlBusyOwner(reason);
   if (owner === "Script") {
     return `Máy ${udid} đang được tác vụ tự động giữ quyền điều khiển. Bấm Dừng tác vụ cũ và điều khiển để nhả máy; kết quả đã đăng được giữ lại.`;
@@ -98,6 +100,7 @@ interface Props {
   onClose: () => void;
   activeSync?: ActiveGroupSync | null;
   onReadinessChange?: (readiness: GroupSyncReadiness | null) => void;
+  onHelperMaintenance?: (udid: string) => void;
   /**
    * The phones the operator can switch to without closing the overlay.
    *
@@ -139,6 +142,7 @@ export function FocusStream({
   onClose: onClosed,
   activeSync = null,
   onReadinessChange,
+  onHelperMaintenance,
   devices,
   onSelectDevice,
   functions = [],
@@ -233,6 +237,7 @@ export function FocusStream({
     [actionFailures, controlErrors],
   );
   const failureCount = Object.keys(failures).length;
+  const hasHelperRecovery = Object.values(failures).some(reason => helperRecoveryMessage(reason) !== null);
   const hasBusyOwner = Object.values(failures).some(canHandoffControl);
   const sessionReady =
     !disconnectedKey && controlState.key === controlKey &&
@@ -389,7 +394,7 @@ export function FocusStream({
   }, [activeSync, controlState.ready, device.udid, failureCount, failures, onReadinessChange, targets]);
 
   const retryControl = async () => {
-    if (inFlight.current || pointerBusyRef.current) return;
+    if (inFlight.current || pointerBusyRef.current || hasHelperRecovery) return;
     const busyUdids = Object.entries(failures)
       .filter(([, reason]) => canHandoffControl(reason))
       .map(([udid]) => udid);
@@ -1213,11 +1218,16 @@ export function FocusStream({
                     <li key={udid}>
                       <strong>{devices.find((candidate) => candidate.udid === udid)?.name ?? udid}</strong>
                       <span>{controlFailureMessage(udid, reason)}</span>
+                      {onHelperMaintenance && helperRecoveryMessage(reason)
+                        && devices.find(candidate => candidate.udid === udid)?.platform === "android" && (
+                        <button type="button" disabled={actionPending || pointerBusy}
+                          onClick={() => onHelperMaintenance(udid)}>Khôi phục helper</button>
+                      )}
                     </li>
                   ))}
                 </ul>
               )}
-              {failureCount > 0 && (
+              {failureCount > 0 && !hasHelperRecovery && (
                 <button type="button" disabled={actionPending || pointerBusy} onClick={() => void retryControl()}>
                   {actionPending ? "Đang nhả máy…" : hasBusyOwner ? "Dừng tác vụ cũ và điều khiển" : "Thử lại điều khiển"}
                 </button>

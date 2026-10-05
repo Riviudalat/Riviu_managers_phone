@@ -114,6 +114,24 @@ async function waitForControlReady() {
 }
 
 describe("FocusStream hit mapping", () => {
+  it("offers helper recovery after an owner conflict without retrying control", async () => {
+    const recover = vi.fn();
+    vi.mocked(deviceControlBegin).mockClear().mockRejectedValueOnce({
+      code: "DeviceControlFailed", message: "HelperRecoveryRequired: owner_conflict",
+    });
+    const props = {
+      device: fixture, index: 2, onClose: vi.fn(), devices: [fixture],
+      onSelectDevice: vi.fn(), onHelperMaintenance: recover,
+    };
+    render(<FocusStream {...props} />);
+    const status = await testingScreen.findByTestId("focus-control-status");
+    expect(status).not.toHaveTextContent(/DeviceControlFailed|owner_conflict/);
+    expect(within(status).queryByRole("button", { name: "Thử lại điều khiển" })).toBeNull();
+    fireEvent.click(await within(status).findByRole("button", { name: "Khôi phục helper" }));
+    expect(recover).toHaveBeenCalledExactlyOnceWith(fixture.udid);
+    expect(deviceControlBegin).toHaveBeenCalledTimes(1);
+    expect(deviceTap).not.toHaveBeenCalled();
+  });
   it("opens the shared nick action on right click without sending a tap, and Escape closes only the menu",async()=>{
     const read=vi.fn(),onClose=vi.fn();
     const view=render(<FocusStream device={fixture} index={2} onClose={onClose} devices={[fixture]} onSelectDevice={vi.fn()} functions={[{id:"read-tiktok-account",label:"Đọc và gán nick TikTok",run:read}]}/>);

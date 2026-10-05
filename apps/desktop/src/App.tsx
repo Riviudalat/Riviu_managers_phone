@@ -89,7 +89,7 @@ import { AppsPage } from "./pages/AppsPage";
 import { DataPage } from "./pages/DataPage";
 import { MaterialPage } from "./pages/MaterialPage";
 import { HelpPage } from "./pages/HelpPage";
-import type { DeviceInfo, DeviceWorkOwner, PageId, TargetRef } from "./types";
+import type { AgentStatus, DeviceInfo, DeviceWorkOwner, PageId, TargetRef } from "./types";
 import type { ActiveGroupSync, GroupSyncReadiness } from "./groupSync";
 import { MoreHorizontal } from "lucide-react";
 import { MENU_ICONS } from "./components/menuIcons";
@@ -271,6 +271,34 @@ function App() {
       window.clearInterval(timer);
     };
   }, [deviceWorkOwnerRetry, fleetSettled, page, rosterKey]);
+
+  // Cached IPC only: polling never attaches a helper or probes a phone.
+  const agentRosterKey = devices.map(device => `${device.udid}:${device.status}`).join("\u0000");
+  const [cachedAgents, setCachedAgents] = useState<{ roster: string; statuses: Map<string, AgentStatus>; error?: string }>({ roster: "", statuses: new Map() });
+  useEffect(() => {
+    if (page !== "control" || !fleetSettled) return;
+    let active = true;
+    let reading = false;
+    const udids = rosterKey.split("\u0000").filter(Boolean);
+    setCachedAgents({ roster: agentRosterKey, statuses: new Map() });
+    const read = async () => {
+      if (reading) return;
+      reading = true;
+      try {
+        const statuses = udids.length ? await agentListStatuses(udids) : [];
+        if (active) setCachedAgents({ roster: agentRosterKey, statuses: new Map(statuses.map(status => [status.udid, status])) });
+      } catch (error) {
+        // An unavailable cache is unknown, never the last successful proof.
+        if (active) setCachedAgents({ roster: agentRosterKey, statuses: new Map(), error: describeError(error) });
+      } finally { reading = false; }
+    };
+    void read();
+    const timer = window.setInterval(() => void read(), 2_000);
+    return () => { active = false; window.clearInterval(timer); };
+  }, [agentRosterKey, deviceWorkOwnerRetry, fleetSettled, page, rosterKey]);
+  const cachedAgent = useCallback((udid: string) =>
+    page === "control" && cachedAgents.roster === agentRosterKey ? cachedAgents.statuses.get(udid) : undefined,
+  [agentRosterKey, cachedAgents, page]);
 
   const deviceWorkOwnerReadState: DeviceWorkOwnerReadState = deviceWorkOwners.state;
   const currentDeviceWorkOwner = useCallback(
@@ -482,10 +510,12 @@ function App() {
           deviceSearch,
           deviceStatusFilter,
           deviceWorkOwnerReadState,
+          cachedAgent(device.udid),
         ),
       ),
     [
       connectionFilter,
+      cachedAgent,
       deviceSearch,
       deviceStatusFilter,
       deviceWorkOwnerReadState,
@@ -720,9 +750,76 @@ function App() {
   }, [devices]);
 
 
+  const runHelperMaintenance = async (targetUdids: string[]) => {
+    if (helperMaintenanceRunning.current) {
+      pushToast("warn", "Helper đang được bảo trì", "Chờ lượt hiện tại kết thúc; không chạy lặp.");
+      return;
+    }
+    const targets = devices.filter((device) =>
+      device.platform === "android" && device.status !== "disconnected"
+      && targetUdids.includes(device.udid));
+    if (!targets.length) {
+      pushToast("warn", "Chưa có máy Android kết nối", "Chọn máy đang kết nối để khôi phục helper.");
+      return;
+    }
+    helperMaintenanceRunning.current = true;
+    // At most two serials in flight; every device retains its own activity result.
+    const bounded = async <T,>(items: T[], action: (item: T) => Promise<void>) => {
+      let next = 0;
+      await Promise.all(Array.from({ length: Math.min(2, items.length) }, async () => {
+        while (next < items.length) {
+          const item = items[next++];
+          await action(item);
+        }
+      }));
+    };
+    const plans: HelperMaintenancePlan[] = [];
+    const observationOnly = new Set<string>();
+    try {
+      await bounded(targets, async (device) => {
+        pushToast("info", `Helper · ${device.udid}`, "Đang chuẩn bị phạm vi bảo trì.");
+        try {
+          const pending = await agentHelperMaintenancePending(device.udid);
+          if (pending) {
+            plans.push(pending.plan);
+            if (pending.observationOnly) observationOnly.add(pending.plan.maintenanceId);
+            pushToast("info", `Helper · ${device.udid}`, pending.observationOnly
+              ? "Đang đối soát phiên cũ; không dừng helper lần nữa."
+              : "Kế hoạch chưa chạy đang chờ xác nhận.");
+          } else {
+            plans.push(await agentHelperMaintenancePrepare(device.udid));
+          }
+        } catch (error) {
+          toastError(`Không chuẩn bị được helper · ${device.udid}`, error);
+        }
+      });
+      if (!plans.length) return;
+      const proceed = await requestConfirm({
+        title: `Khôi phục helper trên ${plans.length} máy Android?`,
+        message: `Phạm vi: ${plans.map((plan) => plan.udid).join(", ")}. ${observationOnly.size} kế hoạch cũ chỉ được quan sát, không dừng lại tiến trình. Clipboard cũ có thể không chứng minh được khôi phục; bản ghi cũ được giữ nguyên, không đăng lại bài. App sẽ kiểm tra lại helper trước khi chạy công việc mới.`,
+        confirmLabel: "Khôi phục helper",
+      });
+      if (!proceed) {
+        for (const plan of plans) pushToast("info", `Helper · ${plan.udid}`, "Đã hủy trước thực thi.");
+        return;
+      }
+      await bounded(plans, async (plan) => {
+        try {
+          const receipt = await agentHelperMaintenanceExecute(plan, true, observationOnly.has(plan.maintenanceId));
+          pushToast("warn", `Helper · ${receipt.udid}`, "Đã kết thúc phiên helper cũ và giữ bản ghi. Chưa xác nhận clipboard cũ đã khôi phục; app sẽ kiểm tra phiên mới trước khi chạy.");
+        } catch (error) {
+          toastError(`Khôi phục helper chưa hoàn tất · ${plan.udid}`, error);
+        }
+      });
+    } finally {
+      helperMaintenanceRunning.current = false;
+      setDeviceWorkOwnerRetry(value => value + 1);
+    }
+  };
+
   const readyCount = useMemo(
-    () => devices.filter((d) => d.wdaReady || d.status === "ready").length,
-    [devices],
+    () => devices.filter(device => deviceOperationalView(device, currentDeviceWorkOwner(device.udid), deviceWorkOwnerReadState, cachedAgent(device.udid)).kind === "ready").length,
+    [devices, currentDeviceWorkOwner, deviceWorkOwnerReadState, cachedAgent],
   );
 
   const runningJobs = useMemo(
@@ -948,71 +1045,7 @@ function App() {
                   }
                 }}
                 onStop={() => setSelected([])}
-                onHelperMaintenance={async () => {
-                  if (helperMaintenanceRunning.current) {
-                    pushToast("warn", "Helper đang được bảo trì", "Chờ lượt hiện tại kết thúc; không chạy lặp.");
-                    return;
-                  }
-                  const targets = devices.filter((device) =>
-                    device.platform === "android" && device.status !== "disconnected"
-                    && (!selected.length || selected.includes(device.udid)));
-                  if (!targets.length) {
-                    pushToast("warn", "Chưa có máy Android kết nối", "Chọn máy đang kết nối để khôi phục helper.");
-                    return;
-                  }
-                  helperMaintenanceRunning.current = true;
-                  // At most two serials in flight; every device retains its own activity result.
-                  const bounded = async <T,>(items: T[], action: (item: T) => Promise<void>) => {
-                    let next = 0;
-                    await Promise.all(Array.from({ length: Math.min(2, items.length) }, async () => {
-                      while (next < items.length) {
-                        const item = items[next++];
-                        await action(item);
-                      }
-                    }));
-                  };
-                  const plans: HelperMaintenancePlan[] = [];
-                  const observationOnly = new Set<string>();
-                  try {
-                    await bounded(targets, async (device) => {
-                      pushToast("info", `Helper · ${device.udid}`, "Đang chuẩn bị phạm vi bảo trì.");
-                      try {
-                        const pending = await agentHelperMaintenancePending(device.udid);
-                        if (pending) {
-                          plans.push(pending.plan);
-                          if (pending.observationOnly) observationOnly.add(pending.plan.maintenanceId);
-                          pushToast("info", `Helper · ${device.udid}`, pending.observationOnly
-                            ? "Đang đối soát phiên cũ; không dừng helper lần nữa."
-                            : "Kế hoạch chưa chạy đang chờ xác nhận.");
-                        } else {
-                          plans.push(await agentHelperMaintenancePrepare(device.udid));
-                        }
-                      } catch (error) {
-                        toastError(`Không chuẩn bị được helper · ${device.udid}`, error);
-                      }
-                    });
-                    if (!plans.length) return;
-                    const proceed = await requestConfirm({
-                      title: `Khôi phục helper trên ${plans.length} máy Android?`,
-                      message: `Phạm vi: ${plans.map((plan) => plan.udid).join(", ")}. ${observationOnly.size} kế hoạch cũ chỉ được quan sát, không dừng lại tiến trình. Clipboard cũ có thể không chứng minh được khôi phục; bản ghi cũ được giữ nguyên, không đăng lại bài. App sẽ kiểm tra lại helper trước khi chạy công việc mới.`,
-                      confirmLabel: "Khôi phục helper",
-                    });
-                    if (!proceed) {
-                      for (const plan of plans) pushToast("info", `Helper · ${plan.udid}`, "Đã hủy trước thực thi.");
-                      return;
-                    }
-                    await bounded(plans, async (plan) => {
-                      try {
-                        const receipt = await agentHelperMaintenanceExecute(plan, true, observationOnly.has(plan.maintenanceId));
-                        pushToast("warn", `Helper · ${receipt.udid}`, "Đã kết thúc phiên helper cũ và giữ bản ghi. Chưa xác nhận clipboard cũ đã khôi phục; app sẽ kiểm tra phiên mới trước khi chạy.");
-                      } catch (error) {
-                        toastError(`Khôi phục helper chưa hoàn tất · ${plan.udid}`, error);
-                      }
-                    });
-                  } finally {
-                    helperMaintenanceRunning.current = false;
-                  }
-                }}
+                onHelperMaintenance={() => runHelperMaintenance(selected.length ? selected : devices.map(device => device.udid))}
                 onQuarantineMaintenance={async () => {
                   if (quarantineMaintenanceRunning.current) {
                     pushToast("warn", "Đang khôi phục phiên điều khiển", "Chờ lượt hiện tại kết thúc; không chạy lặp.");
@@ -1165,6 +1198,12 @@ function App() {
               />
 
 
+              {cachedAgents.roster === agentRosterKey && cachedAgents.error && (
+                <Banner tone="warn" action={<button type="button" onClick={() => setDeviceWorkOwnerRetry(value => value + 1)}>Thử lại trạng thái điều khiển</button>}>
+                  <strong>Chưa đọc được trạng thái điều khiển; các máy chưa được xác nhận sẵn sàng.</strong>
+                  <span>{cachedAgents.error}</span>
+                </Banner>
+              )}
               {deviceWorkOwners.state === "error" && (
                 <Banner
                   tone="error"
@@ -1201,6 +1240,7 @@ function App() {
                   >
                     <option value="all">Mọi trạng thái</option>
                     <option value="ready">Sẵn sàng</option>
+                    <option value="connected">Đã kết nối · Chưa kiểm tra điều khiển</option>
                     <option value="busy">Bận</option>
                     <option value="warning">Cần xem</option>
                     <option value="offline">Ngoại tuyến</option>
@@ -1265,6 +1305,7 @@ function App() {
                         device,
                         currentOwner,
                         deviceWorkOwnerReadState,
+                        cachedAgent(device.udid),
                       );
                       const statusLabel = status.ownerLabel
                         ? `${status.label} · ${status.ownerLabel}`
@@ -1298,13 +1339,17 @@ function App() {
                             <span className="device-table-alias">{tileName(device, meta)}</span>
                           </td>
                           <td>
-                            <span className={`chip ${status.tone}`}>
+                            <span className={`chip ${status.tone}`} title={status.reason}>
                               {statusLabel}
                             </span>
                           </td>
                           <td>{device.connection.toUpperCase()}</td>
                           <td>
                             <div className="device-row-actions">
+                              {status.helperRecovery && <button type="button" className="link" onClick={event => {
+                                event.stopPropagation();
+                                void runHelperMaintenance([device.udid]);
+                              }}>Khôi phục helper</button>}
                               <button
                                 type="button"
                                 className="link"
@@ -1369,7 +1414,9 @@ function App() {
                         device,
                         currentDeviceWorkOwner(device.udid),
                         deviceWorkOwnerReadState,
+                        cachedAgent(device.udid),
                       )}
+                      onHelperMaintenance={udid => void runHelperMaintenance([udid])}
                       onContextMenu={(udid, x, y) => setTileMenu({ udid, x, y })}
                       selected={selected.includes(device.udid)}
                       focused={overlayUdid === device.udid}
@@ -1637,6 +1684,7 @@ function App() {
           onClose={() => deviceWindows.close(udid)}
           activeSync={activeSync?.masterUdid === udid ? activeSync : null}
           onReadinessChange={activeSync?.masterUdid === udid ? setSyncReadiness : undefined}
+          onHelperMaintenance={targetUdid => void runHelperMaintenance([targetUdid])}
           // The same array `index` above is computed from, so the picker's numbering and the
           // header's cannot disagree about which phone is #3.
           devices={devices}

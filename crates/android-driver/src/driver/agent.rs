@@ -490,10 +490,40 @@ impl AndroidDriver {
     /// decide whether the phone has a usable control surface. So every path that learns
     /// something about the agent records it here, exactly as the iOS driver does with
     /// `agent_statuses`.
-    pub(super) fn publish_agent_status(&self, status: riviu_core::AgentStatus) {
+    pub(super) fn publish_agent_status(&self, mut status: riviu_core::AgentStatus) {
+        let helper = self.helpers.lock().get(&status.udid).cloned();
+        let previous = self.agent_statuses.lock().get(&status.udid).cloned();
+        status.features.retain(|feature| feature != "helperReady");
+        if status.state == riviu_core::AgentState::Ready
+            && previous.is_some_and(|value| value.features.iter().any(|feature| feature == "helperReady"))
+            && helper.is_some_and(|value| value.cached_runtime_ready()) {
+            status.features.push("helperReady".into());
+        }
         self.agent_statuses
             .lock()
             .insert(status.udid.clone(), status);
+    }
+    /// Helper qualification is separate from UiAutomator readiness.
+    pub(super) fn publish_helper_status(
+        &self,
+        serial: &str,
+        helper: Option<&crate::riviu_agent::HelperClient>,
+        recovery_required: bool,
+    ) {
+        let mut statuses = self.agent_statuses.lock();
+        let status = statuses.entry(serial.to_owned())
+            .or_insert_with(|| riviu_core::AgentStatus::unknown(serial));
+        status.features.retain(|feature| feature != "helperReady");
+        if recovery_required {
+            status.state = riviu_core::AgentState::RepairRequired;
+            status.features.clear();
+            status.auth_ready = false;
+            status.mjpeg_ready = false;
+            status.session_ready = false;
+            status.message = Some("HelperRecoveryRequired: reconcile retained owner; no action replay".into());
+        } else if helper.is_some_and(|value| value.cached_runtime_ready()) {
+            status.features.push("helperReady".into());
+        }
     }
     pub(super) fn agent_status_for(
         &self,
@@ -537,6 +567,7 @@ impl AndroidDriver {
     }
     pub async fn open_session(&self, udid: &str) -> anyhow::Result<AndroidUiSession> {
         let agent = self.ensure_agent(udid).await?;
+        self.publish_agent_status(self.agent_status_for(udid, riviu_core::AgentState::Ready, None, None));
         let screen = {
             let cache = self
                 .screens
@@ -591,55 +622,46 @@ impl AndroidDriver {
         serial: &str,
     ) -> anyhow::Result<Option<crate::riviu_agent::HelperClient>> {
         let _inventory = self.helper_inventory_lock(serial).write_owned().await;
-        let cached = self.helpers.lock().get(serial).cloned();
-        let cached = match cached {
-            Some(helper) if helper.is_released().await? => {
-                self.helpers.lock().remove(serial);
-                None
+        let result: anyhow::Result<Option<crate::riviu_agent::HelperClient>> = async {
+            let cached = self.helpers.lock().get(serial).cloned();
+            if let Some(helper) = cached {
+                let retained = async {
+                    if helper.settle_released_runtime().await? || helper.is_released().await? {
+                        self.helpers.lock().remove(serial);
+                        return Ok(None);
+                    }
+                    anyhow::ensure!(!helper.cleanup_is_pending(), crate::riviu_agent::HelperRecoveryRequired);
+                    if helper.is_alive().await {
+                        return Ok(Some(helper));
+                    }
+                    if let Some(reconnected) = helper.reconnect_runtime().await? {
+                        self.helpers.lock().insert(serial.to_owned(), reconnected.clone());
+                        return Ok(Some(reconnected));
+                    }
+                    helper.shutdown().await?;
+                    self.helpers.lock().remove(serial);
+                    Ok::<_, anyhow::Error>(None)
+                }.await.context(crate::riviu_agent::HelperRecoveryRequired)?;
+                if retained.is_some() { return Ok(retained); }
             }
-            cached => cached,
-        };
-        if let Some(helper) = cached {
-            if helper.is_alive().await {
-                return Ok(Some(helper));
-            }
-            if let Some(reconnected) = helper.reconnect_runtime().await? {
-                self.helpers.lock().insert(serial.to_owned(), reconnected.clone());
-                return Ok(Some(reconnected));
-            }
-            anyhow::ensure!(!helper.cleanup_is_pending(), "helper cleanup pending; retain owner and transport for reconciliation");
-            helper.shutdown().await?;
-            self.helpers.lock().remove(serial);
-        }
-        // **"I could not ask" is not "it is not installed".** This was
-        // `.unwrap_or_default().contains("package:")`, so a phone that had gone `offline`,
-        // lost authorisation, or timed out on `pm path` reported the helper absent -- and with
-        // no bundled APK configured the method then returned `Ok(None)`, which callers render
-        // as "máy chưa có Riviu helper" or silently disable clipboard. The helper was there the
-        // whole time; the transport was not.
-        //
-        // §9.97 already recorded the operator-facing half of this confusion: a phone with the
-        // helper installed showed "chưa có helper" because the service had not been reached.
-        // The note said the message should say "chưa với tới được"; this is the same
-        // distinction, one layer down, where it can actually be made.
-        let installed = self
-            .adb
-            .shell(serial, &format!("pm path {}", crate::riviu_agent::PACKAGE))
-            .await
-            .with_context(|| format!("không hỏi được máy {serial} xem đã có Riviu helper chưa"))?
-            .contains("package:");
-        if !installed && (!self.automatic_setup_allowed || self.riviu_agent_apk.is_none()) {
-            return Ok(None);
-        }
-        let helper = if self.automatic_setup_allowed {
-            crate::riviu_agent::HelperClient::ensure_runtime(self.adb.clone(), serial, self.riviu_agent_apk.as_deref(), self.helper_state_dir.as_deref()).await?
-        } else {
-            crate::riviu_agent::HelperClient::attach_existing(self.adb.clone(), serial).await?
-        };
-        self.helpers
-            .lock()
-            .insert(serial.to_string(), helper.clone());
-        Ok(Some(helper))
+            let helper = if self.automatic_setup_allowed {
+                // Durable admission precedes package availability: missing APK/transport
+                // must not turn an unresolved retained owner into optional-helper absence.
+                crate::riviu_agent::HelperClient::ensure_runtime(self.adb.clone(), serial, self.riviu_agent_apk.as_deref(), self.helper_state_dir.as_deref()).await?
+            } else {
+                // A failed query is unknown, never proof the optional helper is absent.
+                let installed = self.adb.shell(serial, &format!("pm path {}", crate::riviu_agent::PACKAGE))
+                    .await.with_context(|| format!("không hỏi được máy {serial} xem đã có Riviu helper chưa"))?
+                    .contains("package:");
+                if !installed { return Ok(None); }
+                crate::riviu_agent::HelperClient::attach_existing(self.adb.clone(), serial).await?
+            };
+            self.helpers.lock().insert(serial.to_string(), helper.clone());
+            Ok(Some(helper))
+        }.await;
+        self.publish_helper_status(serial, result.as_ref().ok().and_then(Option::as_ref),
+            result.as_ref().err().is_some_and(|error| error.is::<crate::riviu_agent::HelperRecoveryRequired>()));
+        result
     }
 
     /// One read-only look at the Riviu helper.

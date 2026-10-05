@@ -1,14 +1,14 @@
 {
   "name": "riviumanagersphone",
   "private": true,
-  "version": "0.2.74",
+  "version": "0.2.75",
   "type": "module",
   "engines": {
     "node": ">=20.19"
   },
   "scripts": {
     "dev": "vite",
-    "build": "tsc -b && vite build",
+    "build": "node ../../scripts/frontend_provenance.mjs build",
     "lint": "oxlint --deny-warnings",
     "test": "vitest run",
     "test:e2e": "playwright test",

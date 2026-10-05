@@ -9,7 +9,23 @@
  */
 const GENERIC_CODES = new Set(["OperationFailed"]);
 
+const HELPER_RECOVERY_MESSAGE = "Helper còn giữ phiên cũ hoặc đang thuộc phiên khác; chưa thể xác minh điều khiển. Chọn Khôi phục helper trên đúng máy để xem và xác nhận kế hoạch. Không tự giành quyền hoặc gửi lại thao tác.";
+
+/** Recognize retained helper ownership at the shared IPC error boundary. */
+export function helperRecoveryMessage(cause: unknown): string | null {
+  const message = typeof cause === "string" ? cause
+    : cause instanceof Error ? cause.message
+      : cause && typeof cause === "object"
+        ? [Reflect.get(cause, "code"), Reflect.get(cause, "message")].filter(value => typeof value === "string").join(": ")
+        : "";
+  return /HelperRecoveryRequired|owner_conflict|helper_recovery_required/.test(message)
+    || message === HELPER_RECOVERY_MESSAGE ? HELPER_RECOVERY_MESSAGE : null;
+}
+
 function readableMessage(message: string): string {
+  const helper = helperRecoveryMessage(message);
+  if (helper) return helper;
+  if (message.startsWith("DeviceControlFailed:")) return `Chưa điều khiển được thiết bị: ${message.slice("DeviceControlFailed:".length).trim()}`;
   if (message.includes("device_reconnect_timeout")) return "Máy mất kết nối quá 2 phút. Kết nối lại đúng điện thoại rồi bấm Thử lại.";
   if (/\bdevice offline\b/i.test(message)) {
     const serial = message.match(/\badb(?:\.exe)?\s+-s\s+([^\s;]+)/i)?.[1];
@@ -39,6 +55,8 @@ function readableMessage(message: string): string {
  * store to do it.
  */
 export function describeError(cause: unknown): string {
+  const helper = helperRecoveryMessage(cause);
+  if (helper) return helper;
   if (cause === null || cause === undefined) return "Lỗi không rõ nguyên nhân";
   if (typeof cause === "string") return readableMessage(cause);
   if (cause instanceof Error) return readableMessage(cause.message);

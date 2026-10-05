@@ -12,6 +12,12 @@ import { describeError } from "./describeError";
  * here.
  */
 describe("describeError", () => {
+  it("explains retained helper ownership without leaking raw control errors or promising takeover", () => {
+    const message = describeError({ code: "DeviceControlFailed", message: "HelperRecoveryRequired: owner_conflict" });
+    expect(message).toContain("Khôi phục helper");
+    expect(message).toContain("phiên khác");
+    expect(message).not.toMatch(/DeviceControlFailed|HelperRecoveryRequired|owner_conflict/);
+  });
   it("does not promise publish reconnect for an offline preview", () => {
     const message = describeError({
       code: "OperationFailed",
