@@ -176,12 +176,15 @@ const SCHEDULED_FIRST_CHECK_SECONDS: i64 = 120;
 const VERIFICATION_CHECK_SECONDS: i64 = 300;
 const VERIFICATION_NO_PROGRESS_LIMIT: u64 = 3;
 const VERIFICATION_NO_PROGRESS_CAUSE: &str = "verificationNoProgress";
+const METADATA_RETRY_LIMIT: u64 = 12;
+const METADATA_RETRY_CAUSE: &str = "metadataRetryBudgetExhausted";
 
 fn new_verification_budget(intent: Option<&str>) -> serde_json::Value {
     use sha2::Digest;
     serde_json::json!({
         "version":1,"intentSha256":intent.map(|raw|format!("{:x}",sha2::Sha256::digest(raw.as_bytes()))),
         "publicationStage":0,"noProgressObservations":0,"observations":0,
+        "metadataObservations":0,"metadataLimit":METADATA_RETRY_LIMIT,
         "limit":VERIFICATION_NO_PROGRESS_LIMIT,
     })
 }
@@ -232,8 +235,91 @@ fn advance_verification_budget(
         "version":1,"intentSha256":initial["intentSha256"],"publicationStage":stage,
         "fingerprint":fingerprint,"noProgressObservations":no_progress,
         "observations":prior["observations"].as_u64().unwrap_or(0).saturating_add(1),
+        "metadataObservations":prior["metadataObservations"].as_u64().unwrap_or(0),
+        "metadataLimit":METADATA_RETRY_LIMIT,
         "limit":VERIFICATION_NO_PROGRESS_LIMIT,
     })
+}
+
+/// A copied candidate permits bounded network reads, never publication or Sheet authority.
+fn retained_metadata_observation(
+    conn: &Connection,
+    candidate: &PendingPublishVerification,
+    diagnostic: Option<&serde_json::Value>,
+) -> anyhow::Result<bool> {
+    use crate::publish_submission::*;
+    use sha2::Digest;
+    let Some(value) = diagnostic.and_then(|d| d.get("pendingMetadataCandidate")) else {
+        return Ok(false);
+    };
+    let Ok(pending) = serde_json::from_value::<PendingMetadataCandidate>(value.clone()) else {
+        return Ok(false);
+    };
+    let Some(raw) = candidate.effect_intent.as_deref() else { return Ok(false); };
+    let Ok(proof) = serde_json::from_str::<PublishSubmissionProof>(raw) else { return Ok(false); };
+    if pending.schema_version != 1 || proof.validate().is_err()
+        || !matches!(pending.captured.metadata.state, MetadataAttemptState::Unavailable)
+        || pending.captured.metadata.attempts == 0
+        || pending.campaign_id != candidate.campaign_id
+        || pending.assignment_id != candidate.assignment_id
+        || pending.bundle_id != candidate.bundle_id || proof.bundle_id != candidate.bundle_id
+        || pending.intent_sha256 != format!("{:x}",sha2::Sha256::digest(raw.as_bytes()))
+        || pending.caption_sha256 != proof.caption_sha256
+        || pending.captured.submitted_at != proof.submitted_at
+        || normalize_publish_account(&pending.captured.expected_account).ok()
+            != normalize_publish_account(&proof.expected_account).ok()
+    { return Ok(false); }
+    let manifest: String = conn.query_row("SELECT manifest_json FROM publish_bundles WHERE id=?1 AND campaign_id=?2",
+        params![candidate.bundle_id,candidate.campaign_id],|r|r.get(0))?;
+    let Ok(bundle) = serde_json::from_str::<crate::PublishBundle>(&manifest) else { return Ok(false); };
+    if bundle.id != pending.bundle_id || bundle.media_kind != proof.media_kind
+        || bundle.caption_sha256 != proof.caption_sha256
+        || format!("{:x}",sha2::Sha256::digest(bundle.caption.as_bytes())) != proof.caption_sha256
+        || normalized_caption_sha256(&bundle.caption) != pending.captured.normalized_caption_sha256
+    { return Ok(false); }
+    let Ok(url) = url::Url::parse(&pending.captured.canonical_url) else { return Ok(false); };
+    let targets = crate::interaction::parse_tiktok_links(&pending.captured.canonical_url);
+    let Some(target) = targets.first().and_then(|t|t.target.as_ref()) else { return Ok(false); };
+    if url.scheme() != "https" || !matches!(url.host_str(),Some("www.tiktok.com" | "tiktok.com" | "m.tiktok.com"))
+        || targets.len() != 1 || target.normalized_url != pending.captured.canonical_url
+        || target.content_id != pending.captured.post_id
+        || normalize_publish_account(&target.author).ok() != normalize_publish_account(&proof.expected_account).ok()
+    { return Ok(false); }
+    let claimed_elsewhere: bool = conn.query_row("SELECT EXISTS(SELECT 1 FROM publish_post_identities WHERE post_url=?1 AND assignment_id<>?2)",
+        params![pending.captured.canonical_url,candidate.assignment_id],|r|r.get(0))?;
+    if claimed_elsewhere { return Ok(false); }
+    let prepared_at: Option<String> = conn.query_row("SELECT recorded_at FROM operation_device_events
+        WHERE source_kind='publish' AND source_id=?1 AND udid=?2 AND action='publishStep' AND state='opening_app'
+        AND julianday(recorded_at)<=julianday(?3) AND julianday(recorded_at)>=julianday(?3)-30.0/1440.0
+        ORDER BY recorded_at DESC LIMIT 1",params![candidate.campaign_id,candidate.udid,proof.submitted_at],|r|r.get(0)).optional()?;
+    if prepared_at != pending.captured.prepared_at { return Ok(false); }
+    let Ok(submitted) = DateTime::parse_from_rfc3339(&proof.submitted_at) else { return Ok(false); };
+    let Ok(captured) = DateTime::parse_from_rfc3339(&pending.captured.captured_at) else { return Ok(false); };
+    let Ok(checked) = DateTime::parse_from_rfc3339(&pending.captured.metadata.checked_at) else { return Ok(false); };
+    let Ok(prepared) = DateTime::parse_from_rfc3339(prepared_at.as_deref().unwrap_or(&proof.submitted_at)) else { return Ok(false); };
+    let Some(allocated) = pending.captured.post_id.parse::<u64>().ok()
+        .and_then(|id|DateTime::from_timestamp((id >> 32) as i64,0)) else { return Ok(false); };
+    let now = Utc::now();
+    if prepared > submitted || submitted-prepared > chrono::Duration::minutes(30)
+        || allocated.timestamp() < prepared.timestamp() || allocated > submitted+chrono::Duration::minutes(30)
+        || allocated > now || captured < submitted || captured > now || checked < captured || checked > now
+    { return Ok(false); }
+    let prior = candidate.evidence_json.as_deref().and_then(|raw|serde_json::from_str::<serde_json::Value>(raw).ok());
+    let old = prior.as_ref().and_then(|e|e.get("verificationDiagnostic").and_then(|d|d.get("pendingMetadataCandidate"))
+        .or_else(||e.get("post").and_then(|p|p.get("verificationDiagnostic")).and_then(|d|d.get("pendingMetadataCandidate"))));
+    if let Some(old) = old {
+        let Ok(previous) = serde_json::from_value::<PendingMetadataCandidate>(old.clone()) else { return Ok(false); };
+        let mut identity = value.clone();
+        let mut previous_identity = old.clone();
+        let Some(fields) = identity["captured"].as_object_mut() else { return Ok(false); };
+        fields.remove("metadata");
+        let Some(fields) = previous_identity["captured"].as_object_mut() else { return Ok(false); };
+        fields.remove("metadata");
+        if identity != previous_identity || pending.captured.metadata.attempts <= previous.captured.metadata.attempts {
+            return Ok(false);
+        }
+    }
+    Ok(true)
 }
 
 pub(super) fn needs_review(evidence: Option<&str>) -> bool {
@@ -352,9 +438,11 @@ fn explicit_non_stop_review(evidence: Option<&str>) -> bool {
             (review["state"] == "needsReview"
                 && review["cause"] != "operatorStopped"
                 && review["cause"] != "verificationDeadline"
-                && review["cause"] != VERIFICATION_NO_PROGRESS_CAUSE)
+                && review["cause"] != VERIFICATION_NO_PROGRESS_CAUSE
+                && review["cause"] != METADATA_RETRY_CAUSE)
                 || v.get("verificationReviewBeforeStop")
-                    .is_some_and(|prior| prior["cause"] != VERIFICATION_NO_PROGRESS_CAUSE)
+                    .is_some_and(|prior| prior["cause"] != VERIFICATION_NO_PROGRESS_CAUSE
+                        && prior["cause"] != METADATA_RETRY_CAUSE)
         })
 }
 
@@ -1435,8 +1523,16 @@ impl Database {
         if evidence.get("priorEvidenceJson").is_none() {
             evidence["priorEvidenceJson"] = serde_json::to_value(&prior)?;
         }
+        let metadata_observation = retained_metadata_observation(&transaction,candidate,diagnostic)?;
         if let Some(diagnostic) = diagnostic {
+            let previous = evidence.get("verificationDiagnostic").and_then(|d|d.get("pendingMetadataCandidate"))
+                .or_else(|| evidence.get("post").and_then(|p|p.get("verificationDiagnostic")).and_then(|d|d.get("pendingMetadataCandidate"))).cloned();
             evidence["verificationDiagnostic"] = diagnostic.clone();
+            if !metadata_observation {
+                if let Some(previous) = previous {
+                    evidence["verificationDiagnostic"]["pendingMetadataCandidate"] = previous;
+                }
+            }
         }
         let checked = Utc::now();
         let identity_missing = !submission_identity_complete(intent.as_deref());
@@ -1453,10 +1549,21 @@ impl Database {
         let budget = if prior_review {
             // A one-shot manual check can settle proof, but cannot renew automatic work.
             evidence["verificationBudget"].clone()
+        } else if metadata_observation {
+            let initial = new_verification_budget(intent.as_deref());
+            let prior = &evidence["verificationBudget"];
+            let mut budget = if prior["version"] == 1 && prior["intentSha256"] == initial["intentSha256"] {
+                prior.clone()
+            } else { initial };
+            budget["metadataObservations"] = serde_json::json!(budget["metadataObservations"].as_u64().unwrap_or(0).saturating_add(1));
+            budget["metadataLimit"] = serde_json::json!(METADATA_RETRY_LIMIT);
+            budget["observations"] = serde_json::json!(budget["observations"].as_u64().unwrap_or(0).saturating_add(1));
+            budget
         } else {
             advance_verification_budget(&evidence, intent.as_deref(), diagnostic)
         };
-        let budget_exhausted = budget["noProgressObservations"].as_u64().unwrap_or(0)
+        let metadata_exhausted = budget["metadataObservations"].as_u64().unwrap_or(0) >= METADATA_RETRY_LIMIT;
+        let budget_exhausted = metadata_exhausted || budget["noProgressObservations"].as_u64().unwrap_or(0)
             >= VERIFICATION_NO_PROGRESS_LIMIT;
         evidence["verificationBudget"] = budget;
         let review = identity_missing || legacy_review || prior_review || budget_exhausted;
@@ -1487,6 +1594,8 @@ impl Database {
                 })
                 .filter(|text| !text.trim().is_empty())
                 .unwrap_or(observation_reason.clone())
+        } else if metadata_exhausted && !legacy_review {
+            format!("Đã giữ liên kết ứng viên; tự kiểm tra dữ liệu công khai đã dừng sau {METADATA_RETRY_LIMIT} lượt chưa xác minh được. {observation_reason} Xác nhận Tiếp tục xác minh bài đã gửi để mở ngân sách mới, không đăng lại.")
         } else if budget_exhausted && !legacy_review {
             format!("Tự kiểm tra đã dừng sau {VERIFICATION_NO_PROGRESS_LIMIT} lượt liên tiếp không có bằng chứng mới của đúng bài ({reason_code}). {observation_reason} Cần kiểm tra; xác nhận Tiếp tục xác minh bài đã gửi để mở ngân sách mới, không đăng lại.")
         } else {
@@ -1521,6 +1630,8 @@ impl Database {
                 .unwrap_or("explicitReview")
         } else if legacy_review {
             reason_code
+        } else if metadata_exhausted {
+            METADATA_RETRY_CAUSE
         } else if budget_exhausted {
             VERIFICATION_NO_PROGRESS_CAUSE
         } else {

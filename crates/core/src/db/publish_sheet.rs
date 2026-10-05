@@ -793,6 +793,306 @@ mod tests {
         (db, path, campaign, assignment, intent)
     }
 
+    fn pending_metadata_fixture() -> (
+        Database,
+        PathBuf,
+        String,
+        String,
+        String,
+        crate::publish_submission::PendingMetadataCandidate,
+    ) {
+        use crate::publish_submission::*;
+        use sha2::Digest;
+        let (db, path, campaign, assignment, raw) = review_fixture(1);
+        let detail = db.get_publish_campaign(&campaign).unwrap().unwrap();
+        let row = &detail.assignments[0];
+        let mut frozen = detail.bundles[0].clone();
+        frozen.caption_sha256 = format!("{:x}", sha2::Sha256::digest(frozen.caption.as_bytes()));
+        let mut intent: serde_json::Value = serde_json::from_str(&raw).unwrap();
+        let submitted_at = intent["submittedAt"].as_str().unwrap().to_owned();
+        let proof = PublishSubmissionProof {
+            verification_contract_version: 1,
+            expected_account: "fixture".into(),
+            submitted_at: submitted_at.clone(),
+            package: "com.zhiliaoapp.musically".into(),
+            version: "45.7.3".into(),
+            locale: "en".into(),
+            caption_sha256: frozen.caption_sha256.clone(),
+            bundle_id: frozen.id.clone(),
+            media_kind: frozen.media_kind.clone(),
+        };
+        proof.validate().unwrap();
+        intent.as_object_mut().unwrap().extend(
+            serde_json::to_value(&proof)
+                .unwrap()
+                .as_object()
+                .unwrap()
+                .clone(),
+        );
+        let raw = intent.to_string();
+        let mut request = db.publish_campaign_request(&campaign).unwrap().unwrap();
+        request.verification_contract_version = Some(1);
+        request.verification_builds = vec![PublishVerificationBuild {
+            udid: row.udid.clone(),
+            package: proof.package,
+            version: proof.version,
+            locale: proof.locale,
+        }];
+        let conn = db.conn().unwrap();
+        conn.execute(
+            "UPDATE publish_bundles SET caption_sha256=?2,manifest_json=?3 WHERE id=?1",
+            params![
+                frozen.id,
+                frozen.caption_sha256,
+                serde_json::to_string(&frozen).unwrap()
+            ],
+        )
+        .unwrap();
+        conn.execute(
+            "UPDATE publish_campaigns SET request_json=?2 WHERE id=?1",
+            params![campaign, serde_json::to_string(&request).unwrap()],
+        )
+        .unwrap();
+        conn.execute(
+            "UPDATE publish_assignments SET effect_intent=?2 WHERE id=?1",
+            params![assignment, raw],
+        )
+        .unwrap();
+        drop(conn);
+        let post_id = (((DateTime::parse_from_rfc3339(&submitted_at)
+            .unwrap()
+            .timestamp() as u64)
+            << 32)
+            | 1)
+        .to_string();
+        let now = Utc::now().to_rfc3339();
+        let pending = PendingMetadataCandidate {
+            schema_version: 1,
+            campaign_id: campaign.clone(),
+            assignment_id: assignment.clone(),
+            bundle_id: frozen.id,
+            intent_sha256: format!("{:x}", sha2::Sha256::digest(raw.as_bytes())),
+            caption_sha256: frozen.caption_sha256,
+            captured: CapturedMetadataCandidate {
+                canonical_url: format!("https://www.tiktok.com/@fixture/photo/{post_id}"),
+                post_id,
+                expected_account: "fixture".into(),
+                normalized_caption_sha256: normalized_caption_sha256(&frozen.caption),
+                prepared_at: db
+                    .publish_attempt_opened_at(&campaign, &row.udid, &submitted_at)
+                    .unwrap(),
+                submitted_at,
+                captured_at: now.clone(),
+                provenance: MetadataCandidateProvenance::MeasuredViewerClipboard,
+                metadata: MetadataAttempt {
+                    state: MetadataAttemptState::Unavailable,
+                    attempts: 1,
+                    checked_at: now,
+                    stage: MetadataDiagnostic::HttpStatus,
+                    http_status: Some(400),
+                },
+            },
+        };
+        (db, path, campaign, assignment, raw, pending)
+    }
+
+    #[test]
+    fn retained_metadata_candidate_retries_twelve_observations_and_requires_confirmed_resume() {
+        let (mut db, path, campaign, assignment, intent, mut pending) = pending_metadata_fixture();
+        let immutable = serde_json::to_value(&pending).unwrap();
+        let mut budgets = Vec::new();
+        for attempt in 1..=12 {
+            let row = db
+                .publish_verifications_for_campaign(&campaign, 10)
+                .unwrap()
+                .remove(0);
+            pending.captured.metadata.attempts = attempt;
+            pending.captured.metadata.checked_at = Utc::now().to_rfc3339();
+            let diagnostic = serde_json::json!({"stage":"candidatePublicMetadata","pendingMetadataCandidate":pending,"reasonCode":"metadataUnavailable"});
+            assert!(db
+                .record_publish_verification_diagnostic(
+                    &row,
+                    "public metadata unavailable",
+                    "metadataUnavailable",
+                    Some(&diagnostic)
+                )
+                .unwrap());
+            let detail = db.get_publish_campaign(&campaign).unwrap().unwrap();
+            let actual = &detail.assignments[0];
+            let evidence: serde_json::Value =
+                serde_json::from_str(actual.evidence_json.as_deref().unwrap()).unwrap();
+            let status = &evidence["verificationStatus"];
+            assert_eq!(
+                status["state"],
+                if attempt < 12 {
+                    "pending"
+                } else {
+                    "needsReview"
+                },
+                "valid retained metadata candidate at observation {attempt}"
+            );
+            assert_eq!(actual.effect_intent.as_deref(), Some(intent.as_str()));
+            assert_eq!(
+                evidence["verificationDiagnostic"]["pendingMetadataCandidate"],
+                serde_json::to_value(&pending).unwrap()
+            );
+            assert!(evidence.get("postUrl").is_none());
+            assert_ne!(evidence["publicationVerified"], true);
+            assert_eq!(evidence["cleanup"]["state"], "kept");
+            assert!(db.pending_publish_sheet_row(&assignment).unwrap().is_none());
+            assert!(!db
+                .claim_publish_assignment_for_posting(&assignment, &intent)
+                .unwrap());
+            budgets.push(evidence["verificationBudget"].clone());
+            if attempt < 12 {
+                let automatic = db
+                    .pending_current_publish_verifications(10)
+                    .unwrap()
+                    .remove(0);
+                let checked =
+                    DateTime::parse_from_rfc3339(status["checkedAt"].as_str().unwrap()).unwrap();
+                let next =
+                    DateTime::parse_from_rfc3339(status["nextCheckAt"].as_str().unwrap()).unwrap();
+                assert_eq!((next - checked).num_seconds(), 300);
+                assert!(!automatic.is_due((checked + chrono::Duration::seconds(299)).into()));
+                assert!(automatic.is_due(next.into()));
+            } else {
+                assert_eq!(status["cause"], "metadataRetryBudgetExhausted");
+                assert!(status["nextCheckAt"].is_null());
+                assert!(db
+                    .pending_current_publish_verifications(10)
+                    .unwrap()
+                    .is_empty());
+            }
+            if attempt == 3 {
+                drop(db);
+                db = Database::open(&path).unwrap();
+                let row = db.pending_current_publish_verifications(10).unwrap().remove(0);
+                assert!(db.record_publish_verification_observation(&row, "temporary transport read failure", "readFailed").unwrap());
+                let row = db.pending_current_publish_verifications(10).unwrap().remove(0);
+                let evidence: serde_json::Value = serde_json::from_str(row.evidence_json.as_deref().unwrap()).unwrap();
+                assert_eq!(evidence["verificationBudget"]["metadataObservations"], 3);
+                assert_eq!(evidence["verificationBudget"]["noProgressObservations"], 1);
+                assert_eq!(evidence["verificationDiagnostic"]["pendingMetadataCandidate"], serde_json::to_value(&pending).unwrap());
+            }
+        }
+        for (index, budget) in budgets.iter().enumerate() {
+            assert_eq!(budget["metadataObservations"], index + 1);
+            assert_eq!(budget["metadataLimit"], 12);
+            assert_eq!(budget["noProgressObservations"], if index < 3 { 0 } else { 1 });
+        }
+        let review = db
+            .publish_verifications_for_campaign(&campaign, 10)
+            .unwrap()
+            .remove(0);
+        pending.captured.metadata.attempts += 1;
+        pending.captured.metadata.checked_at = Utc::now().to_rfc3339();
+        let diagnostic = serde_json::json!({"stage":"candidatePublicMetadata","pendingMetadataCandidate":pending,"reasonCode":"metadataUnavailable"});
+        assert!(db
+            .record_manual_publish_verification_diagnostic(
+                &review,
+                "still unavailable",
+                "metadataUnavailable",
+                Some(&diagnostic)
+            )
+            .unwrap());
+        let parked = db
+            .publish_verifications_for_campaign(&campaign, 10)
+            .unwrap()
+            .remove(0);
+        let evidence: serde_json::Value =
+            serde_json::from_str(parked.evidence_json.as_deref().unwrap()).unwrap();
+        assert_eq!(evidence["verificationBudget"], *budgets.last().unwrap());
+        assert!(evidence["verificationStatus"]["nextCheckAt"].is_null());
+        assert_eq!(
+            db.resume_publish_verification(&assignment, true, parked.revision)
+                .unwrap()
+                .state,
+            super::super::publish_verification::PublishResumeVerificationState::Accepted
+        );
+        let resumed = db
+            .pending_current_publish_verifications(10)
+            .unwrap()
+            .remove(0);
+        let evidence: serde_json::Value =
+            serde_json::from_str(resumed.evidence_json.as_deref().unwrap()).unwrap();
+        assert_eq!(resumed.effect_intent.as_deref(), Some(intent.as_str()));
+        assert_eq!(evidence["verificationBudget"]["metadataObservations"], 0);
+        assert_eq!(evidence["verificationBudget"]["metadataLimit"], 12);
+        assert_eq!(
+            evidence["verificationDiagnostic"]["pendingMetadataCandidate"],
+            serde_json::to_value(&pending).unwrap()
+        );
+        assert_eq!(
+            evidence["verificationDiagnostic"]["pendingMetadataCandidate"]["captured"]
+                ["capturedAt"],
+            immutable["captured"]["capturedAt"]
+        );
+        assert!(db.pending_publish_sheet_row(&assignment).unwrap().is_none());
+        drop(db);
+        std::fs::remove_file(path).unwrap();
+    }
+
+    #[test]
+    fn invalid_metadata_candidates_do_not_extend_three_observation_phone_budget() {
+        for invalid in ["malformed", "rejected", "differentOwner"] {
+            let (db, path, campaign, assignment, intent, pending) = pending_metadata_fixture();
+            let mut value = serde_json::to_value(&pending).unwrap();
+            match invalid {
+                "malformed" => value["schemaVersion"] = serde_json::json!("invalid"),
+                "rejected" => {
+                    value["captured"]["metadata"]["state"] = serde_json::json!("rejected")
+                }
+                "differentOwner" => {
+                    value["assignmentId"] = serde_json::json!(Uuid::new_v4().to_string())
+                }
+                _ => unreachable!(),
+            }
+            for attempt in 1..=3 {
+                value["captured"]["metadata"]["attempts"] = serde_json::json!(attempt);
+                let diagnostic = serde_json::json!({"stage":"candidatePublicMetadata","pendingMetadataCandidate":value,"reasonCode":"metadataUnavailable"});
+                let row = db
+                    .publish_verifications_for_campaign(&campaign, 10)
+                    .unwrap()
+                    .remove(0);
+                assert!(db
+                    .record_publish_verification_diagnostic(
+                        &row,
+                        "candidate cannot authorize metadata retry",
+                        "metadataUnavailable",
+                        Some(&diagnostic)
+                    )
+                    .unwrap());
+            }
+            assert!(
+                db.pending_current_publish_verifications(10)
+                    .unwrap()
+                    .is_empty(),
+                "{invalid}"
+            );
+            let detail = db.get_publish_campaign(&campaign).unwrap().unwrap();
+            let evidence: serde_json::Value =
+                serde_json::from_str(detail.assignments[0].evidence_json.as_deref().unwrap())
+                    .unwrap();
+            assert_eq!(
+                evidence["verificationStatus"]["cause"], "verificationNoProgress",
+                "{invalid}"
+            );
+            assert_eq!(
+                evidence["verificationBudget"]["noProgressObservations"], 3,
+                "{invalid}"
+            );
+            assert!(evidence["verificationStatus"]["nextCheckAt"].is_null());
+            assert_eq!(
+                detail.assignments[0].effect_intent.as_deref(),
+                Some(intent.as_str())
+            );
+            assert!(db.pending_publish_sheet_row(&assignment).unwrap().is_none());
+            drop(db);
+            std::fs::remove_file(path).unwrap();
+        }
+    }
+
     fn mark_scheduled(db: &Database, campaign: &str) {
         db.conn()
             .unwrap()

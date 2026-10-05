@@ -213,7 +213,8 @@ campaign và toàn bộ máy nằm trong scope mới được clock production n
 giờ. Các lịch khác, Nuôi và Điều phối vẫn đóng băng, không sửa lịch đã lưu.
 
 Verifier nền chỉ nhận bài đến hạn khi có `publishVerification` hợp lệ cho đúng
-campaign và serial. Nó dùng cùng ngân sách 3 lần không tiến triển và nhịp 5 phút;
+campaign và serial. Nó dùng nhịp 5 phút, ngân sách 3 lần tìm bài không tiến triển
+và ngân sách riêng 12 lần metadata chưa sẵn sàng của candidate đã ràng buộc;
 không tự mở lại bài cần review. Truy vấn và cập nhật lượt thiết bị giới hạn trong
 scope. Cleanup nền cần riêng `publishCleanup` và chỉ dọn bản chuyển đã có proof
 canonical qua kiểm revision/lease hiện có. Thiếu hoặc đổi scope thì không nhận
@@ -466,6 +467,10 @@ Nhãn thời gian own-post chấp nhận EN và VI (`N phút trước` / `vừa 
 nextCheckAt. Bài còn thiếu link được kiểm sau300giây tính từ cuối lượt trước khi còn
 ngân sách. `verificationBudget` version1 lưu fingerprint gắn immutable intent,
 publicationStage, observations và noProgressObservations trong cùng CAS với kết quả.
+Candidate metadata đúng schema/assignment/intent/bundle/account/caption/time được
+kiểm qua mạng với `metadataObservations`, tối đa `metadataLimit=12` mỗi đợt xác minh.
+Các lượt này giữ nguyên bộ đếm tìm bài; lỗi đọc thông thường giữ bộ đếm metadata.
+Hết giới hạn metadata lưu cause `metadataRetryBudgetExhausted` và giữ candidate.
 Sau3lượt liên tiếp không có bằng chứng mới của đúng bài, lưu needsReview với cause
 `verificationNoProgress`, nextCheckAt=null và giữ intent/media/khoản thiếu Sheet.
 Lỗi đọc/transport, processing và tìm kiếm đều tiêu ngân sách hữu hạn này; offline/busy
@@ -626,11 +631,13 @@ vẫn kiểm quyền tại transaction; capability chỉ hướng dẫn UI, khô
 vượt điều kiện khi trạng thái đã đổi.
 
 Resume giữ campaign cancelled, publication/effect intent, jobs và đích Sheet/epoch
-ban đầu. Cause `verificationNoProgress` cũng cho phép resume rõ ràng; các review
+ban đầu. Cause `verificationNoProgress` và `metadataRetryBudgetExhausted` cho phép resume rõ ràng; các review
 khác không được nới. Transaction lưu status/budget/review-before-stop cũ trong
 `verificationBeforeResume` rồi mở budget mới; gọi lặp/ACK replay không reset.
 Worker hiện có dùng `nextCheckAt = checkedAt + 300 giây` khi còn ngân sách; ba lượt
-không tiến triển liên tiếp lại needsReview. **Kiểm tra liên kết** một lần có thể
+không tiến triển liên tiếp ở bước tìm bài, hoặc 12 lượt metadata chưa sẵn sàng, lại needsReview.
+Confirmed resume đặt lại cả hai ngân sách nhưng không đổi candidate, thời điểm capture hay metadata attempt.
+**Kiểm tra liên kết** một lần có thể
 chốt canonical nhưng thất bại không reset budget hoặc mở lại review đã dừng.
 **Kiểm tra liên kết** gọi `publish_check_links`, không
 `publish_execute`; phản hồi pending/busy/stopped/stale/noCandidate không được coi là
