@@ -257,6 +257,11 @@ impl DeviceControlPlane {
         self.work.current_owner(udid)
     }
 
+    /// A held lease snapshot for read-only activity projection; excludes queued waiters.
+    pub fn held_work(&self, udid: &str) -> Option<crate::device_work::HeldDeviceWork> {
+        self.work.held_work(udid)
+    }
+
     /// Invoked under the exclusive device lease immediately before a cold automation start.
     /// Manual viewing and warm verification keep working while a submitted upload is pending.
     pub fn set_clean_start_guard(&self, guard: Arc<CleanStartGuard>) {

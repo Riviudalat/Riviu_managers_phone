@@ -12,6 +12,20 @@ import { describeError } from "./describeError";
  * here.
  */
 describe("describeError", () => {
+  it("explains duplicate TikTok binding without choosing or reassigning a device", () => {
+    const message = describeError({ code: "OperationFailed", message: "TikTok username is already assigned to another device" });
+    expect(message).toContain("đã được gán cho thiết bị khác");
+    expect(message).toContain("đối chiếu");
+    expect(message).toContain("Không tự chuyển");
+  });
+  it("explains agent readiness timeout without claiming a USB or account cause", () => {
+    const message = describeError({ code: "DeviceControlFailed", message: "openControlSession: the agent on fixture-phone did not answer /status within 10 seconds" });
+    expect(message).toContain("Agent chưa phản hồi /status trong 10 giây");
+    expect(message).toContain("Chẩn đoán");
+    expect(message).toContain("chưa xác định nguyên nhân");
+    expect(message).not.toContain("DeviceControlFailed");
+    expect(describeError("GET /status: unrelated failure")).toBe("GET /status: unrelated failure");
+  });
   it("explains retained helper ownership without leaking raw control errors or promising takeover", () => {
     const message = describeError({ code: "DeviceControlFailed", message: "HelperRecoveryRequired: owner_conflict" });
     expect(message).toContain("Khôi phục helper");

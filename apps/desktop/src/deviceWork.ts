@@ -1,4 +1,4 @@
-import type { AgentStatus, DeviceInfo, DeviceWorkOwner } from "./types";
+import type { AgentStatus, DeviceInfo, DeviceWorkOwner, DeviceActivity } from "./types";
 import { describeError, helperRecoveryMessage } from "./describeError";
 
 export type DeviceOperationalStatus = "ready" | "connected" | "busy" | "warning" | "offline";
@@ -11,13 +11,14 @@ export interface DeviceOperationalView {
   ownerLabel: string | null;
   tone: "ok" | "warn" | "info";
   reason?: string;
+  step?: string;
   helperRecovery?: boolean;
 }
 
 const OWNER_LABELS: Record<DeviceWorkOwner, string> = {
   nurture: "Nuôi TikTok",
   interaction: "Tương tác",
-  script: "Flow",
+  script: "Tác vụ tự động",
   repair: "Sửa chữa",
   manualControl: "Điều khiển trực tiếp",
   groupSync: "Đồng bộ nhóm",
@@ -34,12 +35,16 @@ export function deviceOperationalView(
   currentOwner: DeviceWorkOwner | null,
   ownerReadState: DeviceWorkOwnerReadState = "known",
   agent?: AgentStatus,
+  activity?: DeviceActivity | null,
 ): DeviceOperationalView {
   const ownerLabel = currentOwner ? deviceWorkOwnerLabel(currentOwner) : null;
   if (device.status === "disconnected") {
     return { kind: "offline", label: "Ngoại tuyến", ownerLabel, tone: "info" };
   }
   if (currentOwner || device.status === "busy") {
+    if (currentOwner && ownerReadState === "known" && activity?.label.trim() && (activity.state === "running" || activity.state === "queued" || activity.state === "uncertain")) {
+      return { kind: "busy", label: activity.label, ownerLabel: null, tone: "warn", step: activity.step?.trim() || undefined };
+    }
     return { kind: "busy", label: "Bận", ownerLabel, tone: "warn" };
   }
   if (ownerReadState === "loading") {
@@ -64,7 +69,7 @@ export function deviceOperationalView(
     if (agent?.state === "ready" && agent.authReady && agent.sessionReady && agent.features.includes("helperReady")) {
       return { kind: "ready", label: "Sẵn sàng", ownerLabel: null, tone: "ok" };
     }
-    return { kind: "connected", label: "Đã kết nối · Chưa kiểm tra điều khiển", ownerLabel: null, tone: "info" };
+    return { kind: "connected", label: "Đã kết nối", ownerLabel: null, tone: "info", reason: "Điều khiển được kiểm tra khi mở máy hoặc chạy tác vụ; hiện không có kiểm tra đang chạy." };
   }
   if (device.status === "ready" || device.wdaReady) {
     return { kind: "ready", label: "Sẵn sàng", ownerLabel: null, tone: "ok" };

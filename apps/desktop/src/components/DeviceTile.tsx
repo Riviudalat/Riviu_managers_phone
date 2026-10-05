@@ -84,7 +84,7 @@ function DeviceTileInner({
       aria-selected={selected}
       tabIndex={0}
       aria-roledescription="thẻ thiết bị"
-      aria-label={`Máy ${index}, ${displayName}, ${operationalLabel}${selected ? ", đã chọn" : ""}`}
+      aria-label={`Máy ${index}, ${displayName}, ${operationalLabel}${operational.step ? `, ${operational.step}` : ""}${selected ? ", đã chọn" : ""}`}
       style={{ width, height: width * 2 }}
       onClick={(e) => onSelect(device.udid, e.metaKey || e.ctrlKey || e.shiftKey)}
       onKeyDown={(event) => {
@@ -153,9 +153,13 @@ function DeviceTileInner({
             {displayName}
           </span>
           {username && <span className="dev-phone-handle" title={`@${username}`}>@{username}</span>}
-          <span className={`dev-phone-status is-${operational.kind}`} title={operational.reason}>
+          <span className={`dev-phone-status is-${operational.kind}`} title={operational.reason} style={{ pointerEvents: "auto", whiteSpace: "normal", overflowWrap: "anywhere", lineHeight: 1.35 }}>
             {operationalLabel}
           </span>
+          {operational.step && <span className={`dev-phone-status is-${operational.kind}`} title={operational.step}
+            style={{ pointerEvents: "auto", whiteSpace: "normal", overflowWrap: "anywhere", lineHeight: 1.35 }}>
+            {operational.step}
+          </span>}
           {operational.helperRecovery && onHelperMaintenance && (
             <button type="button" className="link" title={operational.reason} style={{ pointerEvents: "auto" }}
               onDoubleClick={event => event.stopPropagation()}

@@ -77,6 +77,14 @@ pub struct DeviceWorkCoordinator {
     state: Arc<CoordinatorState>,
 }
 
+/// In-memory identity of work actually holding the device, not waiting for it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct HeldDeviceWork {
+    pub owner: DeviceWorkOwner,
+    pub token: Uuid,
+    pub acquired_at: chrono::DateTime<chrono::Utc>,
+}
+
 impl DeviceWorkCoordinator {
     pub fn new() -> Self {
         Self::default()
@@ -117,7 +125,11 @@ impl DeviceWorkCoordinator {
             .try_acquire_owned()
             .expect("device semaphore and ownership metadata must agree");
         let token = Uuid::new_v4();
-        metadata.current = Some(CurrentWork { owner, token });
+        metadata.current = Some(CurrentWork {
+            owner,
+            token,
+            acquired_at: chrono::Utc::now(),
+        });
         drop(metadata);
 
         Ok(DeviceWorkLease {
@@ -150,7 +162,11 @@ impl DeviceWorkCoordinator {
             if metadata.current.is_none() && metadata.waiters.is_empty() {
                 if let Ok(permit) = device.semaphore.clone().try_acquire_owned() {
                     let token = Uuid::new_v4();
-                    metadata.current = Some(CurrentWork { owner, token });
+                    metadata.current = Some(CurrentWork {
+                        owner,
+                        token,
+                        acquired_at: chrono::Utc::now(),
+                    });
                     drop(metadata);
                     return Ok(DeviceWorkLease {
                         udid,
@@ -185,7 +201,11 @@ impl DeviceWorkCoordinator {
         let token = Uuid::new_v4();
         let mut metadata = device.metadata.lock();
         metadata.remove_waiter(waiter_id);
-        metadata.current = Some(CurrentWork { owner, token });
+        metadata.current = Some(CurrentWork {
+            owner,
+            token,
+            acquired_at: chrono::Utc::now(),
+        });
         registration.armed = false;
         drop(metadata);
 
@@ -224,6 +244,16 @@ impl DeviceWorkCoordinator {
             .and_then(|device| device.metadata.lock().busy_owner())
     }
 
+    pub fn held_work(&self, udid: &str) -> Option<HeldDeviceWork> {
+        self.state.existing_device(udid).and_then(|device| {
+            device.metadata.lock().current.map(|work| HeldDeviceWork {
+                owner: work.owner,
+                token: work.token,
+                acquired_at: work.acquired_at,
+            })
+        })
+    }
+
     /// Prevent new background visits on exactly these phones until the guard drops.
     /// Existing leases remain owned and drain normally; this never revokes a gesture.
     pub fn defer_idle_work(
@@ -236,11 +266,11 @@ impl DeviceWorkCoordinator {
             .iter()
             .map(|udid| {
                 let device = self.state.device(udid);
-                device
-                    .metadata
-                    .lock()
-                    .idle_deferrals
-                    .push(CurrentWork { owner, token });
+                device.metadata.lock().idle_deferrals.push(CurrentWork {
+                    owner,
+                    token,
+                    acquired_at: chrono::Utc::now(),
+                });
                 device
             })
             .collect();
@@ -420,6 +450,7 @@ impl DeviceMetadata {
 struct CurrentWork {
     owner: DeviceWorkOwner,
     token: Uuid,
+    acquired_at: chrono::DateTime<chrono::Utc>,
 }
 
 struct WaitingWork {
@@ -752,5 +783,25 @@ mod tests {
             coordinator.current_owner("iphone-a"),
             Some(DeviceWorkOwner::Nurture)
         );
+        assert_eq!(coordinator.held_work("iphone-a"), None);
+    }
+
+    #[test]
+    fn held_work_changes_identity_on_same_owner_reacquisition_and_clears_on_release() {
+        let coordinator = DeviceWorkCoordinator::new();
+        let before = chrono::Utc::now();
+        let lease = coordinator
+            .try_acquire("phone", DeviceWorkOwner::Script)
+            .unwrap();
+        let held = coordinator.held_work("phone").unwrap();
+        assert_eq!(held.token, lease.token());
+        assert!(held.acquired_at >= before && held.acquired_at <= chrono::Utc::now());
+        drop(lease);
+        assert_eq!(coordinator.held_work("phone"), None);
+        let next = coordinator
+            .try_acquire("phone", DeviceWorkOwner::Script)
+            .unwrap();
+        assert_ne!(coordinator.held_work("phone").unwrap().token, held.token);
+        drop(next);
     }
 }

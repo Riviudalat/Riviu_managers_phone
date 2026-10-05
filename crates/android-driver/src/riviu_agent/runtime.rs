@@ -7,6 +7,15 @@ const MIN_VERSION: u64 = 7;
 const CHECKPOINT_LIMIT: u64 = 16 * 1024;
 
 #[derive(Debug)]
+struct HelperMaintenanceRetainedOwnerMissing;
+impl std::fmt::Display for HelperMaintenanceRetainedOwnerMissing {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("HelperMaintenanceRetainedOwnerMissing")
+    }
+}
+impl std::error::Error for HelperMaintenanceRetainedOwnerMissing {}
+
+#[derive(Debug)]
 pub struct HelperRecoveryRequired;
 impl std::fmt::Display for HelperRecoveryRequired {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
@@ -17,6 +26,18 @@ impl std::fmt::Display for HelperRecoveryRequired {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn maintenance_missing_retained_owner_is_explicit_and_remains_failed() {
+        let root = std::env::temp_dir().join(format!("helper-maintenance-missing-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir(&root).unwrap();
+        let error = HelperClient::prepare_maintenance(
+            &AdbProgram::at(root.join("never-run-adb")), "fixture", None, Some(&root),
+            "fixture_maintenance_1234", json!({"operation":"fixture"}),
+        ).await.expect_err("missing retained owner must not become success");
+        std::fs::remove_dir_all(&root).unwrap();
+        assert_eq!(error.to_string(), "HelperMaintenanceRetainedOwnerMissing");
+    }
 
 
     #[tokio::test]
@@ -450,7 +471,15 @@ impl HelperClient {
         anyhow::ensure!(effect_intent.as_object().is_some_and(|v| !v.is_empty())
             && serde_json::to_vec(&effect_intent)?.len() <= 4096, "existing effect identity required");
         let state = state_path(root.context("helper state directory missing")?, serial)?;
-        let record = owner_record(&state, serial)?;
+        let record = owner_record(&state, serial).map_err(|error| {
+            if error.downcast_ref::<std::io::Error>()
+                .is_some_and(|cause| cause.kind() == std::io::ErrorKind::NotFound)
+            {
+                anyhow!(HelperMaintenanceRetainedOwnerMissing)
+            } else {
+                error
+            }
+        })?;
         let owner_id = record["ownerId"].as_str().context("old helper owner missing")?;
         owner_credential_name(serial, owner_id)?;
         anyhow::ensure!(checked_shell(adb, serial, "id -u").await?.trim() == "2000"

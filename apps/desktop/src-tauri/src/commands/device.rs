@@ -6,6 +6,10 @@
 
 use super::*;
 
+#[path = "device_activity.rs"]
+mod device_activity;
+use device_activity::{project_activity, DeviceActivity};
+
 #[tauri::command]
 pub async fn device_action_capabilities(
     state: State<'_, AppState>,
@@ -31,6 +35,7 @@ pub async fn device_action_capabilities(
 pub struct DeviceWorkState {
     pub udid: String,
     pub current_owner: Option<DeviceWorkOwner>,
+    pub activity: Option<DeviceActivity>,
 }
 
 #[tauri::command]
@@ -38,18 +43,57 @@ pub async fn list_devices(state: State<'_, AppState>) -> Result<Vec<DeviceInfo>,
     Ok(state.registry.list())
 }
 
-/// Reads in-memory ownership only; it never probes, wakes, or leases a phone.
+/// Reads held ownership and one bounded persisted-progress batch; no phone IO.
 #[tauri::command]
 pub async fn list_device_work_states(
     state: State<'_, AppState>,
 ) -> Result<Vec<DeviceWorkState>, CommandError> {
-    Ok(state
-        .registry
-        .list()
+    let devices = state.registry.list();
+    let held = devices
+        .iter()
+        .map(|device| (device.udid.clone(), state.control.held_work(&device.udid)))
+        .collect::<Vec<_>>();
+    let scopes = held
+        .iter()
+        .filter_map(|(udid, held)| {
+            let held = held.as_ref()?;
+            matches!(
+                held.owner,
+                DeviceWorkOwner::Script | DeviceWorkOwner::Interaction
+            )
+            .then(|| riviu_core::db::DeviceActivityScope {
+                udid: udid.clone(),
+                owner: held.owner,
+                since: held.acquired_at,
+            })
+        })
+        .collect::<Vec<_>>();
+    let progress = if scopes.is_empty() {
+        Vec::new()
+    } else {
+        // Unavailable evidence leaves the owner visible, but cannot name its task.
+        state
+            .db
+            .storage_read(move |db| db.device_activity_progress(&scopes))
+            .await
+            .unwrap_or_default()
+    };
+    let live = state.nurture.list_status();
+    Ok(held
         .into_iter()
-        .map(|device| DeviceWorkState {
-            current_owner: state.control.current_work_owner(&device.udid),
-            udid: device.udid,
+        .map(|(udid, before)| {
+            let after = state.control.held_work(&udid);
+            let current_owner = state.control.current_work_owner(&udid);
+            let activity = if after.map(|held| held.owner) == current_owner {
+                project_activity(&udid, before, after, &live, &progress)
+            } else {
+                None
+            };
+            DeviceWorkState {
+                udid,
+                current_owner,
+                activity,
+            }
         })
         .collect())
 }

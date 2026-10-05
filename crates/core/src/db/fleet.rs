@@ -149,6 +149,15 @@ impl Database {
             current.as_deref().unwrap_or_default() == expected,
             "device account mapping changed; reload before saving"
         );
+        // Readback of an existing account is not a new assignment. Keep legacy
+        // spelling and duplicates untouched, but only after the exact CAS check.
+        if let Some(stored) = current.as_ref() {
+            if !handle.is_empty()
+                && stored.trim().trim_start_matches('@').eq_ignore_ascii_case(handle)
+            {
+                return Ok(stored.clone());
+            }
+        }
         if !handle.is_empty() {
             let duplicate:bool=tx.query_row("SELECT EXISTS(SELECT 1 FROM device_meta WHERE udid<>?1 AND lower(ltrim(trim(handle),'@'))=lower(?2))",params![udid,handle],|row|row.get(0))?;
             anyhow::ensure!(

@@ -370,6 +370,38 @@ describe("device group scope", () => {
 });
 
 describe("device operational identity", () => {
+  it("retains device 8 repair failure when the subsequent cache says ready", async () => {
+    const api = await import("./api");
+    const ready = {
+      udid: androidPhone.udid, state: "ready" as const, artifactId: "uiautomator", artifactVersion: "1",
+      bundleId: "io.appium.uiautomator2.server", protocolVersion: 1, features: [], installedVersion: "1",
+      installedBuild: null, authReady: true, mjpegReady: true, sessionReady: true, message: null,
+    };
+    vi.mocked(api.listDevices).mockResolvedValue([androidPhone]);
+    vi.mocked(api.listDeviceMetas).mockResolvedValue([{ udid: androidPhone.udid, number: 8, alias: "Máy từ xa", notes: "", tags: [] }]);
+    vi.mocked(api.listDeviceWorkStates).mockResolvedValue([]);
+    vi.mocked(api.agentListStatuses).mockResolvedValue([ready]);
+    vi.mocked(api.agentBulkRepair).mockResolvedValue([{ ...ready, state: "error", message: "DeviceControlFailed: lỗi sửa fixture" }]);
+    try {
+      render(<App />);
+      await screen.findByText("Máy từ xa");
+      await userEvent.click(screen.getByText("Bảo trì", { selector: "summary" }));
+      await userEvent.click(screen.getByRole("button", { name: "Sửa Riviu Agent" }));
+      await clickConfirmation("Sửa agent");
+      expect(await screen.findByText("Agent: 0 sẵn sàng, 1 cần xử lý")).toBeVisible();
+      expect(screen.getByText(/Máy 8.*Máy từ xa.*Chưa điều khiển được thiết bị: lỗi sửa fixture/)).toBeVisible();
+      expect(screen.queryByText("Agent: 1 sẵn sàng, 0 cần xử lý")).toBeNull();
+      expect(api.agentBulkRepair).toHaveBeenCalledExactlyOnceWith([androidPhone.udid]);
+      expect(api.agentHelperMaintenancePrepare).not.toHaveBeenCalled();
+      expect(api.agentHelperMaintenanceExecute).not.toHaveBeenCalled();
+      expect(api.deviceControlBegin).not.toHaveBeenCalled();
+    } finally {
+      vi.mocked(api.listDeviceMetas).mockResolvedValue([]);
+      vi.mocked(api.agentListStatuses).mockResolvedValue([]);
+      vi.mocked(api.agentBulkRepair).mockResolvedValue([]);
+    }
+  });
+
   it.each([false, true])("keeps transport-ready Android unknown without helper proof (preflight=%s)", async (preflight) => {
     const api = await import("./api");
     vi.mocked(api.listDevices).mockResolvedValue([androidPhone]);
@@ -381,7 +413,8 @@ describe("device operational identity", () => {
     }] : []);
     render(<App />);
     const tile = await screen.findByTestId("device-tile");
-    expect(await within(tile).findByText("Đã kết nối · Chưa kiểm tra điều khiển")).toBeVisible();
+    expect(await within(tile).findByText("Đã kết nối")).toBeVisible();
+    expect(within(tile).getByText("Đã kết nối")).toHaveAttribute("title", "Điều khiển được kiểm tra khi mở máy hoặc chạy tác vụ; hiện không có kiểm tra đang chạy.");
     expect(within(tile).queryByText("Sẵn sàng")).toBeNull();
     expect(api.deviceControlBegin).not.toHaveBeenCalled();
     expect(api.agentHelperMaintenancePrepare).not.toHaveBeenCalled();
@@ -428,6 +461,43 @@ describe("device operational identity", () => {
     }
   });
 
+  it("refreshes current activity on the existing poll and clears it when the owner ends", async () => {
+    const api = await import("./api");
+    vi.mocked(api.listDevices).mockResolvedValue([androidPhone]);
+    const activity = { operationId: "nurture:live", kind: "nurture" as const, label: "Nuôi TikTok", step: "Đang lướt video", state: "running" as const, updatedAt: "2026-10-05T12:00:00Z" };
+    vi.mocked(api.listDeviceWorkStates).mockResolvedValue([{ udid: androidPhone.udid, currentOwner: "nurture", activity }]);
+    const intervals = vi.spyOn(window, "setInterval");
+    try {
+      render(<App />);
+      const tile = await screen.findByTestId("device-tile");
+      expect(await within(tile).findByText("Nuôi TikTok")).toBeVisible();
+      expect(within(tile).getByText("Đang lướt video")).toBeVisible();
+      const poll = async () => { await act(async () => {
+        for (const [callback, delay] of intervals.mock.calls) {
+          if (delay === 2_000 && typeof callback === "function") callback();
+        }
+      }); };
+      vi.mocked(api.listDeviceWorkStates).mockResolvedValue([{ udid: androidPhone.udid, currentOwner: "nurture", activity: { ...activity, step: "Đang chuyển video" } }]);
+      await poll();
+      expect(within(tile).getByText("Đang chuyển video")).toBeVisible();
+      expect(within(tile).queryByText("Đang lướt video")).toBeNull();
+      await userEvent.click(screen.getByTitle("Danh sách"));
+      expect(screen.getByRole("cell", { name: /Nuôi TikTok.*Đang chuyển video/ })).toBeVisible();
+      vi.mocked(api.listDeviceWorkStates).mockResolvedValue([{ udid: androidPhone.udid, currentOwner: "manualControl" }]);
+      await poll();
+      expect(screen.getByText("Bận · Điều khiển trực tiếp")).toBeVisible();
+      expect(screen.queryByText("Đang chuyển video")).toBeNull();
+      vi.mocked(api.listDeviceWorkStates).mockResolvedValue([{ udid: androidPhone.udid, currentOwner: null }]);
+      await poll();
+      expect(screen.getByRole("cell", { name: "Đã kết nối" })).toBeVisible();
+      expect(screen.queryByText("Bận · Điều khiển trực tiếp")).toBeNull();
+      expect(api.deviceControlBegin).not.toHaveBeenCalled();
+    } finally {
+      intervals.mockRestore();
+      vi.mocked(api.listDeviceWorkStates).mockResolvedValue([]);
+    }
+  });
+
   it("shows the active work owner in the summary and keeps technical identity in details", async () => {
     const api = await import("./api");
     vi.mocked(api.listDevices).mockResolvedValue([androidPhone]);
@@ -468,7 +538,7 @@ describe("device operational identity", () => {
     vi.mocked(api.listDeviceWorkStates).mockResolvedValue([]);
     await userEvent.click(within(alert).getByRole("button", { name: "Thử lại" }));
 
-    expect(await within(tile).findByText("Đã kết nối · Chưa kiểm tra điều khiển")).toBeVisible();
+    expect(await within(tile).findByText("Đã kết nối")).toBeVisible();
     await waitFor(() =>
       expect(screen.queryByText("Chưa đọc được tác vụ")).not.toBeInTheDocument(),
     );

@@ -25,6 +25,13 @@ export function helperRecoveryMessage(cause: unknown): string | null {
 function readableMessage(message: string): string {
   const helper = helperRecoveryMessage(message);
   if (helper) return helper;
+  if (message.includes("TikTok username is already assigned to another device")) {
+    return "Tên người dùng TikTok đã được gán cho thiết bị khác. Mở Chi tiết thiết bị để đối chiếu tài khoản trên hai máy và mapping đã lưu. Không tự chuyển hoặc gán lại tài khoản khi chưa xác minh đúng máy.";
+  }
+  const readinessTimeout = message.match(/the agent on \S+ did not answer \/status within (\d+(?:\.\d+)?) seconds/);
+  if (readinessTimeout) {
+    return `Agent chưa phản hồi /status trong ${readinessTimeout[1]} giây; chưa xác định nguyên nhân. Mở Chẩn đoán của đúng thiết bị để kiểm tra kết nối và trạng thái Agent trước khi đọc lại tài khoản. Lỗi này chưa chứng minh tài khoản TikTok có vấn đề.`;
+  }
   if (message.startsWith("DeviceControlFailed:")) return `Chưa điều khiển được thiết bị: ${message.slice("DeviceControlFailed:".length).trim()}`;
   if (message.includes("device_reconnect_timeout")) return "Máy mất kết nối quá 2 phút. Kết nối lại đúng điện thoại rồi bấm Thử lại.";
   if (/\bdevice offline\b/i.test(message)) {

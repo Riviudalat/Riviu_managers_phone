@@ -5,7 +5,7 @@ import {
   deviceOperationalView,
   deviceWorkOwnerLabel,
 } from "./deviceWork";
-import type { AgentStatus, DeviceInfo } from "./types";
+import type { AgentStatus, DeviceInfo, DeviceActivity } from "./types";
 
 const readyDevice: DeviceInfo = {
   udid: "serial-should-stay-private",
@@ -22,7 +22,7 @@ describe("device work owner presentation", () => {
   it("labels every known owner for the operator", () => {
     expect(deviceWorkOwnerLabel("nurture")).toBe("Nuôi TikTok");
     expect(deviceWorkOwnerLabel("interaction")).toBe("Tương tác");
-    expect(deviceWorkOwnerLabel("script")).toBe("Flow");
+    expect(deviceWorkOwnerLabel("script")).toBe("Tác vụ tự động");
   });
 
   it("does not render a future wire value as blank or idle", () => {
@@ -41,18 +41,28 @@ describe("device operational status", () => {
   });
 
   it.each([
-    [{ status: "ready", wdaReady: false }, "connected", "Đã kết nối · Chưa kiểm tra điều khiển", "info"],
-    [{ status: "connected", wdaReady: true }, "connected", "Đã kết nối · Chưa kiểm tra điều khiển", "info"],
+    [{ status: "ready", wdaReady: false }, "connected", "Đã kết nối", "info"],
+    [{ status: "connected", wdaReady: true }, "connected", "Đã kết nối", "info"],
     [{ status: "busy", wdaReady: false }, "busy", "Bận", "warn"],
     [{ status: "error", wdaReady: false }, "warning", "Cần xem", "warn"],
     [{ status: "disconnected", wdaReady: false }, "offline", "Ngoại tuyến", "info"],
   ] as const)("maps %o to %s", (overrides, kind, label, tone) => {
-    expect(deviceOperationalView({ ...readyDevice, ...overrides }, null)).toEqual({
+    expect(deviceOperationalView({ ...readyDevice, ...overrides }, null)).toMatchObject({
       kind,
       label,
       ownerLabel: null,
       tone,
     });
+  });
+
+  it("uses a publish activity for the shared script owner without leaking it after release", () => {
+    const activity: DeviceActivity = { operationId: "publish:live", kind: "publish", label: "Đăng bài", step: "Đang chuẩn bị ảnh", state: "running", updatedAt: null };
+    expect(deviceOperationalView(readyDevice, "script", "known", undefined, activity)).toEqual({
+      kind: "busy", label: "Đăng bài", ownerLabel: null, tone: "warn", step: "Đang chuẩn bị ảnh",
+    });
+    expect(deviceOperationalView(readyDevice, null, "known", undefined, activity).step).toBeUndefined();
+    expect(deviceOperationalView(readyDevice, "script", "known", undefined, { ...activity, state: "uncertain", step: "Chưa xác nhận kết quả" }).step).toBe("Chưa xác nhận kết quả");
+    expect(deviceOperationalView(readyDevice, "script", "known", undefined, { ...activity, state: "succeeded" }).ownerLabel).toBe("Tác vụ tự động");
   });
 
   it("keeps an offline phone offline even if a stale work owner remains", () => {

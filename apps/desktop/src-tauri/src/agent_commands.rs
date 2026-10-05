@@ -137,8 +137,7 @@ pub async fn agent_helper_maintenance_prepare(
     let driver_plan = state.control
         .prepare_helper_maintenance(&context, &plan.maintenance_id, effect_intent)
         .await
-        .map_err(|_| CommandError::code("HelperMaintenancePrepareFailed",
-            "Không chuẩn bị được helper; chưa thực hiện khôi phục."))?;
+        .map_err(helper_maintenance_prepare_error)?;
     ledger.push(PreparedHelperMaintenance {
         public: plan.clone(),
         driver_plan,
@@ -409,6 +408,28 @@ pub async fn agent_bulk_repair(
     Ok(bulk_repair_with_control(&state.control, udids).await)
 }
 
+fn helper_maintenance_prepare_error(error: DeviceControlError) -> CommandError {
+    // Only allowlisted, complete driver messages become public categories.
+    // Never serialize the raw chain: it may contain credentials or journal data.
+    let cause = match &error {
+        DeviceControlError::Driver { operation: "prepareHelperMaintenance", message, .. } => message.as_str(),
+        _ => "",
+    };
+    let (code, message) = match cause {
+        "live helper owner must settle normally" => ("HelperMaintenanceLiveOwner",
+            "Helper còn phiên đang được ứng dụng giữ; chưa cho phép chuẩn bị khôi phục. Chờ phiên kết thúc bình thường rồi kiểm tra lại; không ép giành quyền."),
+        "maintenance disabled in diagnostic mode" => ("HelperMaintenanceDisabled",
+            "Chế độ chẩn đoán không cho phép chuẩn bị khôi phục helper; chưa thực hiện khôi phục."),
+        "HelperMaintenanceRetainedOwnerMissing" => ("HelperMaintenanceRetainedOwnerMissing",
+            "Không có hồ sơ chủ phiên helper được giữ trên PC này; chưa đủ bằng chứng để chuẩn bị khôi phục. Kiểm tra đúng PC và dữ liệu phiên; không tự giành quyền hoặc đặt lại helper."),
+        "maintenance cannot guess or restore a lost boot IME" => ("HelperMaintenanceImeUnproved",
+            "Chưa chứng minh được bàn phím ban đầu để khôi phục helper. Giữ nguyên phiên và kiểm tra bằng chứng bàn phím; không tự đổi IME."),
+        _ => ("HelperMaintenancePrepareFailed",
+            "Không chuẩn bị được helper; chưa xác định nguyên nhân và chưa thực hiện khôi phục. Mở Chẩn đoán của đúng thiết bị; giữ nguyên dữ liệu phiên, không tự đặt lại helper."),
+    };
+    CommandError::code(code, message)
+}
+
 fn err(error: impl std::fmt::Display) -> CommandError {
     CommandError::operation(error)
 }
@@ -416,6 +437,23 @@ fn err(error: impl std::fmt::Display) -> CommandError {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn helper_prepare_reports_only_safe_known_categories() {
+        for (cause, expected) in [
+            ("live helper owner must settle normally", "HelperMaintenanceLiveOwner"),
+            ("maintenance disabled in diagnostic mode", "HelperMaintenanceDisabled"),
+            ("HelperMaintenanceRetainedOwnerMissing", "HelperMaintenanceRetainedOwnerMissing"),
+            ("maintenance cannot guess or restore a lost boot IME", "HelperMaintenanceImeUnproved"),
+            ("fixture-secret-token raw journal unknown", "HelperMaintenancePrepareFailed"),
+        ] {
+            let error = helper_maintenance_prepare_error(DeviceControlError::Driver {
+                udid: "fixture-device".into(), operation: "prepareHelperMaintenance", message: cause.into(),
+            });
+            assert_eq!(error.code, expected, "{cause}");
+            assert!(!error.message.contains("fixture-secret-token"));
+            assert!(!error.message.contains("raw journal"));
+        }
+    }
     use riviu_core::{
         AgentState, DeviceControlPlane, DeviceDriver, DeviceWorkCoordinator, DeviceWorkOwner,
         StreamBudgetManager,

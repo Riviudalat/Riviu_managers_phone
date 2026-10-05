@@ -54,9 +54,17 @@ tệp/thư mục, rồi **Lấy về máy tính** mở hộp chọn nơi lưu tr
 và nút riêng. **Tệp trên máy…** vẫn mở bảng quản lý đủ cả đưa/lấy/xoá.
 Bảng tệp căn trái tên, giữ khung gọn khi tải và có chuyển động mở/đóng.
 
+Khi máy đang có tác vụ, lưới và bảng hiện tên tác vụ cùng bước hoạt động gần nhất
+của lượt đang giữ máy. Giao diện đọc lại bản ghi có sẵn mỗi hai giây, không gửi thêm
+thao tác hoặc truy vấn thiết bị để tạo nhãn. Bước hoàn tất chỉ được hiện theo kết quả
+backend cung cấp; gửi lệnh không đồng nghĩa đã thích hay đã đăng. Khi lượt kết thúc
+hoặc đổi chủ giữ máy, nhãn cũ được bỏ ở lần đọc tiếp theo. Chưa có hoạt động phù hợp
+thì hiện chủ giữ máy: Tác vụ tự động, Điều khiển trực tiếp hoặc Đồng bộ nhóm.
+
 ### Riviu Helper trên Android
 
-**Đã kết nối · Chưa kiểm tra điều khiển** chỉ xác nhận máy có kết nối; ảnh preview
+**Đã kết nối** chỉ xác nhận máy có kết nối, không có kiểm tra điều khiển đang chạy.
+Rê vào trạng thái để xem giải thích: điều khiển được kiểm tra khi mở máy hoặc chạy tác vụ. Ảnh preview
 hoặc trạng thái USB không chứng minh helper đã hoạt động. Android chỉ hiện **Sẵn sàng**
 khi bản ghi phiên hiện tại xác nhận điều khiển và helper đã được kết nối. Mỗi chức năng
 vẫn kiểm tra điều kiện riêng trước khi chạy; giao diện chỉ đọc bản ghi đã có, không tự

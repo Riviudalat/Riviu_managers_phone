@@ -28,6 +28,8 @@ pub use app_completion::{AppCompletionRecord, AppCompletionStatus};
 mod automation;
 mod comment_verification;
 mod conversation;
+mod device_activity;
+pub use device_activity::{DeviceActivityProgress, DeviceActivityScope};
 mod fleet;
 mod flow_connectors;
 mod flow_runs;
@@ -961,6 +963,22 @@ mod device_meta_tests {
         })
         .unwrap();
         assert!(db.set_device_handle("b", "", "account").is_err());
+        // Legacy duplicate mappings must permit a readback of the same account,
+        // without rewriting either mapping or bypassing the stale-editor fence.
+        db.upsert_device_meta(&crate::types::DeviceMeta {
+            handle: "account".into(),
+            ..meta("legacy")
+        })
+        .unwrap();
+        assert!(db.set_device_handle("a", "stale", "account").is_err());
+        assert_eq!(
+            db.set_device_handle("a", " @Account ", " @ACCOUNT ").unwrap(),
+            " @Account "
+        );
+        assert_eq!(db.get_device_meta("a").unwrap().handle, " @Account ");
+        assert_eq!(db.get_device_meta("legacy").unwrap().handle, "account");
+        assert!(db.set_device_handle("b", "", "account").is_err());
+        db.set_device_handle("legacy", "account", "").unwrap();
         for invalid in [
             "display name",
             "https://www.tiktok.com/@user",

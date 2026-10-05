@@ -89,7 +89,7 @@ import { AppsPage } from "./pages/AppsPage";
 import { DataPage } from "./pages/DataPage";
 import { MaterialPage } from "./pages/MaterialPage";
 import { HelpPage } from "./pages/HelpPage";
-import type { AgentStatus, DeviceInfo, DeviceWorkOwner, PageId, TargetRef } from "./types";
+import type { AgentStatus, DeviceInfo, DeviceWorkOwner, DeviceWorkState, PageId, TargetRef } from "./types";
 import type { ActiveGroupSync, GroupSyncReadiness } from "./groupSync";
 import { MoreHorizontal } from "lucide-react";
 import { MENU_ICONS } from "./components/menuIcons";
@@ -126,7 +126,7 @@ const PAGE_TITLE: Partial<Record<PageId, string>> = {
 
 type DeviceWorkOwnerProjection =
   | { state: "loading" }
-  | { state: "known"; owners: Map<string, DeviceWorkOwner | null> }
+  | { state: "known"; roster: string; owners: Map<string, DeviceWorkState> }
   | { state: "error"; message: string };
 
 type NavigationIntent =
@@ -252,7 +252,8 @@ function App() {
           if (!active) return;
           setDeviceWorkOwners({
             state: "known",
-            owners: new Map(states.map((state) => [state.udid, state.currentOwner])),
+            roster: rosterKey,
+            owners: new Map(states.map((state) => [state.udid, state])),
           });
         })
         .catch((error) => {
@@ -300,13 +301,16 @@ function App() {
     page === "control" && cachedAgents.roster === agentRosterKey ? cachedAgents.statuses.get(udid) : undefined,
   [agentRosterKey, cachedAgents, page]);
 
-  const deviceWorkOwnerReadState: DeviceWorkOwnerReadState = deviceWorkOwners.state;
+  const currentDeviceWorkState = useCallback((udid: string) =>
+    deviceWorkOwners.state === "known" && deviceWorkOwners.roster === rosterKey
+      ? deviceWorkOwners.owners.get(udid) : undefined,
+  [deviceWorkOwners, rosterKey]);
+  const deviceWorkOwnerReadState: DeviceWorkOwnerReadState =
+    deviceWorkOwners.state === "known" && deviceWorkOwners.roster !== rosterKey ? "loading" : deviceWorkOwners.state;
   const currentDeviceWorkOwner = useCallback(
     (udid: string): DeviceWorkOwner | null =>
-      deviceWorkOwners.state === "known"
-        ? (deviceWorkOwners.owners.get(udid) ?? null)
-        : null,
-    [deviceWorkOwners],
+      currentDeviceWorkState(udid)?.currentOwner ?? null,
+    [currentDeviceWorkState],
   );
 
   useEffect(() => {
@@ -1168,18 +1172,18 @@ function App() {
                   if (!proceed) return;
                   try {
                     const repaired = await agentBulkRepair(targets);
-                    const [, refreshed] = await Promise.all([
-                      reload(),
-                      agentListStatuses(targets),
-                    ]);
-                    const summary = summarizeBulkRepair(
-                      refreshed.length ? refreshed : repaired,
-                    );
+                    // The command owns this repair outcome; cached readiness can predate
+                    // a failed repair and must never replace its per-device error.
+                    const summary = summarizeBulkRepair(repaired);
+                    const failures = repaired
+                      .filter((status) => status.state !== "ready")
+                      .map((status) => `${automationDeviceLabels.get(status.udid) ?? status.udid}: ${describeError(status.message || "Chưa xác nhận sửa thành công.")}`);
                     pushToast(
                       summary.attentionCount > 0 ? "warn" : "ok",
                       summary.heading,
-                      summary.message,
+                      [summary.message, ...failures].join(" "),
                     );
+                    await reload();
                   } catch (error) {
                     toastError("Sửa agent thất bại", error);
                   }
@@ -1240,7 +1244,7 @@ function App() {
                   >
                     <option value="all">Mọi trạng thái</option>
                     <option value="ready">Sẵn sàng</option>
-                    <option value="connected">Đã kết nối · Chưa kiểm tra điều khiển</option>
+                    <option value="connected">Đã kết nối</option>
                     <option value="busy">Bận</option>
                     <option value="warning">Cần xem</option>
                     <option value="offline">Ngoại tuyến</option>
@@ -1306,6 +1310,7 @@ function App() {
                         currentOwner,
                         deviceWorkOwnerReadState,
                         cachedAgent(device.udid),
+                        currentDeviceWorkState(device.udid)?.activity,
                       );
                       const statusLabel = status.ownerLabel
                         ? `${status.label} · ${status.ownerLabel}`
@@ -1315,7 +1320,7 @@ function App() {
                           key={device.udid}
                           className={sel ? "selected" : ""}
                           tabIndex={0}
-                          aria-label={`Máy ${machineNumber}, ${tileName(device, meta)}, ${statusLabel}${sel ? ", đã chọn" : ""}`}
+                          aria-label={`Máy ${machineNumber}, ${tileName(device, meta)}, ${statusLabel}${status.step ? `, ${status.step}` : ""}${sel ? ", đã chọn" : ""}`}
                           onClick={(e) => selectDevice(device.udid, e.metaKey || e.ctrlKey)}
                           onKeyDown={(event) => {
                             if (event.target !== event.currentTarget) return;
@@ -1339,8 +1344,9 @@ function App() {
                             <span className="device-table-alias">{tileName(device, meta)}</span>
                           </td>
                           <td>
-                            <span className={`chip ${status.tone}`} title={status.reason}>
-                              {statusLabel}
+                            <span className={`chip ${status.tone}`} title={status.reason} style={{ display: "inline-flex", flexDirection: "column", alignItems: "flex-start", whiteSpace: "normal" }}>
+                              <span>{statusLabel}</span>
+                              {status.step && <span>{status.step}</span>}
                             </span>
                           </td>
                           <td>{device.connection.toUpperCase()}</td>
@@ -1415,6 +1421,7 @@ function App() {
                         currentDeviceWorkOwner(device.udid),
                         deviceWorkOwnerReadState,
                         cachedAgent(device.udid),
+                        currentDeviceWorkState(device.udid)?.activity,
                       )}
                       onHelperMaintenance={udid => void runHelperMaintenance([udid])}
                       onContextMenu={(udid, x, y) => setTileMenu({ udid, x, y })}

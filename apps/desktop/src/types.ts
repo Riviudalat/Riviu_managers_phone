@@ -2061,10 +2061,21 @@ export type DeviceWorkOwner =
   | "groupSync"
   | "idleSweep";
 
+/** Current-owner activity from the cached work-state read; never inferred from UI dispatch. */
+export interface DeviceActivity {
+  operationId: string;
+  kind: OperationRunKind;
+  label: string;
+  step: string | null;
+  state: OperationRunState;
+  updatedAt: string | null;
+}
+
 export interface DeviceWorkState {
   udid: string;
   /** `null` means the coordinator confirms that this device is idle. */
   currentOwner: DeviceWorkOwner | null;
+  activity?: DeviceActivity | null;
 }
 
 export interface CommandError {
