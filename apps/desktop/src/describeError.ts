@@ -26,7 +26,7 @@ function readableMessage(message: string): string {
   const helper = helperRecoveryMessage(message);
   if (helper) return helper;
   if (message.includes("TikTok username is already assigned to another device")) {
-    return "Tên người dùng TikTok đã được gán cho thiết bị khác. Mở Chi tiết thiết bị để đối chiếu tài khoản trên hai máy và mapping đã lưu. Không tự chuyển hoặc gán lại tài khoản khi chưa xác minh đúng máy.";
+    return "Tên người dùng TikTok đã được gán cho thiết bị khác; chưa lưu gán nick. Cần đối chiếu username vừa đọc với mapping đã lưu trên các máy. Không tự chuyển hoặc gán lại tài khoản khi chưa xác minh đúng máy.";
   }
   const readinessTimeout = message.match(/the agent on \S+ did not answer \/status within (\d+(?:\.\d+)?) seconds/);
   if (readinessTimeout) {
@@ -69,6 +69,27 @@ export function describeError(cause: unknown): string {
   if (cause instanceof Error) return readableMessage(cause.message);
   if (typeof cause === "object") {
     const record = cause as Record<string, unknown>;
+    if (record.code === "AccountAssignmentConflict" && record.accountConflict
+      && typeof record.accountConflict === "object") {
+      const conflict = record.accountConflict as Record<string, unknown>;
+      if (typeof conflict.attemptedHandle === "string" && typeof conflict.currentHandle === "string"
+        && Array.isArray(conflict.conflictingDevices)) {
+        const devices = conflict.conflictingDevices.flatMap((value: unknown) => {
+          if (!value || typeof value !== "object") return [];
+          const device = value as Record<string, unknown>;
+          if (typeof device.udid !== "string") return [];
+          const number = typeof device.number === "number" && device.number > 0 ? `Máy ${device.number}` : "";
+          const alias = typeof device.alias === "string" ? device.alias.trim() : "";
+          const label = [number, alias].filter(Boolean).join(" · ");
+          return [label ? `${label} (${device.udid})` : device.udid];
+        });
+        const saved = conflict.currentHandle.trim().replace(/^@+/, "");
+        return `Chưa lưu gán @${conflict.attemptedHandle}: trùng mapping đã lưu trên ${devices.join(", ") || "thiết bị khác"}${conflict.conflictsTruncated === true ? " và các máy khác (danh sách giới hạn 20 máy)" : ""}. `
+          + `Mapping của máy đích vẫn là ${saved ? `@${saved}` : "chưa gán"}. `
+          + "Đây là mapping đã lưu; chưa xác minh tài khoản đang đăng nhập trên các máy trùng. "
+          + "Đối chiếu đúng máy và username trước khi sửa mapping; không tự chuyển hoặc đổi tài khoản.";
+      }
+    }
     if (record.code === "DeviceAppSelectionRequired") {
       const device = typeof record.udid === "string" ? ` ${record.udid}` : "";
       return `Máy${device} có nhiều ứng dụng TikTok. Mở Chi tiết thiết bị, chọn ứng dụng cần dùng rồi kiểm tra lại.`;

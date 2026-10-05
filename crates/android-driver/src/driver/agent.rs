@@ -622,8 +622,9 @@ impl AndroidDriver {
         serial: &str,
     ) -> anyhow::Result<Option<crate::riviu_agent::HelperClient>> {
         let _inventory = self.helper_inventory_lock(serial).write_owned().await;
+        let retained = self.helpers.lock().get(serial).cloned();
         let result: anyhow::Result<Option<crate::riviu_agent::HelperClient>> = async {
-            let cached = self.helpers.lock().get(serial).cloned();
+            let cached = retained.clone();
             if let Some(helper) = cached {
                 let retained = async {
                     if helper.settle_released_runtime().await? || helper.is_released().await? {
@@ -659,6 +660,7 @@ impl AndroidDriver {
             self.helpers.lock().insert(serial.to_string(), helper.clone());
             Ok(Some(helper))
         }.await;
+        if let Some(helper) = retained { helper.record_cached_acquisition(result.is_err()); }
         self.publish_helper_status(serial, result.as_ref().ok().and_then(Option::as_ref),
             result.as_ref().err().is_some_and(|error| error.is::<crate::riviu_agent::HelperRecoveryRequired>()));
         result

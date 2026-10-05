@@ -31,6 +31,7 @@ mod conversation;
 mod device_activity;
 pub use device_activity::{DeviceActivityProgress, DeviceActivityScope};
 mod fleet;
+pub use fleet::{AccountAssignmentConflict, ConflictingAccountDevice};
 mod flow_connectors;
 mod flow_runs;
 mod flows;
@@ -977,7 +978,11 @@ mod device_meta_tests {
         );
         assert_eq!(db.get_device_meta("a").unwrap().handle, " @Account ");
         assert_eq!(db.get_device_meta("legacy").unwrap().handle, "account");
-        assert!(db.set_device_handle("b", "", "account").is_err());
+        let collision = db.set_device_handle("b", "", " @ACCOUNT ").unwrap_err();
+        assert!(collision.to_string().contains("@ACCOUNT"));
+        assert_eq!(db.get_device_meta("b").unwrap().handle, "");
+        assert_eq!(db.get_device_meta("a").unwrap().handle, " @Account ");
+        assert_eq!(db.get_device_meta("legacy").unwrap().handle, "account");
         db.set_device_handle("legacy", "account", "").unwrap();
         for invalid in [
             "display name",

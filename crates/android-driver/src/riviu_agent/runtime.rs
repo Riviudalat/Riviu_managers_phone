@@ -7,6 +7,15 @@ const MIN_VERSION: u64 = 7;
 const CHECKPOINT_LIMIT: u64 = 16 * 1024;
 
 #[derive(Debug)]
+pub(crate) struct HelperMaintenanceBusyBeforeDispatch;
+impl std::fmt::Display for HelperMaintenanceBusyBeforeDispatch {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("HelperMaintenanceBusyBeforeDispatch")
+    }
+}
+impl std::error::Error for HelperMaintenanceBusyBeforeDispatch {}
+
+#[derive(Debug)]
 struct HelperMaintenanceRetainedOwnerMissing;
 impl std::fmt::Display for HelperMaintenanceRetainedOwnerMissing {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
@@ -455,7 +464,92 @@ fn finish_maintenance(state: &Path, archive: &Path, plan: &Value) -> anyhow::Res
     Ok(())
 }
 
+/// Holds the same locks as clipboard cleanup and HTTP dispatch until the driver
+/// finishes maintenance. Inventory/Repair ownership is retained by the caller.
+pub(crate) struct CachedMaintenanceGuard {
+    client: HelperClient,
+    _ime: tokio::sync::OwnedMutexGuard<()>,
+    closed: tokio::sync::OwnedMutexGuard<bool>,
+}
+
+impl CachedMaintenanceGuard {
+    pub(crate) fn released(&self) -> anyhow::Result<bool> {
+        self.client.is_released_locked(*self.closed)
+    }
+
+    pub(crate) fn bind_plan(&self, plan: &Value) -> anyhow::Result<()> {
+        let owner = self.client.canary.as_ref().context("cached maintenance owner missing")?;
+        anyhow::ensure!(plan["serial"] == self.client.serial && plan["androidUser"] == 0
+            && plan["oldOwnerId"] == owner.owner_id
+            && plan["oldServiceInstance"] == owner.instance
+            && plan["oldOwnerGeneration"] == owner.generation,
+            "cached helper maintenance identity changed");
+        if let Some(previous) = self.client.maintenance_plan.lock().as_ref() {
+            anyhow::ensure!(previous == plan, "cached helper maintenance plan changed; reconcile same intent");
+        }
+        Ok(())
+    }
+
+    pub(crate) fn seal(&self, plan: &Value) -> anyhow::Result<()> {
+        self.bind_plan(plan)?;
+        // No await between the final binding and the shared permanent fence.
+        // Dropping/cancelling execute must never re-enable a stale clone.
+        *self.client.maintenance_plan.lock() = Some(plan.clone());
+        self.client.clipboard_qualified.store(false, std::sync::atomic::Ordering::Release);
+        Ok(())
+    }
+
+    pub(crate) async fn retire_forward(&self) -> anyhow::Result<()> {
+        remove_owned_forward(&self.client.adb, &self.client.serial, self.client.host_port).await
+    }
+}
+
 impl HelperClient {
+    pub(crate) async fn lock_cached_maintenance(&self, root: Option<&Path>) -> anyhow::Result<CachedMaintenanceGuard> {
+        self.lock_cached_maintenance_for_execute(root, false).await
+    }
+
+    pub(crate) async fn lock_cached_maintenance_for_execute(&self, root: Option<&Path>, retryable_busy: bool) -> anyhow::Result<CachedMaintenanceGuard> {
+        let ime = ime_lock(&self.serial).try_lock_owned()
+            .map_err(|_| if retryable_busy { anyhow!(HelperMaintenanceBusyBeforeDispatch) }
+                else { anyhow!("helper clipboard work still draining") })?;
+        let closed = self.lifecycle.clone().try_lock_owned()
+            .map_err(|_| if retryable_busy { anyhow!(HelperMaintenanceBusyBeforeDispatch) }
+                else { anyhow!("helper request still draining") })?;
+        let guard = CachedMaintenanceGuard { client: self.clone(), _ime: ime, closed };
+        if guard.released()? { return Ok(guard); }
+        anyhow::ensure!(self.production_runtime
+            && (self.maintenance_plan.lock().is_some()
+                || self.retained_failure.load(std::sync::atomic::Ordering::Acquire)),
+            "live helper owner must settle normally");
+        anyhow::ensure!(!self.cleanup_is_pending(), "helper clipboard/baseline cleanup unresolved");
+        let owner = self.canary.as_ref().context("cached maintenance owner missing")?;
+        let state = state_path(root.context("helper state directory missing")?, &self.serial)?;
+        anyhow::ensure!(owner.report == state, "cached helper state binding changed");
+        if let Some(bytes) = journal_bytes(&state.join("ime-checkpoint.json"))? {
+            let saved: Value = serde_json::from_slice(&bytes)?;
+            anyhow::ensure!(saved["serial"] == self.serial && saved["androidUser"] == 0
+                && saved["ownerId"] == owner.owner_id && saved["serviceInstance"] == owner.instance
+                && saved["generation"] == owner.generation
+                && saved.get("pending").is_some_and(Value::is_null)
+                && saved.get("baseline").is_some_and(Value::is_null),
+                "helper durable clipboard cleanup unresolved");
+        }
+        // The original record must match this client, not merely the requested serial.
+        // After a settled receipt retires it, only the already sealed same-plan retry
+        // may finish removal of this client's exact forward.
+        if state.join("runtime-owner.json").try_exists()? {
+            let record = owner_record(&state, &self.serial)?;
+            anyhow::ensure!(record["ownerId"] == owner.owner_id
+                && record["serviceInstance"] == owner.instance
+                && record["ownerGeneration"] == owner.generation,
+                "cached helper durable owner changed");
+        } else {
+            anyhow::ensure!(self.maintenance_plan.lock().is_some(), "cached helper durable owner missing");
+        }
+        Ok(guard)
+    }
+
     /// Observation only. The caller supplies the existing effect identity, never a retry ID.
     pub(crate) async fn prepare_maintenance(adb: &AdbProgram, serial: &str, apk: Option<&Path>, root: Option<&Path>, maintenance_id: &str, effect_intent: Value) -> anyhow::Result<Value> {
         let state = state_path(root.context("helper state directory missing")?, serial)?;
@@ -514,6 +608,10 @@ impl HelperClient {
 
     /// Explicit maintenance only; never called by automatic install/admission/resume.
     pub(crate) async fn execute_maintenance(adb: &AdbProgram, serial: &str, apk: Option<&Path>, root: Option<&Path>, plan: Value, operator_authorized: bool, observation_only: bool) -> anyhow::Result<Value> {
+        Self::execute_maintenance_with_cache(adb, serial, apk, root, plan, operator_authorized, observation_only, None).await
+    }
+
+    pub(crate) async fn execute_maintenance_with_cache(adb: &AdbProgram, serial: &str, apk: Option<&Path>, root: Option<&Path>, plan: Value, operator_authorized: bool, observation_only: bool, cached: Option<&CachedMaintenanceGuard>) -> anyhow::Result<Value> {
         anyhow::ensure!(operator_authorized, "operator authorization required for helper supersession");
         let state = state_path(root.context("helper state directory missing")?, serial)?;
         let id = plan["maintenanceId"].as_str().context("maintenanceId missing")?;
@@ -525,6 +623,7 @@ impl HelperClient {
         if receipt_path.try_exists()? {
             let receipt = bounded_json(&receipt_path)?;
             anyhow::ensure!(receipt["plan"] == plan && receipt["state"] == "superseded", HelperRecoveryRequired);
+            if let Some(cached) = cached { cached.seal(&plan)?; }
             finish_maintenance(&state, &archive, &plan)?;
             return Ok(receipt);
         }
@@ -541,6 +640,7 @@ impl HelperClient {
             observed["observedProcess"] = plan["observedProcess"].clone();
         }
         anyhow::ensure!(observed == plan, "helper maintenance binding changed; no replay or retirement");
+        if let Some(cached) = cached { cached.seal(&plan)?; }
         if !reconciling { std::fs::create_dir_all(&archive)?; }
         let journals = plan["journalHashes"].as_object().context("maintenance journal binding missing")?;
         for (name, hash) in journals {
@@ -918,6 +1018,7 @@ impl HelperClient {
     pub(crate) async fn reconnect_runtime(&self) -> anyhow::Result<Option<Self>> {
         let result = async {
             if !self.production_runtime { return Ok(None); }
+            self.require_unfenced()?;
             let owner = self.canary.clone().context("runtime owner missing")?;
             let port = forward_helper(&self.adb, &self.serial).await?;
             let mut client = self.clone();

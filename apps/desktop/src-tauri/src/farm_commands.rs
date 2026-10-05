@@ -1264,7 +1264,7 @@ pub fn save_device_handle(
     let saved = state
         .db
         .set_device_handle(&udid, &expected_handle, &handle)
-        .map_err(err)?;
+        .map_err(CommandError::from_service)?;
     log(&state, "device.handle", &udid);
     Ok(saved)
 }

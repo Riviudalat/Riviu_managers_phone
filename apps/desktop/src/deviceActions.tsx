@@ -71,6 +71,7 @@ export async function readAndAssignTikTokAccounts(targets: DeviceInfo[], deps: D
       const meta = deps.metaMap.get(target.udid);
       const number = deps.deviceNumbers?.get(target.udid) ?? meta?.number;
       const label = `${number ? `Máy ${number}` : target.udid} · ${tileName(target, meta)}`;
+      let observedHandle: string | null = null;
       try {
         if (target.platform !== "android") throw new Error("Đọc nick hiện chỉ hỗ trợ Android");
         pushToast("info", `Đang đọc nick TikTok · ${label}`);
@@ -78,6 +79,7 @@ export async function readAndAssignTikTokAccounts(targets: DeviceInfo[], deps: D
         if (reading.udid !== target.udid || !reading.observedHandle || reading.status === "unknown") {
           throw new Error("Chưa đọc được username TikTok của đúng máy");
         }
+        observedHandle = reading.observedHandle;
         const saved = await saveDeviceHandle(target.udid, reading.expectedHandle, reading.observedHandle);
         savedCount++;
         pushToast("ok", `${label} · @${saved}`);
@@ -94,7 +96,11 @@ export async function readAndAssignTikTokAccounts(targets: DeviceInfo[], deps: D
           if (revision === accountMetaReadRevision) refreshDebt = true;
           toastError(`Đã lưu nick nhưng chưa cập nhật danh sách · ${label}`, error);
         }
-      } catch (error) { toastError(`Đọc/gán nick thất bại · ${label}`, error); }
+      } catch (error) {
+        toastError(observedHandle
+          ? `Đã đọc @${observedHandle.replace(/^@+/, "")}; chưa lưu gán nick · ${label}`
+          : `Đọc nick thất bại · ${label}`, error);
+      }
     }));
     if (refreshDebt && savedCount) {
       const revision = ++accountMetaReadRevision;

@@ -1072,6 +1072,8 @@ impl AndroidDriver {
 
     /// Helper-only diagnostic preparation; caller retains its admitted device lease.
     pub async fn prepare_helper_canary(&self, serial: &str, report: PathBuf) -> anyhow::Result<crate::riviu_agent::HelperClient> {
+        let _inventory = self.helper_inventory_lock(serial).write_owned().await;
+        anyhow::ensure!(!self.helpers.lock().contains_key(serial), "cached helper must settle before canary preparation");
         let helper = crate::riviu_agent::HelperClient::prepare_canary(self.adb.clone(), serial, report).await?;
         self.helpers.lock().insert(serial.into(), helper.clone());
         Ok(helper)
@@ -1081,8 +1083,9 @@ impl AndroidDriver {
     /// The inventory writer serializes installation and acquisition with discovery.
     pub async fn prepare_helper_runtime(&self, serial: &str) -> anyhow::Result<crate::riviu_agent::HelperClient> {
         let _inventory = self.helper_inventory_lock(serial).write_owned().await;
+        let retained = self.helpers.lock().get(serial).cloned();
         let result: anyhow::Result<crate::riviu_agent::HelperClient> = async {
-            let cached = self.helpers.lock().get(serial).cloned();
+            let cached = retained.clone();
             let cached = match cached {
                 Some(helper) if helper.settle_released_runtime().await? || helper.is_released().await.context(crate::riviu_agent::HelperRecoveryRequired)? => {
                     self.helpers.lock().remove(serial);
@@ -1104,6 +1107,7 @@ impl AndroidDriver {
             self.helpers.lock().insert(serial.into(), helper.clone());
             Ok(helper)
         }.await;
+        if let Some(helper) = retained { helper.record_cached_acquisition(result.is_err()); }
         self.publish_helper_status(serial, result.as_ref().ok(),
             result.as_ref().err().is_some_and(|error| error.is::<crate::riviu_agent::HelperRecoveryRequired>()));
         result
@@ -1675,7 +1679,7 @@ impl DeviceDriver for AndroidDriver {
         let helpers = self
             .helpers
             .lock()
-            .drain()
+            .keys().cloned()
             .collect::<Vec<_>>();
         let forwarded = self.forwarded.lock().drain().collect::<Vec<_>>();
         let ports = self.ports.lock().clone();
@@ -1741,13 +1745,18 @@ impl DeviceDriver for AndroidDriver {
         }
         self.ports.lock().clear();
 
-        for (serial, helper) in helpers {
+        for serial in helpers {
+            let _inventory = self.helper_inventory_lock(&serial).write_owned().await;
+            let helper = self.helpers.lock().get(&serial).cloned();
+            let Some(helper) = helper else { continue; };
             self.publish_helper_status(&serial, None, false);
             if let Err(error) = helper.clone().shutdown().await {
                 // Retain exact owner/instance/baseline/forward proof for reconciliation.
                 self.publish_helper_status(&serial, None, true);
-                self.helpers.lock().insert(serial, helper);
+                helper.record_cached_acquisition(true);
                 failures.push(error.to_string());
+            } else {
+                self.helpers.lock().remove(&serial);
             }
         }
 
@@ -2215,19 +2224,67 @@ impl DeviceDriver for AndroidDriver {
     /// blind — and it starts no UI session and no producer, which is what the install-only
     /// contract asks for.
     async fn prepare_helper_maintenance(&self, udid: &str, maintenance_id: &str, effect_intent: serde_json::Value) -> anyhow::Result<serde_json::Value> {
-        let _inventory = self.helper_inventory_lock(udid).write_owned().await;
+        let _inventory = self.helper_inventory_lock(udid).try_write_owned()
+            .context("helper inventory work still draining")?;
         anyhow::ensure!(self.automatic_setup_allowed, "maintenance disabled in diagnostic mode");
-        anyhow::ensure!(!self.helpers.lock().contains_key(udid), "live helper owner must settle normally");
-        crate::riviu_agent::HelperClient::prepare_maintenance(&self.adb, udid,
-            self.riviu_agent_apk.as_deref(), self.helper_state_dir.as_deref(), maintenance_id, effect_intent).await
+        let cached = self.helpers.lock().get(udid).cloned();
+        let guard = match cached {
+            Some(helper) => Some(helper.lock_cached_maintenance(self.helper_state_dir.as_deref()).await?),
+            None => None,
+        };
+        let released = guard.as_ref().map(|g| g.released()).transpose()?.unwrap_or(false);
+        if released { self.helpers.lock().remove(udid); }
+        let plan = crate::riviu_agent::HelperClient::prepare_maintenance(&self.adb, udid,
+            self.riviu_agent_apk.as_deref(), self.helper_state_dir.as_deref(), maintenance_id, effect_intent).await?;
+        if let Some(guard) = &guard {
+            if !released { guard.bind_plan(&plan)?; }
+        }
+        Ok(plan)
     }
 
     async fn execute_helper_maintenance(&self, udid: &str, plan: serde_json::Value, operator_authorized: bool, observation_only: bool) -> anyhow::Result<serde_json::Value> {
-        let _inventory = self.helper_inventory_lock(udid).write_owned().await;
+        // Only a fresh authorized attempt can report a retryable pre-dispatch busy.
+        // A sealed cache or durable intent is always reconciliation, even if miscalled.
+        anyhow::ensure!(operator_authorized, "operator authorization required for helper supersession");
+        let cached = self.helpers.lock().get(udid).cloned();
+        let state = self.helper_state_dir.as_ref().context("helper state directory missing")?
+            .join("helper-runtime").join(riviu_core::frame_sha256(udid.as_bytes()));
+        let retryable_busy = !observation_only
+            && cached.as_ref().is_none_or(|helper| helper.require_unfenced().is_ok())
+            && !state.join("maintenance-active.json").try_exists()?;
+        let _inventory = self.helper_inventory_lock(udid).try_write_owned()
+            .map_err(|_| if retryable_busy { anyhow!(crate::riviu_agent::HelperMaintenanceBusyBeforeDispatch) }
+                else { anyhow!("helper inventory work still draining") })?;
         anyhow::ensure!(self.automatic_setup_allowed, "maintenance disabled in diagnostic mode");
-        anyhow::ensure!(!self.helpers.lock().contains_key(udid), "live helper owner must settle normally");
-        crate::riviu_agent::HelperClient::execute_maintenance(&self.adb, udid,
-            self.riviu_agent_apk.as_deref(), self.helper_state_dir.as_deref(), plan, operator_authorized, observation_only).await
+        let cached = self.helpers.lock().get(udid).cloned();
+        let retryable_busy = retryable_busy
+            && cached.as_ref().is_none_or(|helper| helper.require_unfenced().is_ok())
+            && !state.join("maintenance-active.json").try_exists()?;
+        let guard = match cached {
+            Some(helper) => Some(helper.lock_cached_maintenance_for_execute(self.helper_state_dir.as_deref(), retryable_busy).await?),
+            None => None,
+        };
+        let released = guard.as_ref().map(|g| g.released()).transpose()?.unwrap_or(false);
+        if let Some(guard) = &guard {
+            if released { self.helpers.lock().remove(udid); }
+            else { guard.bind_plan(&plan)?; }
+        }
+        let receipt = if let Some(cached) = guard.as_ref().filter(|_| !released) {
+            crate::riviu_agent::HelperClient::execute_maintenance_with_cache(&self.adb, udid,
+                self.riviu_agent_apk.as_deref(), self.helper_state_dir.as_deref(), plan, operator_authorized, observation_only,
+                Some(cached)).await?
+        } else {
+            crate::riviu_agent::HelperClient::execute_maintenance(&self.adb, udid,
+                self.riviu_agent_apk.as_deref(), self.helper_state_dir.as_deref(), plan, operator_authorized, observation_only).await?
+        };
+        if let Some(guard) = &guard {
+            if !released {
+                guard.retire_forward().await?;
+                self.helpers.lock().remove(udid);
+            }
+        }
+        self.publish_agent_status(riviu_core::AgentStatus::unknown(udid));
+        Ok(receipt)
     }
 
     async fn repair_agent_install_only(
@@ -2564,8 +2621,10 @@ impl DeviceDriver for AndroidDriver {
         // A healthy cached owner keeps runtime-owner.json until its exact release;
         // the journal alone therefore cannot classify that owner as stranded.
         {
-            let _inventory = self.helper_inventory_lock(udid).read_owned().await;
+            let _inventory = self.helper_inventory_lock(udid).write_owned().await;
             let helper = self.helpers.lock().get(udid).cloned();
+            let result: anyhow::Result<()> = async {
+            if let Some(helper) = &helper { helper.require_unfenced()?; }
             anyhow::ensure!(
                 helper.as_ref().is_none_or(|helper| !helper.cleanup_is_pending()),
                 crate::riviu_agent::HelperRecoveryRequired
@@ -2606,6 +2665,10 @@ impl DeviceDriver for AndroidDriver {
                     }
                 }
             }
+            Ok(())
+            }.await;
+            if let Some(helper) = helper { helper.record_cached_acquisition(result.is_err()); }
+            result?;
         }
         let screen = self.screen_guard_state(udid).await?;
         anyhow::ensure!(
@@ -3039,6 +3102,170 @@ mod borrowed_shutdown_tests;
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn maintenance_fixture_record(serial: &str) -> serde_json::Value {
+        serde_json::json!({"serial":serial,"androidUser":0,"state":"claimPending",
+            "ownerId":"fixture_owner_0123456789","serviceInstance":"fixture_instance_012345",
+            "ownerGeneration":"fixture_generation_012345","nonce":"fixture_claim_nonce"})
+    }
+
+    #[tokio::test]
+    async fn maintenance_cache_retires_clean_release_but_preserves_live_and_debt() {
+        for (closed, debt) in [(false, false), (true, false), (true, true)] {
+            let root = std::env::temp_dir().join(format!("maintenance-cache-{}", uuid::Uuid::new_v4()));
+            let serial = "fixture-maintenance-cache";
+            let state = root.join("helper-runtime").join(riviu_core::frame_sha256(serial.as_bytes()));
+            std::fs::create_dir_all(&state).unwrap();
+            let adb = AdbProgram::at(root.join("never-run-adb"));
+            let driver = AndroidDriver::with_adb(adb.clone(), adb::AdbOrigin::Configured,
+                &AndroidDriverConfig { helper_state_dir: Some(root.clone()), automatic_setup_allowed: true, ..Default::default() });
+            let (client, _, _) = crate::riviu_agent::tests::cached_maintenance_fixture(adb, serial, &state, closed, debt).await;
+            driver.helpers.lock().insert(serial.into(), client);
+            let error = driver.prepare_helper_maintenance(serial, "fixture_maintenance_1234",
+                serde_json::json!({"operation":"fixture"})).await.unwrap_err();
+            if closed && !debt {
+                assert_eq!(error.to_string(), "HelperMaintenanceRetainedOwnerMissing",
+                    "clean release must reach honest journal admission, not cache-membership rejection");
+                assert!(!driver.helpers.lock().contains_key(serial));
+            } else {
+                assert!(driver.helpers.lock().contains_key(serial));
+                assert!(!error.to_string().contains("RetainedOwnerMissing"));
+            }
+            assert!(!state.join("maintenance-active.json").exists());
+            std::fs::remove_dir_all(root).unwrap();
+        }
+    }
+
+    #[tokio::test]
+    async fn maintenance_failed_retained_cache_reaches_observation_without_release_replay() {
+        for failure_source in ["prepare", "attach", "readiness"] {
+            let root = std::env::temp_dir().join(format!("maintenance-retained-{}", uuid::Uuid::new_v4()));
+            let serial = "fixture-maintenance-retained";
+            let state = root.join("helper-runtime").join(riviu_core::frame_sha256(serial.as_bytes()));
+            std::fs::create_dir_all(&state).unwrap();
+            let adb = AdbProgram::at(root.join("never-run-adb"));
+            let driver = AndroidDriver::with_adb(adb.clone(), adb::AdbOrigin::Configured,
+                &AndroidDriverConfig { helper_state_dir: Some(root.clone()), automatic_setup_allowed: true, ..Default::default() });
+            let (client, ime, lifecycle) = crate::riviu_agent::tests::cached_maintenance_fixture(adb, serial, &state, false, false).await;
+            let record = serde_json::to_vec(&maintenance_fixture_record(serial)).unwrap();
+            let release = br#"{"state":"releasePending"}"#;
+            let owner_path = state.join("runtime-owner.json");
+            let release_path = state.join("release-fixture_owner_0123456789.json");
+            std::fs::write(&owner_path, &record).unwrap();
+            std::fs::write(&release_path, release).unwrap();
+            driver.helpers.lock().insert(serial.into(), client.clone());
+            let failed = match failure_source {
+                "prepare" => driver.prepare_helper_runtime(serial).await.err().unwrap(),
+                "attach" => driver.try_attach_helper(serial).await.err().unwrap(),
+                _ => driver.verify_automation_readiness(serial).await.unwrap_err(),
+            };
+            assert!(failed.is::<crate::riviu_agent::HelperRecoveryRequired>());
+            // Active work is busy; prepare must not wait for or cancel that work.
+            let held = ime.lock().await;
+            let result = tokio::time::timeout(Duration::from_secs(1), driver.prepare_helper_maintenance(
+                serial, "fixture_maintenance_1234", serde_json::json!({"operation":"fixture"}))).await;
+            assert!(result.is_ok(), "active helper work must return busy, not queue indefinitely");
+            assert!(result.unwrap().is_err());
+            drop(held);
+            let held = lifecycle.lock().await;
+            let result = tokio::time::timeout(Duration::from_secs(1), driver.prepare_helper_maintenance(
+                serial, "fixture_maintenance_1234", serde_json::json!({"operation":"fixture"}))).await;
+            assert!(result.is_ok(), "active helper work must return busy, not queue indefinitely");
+            assert!(result.unwrap().is_err());
+            drop(held);
+            let error = driver.prepare_helper_maintenance(serial, "fixture_maintenance_1234",
+                serde_json::json!({"operation":"fixture"})).await.unwrap_err();
+            assert!(error.chain().any(|cause| cause.downcast_ref::<std::io::Error>()
+                .is_some_and(|e| e.kind() == std::io::ErrorKind::NotFound)),
+                "{failure_source}: drained failed cache must reach read-only inventory using missing fixture ADB; got {error:#}");
+            assert_eq!(std::fs::read(&owner_path).unwrap(), record);
+            assert_eq!(std::fs::read(&release_path).unwrap(), release);
+            assert!(driver.helpers.lock().contains_key(serial));
+            assert!(client.is_scoped_canary(), "prepare must not seal the cached owner");
+            assert!(!state.join("maintenance-active.json").exists());
+            let held = ime.lock().await;
+            let busy = driver.execute_helper_maintenance(serial, serde_json::json!({}), true, false).await.unwrap_err();
+            assert_eq!(busy.to_string(), "HelperMaintenanceBusyBeforeDispatch");
+            let reconcile_busy = driver.execute_helper_maintenance(serial, serde_json::json!({}), true, true).await.unwrap_err();
+            assert_ne!(reconcile_busy.to_string(), "HelperMaintenanceBusyBeforeDispatch");
+            drop(held);
+            // Retained durable clipboard debt blocks before any inventory command.
+            let debt = serde_json::to_vec(&serde_json::json!({"serial":serial,"androidUser":0,
+                "ownerId":"fixture_owner_0123456789","serviceInstance":"fixture_instance_012345",
+                "generation":"fixture_generation_012345","pending":null,"baseline":{"baselineId":"unresolved"}})).unwrap();
+            std::fs::write(state.join("ime-checkpoint.json"), &debt).unwrap();
+            let error = driver.prepare_helper_maintenance(serial, "fixture_maintenance_1234",
+                serde_json::json!({"operation":"fixture"})).await.unwrap_err();
+            assert!(error.to_string().contains("clipboard cleanup unresolved"));
+            assert_eq!(std::fs::read(state.join("ime-checkpoint.json")).unwrap(), debt);
+            std::fs::remove_dir_all(root).unwrap();
+        }
+    }
+
+    #[tokio::test]
+    async fn maintenance_settled_receipt_fences_clones_and_reconciles_forward_failure() {
+        let root = std::env::temp_dir().join(format!("maintenance-sealed-{}", uuid::Uuid::new_v4()));
+        let serial = "fixture-maintenance-sealed";
+        let state = root.join("helper-runtime").join(riviu_core::frame_sha256(serial.as_bytes()));
+        std::fs::create_dir_all(&state).unwrap();
+        let adb_path = root.join(if cfg!(windows) { "fixture-adb.cmd" } else { "fixture-adb" });
+        let adb = AdbProgram::at(adb_path.clone());
+        let driver = AndroidDriver::with_adb(adb.clone(), adb::AdbOrigin::Configured,
+            &AndroidDriverConfig { helper_state_dir: Some(root.clone()), automatic_setup_allowed: true, ..Default::default() });
+        let (client, _, _) = crate::riviu_agent::tests::cached_maintenance_fixture(adb, serial, &state, false, false).await;
+        let record = serde_json::to_vec(&maintenance_fixture_record(serial)).unwrap();
+        let release = br#"{"state":"releasePending"}"#;
+        std::fs::write(state.join("runtime-owner.json"), &record).unwrap();
+        std::fs::write(state.join("release-fixture_owner_0123456789.json"), release).unwrap();
+        driver.helpers.lock().insert(serial.into(), client.clone());
+        assert!(driver.prepare_helper_runtime(serial).await.is_err());
+        let plan = serde_json::json!({"maintenanceId":"fixture_maintenance_1234","serial":serial,"androidUser":0,
+            "oldOwnerId":"fixture_owner_0123456789","oldServiceInstance":"fixture_instance_012345",
+            "oldOwnerGeneration":"fixture_generation_012345","oldClaimNonce":"fixture_claim_nonce",
+            "journalHashes":{"runtime-owner.json":riviu_core::frame_sha256(&record),"ime-checkpoint.json":null,
+                "release-fixture_owner_0123456789.json":riviu_core::frame_sha256(release)}});
+        // Already-settled remote receipt is fixture input, not simulated successful execution.
+        let archive = state.join("maintenance/fixture_maintenance_1234");
+        std::fs::create_dir_all(&archive).unwrap();
+        std::fs::write(archive.join("runtime-owner.json"), &record).unwrap();
+        std::fs::write(archive.join("release-fixture_owner_0123456789.json"), release).unwrap();
+        let receipt = serde_json::json!({"state":"superseded","plan":plan,"oldObligations":"archivedUnresolved"});
+        std::fs::write(archive.join("receipt.json"), serde_json::to_vec(&receipt).unwrap()).unwrap();
+        assert!(driver.execute_helper_maintenance(serial, plan.clone(), false, false).await.is_err());
+        assert!(client.is_scoped_canary(), "unauthorized execute cannot seal clones");
+        let mut stale = plan.clone();
+        stale["oldOwnerGeneration"] = serde_json::json!("replacement");
+        assert!(driver.execute_helper_maintenance(serial, stale, true, false).await.is_err());
+        assert!(client.is_scoped_canary(), "stale plan cannot seal clones");
+        assert!(driver.execute_helper_maintenance(serial, plan.clone(), true, true).await.is_err(),
+            "missing fixture ADB leaves exact-forward retirement unresolved");
+        assert!(!client.is_scoped_canary(), "settled supersession must permanently fence clones before forward cleanup");
+        assert!(client.describe_apps(&["fixture".into()], false).await.unwrap_err()
+            .is::<crate::riviu_agent::HelperRecoveryRequired>());
+        assert!(client.clone().shutdown().await.unwrap_err().is::<crate::riviu_agent::HelperRecoveryRequired>());
+        assert!(driver.verify_automation_readiness(serial).await.unwrap_err().is::<crate::riviu_agent::HelperRecoveryRequired>());
+        assert!(driver.helpers.lock().contains_key(serial));
+        // Only the fixture forward-inventory command is now available; no phone/network.
+        #[cfg(windows)]
+        std::fs::write(&adb_path, b"@echo off\r\nexit /b 0\r\n").unwrap();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::write(&adb_path, b"#!/bin/sh\nexit 0\n").unwrap();
+            std::fs::set_permissions(&adb_path, std::fs::Permissions::from_mode(0o700)).unwrap();
+        }
+        let observed = driver.execute_helper_maintenance(serial, plan, true, true).await.unwrap();
+        assert_eq!(observed, receipt);
+        assert!(!driver.helpers.lock().contains_key(serial));
+        let status = driver.cached_agent_status(serial);
+        assert_eq!(status.state, riviu_core::AgentState::Unknown);
+        assert!(status.message.is_none() && !status.features.iter().any(|f| f == "helperReady"));
+        assert_eq!(std::fs::read(archive.join("runtime-owner.json")).unwrap(), record);
+        assert_eq!(std::fs::read(archive.join("release-fixture_owner_0123456789.json")).unwrap(), release);
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+
 
     #[test]
     fn cached_agent_status_drops_helper_ready_without_retained_helper() {

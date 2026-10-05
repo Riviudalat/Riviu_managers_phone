@@ -30,6 +30,22 @@ enum HelperMaintenancePhase {
     Settled,
 }
 
+impl HelperMaintenancePhase {
+    fn restore_pre_dispatch_busy(&mut self, observation_only: bool, error: &DeviceControlError) -> bool {
+        // The driver emits this exact category only before any maintenance fence
+        // or external dispatch. An unknown error must never authorize replay.
+        if !observation_only && *self == Self::ExecutionStarted
+            && matches!(error, DeviceControlError::Driver {
+                operation: "executeHelperMaintenance", message, ..
+            } if message == "HelperMaintenanceBusyBeforeDispatch")
+        {
+            *self = Self::Prepared;
+            return true;
+        }
+        false
+    }
+}
+
 #[derive(Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 struct PreparedHelperMaintenance {
@@ -194,11 +210,22 @@ pub async fn agent_helper_maintenance_execute(
         save_maintenance_ledger(&state, &plan.udid, &ledger).await?;
     }
     let prepared = &ledger[index];
-    let receipt = state.control
+    let execution = state.control
         .execute_helper_maintenance(&context, prepared.driver_plan.clone(), confirmed, observation_only)
-        .await
-        .map_err(|_| CommandError::code("HelperMaintenanceExecutionUnproved",
-            "Khôi phục helper chưa được chứng minh; giữ bản ghi cũ, không tự thử lại."))?;
+        .await;
+    let receipt = match execution {
+        Ok(receipt) => receipt,
+        Err(error) => {
+            if ledger[index].phase.restore_pre_dispatch_busy(observation_only, &error) {
+                save_maintenance_ledger(&state, &plan.udid, &ledger).await?;
+                return Err(CommandError::code("HelperMaintenanceBusyBeforeDispatch",
+                    "Máy đang kết thúc thao tác helper; chưa thực hiện khôi phục. Đợi thao tác kết thúc rồi chọn Khôi phục helper để tiếp tục đúng kế hoạch."));
+            }
+            return Err(CommandError::code("HelperMaintenanceExecutionUnproved",
+                "Khôi phục helper chưa được chứng minh; giữ bản ghi cũ để đối soát, không gửi lại thao tác."));
+        }
+    };
+    let prepared = &ledger[index];
     // Validate the exact driver contract, then expose only nonsecret summary fields.
     // The receipt's plan contains owner/nonce/journal metadata and stays off IPC.
     if receipt["plan"] != prepared.driver_plan
@@ -417,7 +444,11 @@ fn helper_maintenance_prepare_error(error: DeviceControlError) -> CommandError {
     };
     let (code, message) = match cause {
         "live helper owner must settle normally" => ("HelperMaintenanceLiveOwner",
-            "Helper còn phiên đang được ứng dụng giữ; chưa cho phép chuẩn bị khôi phục. Chờ phiên kết thúc bình thường rồi kiểm tra lại; không ép giành quyền."),
+            "Phiên helper hiện chưa được xác định là phiên lỗi cần khôi phục. Kiểm tra trạng thái điều khiển của đúng máy; không đặt lại phiên đang hoạt động."),
+        "helper inventory work still draining" | "helper clipboard work still draining" | "helper request still draining" => ("HelperMaintenanceDraining",
+            "Máy đang kết thúc thao tác helper. Chưa chuẩn bị khôi phục; đợi thao tác kết thúc rồi thử lại trên đúng máy."),
+        "helper clipboard/baseline cleanup unresolved" | "helper durable clipboard cleanup unresolved" => ("HelperMaintenanceCleanupPending",
+            "Phiên cũ còn thao tác clipboard chưa đối soát xong. Cần xử lý kết quả thao tác cũ trước khi khôi phục helper; chưa đặt lại phiên."),
         "maintenance disabled in diagnostic mode" => ("HelperMaintenanceDisabled",
             "Chế độ chẩn đoán không cho phép chuẩn bị khôi phục helper; chưa thực hiện khôi phục."),
         "HelperMaintenanceRetainedOwnerMissing" => ("HelperMaintenanceRetainedOwnerMissing",
@@ -441,6 +472,8 @@ mod tests {
     fn helper_prepare_reports_only_safe_known_categories() {
         for (cause, expected) in [
             ("live helper owner must settle normally", "HelperMaintenanceLiveOwner"),
+            ("helper request still draining", "HelperMaintenanceDraining"),
+            ("helper clipboard/baseline cleanup unresolved", "HelperMaintenanceCleanupPending"),
             ("maintenance disabled in diagnostic mode", "HelperMaintenanceDisabled"),
             ("HelperMaintenanceRetainedOwnerMissing", "HelperMaintenanceRetainedOwnerMissing"),
             ("maintenance cannot guess or restore a lost boot IME", "HelperMaintenanceImeUnproved"),
@@ -453,6 +486,26 @@ mod tests {
             assert!(!error.message.contains("fixture-secret-token"));
             assert!(!error.message.contains("raw journal"));
         }
+    }
+
+    #[test]
+    fn helper_execute_only_reopens_proven_pre_dispatch_busy() {
+        for (observation_only, operation, message, allowed) in [
+            (false, "executeHelperMaintenance", "HelperMaintenanceBusyBeforeDispatch", true),
+            (true, "executeHelperMaintenance", "HelperMaintenanceBusyBeforeDispatch", false),
+            (false, "prepareHelperMaintenance", "HelperMaintenanceBusyBeforeDispatch", false),
+            (false, "executeHelperMaintenance", "transport timeout", false),
+            (false, "executeHelperMaintenance", "context: HelperMaintenanceBusyBeforeDispatch", false),
+        ] {
+            let mut phase = HelperMaintenancePhase::ExecutionStarted;
+            let error = DeviceControlError::Driver { udid: "fixture".into(), operation, message: message.into() };
+            assert_eq!(phase.restore_pre_dispatch_busy(observation_only, &error), allowed);
+            assert!(phase == if allowed { HelperMaintenancePhase::Prepared } else { HelperMaintenancePhase::ExecutionStarted });
+        }
+        let mut phase = HelperMaintenancePhase::Settled;
+        let error = DeviceControlError::Driver { udid: "fixture".into(), operation: "executeHelperMaintenance", message: "HelperMaintenanceBusyBeforeDispatch".into() };
+        assert!(!phase.restore_pre_dispatch_busy(false, &error));
+        assert!(phase == HelperMaintenancePhase::Settled);
     }
     use riviu_core::{
         AgentState, DeviceControlPlane, DeviceDriver, DeviceWorkCoordinator, DeviceWorkOwner,

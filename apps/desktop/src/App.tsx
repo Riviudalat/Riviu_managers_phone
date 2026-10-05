@@ -779,22 +779,27 @@ function App() {
     };
     const plans: HelperMaintenancePlan[] = [];
     const observationOnly = new Set<string>();
+    const helperDeviceLabel = (udid: string) => {
+      const device = targets.find(item => item.udid === udid);
+      const number = fleetNumberByUdid.get(udid);
+      return device && number ? `Máy ${number} · ${tileName(device, metaMap.get(udid))}` : udid;
+    };
     try {
       await bounded(targets, async (device) => {
-        pushToast("info", `Helper · ${device.udid}`, "Đang chuẩn bị phạm vi bảo trì.");
+        pushToast("info", `Helper · ${helperDeviceLabel(device.udid)}`, "Đang kiểm tra phiên cũ trước khi khôi phục.");
         try {
           const pending = await agentHelperMaintenancePending(device.udid);
           if (pending) {
             plans.push(pending.plan);
             if (pending.observationOnly) observationOnly.add(pending.plan.maintenanceId);
-            pushToast("info", `Helper · ${device.udid}`, pending.observationOnly
+            pushToast("info", `Helper · ${helperDeviceLabel(device.udid)}`, pending.observationOnly
               ? "Đang đối soát phiên cũ; không dừng helper lần nữa."
               : "Kế hoạch chưa chạy đang chờ xác nhận.");
           } else {
             plans.push(await agentHelperMaintenancePrepare(device.udid));
           }
         } catch (error) {
-          toastError(`Không chuẩn bị được helper · ${device.udid}`, error);
+          toastError(`Chưa chuẩn bị được khôi phục · ${helperDeviceLabel(device.udid)}`, error);
         }
       });
       if (!plans.length) return;
@@ -810,9 +815,9 @@ function App() {
       await bounded(plans, async (plan) => {
         try {
           const receipt = await agentHelperMaintenanceExecute(plan, true, observationOnly.has(plan.maintenanceId));
-          pushToast("warn", `Helper · ${receipt.udid}`, "Đã kết thúc phiên helper cũ và giữ bản ghi. Chưa xác nhận clipboard cũ đã khôi phục; app sẽ kiểm tra phiên mới trước khi chạy.");
+            pushToast("warn", `Helper · ${helperDeviceLabel(receipt.udid)}`, "Đã kết thúc phiên helper cũ và giữ bản ghi. Chưa xác nhận clipboard cũ đã khôi phục; app sẽ kiểm tra phiên mới trước khi chạy.");
         } catch (error) {
-          toastError(`Khôi phục helper chưa hoàn tất · ${plan.udid}`, error);
+          toastError(`Khôi phục helper chưa hoàn tất · ${helperDeviceLabel(plan.udid)}`, error);
         }
       });
     } finally {

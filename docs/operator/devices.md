@@ -81,6 +81,13 @@ nghĩa vụ chưa rõ vẫn được giữ; khôi phục không tự đăng/gử
 cũ đã được khôi phục và không tự biến máy thành sẵn sàng. **Bảo trì → Khôi phục helper**
 vẫn dùng phạm vi đã chọn; **Sửa Riviu Agent** là thao tác riêng.
 
+Phiên helper đã lỗi có thể được khôi phục khi thao tác cũ đã kết thúc và không còn
+clipboard cần đối soát; chỉ còn bản ghi trong bộ nhớ không có nghĩa máy đang bận.
+Nếu helper vẫn đang hoàn tất thao tác, ứng dụng báo chờ trên đúng máy. Lần bị chặn
+trước khi thực thi giữ nguyên kế hoạch để tiếp tục sau; kết quả chưa rõ sau thực thi
+chỉ được đối soát. Khôi phục thành công khóa các kết nối helper cũ, giữ bản ghi và
+trả máy về **Đã kết nối**; mở điều khiển hoặc chạy tác vụ để kiểm phiên mới.
+
 Khi phát hiện điện thoại Android đã cho phép gỡ lỗi USB, Riviu Manager tự kiểm tra
 **Riviu Helper** và cài app nếu thiếu, hoặc cập nhật bản cũ chưa có biểu tượng. App
 hiển thị tên **Riviu Helper** cùng logo Riviu trong danh sách ứng dụng. Mở app để xem
@@ -118,6 +125,11 @@ Username hiện thêm dưới tên máy, không thay số máy, tên máy hay tr
 Máy đọc lỗi, mất kết nối, username trùng hoặc vừa được sửa sẽ báo riêng và giữ nick cũ;
 các máy còn lại vẫn tiếp tục. Android đang mở điều khiển dùng lại phiên hiện có;
 máy còn bài đăng cần giữ chưa được mở Hồ sơ để đọc nick. iOS chưa hỗ trợ thao tác này.
+Nếu đã đọc được username nhưng chưa lưu vì trùng, thông báo ghi riêng kết quả đọc,
+username muốn gán, số/tên máy đang giữ bản gán trùng và giá trị cũ của máy đích.
+Đây là dữ liệu đã lưu, chưa chứng minh tài khoản đang đăng nhập trên máy kia;
+ứng dụng không tự chuyển bản gán. Khi số máy trùng vượt 20, thông báo nêu danh sách
+đã được giới hạn. Kiểm tra đúng máy trước khi sửa tài khoản đã gán.
 Đọc nick và preflight dùng chung bước khôi phục đầu trang Hồ sơ. Popup đã đo có
 nút **Not now** được từ chối trước khi đọc lại account; app không bấm **Save login**
 hoặc đổi tài khoản. Không đọc được cùng username qua hai lần quan sát thì vẫn báo

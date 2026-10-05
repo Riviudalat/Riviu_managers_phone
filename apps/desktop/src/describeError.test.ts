@@ -17,6 +17,22 @@ describe("describeError", () => {
     expect(message).toContain("đã được gán cho thiết bị khác");
     expect(message).toContain("đối chiếu");
     expect(message).toContain("Không tự chuyển");
+    expect(message).not.toContain("Mở Chi tiết thiết bị");
+    const detailed = describeError({code: "AccountAssignmentConflict", message: "collision", accountConflict: {
+      udid: "target", attemptedHandle: "Exact.Case", expectedHandle: "old", currentHandle: "old", conflictsTruncated: true,
+      conflictingDevices: [
+        {udid: "owner-a", number: 8, alias: "Kệ A", handle: "exact.case"},
+        {udid: "owner-b", number: null, alias: "", handle: "EXACT.CASE"},
+      ],
+    }});
+    expect(detailed).toContain("@Exact.Case");
+    expect(detailed).toContain("Máy 8 · Kệ A (owner-a)");
+    expect(detailed).toContain("owner-b");
+    expect(detailed).toContain("và các máy khác");
+    expect(detailed).toContain("@old");
+    expect(detailed).toContain("mapping đã lưu");
+    expect(detailed).toContain("chưa xác minh tài khoản đang đăng nhập");
+    expect(detailed).not.toContain("Mở Chi tiết thiết bị");
   });
   it("explains agent readiness timeout without claiming a USB or account cause", () => {
     const message = describeError({ code: "DeviceControlFailed", message: "openControlSession: the agent on fixture-phone did not answer /status within 10 seconds" });

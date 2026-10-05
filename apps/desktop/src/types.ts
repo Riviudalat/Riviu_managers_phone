@@ -2078,6 +2078,15 @@ export interface DeviceWorkState {
   activity?: DeviceActivity | null;
 }
 
+export interface AccountAssignmentConflict {
+  udid: string;
+  attemptedHandle: string;
+  conflictsTruncated: boolean;
+  expectedHandle: string;
+  currentHandle: string;
+  conflictingDevices: { udid: string; number: number | null; alias: string; handle: string }[];
+}
+
 export interface CommandError {
   code: string;
   message: string;
@@ -2087,6 +2096,7 @@ export interface CommandError {
   attemptId?: string;
   requestedOwner?: DeviceWorkOwner;
   currentOwner?: DeviceWorkOwner;
+  accountConflict?: AccountAssignmentConflict;
 }
 
 export type FlowValidationIssue = CommandError;

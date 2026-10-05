@@ -3,6 +3,29 @@
 
 use super::*;
 
+/// Saved mapping captured by the transaction rejecting a new account assignment.
+#[derive(Debug, Clone, serde::Serialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct ConflictingAccountDevice {
+    pub udid: String,
+    pub number: Option<u32>,
+    pub alias: String,
+    pub handle: String,
+}
+
+/// Collision context is a snapshot of saved mappings, not live account identity.
+#[derive(Debug, Clone, serde::Serialize, thiserror::Error, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+#[error("TikTok username is already assigned to another device: @{attempted_handle} (target {udid})")]
+pub struct AccountAssignmentConflict {
+    pub udid: String,
+    pub attempted_handle: String,
+    pub expected_handle: String,
+    pub current_handle: String,
+    pub conflicting_devices: Vec<ConflictingAccountDevice>,
+    pub conflicts_truncated: bool,
+}
+
 impl Database {
     /// The columns of one `device_meta` row, in the order both readers below bind them.
     /// One constant so a column added to the table cannot be added to one reader only —
@@ -159,11 +182,36 @@ impl Database {
             }
         }
         if !handle.is_empty() {
-            let duplicate:bool=tx.query_row("SELECT EXISTS(SELECT 1 FROM device_meta WHERE udid<>?1 AND lower(ltrim(trim(handle),'@'))=lower(?2))",params![udid,handle],|row|row.get(0))?;
-            anyhow::ensure!(
-                !duplicate,
-                "TikTok username is already assigned to another device"
-            );
+            // Capture conflicting saved mappings under the same write lock as
+            // the collision check; a later roster read could describe another state.
+            let mut stmt = tx.prepare(
+                "SELECT udid, number, alias, handle FROM device_meta
+                 WHERE udid<>?1 AND lower(ltrim(trim(handle),'@'))=lower(?2)
+                 ORDER BY udid LIMIT 21",
+            )?;
+            let mut conflicting_devices = stmt
+                .query_map(params![udid, handle], |row| {
+                    Ok(ConflictingAccountDevice {
+                        udid: row.get(0)?,
+                        number: row.get(1)?,
+                        alias: row.get(2)?,
+                        handle: row.get(3)?,
+                    })
+                })?
+                .collect::<rusqlite::Result<Vec<_>>>()?;
+            let conflicts_truncated = conflicting_devices.len() > 20;
+            conflicting_devices.truncate(20);
+            if !conflicting_devices.is_empty() {
+                return Err(AccountAssignmentConflict {
+                    udid: udid.to_string(),
+                    attempted_handle: handle.to_string(),
+                    expected_handle: expected.to_string(),
+                    current_handle: current.unwrap_or_default(),
+                    conflicting_devices,
+                    conflicts_truncated,
+                }
+                .into());
+            }
         }
         tx.execute("INSERT INTO device_meta(udid,handle) VALUES(?1,?2) ON CONFLICT(udid) DO UPDATE SET handle=excluded.handle",params![udid,handle])?;
         tx.commit()?;

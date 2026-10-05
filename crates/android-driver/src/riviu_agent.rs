@@ -30,6 +30,7 @@ use crate::frames;
 
 mod runtime;
 pub use runtime::HelperRecoveryRequired;
+pub(crate) use runtime::HelperMaintenanceBusyBeforeDispatch;
 
 /// Package installed on the phone.
 pub const PACKAGE: &str = "com.riviu.agent";
@@ -144,6 +145,8 @@ pub struct HelperClient {
     base: String,
     host_port: u16,
     lifecycle: std::sync::Arc<tokio::sync::Mutex<bool>>,
+    retained_failure: std::sync::Arc<std::sync::atomic::AtomicBool>,
+    maintenance_plan: std::sync::Arc<parking_lot::Mutex<Option<Value>>>,
     pending_clipboard: std::sync::Arc<parking_lot::Mutex<Option<Value>>>,
     canary: Option<CanaryOwner>,
     production_runtime: bool,
@@ -206,11 +209,29 @@ struct CanaryOwner {
 }
 
 impl HelperClient {
-    pub(crate) fn is_scoped_canary(&self) -> bool { self.canary.is_some() && !self.lifecycle.try_lock().map(|closed| *closed).unwrap_or(true) }
+    pub(crate) fn is_scoped_canary(&self) -> bool {
+        self.canary.is_some() && self.maintenance_plan.lock().is_none()
+            && !self.lifecycle.try_lock().map(|closed| *closed).unwrap_or(true)
+    }
+
+    pub(crate) fn record_cached_acquisition(&self, failed: bool) {
+        if failed || self.maintenance_plan.lock().is_none() {
+            self.retained_failure.store(failed, std::sync::atomic::Ordering::Release);
+        }
+    }
+
+    pub(crate) fn require_unfenced(&self) -> anyhow::Result<()> {
+        anyhow::ensure!(self.maintenance_plan.lock().is_none(), HelperRecoveryRequired);
+        Ok(())
+    }
     /// A closed clone is replaceable only after all owned cleanup is proved complete.
     pub(crate) async fn is_released(&self) -> anyhow::Result<bool> {
         let closed = self.lifecycle.lock().await;
-        if !*closed { return Ok(false); }
+        self.is_released_locked(*closed)
+    }
+
+    fn is_released_locked(&self, closed: bool) -> anyhow::Result<bool> {
+        if self.maintenance_plan.lock().is_some() || !closed { return Ok(false); }
         anyhow::ensure!(!self.cleanup_is_pending(), "helper cleanup pending; retain released cache for reconciliation");
         if self.production_runtime {
             let owner = self.canary.as_ref().context("released runtime owner missing")?;
@@ -238,6 +259,7 @@ impl HelperClient {
         );
         let _serial = ime_lock(&self.serial).lock_owned().await;
         let closed = self.lifecycle.lock().await;
+        self.require_unfenced()?;
         anyhow::ensure!(
             !*closed && self.production_runtime,
             "retained production helper unavailable"
@@ -808,6 +830,8 @@ impl HelperClient {
             base: format!("http://127.0.0.1:{host_port}"),
             host_port,
             lifecycle: Default::default(),
+            retained_failure: Default::default(),
+            maintenance_plan: Default::default(),
             pending_clipboard: Default::default(),
             canary: None,
             production_runtime: false,
@@ -821,6 +845,7 @@ impl HelperClient {
         // A cancelled caller may leave its owned clipboard task draining/restoring.
         let _serial = ime_lock(&self.serial).lock_owned().await;
         let mut closed = self.lifecycle.lock().await;
+        self.require_unfenced()?;
         anyhow::ensure!(
             self.pending_clipboard.lock().is_none() && self.clipboard_baseline.lock().is_none(),
             "helper clipboard cleanup unresolved; retain forward for reconciliation"
@@ -905,6 +930,7 @@ impl HelperClient {
 
     async fn require_status(&self) -> anyhow::Result<HelperStatus> {
         let closed = self.lifecycle.lock().await;
+        self.require_unfenced()?;
         anyhow::ensure!(!*closed, "helper connection is closed");
         let response = self
             .http
@@ -1216,6 +1242,7 @@ impl HelperClient {
 
     async fn post_json(&self, path: &str, body: Value) -> anyhow::Result<Value> {
         let closed = self.lifecycle.lock().await;
+        self.require_unfenced()?;
         anyhow::ensure!(!*closed, "helper connection is closed");
         self.post_json_open(path, body).await
     }
@@ -1885,8 +1912,29 @@ struct StatusWire {
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use super::*;
+
+    // Fixture data only: no production constructor or visibility changes.
+    pub(crate) async fn cached_maintenance_fixture(
+        adb: AdbProgram, serial: &str, state: &Path, closed: bool, debt: bool,
+    ) -> (HelperClient, std::sync::Arc<tokio::sync::Mutex<()>>, std::sync::Arc<tokio::sync::Mutex<bool>>) {
+        let mut client = HelperClient::at(adb, serial, 1).unwrap();
+        client.production_runtime = true;
+        client.canary = Some(CanaryOwner {
+            owner_id: "fixture_owner_0123456789".into(),
+            instance: "fixture_instance_012345".into(), generation: "fixture_generation_012345".into(),
+            // Cold resume uses a fresh status nonce; it is not the durable claim nonce.
+            nonce: "fixture_status_nonce".into(), socket: "unused".into(), uid: 10001,
+            apk_path: "/data/app/fixture/base.apk".into(), report: state.into(),
+        });
+        *client.lifecycle.lock().await = closed;
+        if debt { *client.clipboard_baseline.lock() = Some(ClipboardBaseline { id: "retained".into(), text: None }); }
+        let lifecycle = client.lifecycle.clone();
+        (client, ime_lock(serial), lifecycle)
+    }
+
+
 
     #[tokio::test]
     async fn reconnect_rejects_authenticated_helper_with_replaced_owner() {

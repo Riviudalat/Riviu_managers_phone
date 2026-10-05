@@ -94,15 +94,24 @@ describe("buildDeviceActions", () => {
   });
 
   it("keeps failed or unknown accounts and continues after stale saves and disconnects",async()=>{
-    const targets=["a","b","c","d"].map(udid=>device({udid}));
+    const targets=["a","b","c","d","e"].map(udid=>device({udid}));
     vi.mocked(api.interactionReadAccount).mockRejectedValueOnce(new Error("disconnected"))
       .mockResolvedValueOnce({udid:"b",expectedHandle:"old",observedHandle:null,status:"unknown",checkedAt:"",snapshotSha256:"proof"});
-    vi.mocked(api.saveDeviceHandle).mockRejectedValueOnce(new Error("stale account"));
+    const collision = { code: "AccountAssignmentConflict", message: "collision", accountConflict: {
+      udid: "d", attemptedHandle: "nick_d", expectedHandle: "old", currentHandle: "old",
+      conflictingDevices: [{udid: "owner", number: 8, alias: "Kệ A", handle: "nick_d"}],
+    }};
+    vi.mocked(api.saveDeviceHandle).mockRejectedValueOnce(new Error("stale account"))
+      .mockRejectedValueOnce(collision);
     await readAndAssignTikTokAccounts(targets,deps());
-    expect(api.saveDeviceHandle).toHaveBeenCalledTimes(2);
-    expect(api.saveDeviceHandle).toHaveBeenLastCalledWith("d","old","nick_d");
-    expect(toastError).toHaveBeenCalledTimes(3);
-    expect(pushToast).toHaveBeenLastCalledWith("warn","Đã gán nick TikTok 1/4 máy");
+    expect(api.interactionReadAccount).toHaveBeenCalledTimes(5);
+    expect(api.saveDeviceHandle).toHaveBeenCalledTimes(3);
+    expect(api.saveDeviceHandle).toHaveBeenLastCalledWith("e","old","nick_e");
+    expect(toastError).toHaveBeenCalledTimes(4);
+    expect(toastError).toHaveBeenCalledWith(expect.stringContaining("Đọc nick thất bại · a"), expect.any(Error));
+    expect(toastError).toHaveBeenCalledWith(expect.stringContaining("Đã đọc @nick_c; chưa lưu gán nick · c"), expect.any(Error));
+    expect(toastError).toHaveBeenCalledWith(expect.stringContaining("Đã đọc @nick_d; chưa lưu gán nick · d"), collision);
+    expect(pushToast).toHaveBeenLastCalledWith("warn","Đã gán nick TikTok 1/5 máy");
   });
 
   it("refreshes acknowledged account saves when the newest concurrent metadata read fails",async()=>{
