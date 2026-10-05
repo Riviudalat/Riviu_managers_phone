@@ -2225,7 +2225,7 @@ impl DeviceDriver for AndroidDriver {
     /// contract asks for.
     async fn prepare_helper_maintenance(&self, udid: &str, maintenance_id: &str, effect_intent: serde_json::Value) -> anyhow::Result<serde_json::Value> {
         let _inventory = self.helper_inventory_lock(udid).try_write_owned()
-            .context("helper inventory work still draining")?;
+            .map_err(|_| anyhow!("helper inventory work still draining"))?;
         anyhow::ensure!(self.automatic_setup_allowed, "maintenance disabled in diagnostic mode");
         let cached = self.helpers.lock().get(udid).cloned();
         let guard = match cached {
@@ -3111,6 +3111,15 @@ mod tests {
 
     #[tokio::test]
     async fn maintenance_cache_retires_clean_release_but_preserves_live_and_debt() {
+        // The control plane serializes the complete cause chain. Inventory
+        // contention must remain the exact public draining category.
+        let driver = AndroidDriver::with_adb(AdbProgram::at(PathBuf::from("never-run-adb")),
+            adb::AdbOrigin::Configured, &AndroidDriverConfig::default());
+        let held = driver.helper_inventory_lock("busy-fixture").read_owned().await;
+        let error = driver.prepare_helper_maintenance("busy-fixture", "fixture_maintenance_1234",
+            serde_json::json!({"operation":"fixture"})).await.unwrap_err();
+        assert_eq!(format!("{error:#}"), "helper inventory work still draining");
+        drop(held);
         for (closed, debt) in [(false, false), (true, false), (true, true)] {
             let root = std::env::temp_dir().join(format!("maintenance-cache-{}", uuid::Uuid::new_v4()));
             let serial = "fixture-maintenance-cache";
