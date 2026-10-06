@@ -225,6 +225,107 @@ mod tests {
             .app_completion_block_reason("finished")
             .unwrap()
             .is_some());
+
+
+        // Historical unclaimed rows must not own a terminal device forever.
+        // The guard is a read projection; the effect ledger remains unchanged.
+        conn.execute("UPDATE interaction_campaigns SET state='partial' WHERE id='campaign'", []).unwrap();
+        conn.execute("UPDATE interaction_assignments SET state='failed' WHERE id='a'", []).unwrap();
+        conn.execute("INSERT INTO tiktok_action_runs(id,owner_kind,owner_id,device_udid,campaign_id,assignment_id,action_kind,state,revision,created_at,updated_at) VALUES('old-comment','interaction','a','finished','campaign','a','comment','planned',0,'old','old')", []).unwrap();
+        let legacy_planned_blocked = f.db.app_completion_block_reason("finished").unwrap().is_some();
+        let unchanged: (String, i64, Option<String>) = conn.query_row(
+            "SELECT state,revision,effect_intent FROM tiktok_action_runs WHERE id='old-comment'", [],
+            |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
+        ).unwrap();
+        assert_eq!(unchanged, ("planned".into(), 0, None));
+        conn.execute("UPDATE interaction_campaigns SET state='running' WHERE id='campaign'", []).unwrap();
+        assert!(f.db.app_completion_block_reason("finished").unwrap().is_some(), "a live parent still owns its planned action");
+        conn.execute("UPDATE interaction_campaigns SET state='partial' WHERE id='campaign'", []).unwrap();
+        for (state, intent) in [
+            ("preparing", None),
+            ("armed", Some("send-intent")),
+            ("uncertain", Some("send-intent")),
+            ("planned", Some("send-intent")),
+        ] {
+            conn.execute("UPDATE tiktok_action_runs SET state=?1,effect_intent=?2 WHERE id='old-comment'", params![state,intent]).unwrap();
+            assert!(f.db.app_completion_block_reason("finished").unwrap().is_some(), "claimed or intent-bearing {state} must remain protected");
+        }
+        conn.execute("UPDATE tiktok_action_runs SET state='planned',effect_intent=NULL,revision=1 WHERE id='old-comment'", []).unwrap();
+        assert!(f.db.app_completion_block_reason("finished").unwrap().is_some(), "a prior claim is not an untouched legacy row");
+        conn.execute("UPDATE tiktok_action_runs SET revision=0 WHERE id='old-comment'", []).unwrap();
+        conn.execute("UPDATE interaction_assignments SET state='queued' WHERE id='a'", []).unwrap();
+        conn.execute("UPDATE interaction_campaigns SET state='cancelled' WHERE id='campaign'", []).unwrap();
+        let cancelled_unclaimed_blocked = f.db.app_completion_block_reason("finished").unwrap().is_some();
+
+        // Prepared observation inputs are dormant until Send is armed.
+        conn.execute("UPDATE interaction_assignments SET state='failed' WHERE id='a'", []).unwrap();
+        conn.execute("UPDATE interaction_campaigns SET state='partial' WHERE id='campaign'", []).unwrap();
+        conn.execute("UPDATE tiktok_action_runs SET state='failed_before_effect',revision=2 WHERE id='old-comment'", []).unwrap();
+        conn.execute("INSERT INTO interaction_comment_verification(assignment_id,campaign_id,device_id,context_json,state) VALUES('a','campaign','finished','{}','pending')", []).unwrap();
+        let dormant_verification_blocked = f.db.app_completion_block_reason("finished").unwrap().is_some();
+        let dormant: (String, Option<i64>, i64) = conn.query_row(
+            "SELECT state,sent_at_ms,revision FROM interaction_comment_verification WHERE assignment_id='a'", [],
+            |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
+        ).unwrap();
+        assert_eq!(dormant, ("pending".into(), None, 0));
+        conn.execute("UPDATE interaction_comment_verification SET sent_at_ms=1,next_at_ms=2,deadline_ms=3 WHERE assignment_id='a'", []).unwrap();
+        assert!(f.db.app_completion_block_reason("finished").unwrap().is_some(), "sent pending proof stays protected even if its clock is old");
+        conn.execute("UPDATE interaction_comment_verification SET sent_at_ms=NULL,next_at_ms=NULL,deadline_ms=NULL,owner='live-verifier' WHERE assignment_id='a'", []).unwrap();
+        assert!(f.db.app_completion_block_reason("finished").unwrap().is_some(), "never release a verifier claim");
+        conn.execute("UPDATE interaction_comment_verification SET owner=NULL WHERE assignment_id='a'", []).unwrap();
+        conn.execute("UPDATE tiktok_action_runs SET state='uncertain',effect_intent='send-intent',revision=3 WHERE id='old-comment'", []).unwrap();
+        assert!(f.db.app_completion_block_reason("finished").unwrap().is_some(), "a dormant row cannot erase an uncertain action intent");
+        assert_eq!(
+            [legacy_planned_blocked, cancelled_unclaimed_blocked, dormant_verification_blocked],
+            [false, false, false],
+            "terminal pre-effect rows and unsent reservations must not hold cleanup forever",
+        );
+
+
+        // Historical typed text is not a public Send. A fresh process close may
+        // finish while the uncertain action remains non-retryable and unchanged.
+        let typed = serde_json::json!({
+            "phase": "typedCleanupUnverified",
+            "publicSendBoundaryCrossed": false,
+            "publicEffectMayHaveGoneOut": false,
+            "draftCleanupPending": true,
+        }).to_string();
+        conn.execute("UPDATE interaction_assignments SET state='uncertain',effect_intent=NULL WHERE id='a'", []).unwrap();
+        conn.execute("UPDATE tiktok_action_runs SET effect_intent='typed_comment_cleanup_unverified',evidence_json=?1 WHERE id='old-comment'", [&typed]).unwrap();
+        let typed_only_blocked = f.db.app_completion_block_reason("finished").unwrap().is_some();
+        let typed_row: (String, i64, String) = conn.query_row(
+            "SELECT state,revision,effect_intent FROM tiktok_action_runs WHERE id='old-comment'", [],
+            |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
+        ).unwrap();
+        assert_eq!(typed_row, ("uncertain".into(), 3, "typed_comment_cleanup_unverified".into()));
+        assert!(f.db.claim_interaction_action("a", crate::InteractionActionKind::Comment).unwrap().is_none(), "process cleanup does not permit Comment replay");
+        for field in ["phase", "publicSendBoundaryCrossed", "publicEffectMayHaveGoneOut", "draftCleanupPending"] {
+            let mut missing: serde_json::Value = serde_json::from_str(&typed).unwrap();
+            missing.as_object_mut().unwrap().remove(field);
+            conn.execute("UPDATE tiktok_action_runs SET evidence_json=?1 WHERE id='old-comment'", [missing.to_string()]).unwrap();
+            assert!(f.db.app_completion_block_reason("finished").unwrap().is_some(), "missing {field} is not negative Send proof");
+        }
+        conn.execute("UPDATE tiktok_action_runs SET evidence_json=?1 WHERE id='old-comment'", [&typed]).unwrap();
+        conn.execute("UPDATE interaction_campaigns SET state='running' WHERE id='campaign'", []).unwrap();
+        assert!(f.db.app_completion_block_reason("finished").unwrap().is_some(), "typed evidence cannot bypass a live parent");
+        conn.execute("UPDATE interaction_campaigns SET state='partial' WHERE id='campaign'", []).unwrap();
+        conn.execute("UPDATE interaction_assignments SET effect_intent='post_comment' WHERE id='a'", []).unwrap();
+        assert!(f.db.app_completion_block_reason("finished").unwrap().is_some(), "an assignment Send remains protected");
+        conn.execute("UPDATE interaction_assignments SET effect_intent=NULL WHERE id='a'", []).unwrap();
+        conn.execute("UPDATE tiktok_action_runs SET effect_intent='post_comment' WHERE id='old-comment'", []).unwrap();
+        assert!(f.db.app_completion_block_reason("finished").unwrap().is_some(), "a real action Send remains protected");
+        conn.execute("UPDATE tiktok_action_runs SET effect_intent='typed_comment_cleanup_unverified' WHERE id='old-comment'", []).unwrap();
+        conn.execute("UPDATE interaction_comment_verification SET owner='live-verifier' WHERE assignment_id='a'", []).unwrap();
+        assert!(f.db.app_completion_block_reason("finished").unwrap().is_some(), "a verifier lease cannot be ignored");
+        conn.execute("UPDATE interaction_comment_verification SET owner=NULL,sent_at_ms=1 WHERE assignment_id='a'", []).unwrap();
+        assert!(f.db.app_completion_block_reason("finished").unwrap().is_some(), "a recorded Send cannot be ignored");
+        conn.execute("UPDATE interaction_comment_verification SET sent_at_ms=NULL WHERE assignment_id='a'", []).unwrap();
+        conn.execute("INSERT INTO tiktok_action_runs(id,owner_kind,owner_id,device_udid,campaign_id,assignment_id,action_kind,state,revision,created_at,updated_at) VALUES('other-live','interaction','a','finished','campaign','a','like','preparing',1,'now','now')", []).unwrap();
+        assert!(f.db.app_completion_block_reason("finished").unwrap().is_some(), "another active action still owns the device");
+        conn.execute("UPDATE tiktok_action_runs SET state='failed_before_effect' WHERE id='other-live'", []).unwrap();
+        conn.execute("INSERT INTO interaction_assignments(id,campaign_id,target_id,message_ordinal,actor_udid,state,effect_intent,created_at,updated_at) VALUES('older-send','campaign','target',2,'finished','uncertain','post_comment','old','old')", []).unwrap();
+        assert!(f.db.app_completion_block_reason("finished").unwrap().is_some(), "another historical Send debt remains protected");
+        assert!(!typed_only_blocked, "exact typed-only debt may close the process without settling the action");
     }
 }
 
@@ -255,6 +356,42 @@ fn validate(udid: &str, bundle: &str) -> anyhow::Result<()> {
         "Invalid completion package"
     );
     Ok(())
+}
+
+
+/// Exact negative Send evidence only qualifies process closure. It never settles
+/// the action, restores a draft, or grants another Comment claim.
+fn typed_only_cleanup_assignments(conn: &Connection, udid: &str) -> anyhow::Result<Vec<String>> {
+    let mut statement = conn.prepare(
+        "SELECT a.id FROM interaction_assignments a
+         JOIN interaction_campaigns c ON c.id=a.campaign_id
+         JOIN tiktok_action_runs action ON action.assignment_id=a.id
+         JOIN interaction_comment_verification v ON v.assignment_id=a.id
+         WHERE a.actor_udid=?1 AND a.state='uncertain' AND a.effect_intent IS NULL
+           AND c.state IN ('partial','failed','cancelled')
+           AND action.owner_kind='interaction' AND action.owner_id=a.id
+           AND action.campaign_id=a.campaign_id AND action.device_udid=a.actor_udid
+           AND action.action_kind='comment' AND action.state='uncertain'
+           AND action.effect_intent='typed_comment_cleanup_unverified'
+           AND CASE WHEN json_valid(action.evidence_json) THEN
+               json_extract(action.evidence_json,'$.phase')='typedCleanupUnverified'
+               AND json_type(action.evidence_json,'$.publicSendBoundaryCrossed')='false'
+               AND json_type(action.evidence_json,'$.publicEffectMayHaveGoneOut')='false'
+               AND json_type(action.evidence_json,'$.draftCleanupPending')='true'
+               ELSE 0 END
+           AND v.campaign_id=a.campaign_id AND v.device_id=a.actor_udid
+           AND v.state='pending' AND v.sent_at_ms IS NULL AND v.next_at_ms IS NULL
+           AND v.deadline_ms IS NULL AND v.owner IS NULL AND v.lease_until_ms IS NULL
+           AND v.attempts=0 AND v.revision=0
+           AND v.assignment_revision IS NULL AND v.action_revision IS NULL
+           AND NOT EXISTS (
+               SELECT 1 FROM tiktok_action_runs other
+               WHERE other.assignment_id=a.id AND other.id<>action.id
+                 AND other.state IN ('planned','preparing','armed','uncertain')
+           )",
+    )?;
+    let rows = statement.query_map([udid], |row| row.get(0))?;
+    Ok(rows.collect::<rusqlite::Result<Vec<_>>>()?)
 }
 
 impl Database {
@@ -362,21 +499,57 @@ impl Database {
             .naive_local()
             .format("%Y-%m-%dT%H:%M:%S")
             .to_string();
+        let typed_cleanup = serde_json::to_string(&typed_only_cleanup_assignments(&tx, udid)?)?;
+        // Retain raw action/verification history. Only exactly joined, untouched
+        // pre-effect rows under terminal parents are no longer device owners.
+        // Missing parents, live claims and every uncertain intent remain blocking.
         let checks=[
             ("publish capacity", "SELECT EXISTS(SELECT 1 FROM publish_work_claims WHERE udid=?1 AND stage<>'appCompletion')"),
             ("nurture", "SELECT EXISTS(SELECT 1 FROM nurture_run_status_events e WHERE e.udid=?1 AND COALESCE(json_extract(e.status_json,'$.running'),1)<>0 AND NOT EXISTS(SELECT 1 FROM nurture_run_status_events n WHERE n.run_id=e.run_id AND n.udid=e.udid AND n.sequence>e.sequence))"),
-            ("interaction", "SELECT EXISTS(SELECT 1 FROM interaction_assignments a JOIN interaction_campaigns c ON c.id=a.campaign_id WHERE a.actor_udid=?1 AND (a.state IN ('uncertain','sending','posting','verifying') OR (c.state IN ('queued','running') AND a.state NOT IN ('succeeded','failed','failed_before_dispatch','failed_before_effect','cancelled','skipped','skipped_parent'))))"),
-            ("comment verification", "SELECT EXISTS(SELECT 1 FROM interaction_comment_verification WHERE device_id=?1 AND state='pending')"),
-            ("public action", "SELECT EXISTS(SELECT 1 FROM tiktok_action_runs WHERE device_udid=?1 AND state IN ('planned','preparing','armed','uncertain'))"),
+            ("interaction", "SELECT EXISTS(SELECT 1 FROM interaction_assignments a JOIN interaction_campaigns c ON c.id=a.campaign_id WHERE a.actor_udid=?1
+                AND NOT EXISTS(SELECT 1 FROM json_each(?2) eligible WHERE eligible.value=a.id)
+                AND (a.state IN ('uncertain','sending','posting','verifying') OR (c.state IN ('queued','running') AND a.state NOT IN ('succeeded','failed','failed_before_dispatch','failed_before_effect','cancelled','skipped','skipped_parent'))))"),
+            ("comment verification", "SELECT EXISTS(SELECT 1 FROM interaction_comment_verification v WHERE v.device_id=?1 AND v.state='pending'
+                AND NOT EXISTS(SELECT 1 FROM json_each(?2) eligible WHERE eligible.value=v.assignment_id)
+                AND NOT (v.sent_at_ms IS NULL AND v.next_at_ms IS NULL AND v.deadline_ms IS NULL
+                    AND v.owner IS NULL AND v.lease_until_ms IS NULL AND v.attempts=0 AND v.revision=0
+                    AND EXISTS (
+                        SELECT 1 FROM interaction_assignments a
+                        JOIN interaction_campaigns c ON c.id=a.campaign_id
+                        JOIN tiktok_action_runs action ON action.assignment_id=a.id
+                        WHERE a.id=v.assignment_id AND a.campaign_id=v.campaign_id AND a.actor_udid=v.device_id
+                          AND a.state IN ('failed','skipped_parent') AND a.effect_intent IS NULL
+                          AND c.state IN ('partial','failed','cancelled')
+                          AND action.owner_kind='interaction' AND action.owner_id=a.id
+                          AND action.campaign_id=a.campaign_id AND action.device_udid=a.actor_udid
+                          AND action.action_kind='comment' AND action.state='failed_before_effect'
+                          AND action.effect_intent IS NULL
+                    )))"),
+            ("public action", "SELECT EXISTS(SELECT 1 FROM tiktok_action_runs action WHERE action.device_udid=?1
+                AND action.state IN ('planned','preparing','armed','uncertain')
+                AND NOT EXISTS(SELECT 1 FROM json_each(?2) eligible WHERE eligible.value=action.assignment_id)
+                AND NOT (action.owner_kind='interaction' AND action.state='planned'
+                    AND action.revision=0 AND action.effect_intent IS NULL
+                    AND EXISTS (
+                        SELECT 1 FROM interaction_assignments a
+                        JOIN interaction_campaigns c ON c.id=a.campaign_id
+                        WHERE a.id=action.assignment_id AND a.id=action.owner_id
+                          AND a.campaign_id=action.campaign_id AND a.actor_udid=action.device_udid
+                          AND a.effect_intent IS NULL AND c.state IN ('partial','failed','cancelled')
+                          AND (a.state IN ('failed','skipped_parent')
+                               OR (c.state='cancelled' AND a.state='queued' AND a.revision=0))
+                    )))"),
             ("Flow", "SELECT EXISTS(SELECT 1 FROM flow_device_runs d WHERE d.udid=?1 AND (d.state IN ('queued','preflight','running') OR EXISTS(SELECT 1 FROM flow_node_attempts a WHERE a.device_run_id=d.id AND a.state IN ('intentCommitted','effectDispatched','verifying','uncertain','interrupted'))))"),
             ("job", "SELECT EXISTS(SELECT 1 FROM jobs j WHERE j.status NOT IN ('\"succeeded\"','\"failed\"','\"cancelled\"','succeeded','failed','cancelled','\"uncertain\"','uncertain') AND CASE WHEN json_valid(j.udids_json) THEN EXISTS(SELECT 1 FROM json_each(j.udids_json) u WHERE u.value=?1) ELSE 1 END)"),
             ("orchestration", "SELECT EXISTS(SELECT 1 FROM orchestration_runs r WHERE r.state IN ('queued','running','uncertain') AND (EXISTS(SELECT 1 FROM orchestration_attempts a JOIN json_each(a.snapshot_json,'$.target.included') t WHERE a.run_id=r.id AND a.state IN ('queued','dispatching','waiting_child','uncertain') AND json_extract(t.value,'$.udid')=?1) OR EXISTS(SELECT 1 FROM json_each(r.node_targets_json) n JOIN json_each(n.value,'$.included') t WHERE json_extract(t.value,'$.udid')=?1 AND NOT EXISTS(SELECT 1 FROM orchestration_attempts a WHERE a.run_id=r.id AND a.node_id=n.key AND a.state IN ('done','partial','failed','cancelled'))) OR (NOT EXISTS(SELECT 1 FROM json_each(r.node_targets_json)) AND EXISTS(SELECT 1 FROM json_each(r.target_json,'$.included') t WHERE json_extract(t.value,'$.udid')=?1))))"),
         ];
         for (name, sql) in checks {
-            if tx
-                .query_row(sql, [udid], |r| r.get::<_, bool>(0))
-                .with_context(|| format!("Unable to verify pending {name} work"))?
-            {
+            let blocked = if matches!(name, "interaction" | "comment verification" | "public action") {
+                tx.query_row(sql, params![udid, typed_cleanup], |r| r.get::<_, bool>(0))
+            } else {
+                tx.query_row(sql, [udid], |r| r.get::<_, bool>(0))
+            }.with_context(|| format!("Unable to verify pending {name} work"))?;
+            if blocked {
                 return Ok(Some(format!("Chờ công việc {name} trên thiết bị hoàn tất")));
             }
         }

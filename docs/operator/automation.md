@@ -87,10 +87,23 @@ chưa bắt đầu phiên tự động mới có bước tắt TikTok. Riêng b�
 dừng tự xác minh và không có pipeline hoạt động: sau ít nhất 4 giờ kể từ cập nhật cuối,
 việc thiếu link chuyển thành lưu ý **Liên kết bài cũ**, không giữ máy mãi. Bài cũ vẫn
 cần đối soát trong Theo dõi, không được đưa lại vào lượt đăng hay báo Sheet thành công.
+Bản ghi cũ chưa phát thao tác và reservation xác minh chưa Send không giữ máy mãi.
+Nếu bằng chứng xác nhận chỉ còn văn bản chưa dọn, app có thể đóng tiến trình bằng
+lease mới; lịch sử vẫn chưa rõ và không được tự gửi lại. Bản ghi đã qua Send mà chưa
+xác minh vẫn giữ điều kiện kiểm tra.
 Lỗi dọn được báo riêng. Lượt đã qua Send/Post mà chưa rõ kết quả
 không tự gửi/đăng lại; việc kiểm tra lại chỉ đi theo phạm vi đã được ghi nhận.
 
+Trên TikTok Trill 38.3.2 giao diện tiếng Anh, Riviu tự chọn **Deny** cho hộp
+thoại quyền vị trí đã nhận diện, rồi xác minh lại màn hình. Nhánh này áp dụng cả
+trước khi mở ứng dụng và lúc quay về feed; hộp thoại chưa nhận diện vẫn cần kiểm tra.
+
 ## Tương tác
+
+Nếu bằng chứng tác giả/nội dung thay đổi trong lúc copy link trước tương tác, app
+lấy lại toàn bộ bằng chứng đúng bài một lần trong thời hạn hiện có. Chỉ tiếp tục
+khi canonical link và trạng thái bài đều khớp. Kết quả Like/Send đã gửi không được
+tự lặp lại khi chưa rõ kết quả.
 
 Riviu tự lấy và lưu ID bình luận sau khi xác minh trên TikTok Android `45.7.3/en`.
 Khi có ID đã lưu, lượt reply mở và đối chiếu lại ID của câu đang hiển thị; người dùng

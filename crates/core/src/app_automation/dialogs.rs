@@ -124,6 +124,47 @@ pub fn decline_facebook_permission(tree: &Tree, labels: TikTokControls) -> Optio
         .filter(|r| r.enabled && r.clickable)
 }
 
+/// Machine 17, Trill 38.3.2/en on Android 9, 2026-10-06: optional location.
+/// The OS package owns this modal; its resource IDs deliberately use the AOSP prefix.
+/// Match the complete question and both buttons inside one measured container. Camera,
+/// microphone and media permissions remain with the driver's required-permission path.
+pub fn decline_optional_location(tree: &Tree, labels: TikTokControls) -> Option<ElementBox> {
+    if (labels.package(), labels.resource_version(), labels.language())
+        != ("com.ss.android.ugc.trill", Some("38.3.2"), "en")
+    {
+        return None;
+    }
+    let package = "com.google.android.packageinstaller";
+    let exact = |id: &str, text: &str, class: &str| {
+        let matches = tree.matching(package, ElementQuery::ResourceIdSuffix(id));
+        let [index] = matches.as_slice() else { return None; };
+        let node = &tree.nodes[*index];
+        (node.attr("resource-id") == id && node.attr("text") == text
+            && node.attr("class") == class && node.visibility() == Some(true))
+            .then_some(*index)
+    };
+    let container = exact(
+        "com.android.packageinstaller:id/dialog_container", "", "android.widget.LinearLayout",
+    )?;
+    let prompt = exact(
+        "com.android.packageinstaller:id/permission_message",
+        "Allow TikTok to access this device's location?", "android.widget.TextView",
+    )?;
+    let deny = exact(
+        "com.android.packageinstaller:id/permission_deny_button", "Deny", "android.widget.Button",
+    )?;
+    let allow = exact(
+        "com.android.packageinstaller:id/permission_allow_button", "Allow", "android.widget.Button",
+    )?;
+    if ![prompt, deny, allow].into_iter().all(|index| tree.inside(index, container))
+        || tree.nodes[deny].parent != tree.nodes[allow].parent
+        || !tree.nodes[allow].rect().is_some_and(|rect| rect.enabled && rect.clickable)
+    {
+        return None;
+    }
+    tree.nodes[deny].rect().filter(|rect| rect.enabled && rect.clickable)
+}
+
 /// Positive blockers shared by pre-Post account proof and post-link verification.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum AccountBlocker {

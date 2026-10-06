@@ -6,7 +6,7 @@ use tokio::time::Instant;
 
 use super::{
     confirm_target_from_share_link, read_author_label, read_target_identity_caption, TargetArrival,
-    TargetLinkMismatch,
+    TargetCardContinuityLost, TargetLinkMismatch,
 };
 use crate::driver::{ElementQuery, UiSession};
 use crate::tiktok_labels::{TikTokControl, TikTokControls};
@@ -87,6 +87,7 @@ async fn open_target(
     let mut deadline = Instant::now() + CARD_WINDOW;
     let mut redispatched = false;
     let mut declined_contacts = false;
+    let mut continuity_retry_used = false;
     tokio::time::sleep(DISPATCH_SETTLE).await;
     loop {
         ensure_not_cancelled(stop)?;
@@ -159,6 +160,16 @@ async fn open_target(
                 Err(error)
                     if error.downcast_ref::<TargetLinkMismatch>().is_some()
                         && Instant::now() < deadline => {}
+                Err(error)
+                    if error.downcast_ref::<TargetCardContinuityLost>().is_some()
+                        && !continuity_retry_used
+                        && Instant::now() < deadline =>
+                {
+                    // The discarded proof crossed no public-action boundary. Acquire a
+                    // new before/copy/after pair once, within the same loading deadline.
+                    // The canonical URL and every continuity predicate still must match.
+                    continuity_retry_used = true;
+                }
                 Err(error) => {
                     return Err(error.context("target_exact_open: exact post proof failed"));
                 }
@@ -301,6 +312,7 @@ mod tests {
         foreground: bool,
         copied_url: &'static str,
         card_changes_after_copy: bool,
+        transient_author_change: AtomicBool,
         copies: AtomicUsize,
         caption_nodes: Vec<&'static str>,
         caption_query_fails: bool,
@@ -328,6 +340,7 @@ mod tests {
                 foreground: true,
                 copied_url,
                 card_changes_after_copy: false,
+                transient_author_change: AtomicBool::new(false),
                 copies: AtomicUsize::new(0),
                 caption_nodes: vec![CAPTION],
                 caption_query_fails: false,
@@ -501,8 +514,10 @@ mod tests {
                 if self.author_missing {
                     return Ok(None);
                 }
-                let author = if self.card_changes_after_copy
-                    && self.copies.load(Ordering::Relaxed) % 2 == 1
+                let changed_once = self.copies.load(Ordering::Relaxed) > 0
+                    && self.transient_author_change.swap(false, Ordering::Relaxed);
+                let author = if changed_once || (self.card_changes_after_copy
+                    && self.copies.load(Ordering::Relaxed) % 2 == 1)
                 {
                     "Different Author"
                 } else {
@@ -758,12 +773,26 @@ mod tests {
 
     #[tokio::test(start_paused = true)]
     async fn changing_card_during_copy_remains_a_refusal() {
+        // A discarded pre-effect proof may be reacquired once from fresh observations.
+        let transient = ExactSession::new(false, TARGET_URL);
+        transient.transient_author_change.store(true, Ordering::Relaxed);
+        let started = Instant::now();
+        assert!(matches!(
+            run(&transient, &AtomicBool::new(false)).await
+                .expect("transient continuity loss needs one fresh exact-link proof"),
+            TargetArrival::Identified { .. }
+        ));
+        assert_eq!(transient.opens.lock().len(), 1, "do not redispatch VIEW");
+        assert_eq!(transient.copies.load(Ordering::Relaxed), 2);
+        assert_eq!(transient.navigation_taps.load(Ordering::Relaxed), 4);
+        assert!(started.elapsed() < CARD_WINDOW, "do not reset the deadline");
+
         let mut session = ExactSession::new(true, TARGET_URL);
         session.card_changes_after_copy = true;
         let error = run(&session, &AtomicBool::new(false)).await.unwrap_err();
         assert!(format!("{error:#}").contains("card changed"));
         assert_eq!(session.opens.lock().len(), 1);
-        assert_eq!(session.navigation_taps.load(Ordering::Relaxed), 4);
+        assert_eq!(session.navigation_taps.load(Ordering::Relaxed), 6);
     }
 
     #[tokio::test(start_paused = true)]

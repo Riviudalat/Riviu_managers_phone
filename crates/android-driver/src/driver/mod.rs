@@ -56,8 +56,8 @@ const INTERACTION_FIRST_FRAME_TIMEOUT: Duration = Duration::from_secs(12);
 /// Still a deadline and not a fallback: a locked screen makes `monkey` report success
 /// while nothing moves, and that has to end in a refusal rather than a session driving a
 /// lock screen. 40 s is the slowest measured start plus room, on the oldest phone here.
-const FOREGROUND_PROOF_TIMEOUT: Duration = Duration::from_secs(40);
-const FOREGROUND_PROOF_POLL: Duration = Duration::from_millis(250);
+pub(crate) const FOREGROUND_PROOF_TIMEOUT: Duration = Duration::from_secs(40);
+pub(crate) const FOREGROUND_PROOF_POLL: Duration = Duration::from_millis(250);
 /// How long a system dialog gets to go away after Back has been pressed at it.
 ///
 /// Long enough for a dialog that Back *does* dismiss to be gone and the app to be back in

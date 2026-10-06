@@ -328,6 +328,10 @@ struct TargetLinkMismatch {
     observed_url: String,
 }
 
+#[derive(Debug, thiserror::Error)]
+#[error("target_link_proof: card changed while copying its link")]
+struct TargetCardContinuityLost;
+
 fn target_diagnostic_url(value: &str) -> String {
     crate::parse_tiktok_links(value)
         .into_iter()
@@ -363,12 +367,12 @@ pub async fn confirm_target_from_share_link(
     let comments = labels
         .label(TikTokControl::Comments)
         .ok_or_else(|| anyhow::anyhow!("target_link_proof: comments unmeasured"))?;
-    anyhow::ensure!(
-        before_author == after_author
-            && before_caption == after_caption
-            && session.locate(comments.to_query()).await?.is_some(),
-        "target_link_proof: card changed while copying its link"
-    );
+    if !(before_author == after_author
+        && before_caption == after_caption
+        && session.locate(comments.to_query()).await?.is_some())
+    {
+        return Err(TargetCardContinuityLost.into());
+    }
     if !link_identifies_target(&canonical, expected) {
         return Err(TargetLinkMismatch {
             expected_url: target_diagnostic_url(&expected.normalized_url),

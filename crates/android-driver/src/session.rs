@@ -13,6 +13,105 @@ use crate::riviu_agent::HelperClient;
 
 mod observation;
 
+/// Passive observation cannot invalidate independently confirmed foreground. Session/epoch
+/// changes and an uncertain Deny remain failures, even if launch itself later succeeds.
+enum LaunchPermissionObservation {
+    Complete,
+    ReadUnavailable(anyhow::Error),
+    MustStop(anyhow::Error),
+}
+
+/// Drive one launch while observing only the measured optional permission on the owned
+/// agent connection. The caller holds its existing input gate for this entire operation.
+async fn launch_with_optional_location<L, R, RF, T, TF, E>(
+    launch: L,
+    labels: Option<riviu_core::tiktok_labels::TikTokControls>,
+    deadline: tokio::time::Instant,
+    mut read: R,
+    mut tap: T,
+    epoch: E,
+) -> anyhow::Result<()>
+where
+    L: std::future::Future<Output = anyhow::Result<()>>,
+    R: FnMut() -> RF,
+    RF: std::future::Future<Output = anyhow::Result<riviu_core::HierarchySourceSnapshot>>,
+    T: FnMut(TapPoint) -> TF,
+    TF: std::future::Future<Output = anyhow::Result<()>>,
+    E: Fn() -> String,
+{
+    let Some(labels) = labels else { return launch.await; };
+    let expected_epoch = epoch();
+    let launch_done = std::sync::atomic::AtomicBool::new(false);
+    let done = tokio::sync::Notify::new();
+    let launched = async {
+        // No select/timeout drops this effect future. Its own ACK/error always drains.
+        let result = launch.await;
+        launch_done.store(true, Ordering::Release);
+        done.notify_one();
+        result
+    };
+    let observed = async {
+        use LaunchPermissionObservation::{Complete, MustStop, ReadUnavailable};
+        let complete = || if epoch() == expected_epoch { Complete } else {
+            MustStop(anyhow!("launch permission session changed"))
+        };
+        loop {
+            if launch_done.load(Ordering::Acquire) || tokio::time::Instant::now() >= deadline {
+                return complete();
+            }
+            // Only a read can be cancelled when launch completes; never an issued tap.
+            let snapshot = tokio::select! {
+                biased;
+                _ = done.notified() => return complete(),
+                result = tokio::time::timeout_at(deadline, read()) => match result {
+                    Ok(result) => result,
+                    Err(_) => return complete(),
+                },
+            };
+            if epoch() != expected_epoch {
+                return MustStop(anyhow!("launch permission session changed"));
+            }
+            let tree = match snapshot.and_then(riviu_core::ui_automation::tree::Tree::parse) {
+                Ok(tree) => tree,
+                Err(error) if riviu_core::driver::ui_error_kind(&error) == riviu_core::driver::UiErrorKind::Session => {
+                    return MustStop(error);
+                }
+                Err(error) => return ReadUnavailable(error),
+            };
+            if let Some(button) = riviu_core::app_automation::dialogs::decline_optional_location(&tree, labels) {
+                if launch_done.load(Ordering::Acquire) || tokio::time::Instant::now() >= deadline {
+                    return complete();
+                }
+                if epoch() != expected_epoch {
+                    return MustStop(anyhow!("launch permission session changed before Deny"));
+                }
+                // One Deny, fully drained while the same launch continues to await its ACK.
+                return match tap(button.centre()).await {
+                    Ok(()) => complete(),
+                    Err(error) => MustStop(error.context("optional location Deny did not confirm")),
+                };
+            }
+            tokio::select! {
+                _ = done.notified() => return complete(),
+                _ = tokio::time::sleep_until((tokio::time::Instant::now()
+                    + crate::driver::FOREGROUND_PROOF_POLL).min(deadline)) => {},
+            }
+        }
+    };
+    let (launch_result, observation_result) = tokio::join!(launched, observed);
+    match (launch_result, observation_result) {
+        (result, LaunchPermissionObservation::Complete) => result,
+        (Ok(()), LaunchPermissionObservation::ReadUnavailable(error)) => {
+            tracing::warn!(%error, "optional permission read unavailable; launch independently confirmed foreground");
+            Ok(())
+        }
+        (Err(error), LaunchPermissionObservation::ReadUnavailable(observation)) => Err(error.context(
+            format!("optional permission observation unavailable while launch drained: {observation:#}"))),
+        (Ok(()), LaunchPermissionObservation::MustStop(error)) => Err(error),
+        (Err(launch), LaunchPermissionObservation::MustStop(error)) => Err(error.context(
+            format!("launch also failed after draining: {launch:#}"))),
+    }
+}
 /// `KEYCODE_HOME`.
 const KEYCODE_HOME: i64 = 3;
 /// `KEYCODE_BACK`.
@@ -754,7 +853,41 @@ impl UiSession for AndroidUiSession {
     }
 
     async fn launch_app_foreground(&self, bundle_id: &str) -> anyhow::Result<()> {
-        self.traced("launch_app_foreground", self.adb.launch_foreground_checked(&self.serial, bundle_id)).await
+        self.traced("launch_app_foreground", async {
+            let deadline = tokio::time::Instant::now() + crate::driver::FOREGROUND_PROOF_TIMEOUT;
+            // Metadata uses ADB only before dispatch; am start -W owns that device queue.
+            let labels = if bundle_id == "com.ss.android.ugc.trill" {
+                tokio::time::timeout_at(deadline, async {
+                    let version = self.app_version_name(bundle_id).await.unwrap_or_default();
+                    let locale = self.ui_locale().await.unwrap_or_default();
+                    riviu_core::tiktok_labels::controls_for(bundle_id, &locale, &version)
+                        .filter(|labels| labels.resource_version() == Some("38.3.2") && labels.language() == "en")
+                }).await.context("optional permission metadata observation deadline exceeded")?
+            } else { None };
+            launch_with_optional_location(
+                self.adb.launch_foreground_checked(&self.serial, bundle_id), labels, deadline,
+                || async {
+                    // No fallback, session recreation, foreground ADB read or instrumentation
+                    // recovery may enter while the single launch owns the device ADB queue.
+                    let response = self.agent.observation_read_without_recovery(None, deadline.into_std()).await?;
+                    let xml = response.value.get("value").and_then(serde_json::Value::as_str)
+                        .ok_or_else(|| anyhow!("optional permission hierarchy response is not XML"))?.to_owned();
+                    let generation = self.hierarchy_generation.fetch_update(
+                        Ordering::Relaxed, Ordering::Relaxed, |current| current.checked_add(1),
+                    ).map_err(|_| anyhow!("hierarchy source generation exhausted"))? + 1;
+                    Ok(riviu_core::HierarchySourceSnapshot { generation, xml })
+                },
+                |point| async move {
+                    // traced already owns input_gate. Taking it again via self.tap deadlocks.
+                    let result = self.agent.tap(point.x, point.y).await;
+                    if result.is_ok() {
+                        tracing::info!(udid = %self.serial, "declined measured optional TikTok location permission during the owned launch");
+                    }
+                    result
+                },
+                || self.gui_session_epoch(),
+            ).await
+        }).await
     }
 
     /// `am force-stop` and then launch, which on this platform is a real restart.
@@ -1317,6 +1450,118 @@ mod tests {
     /// carousel that nothing in this project can take down again.
     ///
     /// If a later edit unifies them, this test is what fails.
+    #[tokio::test(start_paused = true)]
+    async fn launch_observes_late_optional_location_and_drains_the_single_ack() {
+        use std::sync::{Arc, atomic::{AtomicBool, AtomicUsize}};
+        struct PendingAck { complete: Arc<AtomicBool>, aborted: Arc<AtomicBool> }
+        impl Drop for PendingAck {
+            fn drop(&mut self) {
+                if !self.complete.load(Ordering::Relaxed) { self.aborted.store(true, Ordering::Relaxed); }
+            }
+        }
+        // Each row owns a distinct launch outcome, not a permission-label matrix (core owns that).
+        for case in ["late_prompt", "no_prompt", "passive_read_error", "failed_launch_read_error", "uncertain_deny", "epoch_changed", "invalid_session"] {
+            let fail_read = matches!(case, "passive_read_error" | "failed_launch_read_error");
+            let wait_for_deny = matches!(case, "late_prompt" | "failed_launch_read_error" | "uncertain_deny");
+            let dispatched = Arc::new(AtomicBool::new(false));
+            let prompt = Arc::new(AtomicBool::new(false));
+            let complete = Arc::new(AtomicBool::new(false));
+            let aborted = Arc::new(AtomicBool::new(false));
+            let tap_done = AtomicBool::new(false);
+            let epoch = AtomicUsize::new(1);
+            let launches = AtomicUsize::new(0);
+            let taps = AtomicUsize::new(0);
+            let denied = tokio::sync::Notify::new();
+            // Matches AndroidUiSession::traced: the entire orchestration holds one input gate.
+            let input_gate = tokio::sync::Mutex::new(SessionInputState::default());
+            let _owned_input = input_gate.lock().await;
+            let launch = async {
+                let _ack = PendingAck { complete: complete.clone(), aborted: aborted.clone() };
+                launches.fetch_add(1, Ordering::Relaxed);
+                dispatched.store(true, Ordering::Relaxed);
+                // Clean start is on home; the OS dialog is created by this very launch.
+                tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+                let result = if wait_for_deny {
+                    prompt.store(true, Ordering::Relaxed);
+                    tokio::time::timeout(std::time::Duration::from_secs(2), denied.notified()).await
+                        .map_err(|_| anyhow!("observed fixture: launch ACK blocked by late optional location dialog"))
+                } else { Ok(()) };
+                complete.store(true, Ordering::Relaxed);
+                result
+            };
+            let started = tokio::time::Instant::now();
+            let result = launch_with_optional_location(
+                launch,
+                riviu_core::tiktok_labels::controls_for("com.ss.android.ugc.trill", "en", "38.3.2"),
+                started + std::time::Duration::from_secs(1),
+                || async {
+                    if case == "epoch_changed" { epoch.store(2, Ordering::Relaxed); }
+                    if case == "invalid_session" {
+                        return Err(riviu_core::driver::UiError::new(
+                            riviu_core::driver::UiErrorKind::Session, "observe", "invalid session id",
+                        ).into());
+                    }
+                    anyhow::ensure!(!fail_read, "fixture read failed after launch dispatch");
+                    let xml = if prompt.load(Ordering::Relaxed) {
+                        include_str!("../../core/fixtures/tiktok-publish/optional-location-trill-38.3.2-en.fixture")
+                    } else { "<hierarchy/>" };
+                    Ok(riviu_core::HierarchySourceSnapshot { generation: 1, xml: xml.into() })
+                },
+                |point| {
+                    let dispatched = &dispatched;
+                    let prompt = &prompt;
+                    let complete = &complete;
+                    let input_gate = &input_gate;
+                    let taps = &taps;
+                    let denied = &denied;
+                    let tap_done = &tap_done;
+                    async move {
+                        assert!(dispatched.load(Ordering::Relaxed));
+                        assert!(prompt.load(Ordering::Relaxed));
+                        assert!(!complete.load(Ordering::Relaxed), "Deny must reach the pending launch");
+                        assert!(input_gate.try_lock().is_err(), "the one owned input gate remains held");
+                        assert_eq!((point.x, point.y), (710.0, 1176.0));
+                        taps.fetch_add(1, Ordering::Relaxed);
+                        denied.notify_one();
+                        // Launch may finish now, but the HTTP effect must still drain to its result.
+                        tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+                        tap_done.store(true, Ordering::Relaxed);
+                        anyhow::ensure!(case != "uncertain_deny", "fixture Deny ACK unknown");
+                        Ok(())
+                    }
+                },
+                || format!("owned-agent-generation-{}", epoch.load(Ordering::Relaxed)),
+            ).await;
+            assert_eq!(launches.load(Ordering::Relaxed), 1, "{case}");
+            assert!(complete.load(Ordering::Relaxed), "the dispatched launch must drain on every exit: {case}");
+            assert!(!aborted.load(Ordering::Relaxed), "never abort an uncertain launch ACK: {case}");
+            match case {
+                "failed_launch_read_error" => {
+                    assert!(format!("{:#}", result.unwrap_err()).contains("fixture read failed"));
+                    assert_eq!(taps.load(Ordering::Relaxed), 0);
+                }
+                "uncertain_deny" => {
+                    assert!(format!("{:#}", result.unwrap_err()).contains("Deny ACK unknown"));
+                    assert_eq!(taps.load(Ordering::Relaxed), 1);
+                    assert!(tap_done.load(Ordering::Relaxed));
+                }
+                "epoch_changed" => {
+                    assert!(format!("{:#}", result.unwrap_err()).contains("session changed"));
+                    assert_eq!(taps.load(Ordering::Relaxed), 0);
+                }
+                "invalid_session" => {
+                    assert_eq!(riviu_core::driver::ui_error_kind(&result.unwrap_err()), riviu_core::driver::UiErrorKind::Session);
+                    assert_eq!(taps.load(Ordering::Relaxed), 0);
+                }
+                _ => {
+                    result.expect("late prompt must clear; passive read failure cannot invalidate confirmed launch");
+                    assert_eq!(taps.load(Ordering::Relaxed), usize::from(case == "late_prompt"));
+                    assert!(started.elapsed() < std::time::Duration::from_secs(1), "successful launch must end monitor promptly");
+                    if case == "late_prompt" { assert!(tap_done.load(Ordering::Relaxed)); }
+                }
+            }
+        }
+    }
     #[test]
     fn the_unreadable_case_refuses_for_a_post_and_permits_for_a_comment() {
         assert!(

@@ -337,6 +337,33 @@ async fn step_inner(
         return Ok(ReadWaitResult::Ready(LadderStep::OnFeed));
     }
 
+    if session.supports_accessibility_readback()
+        && read!(session.locate(crate::ElementQuery::ResourceIdSuffix(
+            "com.android.packageinstaller:id/permission_message",
+        )))
+        .is_some()
+    {
+        let snapshot = read!(session.hierarchy_source_snapshot());
+        let tree = crate::ui_automation::tree::Tree::parse(snapshot)?;
+        if let Some(button) = crate::app_automation::dialogs::decline_optional_location(&tree, labels) {
+            if let Some(stopped) = stopped_before_effect(budget) {
+                return Ok(stopped);
+            }
+            anyhow::ensure!(session.gui_session_epoch() == epoch, "feed ladder session changed");
+            let result = session.tap(button.centre()).await;
+            return Ok(ReadWaitResult::Ready(match result {
+                Ok(()) => LadderStep::Tapped {
+                    control: TikTokControl::DialogDismiss,
+                    says: "từ chối quyền vị trí không cần thiết để xem TikTok",
+                },
+                Err(error) => LadderStep::TapFailed {
+                    control: TikTokControl::DialogDismiss,
+                    error: error.to_string(),
+                },
+            }));
+        }
+    }
+
     if labels.package() == "com.ss.android.ugc.trill"
         && labels.resource_version() == Some("38.3.2")
         && labels.language() == "en"
@@ -574,9 +601,21 @@ mod tests {
                     self.desc.lock().expect("desc").contains(&value)
                 }
                 ElementQuery::ClassName(_) => false,
-                // The ladder never looks a node up by id; a fixture that pretended otherwise
-                // would be answering a question the code does not ask.
-                ElementQuery::ResourceIdSuffix(_) | ElementQuery::Semantic(_) => false,
+                ElementQuery::ResourceIdSuffix(suffix) => {
+                    if let Some(xml) = &self.xml {
+                        let tree = crate::ui_automation::tree::Tree::parse(
+                            crate::HierarchySourceSnapshot { generation: 1, xml: xml.clone() },
+                        )?;
+                        return Ok(tree.nodes.iter().enumerate().find_map(|(index, node)| {
+                            (node.attr("resource-id").ends_with(suffix)
+                                && node.visibility() == Some(true)
+                                && tree.ancestors_visible(index))
+                                .then(|| node.rect()).flatten()
+                        }));
+                    }
+                    false
+                }
+                ElementQuery::Semantic(_) => false,
             };
             Ok(found.then_some(ElementBox {
                 x: 100.0,
@@ -632,6 +671,38 @@ mod tests {
                 let points = phone.tapped.lock().unwrap();
                 let point = &points[0];
                 assert_eq!((point.x, point.y), (329.5, 1305.5));
+            } else {
+                assert_eq!(result, LadderStep::Stuck);
+            }
+        }
+    }
+
+    /// Machine 17, 2026-10-06: Android's location dialog cannot be dismissed by Back.
+    /// Keep this at the ladder boundary so a recognizer without its caller still fails.
+    #[tokio::test]
+    async fn optional_location_permission_declines_only_the_measured_tiktok_prompt() {
+        let xml = include_str!("../fixtures/tiktok-publish/optional-location-trill-38.3.2-en.fixture");
+        for (xml, expected_taps) in [
+            (xml.to_owned(), 1),
+            (xml.replace("Allow TikTok", "Allow Instagram"), 0),
+            (xml.replace("this device's location", "photos, media and files on your device"), 0),
+            (xml.replace("access this device's location", "take pictures and record video"), 0),
+            (xml.replace("com.google.android.packageinstaller", "com.example.foreign"), 0),
+            (xml.replace("text=\"Deny\"", "text=\"Allow\""), 0),
+            (xml.replace("clickable=\"true\" enabled=\"true\"", "clickable=\"true\" enabled=\"false\""), 0),
+            (xml.replace("displayed=\"true\"", "displayed=\"false\""), 0),
+            (xml.replace("id/dialog_container", "id/other_container"), 0),
+            (xml.replace("text=\"Allow\"", "text=\"Other\""), 0),
+            (xml.replace("</hierarchy>", r#"<node package="com.google.android.packageinstaller" resource-id="com.android.packageinstaller:id/permission_deny_button" class="android.widget.Button" text="Deny" clickable="true" enabled="true" displayed="true" bounds="[1,1][2,2]"/></hierarchy>"#), 0),
+        ] {
+            let phone = FakePhone { xml: Some(xml), ..Default::default() };
+            let result = step(&phone, measured(), &mut LadderSpend::new(0)).await;
+            assert_eq!(phone.taps(), expected_taps, "{result:?}");
+            assert_eq!(phone.backs.load(Ordering::Relaxed), 0);
+            if expected_taps == 1 {
+                assert!(matches!(result, LadderStep::Tapped { control: TikTokControl::DialogDismiss, .. }));
+                let points = phone.tapped.lock().unwrap();
+                assert_eq!((points[0].x, points[0].y), (710.0, 1176.0));
             } else {
                 assert_eq!(result, LadderStep::Stuck);
             }

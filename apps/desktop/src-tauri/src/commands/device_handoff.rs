@@ -569,6 +569,36 @@ pub(crate) async fn prepare_publish_devices(
         devices, stop_marker: None })
 }
 
+/// Helper qualification may acquire Repair after the handoff's first idle check.
+/// Retry admission only; never revoke that owner or drop an in-flight acquisition.
+async fn acquire_handoff_context(
+    control: &DeviceControlPlane,
+    udid: &str,
+    deadline: tokio::time::Instant,
+) -> Result<DeviceExclusiveContext, CommandError> {
+    loop {
+        if tokio::time::Instant::now() >= deadline {
+            return Err(CommandError::operation(
+                "Đã hết thời gian chờ nhả quyền điều khiển; chưa đóng ứng dụng",
+            ));
+        }
+        match control
+            .try_acquire_exclusive_keeping_stream(udid, DeviceWorkOwner::ManualControl)
+            .await
+        {
+            Ok(context) => return Ok(context),
+            Err(riviu_core::DeviceControlError::Busy(_)) => {
+                tokio::time::sleep_until(std::cmp::min(
+                    deadline,
+                    tokio::time::Instant::now() + std::time::Duration::from_millis(250),
+                ))
+                .await;
+            }
+            Err(error) => return Err(CommandError::from(error)),
+        }
+    }
+}
+
 async fn close_handoff_device(
     state: &AppState,
     udid: &str,
@@ -577,11 +607,7 @@ async fn close_handoff_device(
     timing: StopTiming,
 ) -> Result<(), CommandError> {
     let wait_timing = timing.phase("wait", None);
-    let context = state
-        .control
-        .try_acquire_exclusive_keeping_stream(udid, DeviceWorkOwner::ManualControl)
-        .await
-        .map_err(CommandError::from)?;
+    let context = acquire_handoff_context(&state.control, udid, deadline).await?;
     drop(wait_timing);
     let result = async {
         let queue_timing = timing.phase("closeQueue", None);
@@ -809,4 +835,56 @@ mod tests {
         assert_eq!(selected_operation_scope(&selected, Some(&source)), ["b"]);
         assert!(selected_operation_scope(&selected, None).is_empty());
     }
+    #[tokio::test(start_paused = true)]
+    async fn handoff_waits_for_repair_without_stealing_or_outliving_its_deadline() {
+        use riviu_core::{DeviceWorkCoordinator, StreamBudgetManager};
+        use riviu_ios_driver::MockIosDriver;
+        use std::task::Poll;
+        use std::time::Duration;
+
+        let driver = MockIosDriver::new();
+        let control = DeviceControlPlane::new(
+            Arc::new(driver.clone()),
+            Arc::new(DeviceWorkCoordinator::new()),
+            Arc::new(StreamBudgetManager::default()),
+        );
+        let udid = "handoff-repair";
+        let repair = control
+            .try_acquire_exclusive_keeping_stream(udid, DeviceWorkOwner::Repair)
+            .await
+            .expect("helper qualification owns the device");
+        let deadline = tokio::time::Instant::now() + Duration::from_secs(2);
+        let admission = acquire_handoff_context(&control, udid, deadline);
+        tokio::pin!(admission);
+        assert!(
+            matches!(futures_util::poll!(&mut admission), Poll::Pending),
+            "handoff must wait for transient Repair ownership instead of failing immediately"
+        );
+        assert_eq!(control.current_work_owner(udid), Some(DeviceWorkOwner::Repair));
+        control.close_exclusive_context(repair).expect("Repair releases its own valid lease");
+        tokio::time::advance(Duration::from_millis(250)).await;
+        let manual = admission.await.expect("handoff acquires after Repair releases");
+        assert_eq!(manual.owner(), DeviceWorkOwner::ManualControl);
+        control.close_exclusive_context(manual).expect("handoff releases its own lease");
+
+        let repair = control
+            .try_acquire_exclusive_keeping_stream(udid, DeviceWorkOwner::Repair)
+            .await
+            .expect("a later Repair still owns the device");
+        let deadline = tokio::time::Instant::now() + Duration::from_millis(100);
+        let admission = acquire_handoff_context(&control, udid, deadline);
+        tokio::pin!(admission);
+        assert!(matches!(futures_util::poll!(&mut admission), Poll::Pending));
+        tokio::time::advance(Duration::from_millis(100)).await;
+        let error = admission.await.expect_err("existing handoff deadline bounds admission");
+        assert_eq!(error.code, "OperationFailed");
+        assert_eq!(tokio::time::Instant::now(), deadline);
+        assert_eq!(control.current_work_owner(udid), Some(DeviceWorkOwner::Repair));
+        control.close_exclusive_context(repair).expect("timeout must not revoke Repair");
+        assert!(acquire_handoff_context(&control, udid, deadline).await.is_err());
+        assert_eq!(control.current_work_owner(udid), None);
+        assert_eq!(driver.ordinary_session_calls(), 0);
+        assert_eq!(driver.stream_restart_calls(), 0);
+    }
+
 }

@@ -547,12 +547,38 @@ pub async fn navigate_own_profile(
     let deadline = tokio::time::Instant::now() + Duration::from_secs(15);
     let mut security_close_used = false;
     let mut facebook_decline_used = false;
+    let epoch = session.gui_session_epoch();
+    let mut saw_tiktok = false;
+    let mut reopened_from_launcher = false;
+    let within_deadline = || tokio::time::Instant::now() < deadline
+        && session.gui_scope().and_then(|scope| scope.deadline_ms)
+            .is_none_or(|end| chrono::Utc::now().timestamp_millis() < end);
     let tab = loop {
-        anyhow::ensure!(
-            session.active_app_bundle().await? == labels.package(),
-            "account navigation left TikTok"
-        );
-        let tree = crate::tiktok_account::account_snapshot(session, *labels).await?;
+        let active = if reopened_from_launcher {
+            anyhow::ensure!(within_deadline(), "account navigation recovery deadline exceeded");
+            tokio::time::timeout_at(deadline, session.active_app_bundle()).await
+                .context("account navigation foreground read deadline exceeded")??
+        } else { session.active_app_bundle().await? };
+        anyhow::ensure!(session.gui_session_epoch() == epoch, "account navigation session changed");
+        if active != labels.package() {
+            // Measured machine 1: Samsung Home after the owned account-navigation began.
+            // This is one navigation repair, never a reset or permission to replay an action.
+            anyhow::ensure!(saw_tiktok && !reopened_from_launcher
+                && active == "com.sec.android.app.launcher", "account navigation left TikTok");
+            anyhow::ensure!(within_deadline(), "account navigation recovery deadline exceeded");
+            reopened_from_launcher = true;
+            tracing::info!(package = labels.package(), "account navigation returned to Samsung launcher; reopening bound TikTok once");
+            // A dispatched launch drains to its result; the original deadline is not renewed.
+            session.launch_app_foreground(labels.package()).await?;
+            anyhow::ensure!(session.gui_session_epoch() == epoch, "account navigation session changed");
+            anyhow::ensure!(within_deadline(), "account navigation recovery deadline exceeded");
+            continue;
+        }
+        saw_tiktok = true;
+        let tree = if reopened_from_launcher {
+            tokio::time::timeout_at(deadline, crate::tiktok_account::account_snapshot(session, *labels)).await
+                .context("account navigation profile read deadline exceeded")??
+        } else { crate::tiktok_account::account_snapshot(session, *labels).await? };
         if let Some(diagnostic) = crate::tiktok_account::blocker_diagnostic(&tree, *labels) {
             if diagnostic.state == crate::tiktok_account::AccountState::SecurityPrompt
                 && !security_close_used
@@ -606,7 +632,11 @@ pub async fn navigate_own_profile(
             facebook_decline_used = true;
             continue;
         }
-        if let Some(tab) = session.locate(profile.to_query()).await? {
+        let profile_tab = if reopened_from_launcher {
+            tokio::time::timeout_at(deadline, session.locate(profile.to_query())).await
+                .context("account navigation profile tab deadline exceeded")??
+        } else { session.locate(profile.to_query()).await? };
+        if let Some(tab) = profile_tab {
             break tab;
         }
         anyhow::ensure!(tokio::time::Instant::now() < deadline, "profile tab absent");
@@ -621,6 +651,10 @@ pub async fn navigate_own_profile(
         );
         tokio::time::sleep(Duration::from_millis(300)).await;
     };
+    if reopened_from_launcher {
+        anyhow::ensure!(within_deadline(), "account navigation recovery deadline exceeded");
+        anyhow::ensure!(session.gui_session_epoch() == epoch, "account navigation session changed");
+    }
     session.tap(tab.centre()).await
 }
 
@@ -1374,6 +1408,8 @@ mod tests {
         taps: Mutex<usize>,
         generation: std::sync::atomic::AtomicU64,
         package: &'static str,
+        launches: Mutex<usize>,
+        recovery_case: Option<&'static str>,
     }
     #[async_trait::async_trait]
     impl UiSession for OwnProfileRoute {
@@ -1407,10 +1443,38 @@ mod tests {
         }
         async fn back(&self) -> anyhow::Result<()> {
             *self.backs.lock() += 1;
-            *self.page.lock() = "feed";
+            let mut page = self.page.lock();
+            *page = if matches!(*page, "startup_launcher" | "exit_again") { "launcher" } else { "feed" };
+            Ok(())
+        }
+        fn gui_session_epoch(&self) -> String {
+            if self.recovery_case == Some("epoch_changed") && *self.launches.lock() > 0 {
+                "other-session".into()
+            } else { "owned-session".into() }
+        }
+        fn gui_scope(&self) -> Option<crate::ui_automation::GuiScope> {
+            (self.recovery_case == Some("scope_expired")).then(|| crate::ui_automation::GuiScope {
+                run_id: "profile-owner".into(), assignment_id: None,
+                device_id: "profile-fixture".into(), deadline_ms: Some(chrono::Utc::now().timestamp_millis() - 1),
+            })
+        }
+        async fn launch_app_foreground(&self, package: &str) -> anyhow::Result<()> {
+            assert_eq!(package, self.package, "reopen only the bound TikTok package");
+            *self.launches.lock() += 1;
+            if self.recovery_case == Some("late_launch") {
+                tokio::time::sleep(Duration::from_secs(16)).await;
+            }
+            *self.page.lock() = if self.recovery_case == Some("second_exit") { "exit_again" } else { "feed" };
             Ok(())
         }
         async fn active_app_bundle(&self) -> anyhow::Result<String> {
+            if *self.page.lock() == "launcher" {
+                return match self.recovery_case {
+                    Some("read_error") => Err(anyhow::anyhow!("fixture foreground read unavailable")),
+                    Some("wrong_app") => Ok("com.android.settings".into()),
+                    _ => Ok("com.sec.android.app.launcher".into()),
+                };
+            }
             Ok(self.package.into())
         }
         async fn locate(&self, query: ElementQuery<'_>) -> anyhow::Result<Option<ElementBox>> {
@@ -1467,6 +1531,8 @@ mod tests {
             taps: Mutex::new(0),
             generation: std::sync::atomic::AtomicU64::new(0),
             package: "com.ss.android.ugc.trill",
+            launches: Mutex::new(0),
+            recovery_case: None,
         };
         assert_eq!(
             observe_publish_account(&phone, &labels).await.unwrap(),
@@ -1486,6 +1552,8 @@ mod tests {
             taps: Mutex::new(0),
             generation: std::sync::atomic::AtomicU64::new(0),
             package: "com.zhiliaoapp.musically",
+            launches: Mutex::new(0),
+            recovery_case: None,
         };
         navigate_own_profile(&phone, &labels).await.unwrap();
         assert_eq!(*phone.backs.lock(), 1);
@@ -1498,10 +1566,36 @@ mod tests {
             taps: Mutex::new(0),
             generation: std::sync::atomic::AtomicU64::new(0),
             package: "com.android.settings",
+            launches: Mutex::new(0),
+            recovery_case: None,
         };
         assert!(navigate_own_profile(&wrong_app, &labels).await.is_err());
         assert_eq!(*wrong_app.backs.lock(), 0);
         assert_eq!(*wrong_app.taps.lock(), 0);
+        assert_eq!(*wrong_app.launches.lock(), 0);
+
+        // ROOT machine 1, 2026-10-07: terminal evidence proves Samsung Home before Like;
+        // the real cause of leaving TikTok is unknown. This model exercises that transition.
+        let labels = controls_for("com.ss.android.ugc.trill", "en", "38.3.2").unwrap();
+        for case in ["reopen", "second_exit", "read_error", "wrong_app", "epoch_changed", "late_launch", "scope_expired", "initial_launcher"] {
+            let phone = OwnProfileRoute {
+                page: Mutex::new(if case == "initial_launcher" { "launcher" } else { "startup_launcher" }),
+                backs: Mutex::new(0), taps: Mutex::new(0), launches: Mutex::new(0),
+                generation: std::sync::atomic::AtomicU64::new(0),
+                package: "com.ss.android.ugc.trill", recovery_case: Some(case),
+            };
+            let result = observe_publish_account(&phone, &labels).await;
+            if case == "reopen" {
+                assert_eq!(result.unwrap(), "fixture.actor", "fresh own-account proof after reopening");
+                assert_eq!(*phone.launches.lock(), 1);
+                assert_eq!(*phone.taps.lock(), 2, "own Profile then Home, never a public action");
+                assert_eq!(*phone.page.lock(), "feed");
+            } else {
+                assert!(result.is_err(), "{case} must remain refused");
+                assert_eq!(*phone.taps.lock(), 0, "no stale profile tap: {case}");
+                assert_eq!(*phone.launches.lock(), usize::from(matches!(case, "second_exit" | "epoch_changed" | "late_launch")), "{case}");
+            }
+        }
     }
 
     /// A phone whose clipboard changes **because something tapped the copy row**.
