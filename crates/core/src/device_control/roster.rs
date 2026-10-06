@@ -1,6 +1,6 @@
 //! What the fleet is: which phones are there, what each can do, and getting one ready.
 //!
-//! Reads and preparation, with no lease taken and nothing left running.
+//! Read-only inventory and bounded preparation, with no session left running.
 
 use super::*;
 
@@ -17,6 +17,14 @@ impl DeviceControlPlane {
         &self,
         udid: &str,
     ) -> crate::ipc_contract::DeviceActionCapabilities {
+        self.tiktok_action_capabilities_with_context(udid, None).await
+    }
+
+    async fn tiktok_action_capabilities_with_context(
+        &self,
+        udid: &str,
+        context: Option<&DeviceExclusiveContext>,
+    ) -> crate::ipc_contract::DeviceActionCapabilities {
         use crate::ipc_contract::CapabilityEvidenceState;
         let (package, version, locale, mut refusal) = match self.tiktok_build(udid).await {
             Ok((package, version, locale)) => (package, version, locale, None),
@@ -27,9 +35,14 @@ impl DeviceControlPlane {
                 Some(error.to_string()),
             ),
         };
-        if let Some(owner) = self.current_work_owner(udid) {
+        if let Some(context) = context {
+            if let Err(error) = self.validate_exclusive(context) {
+                refusal = Some(error.to_string());
+            }
+        } else if let Some(owner) = self.current_work_owner(udid) {
             refusal = Some(format!("Thiết bị đang được {owner:?} giữ"));
-        } else if refusal.is_none() {
+        }
+        if refusal.is_none() {
             if let Err(error) = self.verify_automation_readiness(udid).await {
                 refusal = Some(error.to_string());
             }
@@ -56,15 +69,42 @@ impl DeviceControlPlane {
         actions: &[&str],
     ) -> anyhow::Result<()> {
         let _idle = self.defer_idle_work(&[udid.to_owned()], DeviceWorkOwner::Interaction);
-        // Match the existing interaction yield window. Other owners still refuse
-        // immediately; only an idle background lease is allowed to finish.
-        self.work
-            .wait_for_idle_release(
-                udid,
-                tokio::time::Instant::now() + std::time::Duration::from_secs(9),
-            )
+        // Keep the existing nine-second admission window. Helper qualification can
+        // hold Repair between inventory and this preflight, just like IdleSweep.
+        // Hold the resulting lease through the read so neither can race back in.
+        let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(9);
+        let context = loop {
+            match self
+                .try_acquire_exclusive_keeping_stream(udid, DeviceWorkOwner::Interaction)
+                .await
+            {
+                Ok(context) => break context,
+                Err(DeviceControlError::Busy(busy))
+                    if matches!(
+                        busy.current_owner,
+                        DeviceWorkOwner::IdleSweep | DeviceWorkOwner::Repair
+                    ) =>
+                {
+                    let now = tokio::time::Instant::now();
+                    if now >= deadline {
+                        return Err(DeviceControlError::Busy(busy).into());
+                    }
+                    tokio::time::sleep_until(std::cmp::min(
+                        deadline,
+                        now + std::time::Duration::from_millis(250),
+                    ))
+                    .await;
+                    if tokio::time::Instant::now() >= deadline {
+                        return Err(DeviceControlError::Busy(busy).into());
+                    }
+                }
+                Err(error) => return Err(error.into()),
+            }
+        };
+        let report = self
+            .tiktok_action_capabilities_with_context(udid, Some(&context))
             .await;
-        let report = self.tiktok_action_capabilities(udid).await;
+        self.close_exclusive_context(context)?;
         crate::app_automation::require_actions(&report, actions)
     }
     pub fn agent_settings(&self) -> AgentSettings {

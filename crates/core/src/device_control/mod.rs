@@ -2454,7 +2454,7 @@ mod tests {
 
     struct TestSession;
 
-    #[tokio::test]
+    #[tokio::test(start_paused = true)]
     async fn shared_tiktok_preflight_exposes_busy_locked_and_unknown_build_without_a_session() {
         let driver = Arc::new(TestDriver::default());
         let work = Arc::new(DeviceWorkCoordinator::new());
@@ -2469,6 +2469,9 @@ mod tests {
             .is_ok());
         let _lease = work.try_acquire("busy", DeviceWorkOwner::Script).unwrap();
         for udid in ["busy", "locked", "missing-build"] {
+            let before = tokio::time::Instant::now();
+            assert!(control.preflight_tiktok_actions(udid, &["feed"]).await.is_err());
+            assert_eq!(tokio::time::Instant::now(), before, "real owners and failed readiness do not retry");
             let report = control.tiktok_action_capabilities(udid).await;
             assert!(crate::app_automation::require_actions(&report, &["feed"]).is_err());
             assert!(report.actions.iter().all(|row| matches!(
@@ -2477,19 +2480,41 @@ mod tests {
             )));
         }
         assert!(control.current_work_owner("ready").is_none());
-        // A background visit is transient: runtime preflight must wait for its
-        // lease to drain instead of rejecting every requested action immediately.
-        let idle = work.try_acquire("ready", DeviceWorkOwner::IdleSweep).unwrap();
-        let readiness = control.preflight_tiktok_actions("ready", &["feed", "like", "save", "follow"]);
-        tokio::pin!(readiness);
-        tokio::select! {
-            biased;
-            result = &mut readiness => panic!("IdleSweep should yield before preflight settles: {result:?}"),
-            _ = tokio::task::yield_now() => {}
+        // Background setup can overlap inventory/preflight. It must drain without
+        // revocation, while genuine foreground owners still refuse immediately.
+        for owner in [DeviceWorkOwner::IdleSweep, DeviceWorkOwner::Repair] {
+            let background = work.try_acquire("ready", owner).unwrap();
+            let readiness = control.preflight_tiktok_actions("ready", &["feed", "like", "save", "follow"]);
+            tokio::pin!(readiness);
+            tokio::select! {
+                biased;
+                result = &mut readiness => panic!("{owner:?} should yield before preflight settles: {result:?}"),
+                _ = tokio::task::yield_now() => {}
+            }
+            assert_eq!(control.current_work_owner("ready"), Some(owner));
+            work.validate_token("ready", background.token()).expect("background lease remains valid");
+            drop(background);
+            assert!(readiness.await.is_ok());
+            assert!(control.current_work_owner("ready").is_none());
         }
-        assert_eq!(control.current_work_owner("ready"), Some(DeviceWorkOwner::IdleSweep));
-        drop(idle);
-        assert!(readiness.await.is_ok());
+        let build_work = work.clone();
+        control.set_app_binding_resolver(Arc::new(move |udid, _| {
+            assert_eq!(build_work.current_owner(udid), Some(DeviceWorkOwner::Interaction));
+            assert!(matches!(build_work.try_acquire(udid, DeviceWorkOwner::Repair),
+                Err(crate::DeviceBusy { current_owner: DeviceWorkOwner::Interaction, .. })),
+                "Repair must not race back into the build/readiness read");
+            Box::pin(async { Ok(None) })
+        }));
+        assert!(control.preflight_tiktok_actions("ready", &["feed"]).await.is_ok());
+        assert!(control.current_work_owner("ready").is_none());
+        let repair = work.try_acquire("ready", DeviceWorkOwner::Repair).unwrap();
+        let started = tokio::time::Instant::now();
+        let error = control.preflight_tiktok_actions("ready", &["feed"]).await.unwrap_err();
+        assert_eq!(tokio::time::Instant::now() - started, Duration::from_secs(9));
+        assert!(matches!(error.downcast_ref::<DeviceControlError>(),
+            Some(DeviceControlError::Busy(crate::DeviceBusy { current_owner: DeviceWorkOwner::Repair, .. }))));
+        work.validate_token("ready", repair.token()).expect("deadline must retain Repair ownership");
+        drop(repair);
         assert!(control.current_work_owner("ready").is_none());
         assert_eq!(driver.session_starts.load(Ordering::SeqCst), 0);
     }

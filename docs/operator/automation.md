@@ -27,6 +27,10 @@ báo từng máy đã đóng hoặc cần kiểm tra. Kết quả đã đăng/g�
 kiểm tra link tự động của tác vụ Đăng bài đã dừng cũng được dừng qua lần mở app sau.
 Nếu máy đang có tác vụ khác, app báo rõ thay vì đóng ứng dụng của tác vụ đó.
 
+Khi kiểm tra khả năng chạy, Nuôi và Tương tác chờ tác vụ chuẩn bị helper hoặc
+dọn nền nhả máy trong tối đa 9 giây. Nếu vẫn bận, app giữ lý do thật; không
+giành quyền của tác vụ đang chạy.
+
 Nuôi đang chờ quyền điều khiển vẫn nhận lệnh **Dừng**; thời lượng phiên có tính
 thời gian chờ này. Thao tác đã gửi được chờ kết thúc trước khi nhả máy. Bấm chạy
 trùng một máy không thay trạng thái và số video của phiên đang chạy; lượt bị từ
