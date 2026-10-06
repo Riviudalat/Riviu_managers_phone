@@ -276,7 +276,7 @@ pub(super) async fn reuse_prepared(
         progress(&udid, "checkingDevices", "passed", 4, None);
         Ok::<_, anyhow::Error>(())
     }))
-    .buffer_unordered(4);
+    .buffer_unordered(request.udids.len().max(1));
     tokio::pin!(work);
     while let Some(result) = work.next().await {
         result?;

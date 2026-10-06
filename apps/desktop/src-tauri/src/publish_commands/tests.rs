@@ -113,11 +113,9 @@ use super::video_plan_for_build;
 use super::LockScreening;
 use super::PostOutcome;
 use super::IOS_PIXEL_GRID_MAX_IMAGES;
-use super::PUBLISH_FAN_OUT_STAGGER;
 use super::{PublishReadiness, PublishRoute};
 use std::collections::HashMap;
 use std::fs;
-use std::time::Duration;
 use uuid::Uuid;
 
 /// **Two readings of the same phone, and the post waits until they agree.**
@@ -2214,38 +2212,6 @@ fn the_post_path_reconciles_the_two_route_authorities_before_it_branches() {
     );
 }
 
-/// **The fan-out is bounded by the stream budget and staggered.**
-///
-/// Both measured facts about this fleet rather than preferences. Each post holds a
-/// UI-with-stream context, and running past `stream_capacity` does not queue — it fails, on
-/// a phone whose gallery already holds the campaign's images. The stagger is the same two
-/// seconds the interaction path measured: twenty cold starts at once share one USB bus, and
-/// the tail runs past the 40-second foreground window.
-#[test]
-fn the_publish_fan_out_is_bounded_and_staggered() {
-    // **Scoped to the module, not the file.** Two reversals proved why: this searched the
-    // whole source, and the strings it looks for are written out again in its own
-    // assertions — so removing them from the code left the test green on the strength of
-    // its own text. The same shape once let `locate` stop reading an attribute.
-    let source = super::PRODUCTION_SOURCES;
-    let module = source;
-    assert!(
-        // Two facts, matched separately, because `cargo fmt` decides where the line
-        // breaks go and a gate that pins the whole expression breaks on reformatting
-        // rather than on a real change. This one already did once.
-        module.contains("Semaphore::new(") && module.contains("stream_capacity().max(1)"),
-        "the fan-out no longer bounds itself by the stream budget"
-    );
-    assert!(
-        module.contains("PUBLISH_FAN_OUT_STAGGER * index"),
-        "the fan-out starts every phone at once again"
-    );
-    assert!(
-        PUBLISH_FAN_OUT_STAGGER >= Duration::from_secs(1),
-        "a stagger this short does not separate twenty cold starts"
-    );
-}
-
 #[test]
 fn the_transfer_path_claims_the_campaign_instead_of_writing_it() {
     let body = code_of("pub(crate) async fn transfer_publish_campaign_inner(");
@@ -2292,7 +2258,7 @@ fn the_post_fan_out_runs_only_the_unposted_participants() {
     );
     assert!(
         body.iter()
-            .any(|line| line.contains("for (index, assignment) in participants.iter()")),
+            .any(|line| line.contains("for assignment in &participants")),
         "the fan-out spawns from the unfiltered assignment list again"
     );
     assert!(

@@ -1,7 +1,7 @@
 import {
   deviceGetClipboard,
-  interactionReadAccount,
-  saveDeviceHandle,
+  previewAccountReconciliation,
+  applyAccountReconciliation,
   deviceKey,
   deviceSetClipboard,
   deviceShell,
@@ -29,10 +29,11 @@ import {
   setWifiRadio,
   wakeScreen,
 } from "./api";
+import { describeError } from "./describeError";
 import { requestConfirm, requestPrompt } from "./confirmStore";
 import { pushToast, toastError } from "./toastStore";
 import type { DeviceMenuNode } from "./deviceMenu";
-import { parseDeviceNumber, tileName } from "./deviceNaming";
+import { parseDeviceNumber } from "./deviceNaming";
 import { parseCurrentInputMethod, parseInputMethods } from "./imeList";
 import {
   IconApp,
@@ -58,59 +59,67 @@ import { pickDirectory, pickFile } from "./pickFile";
 const accountReads = new Set<string>();
 let accountMetaReadRevision = 0;
 
-/** Reserve the whole selection before reading so a second click cannot repeat queued phones. */
+/** Reserve exact serials through read, conflict expansion, confirmation and apply. */
 export async function readAndAssignTikTokAccounts(targets: DeviceInfo[], deps: DeviceActionDeps) {
-  const unique = [...new Map(targets.map(device => [device.udid, device])).values()];
-  const pending = unique.filter(device => !accountReads.has(device.udid));
-  if (pending.length < unique.length) pushToast("info", "Máy đang đọc nick sẽ giữ lượt hiện có");
-  pending.forEach(device => accountReads.add(device.udid));
-  let savedCount = 0;
-  let refreshDebt = false;
+  const serials = [...new Set(targets.map(device => device.udid))];
+  if (!serials.length) return;
+  if (serials.some(id => accountReads.has(id))) {
+    pushToast("info", "Máy đang đọc nick sẽ giữ lượt hiện có");
+    return;
+  }
+  const reserved = new Set(serials);
+  const label = (udid: string) => {
+    const number = deps.deviceNumbers?.get(udid) ?? deps.metaMap.get(udid)?.number;
+    return number == null ? udid : `Máy ${number} (${udid})`;
+  };
+  serials.forEach(id => accountReads.add(id));
   try {
-    await Promise.all(pending.map(async target => {
-      const meta = deps.metaMap.get(target.udid);
-      const number = deps.deviceNumbers?.get(target.udid) ?? meta?.number;
-      const label = `${number ? `Máy ${number}` : target.udid} · ${tileName(target, meta)}`;
-      let observedHandle: string | null = null;
-      try {
-        if (target.platform !== "android") throw new Error("Đọc nick hiện chỉ hỗ trợ Android");
-        pushToast("info", `Đang đọc nick TikTok · ${label}`);
-        const reading = await interactionReadAccount(target.udid);
-        if (reading.udid !== target.udid || !reading.observedHandle || reading.status === "unknown") {
-          throw new Error("Chưa đọc được username TikTok của đúng máy");
-        }
-        observedHandle = reading.observedHandle;
-        const saved = await saveDeviceHandle(target.udid, reading.expectedHandle, reading.observedHandle);
-        savedCount++;
-        pushToast("ok", `${label} · @${saved}`);
-        // Fast phones publish their acknowledged metadata without waiting for
-        // the slowest reader; older responses cannot replace a newer snapshot.
-        const revision = ++accountMetaReadRevision;
-        try {
-          const metas = await listDeviceMetas();
-          if (revision === accountMetaReadRevision) {
-            refreshDebt = false;
-            deps.setMetas(metas);
-          }
-        } catch (error) {
-          if (revision === accountMetaReadRevision) refreshDebt = true;
-          toastError(`Đã lưu nick nhưng chưa cập nhật danh sách · ${label}`, error);
-        }
-      } catch (error) {
-        toastError(observedHandle
-          ? `Đã đọc @${observedHandle.replace(/^@+/, "")}; chưa lưu gán nick · ${label}`
-          : `Đọc nick thất bại · ${label}`, error);
+    let plan = await previewAccountReconciliation(serials);
+    // Expand only after explicit consent, and re-observe the whole expanded set.
+    // Never reuse an earlier phone's proof across separately read batches.
+    while (plan.blocker) {
+      const error = plan.blocker as { accountConflict?: { conflictingDevices?: { udid: string }[] } };
+      const conflicts = error.accountConflict?.conflictingDevices?.map(row => row.udid) ?? [];
+      const additional = [...new Set(conflicts)].filter(id => !reserved.has(id));
+      for (const row of plan.rows) if (row.error) toastError(`Đọc nick thất bại · ${row.udid}`, row.error);
+      if (!additional.length || additional.some(id => accountReads.has(id))) {
+        toastError("Chưa đối chiếu được tài khoản; giữ nguyên nick đã lưu", plan.blocker);
+        return;
       }
-    }));
-    if (refreshDebt && savedCount) {
-      const revision = ++accountMetaReadRevision;
-      try {
-        const metas = await listDeviceMetas();
-        if (revision === accountMetaReadRevision) deps.setMetas(metas);
-      } catch (error) { toastError("Đã lưu nick nhưng chưa cập nhật danh sách", error); }
+      const consent = await requestConfirm({
+        title: "Đọc các máy đang lưu trùng tài khoản?",
+        message: `${describeError(plan.blocker)}\nĐọc lại toàn bộ nhóm cùng các máy: ${additional.map(label).join(", ")}.`,
+        confirmLabel: "Đọc máy trùng và đối soát",
+      });
+      if (!consent || additional.some(id => accountReads.has(id))) return;
+      additional.forEach(id => { reserved.add(id); accountReads.add(id); });
+      plan = await previewAccountReconciliation([...reserved]);
     }
-    if (pending.length) pushToast(savedCount === pending.length ? "ok" : "warn", `Đã gán nick TikTok ${savedCount}/${pending.length} máy`);
-  } finally { pending.forEach(device => accountReads.delete(device.udid)); }
+    for (const row of plan.rows) if (row.error) toastError(`Đọc nick thất bại · ${row.udid}`, row.error);
+    const proved = plan.rows.filter(row => !row.error && row.observedHandle);
+    const confirmed = await requestConfirm({
+      title: "Cập nhật tài khoản TikTok đã đọc",
+      message: proved.map(row => `${label(row.udid)}: đã lưu ${row.expectedHandle ? `@${row.expectedHandle}` : "chưa gán"} → vừa đọc @${row.observedHandle} (${row.checkedAt})`).join("\n")
+        + `\n${plan.rows.length - proved.length} máy chưa đọc được giữ nguyên. Cập nhật tên tài khoản trong Riviu.`,
+      confirmLabel: "Lưu tài khoản đã đối chiếu",
+    });
+    if (!confirmed) return;
+    let saved;
+    try {
+      saved = await applyAccountReconciliation(plan.operationId);
+    } catch (error) {
+      // Keep identity visible for ROOT/operator reconciliation after a lost ACK.
+      toastError(`Chưa xác nhận lưu tài khoản · mã thao tác ${plan.operationId}`, error);
+      return;
+    }
+    pushToast(saved.length === plan.rows.length ? "ok" : "warn", `Đã gán nick TikTok ${saved.length}/${plan.rows.length} máy`);
+    const revision = ++accountMetaReadRevision;
+    try {
+      const metas = await listDeviceMetas();
+      if (revision === accountMetaReadRevision) deps.setMetas(metas);
+    } catch (error) { toastError("Đã lưu nick nhưng chưa cập nhật danh sách", error); }
+  } catch (error) { toastError("Đọc/đối soát nick thất bại", error); }
+  finally { reserved.forEach(id => accountReads.delete(id)); }
 }
 
 /**

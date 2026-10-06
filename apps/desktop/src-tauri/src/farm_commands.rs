@@ -1269,6 +1269,184 @@ pub fn save_device_handle(
     Ok(saved)
 }
 
+#[derive(Clone, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AccountReconciliationRow {
+    udid: String,
+    expected_handle: String,
+    observed_handle: Option<String>,
+    checked_at: Option<String>,
+    snapshot_sha256: Option<String>,
+    error: Option<CommandError>,
+}
+
+#[derive(Clone, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AccountReconciliationPlan {
+    operation_id: String,
+    rows: Vec<AccountReconciliationRow>,
+    blocker: Option<CommandError>,
+}
+
+struct HeldAccountReconciliation {
+    db: std::sync::Weak<riviu_core::db::Database>,
+    started: std::time::Instant,
+    observations: Vec<riviu_core::db::AccountMappingObservation>,
+    applied: bool,
+}
+
+static ACCOUNT_RECONCILIATIONS: std::sync::LazyLock<
+    std::sync::Mutex<HashMap<String, HeldAccountReconciliation>>,
+> = std::sync::LazyLock::new(|| std::sync::Mutex::new(HashMap::new()));
+const ACCOUNT_RECONCILIATION_TTL: std::time::Duration = std::time::Duration::from_secs(300);
+
+/// Read every selected phone before proposing any mapping write. Only this
+/// server-owned observation set may authorize a later transfer; IPC supplies no proof.
+#[tauri::command]
+pub async fn preview_account_reconciliation(
+    state: State<'_, AppState>,
+    udids: Vec<String>,
+) -> Result<AccountReconciliationPlan, CommandError> {
+    let _admission = state.ensure_accepting_work()?;
+    let mut unique = HashSet::new();
+    if udids.is_empty()
+        || udids.len() > 100
+        || udids
+            .iter()
+            .any(|id| id.trim().is_empty() || !unique.insert(id.clone()))
+    {
+        return Err(CommandError::operation(
+            "select 1..100 distinct exact device identifiers",
+        ));
+    }
+    let started = std::time::Instant::now();
+    let rows: Vec<_> = stream::iter(udids.into_iter().map(|udid| {
+        let state = state.clone();
+        async move {
+            let result =
+                crate::interaction_commands::interaction_read_account(state, udid.clone()).await;
+            match result {
+                Ok(reading) => {
+                    let error = if reading.udid != udid
+                        || reading.status == "unknown"
+                        || reading.observed_handle.as_deref().is_none_or(str::is_empty)
+                    {
+                        Some(CommandError::operation(
+                            "account identity unknown; saved mapping retained",
+                        ))
+                    } else {
+                        None
+                    };
+                    AccountReconciliationRow {
+                        udid,
+                        expected_handle: reading.expected_handle,
+                        observed_handle: reading.observed_handle,
+                        checked_at: Some(reading.checked_at),
+                        snapshot_sha256: Some(reading.snapshot_sha256),
+                        error,
+                    }
+                }
+                Err(error) => AccountReconciliationRow {
+                    udid,
+                    expected_handle: String::new(),
+                    observed_handle: None,
+                    checked_at: None,
+                    snapshot_sha256: None,
+                    error: Some(error),
+                },
+            }
+        }
+    }))
+    .buffered(20)
+    .collect()
+    .await;
+    let observations: Vec<_> = rows
+        .iter()
+        .filter(|row| row.error.is_none())
+        .filter_map(|row| {
+            row.observed_handle
+                .as_ref()
+                .map(|handle| riviu_core::db::AccountMappingObservation {
+                    udid: row.udid.clone(),
+                    expected_handle: row.expected_handle.clone(),
+                    observed_handle: handle.clone(),
+                })
+        })
+        .collect();
+    let blocker = if started.elapsed() > ACCOUNT_RECONCILIATION_TTL {
+        Some(CommandError::operation(
+            "account observations expired; read again",
+        ))
+    } else {
+        state
+            .db
+            .reconcile_account_mappings(&observations, false)
+            .err()
+            .map(CommandError::from_service)
+    };
+    let operation_id = Uuid::new_v4().to_string();
+    if blocker.is_none() {
+        let mut plans = ACCOUNT_RECONCILIATIONS.lock().map_err(err)?;
+        plans.retain(|_, plan| plan.started.elapsed() <= ACCOUNT_RECONCILIATION_TTL);
+        if plans.len() >= 100 {
+            return Err(CommandError::operation(
+                "too many account reconciliation plans",
+            ));
+        }
+        plans.insert(
+            operation_id.clone(),
+            HeldAccountReconciliation {
+                db: std::sync::Arc::downgrade(&state.db),
+                started,
+                observations,
+                applied: false,
+            },
+        );
+    }
+    Ok(AccountReconciliationPlan {
+        operation_id,
+        rows,
+        blocker,
+    })
+}
+
+/// Repeated delivery of the same operation returns its receipt, never replays writes.
+#[tauri::command]
+pub fn apply_account_reconciliation(
+    state: State<'_, AppState>,
+    operation_id: String,
+) -> Result<Vec<riviu_core::db::AccountMappingObservation>, CommandError> {
+    let _admission = state.ensure_accepting_work()?;
+    let mut plans = ACCOUNT_RECONCILIATIONS.lock().map_err(err)?;
+    let plan = plans
+        .get_mut(&operation_id)
+        .ok_or_else(|| CommandError::operation("account reconciliation unavailable; read again"))?;
+    if !plan
+        .db
+        .upgrade()
+        .is_some_and(|db| std::sync::Arc::ptr_eq(&db, &state.db))
+    {
+        return Err(CommandError::operation(
+            "account reconciliation belongs to another database",
+        ));
+    }
+    if plan.applied {
+        return Ok(plan.observations.clone());
+    }
+    if plan.started.elapsed() > ACCOUNT_RECONCILIATION_TTL {
+        return Err(CommandError::operation(
+            "account observations expired; read again",
+        ));
+    }
+    state
+        .db
+        .reconcile_account_mappings(&plan.observations, true)
+        .map_err(CommandError::from_service)?;
+    plan.applied = true;
+    log(&state, "device.accounts.reconciled", &operation_id);
+    Ok(plan.observations.clone())
+}
+
 #[tauri::command]
 pub fn patch_device_meta(
     state: State<'_, AppState>,

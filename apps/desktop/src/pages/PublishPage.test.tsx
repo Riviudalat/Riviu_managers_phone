@@ -384,11 +384,7 @@ describe("production publish wizard", () => {
     expect(publishSetLimits).toHaveBeenCalledExactlyOnceWith({ transfer: 2, compose: 4, verify: 4, deviceTotal: 8 });
     expect(await screen.findByText("Đã lưu giới hạn cho toàn ứng dụng trên máy tính này.")).toBeVisible();
     expect(screen.getByRole("spinbutton", { name: "Lượt chuyển media" })).toHaveValue(2);
-    await userEvent.click(screen.getByRole("button", { name: "Chạy song song toàn bộ máy" }));
-    expect(screen.getAllByRole("spinbutton").every(input => (input as HTMLInputElement).value === "64")).toBe(true);
-    vi.mocked(publishGetLimits).mockResolvedValueOnce({ transfer:64, compose:64, verify:64, deviceTotal:64 });
-    await userEvent.click(screen.getByRole("button", { name: "Lưu giới hạn" }));
-    expect(publishSetLimits).toHaveBeenLastCalledWith({ transfer:64, compose:64, verify:64, deviceTotal:64 });
+    expect(screen.getAllByRole("spinbutton")).toHaveLength(1);
     expect(createCampaign).not.toHaveBeenCalled();
     expect(publishStart).not.toHaveBeenCalled();
   });

@@ -8,6 +8,12 @@
 
 use super::*;
 
+// Bound CPU-heavy startup JPEG decoding, not phone sessions. No permit is held
+// while waiting for a display change or socket bytes; a static/stuck phone cannot
+// occupy a decoder slot. Minicap skip_frames and StreamHub still coalesce frames.
+static FIRST_FRAME_DECODE_SLOTS: std::sync::LazyLock<Arc<tokio::sync::Semaphore>> =
+    std::sync::LazyLock::new(|| Arc::new(tokio::sync::Semaphore::new(4)));
+
 impl AndroidDriver {
     /// Claim the exclusive right to start a producer for `serial`.
     pub(super) fn claim_start(&self, serial: &str) -> anyhow::Result<StartClaim<'_>> {
@@ -184,8 +190,29 @@ impl AndroidDriver {
                     Ok(frame) => {
                         // A frame that does not decode is skipped, not published,
                         // while we are still waiting for the first one.
-                        let qualifies =
-                            ready_tx.is_some() && riviu_core::frame_source::decodes_as_jpeg(&frame);
+                        let (frame, qualifies) = if ready_tx.is_some() {
+                            let Ok(permit) = FIRST_FRAME_DECODE_SLOTS.clone().acquire_owned().await
+                            else {
+                                return;
+                            };
+                            match tokio::task::spawn_blocking(move || {
+                                // The blocking decode retains its permit even if this reader
+                                // is cancelled, so a replacement cannot exceed the CPU bound.
+                                let _permit = permit;
+                                let qualifies = riviu_core::frame_source::decodes_as_jpeg(&frame);
+                                (frame, qualifies)
+                            })
+                            .await
+                            {
+                                Ok(decoded) => decoded,
+                                Err(error) => {
+                                    tracing::warn!(udid, generation, %error, "first frame decoder stopped");
+                                    return;
+                                }
+                            }
+                        } else {
+                            (frame, false)
+                        };
                         if ready_tx.is_some() && !qualifies {
                             tracing::debug!(
                                 udid,

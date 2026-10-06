@@ -1013,6 +1013,7 @@ pub struct AndroidDriver {
     /// Coalesce inventory callers only; helper setup retains its per-device writer.
     inventory_scan_lock: tokio::sync::Mutex<()>,
     helper_setup_errors: Mutex<HashMap<String, String>>,
+    helper_recovery: Mutex<HashMap<String, HelperRecoveryState>>,
     helper_inventory_snapshot: Mutex<Option<Vec<DeviceInfo>>>,
     /// serial -> app names and icons the helper already described, keyed on the exact set of
     /// packages they were read for.
@@ -1038,6 +1039,19 @@ mod device_ops;
 mod helper_setup;
 mod stream;
 
+/// Identity of one observed helper failure episode, independent of USB connection.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct HelperRecoveryGeneration(pub u64);
+
+#[derive(Default)]
+struct HelperRecoveryState {
+    generation: HelperRecoveryGeneration,
+    failed: bool,
+}
+
+/// Fixed sanitized roster text; raw helper errors may contain protected identities.
+pub const HELPER_SETUP_FAILURE: &str = "Riviu Helper: runtime qualification failed; recovery required (no action replay)";
+
 impl AndroidDriver {
     pub fn set_gui_reasoner(&self, reasoner: riviu_core::ui_automation::SharedReasoner) {
         *self.gui_reasoner.lock() = Some(reasoner);
@@ -1051,6 +1065,13 @@ impl AndroidDriver {
         let recorder = self.trace.lock().clone();
         if let Some(recorder) = recorder {
             recorder.flush().await?;
+        }
+        Ok(())
+    }
+    pub async fn flush_traces_for_run(&self, run_id: &str, device_id: &str) -> anyhow::Result<()> {
+        let recorder = self.trace.lock().clone();
+        if let Some(recorder) = recorder {
+            recorder.flush_run(run_id, device_id).await?;
         }
         Ok(())
     }
@@ -1079,9 +1100,37 @@ impl AndroidDriver {
         Ok(helper)
     }
 
+    /// Failed episodes survive inventory refreshes; only runtime qualification clears them.
+    pub fn helper_recovery_snapshot(&self) -> HashMap<String, HelperRecoveryGeneration> {
+        self.helper_recovery.lock().iter()
+            .filter(|(_, state)| state.failed)
+            .map(|(serial, state)| (serial.clone(), state.generation)).collect()
+    }
+
+    /// A terminal result from the admitted automatic preparation worker.
+    pub fn record_helper_preparation_failure(&self, serial: &str) {
+        self.record_helper_runtime_result(serial, false);
+    }
+
+    fn record_helper_runtime_result(&self, serial: &str, qualified: bool) {
+        let mut recovery = self.helper_recovery.lock();
+        let state = recovery.entry(serial.to_owned()).or_default();
+        if !qualified && !state.failed {
+            state.generation.0 = state.generation.0.saturating_add(1);
+        }
+        state.failed = !qualified;
+        let mut errors = self.helper_setup_errors.lock();
+        if qualified {
+            errors.remove(serial);
+        } else {
+            errors.insert(serial.to_owned(), HELPER_SETUP_FAILURE.into());
+        }
+    }
+
     /// Release helper preparation for an admitted caller retaining the device lease.
     /// The inventory writer serializes installation and acquisition with discovery.
     pub async fn prepare_helper_runtime(&self, serial: &str) -> anyhow::Result<crate::riviu_agent::HelperClient> {
+        anyhow::ensure!(self.automatic_setup_allowed, "helper setup disabled in diagnostic mode");
         let _inventory = self.helper_inventory_lock(serial).write_owned().await;
         let retained = self.helpers.lock().get(serial).cloned();
         let result: anyhow::Result<crate::riviu_agent::HelperClient> = async {
@@ -1107,9 +1156,13 @@ impl AndroidDriver {
             self.helpers.lock().insert(serial.into(), helper.clone());
             Ok(helper)
         }.await;
+        let result = match result {
+            Ok(helper) => helper.qualify_clipboard_roundtrip().await.map(|_| helper),
+            Err(error) => Err(error),
+        };
+        self.record_helper_runtime_result(serial, result.is_ok());
         if let Some(helper) = retained { helper.record_cached_acquisition(result.is_err()); }
-        self.publish_helper_status(serial, result.as_ref().ok(),
-            result.as_ref().err().is_some_and(|error| error.is::<crate::riviu_agent::HelperRecoveryRequired>()));
+        self.publish_helper_status(serial, result.as_ref().ok(), false);
         result
     }
 
@@ -1436,6 +1489,7 @@ impl AndroidDriver {
             inventory_metadata_at: Mutex::new(HashMap::new()),
             inventory_scan_lock: tokio::sync::Mutex::new(()),
             helper_setup_errors: Mutex::new(HashMap::new()),
+            helper_recovery: Mutex::new(HashMap::new()),
             helper_inventory_snapshot: Mutex::new(None),
             app_descriptions: Mutex::new(HashMap::new()),
             agent_statuses: Mutex::new(HashMap::new()),
@@ -2158,6 +2212,13 @@ impl DeviceDriver for AndroidDriver {
         if !helper.is_some_and(|value| value.cached_runtime_ready()) {
             status.features.retain(|feature| feature != "helperReady");
         }
+        if self.helper_setup_errors.lock().contains_key(udid) {
+            status.features.retain(|feature| feature != "helperReady");
+            status.state = riviu_core::AgentState::RepairRequired;
+            status.auth_ready = false;
+            status.session_ready = false;
+            status.message = Some(HELPER_SETUP_FAILURE.into());
+        }
         status
     }
 
@@ -2624,6 +2685,7 @@ impl DeviceDriver for AndroidDriver {
             let _inventory = self.helper_inventory_lock(udid).write_owned().await;
             let helper = self.helpers.lock().get(udid).cloned();
             let result: anyhow::Result<()> = async {
+            anyhow::ensure!(!self.helper_setup_errors.lock().contains_key(udid), crate::riviu_agent::HelperRecoveryRequired);
             if let Some(helper) = &helper { helper.require_unfenced()?; }
             anyhow::ensure!(
                 helper.as_ref().is_none_or(|helper| !helper.cleanup_is_pending()),
@@ -2640,17 +2702,18 @@ impl DeviceDriver for AndroidDriver {
                 );
                 if state.join("runtime-owner.json").try_exists()? {
                     if let Some(helper) = &helper {
-                        anyhow::ensure!(
-                            helper.is_scoped_canary(),
-                            crate::riviu_agent::HelperRecoveryRequired
-                        );
-                        helper.validate_runtime_owner_record(&state)?;
+                        if let Err(error) = helper.validate_runtime_owner_record(&state) {
+                            helper.record_cached_acquisition(true);
+                            self.record_helper_runtime_result(udid, false);
+                            return Err(error);
+                        }
                         // health authenticates this cache's owner, instance and generation.
                         // It proves no clipboard operation and never retires the journal.
-                        anyhow::ensure!(
-                            helper.health().await.authenticated == Some(true),
-                            crate::riviu_agent::HelperRecoveryRequired
-                        );
+                        if helper.health().await.authenticated != Some(true) {
+                            helper.record_cached_acquisition(true);
+                            self.record_helper_runtime_result(udid, false);
+                            return Err(crate::riviu_agent::HelperRecoveryRequired.into());
+                        }
                     } else {
                         // A cold host may still prove its exact prior owner with the vault.
                         // This only reads protected status; the leased staging path performs
@@ -2667,7 +2730,8 @@ impl DeviceDriver for AndroidDriver {
             }
             Ok(())
             }.await;
-            if let Some(helper) = helper { helper.record_cached_acquisition(result.is_err()); }
+            // Preflight may overlap legitimate clipboard work. Its busy/unobserved
+            // result is not a failed owner and must not latch automatic repair.
             result?;
         }
         let screen = self.screen_guard_state(udid).await?;
@@ -3267,14 +3331,64 @@ mod tests {
         assert_eq!(observed, receipt);
         assert!(!driver.helpers.lock().contains_key(serial));
         let status = driver.cached_agent_status(serial);
-        assert_eq!(status.state, riviu_core::AgentState::Unknown);
-        assert!(status.message.is_none() && !status.features.iter().any(|f| f == "helperReady"));
+        // Supersession retires the old owner; only a qualified replacement clears
+        // the failed preparation episode. It does not certify runtime readiness.
+        assert_eq!(status.state, riviu_core::AgentState::RepairRequired);
+        assert_eq!(status.message.as_deref(), Some(HELPER_SETUP_FAILURE));
+        assert!(!status.features.iter().any(|f| f == "helperReady"));
         assert_eq!(std::fs::read(archive.join("runtime-owner.json")).unwrap(), record);
         assert_eq!(std::fs::read(archive.join("release-fixture_owner_0123456789.json")).unwrap(), release);
         std::fs::remove_dir_all(root).unwrap();
     }
 
 
+
+    #[tokio::test]
+    async fn automatic_runtime_preparation_refuses_diagnostic_mode_before_adb() {
+        let driver = AndroidDriver::with_adb(
+            AdbProgram::unrunnable_for_test(PathBuf::from("never-run-adb")),
+            adb::AdbOrigin::Configured,
+            &AndroidDriverConfig { automatic_setup_allowed: false, ..Default::default() },
+        );
+        let error = driver.prepare_helper_runtime("fixture").await.err().unwrap();
+        assert_eq!(error.to_string(), "helper setup disabled in diagnostic mode");
+        assert!(driver.helpers.lock().is_empty());
+    }
+
+    #[tokio::test]
+    async fn failed_runtime_without_owner_blocks_roster_and_automation() {
+        let driver = AndroidDriver::with_adb(
+            AdbProgram::unrunnable_for_test(PathBuf::from("never-run-adb")),
+            adb::AdbOrigin::Configured,
+            &AndroidDriverConfig { automatic_setup_allowed: true, helper_state_dir: None, ..Default::default() },
+        );
+        // Missing state directory fails before transport or an owner journal exists.
+        assert!(driver.prepare_helper_runtime("fixture").await.is_err());
+        assert!(driver.helpers.lock().is_empty());
+        assert_eq!(driver.helper_setup_errors.lock().get("fixture").map(String::as_str),
+            Some("Riviu Helper: runtime qualification failed; recovery required (no action replay)"));
+        let error = driver.verify_automation_readiness("fixture").await.unwrap_err();
+        assert!(error.is::<crate::riviu_agent::HelperRecoveryRequired>());
+        assert_eq!(driver.cached_agent_status("fixture").state, riviu_core::AgentState::RepairRequired);
+    }
+
+    #[tokio::test]
+    async fn pending_clipboard_preflight_does_not_latch_helper_failure() {
+        let root = std::env::temp_dir().join(format!("preflight-pending-{}", uuid::Uuid::new_v4()));
+        let serial = "fixture-pending-clipboard";
+        let state = root.join("helper-runtime").join(riviu_core::frame_sha256(serial.as_bytes()));
+        std::fs::create_dir_all(&state).unwrap();
+        let adb = AdbProgram::unrunnable_for_test(root.join("never-run-adb"));
+        let driver = AndroidDriver::with_adb(adb.clone(), adb::AdbOrigin::Configured,
+            &AndroidDriverConfig { helper_state_dir: Some(root.clone()), automatic_setup_allowed: true, ..Default::default() });
+        let (client, _, lifecycle) = crate::riviu_agent::tests::cached_maintenance_fixture(adb, serial, &state, false, true).await;
+        driver.helpers.lock().insert(serial.into(), client.clone());
+        let _held = lifecycle.lock().await;
+        assert!(driver.verify_automation_readiness(serial).await.is_err());
+        assert!(driver.helper_setup_errors.lock().is_empty(), "normal pending work must not latch a failed runtime");
+        assert!(!client.cached_acquisition_failed());
+        std::fs::remove_dir_all(root).unwrap();
+    }
 
     #[test]
     fn cached_agent_status_drops_helper_ready_without_retained_helper() {

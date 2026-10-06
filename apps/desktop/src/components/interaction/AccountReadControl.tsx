@@ -25,6 +25,7 @@ export function AccountReadControl({ udid, handle, disabled }: { udid: string; h
   return <div className="interaction-account-proof">
     <button type="button" className="btn btn-sm" disabled={disabled || busy} onClick={() => void check()} title="Mở Hồ sơ trên máy để đọc tài khoản, không đổi nick đã gán"><ScanSearch size={14} aria-hidden="true" />{busy ? "Đang đọc tài khoản…" : "Đọc tài khoản từ máy"}</button>
     <small role="status" className={reading?.status === "mismatch" ? "interaction-error" : undefined}>{text}{reading?.observedHandle ? ` · @${reading.observedHandle}` : ""}</small>
+    <small>Mapping đã lưu: {handle ? `@${handle}` : "chưa gán"}; tài khoản vừa đọc: {reading?.observedHandle ? `@${reading.observedHandle}` : "chưa xác minh"}</small>
     {reading && <small><time dateTime={reading.checkedAt}>{new Date(reading.checkedAt).toLocaleString("vi-VN")}</time></small>}
     {error && <small role="alert">{error}</small>}
   </div>;

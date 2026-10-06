@@ -74,13 +74,13 @@ fn load_maintenance_ledger(
 }
 
 async fn save_maintenance_ledger(
-    state: &AppState,
+    db: &std::sync::Arc<riviu_core::db::Database>,
     udid: &str,
     ledger: &[PreparedHelperMaintenance],
 ) -> Result<(), CommandError> {
     let key = maintenance_key(udid);
     let raw = serde_json::to_string(ledger).map_err(err)?;
-    state.db.storage_write(move |db| db.set_setting(&key, &raw)).await
+    db.storage_write(move |db| db.set_setting(&key, &raw)).await
         .map_err(|_| CommandError::operation("cannot persist helper maintenance phase; do not redispatch"))
 }
 
@@ -130,12 +130,21 @@ pub async fn agent_helper_maintenance_prepare(
     let context = state.control
         .try_acquire_exclusive(&udid, DeviceWorkOwner::Repair)
         .await?;
-    let mut ledger = load_maintenance_ledger(&state.db, &udid)?;
+    prepare_helper_maintenance_admitted(&state.control, &state.db, &context, udid).await
+}
+
+async fn prepare_helper_maintenance_admitted(
+    control: &DeviceControlPlane,
+    db: &std::sync::Arc<riviu_core::db::Database>,
+    context: &riviu_core::DeviceExclusiveContext,
+    udid: String,
+) -> Result<HelperMaintenancePlan, CommandError> {
+    let mut ledger = load_maintenance_ledger(db, &udid)?;
     if ledger.iter().any(|entry| entry.phase != HelperMaintenancePhase::Settled) {
         return Err(CommandError::code("HelperMaintenancePending",
             "Kế hoạch cũ chưa giải quyết; đọc pending và chỉ quan sát cùng maintenanceId."));
     }
-    let submitted = state.db.helper_maintenance_submitted_bindings(&udid)
+    let submitted = db.helper_maintenance_submitted_bindings(&udid)
         .map_err(|_| CommandError::operation("cannot freeze submitted publication bindings"))?;
     let plan = HelperMaintenancePlan {
         maintenance_id: uuid::Uuid::new_v4().to_string(),
@@ -150,8 +159,8 @@ pub async fn agent_helper_maintenance_prepare(
         "submittedCount": plan.submitted.len(),
         "submittedSetSha256": format!("{:x}", Sha256::digest(&snapshot)),
     });
-    let driver_plan = state.control
-        .prepare_helper_maintenance(&context, &plan.maintenance_id, effect_intent)
+    let driver_plan = control
+        .prepare_helper_maintenance(context, &plan.maintenance_id, effect_intent)
         .await
         .map_err(helper_maintenance_prepare_error)?;
     ledger.push(PreparedHelperMaintenance {
@@ -160,7 +169,7 @@ pub async fn agent_helper_maintenance_prepare(
         prepared_at_ms: chrono::Utc::now().timestamp_millis(),
         phase: HelperMaintenancePhase::Prepared,
     });
-    save_maintenance_ledger(&state, &plan.udid, &ledger).await?;
+    save_maintenance_ledger(db, &plan.udid, &ledger).await?;
     Ok(plan)
 }
 
@@ -179,7 +188,18 @@ pub async fn agent_helper_maintenance_execute(
     let context = state.control
         .try_acquire_exclusive(&plan.udid, DeviceWorkOwner::Repair)
         .await?;
-    let mut ledger = load_maintenance_ledger(&state.db, &plan.udid)?;
+    execute_helper_maintenance_admitted(&state.control, &state.db, &context, plan, confirmed, reconcile_only).await
+}
+
+async fn execute_helper_maintenance_admitted(
+    control: &DeviceControlPlane,
+    db: &std::sync::Arc<riviu_core::db::Database>,
+    context: &riviu_core::DeviceExclusiveContext,
+    plan: HelperMaintenancePlan,
+    confirmed: bool,
+    reconcile_only: Option<bool>,
+) -> Result<HelperMaintenanceReceipt, CommandError> {
+    let mut ledger = load_maintenance_ledger(db, &plan.udid)?;
     let index = ledger.iter().position(|entry| entry.public.maintenance_id == plan.maintenance_id)
         .ok_or_else(|| CommandError::code("HelperMaintenancePlanMissing",
             "Không có kế hoạch bền vững cho maintenanceId này; không thực thi."))?;
@@ -187,7 +207,7 @@ pub async fn agent_helper_maintenance_execute(
         return Err(CommandError::code("HelperMaintenancePlanChanged",
             "Kế hoạch không khớp bản đã lưu; không chấp nhận thay đổi danh tính."));
     }
-    let current = state.db.helper_maintenance_submitted_bindings(&plan.udid)
+    let current = db.helper_maintenance_submitted_bindings(&plan.udid)
         .map_err(|_| CommandError::operation("cannot recheck submitted publication bindings"))?;
     if current != ledger[index].public.submitted {
         // Only redacted DB identities/revisions/hashes, never raw intent or driver metadata.
@@ -207,17 +227,17 @@ pub async fn agent_helper_maintenance_execute(
     // effect, but can never authorize a second stop after an uncertain dispatch.
     if ledger[index].phase == HelperMaintenancePhase::Prepared {
         ledger[index].phase = HelperMaintenancePhase::ExecutionStarted;
-        save_maintenance_ledger(&state, &plan.udid, &ledger).await?;
+        save_maintenance_ledger(db, &plan.udid, &ledger).await?;
     }
     let prepared = &ledger[index];
-    let execution = state.control
-        .execute_helper_maintenance(&context, prepared.driver_plan.clone(), confirmed, observation_only)
+    let execution = control
+        .execute_helper_maintenance(context, prepared.driver_plan.clone(), confirmed, observation_only)
         .await;
     let receipt = match execution {
         Ok(receipt) => receipt,
         Err(error) => {
             if ledger[index].phase.restore_pre_dispatch_busy(observation_only, &error) {
-                save_maintenance_ledger(&state, &plan.udid, &ledger).await?;
+                save_maintenance_ledger(db, &plan.udid, &ledger).await?;
                 return Err(CommandError::code("HelperMaintenanceBusyBeforeDispatch",
                     "Máy đang kết thúc thao tác helper; chưa thực hiện khôi phục. Đợi thao tác kết thúc rồi chọn Khôi phục helper để tiếp tục đúng kế hoạch."));
             }
@@ -239,7 +259,7 @@ pub async fn agent_helper_maintenance_execute(
             "Biên nhận helper không khớp kế hoạch; không tự chạy lại hoặc báo đã khôi phục."));
     }
     ledger[index].phase = HelperMaintenancePhase::Settled;
-    save_maintenance_ledger(&state, &plan.udid, &ledger).await?;
+    save_maintenance_ledger(db, &plan.udid, &ledger).await?;
     Ok(HelperMaintenanceReceipt {
         maintenance_id: plan.maintenance_id,
         udid: plan.udid,
@@ -250,6 +270,32 @@ pub async fn agent_helper_maintenance_execute(
         old_obligations: "archivedUnresolved",
         package_process_absent: true,
     })
+}
+
+pub(crate) fn helper_maintenance_is_pending(
+    db: &riviu_core::db::Database,
+    serial: &str,
+) -> Result<bool, CommandError> {
+    Ok(load_maintenance_ledger(db, serial)?.iter()
+        .any(|entry| entry.phase != HelperMaintenancePhase::Settled))
+}
+
+/// User-authorized automatic policy, under the caller's exclusive Repair lease.
+/// A pending identity is resumed, never replaced; executionStarted is observation-only.
+pub(crate) async fn automatic_helper_maintenance(
+    control: &DeviceControlPlane,
+    db: &std::sync::Arc<riviu_core::db::Database>,
+    context: &riviu_core::DeviceExclusiveContext,
+    serial: &str,
+) -> Result<(), CommandError> {
+    let pending = load_maintenance_ledger(db, serial)?.into_iter()
+        .find(|entry| entry.phase != HelperMaintenancePhase::Settled);
+    let plan = match pending {
+        Some(entry) => entry.public,
+        None => prepare_helper_maintenance_admitted(control, db, context, serial.into()).await?,
+    };
+    execute_helper_maintenance_admitted(control, db, context, plan, true, None).await?;
+    Ok(())
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]

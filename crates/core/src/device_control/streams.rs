@@ -92,13 +92,13 @@ impl DeviceControlPlane {
     }
     /// How many devices may hold a foreground stream at once.
     ///
-    /// Exposed for callers that fan out across devices and need to bound themselves:
-    /// exhausting this is not a queue, it is a **refusal** — `preview_foreground_victim`
-    /// returns `CapacityExhausted` when the budget is full and there is no background
-    /// producer to evict. A caller that starts more concurrent work than this does not
-    /// run slower, it fails the excess.
+    /// Foreground sessions follow the observed fleet. Background preview capacity
+    /// is separate; callers still reserve a token and retain per-device ownership.
     pub fn stream_capacity(&self) -> usize {
-        self.streams.configured_limit()
+        self.streams.foreground_limit()
+    }
+    pub fn grow_foreground_stream_capacity(&self, fleet_size: usize) {
+        self.streams.grow_foreground_to_fleet(fleet_size);
     }
     pub fn grow_stream_capacity(&self, fleet_size: usize) {
         self.streams.grow_to_fleet(fleet_size);

@@ -66,10 +66,30 @@ pub struct SelectionDiagnostic {
     pub viewport: SelectionBounds,
     pub snapshot_generation: Option<u64>,
     pub snapshot_sha256: Option<String>,
+    /// Last completed parsed read, separate from fields cleared for an in-flight read.
+    #[serde(default)]
+    pub last_completed_snapshot: Option<SelectionSnapshotEvidence>,
+    /// Snapshot that last satisfied selection proof, never replaced by partial/read failure.
+    #[serde(default)]
+    pub last_verified_snapshot: Option<SelectionSnapshotEvidence>,
     pub selector_bounds: Vec<SelectionBounds>,
     pub next_bounds: Vec<SelectionBounds>,
     pub artifacts: Vec<SelectionArtifact>,
     pub artifact_write_failed: bool,
+}
+
+/// Bounded successful read evidence; never carries XML or raw album/account/caption.
+#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SelectionSnapshotEvidence {
+    pub generation: u64,
+    pub sha256: String,
+    pub session_epoch: String,
+    pub album_matches: Option<bool>,
+    pub observed_ordinals: Vec<Option<usize>>,
+    pub next_count: Option<usize>,
+    pub selector_bounds: Vec<SelectionBounds>,
+    pub next_bounds: Vec<SelectionBounds>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -641,6 +661,8 @@ impl PickerTrace {
                 },
                 snapshot_generation: None,
                 snapshot_sha256: None,
+                last_completed_snapshot: None,
+                last_verified_snapshot: None,
                 selector_bounds: Vec::new(),
                 next_bounds: Vec::new(),
                 artifacts: Vec::new(),
@@ -658,7 +680,71 @@ impl PickerTrace {
         self.diagnostic.reason_code = reason;
     }
 
+    #[allow(clippy::too_many_arguments)]
     async fn read(
+        &mut self,
+        session: &dyn UiSession,
+        controls: PickerControls,
+        album_query: ElementQuery<'_>,
+        album: &str,
+        deadline: Instant,
+        stop: &AtomicBool,
+        epoch: &str,
+    ) -> anyhow::Result<
+        crate::ui_automation::runtime::ReadWaitResult<Option<(Vec<ElementBox>, Vec<ElementBox>)>>,
+    > {
+        use crate::driver::{classify_read_failure, ReadFailureKind};
+        use crate::ui_automation::runtime::{read_before_deadline, ReadWaitResult};
+        let mut attempt =
+            StageDiagnosticOperation::start("pickerHierarchyRead", epoch, Some(deadline));
+        let mut read_started = false;
+        let result = read_before_deadline(
+            async {
+                read_started = true;
+                self.read_snapshot(session, controls, album_query, album)
+                    .await
+            },
+            deadline,
+            stop,
+        )
+        .await;
+        match &result {
+            Ok(ReadWaitResult::Ready(Some((rows, next))))
+                if !rows.is_empty() && !next.is_empty() =>
+            {
+                attempt.finish("complete")
+            }
+            Ok(ReadWaitResult::Ready(_)) if self.diagnostic.album_matches == Some(false) => {
+                attempt.finish("albumMismatch")
+            }
+            Ok(ReadWaitResult::Ready(_)) => attempt.finish("partial"),
+            Ok(ReadWaitResult::Cancelled) => attempt.finish("cancelled"),
+            Ok(ReadWaitResult::DeadlineExceeded) => attempt.finish(if read_started {
+                "deadline"
+            } else {
+                "deadlineBeforeRead"
+            }),
+            Err(error) if error.is::<crate::driver::SessionEpochChanged>() => {
+                attempt.finish("sessionChanged")
+            }
+            Err(error) if classify_read_failure(error) == ReadFailureKind::Transient => {
+                attempt.finish("transientError")
+            }
+            Err(_) => attempt.finish("error"),
+        }
+        if session.gui_session_epoch() != epoch {
+            attempt.finish("sessionChanged");
+        }
+        if read_started {
+            if let Some(event) = &mut attempt.event {
+                event.snapshot_generation = self.diagnostic.snapshot_generation;
+                event.snapshot_sha256 = self.diagnostic.snapshot_sha256.clone();
+            }
+        }
+        result
+    }
+
+    async fn read_snapshot(
         &mut self,
         session: &dyn UiSession,
         controls: PickerControls,
@@ -675,6 +761,7 @@ impl PickerTrace {
         self.diagnostic.selector_bounds.clear();
         self.diagnostic.next_bounds.clear();
         self.latest = None;
+        let read_epoch = session.gui_session_epoch();
         let snapshot = session.hierarchy_source_snapshot().await?;
         self.diagnostic.snapshot_generation = Some(snapshot.generation);
         self.diagnostic.snapshot_sha256 = Some(crate::frame_sha256(snapshot.xml.as_bytes()));
@@ -709,11 +796,22 @@ impl PickerTrace {
         if matched != Some(true) {
             self.reason(SelectionReason::AlbumMismatch);
         }
+        self.diagnostic.last_completed_snapshot = Some(SelectionSnapshotEvidence {
+            generation: snapshot.generation,
+            sha256: crate::frame_sha256(snapshot.xml.as_bytes()),
+            session_epoch: read_epoch,
+            album_matches: matched,
+            observed_ordinals: self.diagnostic.observed_ordinals.clone(),
+            next_count: self.diagnostic.next_count,
+            selector_bounds: self.diagnostic.selector_bounds.clone(),
+            next_bounds: self.diagnostic.next_bounds.clone(),
+        });
         Ok((matched == Some(true)).then_some(parsed))
     }
 
     fn verified(&mut self, count: usize) {
         self.diagnostic.last_verified_count = count;
+        self.diagnostic.last_verified_snapshot = self.diagnostic.last_completed_snapshot.clone();
         self.verified = self.latest.clone();
     }
 
@@ -797,7 +895,7 @@ impl<P: TapPlanner> Composer<'_, P> {
         trace: &mut PickerTrace,
     ) -> anyhow::Result<Selection> {
         use crate::driver::{classify_read_failure, ReadFailureKind};
-        use crate::ui_automation::runtime::{read_before_deadline, ReadWaitResult};
+        use crate::ui_automation::runtime::ReadWaitResult;
         let wanted = trace.diagnostic.expected_count;
         if !(1..=crate::publish::MAX_CAROUSEL_IMAGES).contains(&wanted) {
             return Ok(Selection::NotEnoughSelected);
@@ -811,11 +909,7 @@ impl<P: TapPlanner> Composer<'_, P> {
         let album_query = self.plan.album_menu;
         let initial_deadline = crate::tiktok_sound::phase_deadline(PICKER_WINDOW);
         let initial = loop {
-            match read_before_deadline(
-                trace.read(session, controls, album_query, album),
-                initial_deadline,
-                stop,
-            )
+            match trace.read(session, controls, album_query, album, initial_deadline, stop, &epoch)
             .await
             {
                 Ok(ReadWaitResult::Ready(initial)) => {
@@ -926,11 +1020,7 @@ impl<P: TapPlanner> Composer<'_, P> {
                         trace.reason(SelectionReason::Stopped);
                         return Ok(Selection::Stopped);
                     }
-                    let observed = match read_before_deadline(
-                        trace.read(session, controls, album_query, album),
-                        hard_deadline,
-                        stop,
-                    )
+                    let observed = match trace.read(session, controls, album_query, album, hard_deadline, stop, &epoch)
                     .await
                     {
                         Ok(ReadWaitResult::Ready(observed)) => observed,
@@ -1035,11 +1125,7 @@ impl<P: TapPlanner> Composer<'_, P> {
                 trace.diagnostic.stage = SelectionStage::ScrollReadback;
                 let scroll_deadline = crate::tiktok_sound::phase_deadline(PICKER_WINDOW);
                 let observed = loop {
-                    let read = read_before_deadline(
-                        trace.read(session, controls, album_query, album),
-                        scroll_deadline,
-                        stop,
-                    )
+                    let read = trace.read(session, controls, album_query, album, scroll_deadline, stop, &epoch)
                     .await;
                     let read = match read {
                         Ok(ReadWaitResult::Ready(read)) => read,
@@ -1863,6 +1949,13 @@ mod tests {
                 if mode == "read" {
                     assert_eq!(diagnostic.snapshot_generation, None);
                     assert_eq!(diagnostic.next_count, None);
+                    let json = serde_json::to_value(diagnostic).unwrap();
+                    // Complete snapshots in this fixture carry generation 1.
+                    assert_eq!(json["lastCompletedSnapshot"]["generation"], 1);
+                    assert_eq!(json["lastCompletedSnapshot"]["nextCount"], 2);
+                    assert_eq!(json["lastVerifiedSnapshot"]["nextCount"], 2);
+                    assert_eq!(json["lastCompletedSnapshot"]["albumMatches"], true);
+                    assert_eq!(json["lastCompletedSnapshot"]["sha256"].as_str().unwrap().len(), 64);
                 }
             }
         }
@@ -2123,13 +2216,39 @@ mod tests {
         let mut session = Picker::new(None);
         session.initial_read_delay = PICKER_WINDOW + Duration::from_secs(1);
         let start = Instant::now();
-        let result = run_picker(&session).await;
+        let (result, diagnostics) = with_stage_diagnostics(
+            StageDiagnosticContext {
+                request_id: "request-fixture".into(),
+                operation_id: "operation-fixture".into(),
+                udid: "device-fixture".into(),
+                queue_wait_ms: None,
+            },
+            None,
+            run_picker(&session),
+        )
+        .await;
         assert!(
             !matches!(result, Selection::Armed { .. }),
             "late initial picker evidence authorized selection"
         );
         assert!(session.taps.lock().is_empty());
         assert!(start.elapsed() <= PICKER_WINDOW);
+        let read = diagnostics
+            .events
+            .iter()
+            .find(|event| event.operation == "pickerHierarchyRead")
+            .expect("timed-out read is retained independently of a completed snapshot");
+        assert_eq!(read.outcome, "deadline");
+        assert_eq!(read.elapsed_ms, PICKER_WINDOW.as_millis() as u64);
+        assert_eq!(
+            read.remaining_budget_ms,
+            Some(PICKER_WINDOW.as_millis() as u64)
+        );
+        assert_eq!(read.remaining_after_ms, Some(0));
+        assert_eq!(session.reads.load(Ordering::Relaxed), 1);
+        assert!(!serde_json::to_string(&diagnostics)
+            .unwrap()
+            .contains("<hierarchy"));
     }
 
     #[tokio::test(start_paused = true)]

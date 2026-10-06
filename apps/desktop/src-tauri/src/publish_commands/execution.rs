@@ -113,6 +113,9 @@ pub(super) async fn post_one_phone(
     };
     evidence = attach_selection_diagnostic(&evidence, attempt.selection_diagnostic.as_ref());
     if let Ok(mut value) = serde_json::from_str::<serde_json::Value>(&evidence) {
+        if let Some(diagnostics) = &attempt.stage_diagnostics {
+            value["stageDiagnostics"] = serde_json::json!(diagnostics);
+        }
         if let Some(diagnostic) = &attempt.account_diagnostic {
             value["accountDiagnostic"] = serde_json::json!(diagnostic);
         }
@@ -1144,14 +1147,6 @@ pub(super) const PUBLIC_POST_CONFIRM: TapPoint = TapPoint { x: 275.0, y: 444.0 }
 /// coordinates*, not about TikTok: a carousel may hold 35 images and a hierarchy-driven
 /// composer that locates its cells is not bound by a grid nobody measured.
 pub(crate) const IOS_PIXEL_GRID_MAX_IMAGES: usize = 11;
-
-/// How far apart the fanned-out publish tasks start.
-///
-/// The same two seconds the interaction path measured on this fleet, and for the same reason
-/// rather than by imitation: twenty cold starts at once share one USB bus and one host, and the
-/// tail of that contention runs past the 40-second foreground window. A publish task opens the
-/// app exactly the way an interaction task does.
-pub(super) const PUBLISH_FAN_OUT_STAGGER: Duration = Duration::from_secs(2);
 
 /// Tell the UI that a campaign moved, once per state write.
 ///
@@ -2468,18 +2463,8 @@ pub(crate) async fn post_publish_campaign_inner(
     }
     announce(&events, &db, &campaign_id);
 
-    // **Fanned out, bounded by the stream budget, staggered.** The same three properties the
-    // interaction path measured its way to, for the same fleet and the same reasons.
-    //
-    // Sequential was the shape before, and its cost is arithmetic: five phones inside TikTok's
-    // composer take about as long each, so a run took five times one phone and four phones sat
-    // idle throughout. Nothing required that — every assignment is claimed by compare-and-swap
-    // (`claim_publish_assignment_for_posting`), so two tasks cannot reach the same row, and the
-    // device control plane already serialises per device.
-    //
-    // The permit count is `stream_capacity`, because each post holds a UI-with-stream context.
-    // Running past it does not queue, it fails — which on this path means a phone with media
-    // already in its gallery.
+    // Each participant runs independently; durable assignment claims and the
+    // control-plane lease serialize the phone, while the driver bounds I/O.
     // A campaign whose every assignment already posted has nothing left to run — which is
     // exactly the state the counting bug used to manufacture: children all `succeeded` under
     // a parent stuck `failed_before_dispatch`. Settling it here is what lets one press of
@@ -2490,11 +2475,9 @@ pub(crate) async fn post_publish_campaign_inner(
             .get_publish_campaign(&campaign_id)?
             .ok_or_else(|| anyhow::anyhow!("campaign disappeared after post"));
     }
-    let gate = Arc::new(tokio::sync::Semaphore::new(
-        control.stream_capacity().max(1),
-    ));
+    let gate = Arc::new(tokio::sync::Semaphore::new(participants.len().max(1)));
     let mut running = Vec::with_capacity(participants.len());
-    for (index, assignment) in participants.iter().enumerate() {
+    for assignment in &participants {
         let Some(bundle) = detail
             .bundles
             .iter()
@@ -2504,7 +2487,7 @@ pub(crate) async fn post_publish_campaign_inner(
             continue;
         };
         running.push(tokio::spawn(post_one_phone(
-            PUBLISH_FAN_OUT_STAGGER * index as u32,
+            Duration::ZERO,
             gate.clone(),
             control.clone(),
             db.clone(),
@@ -2621,6 +2604,7 @@ pub(super) struct AssignmentPostAttempt {
     claim_refused: bool,
     final_revision: Option<i64>,
     selection_diagnostic: Option<serde_json::Value>,
+    stage_diagnostics: Option<riviu_core::tiktok_composer::StageDiagnostics>,
     account_diagnostic: Option<riviu_core::tiktok_account::AccountDiagnostic>,
     recovery_failure: Option<riviu_core::publish_recovery::RecoveryFailure>,
 }
@@ -2677,6 +2661,7 @@ async fn post_one_assignment_owned(
                     claim_refused: true,
                     final_revision: None,
                     selection_diagnostic: None,
+                    stage_diagnostics: None,
                     account_diagnostic: None,
                     recovery_failure: None,
                 }
@@ -2689,6 +2674,7 @@ async fn post_one_assignment_owned(
         claim_refused: false,
         final_revision: initial_revision,
         selection_diagnostic: None,
+        stage_diagnostics: None,
         account_diagnostic: None,
         recovery_failure: None,
     };
@@ -2885,6 +2871,7 @@ async fn post_one_assignment_owned(
     let mut claim_refused = false;
     let mut submitted_at = None;
     let mut composer_failure = None;
+    let mut stage_diagnostics = None;
     let (action_result, mut account_diagnostic) = riviu_core::tiktok_account::with_account_diagnostic(async {
         let mut before_post = |sound_selection: Option<&riviu_core::SoundSelectionEvidence>,
                                identity: Option<
@@ -2958,23 +2945,35 @@ async fn post_one_assignment_owned(
             }
         };
         if session.supports_element_bounds() {
-            Box::pin(post_through_the_composer(
-                control,
-                db,
-                &assignment.id,
-                session.as_ref(),
-                campaign_id,
-                &assignment.udid,
-                bundle,
-                &import,
-                sound_policy,
-                defer_link_capture,
-                &mut before_post,
-                &progress,
-                &diagnostics,
-                &mut composer_failure,
-            ))
-            .await
+            let (outcome, report) = riviu_core::tiktok_composer::with_stage_diagnostics(
+                riviu_core::tiktok_composer::StageDiagnosticContext {
+                    request_id: request.request_id.clone(),
+                    operation_id: format!("publish:{campaign_id}"),
+                    udid: assignment.udid.clone(),
+                    queue_wait_ms: None,
+                },
+                // This route has per-stage budgets, not a whole-composer deadline.
+                None,
+                Box::pin(post_through_the_composer(
+                    control,
+                    db,
+                    &assignment.id,
+                    session.as_ref(),
+                    campaign_id,
+                    &assignment.udid,
+                    bundle,
+                    &import,
+                    sound_policy,
+                    defer_link_capture,
+                    &mut before_post,
+                    &progress,
+                    &diagnostics,
+                    &mut composer_failure,
+                )),
+            )
+            .await;
+            stage_diagnostics = Some(report);
+            outcome
         } else {
             let mut before_pixel_post = || before_post(None, None);
             Box::pin(post_through_the_pixel_grid(
@@ -3046,6 +3045,7 @@ async fn post_one_assignment_owned(
         claim_refused,
         final_revision: initial_revision.map(|r| r + i64::from(effect_claimed)),
         selection_diagnostic: selection_diagnostic.into_inner(),
+        stage_diagnostics,
         recovery_failure: if effect_claimed {
             None
         } else {

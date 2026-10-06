@@ -220,6 +220,11 @@ impl HelperClient {
         }
     }
 
+    /// A failed admitted acquisition, not transient busy or pending clipboard work.
+    pub(crate) fn cached_acquisition_failed(&self) -> bool {
+        self.retained_failure.load(std::sync::atomic::Ordering::Acquire)
+    }
+
     pub(crate) fn require_unfenced(&self) -> anyhow::Result<()> {
         anyhow::ensure!(self.maintenance_plan.lock().is_none(), HelperRecoveryRequired);
         Ok(())

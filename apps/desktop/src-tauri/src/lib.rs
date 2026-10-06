@@ -583,6 +583,8 @@ pub fn run() {
             farm_commands::list_device_metas,
             farm_commands::save_device_meta,
             farm_commands::save_device_handle,
+            farm_commands::preview_account_reconciliation,
+            farm_commands::apply_account_reconciliation,
             farm_commands::patch_device_meta,
             farm_commands::list_groups,
             farm_commands::save_group,

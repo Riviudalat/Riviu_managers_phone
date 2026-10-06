@@ -31,7 +31,7 @@ mod conversation;
 mod device_activity;
 pub use device_activity::{DeviceActivityProgress, DeviceActivityScope};
 mod fleet;
-pub use fleet::{AccountAssignmentConflict, ConflictingAccountDevice};
+pub use fleet::{AccountAssignmentConflict, AccountMappingObservation, ConflictingAccountDevice};
 mod flow_connectors;
 mod flow_runs;
 mod flows;
@@ -973,7 +973,8 @@ mod device_meta_tests {
         .unwrap();
         assert!(db.set_device_handle("a", "stale", "account").is_err());
         assert_eq!(
-            db.set_device_handle("a", " @Account ", " @ACCOUNT ").unwrap(),
+            db.set_device_handle("a", " @Account ", " @ACCOUNT ")
+                .unwrap(),
             " @Account "
         );
         assert_eq!(db.get_device_meta("a").unwrap().handle, " @Account ");
@@ -1003,6 +1004,53 @@ mod device_meta_tests {
             db.set_device_handle("b", "account2", "account").unwrap(),
             "account"
         );
+        drop(db);
+        let _ = std::fs::remove_file(path);
+    }
+
+    #[test]
+    fn account_reconciliation_requires_complete_proof_and_atomic_cas_for_cycles() {
+        let (db, path) = fixture();
+        for (id, handle) in [("a", "alpha"), ("b", "beta"), ("c", "gamma")] {
+            db.set_device_handle(id, "", handle).unwrap();
+        }
+        let proof = |id: &str, expected: &str, observed: &str| AccountMappingObservation {
+            udid: id.into(),
+            expected_handle: expected.into(),
+            observed_handle: observed.into(),
+        };
+        let cycle = vec![
+            proof("a", "alpha", "beta"),
+            proof("b", "beta", "gamma"),
+            proof("c", "gamma", "alpha"),
+        ];
+        // Missing/failed phone proof cannot silently clear its existing slot.
+        assert!(db.reconcile_account_mappings(&cycle[..2], true).is_err());
+        assert_eq!(db.get_device_meta("a").unwrap().handle, "alpha");
+        db.reconcile_account_mappings(&cycle, false).unwrap();
+        assert_eq!(db.get_device_meta("b").unwrap().handle, "beta");
+        let mut stale = cycle.clone();
+        stale[2].expected_handle = "stale".into();
+        assert!(db.reconcile_account_mappings(&stale, true).is_err());
+        assert_eq!(db.get_device_meta("a").unwrap().handle, "alpha");
+        db.reconcile_account_mappings(&cycle, true).unwrap();
+        for (id, expected) in [("a", "beta"), ("b", "gamma"), ("c", "alpha")] {
+            assert_eq!(db.get_device_meta(id).unwrap().handle, expected);
+        }
+        let swap = vec![proof("a", "beta", "gamma"), proof("b", "gamma", "beta")];
+        db.reconcile_account_mappings(&swap, true).unwrap();
+        assert_eq!(db.get_device_meta("a").unwrap().handle, "gamma");
+        assert_eq!(db.get_device_meta("b").unwrap().handle, "beta");
+        assert!(db
+            .reconcile_account_mappings(
+                &[proof("a", "gamma", "beta"), proof("b", "beta", "beta")],
+                true
+            )
+            .is_err());
+        assert!(db
+            .reconcile_account_mappings(&[proof("a", "gamma", "")], true)
+            .is_err());
+        assert_eq!(db.get_device_meta("a").unwrap().handle, "gamma");
         drop(db);
         let _ = std::fs::remove_file(path);
     }

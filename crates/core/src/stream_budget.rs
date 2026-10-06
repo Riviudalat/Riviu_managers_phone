@@ -10,25 +10,9 @@ use uuid::Uuid;
 use crate::DeviceWorkOwner;
 
 const DEFAULT_STREAM_LIMIT: usize = 1;
-/// Hard ceiling on concurrent producers on one desktop.
-///
-/// **Raised from 2 to 32 on 18/08/2026, and the old number's reason is why.** It read: "the
-/// managed fleet may hold 20-100 phones, but only this many ever stream at once — the
-/// desktop shows at most two tiles." That was a statement about *tiles*, and it stopped
-/// being true twice over: Android tiles moved to the H.264 view path, which does not take a
-/// slot here at all, and every nurture session takes a **foreground** slot for its whole
-/// run. So the ceiling was not bounding previews, it was bounding how many phones could be
-/// nurtured at once — two, on a fleet of twenty, with the other eighteen refused
-/// `CapacityExhausted` before they started.
-///
-/// Measured before changing it: six concurrent Android nurture sessions, each with its own
-/// exclusive lease, UI session and minicap producer, all six returned and five watched
-/// video. 32 is a fleet-shaped ceiling above that, not a measured maximum.
-///
-/// **The iOS caveat survives.** Its producers are MJPEG over usbmux, where contention has a
-/// history in this project, and nothing here has been measured at that scale on that
-/// transport. What protects an iOS desktop is the *default*, which is still one per
-/// `Default` and is sized from the connected fleet by the desktop — not this ceiling.
+/// Ceiling for background preview sampling. Foreground work grows with the fleet;
+/// it keeps one reservation per phone, not a desktop-wide worker quota. Driver
+/// frame coalescing and I/O guards bound resource operations separately.
 pub const MAXIMUM_STREAM_LIMIT: usize = 32;
 const BACKGROUND_TURN_TIMEOUT: Duration = Duration::from_secs(5);
 const BACKGROUND_FAILURE_BACKOFF: Duration = Duration::from_secs(30);
@@ -129,6 +113,7 @@ impl StreamStopProof {
 pub struct StreamBudgetManager {
     inner: Arc<Mutex<BudgetState>>,
     configured_limit: Arc<AtomicUsize>,
+    foreground_limit: Arc<AtomicUsize>,
     turn_timeout: Duration,
     failure_backoff: Duration,
     /// Where "now" comes from. Production is `Instant::now`; tests may hand in a closure
@@ -168,6 +153,7 @@ impl StreamBudgetManager {
         Ok(Self {
             inner: Arc::new(Mutex::new(BudgetState::default())),
             configured_limit: Arc::new(AtomicUsize::new(configured_limit)),
+            foreground_limit: Arc::new(AtomicUsize::new(configured_limit)),
             turn_timeout: BACKGROUND_TURN_TIMEOUT,
             failure_backoff: BACKGROUND_FAILURE_BACKOFF,
             clock,
@@ -182,8 +168,19 @@ impl StreamBudgetManager {
         self.configured_limit.load(Ordering::Acquire)
     }
 
+    pub fn foreground_limit(&self) -> usize {
+        self.foreground_limit.load(Ordering::Acquire)
+    }
+
+    /// Session admission follows the fleet independently of preview settings.
+    pub fn grow_foreground_to_fleet(&self, fleet_size: usize) {
+        self.foreground_limit
+            .fetch_max(fleet_size.max(1), Ordering::AcqRel);
+    }
+
     /// Auto sizing only grows: disconnects never revoke a running foreground session.
     pub fn grow_to_fleet(&self, fleet_size: usize) {
+        self.grow_foreground_to_fleet(fleet_size);
         self.configured_limit
             .fetch_max(fleet_size.clamp(1, MAXIMUM_STREAM_LIMIT), Ordering::AcqRel);
     }
@@ -335,15 +332,15 @@ impl StreamBudgetManager {
         });
         let victim_token = if target_background.is_some() {
             target_background
-        } else if state.reserved_capacity() >= self.configured_limit() {
+        } else if state.reserved_capacity() >= self.foreground_limit() {
             state.oldest_background_token()
         } else {
             None
         };
 
-        if victim_token.is_none() && state.reserved_capacity() >= self.configured_limit() {
+        if victim_token.is_none() && state.reserved_capacity() >= self.foreground_limit() {
             return Err(StreamBudgetError::CapacityExhausted {
-                limit: self.configured_limit(),
+                limit: self.foreground_limit(),
             });
         }
 
@@ -420,7 +417,7 @@ impl StreamBudgetManager {
             }
         }
 
-        if state.reserved_capacity() < self.configured_limit() {
+        if state.reserved_capacity() < self.foreground_limit() {
             return Ok(None);
         }
         let victim = state
@@ -429,7 +426,7 @@ impl StreamBudgetManager {
             .map(|record| record.udid.clone());
         victim
             .ok_or(StreamBudgetError::CapacityExhausted {
-                limit: self.configured_limit(),
+                limit: self.foreground_limit(),
             })
             .map(Some)
     }
@@ -957,6 +954,32 @@ mod tests {
             StreamBudgetManager::new(MAXIMUM_STREAM_LIMIT + 1),
             Err(StreamBudgetError::InvalidLimit { .. })
         ));
+    }
+
+    #[test]
+    fn fleet_growth_admits_foreground_devices_beyond_preview_ceiling() {
+        let budget = StreamBudgetManager::new(2).unwrap();
+        budget.grow_to_fleet(66);
+        for ordinal in 0..66 {
+            let udid = format!("phone-{ordinal}");
+            let transfer = budget
+                .begin_foreground_transfer(&udid, DeviceWorkOwner::Script)
+                .unwrap();
+            let reservation = budget
+                .complete_transfer(transfer, StreamStopProof::not_required())
+                .unwrap();
+            budget.mark_running(reservation.token()).unwrap();
+            assert!(budget
+                .begin_foreground_transfer(&udid, DeviceWorkOwner::Script)
+                .is_err());
+        }
+        assert_eq!(budget.running_producer_count(), 66);
+        assert!(matches!(
+            budget.reserve_background("preview"),
+            Err(StreamBudgetError::CapacityExhausted { .. })
+        ));
+        budget.grow_to_fleet(1);
+        assert_eq!(budget.running_producer_count(), 66);
     }
 
     #[tokio::test]

@@ -244,7 +244,7 @@ fn configured_desktop_stream_capacity() -> Option<usize> {
 }
 
 /// Initial capacity follows the first scan; later discovery grows the same shared budget.
-/// Explicit limits remain fixed, clamped to the core ceiling instead of falling back to two.
+/// Explicit settings bound background previews; foreground sessions follow the fleet.
 fn desktop_stream_budget(fleet_size: usize) -> StreamBudgetManager {
     let requested = configured_desktop_stream_capacity().unwrap_or_else(|| {
         fleet_size.clamp(
@@ -252,7 +252,7 @@ fn desktop_stream_budget(fleet_size: usize) -> StreamBudgetManager {
             riviu_core::stream_budget::MAXIMUM_STREAM_LIMIT,
         )
     });
-    match StreamBudgetManager::new(requested) {
+    let manager = match StreamBudgetManager::new(requested) {
         Ok(manager) => manager,
         Err(error) => {
             log::warn!(
@@ -262,7 +262,10 @@ fn desktop_stream_budget(fleet_size: usize) -> StreamBudgetManager {
             StreamBudgetManager::new(DEFAULT_DESKTOP_STREAM_CAPACITY)
                 .expect("the default desktop stream capacity is within the ceiling")
         }
-    }
+    };
+    // Explicit settings still bound preview sampling, never independent phone workers.
+    manager.grow_foreground_to_fleet(fleet_size);
+    manager
 }
 
 /// Which lease a device command is running under.
@@ -1680,9 +1683,7 @@ impl AppState {
             tauri::async_runtime::spawn(async move {
                 let mut interval = tokio::time::interval(Duration::from_secs(30));
                 interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
-                let mut queue = crate::publish_commands::VerificationQueue::with_capacity(
-                    db.publish_limits().map(|v| v.verify).unwrap_or(4),
-                );
+                let mut queue = crate::publish_commands::VerificationQueue::default();
                 let mut failed_until = std::collections::HashMap::new();
                 loop {
                     tokio::select! {
@@ -1756,13 +1757,6 @@ impl AppState {
                         )
                     });
                     failed_until.retain(|_, until| *until > Instant::now());
-                    match db.publish_limits() {
-                        Ok(limits) => queue.set_capacity(limits.verify),
-                        Err(error) => {
-                            log::error!("publish limits: {error:#}");
-                            continue;
-                        }
-                    }
                     // Rotate the inspected device page, including offline phones, so a
                     // large disconnected prefix cannot conceal later due publications.
                     if let Err(error) = db.rotate_publish_devices(
@@ -2294,6 +2288,7 @@ impl AppState {
                         if let Some(setup) = &mut helper_setup {
                             setup.tick_latest();
                         }
+                        control.grow_foreground_stream_capacity(devices.len());
                         if configured_desktop_stream_capacity().is_none() {
                             control.grow_stream_capacity(devices.len());
                         }

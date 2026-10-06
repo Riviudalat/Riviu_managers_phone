@@ -160,7 +160,7 @@ impl Runtime {
             .control
             .acquire_exclusive(&a.udid, DeviceWorkOwner::Script)
             .await?;
-        // The transfer lease is dropped before waiting on a composer permit.
+        // The transfer lease is dropped before the same phone enters its composer.
         let result=async {
             anyhow::ensure!(self.db.publish_pipeline_current(&self.run)? && !self.db.publish_assignment_excluded(&a.id)?,"pipeline stopped before device transfer");
             self.progress(a,progress::PublishProgress::DeviceReady);
@@ -371,7 +371,7 @@ impl DispatchCompletions {
 }
 
 /// One application dispatcher serves immediate and scheduled campaigns. Queue rows
-/// hold IDs only; media and driver sessions are loaded after global stage admission.
+/// hold IDs only; media and driver sessions are loaded after per-device admission.
 #[allow(clippy::too_many_arguments)]
 pub(crate) async fn run_dispatcher(
     control: Arc<DeviceControlPlane>,
@@ -529,11 +529,8 @@ pub(crate) async fn run_dispatcher(
                 roster_at = Some(tokio::time::Instant::now());
             }
             for job in pending {
-                // Completed tasks still occupy a worker slot until joined. Fast failures
-                // must not accumulate an unbounded JoinSet while permits are released.
-                if tasks.len() >= db.publish_limits()?.device_total {
-                    break;
-                }
+                // Durable claims and the device lease serialize one phone. A slow
+                // sibling must not consume a global publish worker slot.
                 if control.current_work_owner(&job.udid).is_some() {
                     db.defer_publish_dispatch(&job, "device_busy")?;
                     continue;

@@ -3,9 +3,6 @@
 use super::*;
 use futures_util::stream::{self, StreamExt};
 
-// Independent per-device checks; the Android driver owns USB/ADB I/O admission.
-const PUBLISH_PREFLIGHT_DEVICE_LIMIT: usize = 64;
-
 #[derive(Clone)]
 pub(super) struct PreflightDeviceObservation {
     exists: bool,
@@ -29,8 +26,10 @@ where
         .enumerate()
         .map(|(index, future)| async move { (index, future.await) }.boxed())
         .collect();
+    // Poll every selected phone; the driver bounds individual USB/ADB operations.
+    let device_count = futures.len().max(1);
     let mut completed = stream::iter(futures)
-        .buffer_unordered(PUBLISH_PREFLIGHT_DEVICE_LIMIT)
+        .buffer_unordered(device_count)
         .collect::<Vec<_>>()
         .await;
     completed.sort_by_key(|(index, _)| *index);
@@ -1189,33 +1188,29 @@ mod sheet_choice_tests {
 #[cfg(test)]
 mod bounded_device_observation_tests {
     use super::*;
-    use std::sync::atomic::{AtomicUsize, Ordering};
 
     #[tokio::test]
-    async fn device_observations_are_bounded_and_return_in_assignment_order() {
-        let active = AtomicUsize::new(0);
-        let peak = AtomicUsize::new(0);
-        let observed = collect_bounded_device_observations((0..10).map(|ordinal| {
-            let active = &active;
-            let peak = &peak;
-            async move {
-                let now = active.fetch_add(1, Ordering::SeqCst) + 1;
-                peak.fetch_max(now, Ordering::SeqCst);
-                tokio::time::sleep(Duration::from_millis((10 - ordinal) * 5)).await;
-                active.fetch_sub(1, Ordering::SeqCst);
-                (ordinal, ordinal == 2)
-            }
-        }))
-        .await;
-
+    async fn device_observations_are_independent_and_return_in_assignment_order() {
+        // Every device must start before any can finish; the old 64 cap deadlocks.
+        let barrier = Arc::new(tokio::sync::Barrier::new(66));
+        let observed = tokio::time::timeout(
+            Duration::from_secs(5),
+            collect_bounded_device_observations((0..66).map(|ordinal| {
+                let barrier = barrier.clone();
+                async move {
+                    barrier.wait().await;
+                    (ordinal, ordinal == 2)
+                }
+            })),
+        )
+        .await
+        .expect("all selected device observations must start independently");
         assert_eq!(
             observed,
-            (0..10)
+            (0..66)
                 .map(|ordinal| (ordinal, ordinal == 2))
                 .collect::<Vec<_>>()
         );
-        assert_eq!(peak.load(Ordering::SeqCst), 4);
-        assert_eq!(active.load(Ordering::SeqCst), 0);
     }
 
     #[tokio::test]

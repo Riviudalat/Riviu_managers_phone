@@ -1,19 +1,22 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
-import { waitFor } from "@testing-library/react";
 import * as api from "./api";
-import { pushToast, toastError } from "./toastStore";
+import { requestConfirm } from "./confirmStore";
+import { toastError } from "./toastStore";
 
 import { buildDeviceActions, readAndAssignTikTokAccounts, type DeviceActionDeps } from "./deviceActions";
 import { gateDeviceMenu, isSubmenu, menuLeaves, type DeviceMenuNode } from "./deviceMenu";
-import type { DeviceInfo, DeviceMeta } from "./types";
+import type { DeviceInfo } from "./types";
 
-vi.mock("./api", async importOriginal => ({...await importOriginal<typeof api>(), interactionReadAccount:vi.fn(),saveDeviceHandle:vi.fn(),listDeviceMetas:vi.fn()}));
-vi.mock("./toastStore",()=>({pushToast:vi.fn(),toastError:vi.fn()}));
+vi.mock("./api", async importOriginal => ({ ...await importOriginal<typeof api>(), previewAccountReconciliation: vi.fn(), applyAccountReconciliation: vi.fn(), listDeviceMetas: vi.fn() }));
+vi.mock("./confirmStore", () => ({ requestConfirm: vi.fn(), requestPrompt: vi.fn() }));
+vi.mock("./toastStore", () => ({ pushToast: vi.fn(), toastError: vi.fn() }));
 
-beforeEach(()=>{
-  vi.clearAllMocks();
-  vi.mocked(api.interactionReadAccount).mockImplementation(async udid=>({udid,expectedHandle:"old",observedHandle:`nick_${udid}`,status:"mismatch",checkedAt:"2026-09-16T00:00:00Z",snapshotSha256:"proof"}));
-  vi.mocked(api.saveDeviceHandle).mockImplementation(async (_id,_expected,handle)=>handle);
+beforeEach(() => {
+  vi.resetAllMocks();
+  vi.mocked(requestConfirm).mockResolvedValue(true);
+  vi.mocked(api.previewAccountReconciliation).mockImplementation(async udids => ({ operationId: "op-proof", blocker: null,
+    rows: udids.map(udid => ({ udid, expectedHandle: "old", observedHandle: `nick_${udid}`, checkedAt: "2026-10-06T00:00:00Z", snapshotSha256: "proof", error: null })) }));
+  vi.mocked(api.applyAccountReconciliation).mockResolvedValue([{ udid: "a", expectedHandle: "old", observedHandle: "nick_a" }]);
   vi.mocked(api.listDeviceMetas).mockResolvedValue([]);
 });
 
@@ -64,69 +67,45 @@ function deps(over: Partial<DeviceActionDeps> = {}): DeviceActionDeps {
 }
 
 describe("buildDeviceActions", () => {
-  it("reads the selected group when invoked on its tile, and only the clicked phone outside it",async()=>{
-    const a=device({udid:"a"}), b=device({udid:"b"}), c=device({udid:"c"});
-    const d=deps({selectedDevices:[a,b]});
-    buildDeviceActions(a,d).find(n=>n.id==="read-tiktok-account")!.run!();
-    await waitFor(()=>expect(api.saveDeviceHandle).toHaveBeenCalledTimes(2));
-    expect(api.interactionReadAccount).toHaveBeenNthCalledWith(1,"a");
-    expect(api.interactionReadAccount).toHaveBeenNthCalledWith(2,"b");
-    await waitFor(()=>expect(pushToast).toHaveBeenCalledWith("ok","Đã gán nick TikTok 2/2 máy"));
-    buildDeviceActions(c,d).find(n=>n.id==="read-tiktok-account")!.run!();
-    await waitFor(()=>expect(api.saveDeviceHandle).toHaveBeenCalledWith("c","old","nick_c"));
+  it("waits for the complete read batch and confirmation before applying its operation", async () => {
+    let finish!: (value: api.AccountReconciliationPlan) => void;
+    vi.mocked(api.previewAccountReconciliation).mockImplementationOnce(() => new Promise(resolve => { finish = resolve; }));
+    const running = readAndAssignTikTokAccounts([device({ udid: "a" }), device({ udid: "b" })], deps());
+    await readAndAssignTikTokAccounts([device({ udid: "b" })], deps());
+    expect(api.previewAccountReconciliation).toHaveBeenCalledTimes(1);
+    expect(api.applyAccountReconciliation).not.toHaveBeenCalled();
+    finish({ operationId: "batch", blocker: null, rows: [{ udid: "a", expectedHandle: "old", observedHandle: "next", checkedAt: "now", snapshotSha256: "proof", error: null }] });
+    await running;
+    expect(requestConfirm).toHaveBeenCalledTimes(1);
+    expect(api.applyAccountReconciliation).toHaveBeenCalledWith("batch");
   });
 
-  it("reserves queued phones across repeated clicks and keeps the captured selection",async()=>{
-    const a=device({udid:"a"}),b=device({udid:"b"});
-    let finish!: (value:api.AccountReading)=>void;
-    vi.mocked(api.interactionReadAccount).mockImplementationOnce(()=>new Promise(resolve=>{finish=resolve;}));
-    const d=deps({selectedDevices:[a,b]});
-    const first=readAndAssignTikTokAccounts([...d.selectedDevices!],d);
-    await readAndAssignTikTokAccounts([a,b],d);
-    d.selectedDevices=[device({udid:"c"})];
-    expect(api.interactionReadAccount).toHaveBeenCalledTimes(2);
-    await waitFor(()=>expect(api.saveDeviceHandle).toHaveBeenCalledWith("b","old","nick_b"));
-    expect(api.saveDeviceHandle).not.toHaveBeenCalledWith("a",expect.anything(),expect.anything());
-    finish({udid:"a",expectedHandle:"old",observedHandle:"nick_a",status:"mismatch",checkedAt:"",snapshotSha256:"proof"});
-    await first;
-    expect(api.interactionReadAccount).toHaveBeenCalledTimes(2);
-    expect(api.saveDeviceHandle).toHaveBeenCalledWith("a","old","nick_a");
+  it("reads conflicting exact serials only after consent and confirms the fresh expanded plan", async () => {
+    vi.mocked(api.previewAccountReconciliation).mockResolvedValueOnce({ operationId: "blocked", rows: [], blocker: {
+      accountConflict: { conflictingDevices: [{ udid: "ce0517151215a00304" }] } } });
+    await readAndAssignTikTokAccounts([device({ udid: "ce031713dd735a1103" })], deps());
+    expect(api.previewAccountReconciliation).toHaveBeenNthCalledWith(2, ["ce031713dd735a1103", "ce0517151215a00304"]);
+    expect(requestConfirm).toHaveBeenCalledTimes(2);
+    expect(api.applyAccountReconciliation).toHaveBeenCalledWith("op-proof");
   });
 
-  it("keeps failed or unknown accounts and continues after stale saves and disconnects",async()=>{
-    const targets=["a","b","c","d","e"].map(udid=>device({udid}));
-    vi.mocked(api.interactionReadAccount).mockRejectedValueOnce(new Error("disconnected"))
-      .mockResolvedValueOnce({udid:"b",expectedHandle:"old",observedHandle:null,status:"unknown",checkedAt:"",snapshotSha256:"proof"});
-    const collision = { code: "AccountAssignmentConflict", message: "collision", accountConflict: {
-      udid: "d", attemptedHandle: "nick_d", expectedHandle: "old", currentHandle: "old",
-      conflictingDevices: [{udid: "owner", number: 8, alias: "Kệ A", handle: "nick_d"}],
-    }};
-    vi.mocked(api.saveDeviceHandle).mockRejectedValueOnce(new Error("stale account"))
-      .mockRejectedValueOnce(collision);
-    await readAndAssignTikTokAccounts(targets,deps());
-    expect(api.interactionReadAccount).toHaveBeenCalledTimes(5);
-    expect(api.saveDeviceHandle).toHaveBeenCalledTimes(3);
-    expect(api.saveDeviceHandle).toHaveBeenLastCalledWith("e","old","nick_e");
-    expect(toastError).toHaveBeenCalledTimes(4);
-    expect(toastError).toHaveBeenCalledWith(expect.stringContaining("Đọc nick thất bại · a"), expect.any(Error));
-    expect(toastError).toHaveBeenCalledWith(expect.stringContaining("Đã đọc @nick_c; chưa lưu gán nick · c"), expect.any(Error));
-    expect(toastError).toHaveBeenCalledWith(expect.stringContaining("Đã đọc @nick_d; chưa lưu gán nick · d"), collision);
-    expect(pushToast).toHaveBeenLastCalledWith("warn","Đã gán nick TikTok 1/5 máy");
+  it("keeps mappings when confirmation is cancelled and reports independent read errors", async () => {
+    vi.mocked(requestConfirm).mockResolvedValue(false);
+    vi.mocked(api.previewAccountReconciliation).mockResolvedValue({ operationId: "partial", blocker: null, rows: [
+      { udid: "a", expectedHandle: "", observedHandle: null, checkedAt: null, snapshotSha256: null, error: { message: "offline" } },
+      { udid: "b", expectedHandle: "old", observedHandle: "next", checkedAt: "now", snapshotSha256: "proof", error: null },
+    ] });
+    await readAndAssignTikTokAccounts([device({ udid: "a" }), device({ udid: "b" })], deps());
+    expect(toastError).toHaveBeenCalledWith(expect.stringContaining("a"), { message: "offline" });
+    expect(api.applyAccountReconciliation).not.toHaveBeenCalled();
   });
 
-  it("refreshes acknowledged account saves when the newest concurrent metadata read fails",async()=>{
-    let finish!: (value:DeviceMeta[])=>void;
-    const metas = [{ udid:"b", tiktokHandle:"nick_b" }] as unknown as DeviceMeta[];
-    vi.mocked(api.listDeviceMetas)
-      .mockImplementationOnce(()=>new Promise(resolve=>{finish=resolve;}))
-      .mockRejectedValueOnce(new Error("metadata unavailable"))
-      .mockResolvedValue(metas);
-    const d=deps();
-    const reading=readAndAssignTikTokAccounts([device({udid:"a"}),device({udid:"b"})],d);
-    await waitFor(()=>expect(api.listDeviceMetas).toHaveBeenCalledTimes(2));
-    finish([]);
-    await reading;
-    expect(d.setMetas).toHaveBeenLastCalledWith(metas);
+  it("retains operation identity without replay when apply acknowledgment is lost", async () => {
+    vi.mocked(api.applyAccountReconciliation).mockRejectedValue(new Error("lost ACK"));
+    await readAndAssignTikTokAccounts([device({ udid: "a" })], deps());
+    expect(api.applyAccountReconciliation).toHaveBeenCalledTimes(1);
+    expect(api.previewAccountReconciliation).toHaveBeenCalledTimes(1);
+    expect(toastError).toHaveBeenCalledWith(expect.stringContaining("op-proof"), expect.any(Error));
   });
   it("still offers the whole catalog after the move", () => {
     // A guard on the four tests below: every one of them would pass vacuously against an

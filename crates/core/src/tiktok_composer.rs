@@ -980,6 +980,8 @@ pub struct StageDiagnosticEvent {
     pub planner_point: Option<[f64; 2]>,
     pub enabled: Option<bool>,
     pub clickable: Option<bool>,
+    pub snapshot_generation: Option<u64>,
+    pub snapshot_sha256: Option<String>,
 }
 
 #[derive(Debug, serde::Serialize)]
@@ -1056,6 +1058,7 @@ impl StageDiagnosticOperation {
                 remaining_after_ms: None,
                 outcome: "interrupted".into(), bounds: None, planner_point: None,
                 enabled: None, clickable: None,
+                snapshot_generation: None, snapshot_sha256: None,
             }
         }).ok();
         Self { event, started, deadline: effective_deadline, previous_deadline }
@@ -1315,6 +1318,8 @@ impl<'a, P: TapPlanner> Composer<'a, P> {
         let deadline =
             crate::tiktok_sound::phase_deadline(COMPOSER_WINDOW * 2 + Duration::from_secs(33));
         let epoch = self.session.gui_session_epoch();
+        let mut gallery = StageDiagnosticOperation::start("galleryShutter", &epoch, Some(deadline));
+        gallery.finish("errorOrInterrupted");
         let Some(shutter) = self
             .await_condition_until(
                 deadline.min(Instant::now() + COMPOSER_WINDOW),
@@ -1324,9 +1329,19 @@ impl<'a, P: TapPlanner> Composer<'a, P> {
             )
             .await?
         else {
+            gallery.finish(if stop.load(Ordering::Relaxed) {
+                "cancelled"
+            } else if Instant::now() >= deadline {
+                "deadline"
+            } else {
+                "targetUnproven"
+            });
             return Ok(false);
         };
         if let Some(entry_query) = self.plan.gallery_entry {
+            if let Some(event) = &mut gallery.event {
+                event.operation = "galleryMeasuredEntry".into();
+            }
             let entry = self
                 .await_condition_until(
                     deadline.min(Instant::now() + COMPOSER_WINDOW),
@@ -1336,6 +1351,13 @@ impl<'a, P: TapPlanner> Composer<'a, P> {
                 )
                 .await;
             if stop.load(Ordering::Relaxed) || Instant::now() >= deadline {
+                gallery.finish(if stop.load(Ordering::Relaxed) {
+                    "cancelled"
+                } else if Instant::now() >= deadline {
+                    "deadline"
+                } else {
+                    "targetUnproven"
+                });
                 return Ok(false);
             }
             anyhow::ensure!(
@@ -1352,6 +1374,9 @@ impl<'a, P: TapPlanner> Composer<'a, P> {
                         "fallbackStarted",
                         None,
                     );
+                    if let Some(event) = &mut gallery.event {
+                        event.operation = "gallerySemanticFallback".into();
+                    }
                     let Some(entry) = self
                         .await_condition_until(
                             deadline.min(Instant::now() + Duration::from_secs(30)),
@@ -1361,6 +1386,13 @@ impl<'a, P: TapPlanner> Composer<'a, P> {
                         )
                         .await?
                     else {
+                        gallery.finish(if stop.load(Ordering::Relaxed) {
+                            "cancelled"
+                        } else if Instant::now() >= deadline {
+                            "deadline"
+                        } else {
+                            "targetUnproven"
+                        });
                         return Ok(false);
                     };
                     (entry, ElementQuery::Semantic("gallery"))
@@ -1376,6 +1408,9 @@ impl<'a, P: TapPlanner> Composer<'a, P> {
                     );
                     // This is the existing hierarchy adapter, not a remote
                     // vision proposal. A tree error alone never grants a tap.
+                    if let Some(event) = &mut gallery.event {
+                        event.operation = "gallerySemanticFallback".into();
+                    }
                     let Some(entry) = self
                         .await_condition_until(
                             deadline.min(Instant::now() + Duration::from_secs(30)),
@@ -1386,6 +1421,13 @@ impl<'a, P: TapPlanner> Composer<'a, P> {
                         .await
                         .with_context(|| format!("gallery adapter read failed after: {error}"))?
                     else {
+                        gallery.finish(if stop.load(Ordering::Relaxed) {
+                            "cancelled"
+                        } else if Instant::now() >= deadline {
+                            "deadline"
+                        } else {
+                            "targetUnproven"
+                        });
                         return Ok(false);
                     };
                     (entry, ElementQuery::Semantic("gallery"))
@@ -1395,6 +1437,9 @@ impl<'a, P: TapPlanner> Composer<'a, P> {
             // SM-G955U1 / Trill 38.3.2: shutter and gallery become locatable
             // before the camera finishes moving. Wait for the gallery's own
             // geometry to settle and tap its centre, not a pre-animation edge.
+            if let Some(event) = &mut gallery.event {
+                event.operation = "galleryStabilization".into();
+            }
             let mut stable = entry;
             let end = deadline.min(Instant::now() + Duration::from_secs(3));
             loop {
@@ -1407,6 +1452,13 @@ impl<'a, P: TapPlanner> Composer<'a, P> {
                     .await_condition_until(end, resolved_query, stop, |_| true)
                     .await?
                 else {
+                    gallery.finish(if stop.load(Ordering::Relaxed) {
+                        "cancelled"
+                    } else if Instant::now() >= end {
+                        "deadline"
+                    } else {
+                        "targetUnproven"
+                    });
                     return Ok(false);
                 };
                 anyhow::ensure!(
@@ -1421,6 +1473,13 @@ impl<'a, P: TapPlanner> Composer<'a, P> {
                     // Use the just-proved target. activate_element hides a new
                     // unbounded read before dispatch and can race Stop there.
                     if stop.load(Ordering::Relaxed) || Instant::now() >= end {
+                        gallery.finish(if stop.load(Ordering::Relaxed) {
+                            "cancelled"
+                        } else if Instant::now() >= end {
+                            "deadline"
+                        } else {
+                            "targetUnproven"
+                        });
                         return Ok(false);
                     }
                     self.tap_inside(&current).await?;
@@ -1428,6 +1487,7 @@ impl<'a, P: TapPlanner> Composer<'a, P> {
                 }
                 stable = current;
             }
+            gallery.finish("tapped");
             return Ok(true);
         }
         anyhow::ensure!(
@@ -1435,12 +1495,30 @@ impl<'a, P: TapPlanner> Composer<'a, P> {
             "gallery session changed before navigation"
         );
         if stop.load(Ordering::Relaxed) || Instant::now() >= deadline {
+            gallery.finish(if stop.load(Ordering::Relaxed) {
+                "cancelled"
+            } else if Instant::now() >= deadline {
+                "deadline"
+            } else {
+                "targetUnproven"
+            });
             return Ok(false);
         }
+        if let Some(event) = &mut gallery.event {
+            event.operation = "galleryGeometry".into();
+        }
         let Some(entry) = GalleryEntry::beside_shutter(screen, &shutter) else {
+            gallery.finish(if stop.load(Ordering::Relaxed) {
+                "cancelled"
+            } else if Instant::now() >= deadline {
+                "deadline"
+            } else {
+                "targetUnproven"
+            });
             return Ok(false);
         };
         self.tap_inside(&entry.rect()).await?;
+        gallery.finish("tapped");
         Ok(true)
     }
 
@@ -3177,8 +3255,11 @@ impl<'a, P: TapPlanner> Composer<'a, P> {
                 Ok(ReadWaitResult::Ready(None)) => trace.finish("absentOrAmbiguous"),
                 Ok(ReadWaitResult::Cancelled) => trace.finish("cancelled"),
                 Ok(ReadWaitResult::DeadlineExceeded) => trace.finish("deadline"),
+                Err(error) if error.is::<crate::driver::SessionEpochChanged>() => trace.finish("sessionChanged"),
+                Err(error) if classify_read_failure(error) == ReadFailureKind::Transient => trace.finish("transientError"),
                 Err(_) => trace.finish("error"),
             }
+            if self.session.gui_session_epoch() != epoch { trace.finish("sessionChanged"); }
             drop(trace);
             if stop.load(Ordering::Relaxed) {
                 return Ok(None);

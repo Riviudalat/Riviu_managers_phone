@@ -377,7 +377,7 @@ fn permits_are_global_across_connections_and_release_by_exact_device() {
         .try_publish_work("t0", "verify", "observer")
         .unwrap()
         .is_none());
-    for n in 0..4 {
+    for n in 0..65 {
         permits.push(
             other
                 .try_publish_work(&format!("v{n}"), "verify", "observer")
@@ -388,7 +388,7 @@ fn permits_are_global_across_connections_and_release_by_exact_device() {
     assert!(db
         .try_publish_work("post", "compose", "poster")
         .unwrap()
-        .is_none());
+        .is_some());
     permits.remove(0);
     assert!(db
         .try_publish_work("post", "compose", "poster")
@@ -524,6 +524,44 @@ fn cached_candidates_cannot_start_two_publications_on_the_same_device() {
 }
 
 #[test]
+fn held_phone_does_not_block_more_than_old_cap_of_compose_dispatches() {
+    let (db, _, campaign, _) = fixture();
+    seed_load(&db, &campaign, 66, 66);
+    db.conn()
+        .unwrap()
+        .execute("UPDATE publish_dispatch_jobs SET phase='compose'", [])
+        .unwrap();
+    let pending = db.pending_publish_dispatch(128).unwrap();
+    assert_eq!(pending.len(), 66);
+    let held = &pending[0];
+    let held_permit = db
+        .try_publish_work(&held.udid, &held.phase, &held.attempt_id)
+        .unwrap()
+        .unwrap();
+    assert!(db.claim_publish_dispatch(held, 0).unwrap());
+    let mut siblings = Vec::new();
+    for job in db.pending_publish_dispatch(128).unwrap() {
+        let permit = db
+            .try_publish_work(&job.udid, &job.phase, &job.attempt_id)
+            .unwrap()
+            .unwrap();
+        assert!(db.claim_publish_dispatch(&job, 0).unwrap());
+        siblings.push((job, permit));
+    }
+    assert_eq!(siblings.len(), 65);
+    for (job, permit) in siblings {
+        assert!(db.finish_publish_dispatch(&job, None).unwrap());
+        drop(permit);
+    }
+    assert!(db
+        .try_publish_work(&held.udid, "verify", "sibling")
+        .unwrap()
+        .is_none());
+    assert!(db.finish_publish_dispatch(held, None).unwrap());
+    drop(held_permit);
+}
+
+#[test]
 fn restart_settles_all_unstarted_scheduled_jobs_as_missed_at_campaign_level() {
     let (db, path, campaign, _) = fixture();
     db.claim_publish_pipeline(&campaign).unwrap();
@@ -555,7 +593,7 @@ fn shutdown_paused_jobs_are_not_finished_runs() {
 }
 
 #[test]
-fn lowering_host_capacity_drains_existing_claims_before_new_admission() {
+fn lowering_transfer_capacity_does_not_block_other_device_stages() {
     let (db, _, _, _) = fixture();
     let first = db.try_publish_work("a", "transfer", "a").unwrap().unwrap();
     let second = db.try_publish_work("b", "transfer", "b").unwrap().unwrap();
@@ -564,11 +602,14 @@ fn lowering_host_capacity_drains_existing_claims_before_new_admission() {
         r#"{"transfer":1,"compose":1,"verify":1,"deviceTotal":1}"#,
     )
     .unwrap();
-    assert!(db.try_publish_work("c", "compose", "c").unwrap().is_none());
+    let compose = db.try_publish_work("c", "compose", "c").unwrap().unwrap();
+    assert!(db.try_publish_work("c", "verify", "c").unwrap().is_none());
+    assert!(db.try_publish_work("d", "transfer", "d").unwrap().is_none());
     drop(first);
-    assert!(db.try_publish_work("c", "compose", "c").unwrap().is_none());
+    assert!(db.try_publish_work("d", "transfer", "d").unwrap().is_none());
     drop(second);
-    assert!(db.try_publish_work("c", "compose", "c").unwrap().is_some());
+    assert!(db.try_publish_work("d", "transfer", "d").unwrap().is_some());
+    drop(compose);
 }
 
 #[test]
@@ -716,8 +757,18 @@ fn publish_dispatch_sixty_minute_soak() {
                 .unwrap();
             max_claims = max_claims.max(count);
             assert!(count <= 8);
-            assert!(active.iter().filter(|(j, _)| j.phase == "transfer").count() <= 4);
-            assert!(active.iter().filter(|(j, _)| j.phase == "compose").count() <= 4);
+            assert!(
+                active.iter().filter(|(j, _)| j.phase == "transfer").count()
+                    <= db.publish_limits().unwrap().transfer
+            );
+            assert_eq!(
+                active
+                    .iter()
+                    .map(|(job, _)| &job.udid)
+                    .collect::<std::collections::HashSet<_>>()
+                    .len(),
+                active.len()
+            );
             drop(verify);
             drop(cleanup);
             for (job, permit) in active.into_iter().rev() {

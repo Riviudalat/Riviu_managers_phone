@@ -16,7 +16,9 @@ pub struct ConflictingAccountDevice {
 /// Collision context is a snapshot of saved mappings, not live account identity.
 #[derive(Debug, Clone, serde::Serialize, thiserror::Error, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
-#[error("TikTok username is already assigned to another device: @{attempted_handle} (target {udid})")]
+#[error(
+    "TikTok username is already assigned to another device: @{attempted_handle} (target {udid})"
+)]
 pub struct AccountAssignmentConflict {
     pub udid: String,
     pub attempted_handle: String,
@@ -26,7 +28,105 @@ pub struct AccountAssignmentConflict {
     pub conflicts_truncated: bool,
 }
 
+/// A backend-observed identity and its exact pre-observation stored value.
+#[derive(Debug, Clone, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AccountMappingObservation {
+    pub udid: String,
+    pub expected_handle: String,
+    pub observed_handle: String,
+}
+
 impl Database {
+    /// Validate the complete final mapping before writing any slot. Callers own
+    /// observation provenance/freshness; this boundary owns exact CAS and collisions.
+    pub fn reconcile_account_mappings(
+        &self,
+        observations: &[AccountMappingObservation],
+        apply: bool,
+    ) -> anyhow::Result<()> {
+        anyhow::ensure!(!observations.is_empty(), "no verified account observations");
+        let normalize = |value: &str| value.trim().trim_start_matches('@').to_ascii_lowercase();
+        let mut serials = std::collections::HashSet::new();
+        let mut handles = std::collections::HashSet::new();
+        for item in observations {
+            anyhow::ensure!(
+                !item.udid.trim().is_empty() && serials.insert(&item.udid),
+                "duplicate or empty device identifier"
+            );
+            let handle = &item.observed_handle;
+            anyhow::ensure!(
+                !handle.is_empty()
+                    && handle.len() <= 24
+                    && !handle.ends_with('.')
+                    && handle
+                        .bytes()
+                        .all(|b| b.is_ascii_alphanumeric() || b == b'_' || b == b'.'),
+                "invalid observed TikTok username"
+            );
+            anyhow::ensure!(
+                handles.insert(normalize(handle)),
+                "multiple phones observed the same TikTok account; mappings unchanged"
+            );
+        }
+        let mut conn = self.conn()?;
+        let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
+        for item in observations {
+            let current: Option<String> = tx
+                .query_row(
+                    "SELECT handle FROM device_meta WHERE udid=?1",
+                    [&item.udid],
+                    |row| row.get(0),
+                )
+                .optional()?;
+            anyhow::ensure!(
+                current.as_deref().unwrap_or_default() == item.expected_handle,
+                "device account mapping changed for {}; read again before reconciling",
+                item.udid
+            );
+            let mut stmt = tx.prepare("SELECT udid, number, alias, handle FROM device_meta WHERE udid<>?1 AND lower(ltrim(trim(handle),'@'))=lower(?2) ORDER BY udid")?;
+            let conflicts = stmt
+                .query_map(params![item.udid, item.observed_handle], |row| {
+                    Ok(ConflictingAccountDevice {
+                        udid: row.get(0)?,
+                        number: row.get(1)?,
+                        alias: row.get(2)?,
+                        handle: row.get(3)?,
+                    })
+                })?
+                .collect::<rusqlite::Result<Vec<_>>>()?;
+            let blocked: Vec<_> = conflicts
+                .into_iter()
+                .filter(|slot| {
+                    !observations.iter().any(|proof| {
+                        proof.udid == slot.udid
+                            && proof.expected_handle == slot.handle
+                            && normalize(&proof.observed_handle) != normalize(&slot.handle)
+                    })
+                })
+                .collect();
+            if !blocked.is_empty() {
+                return Err(AccountAssignmentConflict {
+                    udid: item.udid.clone(),
+                    attempted_handle: item.observed_handle.clone(),
+                    expected_handle: item.expected_handle.clone(),
+                    current_handle: current.unwrap_or_default(),
+                    conflicting_devices: blocked,
+                    conflicts_truncated: false,
+                }
+                .into());
+            }
+        }
+        if apply {
+            for item in observations {
+                tx.execute("INSERT INTO device_meta(udid,handle) VALUES(?1,?2) ON CONFLICT(udid) DO UPDATE SET handle=excluded.handle",
+                    params![item.udid, item.observed_handle])?;
+            }
+            tx.commit()?;
+        }
+        Ok(())
+    }
+
     /// The columns of one `device_meta` row, in the order both readers below bind them.
     /// One constant so a column added to the table cannot be added to one reader only —
     /// which is how `handle` came to be selected by the single-row read and not by anything
@@ -176,7 +276,10 @@ impl Database {
         // spelling and duplicates untouched, but only after the exact CAS check.
         if let Some(stored) = current.as_ref() {
             if !handle.is_empty()
-                && stored.trim().trim_start_matches('@').eq_ignore_ascii_case(handle)
+                && stored
+                    .trim()
+                    .trim_start_matches('@')
+                    .eq_ignore_ascii_case(handle)
             {
                 return Ok(stored.clone());
             }

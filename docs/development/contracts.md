@@ -10,7 +10,8 @@ IPC frontend. Không thêm một control plane riêng để đi vòng ownership/
 `publish_start_status` đối soát cùng request ID sau mất phản hồi. Migration 48
 giữ receipt khởi chạy và yêu cầu loại assignment. Restart không tự phát lại
 Post cho receipt chưa rõ kết quả. Preflight phát `publishPreflightProgress`
-theo từng máy, tối đa bốn probe đồng thời; bản chuẩn bị tối đa 30 giây chỉ được
+theo từng máy; các máy đã chọn được quan sát song song và trả kết quả theo thứ tự
+assignment. Bản chuẩn bị tối đa 30 giây chỉ được
 tái dùng sau kiểm source, owner, transport, readiness và binding hiện hành.
 
 `scripts/dev_compile_cache.ps1 -Action plan` chỉ ra một Cargo target chuẩn của
@@ -451,15 +452,20 @@ Escape và chọn option. WebView cũ giữ select native với khung theo token
 
 Helper Android được chuẩn bị sau inventory ổn định bằng worker
 `android_helper_setup` trong `state`: tối đa hai máy, admission và lease Repair giữ
-stream, một lần thử mỗi kết nối. `AndroidDriver::ensure_helper_installed` chỉ cài
-gói/đọc lại versionCode và launcher; không mở Activity, đổi IME hay tạo session.
+stream. `prepare_helper_runtime` xác minh gói, quyền sở hữu và clipboard có khôi phục;
+khi gặp retained owner lỗi, worker dùng chung kế hoạch maintenance với lệnh thủ công.
+Mỗi kết nối hoặc episode lỗi mới có một lần chuẩn bị; contention trước dispatch
+được chờ lại, kết quả chưa rõ giữ nguyên maintenance ID để đối soát. Inventory chỉ
+tiêu thụ bản ghi lỗi đã quan sát, không gọi HTTP helper trong lượt quét. Preflight
+gặp clipboard đang làm việc không được chốt thành helper hỏng. Chỉ runtime được
+xác minh mới xóa lỗi chuẩn bị; package presence hoặc reconnect không đủ.
 Inventory dùng dữ liệu máy đã đọc khi cùng máy đang giữ khóa chuẩn bị helper; lỗi
 scan Android không được coi là disconnect để cấp lại lượt cài. Gói `com.riviu.agent`
 có versionCode tối thiểu 5 cho launcher; APK, manifest và NOTICE phải khớp hash.
 
 ## Xác minh Publish và kết quả qua restart
 
-VerificationQueue dùng giới hạn máy chủ, mặc định4 observer, một observer mỗi máy.
+VerificationQueue giữ một observer mỗi máy, không dùng trần observer toàn máy chủ.
 Cleanup media chạy worker riêng; một máy đọc chậm không chặn dispatcher hoặc Sheet.
 Candidates được phân trang hữu hạn, ưu tiên bài tới hạn và luân phiên giữa các máy.
 Nhãn thời gian own-post chấp nhận EN và VI (`N phút trước` / `vừa xong`).
@@ -816,7 +822,8 @@ hiện cần kiểm tra; người vận hành chủ động yêu cầu đọc l�
 
 
 Điều phối Đăng bài dùng `publish_dispatch_jobs` trong SQLite (migration41), cùng
-claim theo thiết bị và giới hạn giai đoạn. Worker chỉ tạo task sau admission;
+claim độc quyền theo thiết bị và giới hạn riêng cho chuyển media. Soạn bài, xác
+minh, cleanup và hoàn tất ứng dụng không dùng trần số máy. Worker chỉ tạo task sau admission;
 media được tải theo bài đã nhận, hàng chờ chỉ giữ ID. `publish_attempts` giữ lịch
 sử lần thử; `publication_id` được backfill bằng assignment ID và bất biến, không
 nhóm lại dữ liệu cũ theo caption, thư mục hoặc tên máy. Intent và revision của
@@ -824,8 +831,11 @@ pipeline vẫn kiểm tại nút Đăng. Worker đã lỗi sau effect chỉ chuy
 
 `publish_get_limits`/`publish_set_limits` nhận `{transfer,compose,verify,deviceTotal}`,
 lưu ở `publish.dispatch.limits` theo database máy chủ, mỗi giá trị từ 1 đến 64.
-Giảm giới hạn chặn cấp lượt mới đến khi số đang chạy xuống mức mới; không cắt request
-thiết bị đang thực hiện. Worker đọc lại giới hạn verify ở vòng điều phối tiếp theo; phiên đang chạy được hoàn tất.
+Giữ cả bốn trường để tương thích dữ liệu cũ; chỉ `transfer` tác động admission.
+Giảm `transfer` chặn cấp lượt chuyển mới đến khi số đang chạy xuống mức mới,
+không cắt request đang thực hiện. Phân trang candidate chỉ phân chia lượt quét,
+không giới hạn tổng worker. Foreground stream tăng theo số máy đã phát hiện;
+preview vẫn dùng ngân sách cấu hình chung và nhường cho foreground.
 Đợt hẹn giờ chỉ được claim trong cửa sổ 30 giây theo giờ máy chủ. Cohort được
 claim đúng giờ không có deadline theo công suất cho từng assignment; started_at_ms
 chỉ được ghi khi thực sự dispatch. Cohort chưa được nhận đúng cửa sổ vẫn CAS sang

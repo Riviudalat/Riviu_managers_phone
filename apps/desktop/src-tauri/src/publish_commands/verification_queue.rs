@@ -1,29 +1,21 @@
 use std::{collections::HashMap, future::Future};
 use tokio::task::{Id, JoinSet};
 
-/// Bounded observers; pending publications remain durable database rows.
+/// One observer per phone; pending publications remain durable database rows.
 pub(crate) struct VerificationQueue {
     tasks: JoinSet<anyhow::Result<bool>>,
-    capacity: usize,
     devices: HashMap<Id, String>,
 }
 
 impl Default for VerificationQueue {
     fn default() -> Self {
-        Self::with_capacity(4)
-    }
-}
-impl VerificationQueue {
-    pub fn set_capacity(&mut self, capacity: usize) {
-        self.capacity = capacity.clamp(1, 64);
-    }
-    pub fn with_capacity(capacity: usize) -> Self {
         Self {
             tasks: JoinSet::new(),
             devices: HashMap::new(),
-            capacity: capacity.clamp(1, 64),
         }
     }
+}
+impl VerificationQueue {
     pub fn device_can_observe(device: &riviu_core::DeviceInfo) -> bool {
         use riviu_core::{DevicePlatform, DeviceStatus};
         device.status == DeviceStatus::Ready
@@ -38,7 +30,7 @@ impl VerificationQueue {
 
     /// True when this UDID is not already running an observer.
     pub fn available(&self, udid: &str) -> bool {
-        self.tasks.len() < self.capacity && !self.devices.values().any(|id| id == udid)
+        !self.devices.values().any(|id| id == udid)
     }
 
     pub fn push(
@@ -98,21 +90,22 @@ mod tests {
 
     #[tokio::test(start_paused = true)]
     async fn slow_device_does_not_hold_a_completed_phone_or_the_next_phone() {
-        let mut queue = VerificationQueue::with_capacity(6);
+        let mut queue = VerificationQueue::default();
         queue.push("slow".into(), async {
             tokio::time::sleep(Duration::from_secs(120)).await;
             Ok(false)
         });
         assert!(!queue.available("slow"));
-        for name in ["fast", "third", "fourth", "fifth", "sixth"] {
-            assert!(queue.available(name), "{name}");
+        for ordinal in 0..65 {
+            let name = format!("fast-{ordinal}");
+            assert!(queue.available(&name), "{name}");
             queue.push(name.to_string(), async { Ok(true) });
         }
-        assert!(!queue.available("fast"));
+        assert!(!queue.available("fast-0"));
         let start = tokio::time::Instant::now();
-        let mut finished =
-            std::collections::HashSet::from(["fast", "third", "fourth", "fifth", "sixth"]);
-        for _ in 0..5 {
+        let mut finished: std::collections::HashSet<_> =
+            (0..65).map(|ordinal| format!("fast-{ordinal}")).collect();
+        for _ in 0..65 {
             let (device, result) = queue.next().await.unwrap();
             assert!(result.unwrap());
             assert!(finished.remove(device.as_str()), "{device}");

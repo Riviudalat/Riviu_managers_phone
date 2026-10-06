@@ -9,10 +9,29 @@ pub async fn operation_trace_export(
     udid: String,
 ) -> Result<riviu_core::ipc_contract::TraceArtifact, CommandError> {
     let _admission = state.ensure_accepting_work()?;
-    if let Some(android) = &state.android {
-        android.flush_traces().await.map_err(err)?;
-    }
     let live = state.nurture.list_status();
+    let scope_live = live.clone();
+    let scope_operation = operation_id.clone();
+    let scope_device = udid.clone();
+    let sources = state
+        .db
+        .storage_read(move |db| {
+            Ok((|| {
+                let detail = read_operation_run_from(db, &scope_live, &scope_operation)?
+                    .ok_or_else(|| CommandError::invalid_argument("operation no longer exists"))?;
+                operation_trace_sources(db, &detail, &scope_device)
+            })())
+        })
+        .await
+        .map_err(err)??;
+    if let Some(android) = &state.android {
+        for source in &sources {
+            android
+                .flush_traces_for_run(source, &udid)
+                .await
+                .map_err(err)?;
+        }
+    }
     let artifacts_root = state.artifacts_dir.clone();
     state
         .db
@@ -23,31 +42,19 @@ pub async fn operation_trace_export(
                 &artifacts_root,
                 &operation_id,
                 &udid,
+                &sources,
             ))
         })
         .await
         .map_err(err)?
 }
 
-fn export_operation_trace(
+fn operation_trace_sources(
     db: &riviu_core::db::Database,
-    live: &[NurtureSessionStatus],
-    artifacts_root: &Path,
-    operation_id: &str,
+    detail: &riviu_core::OperationRunDetail,
     udid: &str,
-) -> Result<riviu_core::ipc_contract::TraceArtifact, CommandError> {
-    use riviu_core::ipc_contract::{OperationTrace, TraceArtifact};
-    use sha2::Digest;
-    let detail = read_operation_run_from(db, live, operation_id)?
-        .ok_or_else(|| CommandError::invalid_argument("operation no longer exists"))?;
-    let mut logs = read_operation_device_log(db, live, operation_id, udid)?;
-    let root = artifacts_root.canonicalize().map_err(err)?;
-    let mut observations = riviu_core::ui_automation::trace::read_run(
-        &root.join("traces"),
-        &detail.summary.source_id,
-        udid,
-    )
-    .map_err(err)?;
+) -> Result<Vec<String>, CommandError> {
+    let mut sources = vec![detail.summary.source_id.clone()];
     if detail.summary.kind == riviu_core::OperationRunKind::Orchestration {
         let source = db
             .get_orchestration_run(uuid::Uuid::parse_str(&detail.summary.source_id).map_err(err)?)
@@ -59,12 +66,43 @@ fn export_operation_trace(
             .filter(|a| a.snapshot.target.included.iter().any(|d| d.udid == udid))
         {
             if let Some((_, id)) = orchestration_child_source(db, attempt)? {
-                observations.extend(
-                    riviu_core::ui_automation::trace::read_run(&root.join("traces"), &id, udid)
-                        .map_err(err)?,
-                );
+                sources.push(id);
             }
         }
+    }
+    sources.sort();
+    sources.dedup();
+    Ok(sources)
+}
+
+fn export_operation_trace(
+    db: &riviu_core::db::Database,
+    live: &[NurtureSessionStatus],
+    artifacts_root: &Path,
+    operation_id: &str,
+    udid: &str,
+    flushed_sources: &[String],
+) -> Result<riviu_core::ipc_contract::TraceArtifact, CommandError> {
+    use riviu_core::ipc_contract::{OperationTrace, TraceArtifact};
+    use sha2::Digest;
+    let detail = read_operation_run_from(db, live, operation_id)?
+        .ok_or_else(|| CommandError::invalid_argument("operation no longer exists"))?;
+    let mut logs = read_operation_device_log(db, live, operation_id, udid)?;
+    let root = artifacts_root.canonicalize().map_err(err)?;
+    let sources = operation_trace_sources(db, &detail, udid)?;
+    if sources != flushed_sources {
+        return Err(CommandError::invalid_argument(
+            "Trace scope changed during export; retry export",
+        ));
+    }
+    let mut observations = Vec::new();
+    for source in &sources {
+        observations.extend(
+            riviu_core::ui_automation::trace::read_run(&root.join("traces"), source, udid)
+                .map_err(err)?,
+        );
+    }
+    if detail.summary.kind == riviu_core::OperationRunKind::Orchestration {
         observations.sort_by(|a, b| {
             a.observed_at
                 .cmp(&b.observed_at)
@@ -127,7 +165,7 @@ fn export_operation_trace(
             let Some(evidence) = row.evidence.as_deref().and_then(persisted_trace_evidence) else {
                 continue;
             };
-            let bytes = serde_json::to_vec(&serde_json::json!({
+            let mut bytes = serde_json::to_vec(&serde_json::json!({
                 "runId": operation_id,
                 "sourceId": detail.summary.source_id,
                 "deviceId": udid,
@@ -136,7 +174,14 @@ fn export_operation_trace(
             }))
             .map_err(err)?;
             if bytes.len() > 256 * 1024 {
-                continue;
+                bytes = serde_json::to_vec(&serde_json::json!({
+                    "runId": operation_id,
+                    "sourceId": detail.summary.source_id,
+                    "deviceId": udid,
+                    "assignmentId": row.id,
+                    "evidence": trace_evidence_omitted("exportByteLimit"),
+                }))
+                .map_err(err)?;
             }
             let sha256 = format!("{:x}", sha2::Sha256::digest(&bytes));
             // Keep the bounded diagnostic body in the exported trace too: a
@@ -234,15 +279,16 @@ fn export_operation_trace(
 fn persisted_trace_evidence(raw: &str) -> Option<serde_json::Value> {
     const MAX_BYTES: usize = 256 * 1024;
     if raw.len() > MAX_BYTES {
-        return None;
+        return Some(trace_evidence_omitted("rawByteLimit"));
     }
     fn project(value: &serde_json::Value, depth: usize) -> Option<serde_json::Value> {
         if depth == 0 {
-            return None;
+            return Some(trace_evidence_omitted("depthLimit"));
         }
         let mut fields = serde_json::Map::new();
         for key in [
             "selectionDiagnostic",
+            "stageDiagnostics",
             "message",
             "mediaStage",
             "nativePrepare",
@@ -259,14 +305,18 @@ fn persisted_trace_evidence(raw: &str) -> Option<serde_json::Value> {
             }
         }
         if let Some(prior) = value.get("priorEvidenceJson") {
-            let parsed = if let Some(raw) = prior.as_str() {
-                (raw.len() <= MAX_BYTES)
-                    .then(|| serde_json::from_str::<serde_json::Value>(raw).ok())
-                    .flatten()
+            let projected = if let Some(raw) = prior.as_str() {
+                if raw.len() > MAX_BYTES {
+                    Some(trace_evidence_omitted("rawByteLimit"))
+                } else {
+                    serde_json::from_str::<serde_json::Value>(raw)
+                        .ok()
+                        .and_then(|prior| project(&prior, depth - 1))
+                }
             } else {
-                Some(prior.clone())
+                project(prior, depth - 1)
             };
-            if let Some(prior) = parsed.as_ref().and_then(|prior| project(prior, depth - 1)) {
+            if let Some(prior) = projected {
                 fields.insert("priorEvidenceJson".into(), prior);
             }
         }
@@ -276,25 +326,51 @@ fn persisted_trace_evidence(raw: &str) -> Option<serde_json::Value> {
     project(&value, 8)
 }
 
+fn trace_evidence_omitted(reason: &str) -> serde_json::Value {
+    serde_json::json!({"truncated": true, "omitted": true, "reasonCode": reason})
+}
+
 fn bounded_trace_value(value: &serde_json::Value, depth: usize) -> Option<serde_json::Value> {
     use serde_json::Value;
     if depth == 0 {
-        return None;
+        return Some(trace_evidence_omitted("depthLimit"));
     }
     match value {
-        Value::String(s) => (s.len() <= 8192).then(|| value.clone()),
+        Value::String(s) if s.len() > 8192 => Some(trace_evidence_omitted("stringByteLimit")),
+        Value::String(_) => Some(value.clone()),
         Value::Array(values) if values.len() <= 128 => values
             .iter()
             .map(|v| bounded_trace_value(v, depth - 1))
             .collect::<Option<Vec<_>>>()
             .map(Value::Array),
-        Value::Array(_) => None,
+        Value::Array(_) => Some(trace_evidence_omitted("arrayLimit")),
         Value::Object(values) => {
             let mut out = serde_json::Map::new();
             for (key, value) in values {
                 if matches!(
                     key.as_str(),
                     "stage"
+                        | "context"
+                        | "requestId"
+                        | "operationId"
+                        | "queueWaitMs"
+                        | "events"
+                        | "droppedEvents"
+                        | "phase"
+                        | "operation"
+                        | "selector"
+                        | "sessionEpoch"
+                        | "startedMs"
+                        | "elapsedMs"
+                        | "remainingBudgetMs"
+                        | "remainingAfterMs"
+                        | "outcome"
+                        | "bounds"
+                        | "plannerPoint"
+                        | "enabled"
+                        | "clickable"
+                        | "lastCompletedSnapshot"
+                        | "lastVerifiedSnapshot"
                         | "reasonCode"
                         | "expectedCount"
                         | "lastVerifiedCount"
@@ -338,6 +414,29 @@ fn bounded_trace_value(value: &serde_json::Value, depth: usize) -> Option<serde_
                         | "message"
                         | "chain"
                 ) {
+                    // Only the producer's event stream has the larger 1024-item budget.
+                    if key == "events" {
+                        if let Some(events) = value.as_array() {
+                            let projected = events
+                                .iter()
+                                .take(1024)
+                                .map(|event| {
+                                    bounded_trace_value(event, depth - 1).unwrap_or_else(|| {
+                                        trace_evidence_omitted("unsupportedEvent")
+                                    })
+                                })
+                                .collect::<Vec<_>>();
+                            out.insert(key.clone(), Value::Array(projected));
+                            if events.len() > 1024 {
+                                out.insert("eventsTruncated".into(), Value::Bool(true));
+                                out.insert(
+                                    "omittedEvents".into(),
+                                    Value::from(events.len() - 1024),
+                                );
+                            }
+                            continue;
+                        }
+                    }
                     if let Some(value) = bounded_trace_value(value, depth - 1) {
                         out.insert(key.clone(), value);
                     }
@@ -940,6 +1039,86 @@ mod nurture_history_tests {
     use super::*;
     use chrono::{TimeZone, Utc};
 
+
+    #[test]
+    fn persisted_diagnostics_projection_preserves_bounded_evidence_without_raw_envelopes() {
+        use serde_json::json;
+        let snapshot = json!({"generation": 7, "sha256": "snapshot", "sessionEpoch": "epoch",
+            "albumMatches": true, "observedOrdinals": [1, 2], "nextCount": 2,
+            "selectorBounds": [{"x": 1, "y": 2, "width": 3, "height": 4}],
+            "nextBounds": [], "album": "SECRET"});
+        let event = json!({"phase": "picker", "operation": "read", "sessionEpoch": "epoch",
+            "startedMs": 10, "elapsedMs": 20, "remainingBudgetMs": 30, "remainingAfterMs": 10,
+            "outcome": "completed", "selector": "text", "bounds": [1,2,3,4],
+            "plannerPoint": [2,3], "enabled": true, "clickable": false,
+            "snapshotGeneration": 7, "snapshotSha256": "snapshot", "caption": "SECRET"});
+        let raw = json!({"stageDiagnostics": {"context": {"requestId": "request",
+            "operationId": "operation", "udid": "phone", "queueWaitMs": null, "account": "SECRET"},
+            "events": [event], "droppedEvents": 2, "helper": {"message": "SECRET"}},
+            "selectionDiagnostic": {"stage": "tapReadback", "snapshotGeneration": null,
+                "lastCompletedSnapshot": snapshot, "lastVerifiedSnapshot": snapshot},
+            "caption": "SECRET", "account": "SECRET", "album": "SECRET"});
+        let projected = persisted_trace_evidence(&raw.to_string()).unwrap();
+        let stage = &projected["stageDiagnostics"];
+        assert_eq!(stage["context"]["requestId"], "request");
+        assert_eq!(stage["context"]["operationId"], "operation");
+        assert_eq!(stage["context"]["udid"], "phone");
+        assert!(stage["context"]["queueWaitMs"].is_null());
+        assert_eq!(stage["droppedEvents"], 2);
+        let mut safe_event = event.clone();
+        safe_event.as_object_mut().unwrap().remove("caption");
+        assert_eq!(stage["events"][0], safe_event);
+        let mut safe_snapshot = snapshot.clone();
+        safe_snapshot.as_object_mut().unwrap().remove("album");
+        for key in ["lastCompletedSnapshot", "lastVerifiedSnapshot"] {
+            assert_eq!(projected["selectionDiagnostic"][key], safe_snapshot);
+        }
+        assert!(projected["selectionDiagnostic"]["snapshotGeneration"].is_null());
+        assert!(!projected.to_string().contains("SECRET"));
+        for prior in [raw.clone(), json!(raw.to_string())] {
+            let wrapped =
+                persisted_trace_evidence(&json!({"priorEvidenceJson": prior}).to_string()).unwrap();
+            assert_eq!(wrapped["priorEvidenceJson"], projected);
+        }
+        // Compact events exercise the count cap independently of the raw byte cap.
+        let mut many = json!({"stageDiagnostics": {"events": vec![json!({"elapsedMs": 1}); 1024]}});
+        let full = persisted_trace_evidence(&many.to_string()).unwrap();
+        assert_eq!(
+            full["stageDiagnostics"]["events"].as_array().unwrap().len(),
+            1024
+        );
+        many["stageDiagnostics"]["events"]
+            .as_array_mut()
+            .unwrap()
+            .push(json!({"elapsedMs": 2}));
+        let limited = persisted_trace_evidence(&many.to_string()).unwrap();
+        assert_eq!(
+            limited["stageDiagnostics"]["events"]
+                .as_array()
+                .unwrap()
+                .len(),
+            1024
+        );
+        assert_eq!(limited["stageDiagnostics"]["omittedEvents"], 1);
+        assert_eq!(limited["stageDiagnostics"]["eventsTruncated"], true);
+        let oversized = json!({"stageDiagnostics": {"events": vec![event; 1024]}}).to_string();
+        assert!(oversized.len() > 256 * 1024);
+        let omitted = persisted_trace_evidence(&oversized).expect("explicit omission");
+        assert_eq!(omitted["reasonCode"], "rawByteLimit");
+        assert_eq!(omitted["omitted"], true);
+        assert_eq!(omitted["truncated"], true);
+        let mut deep = raw;
+        for _ in 0..8 {
+            deep = json!({"priorEvidenceJson": deep});
+        }
+        let deep = persisted_trace_evidence(&deep.to_string()).unwrap();
+        let mut leaf = &deep;
+        for _ in 0..8 {
+            leaf = &leaf["priorEvidenceJson"];
+        }
+        assert_eq!(leaf["reasonCode"], "depthLimit");
+    }
+
     #[test]
     fn script_export_uses_its_device_artifact_even_after_another_device_overwrites_the_global_step()
     {
@@ -974,8 +1153,18 @@ mod nurture_history_tests {
         job.steps[0].artifact_path = Some(b.to_string_lossy().into_owned());
         db.save_job_device_step(&job, "b", 0, "session-b", 10)
             .unwrap();
-        let exported =
-            export_operation_trace(&db, &[], &root, &format!("script:{id}"), "a").unwrap();
+        let changed_scope =
+            export_operation_trace(&db, &[], &root, &format!("script:{id}"), "a", &[]).unwrap_err();
+        assert!(changed_scope.message.contains("Trace scope changed"));
+        let exported = export_operation_trace(
+            &db,
+            &[],
+            &root,
+            &format!("script:{id}"),
+            "a",
+            &[id.to_string()],
+        )
+        .unwrap();
         let trace: riviu_core::ipc_contract::OperationTrace =
             serde_json::from_slice(&std::fs::read(exported.path).unwrap()).unwrap();
         assert_eq!(trace.artifacts.len(), 1);

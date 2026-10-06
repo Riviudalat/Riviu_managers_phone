@@ -299,9 +299,6 @@ function dispatchDetail(assignment: PublishAssignmentRecord): string | null {
 
 const PUBLISH_LIMIT_FIELDS: { key: keyof PublishLimits; label: string }[] = [
   { key: "transfer", label: "Lượt chuyển media" },
-  { key: "compose", label: "Phiên thao tác TikTok" },
-  { key: "verify", label: "Lượt xác minh liên kết" },
-  { key: "deviceTotal", label: "Tổng lượt điều khiển thiết bị" },
 ];
 
 function PublishHostLimits({ onSaved }: { onSaved: () => void }) {
@@ -310,7 +307,7 @@ function PublishHostLimits({ onSaved }: { onSaved: () => void }) {
   const [message, setMessage] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
   const flight = useRef(false);
-  const valid = limits !== null && Object.values(limits).every(value => Number.isInteger(value) && value >= 1 && value <= 64);
+  const valid = limits !== null && Number.isInteger(limits.transfer) && limits.transfer >= 1 && limits.transfer <= 64;
   const read = async () => {
     if (flight.current) return;
     flight.current = true; setBusy(true); setError(null); setMessage(null);
@@ -333,7 +330,7 @@ function PublishHostLimits({ onSaved }: { onSaved: () => void }) {
     if (event.currentTarget.open && !limits && !flight.current) void read();
   }}>
     <summary>Giới hạn chạy đồng thời</summary>
-    <p>Đăng ngay và hẹn giờ dùng chung các giới hạn này. Sheet giữ tối đa 2 yêu cầu, gồm tối đa 1 yêu cầu báo tiến độ.</p>
+    <p>Mỗi điện thoại chạy độc lập; các bài trên cùng một máy chạy lần lượt. Chỉ giới hạn chuyển media để bảo vệ USB. Sheet giữ tối đa 2 yêu cầu.</p>
     {busy && <p role="status">Đang đọc hoặc lưu giới hạn…</p>}
     {error && <p role="alert">{error}</p>}
     {limits && <fieldset disabled={busy}><legend>Giới hạn của máy tính này</legend>
@@ -343,12 +340,11 @@ function PublishHostLimits({ onSaved }: { onSaved: () => void }) {
         }} />
       </label>)}
       {!valid && <p role="alert">Mỗi giới hạn phải là số nguyên từ 1 đến 64.</p>}
-      <button type="button" onClick={() => { setLimits({transfer:64,compose:4,verify:4,deviceTotal:64}); setMessage("Đã chọn tối đa 64 máy, 4 phiên TikTok và 4 lượt xác minh; bấm Lưu giới hạn để áp dụng."); }}>Tối đa 64 máy, 4 phiên TikTok</button>
       <button type="button" disabled={!valid} onClick={() => void save()}>Lưu giới hạn</button>
     </fieldset>}
     {error && <button type="button" disabled={busy} onClick={() => void read()}>Đọc lại giới hạn</button>}
     {message && <p role="status">{message}</p>}
-    <p>Máy đã chuyển media có thể chờ lượt thao tác TikTok; đang xếp hàng chưa có nghĩa đã bấm Đăng. Giới hạn mới áp dụng khi cấp lượt mới, phiên đang chạy tiếp tục hoàn tất.</p>
+    <p>Giới hạn chuyển media mới áp dụng khi cấp lượt mới; tác vụ đang chạy tiếp tục hoàn tất.</p>
   </details>;
 }
 

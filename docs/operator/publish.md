@@ -4,15 +4,16 @@
 
 ## Đăng bài
 
-Mục **Giới hạn chạy đồng thời** trên trang Đăng bài cho phép xem và lưu giới hạn
-chuyển media, thao tác TikTok, xác minh link và tổng lượt điều khiển theo máy chủ.
-Sau khi đổi giới hạn, kiểm tra lại lịch trước khi lưu; lịch quá tải có cảnh báo.
+Mỗi điện thoại có lượt đăng và xác minh riêng. Máy đang soạn bài hoặc chờ link
+không giữ lượt của máy khác. Một điện thoại vẫn chỉ nhận một chủ điều khiển tại
+một thời điểm; hai bài trên cùng máy phải chờ nhau.
 
-Đăng ngay và hẹn giờ dùng chung hàng chờ bền vững theo từng bài/máy. Mặc định toàn
-ứng dụng cho phép 64 lượt chuyển media, 4 lượt thao tác TikTok và 4 lượt xác minh
-liên kết, với tổng tối đa 64 máy; mỗi máy chỉ có một chủ điều khiển. Cấu hình giới hạn đã lưu trên PC được
-giữ nguyên: chọn **Chạy song song toàn bộ máy** rồi **Lưu giới hạn** để mở toàn bộ
-lượt trên PC đang dùng giới hạn cũ. Lệnh ADB vẫn có giới hạn I/O chung theo bus USB.
+Đăng ngay và hẹn giờ dùng chung hàng chờ bền vững theo từng bài/máy. Các giới hạn
+thao tác TikTok, xác minh link và tổng máy đã lưu ở bản cũ không chặn máy mới vào
+lượt. Mục giới hạn trên trang Đăng bài chỉ điều chỉnh số máy chuyển media đồng
+thời, từ 1 đến 64. Lệnh ADB vẫn có giới hạn I/O chung theo bus USB. Tốc độ thực tế
+phụ thuộc USB, CPU, mạng và phản hồi từng điện thoại; app ưu tiên phiên đang thao
+tác hơn các ảnh xem trước khi tài nguyên stream đầy.
 Sheet có tối đa 2 request, trong đó tối đa
 1 request báo tiến độ. Theo dõi hiển thị giai đoạn, thời điểm vào hàng và lý do chờ.
 Sau khi gửi, app trả lượt thao tác TikTok rồi xác minh riêng; retry trước gửi giữ
@@ -39,8 +40,8 @@ hoặc byte ảnh đã đổi, lượt đăng dừng trước bộ chọn ảnh 
 Bài đã gửi và lượt chưa rõ kết quả không được đăng lại để sửa thứ tự.
 
 Giờ hẹn là lúc ứng dụng nhận đợt đăng vào hàng chờ. Đợt được nhận trong 30 giây
-được xử lý theo giới hạn đã lưu; các máy còn chờ lượt không bị ghi Lỡ lịch chỉ vì
-hết lượt chạy đồng thời. Đợt chưa được nhận trong cửa sổ đó hoặc app mở lại sau
+được xử lý độc lập theo từng máy, với giới hạn chuyển media đã lưu; máy chờ
+chuyển media không bị ghi Lỡ lịch vì phải chờ lượt. Đợt chưa được nhận trong cửa sổ đó hoặc app mở lại sau
 giờ hẹn được ghi **Lỡ lịch**, không tự đăng bù. Bài đã gửi vẫn được xác minh.
 Lịch đông máy có thể bắt đầu thao tác ở từng máy muộn hơn giờ hẹn.
 

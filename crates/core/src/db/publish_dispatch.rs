@@ -8,6 +8,7 @@ mod completion;
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct PublishLimits {
     pub transfer: usize,
+    /// Legacy wire fields, retained for old clients; only transfer limits admission.
     pub compose: usize,
     pub verify: usize,
     pub device_total: usize,
@@ -35,16 +36,6 @@ impl PublishLimits {
             "Giới hạn đăng bài phải từ 1 đến 64"
         );
         Ok(())
-    }
-    fn stage(self, stage: &str) -> anyhow::Result<usize> {
-        Ok(match stage {
-            "transfer" => self.transfer,
-            "compose" => self.compose,
-            "verify" => self.verify,
-            "cleanup" => self.device_total,
-            "appCompletion" => self.device_total,
-            _ => anyhow::bail!("unknown publish work stage"),
-        })
     }
 }
 
@@ -328,14 +319,20 @@ impl Database {
         let connection = self.dispatch_conn()?;
         let mut conn = connection.lock();
         let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
-        // A concurrent configuration reduction must commit before or after this
-        // admission, never between its capacity snapshot and the claim insert.
+        // Only media transfer is host-limited. Legacy compose/verify/deviceTotal
+        // fields remain readable, but cannot block an independent phone.
+        anyhow::ensure!(
+            matches!(
+                stage,
+                "transfer" | "compose" | "verify" | "cleanup" | "appCompletion"
+            ),
+            "unknown publish work stage"
+        );
         let limits = Self::publish_limits_from_connection(&tx)?;
-        let cap = limits.stage(stage)? as i64;
-        let (total, same, busy): (i64,i64,i64) = tx.query_row(
-            "SELECT COUNT(*),COALESCE(SUM(stage=?1),0),COALESCE(SUM(udid=?2),0) FROM publish_work_claims",
-            params![stage,udid], |r| Ok((r.get(0)?,r.get(1)?,r.get(2)?)))?;
-        if total >= limits.device_total as i64 || same >= cap || busy > 0 {
+        let (transfers, busy): (i64, i64) = tx.query_row(
+            "SELECT COALESCE(SUM(stage='transfer'),0),COALESCE(SUM(udid=?1),0) FROM publish_work_claims",
+            [udid], |r| Ok((r.get(0)?, r.get(1)?)))?;
+        if busy > 0 || (stage == "transfer" && transfers >= limits.transfer as i64) {
             return Ok(None);
         }
         let token = Uuid::new_v4().to_string();
@@ -439,7 +436,7 @@ impl Database {
           WHERE j.state='queued' AND c.state='posting'
           AND NOT EXISTS(SELECT 1 FROM publish_recovery_state retry WHERE retry.assignment_id=j.assignment_id AND CAST(json_extract(retry.payload,'$.nextRetryAt') AS REAL)>CAST(strftime('%s','now') AS INTEGER)*1000)
           AND ((j.phase='transfer' AND (SELECT COUNT(*) FROM publish_work_claims WHERE stage='transfer')<CAST(COALESCE((SELECT json_extract(value,'$.transfer') FROM settings WHERE key='publish.dispatch.limits'),64) AS INTEGER))
-            OR (j.phase='compose' AND (SELECT COUNT(*) FROM publish_work_claims WHERE stage='compose')<CAST(COALESCE((SELECT json_extract(value,'$.compose') FROM settings WHERE key='publish.dispatch.limits'),4) AS INTEGER)))
+            OR j.phase='compose')
           AND NOT EXISTS(SELECT 1 FROM publish_work_claims w WHERE w.udid=j.udid)
           AND NOT EXISTS(SELECT 1 FROM publish_dispatch_jobs busy WHERE busy.udid=j.udid
             AND busy.assignment_id<>j.assignment_id AND busy.state IN ('queued','running') AND busy.started_at_ms IS NOT NULL)

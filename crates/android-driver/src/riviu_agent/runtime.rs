@@ -606,7 +606,7 @@ impl HelperClient {
             "exactReleaseProved":false,"clipboardRestorationProved":false}))
     }
 
-    /// Explicit maintenance only; never called by automatic install/admission/resume.
+    /// Exact-plan maintenance only, authorized by operator confirmation or automatic setup policy.
     pub(crate) async fn execute_maintenance(adb: &AdbProgram, serial: &str, apk: Option<&Path>, root: Option<&Path>, plan: Value, operator_authorized: bool, observation_only: bool) -> anyhow::Result<Value> {
         Self::execute_maintenance_with_cache(adb, serial, apk, root, plan, operator_authorized, observation_only, None).await
     }
@@ -850,7 +850,8 @@ impl HelperClient {
         }
         let apk = apk.context("compatible bundled helper APK missing")?;
         let hash = riviu_core::frame_sha256(&std::fs::read(apk)?);
-        anyhow::ensure!(checked_shell(&adb, serial, "id -u").await?.trim() == "2000", "helper runtime requires shell UID2000; no root fallback");
+        let shell_uid = checked_shell(&adb, serial, "id -u").await?;
+        anyhow::ensure!(shell_uid.trim() == "2000", "helper runtime requires shell UID2000; observed adbd UID {}; no root fallback", shell_uid.trim());
         anyhow::ensure!(checked_shell(&adb, serial, "am get-current-user").await?.trim() == "0", "helper runtime requires checked Android user0");
         let installed = package_installed(&adb, serial).await?;
         let old = if installed { Some(inventory(&adb, serial).await?) } else { None };

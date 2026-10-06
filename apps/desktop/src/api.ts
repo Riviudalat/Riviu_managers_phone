@@ -965,6 +965,22 @@ export async function saveDeviceHandle(udid: string, expectedHandle: string, han
   return result;
 }
 
+export interface AccountReconciliationRow {
+  udid: string; expectedHandle: string; observedHandle: string | null;
+  checkedAt: string | null; snapshotSha256: string | null; error: unknown | null;
+}
+export interface AccountReconciliationPlan {
+  operationId: string; rows: AccountReconciliationRow[]; blocker: unknown | null;
+}
+export async function previewAccountReconciliation(udids: string[]) {
+  return invoke<AccountReconciliationPlan>("preview_account_reconciliation", { udids });
+}
+export async function applyAccountReconciliation(operationId: string) {
+  const result = await invoke<{ udid: string; expectedHandle: string; observedHandle: string }[]>("apply_account_reconciliation", { operationId });
+  await invalidateReadScope(["deviceMetadata"]);
+  return result;
+}
+
 export type DeviceMetaChange = { field: "alias"; value: string } | { field: "number"; value: number | null };
 export async function patchDeviceMeta(udid: string, change: DeviceMetaChange) {
   const result = await invoke<DeviceMeta>("patch_device_meta", { udid, change });

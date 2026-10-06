@@ -165,9 +165,7 @@ impl AndroidDriver {
             self.inventory_metadata_at
                 .lock()
                 .retain(|serial, _| connected.contains(serial));
-            self.helper_setup_errors
-                .lock()
-                .retain(|serial, _| connected.contains(serial));
+            // Failure remains visible across disconnect; only qualified setup clears it.
         }
 
         // Metadata is optional and bounded; every row's connection comes from this
@@ -293,9 +291,23 @@ impl AndroidDriver {
                 .copied()
                 .unwrap_or(usize::MAX)
         });
+        // Consume failure already observed by an admitted operation. Inventory never
+        // waits for helper HTTP/lifecycle locks, and ordinary busy is not failure.
+        for device in &devices {
+            if !connected.contains(&device.udid) { continue; }
+            let Ok(_guard) = self.helper_inventory_lock(&device.udid).try_read_owned() else { continue; };
+            let helper = self.helpers.lock().get(&device.udid).cloned();
+            if helper.is_some_and(|helper| helper.cached_acquisition_failed()) {
+                self.record_helper_runtime_result(&device.udid, false);
+            }
+        }
         for device in &mut devices {
-            if device.last_error.is_none() && connected.contains(&device.udid) {
-                device.last_error = self.helper_setup_errors.lock().get(&device.udid).cloned();
+            if connected.contains(&device.udid) {
+                if let Some(error) = self.helper_setup_errors.lock().get(&device.udid).cloned() {
+                    device.wda_ready = false;
+                    device.status = DeviceStatus::Error;
+                    if device.last_error.is_none() { device.last_error = Some(error); }
+                }
             }
         }
         if reading.stable && reading.failure.is_none() {
@@ -325,15 +337,8 @@ impl AndroidDriver {
         })
             .await
         }.await;
-        let mut errors = self.helper_setup_errors.lock();
-        match &result {
-            Ok(()) => {
-                errors.remove(serial);
-            }
-            Err(error) => {
-                errors.insert(serial.to_owned(), format!("Riviu Helper: {error:#}"));
-            }
-        }
+        // Package presence alone is never qualified runtime success.
+        if result.is_err() { self.record_helper_runtime_result(serial, false); }
         result
     }
 
@@ -525,7 +530,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn untrusted_partial_inventory_keeps_failure_until_stable_departure() {
+    async fn untrusted_partial_inventory_keeps_failure_across_reconnection() {
         let driver = inventory_driver();
         let failure = "Riviu Helper: INSTALL_FAILED_USER_RESTRICTED";
         driver
@@ -563,10 +568,12 @@ mod tests {
             ["b"]
         );
         assert!(!driver.inventory_cache.lock().contains_key("a"));
-        assert!(!driver.helper_setup_errors.lock().contains_key("a"));
+        assert!(driver.helper_setup_errors.lock().contains_key("a"));
         let reconnected = driver
             .inventory_from_reading(inventory_reading(&["a", "b"], true, None), inventory_probe)
             .await;
-        assert!(reconnected[0].last_error.is_none());
+        assert_eq!(reconnected[0].last_error.as_deref(), Some(failure));
+        assert_eq!(reconnected[0].status, DeviceStatus::Error);
+        assert!(!reconnected[0].wda_ready);
     }
 }

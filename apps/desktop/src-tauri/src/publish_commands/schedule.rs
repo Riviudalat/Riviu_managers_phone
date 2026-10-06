@@ -417,7 +417,10 @@ mod tests {
         let warnings = schedule_capacity_warnings(
             &request,
             &existing,
-            riviu_core::db::PublishLimits::default(),
+            riviu_core::db::PublishLimits {
+                transfer: 4,
+                ..Default::default()
+            },
         )
         .unwrap();
         assert_eq!(warnings.len(), 1);
@@ -435,9 +438,7 @@ mod tests {
             ..Default::default()
         };
         let warnings = schedule_capacity_warnings(&mixed, &[], limits).unwrap();
-        assert_eq!(warnings.len(), 1);
-        assert!(warnings[0].contains("2 bài cùng giờ"));
-        assert!(warnings[0].contains("tối đa 1 lượt"));
+        assert!(warnings.is_empty());
     }
 
     #[test]

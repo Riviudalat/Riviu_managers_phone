@@ -89,14 +89,24 @@ chỉ được đối soát. Khôi phục thành công khóa các kết nối he
 trả máy về **Đã kết nối**; mở điều khiển hoặc chạy tác vụ để kiểm phiên mới.
 
 Khi phát hiện điện thoại Android đã cho phép gỡ lỗi USB, Riviu Manager tự kiểm tra
-**Riviu Helper** và cài app nếu thiếu, hoặc cập nhật bản cũ chưa có biểu tượng. App
+**Riviu Helper**, cài nếu thiếu, cập nhật gói chưa phù hợp và xác minh runtime trước
+khi báo hoàn tất. Khi một thao tác phát hiện helper hỏng giữa phiên, app xếp lại
+việc chuẩn bị cho đúng máy sau khi tác vụ giữ máy kết thúc. App
 hiển thị tên **Riviu Helper** cùng logo Riviu trong danh sách ứng dụng. Mở app để xem
 chức năng và trạng thái dịch vụ; thao tác này không đổi bàn phím hoặc mở quyền mới.
 
 Việc chuẩn bị chạy nền tối đa hai máy cùng lúc. Máy đang có tác vụ hoặc được mở điều
 khiển sẽ chờ đến khi rảnh; stream vẫn giữ nguyên. Máy đã có bản phù hợp được dùng lại,
-không cài lại mỗi lần quét. Cài xong phải đọc lại phiên bản và biểu tượng mới tính là
-hoàn tất. Dịch vụ clipboard/media chỉ khởi động khi một chức năng cần sử dụng.
+không cài lại mỗi lần quét. Cài xong phải đọc lại phiên bản, kiểm quyền sở hữu và
+xác minh clipboard có khôi phục trước khi báo hoàn tất. Quyền cài USB bị ROM từ
+chối hoặc bản ghi thao tác cũ chưa đối soát được sẽ hiện trên đúng máy; app không
+lặp cài liên tục. Kế hoạch khôi phục đã thực thi chỉ được đọc lại kết quả. Nút
+**Khôi phục helper** vẫn có để xử lý trường hợp cần người vận hành kiểm tra.
+
+**Đọc và gán nick TikTok** đọc song song các máy đã chọn, rồi đối chiếu cả nhóm
+trước khi lưu. Nếu tài khoản chuyển giữa các máy, Riviu cần đọc cả những máy đang
+lưu tên trùng và hiển thị tên cũ, tên vừa đọc để xác nhận. Máy chưa đọc được giữ
+nguyên dữ liệu; chỉ cập nhật tên trong Riviu, không chuyển tài khoản trên điện thoại.
 
 Nếu điện thoại chặn **Cài đặt qua USB**, ứng dụng ghi rõ lỗi ở máy và **Hoạt động / nhật ký của tác vụ liên quan**. Bật quyền cài qua USB trên điện thoại rồi ngắt/kết nối lại để thử lại.
 Mỗi kết nối chỉ có một lần thử cài, không lặp cài liên tục khi bị từ chối. Máy chưa
