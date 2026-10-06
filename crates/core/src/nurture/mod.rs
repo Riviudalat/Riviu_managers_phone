@@ -809,17 +809,39 @@ impl NurtureEngine {
         bundle_id: &str,
         kind: InteractionSessionKind,
         stop: &AtomicBool,
+        deadline: Option<Instant>,
         waiting: impl Fn() + Send,
     ) -> Result<UiWithStreamContext, crate::DeviceControlError> {
-        let exclusive = self
-            .control
-            .acquire_exclusive(udid, DeviceWorkOwner::Nurture)
-            .await?;
+        let cancelled =
+            || stop.load(Ordering::Acquire) || deadline.is_some_and(|at| Instant::now() >= at);
+        let mut announced = false;
+        let exclusive = loop {
+            if cancelled() {
+                return Err(crate::DeviceControlError::CapacityWaitCancelled);
+            }
+            // Busy admission has no driver effects. Await a successful attempt fully:
+            // it includes parking the preview and must never be dropped on cancellation.
+            match self
+                .control
+                .try_acquire_exclusive(udid, DeviceWorkOwner::Nurture)
+                .await
+            {
+                Ok(context) => break context,
+                Err(crate::DeviceControlError::Busy(_)) => {
+                    if !announced {
+                        waiting();
+                        announced = true;
+                    }
+                    tokio::time::sleep(Duration::from_millis(200)).await;
+                }
+                Err(error) => return Err(error),
+            }
+        };
         let (exclusive, capacity) = self
             .control
-            .reserve_ui_capacity_until(exclusive, || stop.load(Ordering::Acquire), waiting)
+            .reserve_ui_capacity_until(exclusive, cancelled, waiting)
             .await?;
-        if stop.load(Ordering::Acquire) {
+        if cancelled() {
             return Err(crate::DeviceControlError::CapacityWaitCancelled);
         }
         self.control
@@ -1315,6 +1337,7 @@ impl NurtureEngine {
         settings: &NurtureSettings,
         status: &mut NurtureSessionStatus,
         ctx: &SessionCtx<'_, F>,
+        deadline: Option<Instant>,
     ) -> anyhow::Result<Option<OpenedDevice>> {
         if ctx.stop.load(Ordering::Acquire) {
             status.finish(Outcome::Stopped);
@@ -1369,16 +1392,23 @@ impl NurtureEngine {
         queued.phase = NurturePhase::Queued;
         queued.last_message = "Chờ lượt điều khiển".into();
         let first_session = self
-            .open_ui_context(ctx.udid, &bundle_id, session_kind, ctx.stop, || {
-                (ctx.on_status)(queued.clone())
-            })
+            .open_ui_context(
+                ctx.udid,
+                &bundle_id,
+                session_kind,
+                ctx.stop,
+                deadline,
+                || (ctx.on_status)(queued.clone()),
+            )
             .await;
         let ui_context = match first_session {
             Ok(context) => context,
             Err(first) => {
-                if ctx.stop.load(Ordering::Acquire) {
+                if matches!(first, crate::DeviceControlError::CapacityWaitCancelled)
+                    || ctx.stop.load(Ordering::Acquire)
+                {
                     status.finish(Outcome::Stopped);
-                    ctx.report(status, "Đã dừng khi chờ lượt".into());
+                    ctx.report(status, "Đã dừng hoặc hết thời gian khi chờ lượt".into());
                     return Ok(None);
                 }
                 ctx.report(
@@ -1386,9 +1416,14 @@ impl NurtureEngine {
                     format!("chưa mở được phiên điều khiển ({first}) — thử lần nữa"),
                 );
                 let second_session = self
-                    .open_ui_context(ctx.udid, &bundle_id, session_kind, ctx.stop, || {
-                        (ctx.on_status)(queued.clone())
-                    })
+                    .open_ui_context(
+                        ctx.udid,
+                        &bundle_id,
+                        session_kind,
+                        ctx.stop,
+                        deadline,
+                        || (ctx.on_status)(queued.clone()),
+                    )
                     .await;
                 match second_session {
                     Ok(context) => {
@@ -1396,9 +1431,11 @@ impl NurtureEngine {
                         context
                     }
                     Err(e) => {
-                        if ctx.stop.load(Ordering::Acquire) {
+                        if matches!(e, crate::DeviceControlError::CapacityWaitCancelled)
+                            || ctx.stop.load(Ordering::Acquire)
+                        {
                             status.finish(Outcome::Stopped);
-                            ctx.report(status, "Đã dừng khi chờ lượt".into());
+                            ctx.report(status, "Đã dừng hoặc hết thời gian khi chờ lượt".into());
                             return Ok(None);
                         }
                         let cleanup = self
@@ -2644,7 +2681,12 @@ impl NurtureEngine {
         ctx.push(&progress.status);
 
         let Some(mut device) = self
-            .open_for_session(&settings, &mut progress.status, &ctx)
+            .open_for_session(
+                &settings,
+                &mut progress.status,
+                &ctx,
+                max_duration.map(|duration| started + duration),
+            )
             .await?
         else {
             return Ok(progress.status);
@@ -3888,7 +3930,7 @@ mod tests {
             std::env::temp_dir().join(format!("riviu-pre-stopped-{}.db", uuid::Uuid::new_v4()));
         let engine = NurtureEngine::new(
             Arc::new(Database::open(&db_path).expect("test database")),
-            control,
+            control.clone(),
             Arc::new(NullFrameSource),
             std::env::temp_dir(),
         );
@@ -3912,6 +3954,52 @@ mod tests {
         assert!(!final_status.running);
         assert_eq!(driver.session_calls.load(Ordering::Relaxed), 0);
         assert_eq!(driver.stream_calls.load(Ordering::Relaxed), 0);
+
+        // Stop and duration must end admission while the other owner still holds
+        // the phone, without dispatching a session or cleaning up that owner's app.
+        for cancel_when_queued in [true, false] {
+            let udid = "queued-device";
+            let held = control
+                .try_acquire_exclusive_keeping_stream(udid, DeviceWorkOwner::ManualControl)
+                .await
+                .expect("fixture holds the phone");
+            let owner_before = control.held_work(udid).expect("held owner");
+            let stop = Arc::new(AtomicBool::new(false));
+            let callback_stop = stop.clone();
+            let result = tokio::time::timeout(
+                Duration::from_secs(1),
+                engine.run_session(
+                    udid,
+                    NurtureSettings {
+                        comment_prob: 0,
+                        ..Default::default()
+                    },
+                    stop,
+                    if cancel_when_queued {
+                        None
+                    } else {
+                        Some(Duration::from_millis(20))
+                    },
+                    move |status| {
+                        if cancel_when_queued && status.phase == NurturePhase::Queued {
+                            callback_stop.store(true, Ordering::Release);
+                        }
+                    },
+                ),
+            )
+            .await
+            .expect("queued nurture must finish before the other owner releases")
+            .expect("admission ends with a terminal status");
+            assert!(!result.running);
+            assert_eq!(result.outcome, Some(Outcome::Stopped));
+            assert_eq!(control.held_work(udid).unwrap().token, owner_before.token);
+            assert_eq!(driver.session_calls.load(Ordering::Relaxed), 0);
+            assert_eq!(driver.stream_calls.load(Ordering::Relaxed), 0);
+            assert_eq!(driver.terminate_calls.load(Ordering::Relaxed), 0);
+            control
+                .close_exclusive_context(held)
+                .expect("release fixture owner");
+        }
 
         drop(engine);
         let _ = std::fs::remove_file(db_path);
@@ -3944,7 +4032,7 @@ mod tests {
                     ..Default::default()
                 },
                 Arc::new(AtomicBool::new(false)),
-                Some(Duration::from_millis(1)),
+                None,
                 |_| {},
             )
             .await

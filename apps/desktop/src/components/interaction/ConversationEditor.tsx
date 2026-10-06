@@ -29,6 +29,23 @@ export function ConversationEditor({draft, onChange, onRawChange, targets, devic
   const [direction,setDirection]=useState("Nói tự nhiên, nội dung nối đúng câu trước");
   const [aiRoles,setAiRoles]=useState("vai_a, vai_b");const [count,setCount]=useState(6);
   const [error,setError]=useState("");const [busy,setBusy]=useState(false);const generation=useRef(0);
+  // Bind both success and failure to the inputs that requested them, including
+  // parent-owned target/draft changes and editor unmount.
+  // Fleet telemetry changes do not change the requested script or actor bindings.
+  const actorScope=devices.map(({udid,platform})=>[udid,platform]);
+  const generationInput=JSON.stringify([draft,targets,actorScope,handles,targetKey,context,direction,aiRoles,count,raw]);
+  useEffect(()=>{
+    generation.current+=1;
+    setError("");
+    return ()=>{generation.current+=1;};
+  },[generationInput]);
+  const requestedRoles=aiRoles.split(/[,\s]+/).filter(Boolean);
+  const aiInputError=!context.trim() || context.length>32_000
+    ? "Nhập mô tả hoặc caption của bài (tối đa 32.000 ký tự)"
+    : requestedRoles.length<2 || new Set(requestedRoles).size!==requestedRoles.length
+      ? "Cần ít nhất hai vai khác nhau"
+      : !Number.isInteger(count) || count<2 || count>64
+        ? "Số câu AI soạn phải là số nguyên từ 2 đến 64" : "";
   const steps=current.targetScripts.find(t=>t.targetKey===targetKey)?.steps ?? [];
   const roles=[...new Set(current.targetScripts.flatMap(t=>t.steps.flatMap(s=>[s.speakerId,...s.mentionRoleIds])))];
   const save=(value:ScriptedConversation)=>{generation.current+=1;onChange(JSON.stringify(value));};
@@ -44,11 +61,11 @@ export function ConversationEditor({draft, onChange, onRawChange, targets, devic
     save({...value,targetScripts,roleBindings});
   };
   const parse=async(ai:boolean)=>{
-    if(!targetKey||busy)return;setBusy(true);setError("");const ticket=++generation.current;const key=targetKey;
+    if(!targetKey||busy||(ai&&aiInputError))return;setBusy(true);setError("");const ticket=++generation.current;const key=targetKey;
     try {
-      const values=ai?await interactionDraftConversation(context,direction,aiRoles.split(/[,\s]+/).filter(Boolean),count):await interactionParseConversation(raw[key]??"");
+      const values=ai?await interactionDraftConversation(context,direction,requestedRoles,count):await interactionParseConversation(raw[key]??"");
       if(ticket===generation.current)saveSteps(key,values);
-    }catch(e){setError(describeError(e));}finally{setBusy(false);}
+    }catch(e){if(ticket===generation.current)setError(describeError(e));}finally{setBusy(false);}
   };
   const edit=(index:number,change:Partial<ConversationStep>)=>saveSteps(targetKey,steps.map((s,i)=>i===index?{...s,...change}:s));
   const total=current.targetScripts.reduce((sum,t)=>sum+t.steps.length,0);
@@ -72,7 +89,8 @@ export function ConversationEditor({draft, onChange, onRawChange, targets, devic
       <label className="iw-field"><span>Mô tả hoặc caption của bài đang chọn</span><textarea value={context} onChange={e=>setContext(e.target.value)} rows={3}/></label>
       <label className="iw-field"><span>Giọng điệu và yêu cầu</span><input value={direction} onChange={e=>setDirection(e.target.value)}/></label>
       <div className="iw-fields"><label className="iw-field"><span>Vai cho AI</span><input value={aiRoles} onChange={e=>setAiRoles(e.target.value)}/></label><label className="iw-field"><span>Số câu AI soạn</span><input type="number" min={2} max={64} value={count} onChange={e=>setCount(Number(e.target.value))}/></label></div>
-      <button type="button" disabled={busy||!context.trim()||!targetKey} onClick={()=>void parse(true)}>Soạn để duyệt</button>
+      {aiInputError&&<p className="iw-help">{aiInputError}</p>}
+      <button type="button" disabled={busy||!!aiInputError||!targetKey} onClick={()=>void parse(true)}>Soạn để duyệt</button>
     </details>
     {busy&&<p role="status">Đang chuẩn bị kịch bản…</p>}{error&&<p role="alert">{error}</p>}
     {steps.length>0&&<div className="iw-table-scroll" tabIndex={0}><table className="iw-table" aria-label="Các câu trong kịch bản"><thead><tr><th>Câu / chủ đề</th><th>Người nói</th><th>Trả lời</th><th>Nội dung</th><th>Tag vai</th></tr></thead><tbody>{steps.map((s,i)=><tr key={s.id}>

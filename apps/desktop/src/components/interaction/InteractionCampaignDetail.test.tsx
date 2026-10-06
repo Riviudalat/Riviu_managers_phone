@@ -61,9 +61,16 @@ describe("InteractionCampaignDetail terminal action projection", () => {
       { ...assignment(1, "succeeded", [action("comment", "confirmed", "send")]), preparedText: "evidence for second machine" },
     ]);
     const retry = vi.fn();
-    render(<InteractionCampaignDetailView compact detail={detail} artifacts={[]} notes={[]} devices={[]} deviceNumber={new Map()} handles={{}}
+    const showShot = vi.fn();
+    const artifacts = [
+      { id: "cleanup-current", assignmentId: "assignment-0", kind: "tiktok-cleanup", relativePath: null, sha256: "", createdAt: "2026-10-06T10:03:00Z" },
+      { id: "failed-current", assignmentId: "assignment-0", kind: "interaction-terminal-evidence-capture-failed", relativePath: null, sha256: "", createdAt: "2026-10-06T10:02:00Z" },
+      { id: "old-first", assignmentId: "assignment-0", kind: "interaction-terminal-evidence", relativePath: "old.png", sha256: "a".repeat(64), createdAt: "2026-10-06T10:01:00Z" },
+      { id: "current-second", assignmentId: "assignment-1", kind: "interaction-terminal-evidence", relativePath: "current.png", sha256: "b".repeat(64), createdAt: "2026-10-06T10:00:00Z" },
+    ];
+    render(<InteractionCampaignDetailView compact detail={detail} artifacts={artifacts} notes={[]} devices={[]} deviceNumber={new Map()} handles={{}}
       busy={false} error={null} onBack={() => {}} onCancel={() => {}} onRetry={retry}
-      onShowShot={() => {}} shot={null} onDismissShot={() => {}} />);
+      onShowShot={showShot} shot={null} onDismissShot={() => {}} />);
     expect(screen.getByText("Lưu · Chưa chắc kết quả")).toBeVisible();
     expect(screen.queryByText("evidence for first machine")).toBeNull();
     fireEvent.click(screen.getAllByRole("button", { name: /^Xem log / })[0]);
@@ -71,8 +78,13 @@ describe("InteractionCampaignDetail terminal action projection", () => {
     expect(within(drawer).getByText("evidence for first machine")).toBeVisible();
     expect(within(drawer).queryByText("evidence for second machine")).toBeNull();
     expect(within(drawer).queryByRole("button", { name: "Thử lại" })).toBeNull();
+    expect(within(drawer).getByText("Không chụp được ảnh sau lượt này.")).toBeVisible();
+    expect(within(drawer).queryByRole("button", { name: "Ảnh" })).toBeNull();
     fireEvent.keyDown(document, { key: "Escape" });
     expect(screen.queryByRole("dialog")).toBeNull();
+    fireEvent.click(screen.getAllByRole("button", { name: /^Xem log / })[1]);
+    fireEvent.click(within(screen.getByRole("dialog")).getByRole("button", { name: "Ảnh" }));
+    expect(showShot).toHaveBeenCalledExactlyOnceWith("current-second");
     expect(retry).not.toHaveBeenCalled();
   });
   it("settles all 40 actions while preserving 9 unclaimed historical comments and their raw records", () => {

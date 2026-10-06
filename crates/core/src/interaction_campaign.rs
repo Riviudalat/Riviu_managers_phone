@@ -228,83 +228,112 @@ async fn open_interaction_context_with_start(
     })
 }
 
-/// Pick the frame that can honestly stand as proof of a send, or nothing.
-///
-/// Two conditions, and both were missing. **Generation**: the caller's own stream
-/// generation, so a frame cached by a producer that has since died cannot be published —
-/// measured on this farm (`last_frame_age_ms=11373` with `baseline_sequence ==
-/// latest_sequence`), the hub will happily hand back stale bytes and `FrameSource::latest`
-/// promises nothing about liveness. **Watermark**: strictly newer than the frame that was
-/// current before the Send tap, so what gets filed is the screen *after* the comment
-/// exists rather than the screen that preceded it.
-///
-/// Pure and separated from the campaign so both can be pinned by tests without a device.
-fn evidence_frame_after(
-    frames: &dyn crate::GenerationFrameSource,
-    udid: &str,
-    generation: u64,
-    watermark: Option<u64>,
-) -> Option<crate::GenerationFrame> {
-    frames
-        .latest_in_generation(udid, generation)
-        // `map_or(true, ..)` rather than `is_none_or`: this crate pins MSRV 1.77.2 and that
-        // helper only stabilised in 1.82.
-        // `is_none_or` rather than the `map_or(true, ..)` this carried in the desktop crate:
-        // that spelling was there for `rust-version = "1.77.2"`, which `riviu-core` does not
-        // declare and could not honour anyway -- five other files here already use the 1.82
-        // helper.
-        .filter(|frame| watermark.is_none_or(|mark| frame.sequence > mark))
-}
-
-/// Save the screen as it stands and return its stored path.
-///
-/// The campaign used to persist frame hashes without keeping a single frame, so
-/// nothing it recorded could be checked afterwards — and `Uncertain`, the state
-/// that most needs looking at, wrote no artifact at all. Publishing is
-/// best-effort: a campaign must not fail because evidence could not be filed.
-///
-/// Takes the frame rather than a source, because the caller is the only place that knows
-/// which frame is admissible — and because reading it *here* was the bug: this ran after
-/// `close_ui_context`, which tears the stream down and removes the device's cached frame,
-/// so `latest` returned `None` on every single call and every artefact row was filed with
-/// a path of `NULL`.
-fn publish_evidence_frame(
+/// Capture through the owned UI session, after settlement and before its release.
+/// A screenshot is diagnostic evidence, never an action verifier or a retry signal.
+#[allow(clippy::too_many_arguments)]
+async fn capture_interaction_evidence(
+    db: &Arc<crate::db::Database>,
     artifacts: &crate::FlowArtifactStore,
-    frame: Option<crate::GenerationFrame>,
+    session: &dyn crate::UiSession,
     campaign_id: &str,
+    request_id: &str,
     assignment_id: &str,
+    owner_revision: i64,
     udid: &str,
-) -> Option<(String, String)> {
-    let Some(frame) = frame else {
-        tracing::warn!(
-            "interaction {udid}: không có frame nào hợp lệ sau khi gửi \
-             (generation đã tiến, hoặc chưa có frame mới hơn mốc trước khi gửi) — \
-             không lưu ảnh bằng chứng"
-        );
-        return None;
-    };
-    let frame = frame.bytes;
-    let campaign = uuid::Uuid::parse_str(campaign_id).ok()?;
-    let assignment = uuid::Uuid::parse_str(assignment_id).ok()?;
-    let prepared = artifacts
-        .prepare_image(
-            campaign,
-            assignment,
+    target_key: &str,
+    action: Option<&crate::PublicActionResult>,
+    outcome: &serde_json::Value,
+) -> serde_json::Value {
+    let capture_requested_at = chrono::Utc::now().to_rfc3339();
+    let saved = async {
+        let png = tokio::time::timeout(Duration::from_secs(5), session.screenshot_png())
+            .await
+            .context("interaction screenshot timed out")??;
+        let prepared = artifacts.prepare_image(
+            uuid::Uuid::parse_str(campaign_id)?,
+            uuid::Uuid::parse_str(assignment_id)?,
             uuid::Uuid::new_v4(),
-            "comment-drawer.jpeg",
-            "jpeg",
-            &frame,
-        )
-        .map_err(|error| tracing::warn!("interaction: không chuẩn bị được ảnh bằng chứng: {error}"))
-        .ok()?;
-    match artifacts.publish_file(&prepared) {
-        Ok(relative) => Some((relative.to_string_lossy().into_owned(), prepared.sha256)),
-        Err(error) => {
-            tracing::warn!("interaction: không lưu được ảnh bằng chứng: {error}");
-            let _ = artifacts.rollback_file(&prepared);
-            None
+            "interaction.png",
+            "png",
+            &png,
+        )?;
+        match artifacts.publish_file(&prepared) {
+            Ok(path) => {
+                Ok::<_, anyhow::Error>((path.to_string_lossy().into_owned(), prepared.sha256))
+            }
+            Err(error) => {
+                let _ = artifacts.rollback_file(&prepared);
+                Err(error)
+            }
         }
     }
+    .await;
+    let (path, sha, capture_error) = match saved {
+        Ok((path, sha)) => (Some(path), sha, None),
+        Err(error) => (None, String::new(), Some(format!("{error:#}"))),
+    };
+    let (action_runs, action_read_error) = match db.list_interaction_action_runs(assignment_id) {
+        Ok(rows) => (
+            rows.into_iter()
+                .filter(|row| action.is_none_or(|a| a.kind == row.kind))
+                .collect::<Vec<_>>(),
+            None,
+        ),
+        Err(error) => (Vec::new(), Some(format!("{error:#}"))),
+    };
+    let mut metadata = serde_json::json!({
+        "campaignId": campaign_id,
+        "requestId": request_id,
+        "assignmentId": assignment_id,
+        "ownerRevision": owner_revision,
+        "deviceId": udid,
+        "targetKey": target_key,
+        "action": action,
+        "actionRuns": action_runs,
+        "actionReadError": action_read_error,
+        "result": outcome,
+        "captureRequestedAt": capture_requested_at,
+        "capturedAt": chrono::Utc::now().to_rfc3339(),
+        "relativePath": path,
+        "sha256": sha,
+        "captureError": capture_error,
+    });
+    // Failure rows remain visible too. Never propagate a diagnostic failure into the
+    // settled effect, discard its error/identity, or authorize another public action.
+    let mut kind = match action {
+        Some(action) => format!("{}-{:?}-evidence", action.kind.as_str(), action.state),
+        None => "interaction-terminal-evidence".to_owned(),
+    };
+    if capture_error.is_some() {
+        kind.push_str("-capture-failed");
+    }
+    let metadata_text = metadata.to_string();
+    if let Err(error) = interaction_mutation!(
+        db,
+        "artifact",
+        [
+            campaign_id,
+            target_key,
+            assignment_id,
+            kind,
+            metadata_text,
+            sha,
+            path
+        ],
+        |db| db.add_interaction_artifact(
+            &campaign_id,
+            &target_key,
+            Some(&assignment_id),
+            &kind,
+            &metadata_text,
+            &sha,
+            path.as_deref(),
+        )
+    ) {
+        tracing::warn!("interaction evidence {campaign_id}/{assignment_id}/{udid}: {error:#}");
+        metadata["persistenceError"] = serde_json::Value::String(format!("{error:#}"));
+    }
+    metadata
 }
 
 /// The carousel walk's picture source in production: whatever the phone's live stream last sent.
@@ -2320,9 +2349,8 @@ async fn run_cohort(
     plan: ThreadPlan,
     only_assignments: Option<std::collections::HashSet<String>>,
     artifacts: crate::FlowArtifactStore,
-    // Separate from `engine.frames`, which is an `Arc<dyn FrameSource>` and therefore has
-    // no way to ask for a *generation*. Evidence needs that: see `evidence_frame_after`.
-    frame_source: Arc<dyn crate::GenerationFrameSource>,
+    // Retained for existing engine callers; result evidence uses a fresh session read.
+    _frame_source: Arc<dyn crate::GenerationFrameSource>,
     // Text already written for these assignments, by assignment id.
     //
     // Empty for a thread, and empty for a `Standalone` target whose pre-pass could not run —
@@ -2883,15 +2911,7 @@ async fn run_cohort(
             });
             let mut effect_intent = false;
             let cleanup_attention = AtomicBool::new(false);
-            // The stream this context owns. A frame from any other generation belongs to a
-            // producer that has already been torn down and proves nothing about this send.
-            let generation = context.stream_proof().generation;
-            // Seeded here so a failure *before* the send (a refused arrival, a driver that
-            // will not be chosen) still files the screen that explains it, and re-read just
-            // before the tap so the published frame is strictly newer than the comment.
-            let mut watermark = frame_source
-                .latest_in_generation(&prepared.actor_udid, generation)
-                .map(|frame| frame.sequence);
+            let mut action_screenshots = Vec::new();
             let result = async {
                 // Chosen once per assignment, from the session in hand. A build with no
                 // measured labels refuses here — before the link is opened, so before
@@ -2979,6 +2999,11 @@ async fn run_cohort(
                             return Err(error);
                         }
                     };
+                    action_screenshots.push(capture_interaction_evidence(
+                        &db, &artifacts, session.as_ref(), &campaign_id, &request.request_id,
+                        id, *ownership_revision, &prepared.actor_udid, &target.target_key,
+                        Some(&action), &serde_json::json!({"phase":"actionSettled"}),
+                    ).await);
                     let stops = action_stops_assignment(&action);
                     effect_intent |= action_requires_uncertain_assignment(&action);
                     let stop_reason = stops.then(|| stopped_action_reason(&action));
@@ -3008,6 +3033,11 @@ async fn run_cohort(
                             return Err(error);
                         }
                     };
+                    action_screenshots.push(capture_interaction_evidence(
+                        &db, &artifacts, session.as_ref(), &campaign_id, &request.request_id,
+                        id, *ownership_revision, &prepared.actor_udid, &target.target_key,
+                        Some(&action), &serde_json::json!({"phase":"actionSettled"}),
+                    ).await);
                     let stops = action_stops_assignment(&action);
                     effect_intent |= action_requires_uncertain_assignment(&action);
                     let stop_reason = stops.then(|| stopped_action_reason(&action));
@@ -3023,6 +3053,11 @@ async fn run_cohort(
                         Ok(action)=>action,
                         Err(error)=>{effect_intent|=failed_action_may_have_crossed_effect(db.as_ref(),id,crate::InteractionActionKind::Share);return Err(error);}
                     };
+                    action_screenshots.push(capture_interaction_evidence(
+                        &db, &artifacts, session.as_ref(), &campaign_id, &request.request_id,
+                        id, *ownership_revision, &prepared.actor_udid, &target.target_key,
+                        Some(&action), &serde_json::json!({"phase":"actionSettled"}),
+                    ).await);
                     let stops=action_stops_assignment(&action);effect_intent|=action_requires_uncertain_assignment(&action);
                     let reason=stops.then(||stopped_action_reason(&action));action_results.push(action);notify(&events,&campaign_id);
                     if let Some(reason)=reason {anyhow::bail!(reason);}
@@ -3033,6 +3068,11 @@ async fn run_cohort(
                         Ok(action)=>action,
                         Err(error)=>{effect_intent |= failed_action_may_have_crossed_effect(db.as_ref(),id,crate::InteractionActionKind::Follow);return Err(error);}
                     };
+                    action_screenshots.push(capture_interaction_evidence(
+                        &db, &artifacts, session.as_ref(), &campaign_id, &request.request_id,
+                        id, *ownership_revision, &prepared.actor_udid, &target.target_key,
+                        Some(&action), &serde_json::json!({"phase":"actionSettled"}),
+                    ).await);
                     let stops=action_stops_assignment(&action);
                     effect_intent |= action_requires_uncertain_assignment(&action);
                     let reason=stops.then(||stopped_action_reason(&action));
@@ -3168,10 +3208,6 @@ async fn run_cohort(
                         .lock()
                         .expect("comment action revision mutex") = armed;
                     if armed.is_some() {
-                        // Sample at the boundary itself: the next device operation is Send.
-                        watermark = frame_source
-                            .latest_in_generation(&prepared.actor_udid, generation)
-                            .map(|frame| frame.sequence);
                         notify(&events, &campaign_id);
                     }
                     Ok(armed.is_some())
@@ -3336,15 +3372,23 @@ async fn run_cohort(
             }
             .await;
             let effect_claim_lost = matches!(&result, Ok(None));
-            // Before the teardown, not after. `close_ui_context` stops the stream and
-            // removes this device's cached frame, which is why every artefact row until
-            // now was filed with a NULL path.
-            let evidence = evidence_frame_after(
-                frame_source.as_ref(),
-                &prepared.actor_udid,
-                generation,
-                watermark,
-            );
+            // Even a failed/cancelled/unknown attempt gets a fresh diagnostic read while
+            // this device session is owned. A CAS loser must not file a winner's evidence.
+            let screenshot = if effect_claim_lost {
+                None
+            } else {
+                let outcome = match &result {
+                    Ok(Some(value)) => value.clone(),
+                    Err(error) => serde_json::json!({"error":format!("{error:#}"),
+                        "state":assignment_state_after_failure(effect_intent)}),
+                    Ok(None) => unreachable!(),
+                };
+                Some(capture_interaction_evidence(
+                    &db, &artifacts, session.as_ref(), &campaign_id, &request.request_id,
+                    id, *ownership_revision, &prepared.actor_udid, &target.target_key,
+                    None, &outcome,
+                ).await)
+            };
             let draft_cleanup_attention = cleanup_attention.load(Ordering::Relaxed);
             let cleanup = if draft_cleanup_attention {
                 control.quarantine_ui_context_for_app(context, &opened_package)
@@ -3392,6 +3436,8 @@ async fn run_cohort(
                 Ok(Some(mut evidence_json)) => {
                     if let Some(object) = evidence_json.as_object_mut() {
                         object.insert("appCleanup".into(), cleanup_evidence.clone());
+                        object.insert("screenshot".into(), serde_json::json!(screenshot));
+                        object.insert("actionScreenshots".into(), serde_json::json!(action_screenshots));
                     }
                     let evidence_text = evidence_json.to_string();
                     let skipped_parent_at = evidence_json
@@ -3481,51 +3527,6 @@ async fn run_cohort(
                         notify(&events, &campaign_id);
                         continue;
                     }
-                    let artifact_kind = if !actions.comment || skipped_parent_at.is_some() {
-                        "public-action-evidence"
-                    } else if prepared.parent_ordinal.is_some() {
-                        "comment-reply-evidence"
-                    } else {
-                        "comment-root-evidence"
-                    };
-                    // The drawer is still open on the phone — nothing closes it after the
-                    // identity pass — so this frame shows the comment that was just posted,
-                    // in the list, which is the only thing that settles a dispute later.
-                    // The frame itself was taken above, while the stream was still alive.
-                    let saved = publish_evidence_frame(
-                        &artifacts,
-                        evidence.clone(),
-                        &campaign_id,
-                        id,
-                        &prepared.actor_udid,
-                    );
-                    // No fallback sha. It used to borrow `postedIdentity.frameSha256` when
-                    // nothing was stored, which produced exactly the row observed on
-                    // 13/08/2026: a digest that looks like evidence next to a `relative_path`
-                    // of NULL and no bytes anywhere. A row that stored nothing must say so.
-                    let artifact_sha = saved.as_ref().map(|(_, sha)| sha.as_str()).unwrap_or("");
-                    let _ = interaction_mutation!(
-                        db,
-                        "artifact",
-                        [
-                            campaign_id,
-                            target,
-                            id,
-                            evidence_text,
-                            artifact_kind,
-                            artifact_sha,
-                            saved
-                        ],
-                        |db| db.add_interaction_artifact(
-                            &campaign_id,
-                            &target.target_key,
-                            Some(id),
-                            artifact_kind,
-                            &evidence_text,
-                            artifact_sha,
-                            saved.as_ref().map(|(path, _)| path.as_str()),
-                        )
-                    )?;
                     if skipped_parent_at.is_none() {
                         if let Some(identity) =
                             evidence_json.get("postedIdentity").and_then(|value| {
@@ -3545,43 +3546,22 @@ async fn run_cohort(
                 Err(error) => {
                     let state = assignment_state_after_failure(effect_intent);
                     let failure_detail = format!("{error:#}");
+                    let failure_evidence = serde_json::json!({
+                        "screenshot": screenshot, "appCleanup": cleanup_evidence,
+                        "actionScreenshots": action_screenshots,
+                    }).to_string();
                     let _ = interaction_mutation!(
                         db,
                         "settle_assignment",
-                        [id, ownership_revision, failure_detail],
+                        [id, ownership_revision, failure_detail, failure_evidence],
                         |db| db.settle_owned_interaction_assignment(
                             id,
                             *ownership_revision,
                             state,
                             Some(&failure_detail),
-                            None,
+                            Some(&failure_evidence),
                         )
                     )?;
-                    // Retain evidence for either an unconfirmed Send or an unresolved
-                    // pre-Send draft. The typed failure records whether the public
-                    // boundary crossed; Uncertain alone never claims a comment posted.
-                    if let Some((path, sha)) = publish_evidence_frame(
-                        &artifacts,
-                        evidence,
-                        &campaign_id,
-                        id,
-                        &prepared.actor_udid,
-                    ) {
-                        let _ = interaction_mutation!(
-                            db,
-                            "artifact",
-                            [campaign_id, target, id, failure_detail, sha, path],
-                            |db| db.add_interaction_artifact(
-                                &campaign_id,
-                                &target.target_key,
-                                Some(id),
-                                "comment-failure-evidence",
-                                &serde_json::json!({ "error": failure_detail }).to_string(),
-                                &sha,
-                                Some(&path),
-                            )
-                        );
-                    }
                     failed += 1;
                 }
             }
@@ -5262,8 +5242,47 @@ mod tests {
         }
     }
 
-    #[test]
-    fn cancellation_between_like_and_save_cannot_reuse_a_planned_save_as_success() {
+    struct EvidenceSession {
+        pixel: u8,
+        fail: bool,
+        reads: std::sync::atomic::AtomicUsize,
+    }
+
+    #[async_trait::async_trait]
+    impl crate::UiSession for EvidenceSession {
+        async fn screenshot_png(&self) -> anyhow::Result<Vec<u8>> {
+            self.reads.fetch_add(1, Ordering::Relaxed);
+            anyhow::ensure!(!self.fail, "fixture capture unavailable");
+            let image = image::RgbImage::from_pixel(1, 1, image::Rgb([self.pixel; 3]));
+            let mut bytes = std::io::Cursor::new(Vec::new());
+            image.write_to(&mut bytes, image::ImageFormat::Png)?;
+            Ok(bytes.into_inner())
+        }
+        fn stream_url(&self) -> Option<String> {
+            None
+        }
+        async fn tap(&self, _: crate::TapPoint) -> anyhow::Result<()> {
+            panic!("evidence must not tap")
+        }
+        async fn swipe(&self, _: crate::SwipeGesture) -> anyhow::Result<()> {
+            panic!("evidence must not swipe")
+        }
+        async fn type_text(&self, _: &str) -> anyhow::Result<()> {
+            panic!("evidence must not type")
+        }
+        async fn home(&self) -> anyhow::Result<()> {
+            panic!("evidence must precede release")
+        }
+        async fn find_and_tap(&self, _: &str) -> anyhow::Result<()> {
+            panic!("evidence must not tap")
+        }
+        async fn assert_visible(&self, _: &str) -> anyhow::Result<()> {
+            panic!("unexpected visibility read")
+        }
+    }
+
+    #[tokio::test]
+    async fn cancellation_between_like_and_save_cannot_reuse_a_planned_save_as_success() {
         use crate::interaction::{
             plan_threads, InteractionActionKind, InteractionActionSet, InteractionActionState,
             ResolvedTikTokTarget, ThreadMode, ThreadShape, TikTokPostKind,
@@ -5274,7 +5293,7 @@ mod tests {
             "riviu-interaction-cancel-between-actions-{}.db",
             Uuid::new_v4()
         ));
-        let db = crate::db::Database::open(&path).expect("open fixture database");
+        let db = Arc::new(crate::db::Database::open(&path).expect("open fixture database"));
         let request = ThreadCampaignRequest {
             seeding: None,
             scripted_conversation: None,
@@ -5287,7 +5306,7 @@ mod tests {
                 author: "creator".into(),
                 kind: TikTokPostKind::Video,
             }],
-            actor_udids: vec!["phone-a".into()],
+            actor_udids: vec!["phone-a".into(), "phone-b".into()],
             message_count: 0,
             instruction: String::new(),
             max_words: 0,
@@ -5354,8 +5373,133 @@ mod tests {
             )
             .expect("settle Like"));
 
+        let root = path.with_extension("artifacts");
+        let store = crate::FlowArtifactStore::new(&root).expect("artifact store");
+        let session = EvidenceSession {
+            pixel: 17,
+            fail: false,
+            reads: Default::default(),
+        };
+        let action = db
+            .get_interaction_campaign(&campaign)
+            .unwrap()
+            .unwrap()
+            .assignments[0]
+            .actions
+            .iter()
+            .find(|a| a.kind == InteractionActionKind::Like)
+            .unwrap()
+            .clone();
+        let shot = capture_interaction_evidence(
+            &db,
+            &store,
+            &session,
+            &campaign,
+            &request.request_id,
+            &assignment,
+            1,
+            "phone-a",
+            "content:2",
+            Some(&action),
+            &serde_json::json!({"phase":"actionSettled"}),
+        )
+        .await;
+        assert!(shot["captureError"].is_null(), "{shot}");
+        assert_eq!(
+            session.reads.load(Ordering::Relaxed),
+            1,
+            "fresh read after completed effect"
+        );
+        assert_eq!(shot["deviceId"], "phone-a");
+        assert_eq!(shot["action"]["state"], "confirmed");
+        let first_path = shot["relativePath"].as_str().unwrap();
+        assert!(first_path.ends_with(".png"));
+        let bytes = store
+            .read_published(first_path, shot["sha256"].as_str().unwrap())
+            .unwrap();
+        assert_eq!(
+            image::guess_format(&bytes).unwrap(),
+            image::ImageFormat::Png
+        );
+        assert_eq!(
+            image::load_from_memory(&bytes)
+                .unwrap()
+                .to_rgb8()
+                .get_pixel(0, 0)
+                .0,
+            [17; 3]
+        );
+
+        // A sibling's capture has independent bytes/path/assignment, never the first device's cache.
+        let sibling = db
+            .get_interaction_campaign(&campaign)
+            .unwrap()
+            .unwrap()
+            .assignments
+            .into_iter()
+            .find(|a| a.actor_udid == "phone-b")
+            .unwrap();
+        let second = capture_interaction_evidence(
+            &db,
+            &store,
+            &EvidenceSession {
+                pixel: 29,
+                fail: false,
+                reads: Default::default(),
+            },
+            &campaign,
+            &request.request_id,
+            &sibling.id,
+            1,
+            "phone-b",
+            "content:2",
+            None,
+            &serde_json::json!({"state":"failedBeforeEffect"}),
+        )
+        .await;
+        assert_ne!(shot["relativePath"], second["relativePath"]);
+        assert_ne!(shot["sha256"], second["sha256"]);
+        assert_eq!(second["assignmentId"], sibling.id);
+        assert_eq!(second["deviceId"], "phone-b");
+        assert_eq!(db.list_interaction_artifacts(&campaign).unwrap().len(), 2);
+
         db.cancel_interaction_campaign(&campaign)
             .expect("cancel between Like and Save");
+        let failed_shot = capture_interaction_evidence(
+            &db,
+            &store,
+            &EvidenceSession {
+                pixel: 17,
+                fail: true,
+                reads: Default::default(),
+            },
+            &campaign,
+            &request.request_id,
+            &assignment,
+            1,
+            "phone-a",
+            "content:2",
+            Some(&action),
+            &serde_json::json!({"state":"cancelled"}),
+        )
+        .await;
+        assert!(failed_shot["relativePath"].is_null());
+        assert_eq!(failed_shot["sha256"], "");
+        assert!(failed_shot["captureError"]
+            .as_str()
+            .unwrap()
+            .contains("fixture capture unavailable"));
+        let rows = db.list_interaction_artifacts(&campaign).unwrap();
+        assert_eq!(rows.len(), 3, "failed capture also remains visible");
+        assert!(rows
+            .iter()
+            .any(|row| row.kind.ends_with("capture-failed") && row.relative_path.is_none()));
+        assert!(
+            db.claim_interaction_action(&assignment, InteractionActionKind::Like)
+                .unwrap()
+                .is_none(),
+            "capture failure must never replay the settled Like"
+        );
         let mut save_taps = 0_u8;
         if let Ok(ActionClaim::Owned(_)) =
             claim_action_or_reuse_terminal(&db, &assignment, InteractionActionKind::Save)
@@ -5392,99 +5536,9 @@ mod tests {
 
         drop(db);
         std::fs::remove_file(path).expect("remove fixture database");
+        std::fs::remove_dir_all(root).expect("remove fixture artifacts");
     }
 
-    /// The two conditions an evidence frame has to satisfy, pinned without a device.
-    mod evidence_frames {
-        use super::*;
-        use crate::{GenerationFrame, GenerationFrameStream};
-
-        /// A hub that hands back exactly one frame, for one generation.
-        struct FakeHub {
-            generation: u64,
-            sequence: u64,
-        }
-
-        impl crate::FrameSource for FakeHub {
-            fn subscribe(&self, _udid: &str) -> Box<dyn crate::FrameStream> {
-                unimplemented!("evidence uses the latest read, never a subscription")
-            }
-
-            /// Deliberately answers even when the generation-qualified read would not.
-            ///
-            /// That asymmetry *is* the bug this guards: the unqualified read is what the
-            /// campaign used to call, and it happily returns a dead producer's bytes.
-            fn latest(&self, _udid: &str) -> Option<crate::Frame> {
-                Some(std::sync::Arc::new(vec![0xff, 0xd8, 0xff]))
-            }
-        }
-
-        impl crate::GenerationFrameSource for FakeHub {
-            fn subscribe_generation(
-                &self,
-                _udid: &str,
-                _generation: u64,
-            ) -> Box<dyn GenerationFrameStream> {
-                unimplemented!("evidence uses the latest read, never a subscription")
-            }
-
-            fn latest_in_generation(
-                &self,
-                _udid: &str,
-                generation: u64,
-            ) -> Option<GenerationFrame> {
-                // A real hub answers `None` once the generation has moved on; anything else
-                // would hand out a dead producer's bytes.
-                (generation == self.generation).then(|| GenerationFrame {
-                    generation: self.generation,
-                    sequence: self.sequence,
-                    bytes: std::sync::Arc::new(vec![0xff, 0xd8, 0xff]),
-                })
-            }
-        }
-
-        #[test]
-        fn an_evidence_frame_from_before_the_send_is_not_published_as_proof_of_it() {
-            // The watermark is the frame that was current when Send was tapped. A frame at
-            // or below it shows the screen *without* the comment, and filing that as proof
-            // of the comment is worse than filing nothing — it looks checkable and is not.
-            let hub = FakeHub {
-                generation: 7,
-                sequence: 42,
-            };
-            assert!(evidence_frame_after(&hub, "udid", 7, Some(42)).is_none());
-            assert!(evidence_frame_after(&hub, "udid", 7, Some(99)).is_none());
-            assert_eq!(
-                evidence_frame_after(&hub, "udid", 7, Some(41)).map(|frame| frame.sequence),
-                Some(42)
-            );
-        }
-
-        #[test]
-        fn an_evidence_frame_is_refused_once_the_stream_generation_has_advanced() {
-            // Measured on this farm: the hub will return stale bytes for a producer that has
-            // already died (`last_frame_age_ms=11373` with the sequence unmoved), and
-            // `FrameSource::latest` promises nothing about liveness. Asking for a specific
-            // generation is what makes the answer mean something.
-            let hub = FakeHub {
-                generation: 7,
-                sequence: 42,
-            };
-            assert!(evidence_frame_after(&hub, "udid", 8, None).is_none());
-            assert!(evidence_frame_after(&hub, "udid", 6, None).is_none());
-        }
-
-        #[test]
-        fn with_no_watermark_any_frame_of_the_right_generation_is_admissible() {
-            // The pre-send seed case: a refused arrival files whatever explains it, and
-            // there is no "after the send" to be newer than.
-            let hub = FakeHub {
-                generation: 3,
-                sequence: 1,
-            };
-            assert!(evidence_frame_after(&hub, "udid", 3, None).is_some());
-        }
-    }
     use crate::InteractionAssignmentRecord;
 
     fn assignment(id: &str, ordinal: u8, state: ThreadMessageState) -> InteractionAssignmentRecord {
@@ -5968,6 +6022,20 @@ mod boundary_tests {
             "both drivers must receive the CAS-bearing gate"
         );
         assert!(runner[claim..].contains("&mut effect_gate"));
+        let capture = runner.find("action_screenshots.push(capture_interaction_evidence(")
+            .expect("each completed public action needs a fresh screenshot");
+        let terminal_capture = runner.find("let screenshot = if effect_claim_lost")
+            .expect("terminal attempts retain failure/unknown evidence");
+        let release = runner[terminal_capture..].find("control.quarantine_ui_context_for_app(context")
+            .map(|offset| terminal_capture + offset).expect("release boundary");
+        assert!(capture < terminal_capture && terminal_capture < release);
+        for action in ["like", "save", "share", "follow"] {
+            let start = runner.find(&format!("execute_{action}_action(")).unwrap();
+            let tail = &runner[start..];
+            assert!(tail.find("capture_interaction_evidence(").unwrap()
+                < tail.find("action_results.push(action)").unwrap(), "{action} evidence before advancing");
+        }
+
     }
 
     #[test]

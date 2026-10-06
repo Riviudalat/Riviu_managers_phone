@@ -383,9 +383,9 @@ export function InteractionCampaignDetailView({
           {rows.map((assignment) => {
             const scriptStep = detail.scriptedConversation?.targetScripts.find(s=>s.targetKey===targetKey)?.steps[assignment.ordinal];
             const reason = assignmentReason(assignment);
-            const shotRecord = artifacts.find(
-              (item) => item.assignmentId === assignment.id && item.relativePath,
-            );
+            const latestCapture = artifacts.find((item) => item.assignmentId === assignment.id && (item.relativePath || item.kind.endsWith("-capture-failed")));
+            const captureFailed = latestCapture?.kind.endsWith("-capture-failed") === true;
+            const shotRecord = !captureFailed && latestCapture?.relativePath ? latestCapture : undefined;
             // Only on a message that actually stopped, and only once the campaign has. The
             // backend would also accept `queued`/`preparing`/`ready`, but offering a retry
             // beside every message still waiting its turn puts a button on thirteen rows
@@ -492,6 +492,7 @@ export function InteractionCampaignDetailView({
                   {assignment.state === "uncertain" && (!assignment.commentVerification||assignment.actions?.some(a=>a.kind==="like"||a.kind==="save")) && <InteractionReadbackControl campaignId={summary.id} assignmentId={assignment.id} disabled={busy || summary.state === "running"} />}
                   {assignment.commentVerification&&<CommentVerificationControl campaignId={summary.id} assignmentId={assignment.id} value={assignment.commentVerification} disabled={busy}/>}
                 </span>
+                {captureFailed && <small className="interaction-error">Không chụp được ảnh sau lượt này.</small>}
                 {shotRecord && (
                   <button
                     type="button"
@@ -524,7 +525,7 @@ export function InteractionCampaignDetailView({
       ))}
       {shot && (
         <button type="button" className="interaction-shot" onClick={onDismissShot}>
-          <img src={shot} alt="Ảnh màn hình khay bình luận" />
+          <img src={shot} alt="Ảnh màn hình sau tương tác" />
         </button>
       )}
   </>;

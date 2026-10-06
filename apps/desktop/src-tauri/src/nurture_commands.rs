@@ -750,7 +750,17 @@ impl NurtureRuntime {
 
     fn store_live_status(&self, st: NurtureSessionStatus) {
         self.inner.log.record(&st.udid, &st.last_message);
-        self.inner.status.lock().insert(st.udid.clone(), st);
+        let mut statuses = self.inner.status.lock();
+        // A refused overlapping start remains in durable run history and the log,
+        // but cannot replace the live owner that still holds this device's stop token.
+        if !st.running
+            && statuses
+                .get(&st.udid)
+                .is_some_and(|current| current.running && current.run_id != st.run_id)
+        {
+            return;
+        }
+        statuses.insert(st.udid.clone(), st);
     }
 
     pub fn stop(&self, udid: &str) {
@@ -1026,6 +1036,61 @@ mod tests {
             reservations.iter().filter(|value| value.is_some()).count(),
             1
         );
+
+        // A refused overlapping start is durable history, not the live owner.
+        let active_run = uuid::Uuid::new_v4();
+        let active = NurtureSessionStatus {
+            running: true,
+            run_id: Some(active_run),
+            videos_done: 4,
+            ..NurtureSessionStatus::new("same-device")
+        };
+        runtime.store_live_status(active.clone());
+        let sibling = runtime.reserve_start("sibling").expect("sibling token");
+        runtime.store_live_status(NurtureSessionStatus {
+            running: true,
+            run_id: Some(active_run),
+            ..NurtureSessionStatus::new("sibling")
+        });
+        let mut rejected = NurtureSessionStatus {
+            run_id: Some(uuid::Uuid::new_v4()),
+            ..NurtureSessionStatus::new("same-device")
+        };
+        rejected.finish(riviu_core::Outcome::Failed);
+        runtime.store_live_status(rejected);
+        let statuses = runtime.list_status();
+        let retained = statuses.iter().find(|st| st.udid == "same-device").unwrap();
+        assert!(
+            retained.running,
+            "rejected start must not hide the active owner"
+        );
+        assert_eq!(retained.run_id, Some(active_run));
+        assert_eq!(retained.videos_done, 4);
+        assert!(
+            statuses
+                .iter()
+                .find(|st| st.udid == "sibling")
+                .unwrap()
+                .running
+        );
+
+        runtime.stop("same-device");
+        let owner_stop = reservations.iter().flatten().next().unwrap();
+        assert!(owner_stop.load(Ordering::Relaxed));
+        assert!(!sibling.load(Ordering::Relaxed));
+        let mut finished = active;
+        finished.finish(riviu_core::Outcome::Stopped);
+        runtime.store_live_status(finished);
+        assert!(
+            !runtime
+                .list_status()
+                .iter()
+                .find(|st| st.udid == "same-device")
+                .unwrap()
+                .running
+        );
+        runtime.finish_start("same-device", owner_stop);
+        assert!(runtime.reserve_start("same-device").is_some());
     }
 
     #[test]

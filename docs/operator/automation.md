@@ -27,6 +27,11 @@ báo từng máy đã đóng hoặc cần kiểm tra. Kết quả đã đăng/g�
 kiểm tra link tự động của tác vụ Đăng bài đã dừng cũng được dừng qua lần mở app sau.
 Nếu máy đang có tác vụ khác, app báo rõ thay vì đóng ứng dụng của tác vụ đó.
 
+Nuôi đang chờ quyền điều khiển vẫn nhận lệnh **Dừng**; thời lượng phiên có tính
+thời gian chờ này. Thao tác đã gửi được chờ kết thúc trước khi nhả máy. Bấm chạy
+trùng một máy không thay trạng thái và số video của phiên đang chạy; lượt bị từ
+chối vẫn có trong lịch sử.
+
 **Thiết lập** có các tab trực tiếp **Phiên nuôi · Hành vi · AI**. Lịch sử bình luận
 và token AI nằm trong **Theo dõi → Bình luận & chi phí AI**, bên cạnh **Tiến độ máy**.
 Nút **Sửa thiết lập** mở đúng tab và đưa focus về trường cần sửa.
@@ -118,6 +123,11 @@ Ba bước trên trang là **Chọn bài viết → Hành động & máy → Ki�
 Tắt Bình luận thì chỉ cần chọn Tim/Lưu và máy; phần AI được ẩn. Theo dõi hiển thị
 bảng kết quả theo máy; **Xem log** mở bằng chứng và thao tác xử lý của đúng máy.
 
+Sau từng hành động và khi lượt kết thúc, Riviu chụp ảnh mới từ phiên của đúng máy
+trước khi dọn ứng dụng. Nút **Ảnh** mở ảnh đã lưu theo lượt, kèm thời điểm và hash
+trong bằng chứng. Nếu lần chụp mới thất bại, giao diện báo rõ và không lấy ảnh cũ
+thay thế. Lỗi lưu ảnh không làm app lặp lại hành động đã gửi.
+
 **Đầu vào:** URL bài, hành động, nội dung/AI và máy thực hiện. **Thao tác:** parse
 đúng chuỗi URL hiện tại; sửa lỗi parse trước khi chạy; review assignment và số bài/số máy;
 chạy rồi theo dõi kết quả từng hành động.
@@ -125,6 +135,9 @@ chạy rồi theo dõi kết quả từng hành động.
 **Hội thoại theo kịch bản** cho mỗi link một nội dung riêng. Chọn bài trong mục kịch bản,
 dán các dòng `@vai: nội dung`, bấm Phân tích rồi sửa câu, chủ đề, parent và tag.
 AI có thể soạn trước từ mô tả/caption do bạn nhập; toàn bộ câu vẫn phải duyệt trước chạy.
+Đổi bài, vai, số câu hoặc yêu cầu trong lúc AI đang soạn sẽ bỏ kết quả trả về của
+yêu cầu cũ. Kịch bản sinh bởi AI và kịch bản có sẵn đều được kiểm tra ID, vai,
+thứ tự trả lời và giới hạn nội dung trước khi chạy trên cùng luồng Tương tác.
 Chọn máy Android cho từng vai; bảng Vai → Máy → Username lấy username đã lưu
 trong danh sách thiết bị, không lấy tên máy hay tên hiển thị TikTok. Máy thiếu nick
 có nút Gán tài khoản mở ô sửa hiện có. Thiếu, trùng, không hợp lệ, chưa lưu hoặc

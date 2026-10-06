@@ -1010,7 +1010,12 @@ pub fn interaction_read_artifact(
     Ok(InteractionArtifactPayload {
         id: record.id,
         kind: record.kind,
-        mime_type: "image/jpeg".into(),
+        mime_type: if relative.ends_with(".png") {
+            "image/png"
+        } else {
+            "image/jpeg"
+        }
+        .into(),
         base64: base64::Engine::encode(&base64::engine::general_purpose::STANDARD, bytes),
     })
 }
