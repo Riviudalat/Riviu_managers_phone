@@ -391,6 +391,25 @@ pub fn hardware_key_message(key: riviu_core::HardwareKey) -> Vec<u8> {
     bytes
 }
 
+/// scrcpy 3.3.4 SET_CLIPBOARD: type, u64 sequence, paste flag, u32 UTF-8 byte count.
+/// Sequence zero suppresses ACK (the control drain does not interpret replies).
+/// Reject oversize text intact instead of truncating Unicode or splitting one paste.
+pub fn clipboard_paste_message(text: &str) -> anyhow::Result<Vec<u8>> {
+    anyhow::ensure!(
+        text.len() <= 262_130,
+        "Clipboard text exceeds scrcpy limit of 262130 UTF-8 bytes"
+    );
+    let mut message = Vec::with_capacity(14 + text.len());
+    // v3.3.4 ControlMessage.java: TYPE_SET_CLIPBOARD = 9; type 8 is GET_CLIPBOARD.
+    // https://github.com/Genymobile/scrcpy/blob/v3.3.4/server/src/main/java/com/genymobile/scrcpy/control/ControlMessage.java
+    message.push(9);
+    message.extend_from_slice(&0u64.to_be_bytes());
+    message.push(1);
+    message.extend_from_slice(&(text.len() as u32).to_be_bytes());
+    message.extend_from_slice(text.as_bytes());
+    Ok(message)
+}
+
 /// Which end of a gesture a touch message carries.
 ///
 /// The values are `AMOTION_EVENT_ACTION_*` and must stay these numbers — the server passes
@@ -968,6 +987,21 @@ pub fn encode_hello(device_name: &str, width: u32, height: u32) -> Vec<u8> {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn clipboard_paste_preserves_utf8_and_enforces_packet_limit() {
+        let packet = super::clipboard_paste_message("é\n🙂").unwrap();
+        assert_eq!(
+            packet,
+            vec![9, 0, 0, 0, 0, 0, 0, 0, 0, 1, 0, 0, 0, 7,
+                0xc3, 0xa9, 0x0a, 0xf0, 0x9f, 0x99, 0x82]
+        );
+        assert_eq!(
+            super::clipboard_paste_message(&"a".repeat(262_130)).unwrap().len(),
+            262_144
+        );
+        assert!(super::clipboard_paste_message(&"a".repeat(262_131)).is_err());
+    }
+
     use super::*;
     use std::io::Cursor;
 

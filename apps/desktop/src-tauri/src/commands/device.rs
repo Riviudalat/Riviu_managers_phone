@@ -660,6 +660,50 @@ pub async fn device_type_text(
     .await
 }
 
+/// Paste at the Android selection through the existing scrcpy producer, without replacement.
+/// A successful write is dispatch evidence only; never retry an uncertain write.
+#[tauri::command]
+pub async fn device_paste_text(
+    state: State<'_, AppState>,
+    udid: String,
+    text: String,
+    generation: u64,
+) -> Result<(), CommandError> {
+    let _admission = state.ensure_accepting_work()?;
+    let device = state
+        .registry
+        .list()
+        .into_iter()
+        .find(|device| device.udid == udid)
+        .ok_or_else(|| CommandError::code("DeviceUnavailable", "Thiết bị không còn kết nối"))?;
+    if device.platform != riviu_core::DevicePlatform::Android {
+        return Err(CommandError::code(
+            "UnsupportedOperation",
+            "Dán trực tiếp chỉ hỗ trợ Android",
+        ));
+    }
+    // Borrow only an already-ready overlay. This validates its control-plane session
+    // identity and holds its exclusive ManualControl lease through the socket write.
+    let hold = state.overlay_ui_session(&udid).await.ok_or_else(|| {
+        CommandError::code("DeviceControlNotReady", "Mở phiên điều khiển trước khi dán")
+    })?;
+    if state.control.current_work_owner(&udid) != Some(DeviceWorkOwner::ManualControl) {
+        return Err(CommandError::code(
+            "DeviceBusy",
+            "Thiết bị không thuộc phiên điều khiển thủ công",
+        ));
+    }
+    let android = state.android.as_ref().ok_or_else(|| {
+        CommandError::code("DeviceUnavailable", "Android không khả dụng")
+    })?;
+    let result = android
+        .paste_text(&udid, generation, &text)
+        .await
+        .map_err(CommandError::operation);
+    drop(hold);
+    result
+}
+
 #[tauri::command]
 pub async fn device_home(state: State<'_, AppState>, udid: String) -> Result<(), CommandError> {
     let _admission = state.ensure_accepting_work()?;

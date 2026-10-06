@@ -6,6 +6,7 @@ import { groupInputOutcome } from "../groupInput";
 import { getGroupSync, isNoopGroupSync, type ActiveGroupSync, type GroupSyncReadiness } from "../groupSync";
 import { recordSwipe, recordTap } from "../macroStore";
 import {
+  devicePasteText,
   deviceSwipe,
   deviceSwipePath,
   deviceTap,
@@ -150,7 +151,7 @@ export function FocusStream({
 }: Props) {
   const { closing, close: onClose } = useClosingTransition(onClosed, 180, device.udid);
   const dialogRef = useRef<HTMLDivElement>(null);
-  useEffect(() => { if (active) dialogRef.current?.focus({ preventScroll: true }); }, [active]);
+  useEffect(() => { if (active && document.activeElement !== screenRef.current) dialogRef.current?.focus({ preventScroll: true }); }, [active]);
   useEffect(() => {
     void viewSetPreset(device.udid, "overlay").catch(error => console.warn("overlay preset refused", error));
     return () => { void viewSetPreset(device.udid, "tile").catch(() => {}); };
@@ -244,6 +245,13 @@ export function FocusStream({
     controlState.ready.length === targets.length &&
     failureCount === 0;
   const keyDisabled = busy || actionPending || pointerBusy || !sessionReady;
+  const pasteIdentity = useMemo(() => ({}), [device.udid, controlKey, viewSize?.generation, active, closing]);
+  const currentPasteIdentity = useRef<object | null>(pasteIdentity);
+  currentPasteIdentity.current = pasteIdentity;
+  useEffect(() => {
+    currentPasteIdentity.current = pasteIdentity;
+    return () => { currentPasteIdentity.current = null; };
+  }, [pasteIdentity]);
   const finishPointer = () => {
     pointerBusyRef.current = false;
     setPointerBusy(false);
@@ -938,11 +946,49 @@ export function FocusStream({
           // restyle is about to change a lot of them; a test that breaks because a colour
           // moved is a test that stops meaning anything.
           data-testid="focus-screen"
+          tabIndex={0}
+          aria-label={`Màn hình ${device.name}`}
+          onPaste={event => {
+            if (event.target !== event.currentTarget || document.activeElement !== event.currentTarget || !active || closing) return;
+            event.preventDefault();
+            event.stopPropagation();
+            if (activeSync?.masterUdid === device.udid) {
+              pushToast("warn", "Chưa hỗ trợ dán vào nhóm máy", "Tắt đồng bộ nhóm rồi dán trên từng máy.");
+              return;
+            }
+            if (isIos) {
+              pushToast("warn", "Dán trực tiếp chỉ hỗ trợ Android");
+              return;
+            }
+            if (keyDisabled || inFlight.current || pointerBusyRef.current || !controlReady.current.has(device.udid)) {
+              pushToast("warn", "Chưa sẵn sàng dán", "Chờ máy rảnh và phiên điều khiển sẵn sàng.");
+              return;
+            }
+            if (!hasView || viewSize?.generation === undefined) {
+              pushToast("warn", "Chưa có luồng hình để dán");
+              return;
+            }
+            const text = event.clipboardData.getData("text/plain");
+            if (!text) return;
+            // Only the native paste event dispatches. No keydown/async clipboard read,
+            // trimming, replacement, or retry of a potentially delivered paste.
+            const identity = pasteIdentity;
+            void runExclusive(async () => {
+              try {
+                await devicePasteText(device.udid, text, viewSize.generation);
+              } catch (error) {
+                if (currentPasteIdentity.current === identity) {
+                  toastError("Chưa xác nhận dán; kiểm tra trên điện thoại trước khi dán lại", error);
+                }
+              }
+            });
+          }}
           onContextMenu={event=>{event.preventDefault();event.stopPropagation();setContextMenu({x:event.clientX,y:event.clientY,udid:device.udid});}}
           style={{ width: layout.screenWidth, height: layout.screenHeight }}
           title="Ctrl + lăn chuột để phóng to / thu nhỏ"
           onPointerDown={(e) => {
             if (busy || inFlight.current || pointerBusyRef.current || !sessionReady || e.button !== 0 || drag.current) return;
+            e.currentTarget.focus({ preventScroll: true });
             // Said out loud rather than dropped. A gesture needs the encoded frame size to
             // map through, and without it this handler used to return in silence -- so on a
             // phone that had not painted yet the operator could click the picture as long as

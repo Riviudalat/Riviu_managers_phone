@@ -28,7 +28,10 @@ vi.mock("../pickFile", () => ({
   pickFiles: vi.fn(async () => ["C:/picture.jpg"]),
 }));
 
+const pasteText = vi.hoisted(() => vi.fn(async (_udid: string, _text: string, _generation: number) => undefined));
+
 vi.mock("../api", () => ({
+  devicePasteText: pasteText,
   backupDevice: vi.fn(),
   deviceControlBegin: vi.fn(async () => undefined),
   deviceControlEnd: vi.fn(async () => undefined),
@@ -1137,4 +1140,68 @@ it("coalesces wheel ticks while a swipe is pending and stops after closing", asy
   view.unmount();
   await Promise.resolve();
   expect(deviceSwipe).toHaveBeenCalledTimes(2);
+});
+
+
+describe("focused phone paste", () => {
+  beforeEach(() => {
+    pasteText.mockReset().mockResolvedValue(undefined);
+    vi.mocked(deviceControlBegin).mockReset().mockResolvedValue(undefined);
+    vi.mocked(deviceTypeText).mockClear();
+    resetToasts();
+  });
+
+  it("focuses the phone and dispatches one native paste preserving Unicode and newlines", async () => {
+    const view = render(<FocusStream device={fixture} index={1} onClose={vi.fn()} devices={[fixture]} onSelectDevice={vi.fn()} />);
+    await waitForControlReady();
+    const pane = view.getByTestId("focus-screen");
+    // No geometry means no device tap; pointer activation must still focus the surface.
+    fireEvent.pointerDown(pane, { button: 0, pointerId: 1 });
+    expect(pane).toHaveFocus();
+    const text = "Chào bạn 👋\nDòng hai";
+    let finish!: () => void;
+    pasteText.mockImplementationOnce(() => new Promise(resolve => { finish = () => resolve(undefined); }));
+    fireEvent.keyDown(pane, { key: "v", ctrlKey: true });
+    fireEvent.paste(pane, { clipboardData: { getData: () => text } });
+    fireEvent.paste(pane, { clipboardData: { getData: () => text } });
+    expect(pasteText).toHaveBeenCalledExactlyOnceWith(fixture.udid, text, 1);
+    expect(deviceTypeText).not.toHaveBeenCalled();
+    await act(async () => finish());
+  });
+
+  it("refuses group paste and ignores paste outside the focused phone", async () => {
+    const other = { ...fixture, udid: "ce07" };
+    const view = render(<><FocusStream device={fixture} index={1} onClose={vi.fn()} devices={[fixture, other]} onSelectDevice={vi.fn()} activeSync={{ masterUdid: fixture.udid, targetUdids: [fixture.udid, other.udid] }} /><textarea aria-label="Local text" /><ActivityCenter /></>);
+    await waitForControlReady();
+    const local = view.getByRole("textbox", { name: "Local text" });
+    local.focus();
+    expect(fireEvent.paste(local, { clipboardData: { getData: () => "local" } })).toBe(true);
+    const pane = view.getByTestId("focus-screen");
+    pane.focus();
+    fireEvent.paste(pane, { clipboardData: { getData: () => "group" } });
+    expect(await view.findByText("Chưa hỗ trợ dán vào nhóm máy")).toBeVisible();
+    expect(pasteText).not.toHaveBeenCalled();
+  });
+
+  it("does not replay a failed paste or attribute its late error to a switched phone", async () => {
+    const other = { ...fixture, udid: "ce07", name: "Other phone" };
+    const props = { index: 1, onClose: vi.fn(), devices: [fixture, other], onSelectDevice: vi.fn() };
+    const view = render(<><FocusStream {...props} device={fixture} /><ActivityCenter /></>);
+    await waitForControlReady();
+    let reject!: (error: Error) => void;
+    pasteText.mockImplementationOnce(() => new Promise((_resolve, fail) => { reject = fail; }));
+    const pane = view.getByTestId("focus-screen");
+    pane.focus();
+    fireEvent.paste(pane, { clipboardData: { getData: () => "first" } });
+    expect(pasteText).toHaveBeenCalledExactlyOnceWith(fixture.udid, "first", 1);
+    view.rerender(<><FocusStream {...props} device={other} /><ActivityCenter /></>);
+    await act(async () => reject(new Error("transport timeout")));
+    expect(view.queryByText(/transport timeout/)).toBeNull();
+    expect(pasteText).toHaveBeenCalledTimes(1);
+    await waitForControlReady();
+    const next = view.getByTestId("focus-screen");
+    next.focus();
+    fireEvent.paste(next, { clipboardData: { getData: () => "second" } });
+    expect(pasteText).toHaveBeenLastCalledWith(other.udid, "second", 1);
+  });
 });

@@ -270,6 +270,11 @@ export async function deviceSwipe(
   });
 }
 
+/** Native cursor paste; completion means dispatched, not text readback. Never retry automatically. */
+export async function devicePasteText(udid: string, text: string, generation: number) {
+  return invoke<void>("device_paste_text", { udid, text, generation });
+}
+
 export async function deviceTypeText(udid: string, text: string) {
   return invoke<void>("device_type_text", { udid, text });
 }

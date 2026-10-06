@@ -47,6 +47,13 @@ Kéo tiêu đề có số máy để di chuyển, kéo góc dưới phải để
 vẫn dùng được khi cửa sổ mở. Nút Đóng hoặc Escape đóng cửa sổ đang thao tác. Tìm chức năng lọc toàn bộ bảng;
 các lệnh chưa dùng được vẫn hiện lý do/trạng thái theo máy.
 
+Trên Android, chạm vào ô nhập trên màn hình điện thoại rồi nhấn **Ctrl+V** để dán
+chữ từ PC tại con trỏ. Có thể giữ bàn phím Samsung/Gboard đang dùng; thao tác dán
+không đổi bàn phím. Nếu máy còn hiện thanh Clear Text/Switch IME của bàn phím ADB,
+mở **Đổi bàn phím** và chọn bàn phím thông thường đã cài. Ctrl+V chỉ áp dụng khi
+vùng màn hình điện thoại đang được chọn và phiên điều khiển sẵn sàng. Khi bật
+đồng bộ nhóm, dùng ô **Nhập chữ**; dán trực tiếp hiện chỉ dành cho một máy Android.
+
 **PC → Điện thoại** mở hộp chọn một/nhiều tệp trên PC, sau đó mở thư mục điện thoại.
 Chọn thư mục đích rồi bấm **Đưa vào thư mục này**. Nếu có tệp lỗi, bấm lại chỉ gửi
 những tệp chưa thành công. **Điện thoại → PC** mở thư mục điện thoại để đánh dấu

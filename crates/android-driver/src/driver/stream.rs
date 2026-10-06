@@ -1053,6 +1053,53 @@ impl AndroidDriver {
         );
         Ok(())
     }
+    /// One native paste on the exact producer the operator was watching.
+    /// Caller must retain the overlay ManualControl lease; no fallback or retry is safe.
+    pub async fn paste_text(
+        &self,
+        serial: &str,
+        generation: u64,
+        text: &str,
+    ) -> anyhow::Result<()> {
+        let message = crate::scrcpy::clipboard_paste_message(text)?;
+        if text.is_empty() {
+            return Ok(());
+        }
+        // Retain producer identity through one nonblocking write. Replacement removes
+        // this entry before stopping it; no socket await may hold the fleet map.
+        let views = self.views.lock().await;
+        let control = {
+            let producer = views
+                .get(serial)
+                .ok_or_else(|| anyhow!("No active scrcpy stream for paste"))?;
+            anyhow::ensure!(
+                producer.generation == generation
+                    && !producer.reader.is_finished()
+                    && !producer.control_drain.is_finished(),
+                "Stream changed or stopped; paste was not sent"
+            );
+            Arc::clone(&producer.control)
+        };
+        // Refuse contention before sending, rather than queue a paste behind another action.
+        let mut socket = control
+            .try_lock()
+            .map_err(|_| anyhow!("Scrcpy control is busy; paste was not sent"))?;
+        let sent = socket.try_write(&message);
+        drop(views);
+        match sent {
+            Ok(written) if written == message.len() => Ok(()),
+            Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
+                anyhow::bail!("Scrcpy control is not writable; paste was not sent");
+            }
+            _ => {
+                // A partial packet poisons only this stream. Close it without holding
+                // the fleet map, and never replay on this socket or a replacement.
+                let _ = tokio::time::timeout(Duration::from_secs(2), socket.shutdown()).await;
+                anyhow::bail!("Paste dispatch uncertain; inspect the phone before pasting again");
+            }
+        }
+    }
+
     /// Hardware keys use the existing scrcpy shell transport. The caller owns a manual lease.
     /// Return false only before sending anything; errors must never replay a possibly sent key.
     pub async fn inject_hardware_key(
