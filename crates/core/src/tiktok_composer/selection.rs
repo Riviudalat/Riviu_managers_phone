@@ -1015,6 +1015,7 @@ impl<P: TapPlanner> Composer<'_, P> {
                 let hard_deadline =
                     crate::tiktok_sound::phase_deadline(ARM_WINDOW + Duration::from_secs(8));
                 let mut recovering_partial = false;
+                let mut readback_completed = false;
                 current = loop {
                     if stop.load(Ordering::Relaxed) {
                         trace.reason(SelectionReason::Stopped);
@@ -1023,10 +1024,29 @@ impl<P: TapPlanner> Composer<'_, P> {
                     let observed = match trace.read(session, controls, album_query, album, hard_deadline, stop, &epoch)
                     .await
                     {
-                        Ok(ReadWaitResult::Ready(observed)) => observed,
+                        Ok(ReadWaitResult::Ready(observed)) => {
+                            readback_completed = true;
+                            observed
+                        },
                         Ok(ReadWaitResult::Cancelled) => {
                             trace.reason(SelectionReason::Stopped);
                             return Ok(Selection::Stopped);
+                        }
+                        Ok(ReadWaitResult::DeadlineExceeded) if !readback_completed => {
+                            if stop.load(Ordering::Relaxed) {
+                                trace.reason(SelectionReason::Stopped);
+                                return Ok(Selection::Stopped);
+                            }
+                            anyhow::ensure!(
+                                session.gui_session_epoch() == epoch,
+                                "picker session changed before selection readback deadline"
+                            );
+                            trace.reason(SelectionReason::SelectionReadbackUnproven);
+                            // No readback completed after this tap. Only the outer
+                            // pre-Post dispatcher may rebuild; never toggle it again.
+                            return Err(crate::publish_recovery::observation_deadline().context(
+                                "picker selection readback unavailable after tap; fresh preparation required",
+                            ));
                         }
                         Ok(ReadWaitResult::DeadlineExceeded) => None,
                         Err(error)
@@ -2270,11 +2290,16 @@ mod tests {
             "wrong-album",
             "dropped-tap",
             "never-recovers",
+            "read-timeout",
             "stopped",
         ] {
             let mut session = Picker::new((mode == "dropped-tap").then_some(4));
             session.total = 8;
-            *session.partial_after_fifth.lock() = Some(Duration::from_millis(5151));
+            *session.partial_after_fifth.lock() = Some(if mode == "read-timeout" {
+                ARM_WINDOW + Duration::from_secs(9)
+            } else {
+                Duration::from_millis(5151)
+            });
             session.wrong_after_fifth = mode == "wrong-album";
             session.partial_forever = mode == "never-recovers";
             let start = Instant::now();
@@ -2302,6 +2327,22 @@ mod tests {
                     }
                 },
             );
+            if mode == "read-timeout" {
+                let error = result.expect_err("unknown readback must retain a typed observation timeout");
+                let failure = crate::publish_recovery::describe(&error);
+                assert_eq!(failure.kind, crate::publish_recovery::FailureKind::Retryable);
+                assert_eq!(failure.code, "publish_observation_deadline");
+                let diagnostic = composer.last_selection_diagnostic().unwrap();
+                assert_eq!(diagnostic.stage, SelectionStage::TapReadback);
+                assert_eq!(diagnostic.reason_code, SelectionReason::SelectionReadbackUnproven);
+                assert_eq!(diagnostic.last_verified_count, 4);
+                assert_eq!(diagnostic.snapshot_generation, None);
+                assert_eq!(diagnostic.last_completed_snapshot, diagnostic.last_verified_snapshot);
+                assert_eq!(session.taps.lock().len(), 5, "never replay the uncertain fifth tap");
+                assert_eq!(*session.swipes.lock(), 0);
+                assert_eq!(start.elapsed(), ARM_WINDOW + Duration::from_secs(8));
+                continue;
+            }
             let result = result.unwrap();
             if mode == "recovers" {
                 assert!(

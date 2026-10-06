@@ -118,6 +118,9 @@ impl RecoveryFailure {
             FailureKind::Retryable if adb_daemon_connect_timeout(&message) => {
                 "adb_daemon_connect_timeout"
             }
+            FailureKind::Retryable if adb_transfer_daemon_start_failed(&message) => {
+                "adb_daemon_start_failed"
+            }
             FailureKind::Retryable => "legacy_retryable",
             FailureKind::Terminal => "legacy_terminal",
         };
@@ -159,9 +162,19 @@ fn unavailable_android_agent_status(message: &str) -> bool {
 
 fn adb_daemon_connect_timeout(message: &str) -> bool {
     let message = message.to_ascii_lowercase();
-    message.contains("adb.exe: cannot connect to daemon at tcp:5037:")
+    (message.contains("adb.exe: cannot connect to daemon at tcp:5037:")
+        || message.contains("error: cannot connect to daemon at tcp:5037:"))
         && message.contains("cannot connect to 127.0.0.1:5037:")
         && message.contains("(10060)")
+}
+
+fn adb_transfer_daemon_start_failed(message: &str) -> bool {
+    let message = message.to_ascii_lowercase();
+    message.contains("stagepublishmedia failed for device ")
+        && message.contains("* daemon not running; starting now at tcp:5037")
+        && message.contains("could not read ok from adb server")
+        && message.contains("* failed to start daemon")
+        && message.contains("failed to get feature set: cannot connect to daemon")
 }
 
 #[derive(Debug)]
@@ -302,7 +315,7 @@ pub fn classify(message: &str) -> FailureKind {
     // Windows ADB reports WSAETIMEDOUT without the words "timeout" or "timed
     // out". Match the measured loopback daemon failure, after specific terminal
     // refusals; the existing intent/revision gates still own permission to retry.
-    if adb_daemon_connect_timeout(message) {
+    if adb_daemon_connect_timeout(message) || adb_transfer_daemon_start_failed(message) {
         return FailureKind::Retryable;
     }
     if [
@@ -472,10 +485,25 @@ mod tests {
         let daemon_failure = RecoveryFailure::legacy(daemon_connect);
         assert_eq!(daemon_failure.kind, FailureKind::Retryable);
         assert_eq!(daemon_failure.code, "adb_daemon_connect_timeout");
+        // The shell-output readback wrapper reports the same measured WSA error
+        // with `error:` instead of `adb.exe:`. Both must reach bounded recovery.
+        let readback_connect = daemon_connect.replace("adb.exe:", "error:");
+        let readback_failure = RecoveryFailure::legacy(&readback_connect);
+        assert_eq!(readback_failure.kind, FailureKind::Retryable);
+        assert_eq!(readback_failure.code, "adb_daemon_connect_timeout");
+        let daemon_start = "stagePublishMedia failed for device fixture: push fixture.png to /sdcard/Pictures/.riviu-publish/fixture/fixture.png: adb -s fixture push fixture.png /sdcard/Pictures/.riviu-publish/fixture/fixture.png failed: * daemon not running; starting now at tcp:5037\r\ncould not read ok from ADB Server\r\n* failed to start daemon\r\nadb: error: failed to get feature set: cannot connect to daemon";
+        let start_failure = RecoveryFailure::legacy(daemon_start);
+        assert_eq!(start_failure.kind, FailureKind::Retryable);
+        assert_eq!(start_failure.code, "adb_daemon_start_failed");
         for refusal in [
             format!("device unauthorized: {daemon_connect}"),
             daemon_connect.replace("127.0.0.1:5037", "192.0.2.1:5037"),
             daemon_connect.replace("(10060)", "(10013)"),
+            readback_connect.replace("(10060)", "(10013)"),
+            readback_connect.replace("127.0.0.1:5037", "192.0.2.1:5037"),
+            format!("device unauthorized: {daemon_start}"),
+            daemon_start.replace("tcp:5037", "tcp:5038"),
+            daemon_start.replace("stagePublishMedia failed for device", "tap failed for device"),
         ] {
             assert_eq!(classify(&refusal), FailureKind::Terminal, "{refusal}");
         }

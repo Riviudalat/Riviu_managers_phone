@@ -1877,7 +1877,12 @@ impl<'a, P: TapPlanner> Composer<'a, P> {
     /// defaulted, so a picker that did not render cannot be tapped at remembered coordinates.
     async fn grid(&self, screen: Screen, stop: &AtomicBool) -> anyhow::Result<Option<PhotoGrid>> {
         let Some(tabs) = self
-            .await_condition(PICKER_WINDOW, self.plan.tabs, stop, |_| true)
+            .await_navigation_target(
+                crate::tiktok_sound::phase_deadline(PICKER_WINDOW),
+                self.plan.tabs,
+                stop,
+                None,
+            )
             .await?
         else {
             return Ok(None);
@@ -6494,6 +6499,20 @@ mod tests {
             1,
             "only the album menu was tapped"
         );
+
+        // The picker tab read can also time out after the album was selected.
+        // That does not prove the anchor is absent and must never allow a tap.
+        let session = FakeSession {
+            locate_delay: PICKER_WINDOW + Duration::from_secs(1),
+            ..FakeSession::with(vec![picker("fixture", None)])
+        };
+        let composer = Composer::new(&session, plan(), |element: &ElementBox| element.centre());
+        let error = composer.grid(screen(), &AtomicBool::new(false)).await
+            .expect_err("late tab read must retain the observation timeout");
+        let failure = crate::publish_recovery::describe(&error);
+        assert_eq!(failure.kind, crate::publish_recovery::FailureKind::Retryable);
+        assert_eq!(failure.code, "publish_observation_deadline");
+        assert!(session.taps.lock().is_empty());
     }
 
     // -------------------------------------------------------------- the album
