@@ -3895,6 +3895,18 @@ where
                             candidate.title == selection.title
                                 && candidate.artist == selection.artist
                         }) {
+                            if matches!(
+                                sound_policy,
+                                PublishSoundPolicy::Default | PublishSoundPolicy::TrendingAny { .. }
+                            ) {
+                                // Any current recommendation is permitted, but the
+                                // bound choice stays fixed until this attempt ends.
+                                // Only the dispatcher may admit a fresh pre-Post attempt.
+                                return Err(crate::publish_recovery::retryable_error(
+                                    "sound_any_choice_requires_fresh_attempt",
+                                    "Nhạc đã chọn không còn trong danh sách hiện tại; cần lượt thử mới để chọn nhạc đề xuất khác, chưa bấm Đăng",
+                                ));
+                            }
                             observed = Some(
                                 crate::tiktok_sound::recover_frozen_sound_pool(
                                     session,
@@ -5836,7 +5848,10 @@ mod tests {
     #[tokio::test(start_paused = true)]
     async fn confirmed_sound_is_journaled_before_caption_can_fail() {
         #[derive(Default)]
-        struct Journal(Mutex<Vec<SoundSelectionEvidence>>);
+        struct Journal(
+            Mutex<Vec<SoundSelectionEvidence>>,
+            std::sync::atomic::AtomicUsize,
+        );
         impl crate::publish_recovery::RecoveryJournal for Journal {
             fn step(&self, step: &str, _: Option<&str>) -> anyhow::Result<()> {
                 anyhow::ensure!(step != "caption", "fixture caption unavailable");
@@ -5846,6 +5861,7 @@ mod tests {
                 &self,
                 _: &crate::publish_recovery::RecoveryFailure,
             ) -> anyhow::Result<Option<Duration>> {
+                self.1.fetch_add(1, Ordering::Relaxed);
                 Ok(None)
             }
             fn sound(
@@ -5859,72 +5875,129 @@ mod tests {
             }
         }
 
-        // Reuse the measured inline-sheet shape: already selected marker, then
-        // Back closes the sheet onto the editor with the exact selected title.
-        let mut session = FakeSession::full_walk("album");
-        let mut editor = sound_edit_step("Sound A");
-        editor
-            .elements
-            .insert(":id/c_4".into(), box_at(100.0, 100.0));
-        editor.exit = Some(":id/c_4".into());
-        let sheet = scene(
-            vec![
-                ("Recommended", box_at(0.0, 0.0)),
-                (":id/ta8", labelled("", 0.0, 100.0, 800.0, 200.0)),
-                (":id/title", box_at(100.0, 120.0)),
-                (":id/rr5", box_at(100.0, 200.0)),
-                (":id/dfu", box_at(500.0, 120.0)),
-            ],
-            None,
-        )
-        .texted("Recommended", "Recommended")
-        .texted(":id/title", "Sound A")
-        .texted(":id/rr5", "Artist A");
-        session.screens.truncate(7);
-        session.screens.extend([editor, sheet]);
-        let journal = std::sync::Arc::new(Journal::default());
-        let result = crate::publish_recovery::scope(
-            journal.clone(),
-            publish_selected_media_with_sound_effect_intent(
-                &session,
-                plan(),
-                SoundPickerPlan::resolve("com.ss.android.ugc.trill", "en", "38.3.2").unwrap(),
-                &PublishSoundPolicy::TrendingAny {
+        for (policy, prior_bound) in [
+            (
+                PublishSoundPolicy::TrendingAny {
                     pool_size: 1,
                     seed: 1,
                 },
-                |element: &ElementBox| element.centre(),
-                PickerSelection {
-                    album: "album",
-                    count: 1,
-                    screen: screen(),
-                    video: true,
+                false,
+            ),
+            (PublishSoundPolicy::Default, true),
+            (
+                PublishSoundPolicy::TrendingAny {
+                    pool_size: 1,
+                    seed: 1,
                 },
-                "caption",
-                &AtomicBool::new(false),
-                |_| panic!("caption failure must precede Post intent"),
-                &|_| {},
-                &|_| {},
                 true,
             ),
-        )
-        .await;
-        assert!(format!("{:#}", result.unwrap_err()).contains("fixture caption unavailable"));
-        let writes = journal.0.lock();
-        assert_eq!(
-            writes.len(),
-            2,
-            "intent and confirmed evidence must both reach the journal"
-        );
-        assert!(!writes[0].confirmed);
-        let mut expected = writes[0].clone();
-        expected.confirmed = true;
-        assert_eq!(
-            writes[1], expected,
-            "confirmation must preserve the frozen identity"
-        );
-        assert!(session.typed.lock().is_none());
-        assert_eq!(post_button_taps(&session), 0);
+        ] {
+            // Reuse the measured inline-sheet shape: already selected marker, then
+            // Back closes the sheet onto the editor with the exact selected title.
+            let mut session = FakeSession::full_walk("album");
+            let mut editor = sound_edit_step("Sound A");
+            editor
+                .elements
+                .insert(":id/c_4".into(), box_at(100.0, 100.0));
+            editor.exit = Some(":id/c_4".into());
+            let sheet = scene(
+                vec![
+                    ("Recommended", box_at(0.0, 0.0)),
+                    (":id/ta8", labelled("", 0.0, 100.0, 800.0, 200.0)),
+                    (":id/title", box_at(100.0, 120.0)),
+                    (":id/rr5", box_at(100.0, 200.0)),
+                    (":id/dfu", box_at(500.0, 120.0)),
+                ],
+                None,
+            )
+            .texted("Recommended", "Recommended")
+            .texted(":id/title", "Sound A")
+            .texted(":id/rr5", "Artist A");
+            session.screens.truncate(7);
+            session.screens.extend([editor, sheet]);
+            let journal = std::sync::Arc::new(Journal::default());
+            let prior = SoundSelectionEvidence {
+                section: crate::publish::SoundSectionKind::Trending,
+                title: "Previous sound".into(),
+                artist: "Previous artist".into(),
+                index: 3,
+                candidates_digest: "previous-pool".into(),
+                confirmed: true,
+            };
+            if prior_bound {
+                journal.0.lock().push(prior.clone());
+            }
+            let selection_steps = std::sync::atomic::AtomicUsize::new(0);
+            let result = crate::publish_recovery::scope(
+                journal.clone(),
+                publish_selected_media_with_sound_effect_intent(
+                    &session,
+                    plan(),
+                    SoundPickerPlan::resolve("com.ss.android.ugc.trill", "en", "38.3.2").unwrap(),
+                    &policy,
+                    |element: &ElementBox| element.centre(),
+                    PickerSelection {
+                        album: "album",
+                        count: 1,
+                        screen: screen(),
+                        video: true,
+                    },
+                    "caption",
+                    &AtomicBool::new(false),
+                    |_| panic!("caption failure must precede Post intent"),
+                    &|event| {
+                        if matches!(event, PublishProgress::SelectingSound { .. }) {
+                            selection_steps.fetch_add(1, Ordering::Relaxed);
+                        }
+                    },
+                    &|_| {},
+                    true,
+                ),
+            )
+            .await;
+            let error = result.expect_err("this journey must remain before Post");
+            let writes = journal.0.lock();
+            if prior_bound {
+                let failure = crate::publish_recovery::describe(&error);
+                assert_eq!(
+                    failure.kind,
+                    crate::publish_recovery::FailureKind::Retryable
+                );
+                assert_eq!(failure.code, "sound_any_choice_requires_fresh_attempt");
+                assert!(crate::publish_recovery::requires_fresh_preparation(&error));
+                assert_eq!(
+                    &*writes,
+                    &[prior],
+                    "the active attempt must not replace its bound choice"
+                );
+                assert_eq!(
+                    selection_steps.load(Ordering::Relaxed),
+                    0,
+                    "no inline selection of a replacement"
+                );
+            } else {
+                assert!(format!("{error:#}").contains("fixture caption unavailable"));
+                assert_eq!(
+                    writes.len(),
+                    2,
+                    "intent and confirmed evidence must both reach the journal"
+                );
+                assert!(!writes[0].confirmed);
+                let mut expected = writes[0].clone();
+                expected.confirmed = true;
+                assert_eq!(
+                    writes[1], expected,
+                    "confirmation must preserve the frozen identity"
+                );
+            }
+            assert_eq!(
+                journal.1.load(Ordering::Relaxed),
+                0,
+                "fresh preparation cannot spend an inline retry"
+            );
+            assert!(session.typed.lock().is_none());
+            assert_eq!(post_button_taps(&session), 0);
+        }
     }
 
     #[tokio::test(start_paused = true)]

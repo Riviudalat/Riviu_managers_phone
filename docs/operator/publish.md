@@ -270,8 +270,9 @@ lượt kế tiếp chờ ít nhất đến hết khoảng phục hồi của ph
 không tiêu hết lượt thử trong lúc instrumentation còn cooldown. Bước chọn nhạc có
 tổng thời hạn 3 phút, gồm các lần đọc lại và khoảng chờ thử lại; không cấp thêm
 3 phút sau mỗi lỗi. Hết thời hạn thì máy dừng trước Đăng và cần bấm **Thử lại**.
-App ưu tiên
-tiếp tục bước đang lỗi, giữ bài, caption và nhạc đã chọn; nếu mất màn soạn thì dựng
+App ưu tiên tiếp tục bước đang lỗi, giữ bài và caption đã duyệt. Trong cùng một
+lần chạy, nhạc đã chọn được giữ để đọc lại và xác nhận. Khi cần bắt đầu lần thử mới,
+app có thể chọn nhạc khác trong Recommended hiện tại; nếu mất màn soạn thì dựng
 lại từ bản đã duyệt. Media còn đúng hash và MediaStore được dùng lại.
 Máy mất kết nối được chờ đúng serial tối đa **2 phút**, không giữ slot của máy khác.
 Caption tạm thời chưa đọc được được kiểm tra lại trong thời hạn của bước, không
@@ -284,9 +285,11 @@ lại trạng thái quyền trước khi tiếp tục. Android từ chối hoặ
 thì máy báo lỗi, không tự bấm hộp thoại và không tiếp tục thao tác đăng. Cơ chế này
 không cấp quyền cho ứng dụng khác và không thay thế bước cho phép USB debugging.
 
-Trong **Theo dõi tiến trình**, mỗi máy lỗi có nút **Thử lại**. Bấm nút này chỉ chạy
-thêm **một lượt bài**; trong lượt đó lỗi tạm thời trước Đăng vẫn được thử lại tối đa
-ba lần ở đúng bước. Không tự tạo lượt bài khác nếu lượt thủ công này thất bại.
+Trong **Theo dõi tiến trình**, mỗi máy lỗi có nút **Thử lại**. Bấm nút này mở một
+đợt phục hồi mới cho đúng bài chưa gửi, với tối đa **ba lần tự thử ở mỗi bước**.
+Sau lần thử thủ công, lỗi tạm thời vẫn được tự phục hồi: thử lại trong bước và
+chạy lại từ chuyển media dùng chung bộ đếm đã lưu của bước đó. Hết ngân sách thì
+dừng để người dùng kiểm tra; gửi lại cùng yêu cầu Thử lại không cấp thêm lượt.
 Nếu agent đang phục hồi, lệnh được ghi nhận
 nhưng chờ hết cooldown của máy trước khi mở phiên mới. Khi đang tự phục hồi, nút bị khóa và
 hiện bước cùng số lần. Bài đã Post chỉ có **Kiểm tra liên kết** hoặc **Ghi lại Sheet**;
@@ -455,10 +458,13 @@ qua Post. Khi backend báo pipeline còn chạy, máy bận hoặc chưa đọc 
 lại, nút bị khoá kèm lý do; chờ/đọc lại chi tiết, không tạo campaign khác để né guard.
 Thao tác này khác tiếp tục xác minh, kiểm tra link và ghi lại Sheet.
 
-Khi xác nhận thử lại, nhạc tự chọn chưa xác minh được chọn lại theo cấu hình đã
-lưu của bài nếu danh sách Hot đã đổi; binding cũ được giữ trong audit. Retry tự
-động trong cùng lần chạy không đổi nhạc. Nhạc đã xác minh và bài đã qua Post
-không được reset hay gửi lại bằng thao tác này.
+Mỗi lần chạy mới trước Post, từ **Thử lại máy này** hoặc tự phục hồi trong ngân
+sách, có thể chọn bất kỳ bài nhạc nào trong Recommended đang hiện. Lựa chọn mới
+có thể thay nhạc đã xác minh ở lần chạy trước; lựa chọn cũ vẫn được lưu trong lịch
+sử. Trong cùng một lần chạy, app giữ nhạc đã chọn và phải đọc lại đúng tên, nghệ sĩ
+và xác nhận trên màn soạn trước Post. Nếu nhạc không còn trong danh sách đã đọc
+rõ, app chuyển sang lần thử mới trong ngân sách để chọn lại. Bài đã qua Post chỉ
+được kiểm tra kết quả, không gửi lại.
 
 ### Đọc cảnh báo nguồn trước khi xác nhận
 

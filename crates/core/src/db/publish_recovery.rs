@@ -280,9 +280,8 @@ impl Database {
                 step: job.phase.clone(),
                 ..Default::default()
             });
-        if s.manual {
-            return Ok(false);
-        }
+        // Manual is the attempt's origin; transient recovery still spends the
+        // same persisted budget as retries within a step.
         let now = Utc::now().timestamp_millis();
         record_failure(&mut s, failure);
         if kind == FailureKind::Disconnected {
@@ -302,10 +301,23 @@ impl Database {
             tx.commit()?;
             return Ok(false);
         }
+        let attempt = Uuid::new_v4().to_string();
+        // The old attempt is finished. Preserve its choice as evidence, then let
+        // the new attempt bind a current Recommended song before editor proof.
+        if let Some(prior) = s.sound.take() {
+            tx.execute("INSERT INTO operation_device_events(source_kind,source_id,udid,action,state,recorded_at,text,detail)
+                SELECT 'publish',campaign_id,udid,'publishSoundRebind','retrying',?2,?3,?4 FROM publish_assignments WHERE id=?1",
+                params![job.assignment_id, Utc::now().to_rfc3339(),
+                    "Chọn nhạc trong Recommended cho lượt tự thử lại mới trước Post",
+                    serde_json::to_string(&serde_json::json!({
+                        "assignmentId": job.assignment_id, "priorAttemptId": job.attempt_id,
+                        "attemptId": attempt, "source": "automatic_retry_before_post",
+                        "priorSound": prior, "priorCheckpoint": s.checkpoint,
+                    }))?])?;
+        }
         write(&tx, &job.assignment_id, &job.run.token, &s)?;
         // Composer cleanup may have invalidated imported assets. Re-enter transfer
         // for revalidation using the existing import identity, never a new publication.
-        let attempt = Uuid::new_v4().to_string();
         tx.execute(
             "UPDATE publish_attempts SET finished_at_ms=?2,result=?3 WHERE attempt_id=?1",
             params![job.attempt_id, now, error],
@@ -825,7 +837,7 @@ mod tests {
             .is_err());
     }
     #[test]
-    fn manual_retry_ack_is_idempotent_and_keeps_manual_requeue_policy() {
+    fn manual_retry_ack_is_idempotent_and_keeps_bounded_recovery() {
         let (db, _, campaign, a) = fixture();
         let run = db.claim_publish_pipeline(&campaign).unwrap().unwrap();
         let job = db.pending_publish_dispatch(10).unwrap().remove(0);
@@ -858,10 +870,74 @@ mod tests {
         let recovery = db.publish_recovery_state(id).unwrap().unwrap();
         assert!(recovery.manual);
         assert_eq!(recovery.max_retries, 3);
+        let mut retry_job = db
+            .pending_publish_dispatch(10)
+            .unwrap()
+            .into_iter()
+            .find(|job| job.assignment_id == *id)
+            .unwrap();
+        db.update_publish_recovery_step(id, &first.token, "transfer", None)
+            .unwrap();
         assert!(db
             .reserve_publish_step_retry(id, &first.token, "network")
             .unwrap()
             .is_some());
+        // Inline and whole-job recovery share this manual attempt's three-retry
+        // budget. Replaying the same operator request must never replenish it.
+        for used in 2..=3 {
+            let sound = crate::SoundSelectionEvidence {
+                section: crate::publish::SoundSectionKind::Trending,
+                title: format!("Recommended attempt {used}"), artist: "Artist".into(),
+                index: 0, candidates_digest: format!("pool-{used}"), confirmed: true,
+            };
+            db.bind_publish_recovery_sound(id, &first.token, Some(&sound)).unwrap();
+            assert!(db.claim_publish_dispatch(&retry_job, 0).unwrap());
+            assert!(db
+                .finish_publish_dispatch(&retry_job, Some("connection reset"))
+                .unwrap());
+            let recovery = db.publish_recovery_state(id).unwrap().unwrap();
+            assert!(recovery.manual);
+            assert_eq!(recovery.state, "retryWaiting");
+            assert_eq!(recovery.retries_used, used);
+            assert_eq!(recovery.counts["transfer"], used);
+            assert!(recovery.sound.is_none(), "a new attempt must choose from current Recommended");
+            let archived: String = db.conn().unwrap().query_row(
+                "SELECT detail FROM operation_device_events WHERE source_kind='publish' AND source_id=?1 AND action='publishSoundRebind' ORDER BY rowid DESC LIMIT 1",
+                [&campaign], |row| row.get(0),
+            ).unwrap();
+            let archived: serde_json::Value = serde_json::from_str(&archived).unwrap();
+            assert_eq!(archived["priorSound"], serde_json::to_value(sound).unwrap());
+            assert_eq!(archived["priorAttemptId"], retry_job.attempt_id);
+            let replay = db
+                .claim_publish_assignment_retry_checked(id, revision, &request)
+                .unwrap()
+                .unwrap();
+            assert_eq!(replay.token, first.token);
+            assert_eq!(db.publish_recovery_state(id).unwrap().unwrap().counts["transfer"], used);
+            // Advance only the fixture's backoff eligibility, preserving counts.
+            db.conn().unwrap().execute(
+                "UPDATE publish_recovery_state SET payload=json_set(payload,'$.nextRetryAt',0) WHERE assignment_id=?1",
+                [id],
+            ).unwrap();
+            let next = db
+                .pending_publish_dispatch(10)
+                .unwrap()
+                .into_iter()
+                .find(|job| job.assignment_id == *id)
+                .unwrap();
+            assert_ne!(next.attempt_id, retry_job.attempt_id);
+            assert_eq!(next.phase, "transfer");
+            retry_job = next;
+        }
+        assert!(db.claim_publish_dispatch(&retry_job, 0).unwrap());
+        assert!(db.finish_publish_dispatch(&retry_job, Some("connection reset")).unwrap());
+        let exhausted = db.publish_recovery_state(id).unwrap().unwrap();
+        assert_eq!(exhausted.state, "exhausted");
+        assert_eq!(exhausted.counts["transfer"], 3);
+        assert!(exhausted.next_retry_at.is_none());
+        assert!(!db.pending_publish_dispatch(10).unwrap().iter().any(|job| job.assignment_id == *id));
+        assert!(db.claim_publish_assignment_retry_checked(id, revision, &request).unwrap().is_some());
+        assert_eq!(db.publish_recovery_state(id).unwrap().unwrap().state, "exhausted");
         let other = a.iter().find(|a| a.id != *id).unwrap();
         assert!(db
             .acknowledged_publish_retry(&other.id, revision, &request)

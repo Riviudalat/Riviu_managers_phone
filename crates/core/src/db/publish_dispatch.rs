@@ -202,54 +202,23 @@ impl Database {
             recovery.expected_account == current_account,
             "Tài khoản đã đổi; không thử lại bài cũ"
         );
-        // Older composers persisted the binding before confirmation but only
-        // advanced the checkpoint after proving it. Preserve that historical
-        // proof before resetting counters or later overwriting the checkpoint.
-        // This never substitutes for the fresh editor reproof before Post.
-        if matches!(
-            recovery.checkpoint.as_str(),
-            "soundConfirmed" | "captionEntered" | "captionConfirmed"
-        ) || recovery
-            .counts
-            .get("prePost")
-            .is_some_and(|count| *count > 0)
-        {
-            if let Some(sound) = recovery.sound.as_mut() {
-                sound.confirmed = true;
-            }
+        // A new pre-Post attempt may choose from current Recommended songs.
+        // Archive the prior choice; this does not change a live attempt's binding.
+        if let Some(prior) = recovery.sound.take() {
+            tx.execute("INSERT INTO operation_device_events(source_kind,source_id,udid,action,state,recorded_at,text,detail)
+                VALUES('publish',?1,?2,'publishSoundRebind','retrying',?3,?4,?5)",
+                params![run.campaign_id, udid, now.to_rfc3339(),
+                    "Chọn nhạc trong Recommended cho lượt thử lại mới trước Post",
+                    serde_json::to_string(&serde_json::json!({
+                        "assignmentId": assignment_id,
+                        "requestId": request.map(|(_, request_id)| request_id),
+                        "source": "operator_retry_before_post", "priorSound": prior,
+                        "priorCheckpoint": recovery.checkpoint,
+                    }))?])?;
         }
-        if let Some((_, request_id)) = request {
-            if matches!(recovery.step.as_str(), "sound" | "prePost")
-                && recovery
-                    .sound
-                    .as_ref()
-                    .is_some_and(|sound| !sound.confirmed)
-            {
-                let json: String = tx.query_row(
-                    "SELECT request_json FROM publish_campaigns WHERE id=?1",
-                    [&run.campaign_id],
-                    |row| row.get(0),
-                )?;
-                let frozen: crate::publish::PublishCampaignRequest = serde_json::from_str(&json)?;
-                if matches!(
-                    frozen.sound_policy,
-                    crate::publish::PublishSoundPolicy::Default
-                        | crate::publish::PublishSoundPolicy::TrendingAny { .. }
-                ) {
-                    let prior = recovery.sound.take();
-                    tx.execute("INSERT INTO operation_device_events(source_kind,source_id,udid,action,state,recorded_at,text,detail)
-                        VALUES('publish',?1,?2,'publishSoundRebind','retrying',?3,?4,?5)",
-                        params![run.campaign_id, udid, now.to_rfc3339(),
-                            "Chọn lại nhạc tự chọn chưa xác minh trong lượt thử lại trước Post",
-                            serde_json::to_string(&serde_json::json!({
-                            "assignmentId": assignment_id, "requestId": request_id,
-                            "source": "confirmed_operator_retry_before_post", "priorSound": prior,
-                        }))?])?;
-                }
-            }
-        }
-        // The operator grants a new pre-Post attempt, including bounded retries
-        // inside a step. `manual` still forbids requeueing the whole job.
+        // The operator grants one fresh bounded pre-Post recovery budget shared
+        // by retries inside a step and whole-job requeues. Request replay returned
+        // above, so it cannot reset these counters.
         recovery.max_retries = 3;
         recovery.retries_used = 0;
         recovery.counts.clear();

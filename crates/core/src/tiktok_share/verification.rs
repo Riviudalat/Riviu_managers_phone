@@ -686,6 +686,46 @@ fn classify(tree: &Tree, plan: &PublishVerificationPlan) -> Screen {
     Screen::Unknown
 }
 
+/// Navigation-only recovery for the measured caption-hidden Trill detail.
+/// Copy and publication proof still require their unchanged independent checks.
+fn hidden_post_restore_surface(tree: &Tree, plan: &PublishVerificationPlan) -> Option<[ElementBox; 4]> {
+    let package = plan.labels.package();
+    if package != "com.ss.android.ugc.trill"
+        || plan.labels.resource_version() != Some("38.3.2")
+        || plan.labels.language() != "en"
+        || classify(tree, plan) != Screen::Unknown
+    {
+        return None;
+    }
+    let shape = UnknownScreenShape::from_tree(tree, plan);
+    if shape.foreign_visible_nodes != 0
+        || shape.has_profile_tab || shape.has_feed_tab || shape.has_post_tile
+        || shape.has_post_caption || shape.has_copy_control
+        || tree.nodes.iter().enumerate().any(|(index, node)| {
+            node.visible(package) && tree.ancestors_visible(index)
+                && node.attr("class") == "android.widget.EditText"
+        })
+    {
+        return None;
+    }
+    // 06/10/2026 machine2-post-observe: exact measured native control tuple.
+    let actionable = |query, id: &str, class: &str| {
+        let matches = tree.matching(package, query);
+        let [index] = matches.as_slice() else { return None; };
+        let node = &tree.nodes[*index];
+        if !node.attr("resource-id").ends_with(id) || node.attr("class") != class {
+            return None;
+        }
+        node.rect().filter(|rect| rect.enabled && rect.clickable)
+    };
+    Some([
+        actionable(ElementQuery::Description { value: "Back", exact: true }, ":id/aur", "android.widget.ImageView")?,
+        actionable(plan.labels.label(TikTokControl::Comments)?.to_query(), ":id/cqn", "android.widget.Button")?,
+        actionable(plan.labels.label(TikTokControl::Share)?.to_query(), ":id/drt", "android.widget.Button")?,
+        actionable(ElementQuery::Description { value: "Video", exact: true }, ":id/long_press_layout", "android.view.View")?,
+    ])
+}
+
 fn decline_facebook_permission(tree: &Tree, plan: &PublishVerificationPlan) -> Option<ElementBox> {
     crate::app_automation::dialogs::decline_facebook_permission(tree, plan.labels)
 }
@@ -885,8 +925,23 @@ impl Capture<'_> {
         let mut last_screen = None;
         let mut last_action_at: Option<Instant> = None;
         loop {
-            let tree = self.read().await?;
-            let screen = classify(&tree, self.plan);
+            let mut tree = self.read().await?;
+            let mut screen = classify(&tree, self.plan);
+            if restoring && screen == Screen::Unknown {
+                if let Some(surface) = hidden_post_restore_surface(&tree, self.plan) {
+                    let epoch = self.session.gui_session_epoch();
+                    let fresh = self.read().await?;
+                    if self.session.gui_session_epoch() != epoch {
+                        return Err(VerificationReason::StaleSnapshot);
+                    }
+                    screen = if hidden_post_restore_surface(&fresh, self.plan).as_ref() == Some(&surface) {
+                        Screen::Post
+                    } else {
+                        classify(&fresh, self.plan)
+                    };
+                    tree = fresh;
+                }
+            }
             self.diagnostic.screen_state = format!("{screen:?}");
             if screen == Screen::Unknown && self.diagnostic.unknown_screen_shape.is_none() {
                 self.diagnostic.unknown_screen_shape =

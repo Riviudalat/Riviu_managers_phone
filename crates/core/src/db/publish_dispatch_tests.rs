@@ -167,16 +167,16 @@ fn explicit_retry_restores_three_sound_retries_without_reopening_post() {
 }
 
 #[test]
-fn checked_pre_post_retry_rebinds_only_unconfirmed_random_sound_and_audits_prior_choice() {
-    for (confirmed, step, checkpoint, pre_post_retries, reset) in [
-        (false, "sound", "mediaSelected", 0, true),
-        (false, "prePost", "approved", 0, true),
-        (true, "sound", "mediaSelected", 0, false),
-        (false, "caption", "mediaSelected", 0, false),
-        (false, "sound", "soundConfirmed", 0, false),
-        (false, "prePost", "captionEntered", 0, false),
-        (false, "prePost", "captionConfirmed", 0, false),
-        (false, "sound", "mediaSelected", 1, false),
+fn checked_pre_post_retry_rebinds_current_recommended_and_audits_prior_choice() {
+    for (confirmed, step, checkpoint, pre_post_retries) in [
+        (false, "sound", "mediaSelected", 0),
+        (false, "prePost", "approved", 0),
+        (true, "sound", "mediaSelected", 0),
+        (false, "caption", "mediaSelected", 0),
+        (false, "sound", "soundConfirmed", 0),
+        (false, "prePost", "captionEntered", 0),
+        (false, "prePost", "captionConfirmed", 0),
+        (false, "sound", "mediaSelected", 1),
     ] {
         let (db, _, campaign, assignments) = fixture();
         let run = db.claim_publish_pipeline(&campaign).unwrap().unwrap();
@@ -215,21 +215,24 @@ fn checked_pre_post_retry_rebinds_only_unconfirmed_random_sound_and_audits_prior
             .publish_recovery_state(&job.assignment_id)
             .unwrap()
             .unwrap();
-        let mut preserved = sound.clone();
-        if matches!(
-            checkpoint,
-            "soundConfirmed" | "captionEntered" | "captionConfirmed"
-        ) || pre_post_retries > 0
-        {
-            preserved.confirmed = true;
-        }
-        assert_eq!(recovery.sound, (!reset).then_some(preserved));
+        assert!(recovery.sound.is_none());
+        let current_sound = crate::SoundSelectionEvidence {
+            title: "Current Recommended choice".into(),
+            candidates_digest: "current-pool".into(),
+            confirmed: false,
+            ..sound.clone()
+        };
+        let retry_run = db.claim_publish_assignment_retry_checked(&job.assignment_id, revision, &request)
+            .unwrap().unwrap();
+        db.bind_publish_recovery_sound(&job.assignment_id, &retry_run.token, Some(&current_sound)).unwrap();
+        db.claim_publish_assignment_retry_checked(&job.assignment_id, revision, &request).unwrap().unwrap();
+        assert_eq!(db.publish_recovery_state(&job.assignment_id).unwrap().unwrap().sound, Some(current_sound));
         let conn = db.conn().unwrap();
         let archived: Option<String> = conn.query_row(
             "SELECT detail FROM operation_device_events WHERE source_kind='publish' AND source_id=?1 AND action='publishSoundRebind' ORDER BY rowid DESC LIMIT 1",
             [&campaign], |row| row.get(0),
         ).optional().unwrap();
-        assert_eq!(archived.is_some(), reset);
+        assert!(archived.is_some());
         if let Some(payload) = archived {
             let payload: serde_json::Value = serde_json::from_str(&payload).unwrap();
             assert_eq!(payload["assignmentId"], job.assignment_id);

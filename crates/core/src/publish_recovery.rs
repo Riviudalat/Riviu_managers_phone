@@ -267,6 +267,7 @@ pub(crate) fn requires_fresh_preparation(error: &anyhow::Error) -> bool {
             | "sound_selection_readback_unavailable"
             | "sound_entry_observation_changed"
             | "sound_recent_observation_invalidated"
+            | "sound_any_choice_requires_fresh_attempt"
     )
 }
 pub fn classify(message: &str) -> FailureKind {

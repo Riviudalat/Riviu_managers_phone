@@ -347,6 +347,8 @@ fn measured_comments_drawer_requires_both_headers_input_and_exact_build() {
 async fn comments_recovery_observes_post_before_grid_and_never_backs_from_composer_or_unknown() {
     for (target, expected, backs) in [
         ("post", Ok(()), 2),
+        ("caption-hidden-post", Ok(()), 2),
+        ("caption-hidden-disabled", Err(VerificationReason::GridNotRestored), 1),
         ("composer", Err(VerificationReason::ComposerOrUpload), 1),
         ("unknown", Err(VerificationReason::GridNotRestored), 1),
         (
@@ -411,8 +413,13 @@ async fn comments_recovery_observes_post_before_grid_and_never_backs_from_compos
             "{target}"
         );
         assert!(session.writes.lock().is_empty());
-        if target == "post" {
+        if matches!(target, "post" | "caption-hidden-post") {
             assert_eq!(*session.page.lock(), "profile");
+            if target == "caption-hidden-post" {
+                assert!(capture.started.elapsed() < Duration::from_secs(2));
+                assert!(capture.diagnostic.publication_evidence.is_none());
+                assert_eq!(capture.diagnostic.copy_attempts, 0);
+            }
         } else if target == "unknown" {
             let value = serde_json::to_value(&capture.diagnostic).unwrap();
             assert_eq!(value["unknownScreenShape"]["totalNodes"], 2);
@@ -573,6 +580,17 @@ impl Session {
                 r#"<node package="{PACKAGE}" class="android.widget.TextView" resource-id="{PACKAGE}:id/title" text="Log in to TikTok" bounds="[0,500][600,650]" displayed="true"/><node package="{PACKAGE}" class="android.widget.Button" content-desc="Use phone / email / username" bounds="[0,700][600,850]" enabled="true" clickable="true" displayed="true"/>"#
             ),
             "comments" => comments_drawer_xml(),
+            "caption-hidden-post" | "caption-hidden-disabled" => {
+                // Sanitized control-only extract of machine2-post-observe.xml,
+                // Trill38.3.2/en, 06/10/2026. No caption, account or content bytes.
+                let controls = format!(r#"<node package="{PACKAGE}" resource-id="{PACKAGE}:id/aur" class="android.widget.ImageView" content-desc="Back" bounds="[15,63][151,199]" enabled="true" clickable="true" displayed="true"/>
+                    <node package="{PACKAGE}" resource-id="{PACKAGE}:id/cqn" class="android.widget.Button" content-desc="Read or add comments. 0 comments" bounds="[922,1303][1080,1474]" enabled="true" clickable="true" displayed="true"/>
+                    <node package="{PACKAGE}" resource-id="{PACKAGE}:id/drt" class="android.widget.Button" content-desc="Share video.  shares" bounds="[922,1640][1080,1763]" enabled="true" clickable="true" displayed="true"/>
+                    <node package="{PACKAGE}" resource-id="{PACKAGE}:id/long_press_layout" class="android.view.View" content-desc="Video" bounds="[0,0][1080,1965]" enabled="true" clickable="true" displayed="true"/>"#);
+                if page == "caption-hidden-disabled" {
+                    controls.replace("clickable=\"true\"", "clickable=\"false\"")
+                } else { controls }
+            }
             "profile" => {
                 // Account controls reproduce the already retained 46.2.1 fixture;
                 // the scroll container is an explicit synthetic observation.
@@ -778,7 +796,7 @@ impl UiSession for Session {
     async fn back(&self) -> anyhow::Result<()> {
         let mut page = self.page.lock();
         *page = match *page {
-            "post" => "profile",
+            "post" | "caption-hidden-post" => "profile",
             "share" => "post",
             "comments" => self.comments_back_target,
             _ => anyhow::bail!("unproved Back"),
