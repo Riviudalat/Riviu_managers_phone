@@ -3,6 +3,7 @@ use super::publish_sheet::{
     evidence_has_post_link, queue_sheet_row, reconciled_sheet_delivery_status,
 };
 use super::*;
+use crate::publish_submission::normalize_publish_account;
 
 #[cfg(test)]
 #[path = "publish_verification_resume_tests.rs"]
@@ -109,6 +110,46 @@ fn completed_upload_with_link_debt(
 }
 
 impl PendingPublishVerification {
+    /// Routing proof only. Network capture must still validate the frozen bundle,
+    /// canonical identity and current authorization before and after its read.
+    /// A present but invalid candidate is an error, never permission to use a phone.
+    pub fn retained_metadata_candidate(&self) -> anyhow::Result<Option<crate::publish_submission::PendingMetadataCandidate>> {
+        use crate::publish_submission::{MetadataAttemptState, PendingMetadataCandidate, PublishSubmissionProof};
+        use sha2::Digest;
+        let evidence: serde_json::Value = self.evidence_json.as_deref()
+            .map(serde_json::from_str).transpose()?.unwrap_or_default();
+        let value = evidence.get("verificationDiagnostic").and_then(|d| d.get("pendingMetadataCandidate"))
+            .or_else(|| evidence.get("post").and_then(|p| p.get("verificationDiagnostic"))
+                .and_then(|d| d.get("pendingMetadataCandidate")));
+        let Some(value) = value else { return Ok(None); };
+        let pending: PendingMetadataCandidate = serde_json::from_value(value.clone())?;
+        let raw = self.effect_intent.as_deref().context("metadata candidate submission missing")?;
+        let proof: PublishSubmissionProof = serde_json::from_str(raw)?;
+        proof.validate()?;
+        anyhow::ensure!(pending.schema_version == 1
+            && matches!(pending.captured.metadata.state, MetadataAttemptState::Unavailable | MetadataAttemptState::Rejected)
+            && pending.captured.metadata.attempts > 0
+            && pending.campaign_id == self.campaign_id
+            && pending.assignment_id == self.assignment_id
+            && pending.bundle_id == self.bundle_id && proof.bundle_id == self.bundle_id
+            && pending.intent_sha256 == format!("{:x}", sha2::Sha256::digest(raw.as_bytes()))
+            && pending.caption_sha256 == proof.caption_sha256
+            && pending.captured.submitted_at == proof.submitted_at
+            && normalize_publish_account(&pending.captured.expected_account)?
+                == normalize_publish_account(&proof.expected_account)?,
+            "retained metadata candidate invalid; phone fallback forbidden");
+        Ok(Some(pending))
+    }
+
+    /// Automatic scheduling policy does not invalidate a manual one-shot read.
+    pub fn automatic_metadata_observation_allowed(&self, now: DateTime<Utc>) -> bool {
+        let evidence: serde_json::Value = self.evidence_json.as_deref()
+            .and_then(|raw| serde_json::from_str(raw).ok()).unwrap_or_default();
+        !needs_review(self.evidence_json.as_deref()) && self.is_due(now)
+            && evidence["verificationBudget"]["metadataObservations"].as_u64().unwrap_or(0) < METADATA_RETRY_LIMIT
+            && evidence["verificationBudget"]["noProgressObservations"].as_u64().unwrap_or(0) < VERIFICATION_NO_PROGRESS_LIMIT
+    }
+
     /// Old receipts without scheduling metadata remain immediately eligible.
     pub fn is_due(&self, now: DateTime<Utc>) -> bool {
         self.evidence_json
@@ -1566,7 +1607,8 @@ impl Database {
         let budget_exhausted = metadata_exhausted || budget["noProgressObservations"].as_u64().unwrap_or(0)
             >= VERIFICATION_NO_PROGRESS_LIMIT;
         evidence["verificationBudget"] = budget;
-        let review = identity_missing || legacy_review || prior_review || budget_exhausted;
+        let review = identity_missing || legacy_review || prior_review || budget_exhausted
+            || reason_code == "metadataCandidateInvalid";
         if manual
             && legacy
             && !review

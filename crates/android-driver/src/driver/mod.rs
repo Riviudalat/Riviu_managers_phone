@@ -1116,8 +1116,25 @@ impl AndroidDriver {
         if qualified {
             errors.remove(serial);
         } else {
-            errors.insert(serial.to_owned(), HELPER_SETUP_FAILURE.into());
+            errors.entry(serial.to_owned()).or_insert_with(|| HELPER_SETUP_FAILURE.into());
         }
+    }
+
+    // Keep the original error for typed recovery decisions; publish only fixed vocabulary.
+    fn record_helper_runtime_failure(&self, serial: &str, stage: &'static str, error: &anyhow::Error) {
+        let (category, reason) = if error.is::<crate::riviu_agent::HelperClipboardNotQualified>() {
+            ("clipboard_not_qualified", "Chưa xác minh được clipboard; giữ phiên hiện tại và kiểm tra chẩn đoán của máy.")
+        } else if error.is::<crate::riviu_agent::HelperRecoveryRequired>() {
+            ("recovery_required", "Cần đối soát phiên helper đang giữ; chưa nhận phiên thay thế.")
+        } else {
+            ("unknown", "Kiểm tra chẩn đoán của đúng máy; nguyên nhân hiện chưa xác định.")
+        };
+        self.record_helper_runtime_result(serial, false);
+        self.helper_setup_errors.lock().insert(serial.to_owned(), format!(
+            "{HELPER_SETUP_FAILURE}; stage={stage}; category={category}; {reason}"));
+        let device: String = serial.chars().take(128)
+            .filter(|c| c.is_ascii_alphanumeric() || matches!(c, '-' | '_' | '.' | ':')).collect();
+        tracing::warn!(serial = %device, stage, category, reason, "helper runtime qualification failed; no action replay");
     }
 
     /// Release helper preparation for an admitted caller retaining the device lease.
@@ -1149,11 +1166,15 @@ impl AndroidDriver {
             self.helpers.lock().insert(serial.into(), helper.clone());
             Ok(helper)
         }.await;
+        let stage = if result.is_ok() { "clipboard_qualification" } else { "runtime_acquisition" };
         let result = match result {
             Ok(helper) => helper.qualify_clipboard_roundtrip().await.map(|_| helper),
             Err(error) => Err(error),
         };
-        self.record_helper_runtime_result(serial, result.is_ok());
+        match &result {
+            Ok(_) => self.record_helper_runtime_result(serial, true),
+            Err(error) => self.record_helper_runtime_failure(serial, stage, error),
+        }
         if let Some(helper) = retained { helper.record_cached_acquisition(result.is_err()); }
         self.publish_helper_status(serial, result.as_ref().ok(), false);
         result
@@ -2205,12 +2226,12 @@ impl DeviceDriver for AndroidDriver {
         if !helper.is_some_and(|value| value.cached_runtime_ready()) {
             status.features.retain(|feature| feature != "helperReady");
         }
-        if self.helper_setup_errors.lock().contains_key(udid) {
+        if let Some(message) = self.helper_setup_errors.lock().get(udid).cloned() {
             status.features.retain(|feature| feature != "helperReady");
             status.state = riviu_core::AgentState::RepairRequired;
             status.auth_ready = false;
             status.session_ready = false;
-            status.message = Some(HELPER_SETUP_FAILURE.into());
+            status.message = Some(message);
         }
         status
     }
@@ -3358,8 +3379,26 @@ mod tests {
         // Missing state directory fails before transport or an owner journal exists.
         assert!(driver.prepare_helper_runtime("fixture").await.is_err());
         assert!(driver.helpers.lock().is_empty());
-        assert_eq!(driver.helper_setup_errors.lock().get("fixture").map(String::as_str),
-            Some("Riviu Helper: runtime qualification failed; recovery required (no action replay)"));
+        let message = driver.cached_agent_status("fixture").message.unwrap();
+        assert!(message.contains("stage=runtime_acquisition; category=unknown"));
+        // The public roster boundary must distinguish typed causes without serializing
+        // their secret-bearing context; a later generic worker failure must not erase it.
+        for (cause, category) in [
+            (anyhow::Error::new(crate::riviu_agent::HelperRecoveryRequired), "recovery_required"),
+            (anyhow::Error::new(crate::riviu_agent::HelperClipboardNotQualified), "clipboard_not_qualified"),
+            (anyhow!("fixture-secret-token owner clipboard credential envelope"), "unknown"),
+        ] {
+            let cause = cause.context("fixture-secret-token owner clipboard credential envelope");
+            driver.record_helper_runtime_failure("fixture", "clipboard_qualification", &cause);
+            driver.record_helper_preparation_failure("fixture");
+            let status = driver.cached_agent_status("fixture");
+            let public = serde_json::to_string(&status).unwrap();
+            assert!(public.contains(&format!("category={category}")));
+            assert!(!public.contains("fixture-secret-token"));
+            assert!(!public.contains("owner clipboard credential envelope"));
+            assert_eq!(status.state, riviu_core::AgentState::RepairRequired);
+            assert!(!status.features.iter().any(|feature| feature == "helperReady"));
+        }
         let error = driver.verify_automation_readiness("fixture").await.unwrap_err();
         assert!(error.is::<crate::riviu_agent::HelperRecoveryRequired>());
         assert_eq!(driver.cached_agent_status("fixture").state, riviu_core::AgentState::RepairRequired);

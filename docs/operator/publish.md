@@ -21,8 +21,10 @@ nguyên bài dự kiến, retry lấy link hoặc ghi Sheet không gửi bài l�
 
 Khi đã lưu liên kết ứng viên đúng lượt đăng nhưng dữ liệu công khai của TikTok
 chưa sẵn sàng, app dùng lại link và tự kiểm tra qua mạng mỗi 5 phút, tối đa 12 lượt
-trong một đợt xác minh. Giai đoạn này không mở lại điện thoại để Copy. Link chỉ
-được ghi Sheet sau khi xác minh đúng tài khoản, nội dung và thời điểm bài đăng.
+trong một đợt xác minh. Giai đoạn này không mở lại điện thoại để Copy và vẫn kiểm
+tra khi máy offline, chưa sẵn sàng hoặc đang bận tác vụ khác. Lượt tự động chỉ chạy
+khi đến lịch và còn ngân sách; link chỉ được ghi Sheet sau khi xác minh đúng tài khoản,
+nội dung và thời điểm bài đăng.
 Lỗi tìm bài hoặc thao tác điện thoại vẫn dừng sau ba lượt không có bằng chứng mới.
 Hết giới hạn riêng của metadata, chọn **Tiếp tục xác minh bài đã gửi** để mở đợt
 kiểm tra mới. Link và định danh bài cũ được giữ nguyên; thao tác Đăng không lặp lại.
@@ -166,7 +168,8 @@ cần kiểm tra và tạo lại trước khi chạy. Với bài đã gửi tron
 liên kết để tiếp tục xác minh. Khi còn đủ bằng chứng tài khoản và thời điểm gửi,
 lượt kiểm tra chủ động sẽ lưu lịch kiểm tra lại mỗi 5 phút trong ngân sách hữu hạn,
 kể cả sau khi mở lại app. Lượt đã Cần kiểm tra vì hết ngân sách chỉ được kiểm một
-lần bằng nút này; muốn tự kiểm tiếp phải xác nhận **Tiếp tục xác minh bài đã gửi**. Bài thiếu bằng chứng hoặc đang ở màn nháp/soạn bài vẫn cần kiểm tra riêng;
+lần bằng nút này, không đặt lại bộ đếm hoặc mở lịch tự kiểm mới; muốn tự kiểm tiếp
+phải xác nhận **Tiếp tục xác minh bài đã gửi**. Bài thiếu bằng chứng hoặc đang ở màn nháp/soạn bài vẫn cần kiểm tra riêng;
 app không gửi lại bài đã có intent Đăng.
 
 Khi tìm link, app đọc toàn bộ caption, tài khoản và thời gian của bài. Caption bị
@@ -174,10 +177,13 @@ rút gọn chỉ được mở khi chính vùng caption có thể bấm và nh�
 đọc lại nội dung. Có nhiều bài cùng khớp hoặc chưa đủ bằng chứng thì giữ trạng thái
 cần kiểm tra. App không tự bấm Đăng lần nữa để giải quyết lỗi lấy link.
 
-Sau Đăng, Theo dõi hiển thị lý do chưa xác minh, lần kiểm gần nhất và lần kiểm
-kế tiếp. Trên Android, sau khi nhận kết quả đã gửi và máy rảnh, app tắt hẳn đúng
-TikTok rồi mở lại trước khi lấy link. Nếu chưa có link, chu kỳ tắt/mở và kiểm tra
-lặp sau 5 phút, tính từ cuối lần kiểm trước, trong ngân sách hữu hạn bên dưới.
+Sau Đăng, Theo dõi hiển thị lý do chưa xác minh, lần kiểm gần nhất, lịch kiểm
+kế tiếp và số lượt đã dùng/giới hạn cho tìm bài không tiến triển và metadata.
+Đến giờ kiểm vẫn phải chờ đủ điều kiện xác minh; thiếu lịch được ghi rõ là chưa
+rõ. Khi bài đã xác minh, giao diện bỏ cảnh báo phục hồi cũ và hiện riêng trạng thái
+bài/Sheet. Trên Android, khi chưa giữ được link ứng viên, sau khi nhận kết quả đã
+gửi và máy rảnh, app tắt hẳn đúng TikTok rồi mở lại trước khi lấy link. Nếu chưa có
+link, chu kỳ tắt/mở và kiểm tra lặp sau 5 phút, tính từ cuối lần kiểm trước, trong ngân sách hữu hạn bên dưới.
 Nhật ký **Kiểm tra liên kết lần N** là kiểm thao tác đã có, không phải bấm Đăng thêm;
 **Chưa xác minh được liên kết** không khẳng định bài đã công khai. Media được giữ khi còn chờ link; link
 xác minh xong được gửi Sheet ngay. Chỉ sau khi bài và liên kết chính tắc được xác
@@ -211,8 +217,9 @@ TikTok vẫn xử lý cũng không được thử mãi. Caption của bài khác
 thời gian cùng bài khớp lần đầu mới mở thêm ngân sách chờ; chưa thay xác minh link.
 Link ứng viên đã lưu đúng định danh có ngân sách riêng tối đa 12 lượt chờ dữ liệu
 công khai; các lượt này dùng lại link và không tính vào ba lượt thao tác điện thoại.
-Mở lại app giữ mốc Đăng, lần kiểm tiếp và bộ đếm. Máy offline/bận chưa có lượt đọc
-thì chờ khi sẵn sàng. Bài cũ chưa có bộ đếm bắt đầu từ lượt quan sát đầu của bản mới.
+Mở lại app giữ mốc Đăng, lần kiểm tiếp và bộ đếm. Lượt cần quan sát điện thoại
+chờ máy sẵn sàng/rảnh; lượt kiểm metadata của link đã giữ không phải chờ máy.
+Bài cũ chưa có bộ đếm bắt đầu từ lượt quan sát đầu của bản mới.
 Trước khi mở TikTok để đọc link trên Android, app thử gỡ màn khóa chỉ vuốt và
 đọc lại trạng thái khóa. Máy dùng PIN/pattern vẫn phải mở bằng tay; không coi
 ACK mở app là bằng chứng TikTok đã lên foreground.
@@ -255,7 +262,10 @@ app chỉ chuyển sang cây giao diện khi đã xác nhận đúng bảng, tab
 định. Không chứng minh được thì báo lỗi trước Đăng; không tự chạm vào một hàng bất kỳ.
 
 Lỗi tạm thời trước Đăng được **tự thử lại tối đa 3 lần ngoài lần chạy đầu**, chờ lần
-lượt 2, 5 và 10 giây. Nếu agent Android không đọc được cây UI hoặc không trả `/status`,
+lượt 2, 5 và 10 giây. Chưa thấy nút mở soạn bài, màn camera, lối vào thư viện hoặc
+bộ chọn ảnh trong thời hạn hiện có cũng dùng ngân sách này. Nếu có nhiều mục cùng
+khớp khiến đích bấm mơ hồ, app dừng trước Đăng, không tự chọn hoặc thử tiếp.
+Nếu agent Android không đọc được cây UI hoặc không trả `/status`,
 lượt kế tiếp chờ ít nhất đến hết khoảng phục hồi của phiên (tối đa khoảng 65 giây),
 không tiêu hết lượt thử trong lúc instrumentation còn cooldown. Bước chọn nhạc có
 tổng thời hạn 3 phút, gồm các lần đọc lại và khoảng chờ thử lại; không cấp thêm
@@ -407,7 +417,8 @@ không phải xoá tùy ý theo tên thư mục.
 ### Tiếp tục xác minh bài đã gửi sau khi Dừng
 
 Trong **Theo dõi → Chi tiết máy**, bài thuộc chiến dịch đã Dừng hoặc đã dừng tự
-kiểm vì 3 lượt không tiến triển có thể hiện **Tiếp tục xác minh bài đã gửi** khi
+kiểm vì 3 lượt không tiến triển hoặc hết 12 lượt metadata có thể hiện
+**Tiếp tục xác minh bài đã gửi** khi
 backend xác nhận còn đủ identity của lần Đăng. Chỉ xác nhận này mở ngân sách mới;
 refresh, khởi động lại app hoặc Kiểm tra liên kết thất bại không tự mở lại.
 Đọc xác nhận trước khi tiếp tục: chỉ kiểm tra bài cũ trên máy đó, không đăng lại,
@@ -420,7 +431,9 @@ khi tiếp tục xác minh. Không mở lại observer trong khi lệnh đóng p
 Nhận yêu cầu không có nghĩa đã lấy được link. App dùng worker hiện có để kiểm tra
 lại sau mỗi 5 phút tính từ cuối lần kiểm trước: ba lượt tìm bài liên tiếp không có
 bằng chứng mới, hoặc tối đa 12 lượt chờ dữ liệu công khai của link đã giữ. Bộ đếm
-được giữ qua restart; máy offline/bận chờ khi sẵn sàng. Campaign vẫn có thể mang nhãn **Đã huỷ** dù một bài trong đó đang
+được giữ qua restart. Lượt cần đọc điện thoại chờ máy sẵn sàng/rảnh; link ứng viên
+đã giữ vẫn được kiểm qua mạng khi máy offline/bận. Campaign vẫn có thể mang nhãn
+**Đã huỷ** dù một bài trong đó đang
 được tiếp tục xác minh. Bài và lịch sử Đăng, các máy chưa gửi, cùng đích Sheet/đợt
 báo cáo ban đầu không đổi. **Kiểm tra liên kết** chỉ quan sát bài đã gửi; báo máy
 bận, đã dừng, chưa đủ điều kiện hoặc chưa có link không phải thành công.
@@ -512,6 +525,8 @@ Canary Rust cũ chỉ dùng cô lập để khảo sát/rehearsal, Sheet tắt v
 Riviu trên cùng điện thoại hoặc nhập DB thử vào dữ liệu đang vận hành.
 
 Khi đã giữ được liên kết ứng viên của đúng bài đã gửi, lượt xác minh tiếp theo
-kiểm tra dữ liệu công khai trước. TikTok chưa cung cấp đủ dữ liệu thì app giữ
+chỉ kiểm tra dữ liệu công khai qua mạng, không mở điện thoại để tìm link khác.
+Ứng viên không còn khớp lượt Đăng được giữ để kiểm tra, không chuyển sang thao tác
+điện thoại. TikTok chưa cung cấp đủ dữ liệu thì app giữ
 bài chờ kiểm tra; liên kết ứng viên chưa được ghi là bài thành công hoặc ghi
 Sheet. Lượt chưa có ứng viên tiếp tục dùng luồng quan sát TikTok có giới hạn.

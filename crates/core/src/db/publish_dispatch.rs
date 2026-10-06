@@ -8,7 +8,7 @@ mod completion;
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct PublishLimits {
     pub transfer: usize,
-    /// Legacy wire fields, retained for old clients; only transfer limits admission.
+    /// Legacy phone-stage limits; verify also bounds network-only metadata reads.
     pub compose: usize,
     pub verify: usize,
     pub device_total: usize,
@@ -315,30 +315,54 @@ impl Database {
         stage: &str,
         owner: &str,
     ) -> anyhow::Result<Option<PublishWorkPermit>> {
+        anyhow::ensure!(matches!(stage, "transfer" | "compose" | "verify" | "cleanup" | "appCompletion"),
+            "unknown publish work stage");
+        self.try_publish_work_inner(udid, stage, owner)
+    }
+
+    /// Assignment-scoped network work shares exact-token release and startup recovery
+    /// with phone work, but cannot occupy the physical phone's unique claim.
+    pub fn try_publish_metadata_work(
+        &self,
+        candidate: &PendingPublishVerification,
+        manual: bool,
+    ) -> anyhow::Result<Option<PublishWorkPermit>> {
+        anyhow::ensure!(candidate.retained_metadata_candidate()?.is_some(), "retained metadata candidate required");
+        if (!manual && !candidate.automatic_metadata_observation_allowed(Utc::now()))
+            || !self.publish_verification_is_current(candidate)? { return Ok(None); }
+        self.try_publish_work_inner(
+            &format!("publish-metadata:{}", candidate.assignment_id), "metadata", &candidate.assignment_id,
+        )
+    }
+
+    fn try_publish_work_inner(&self, key: &str, stage: &str, owner: &str) -> anyhow::Result<Option<PublishWorkPermit>> {
         self.ensure_publish_recovery_ready()?;
         let connection = self.dispatch_conn()?;
         let mut conn = connection.lock();
         let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
-        // Only media transfer is host-limited. Legacy compose/verify/deviceTotal
-        // fields remain readable, but cannot block an independent phone.
+        // Phone concurrency remains unchanged. Network metadata reads use the
+        // configured verify cap, independently of device ownership and transfers.
         anyhow::ensure!(
             matches!(
                 stage,
-                "transfer" | "compose" | "verify" | "cleanup" | "appCompletion"
+                "transfer" | "compose" | "verify" | "cleanup" | "appCompletion" | "metadata"
             ),
             "unknown publish work stage"
         );
         let limits = Self::publish_limits_from_connection(&tx)?;
-        let (transfers, busy): (i64, i64) = tx.query_row(
-            "SELECT COALESCE(SUM(stage='transfer'),0),COALESCE(SUM(udid=?1),0) FROM publish_work_claims",
-            [udid], |r| Ok((r.get(0)?, r.get(1)?)))?;
-        if busy > 0 || (stage == "transfer" && transfers >= limits.transfer as i64) {
+        let (transfers, metadata, busy): (i64, i64, i64) = tx.query_row(
+            "SELECT COALESCE(SUM(stage='transfer'),0),COALESCE(SUM(stage='metadata'),0),
+             COALESCE(SUM(udid=?1 OR (owner=?2 AND ((?3='metadata' AND stage='verify')
+                 OR (?3='verify' AND stage='metadata')))),0) FROM publish_work_claims",
+            params![key, owner, stage], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)))?;
+        if busy > 0 || (stage == "transfer" && transfers >= limits.transfer as i64)
+            || (stage == "metadata" && metadata >= limits.verify as i64) {
             return Ok(None);
         }
         let token = Uuid::new_v4().to_string();
         tx.execute(
             "INSERT INTO publish_work_claims VALUES(?1,?2,?3,?4,?5)",
-            params![token, udid, stage, owner, Utc::now().timestamp_millis()],
+            params![token, key, stage, owner, Utc::now().timestamp_millis()],
         )?;
         tx.commit()?;
         Ok(Some(PublishWorkPermit {

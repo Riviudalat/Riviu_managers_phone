@@ -1283,14 +1283,24 @@ impl<'a, P: TapPlanner> Composer<'a, P> {
     /// for an ambiguous match. The shutter positively proves the camera screen.
     async fn open(&mut self, stop: &AtomicBool) -> anyhow::Result<bool> {
         let Some(opener) = self
-            .await_condition(COMPOSER_WINDOW, self.plan.open, stop, |_| true)
+            .await_navigation_target(
+                crate::tiktok_sound::phase_deadline(COMPOSER_WINDOW),
+                self.plan.open,
+                stop,
+                Some("composer_opener_unavailable"),
+            )
             .await?
         else {
             return Ok(false);
         };
         self.tap_inside(&opener).await?;
         Ok(self
-            .await_condition(COMPOSER_WINDOW, self.plan.shutter, stop, |_| true)
+            .await_navigation_target(
+                crate::tiktok_sound::phase_deadline(COMPOSER_WINDOW),
+                self.plan.shutter,
+                stop,
+                Some("composer_camera_unavailable"),
+            )
             .await?
             .is_some())
     }
@@ -1321,11 +1331,11 @@ impl<'a, P: TapPlanner> Composer<'a, P> {
         let mut gallery = StageDiagnosticOperation::start("galleryShutter", &epoch, Some(deadline));
         gallery.finish("errorOrInterrupted");
         let Some(shutter) = self
-            .await_condition_until(
+            .await_navigation_target(
                 deadline.min(Instant::now() + COMPOSER_WINDOW),
                 self.plan.shutter,
                 stop,
-                |_| true,
+                Some("composer_camera_unavailable"),
             )
             .await?
         else {
@@ -1343,11 +1353,11 @@ impl<'a, P: TapPlanner> Composer<'a, P> {
                 event.operation = "galleryMeasuredEntry".into();
             }
             let entry = self
-                .await_condition_until(
+                .await_navigation_target(
                     deadline.min(Instant::now() + COMPOSER_WINDOW),
                     entry_query,
                     stop,
-                    |_| true,
+                    None,
                 )
                 .await;
             if stop.load(Ordering::Relaxed) || Instant::now() >= deadline {
@@ -1378,11 +1388,11 @@ impl<'a, P: TapPlanner> Composer<'a, P> {
                         event.operation = "gallerySemanticFallback".into();
                     }
                     let Some(entry) = self
-                        .await_condition_until(
+                        .await_navigation_target(
                             deadline.min(Instant::now() + Duration::from_secs(30)),
                             ElementQuery::Semantic("gallery"),
                             stop,
-                            |_| true,
+                            Some("composer_gallery_unavailable"),
                         )
                         .await?
                     else {
@@ -1412,11 +1422,11 @@ impl<'a, P: TapPlanner> Composer<'a, P> {
                         event.operation = "gallerySemanticFallback".into();
                     }
                     let Some(entry) = self
-                        .await_condition_until(
+                        .await_navigation_target(
                             deadline.min(Instant::now() + Duration::from_secs(30)),
                             ElementQuery::Semantic("gallery"),
                             stop,
-                            |_| true,
+                            Some("composer_gallery_unavailable"),
                         )
                         .await
                         .with_context(|| format!("gallery adapter read failed after: {error}"))?
@@ -1449,7 +1459,12 @@ impl<'a, P: TapPlanner> Composer<'a, P> {
                 )
                 .await;
                 let Some(current) = self
-                    .await_condition_until(end, resolved_query, stop, |_| true)
+                    .await_navigation_target(
+                        end,
+                        resolved_query,
+                        stop,
+                        Some("composer_gallery_unavailable"),
+                    )
                     .await?
                 else {
                     gallery.finish(if stop.load(Ordering::Relaxed) {
@@ -1530,7 +1545,12 @@ impl<'a, P: TapPlanner> Composer<'a, P> {
     /// picker is closed. The only sound test is a node the picker alone contributes.
     async fn await_picker(&self, stop: &AtomicBool) -> anyhow::Result<bool> {
         Ok(self
-            .await_condition(PICKER_WINDOW, self.plan.multi_select, stop, |_| true)
+            .await_navigation_target(
+                crate::tiktok_sound::phase_deadline(PICKER_WINDOW),
+                self.plan.multi_select,
+                stop,
+                Some("composer_picker_unavailable"),
+            )
             .await?
             .is_some())
     }
@@ -1599,9 +1619,15 @@ impl<'a, P: TapPlanner> Composer<'a, P> {
             {
                 Ok(ReadWaitResult::Ready(rows)) => rows,
                 Ok(ReadWaitResult::Cancelled) => return Ok(AlbumChoice::NotFound),
-                Ok(ReadWaitResult::DeadlineExceeded) => anyhow::bail!(
-                    "album_not_visible: hết thời gian đọc album {album}; chưa chọn album"
-                ),
+                Ok(ReadWaitResult::DeadlineExceeded) => {
+                    anyhow::ensure!(
+                        self.session.gui_session_epoch() == epoch,
+                        "album session changed before read deadline"
+                    );
+                    return Err(crate::publish_recovery::observation_deadline().context(
+                        format!("album_not_visible: hết thời gian đọc album {album}; chưa chọn album"),
+                    ));
+                }
                 Err(error) if classify_read_failure(&error) == ReadFailureKind::Transient => {
                     anyhow::ensure!(
                         self.session.gui_session_epoch() == epoch,
@@ -3184,6 +3210,94 @@ impl<'a, P: TapPlanner> Composer<'a, P> {
             if rows.is_empty() {
                 return Ok(true);
             }
+            sleep(
+                POLL.min(deadline.saturating_duration_since(Instant::now())),
+                stop,
+            )
+            .await;
+        }
+    }
+
+    /// Only pre-Post navigation distinguishes absent from ambiguous targets.
+    /// `None` retains the measured gallery lookup's same-epoch local fallback.
+    async fn await_navigation_target(
+        &self,
+        deadline: Instant,
+        query: ElementQuery<'_>,
+        stop: &AtomicBool,
+        missing_code: Option<&'static str>,
+    ) -> anyhow::Result<Option<ElementBox>> {
+        use crate::driver::{classify_read_failure, ReadFailureKind};
+        use crate::ui_automation::runtime::{read_before_deadline, ReadWaitResult};
+        anyhow::ensure!(
+            query != NEVER_MEASURED,
+            "composer navigation target unmeasured"
+        );
+        let epoch = self.session.gui_session_epoch();
+        loop {
+            if stop.load(Ordering::Relaxed) {
+                return Ok(None);
+            }
+            anyhow::ensure!(
+                self.session.gui_session_epoch() == epoch,
+                "composer navigation session changed"
+            );
+            if Instant::now() >= deadline {
+                return match missing_code {
+                    Some(code) => Err(crate::publish_recovery::retryable_error(
+                        code,
+                        "pre-Post navigation target unavailable within existing deadline",
+                    )),
+                    None => Ok(None),
+                };
+            }
+            let mut trace = StageDiagnosticOperation::start("locate", &epoch, Some(deadline));
+            trace.query(query);
+            let observed = read_before_deadline(
+                crate::tiktok_sound::read_sound(self.session.locate_all(query)),
+                deadline,
+                stop,
+            )
+            .await;
+            if stop.load(Ordering::Relaxed) {
+                trace.finish("cancelled");
+                return Ok(None);
+            }
+            if observed
+                .as_ref()
+                .is_err_and(|error| error.is::<crate::driver::SessionEpochChanged>())
+            {
+                trace.finish("sessionChanged");
+                return observed.map(|_| None);
+            }
+            anyhow::ensure!(
+                self.session.gui_session_epoch() == epoch,
+                "composer navigation session changed"
+            );
+            match observed {
+                Ok(ReadWaitResult::Ready(rows)) => match rows.as_slice() {
+                    [target] => {
+                        trace.target(target, None);
+                        trace.finish("found");
+                        return Ok(Some(target.clone()));
+                    }
+                    [] => trace.finish("absent"),
+                    _ => {
+                        trace.finish("ambiguous");
+                        anyhow::bail!("composer navigation target ambiguous");
+                    }
+                },
+                Ok(ReadWaitResult::Cancelled) => return Ok(None),
+                Ok(ReadWaitResult::DeadlineExceeded) => {
+                    trace.finish("deadline");
+                    return Err(crate::publish_recovery::observation_deadline());
+                }
+                Err(error) if classify_read_failure(&error) == ReadFailureKind::Transient => {
+                    trace.finish("transientError");
+                }
+                Err(error) => return Err(error),
+            }
+            drop(trace);
             sleep(
                 POLL.min(deadline.saturating_duration_since(Instant::now())),
                 stop,
@@ -5238,6 +5352,16 @@ mod tests {
                 return Ok(Vec::new());
             }
             let mut found: Vec<_> = self.locate(query).await?.into_iter().collect();
+            let wanted = match query {
+                ElementQuery::Description { value, .. }
+                | ElementQuery::Text { value, .. }
+                | ElementQuery::ClassName(value)
+                | ElementQuery::ResourceIdSuffix(value)
+                | ElementQuery::Semantic(value) => value,
+            };
+            if let Some(rows) = self.rows.lock().get(wanted) {
+                found = rows.clone();
+            }
             if self.list_omits_armed_flags {
                 for element in &mut found {
                     element.enabled = true;
@@ -6254,22 +6378,121 @@ mod tests {
             screen: screen(),
         };
         let stop = AtomicBool::new(false);
+        let error = publish_carousel(
+            &session,
+            plan(),
+            |element: &ElementBox| element.centre(),
+            &request,
+            &stop,
+        )
+        .await
+        .expect_err("absent camera preserves typed bounded recovery");
+        let failure = crate::publish_recovery::describe(&error);
         assert_eq!(
-            publish_carousel(
-                &session,
-                plan(),
-                |element: &ElementBox| element.centre(),
-                &request,
-                &stop
-            )
-            .await
-            .expect("no transport error"),
-            ComposerVerdict::ComposerDidNotOpen
+            failure.kind,
+            crate::publish_recovery::FailureKind::Retryable
         );
+        assert_eq!(failure.code, "composer_camera_unavailable");
         assert_eq!(
             session.taps.lock().len(),
             1,
             "only Create should have been tapped; a second tap is the blind one on the feed"
+        );
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn prepost_navigation_absence_is_retryable_without_post_intent() {
+        use crate::publish_recovery::{describe, FailureKind};
+        for (missing_gallery, expected_code, expected_taps) in [
+            (true, "composer_gallery_unavailable", 1),
+            (false, "composer_picker_unavailable", 2),
+        ] {
+            let plan =
+                ComposerPlan::resolve(&every_publish_control_measured_with_gallery_id()).unwrap();
+            let entry = labelled("", 0.0, 1891.0, 179.0, 179.0);
+            let mut controls = vec![(
+                "fixture-shutter",
+                labelled("Record video", 375.0, 1545.0, 330.0, 330.0),
+            )];
+            if !missing_gallery {
+                controls.push(("fixture-gallery-entry", entry.clone()));
+            }
+            let session = FakeSession {
+                stuck_at: Some(1),
+                ..FakeSession::with(vec![feed(), scene(controls, None).leaving_by(entry)])
+            };
+            let request = CarouselRequest {
+                album: "fixture",
+                images: 1,
+                caption: "",
+                screen: screen(),
+            };
+            let mut intents = 0;
+            let error = publish_carousel_with_effect_intent(
+                &session,
+                plan,
+                |element: &ElementBox| element.centre(),
+                &request,
+                &AtomicBool::new(false),
+                || {
+                    intents += 1;
+                    Ok(())
+                },
+            )
+            .await
+            .expect_err("navigation refusal must reach recovery as a typed error");
+            let failure = describe(&error);
+            assert_eq!(failure.kind, FailureKind::Retryable);
+            assert_eq!(failure.code, expected_code);
+            assert_eq!(intents, 0);
+            assert_eq!(session.taps.lock().len(), expected_taps);
+        }
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn prepost_ambiguous_gallery_remains_terminal_without_navigation() {
+        let plan =
+            ComposerPlan::resolve(&every_publish_control_measured_with_gallery_id()).unwrap();
+        let session = FakeSession::with(vec![camera()]).rows(
+            "fixture-gallery-entry",
+            vec![box_at(0.0, 400.0), box_at(200.0, 400.0)],
+        );
+        let mut composer = Composer::new(&session, plan, |element: &ElementBox| element.centre());
+        let error = composer
+            .tap_gallery_entry(screen(), &AtomicBool::new(false))
+            .await
+            .expect_err("ambiguous measured entry must not use semantic fallback");
+        assert_eq!(
+            crate::publish_recovery::describe(&error).kind,
+            crate::publish_recovery::FailureKind::Terminal
+        );
+        assert!(session.taps.lock().is_empty());
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn prepost_album_read_deadline_retains_observation_timeout() {
+        let session = FakeSession {
+            described_delay: PICKER_WINDOW + Duration::from_secs(1),
+            ..FakeSession::with(vec![
+                picker("All", Some("fixture-album-menu")),
+                picker("All", None),
+            ])
+        };
+        let mut composer = Composer::new(&session, plan(), |element: &ElementBox| element.centre());
+        let error = composer
+            .select_album("fixture", &AtomicBool::new(false))
+            .await
+            .expect_err("late album read cannot select a row");
+        let failure = crate::publish_recovery::describe(&error);
+        assert_eq!(
+            failure.kind,
+            crate::publish_recovery::FailureKind::Retryable
+        );
+        assert_eq!(failure.code, "publish_observation_deadline");
+        assert_eq!(
+            session.taps.lock().len(),
+            1,
+            "only the album menu was tapped"
         );
     }
 

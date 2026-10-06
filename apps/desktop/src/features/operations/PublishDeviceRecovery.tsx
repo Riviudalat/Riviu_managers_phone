@@ -14,13 +14,28 @@ const accountGuidance: Record<string, string> = {
  account_mismatch: "Tài khoản đang mở khác tài khoản của lượt này. Mở lại đúng tài khoản; không tự đổi tài khoản đã gắn với bài.",
  account_read_failed: "Không đọc được hồ sơ do kết nối hoặc phiên điều khiển. Kiểm tra kết nối máy rồi thử lại.",
 };
-function accountFailureCode(evidenceJson: string | null | undefined): string | null {
- try {
-  const value: unknown = JSON.parse(evidenceJson ?? "null");
-  if (!value || typeof value !== "object" || !("recoveryFailure" in value)) return null;
-  const failure = value.recoveryFailure;
-  return failure && typeof failure === "object" && "code" in failure && typeof failure.code === "string" ? failure.code : null;
- } catch { return null; }
+function object(value: unknown): Record<string, unknown> {
+ return value !== null && typeof value === "object" && !Array.isArray(value) ? value as Record<string, unknown> : {};
+}
+function readEvidence(raw: string | null | undefined): Record<string, unknown> {
+ // Evidence may include large artifacts; decline oversized/malformed envelopes.
+ if (!raw || raw.length > 262144) return {};
+ try { return object(JSON.parse(raw)); } catch { return {}; }
+}
+function budgetPair(used: unknown, limit: unknown): string | null {
+ return typeof used === "number" && Number.isSafeInteger(used) && used >= 0
+  && typeof limit === "number" && Number.isSafeInteger(limit) && limit > 0 ? `${used}/${limit}` : null;
+}
+function verificationSummary(evidence: Record<string, unknown>, now: number): {text: string; budget: string} {
+ const status=object(evidence.verificationStatus), budget=object(evidence.verificationBudget);
+ const reason=typeof status.reason === "string" && status.reason.trim() ? status.reason.trim().slice(0,512) : null;
+ const due=typeof status.nextCheckAt === "string" && status.nextCheckAt.length <= 64 ? Date.parse(status.nextCheckAt) : NaN;
+ const text=status.state === "needsReview" ? `Cần xem xét${reason?` · ${reason}`:" · Chưa có lý do được lưu."}`
+  : status.state === "pending" && Number.isFinite(due)
+   ? `${due>now?"Chờ lịch kiểm tra từ":"Đã đến lịch kiểm tra"} ${new Date(due).toLocaleString("vi-VN")} · chờ điều kiện xác minh; không đăng lại.`
+   : "Chưa rõ lịch kiểm tra tiếp theo.";
+ const ordinary=budgetPair(budget.noProgressObservations,budget.limit), metadata=budgetPair(budget.metadataObservations,budget.metadataLimit);
+ return {text,budget:[ordinary?`Không có tiến triển ${ordinary}`:null,metadata?`Metadata ${metadata}`:null].filter(Boolean).join(" · ")};
 }
 type PublishProgressCapability = PublishRecoveryCapability & {
  exclusion?: PublishExcludeResult | null;
@@ -70,7 +85,9 @@ export function PublishDeviceRecovery({campaignId,udid}:{campaignId:string;udid:
    const receipt=exclusions[a.id];
    const durable=c?.exclusion?.assignmentId===a.id?c.exclusion:null;
    const exclusion=durable&&(!receipt||durable.revision>=receipt.revision)?durable:receipt;
-   const accountCode = c?.recovery?.lastErrorCode ?? accountFailureCode(a.evidenceJson) ?? a.errorCode;
+   const evidence=readEvidence(a.evidenceJson);
+   const failureCode=object(evidence.recoveryFailure).code;
+   const accountCode = c?.recovery?.lastErrorCode ?? (typeof failureCode === "string" ? failureCode : null) ?? a.errorCode;
    const guidance = accountCode ? accountGuidance[accountCode] : undefined;
    const r=c?.recovery;const waiting=r&&["retryWaiting","waitingDevice"].includes(r.state)&&!a.effectIntent;
    const text=r?.state==="waitingDevice"?`Mất kết nối · chờ máy, còn ${Math.max(0,Math.ceil(((r.reconnectDeadline??0)-now)/1000))} giây`:r?.state==="retryWaiting"?`Thử lại ${r.retriesUsed}/${r.maxRetries} · ${stepLabel[r.step]??r.step}`:r?.state==="exhausted"?`Đã hết lượt tự thử · ${stepLabel[r.step]??r.step}`:null;
@@ -87,21 +104,23 @@ export function PublishDeviceRecovery({campaignId,udid}:{campaignId:string;udid:
     exclusionState:exclusion?.state,
     recoveryStep:r&&["retryWaiting","waitingDevice","failed","exhausted","interrupted"].includes(r.state)?r.step:undefined,
    });
+   const verification=verificationSummary(evidence,now);
    return <div key={a.id}>
     <ProgressBar label={`Tiến độ đăng trên máy ${udid} · bài ${a.ordinal+1}`} fraction={log.error&&!progress.done?null:progress.fraction}
       tone={progress.done?"done":progress.stopped?"failed":"run"}/>
     <small>{progress.stage} · {progress.completed}/{progress.total} bước đã xác nhận · {progressLabel(log.error&&!progress.done?null:progress.fraction)}</small>
     {progress.uncertain&&<small>Đã gửi hoặc đang xác minh bài; chưa đủ bằng chứng để tính hoàn tất.</small>}
     {progress.verified&&!progress.done&&!progress.stopped&&<small>{c?.sheetRequired===undefined&&!a.sheetDelivery?"Chưa đọc được yêu cầu Sheet; chưa thể xác nhận hoàn tất.":"Bài đã xác minh · chờ hoàn tất Sheet."}</small>}
-    <small>{step?logMessage(step):stepLabel[r?.step??""]??"Chờ mốc tiến trình"}</small>
+    <small>{progress.verified ? (a.sheetDelivery?.state==="sent"?"Bài đã xác minh · Sheet đã ghi.":"Bài đã xác minh.") : a.effectIntent ? verification.text : step?logMessage(step):stepLabel[r?.step??""]??"Chờ mốc tiến trình"}</small>
+    {!progress.verified&&a.effectIntent&&verification.budget&&<small>{verification.budget}</small>}
     <small>{elapsed===null?"Chưa có thời gian bước":`Bước ${elapsed} giây`} · {total===null?"Chưa có tổng thời gian":`Tổng ${total} giây`}</small>
     {log.error&&<small role="status">Chưa cập nhật được mốc tiến trình: {log.error}</small>}
     {exclusion&&<small role="status">{exclusion.state==="excluded"?"Đã loại máy khỏi lượt này.":exclusion.state==="stopping"?"Đang dừng riêng máy này; chờ nhả máy.":"Máy còn bài cần đối chiếu; giữ nguyên nghĩa vụ xác minh."}{exclusion.reason&&` ${exclusion.reason}`}</small>}
     {c&&!["succeeded","cancelled","missed"].includes(a.state)&&<button type="button" disabled={busy||!!exclusion} title="Chỉ dừng máy này trong lượt đăng; giữ nguyên bài đã gửi và nghĩa vụ xác minh" onClick={()=>void exclude(c)}>Loại khỏi lượt này</button>}
 
-    {text&&<small role="status">{text}</small>}
-    {guidance&&<small role="status">{guidance}</small>}
-    {!guidance&&r?.lastError&&["failed","exhausted","interrupted"].includes(r.state)&&<small>{describeError(r.lastError)}</small>}
+    {!progress.verified&&text&&<small role="status">{text}</small>}
+    {!progress.verified&&guidance&&<small role="status">{guidance}</small>}
+    {!progress.verified&&!guidance&&r?.lastError&&["failed","exhausted","interrupted"].includes(r.state)&&<small>{describeError(r.lastError)}</small>}
     {!c&&<small>Chưa đọc được quyền thao tác cho máy này.</small>}
     {c&&!a.effectIntent&&(a.state==="failedBeforeDispatch"||waiting)&&<><button type="button" disabled={busy||!!exclusion||!!waiting||!online||!c.retryBeforePost.allowed} title={!online?"Máy chưa kết nối":c.retryBeforePost.allowed?"Chạy thêm đúng một lần; giữ nguyên bài và máy":c.retryBeforePost.reason??"Đang phục hồi"} onClick={()=>void act(c,"retry")}>Thử lại</button>{!online&&<small>Máy chưa kết nối</small>}</>}
     {a.effectIntent&&c?.resumeVerification.allowed&&<button type="button" disabled={busy} onClick={()=>void act(c,"resume")}>Tiếp tục kiểm tra link</button>}

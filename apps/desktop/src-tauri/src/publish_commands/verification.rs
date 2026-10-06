@@ -337,6 +337,25 @@ pub(super) fn verification_input(
     Ok(Some((assignment, bundle)))
 }
 
+/// Network-only authorization: no device-wide restart/upload admission is needed.
+/// The captured assignment must still be exactly the observer's immutable snapshot.
+pub(super) fn authorize_metadata_observer(
+    db: &Database,
+    assignment: &riviu_core::PublishAssignmentRecord,
+    observer: &riviu_core::db::PendingPublishVerification,
+) -> anyhow::Result<()> {
+    anyhow::ensure!(observer.retained_metadata_candidate()?.is_some()
+        && observer.assignment_id == assignment.id
+        && observer.campaign_id == assignment.campaign_id
+        && observer.bundle_id == assignment.bundle_id
+        && observer.udid == assignment.udid
+        && observer.effect_intent == assignment.effect_intent
+        && observer.evidence_json == assignment.evidence_json
+        && db.publish_verification_is_current(observer)?,
+        "metadata observer changed or stopped; phone fallback forbidden");
+    Ok(())
+}
+
 pub(crate) async fn verify_pending_assignment(
     control: &DeviceControlPlane,
     db: &Database,
@@ -361,11 +380,32 @@ async fn verify_pending_assignment_inner(
     if !db.publish_verification_is_current(candidate)? {
         return Ok((CheckStatus::Stale, None));
     }
-    if control.current_work_owner(&candidate.udid).is_some() {
+    let metadata_only = match candidate.retained_metadata_candidate() {
+        Ok(candidate) => candidate.is_some(),
+        Err(_) => {
+            // Controlled terminal diagnostic; never serialize the invalid envelope.
+            let reason = "Retained metadata candidate is invalid; review the original publication, no phone fallback.";
+            let record = if manual { Database::record_manual_publish_verification_diagnostic }
+                else { Database::record_publish_verification_diagnostic };
+            if record(db, candidate, reason, "metadataCandidateInvalid", None)? {
+                execution::announce(events, db, &candidate.campaign_id);
+                return committed_observation_outcome(db, candidate);
+            }
+            return Ok((CheckStatus::Stale, None));
+        }
+    };
+    if metadata_only && !manual && !candidate.automatic_metadata_observation_allowed(chrono::Utc::now()) {
+        return Ok((CheckStatus::Pending, None));
+    }
+    if !metadata_only && control.current_work_owner(&candidate.udid).is_some() {
         return Ok((CheckStatus::Busy, None));
     }
-    let Some(permit) = db.try_publish_work(&candidate.udid, "verify", &candidate.assignment_id)?
-    else {
+    let permit = if metadata_only {
+        db.try_publish_metadata_work(candidate, manual)?
+    } else {
+        db.try_publish_work(&candidate.udid, "verify", &candidate.assignment_id)?
+    };
+    let Some(permit) = permit else {
         return Ok((CheckStatus::Busy, None));
     };
     let Some((assignment, bundle)) = verification_input(db, candidate)? else {
@@ -387,14 +427,19 @@ async fn verify_pending_assignment_inner(
         &candidate.assignment_id,
         progress::PublishProgress::CheckingExistingPostLink { attempt },
     );
-    let capture = execution::capture_confirmed_assignment_link(
-        db,
-        control,
-        &assignment,
-        &bundle,
-        Some(candidate),
-    )
-    .await;
+    let capture = if metadata_only {
+        // This branch has no control/session argument and no fallback, even if a
+        // concurrent revision removes or changes the retained candidate.
+        async {
+            db.publish_campaign_request(&assignment.campaign_id)?
+                .context("publish campaign request not found")?.network.ensure_implemented()?;
+            anyhow::ensure!(!bundle.caption.trim().is_empty(), "caption missing for own-post proof");
+            execution::capture_pending_metadata(db, &assignment, &bundle, Some(candidate))
+                .await?.context("retained metadata candidate missing; phone fallback forbidden")
+        }.await
+    } else {
+        execution::capture_confirmed_assignment_link(db, control, &assignment, &bundle, Some(candidate)).await
+    };
     // Keep the work permit through the existing CAS/outbox or diagnostic commit.
     let _permit = permit;
     match capture {

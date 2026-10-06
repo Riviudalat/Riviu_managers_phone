@@ -2098,7 +2098,7 @@ fn attach_pending_metadata_candidate(
 
 /// Returns None only for legacy evidence without a typed candidate. Invalid typed
 /// evidence fails closed instead of silently falling back to a different phone post.
-async fn capture_pending_metadata(
+pub(super) async fn capture_pending_metadata(
     db: &Database,
     assignment: &riviu_core::PublishAssignmentRecord,
     bundle: &riviu_core::PublishBundle,
@@ -2114,7 +2114,9 @@ async fn capture_pending_metadata(
     let mut pending: PendingMetadataCandidate = serde_json::from_value(value.clone())?;
     // Same authorization used by phone observation, before and after external IO.
     let authorize = || {
-        if super::verification_restart::shared_debt(db, assignment)? {
+        if let Some(observer) = observer {
+            super::verification::authorize_metadata_observer(db, assignment, observer)
+        } else if super::verification_restart::shared_debt(db, assignment)? {
             super::verification_restart::authorize(db, assignment, observer)
         } else {
             super::verification_restart::authorize_restart(db, assignment, observer)

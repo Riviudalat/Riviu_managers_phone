@@ -866,8 +866,8 @@ fn test_assignment(id: &str, bundle_id: &str, udid: &str) -> riviu_core::Publish
     }
 }
 
-#[test]
-fn verification_and_stored_reconciliation_hydrate_only_the_selected_publication() {
+#[tokio::test]
+async fn verification_and_stored_reconciliation_hydrate_only_the_selected_publication() {
     let path = std::env::temp_dir().join(format!(
         "riviu-verification-hydration-{}.db",
         Uuid::new_v4()
@@ -970,6 +970,59 @@ fn verification_and_stored_reconciliation_hydrate_only_the_selected_publication(
         super::verification::verification_input(&db, &candidate).is_err(),
         "selected corruption must still fail"
     );
+    // The observer commit reconciles the campaign snapshot, so restore valid
+    // manifests after the selected-hydration corruption checks above.
+    for bundle in &bundles {
+        raw.execute(
+            "UPDATE publish_bundles SET manifest_json=?2 WHERE id=?1",
+            rusqlite::params![bundle.id, serde_json::to_string(bundle).unwrap()],
+        )
+        .unwrap();
+    }
+    // Invalid retained metadata must fail at the real observer boundary before
+    // any session is acquired, even when the selected publication is current.
+    let driver = riviu_ios_driver::MockIosDriver::new();
+    let control = riviu_core::DeviceControlPlane::new(
+        std::sync::Arc::new(driver.clone()),
+        std::sync::Arc::new(riviu_core::DeviceWorkCoordinator::new()),
+        std::sync::Arc::new(riviu_core::StreamBudgetManager::default()),
+    );
+    let events = riviu_core::events::EventBus::new(8);
+    let original_state: String = raw.query_row("SELECT state FROM publish_assignments WHERE id=?1", [&assignment.id], |r|r.get(0)).unwrap();
+    let intent = serde_json::json!({
+        "effectIntent":"post","verificationContractVersion":1,"expectedAccount":"fixture",
+        "submittedAt":"2026-10-06T01:00:00Z","package":"com.zhiliaoapp.musically",
+        "version":"45.7.3","locale":"en","captionSha256":bundle.caption_sha256,
+        "bundleId":bundle.id,"mediaKind":"image"
+    }).to_string();
+    for (schema, state) in [(2, "unavailable"), (1, "verified")] {
+        let evidence = serde_json::json!({"verificationDiagnostic":{"pendingMetadataCandidate":{
+            "schemaVersion":schema,"campaignId":candidate.campaign_id,"assignmentId":candidate.assignment_id,
+            "bundleId":bundle.id,"intentSha256":super::frame_sha256(intent.as_bytes()),"captionSha256":bundle.caption_sha256,
+            "captured":{"canonicalUrl":"https://www.tiktok.com/@fixture/photo/7550000000000000000",
+                "postId":"7550000000000000000","expectedAccount":"fixture","normalizedCaptionSha256":"a".repeat(64),
+                "preparedAt":null,"submittedAt":"2026-10-06T01:00:00Z","capturedAt":"2026-10-06T01:01:00Z",
+                "provenance":"measuredViewerClipboard","metadata":{"state":state,"attempts":1,
+                    "checkedAt":"2026-10-06T01:01:00Z","stage":"httpStatus","httpStatus":400}}
+        }}}).to_string();
+        raw.execute("UPDATE publish_assignments SET state='verifying',effect_intent=?2,evidence_json=?3 WHERE id=?1",
+            rusqlite::params![assignment.id,intent,evidence]).unwrap();
+        let mut invalid = candidate.clone();
+        invalid.effect_intent = Some(intent.clone());
+        invalid.evidence_json = Some(evidence);
+        invalid.revision = db.publish_assignment_revision(&assignment.id).unwrap();
+        assert!(db.publish_verification_is_current(&invalid).unwrap());
+        assert!(!super::verification::verify_pending_assignment(&control, &db, &events, &invalid).await.unwrap());
+        let saved: String = raw.query_row("SELECT evidence_json FROM publish_assignments WHERE id=?1", [&assignment.id], |r|r.get(0)).unwrap();
+        let saved: serde_json::Value = serde_json::from_str(&saved).unwrap();
+        assert_eq!(saved["verificationStatus"]["state"], "needsReview");
+        assert_eq!(saved["verificationStatus"]["reasonCode"], "metadataCandidateInvalid");
+        assert!(saved["verificationStatus"]["nextCheckAt"].is_null());
+        assert_eq!(driver.ordinary_session_calls(), 0);
+        assert_eq!(driver.fresh_text_session_calls(), 0);
+    }
+    raw.execute("UPDATE publish_assignments SET state=?2,effect_intent=?3,evidence_json=?4,revision=?5 WHERE id=?1",
+        rusqlite::params![assignment.id,original_state,candidate.effect_intent,candidate.evidence_json,candidate.revision]).unwrap();
     drop(raw);
     drop(db);
     std::fs::remove_file(path).unwrap();

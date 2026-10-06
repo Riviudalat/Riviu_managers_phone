@@ -1,7 +1,7 @@
 use std::{collections::HashMap, future::Future};
 use tokio::task::{Id, JoinSet};
 
-/// One observer per phone; pending publications remain durable database rows.
+/// One observer per phone or retained metadata assignment; rows remain durable.
 pub(crate) struct VerificationQueue {
     tasks: JoinSet<anyhow::Result<bool>>,
     devices: HashMap<Id, String>,
@@ -16,6 +16,25 @@ impl Default for VerificationQueue {
     }
 }
 impl VerificationQueue {
+    pub fn observer_key(row: &riviu_core::db::PendingPublishVerification) -> anyhow::Result<String> {
+        Ok(if row.retained_metadata_candidate().map_or(true, |candidate| candidate.is_some()) {
+            format!("publish-metadata:{}", row.assignment_id)
+        } else { row.udid.clone() })
+    }
+
+    pub fn can_observe(
+        row: &riviu_core::db::PendingPublishVerification,
+        device: Option<&riviu_core::DeviceInfo>,
+        phone_busy: bool,
+    ) -> anyhow::Result<bool> {
+        Ok(match row.retained_metadata_candidate() {
+            // Admit only to persist a controlled terminal diagnostic, without IO.
+            Err(_) => true,
+            Ok(Some(_)) => row.automatic_metadata_observation_allowed(chrono::Utc::now()),
+            Ok(None) => !phone_busy && device.is_some_and(Self::device_can_observe),
+        })
+    }
+
     pub fn device_can_observe(device: &riviu_core::DeviceInfo) -> bool {
         use riviu_core::{DevicePlatform, DeviceStatus};
         device.status == DeviceStatus::Ready
@@ -86,6 +105,44 @@ mod tests {
         assert!(!VerificationQueue::device_can_observe(&device));
         device.status = riviu_core::DeviceStatus::Ready;
         assert!(VerificationQueue::device_can_observe(&device));
+
+        let intent = serde_json::json!({
+            "effectIntent":"post","verificationContractVersion":1,"expectedAccount":"fixture",
+            "submittedAt":"2026-10-06T01:00:00Z","package":"com.zhiliaoapp.musically",
+            "version":"45.7.3","locale":"en","captionSha256":"a".repeat(64),"bundleId":"bundle","mediaKind":"image"
+        }).to_string();
+        let evidence = serde_json::json!({"verificationDiagnostic":{"pendingMetadataCandidate":{
+            "schemaVersion":1,"campaignId":"campaign","assignmentId":"assignment","bundleId":"bundle",
+            "intentSha256":riviu_core::frame_sha256(intent.as_bytes()),"captionSha256":"a".repeat(64),
+            "captured":{"canonicalUrl":"https://www.tiktok.com/@fixture/photo/7550000000000000000",
+                "postId":"7550000000000000000","expectedAccount":"fixture","normalizedCaptionSha256":"a".repeat(64),
+                "preparedAt":null,"submittedAt":"2026-10-06T01:00:00Z","capturedAt":"2026-10-06T01:01:00Z",
+                "provenance":"measuredViewerClipboard","metadata":{"state":"unavailable","attempts":1,
+                    "checkedAt":"2026-10-06T01:01:00Z","stage":"httpStatus","httpStatus":400}}
+        }}});
+        let mut row = riviu_core::db::PendingPublishVerification {
+            assignment_id:"assignment".into(),campaign_id:"campaign".into(),bundle_id:"bundle".into(),
+            udid:"phone".into(),scheduled:false,revision:1,effect_intent:Some(intent),evidence_json:None,stop_marker:None,
+        };
+        assert!(!VerificationQueue::can_observe(&row, None, false).unwrap());
+        assert!(!VerificationQueue::can_observe(&row, Some(&device), true).unwrap());
+        row.evidence_json = Some(evidence.to_string());
+        assert!(VerificationQueue::can_observe(&row, None, true).unwrap(), "offline/busy phone does not block metadata");
+        assert_ne!(VerificationQueue::observer_key(&row).unwrap(), row.udid);
+        for (field, value) in [("schemaVersion", serde_json::json!(2)), ("captured", serde_json::Value::Null)] {
+            let mut invalid = evidence.clone();
+            invalid["verificationDiagnostic"]["pendingMetadataCandidate"][field] = value;
+            row.evidence_json = Some(invalid.to_string());
+            assert!(VerificationQueue::can_observe(&row, Some(&device), false).unwrap(), "invalid candidate must reach diagnostic commit, never phone fallback");
+        }
+        row.evidence_json = Some(evidence.to_string().replace("unavailable", "rejected"));
+        assert!(VerificationQueue::can_observe(&row, Some(&device), false).unwrap(), "Rejected rechecks the same candidate within budget");
+        let mut exhausted = evidence.clone();
+        exhausted["verificationBudget"] = serde_json::json!({"metadataObservations":12});
+        row.evidence_json = Some(exhausted.to_string());
+        assert!(!VerificationQueue::can_observe(&row, None, false).unwrap());
+        row.evidence_json = Some(evidence.to_string());
+        assert!(VerificationQueue::can_observe(&row, None, false).unwrap());
     }
 
     #[tokio::test(start_paused = true)]

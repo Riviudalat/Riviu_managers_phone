@@ -357,7 +357,7 @@ fn publication_survives_retries_and_stale_claims_cannot_finish_new_attempt() {
 
 #[test]
 fn permits_are_global_across_connections_and_release_by_exact_device() {
-    let (db, path, _, _) = fixture();
+    let (db, path, campaign, assignments) = fixture();
     // This case owns configured admission, independent of the default fleet cap.
     db.set_setting("publish.dispatch.limits", r#"{"transfer":4,"compose":4,"verify":4,"deviceTotal":8}"#).unwrap();
     let other = Database::open(path).unwrap();
@@ -394,6 +394,94 @@ fn permits_are_global_across_connections_and_release_by_exact_device() {
         .try_publish_work("post", "compose", "poster")
         .unwrap()
         .is_some());
+    // A durable candidate can read metadata while its physical phone is composing.
+    // Both connections use production admission, not a mocked grant.
+    let assignment = &assignments[0];
+    let intent = serde_json::json!({
+        "effectIntent":"post", "verificationContractVersion":1, "expectedAccount":"fixture",
+        "submittedAt":"2026-10-06T01:00:00Z", "package":"com.zhiliaoapp.musically",
+        "version":"45.7.3", "locale":"en", "captionSha256":"a".repeat(64),
+        "bundleId":assignment.bundle_id, "mediaKind":"image"
+    }).to_string();
+    let evidence = serde_json::json!({"verificationDiagnostic":{"pendingMetadataCandidate":{
+        "schemaVersion":1,"campaignId":campaign,"assignmentId":assignment.id,
+        "bundleId":assignment.bundle_id,"intentSha256":crate::frame_sha256(intent.as_bytes()),
+        "captionSha256":"a".repeat(64),"captured":{
+            "canonicalUrl":"https://www.tiktok.com/@fixture/photo/7550000000000000000",
+            "postId":"7550000000000000000","expectedAccount":"fixture",
+            "normalizedCaptionSha256":"a".repeat(64),"preparedAt":null,
+            "submittedAt":"2026-10-06T01:00:00Z","capturedAt":"2026-10-06T01:01:00Z",
+            "provenance":"measuredViewerClipboard","metadata":{"state":"unavailable","attempts":1,
+                "checkedAt":"2026-10-06T01:01:00Z","stage":"httpStatus","httpStatus":400}
+        }
+    }}}).to_string();
+    db.conn().unwrap().execute("UPDATE publish_assignments SET state='verifying',effect_intent=?2,evidence_json=?3 WHERE id=?1",
+        params![assignment.id,intent,evidence]).unwrap();
+    let candidate = PendingPublishVerification {
+        assignment_id:assignment.id.clone(),campaign_id:campaign,bundle_id:assignment.bundle_id.clone(),
+        udid:assignment.udid.clone(),scheduled:false,revision:db.publish_assignment_revision(&assignment.id).unwrap(),
+        effect_intent:Some(intent),evidence_json:Some(evidence),stop_marker:None,
+    };
+    let phone = db.try_publish_work(&candidate.udid, "compose", "independent-post").unwrap().unwrap();
+    assert!(other.try_publish_work(&candidate.udid, "verify", &candidate.assignment_id).unwrap().is_none());
+    let metadata = db.try_publish_metadata_work(&candidate, false).unwrap().expect("busy phone cannot block network metadata");
+    assert!(other.try_publish_metadata_work(&candidate, false).unwrap().is_none(), "no duplicate observer across connections");
+    drop(phone);
+    let phone = other.try_publish_work(&candidate.udid, "compose", "independent-post").unwrap()
+        .expect("metadata cannot hold a phone work permit");
+    drop(phone);
+    assert!(other.try_publish_work(&candidate.udid, "verify", &candidate.assignment_id).unwrap().is_none(),
+        "phone verification cannot race the same assignment metadata observation");
+    drop(metadata);
+    let verify = db.try_publish_work(&candidate.udid, "verify", &candidate.assignment_id).unwrap().unwrap();
+    assert!(other.try_publish_metadata_work(&candidate, false).unwrap().is_none());
+    drop(verify);
+    let mut stale = candidate.clone();
+    stale.revision += 1;
+    assert!(db.try_publish_metadata_work(&stale, false).unwrap().is_none());
+    let mut deferred = candidate.clone();
+    let mut deferred_evidence: serde_json::Value = serde_json::from_str(deferred.evidence_json.as_deref().unwrap()).unwrap();
+    deferred_evidence["verificationStatus"] = serde_json::json!({"nextCheckAt":(Utc::now()+chrono::Duration::hours(1)).to_rfc3339()});
+    deferred.evidence_json = Some(deferred_evidence.to_string());
+    assert!(db.try_publish_metadata_work(&deferred, false).unwrap().is_none());
+    let mut rejected = candidate.clone();
+    rejected.evidence_json = Some(rejected.evidence_json.unwrap().replace("unavailable", "rejected"));
+    for row in [&deferred, &rejected] {
+        db.conn().unwrap().execute("UPDATE publish_assignments SET evidence_json=?2 WHERE id=?1",
+            params![row.assignment_id,row.evidence_json]).unwrap();
+        let automatic = db.try_publish_metadata_work(row, false).unwrap();
+        assert_eq!(automatic.is_some(), row.is_due(Utc::now()));
+        drop(automatic);
+        assert!(db.try_publish_metadata_work(row, true).unwrap().is_some(), "future-due manual and Rejected one-shot are eligible");
+    }
+    for mut row in [deferred, rejected] {
+        // Persist the exact candidate so this exercises policy, not stale refusal.
+        let mut evidence: serde_json::Value = serde_json::from_str(row.evidence_json.as_deref().unwrap()).unwrap();
+        evidence["verificationBudget"] = serde_json::json!({"metadataObservations":12,"noProgressObservations":3});
+        evidence["verificationStatus"]["state"] = serde_json::json!("needsReview");
+        row.evidence_json = Some(evidence.to_string());
+        db.conn().unwrap().execute("UPDATE publish_assignments SET evidence_json=?2 WHERE id=?1",
+            params![row.assignment_id,row.evidence_json]).unwrap();
+        row.revision = db.publish_assignment_revision(&row.assignment_id).unwrap();
+        assert!(db.try_publish_metadata_work(&row, false).unwrap().is_none());
+        let manual = db.try_publish_metadata_work(&row, true).unwrap().expect("manual one-shot bypasses automatic budget and due only");
+        assert!(other.try_publish_metadata_work(&row, true).unwrap().is_none());
+        drop(manual);
+        let saved: String = db.conn().unwrap().query_row("SELECT evidence_json FROM publish_assignments WHERE id=?1",
+            [&row.assignment_id], |r|r.get(0)).unwrap();
+        assert_eq!(Some(saved), row.evidence_json, "admission cannot reset budget or resume");
+        assert!(db.record_manual_publish_verification_diagnostic(&row, "still unavailable", "metadataUnavailable", None).unwrap());
+        let saved: String = db.conn().unwrap().query_row("SELECT evidence_json FROM publish_assignments WHERE id=?1",
+            [&row.assignment_id], |r|r.get(0)).unwrap();
+        let saved: serde_json::Value = serde_json::from_str(&saved).unwrap();
+        assert_eq!(saved["verificationBudget"], evidence["verificationBudget"]);
+        assert_eq!(saved["verificationStatus"]["state"], "needsReview");
+        assert!(saved["verificationStatus"]["nextCheckAt"].is_null());
+        assert!(saved.get("verificationResume").is_none());
+    }
+    db.conn().unwrap().execute("UPDATE publish_assignments SET evidence_json=?2,revision=?3 WHERE id=?1",
+        params![candidate.assignment_id,candidate.evidence_json,candidate.revision]).unwrap();
+    assert!(other.try_publish_metadata_work(&candidate, false).unwrap().is_some(), "exact-token release permits another observation");
     drop(permits);
     assert_eq!(
         db.conn()

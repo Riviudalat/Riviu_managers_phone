@@ -241,8 +241,7 @@ async fn execute_helper_maintenance_admitted(
                 return Err(CommandError::code("HelperMaintenanceBusyBeforeDispatch",
                     "Máy đang kết thúc thao tác helper; chưa thực hiện khôi phục. Đợi thao tác kết thúc rồi chọn Khôi phục helper để tiếp tục đúng kế hoạch."));
             }
-            return Err(CommandError::code("HelperMaintenanceExecutionUnproved",
-                "Khôi phục helper chưa được chứng minh; giữ bản ghi cũ để đối soát, không gửi lại thao tác."));
+            return Err(helper_maintenance_execution_error(&plan.udid, &error));
         }
     };
     let prepared = &ledger[index];
@@ -481,6 +480,30 @@ pub async fn agent_bulk_repair(
     Ok(bulk_repair_with_control(&state.control, udids).await)
 }
 
+fn helper_maintenance_execution_error(udid: &str, error: &DeviceControlError) -> CommandError {
+    // The control-plane boundary has already erased the anyhow type. Accept only
+    // complete existing driver literals, never substrings or arbitrary envelopes.
+    let cause = match error {
+        DeviceControlError::Driver { operation: "executeHelperMaintenance", message, .. } => message.as_str(),
+        _ => "",
+    };
+    let (stage, category, reason) = match cause {
+        "helper maintenance binding changed; no replay or retirement"
+        | "maintenance active plan changed; no replay or retirement" =>
+            ("maintenance_binding", "binding_changed", "Thông tin thiết bị đã khác kế hoạch đang giữ; cần đối chiếu trước khi khôi phục."),
+        "maintenance effect unresolved; process present; no replay" =>
+            ("maintenance_reconciliation", "process_present", "Tiến trình helper vẫn còn; tiếp tục đối soát kế hoạch cũ, chưa gửi lệnh dừng lần nữa."),
+        "HelperRecoveryRequired" =>
+            ("maintenance_execution", "recovery_required", "Cần đối soát phiên helper đang giữ; chưa nhận phiên thay thế."),
+        _ => ("maintenance_execution", "unknown", "Kiểm tra chẩn đoán của đúng máy; nguyên nhân hiện chưa xác định."),
+    };
+    let device: String = udid.chars().take(128)
+        .filter(|c| c.is_ascii_alphanumeric() || matches!(c, '-' | '_' | '.' | ':')).collect();
+    log::warn!("helper maintenance unproved; device={device}; stage={stage}; category={category}; {reason}; no action replay");
+    CommandError::code("HelperMaintenanceExecutionUnproved", format!(
+        "Khôi phục helper chưa được chứng minh; giữ bản ghi cũ để đối soát, không gửi lại thao tác; no action replay; stage={stage}; category={category}; {reason}"))
+}
+
 fn helper_maintenance_prepare_error(error: DeviceControlError) -> CommandError {
     // Only allowlisted, complete driver messages become public categories.
     // Never serialize the raw chain: it may contain credentials or journal data.
@@ -547,6 +570,27 @@ mod tests {
             let error = DeviceControlError::Driver { udid: "fixture".into(), operation, message: message.into() };
             assert_eq!(phase.restore_pre_dispatch_busy(observation_only, &error), allowed);
             assert!(phase == if allowed { HelperMaintenancePhase::Prepared } else { HelperMaintenancePhase::ExecutionStarted });
+        }
+        // Public error projection shares the exact execution-failure boundary and
+        // must never turn a distinguishable cause into permission to replay.
+        for (message, category, stage) in [
+            ("helper maintenance binding changed; no replay or retirement", "binding_changed", "maintenance_binding"),
+            ("maintenance effect unresolved; process present; no replay", "process_present", "maintenance_reconciliation"),
+            ("fixture-secret-token owner clipboard credential envelope", "unknown", "maintenance_execution"),
+            ("helper maintenance binding changed; no replay or retirement: fixture-secret-token", "unknown", "maintenance_execution"),
+        ] {
+            let error = DeviceControlError::Driver {
+                udid: "fixture-secret-owner".into(), operation: "executeHelperMaintenance", message: message.into(),
+            };
+            let mut phase = HelperMaintenancePhase::ExecutionStarted;
+            assert!(!phase.restore_pre_dispatch_busy(true, &error));
+            assert!(phase == HelperMaintenancePhase::ExecutionStarted);
+            let public = helper_maintenance_execution_error("fixture", &error);
+            assert_eq!(public.code, "HelperMaintenanceExecutionUnproved");
+            assert!(public.message.contains(&format!("stage={stage}; category={category}")));
+            assert!(public.message.contains("no action replay"));
+            assert!(!serde_json::to_string(&public).unwrap().contains("fixture-secret"));
+            assert!(!public.message.contains("owner clipboard credential envelope"));
         }
         let mut phase = HelperMaintenancePhase::Settled;
         let error = DeviceControlError::Driver { udid: "fixture".into(), operation: "executeHelperMaintenance", message: "HelperMaintenanceBusyBeforeDispatch".into() };

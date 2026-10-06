@@ -123,6 +123,15 @@ chối hoặc bản ghi thao tác cũ chưa đối soát được sẽ hiện tr
 lặp cài liên tục. Kế hoạch khôi phục đã thực thi chỉ được đọc lại kết quả. Nút
 **Khôi phục helper** vẫn có để xử lý trường hợp cần người vận hành kiểm tra.
 
+Lỗi chuẩn bị helper phân biệt `runtime_acquisition` (nhận phiên runtime) và
+`clipboard_qualification` (xác minh clipboard). Thông báo chỉ dùng các nhóm nguyên
+nhân cố định: `clipboard_not_qualified`, `recovery_required` hoặc `unknown`; nhật ký
+kèm mã thiết bị để đối chiếu đúng máy. Lỗi khôi phục còn phân biệt kế hoạch đã đổi
+(`binding_changed`) và tiến trình vẫn còn khi đối soát (`process_present`).
+`unknown` nghĩa là chưa xác định nguyên nhân, không chứng minh máy thuộc PC khác.
+Các thông báo này giữ nguyên yêu cầu đối soát và bản ghi cũ, không cho phép gửi lại
+thao tác hoặc đặt lại toàn bộ helper.
+
 **Đọc và gán nick TikTok** đọc song song các máy đã chọn, rồi đối chiếu cả nhóm
 trước khi lưu. Nếu tài khoản chuyển giữa các máy, Riviu cần đọc cả những máy đang
 lưu tên trùng và hiển thị tên cũ, tên vừa đọc để xác nhận. Máy chưa đọc được giữ

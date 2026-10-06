@@ -1775,14 +1775,16 @@ impl AppState {
                         ) {
                             continue;
                         }
-                        if !queue.available(&row.udid)
-                            || !registry.get(&row.udid).is_some_and(|device| {
-                                crate::publish_commands::VerificationQueue::device_can_observe(
-                                    &device,
-                                )
-                            })
-                            || control.current_work_owner(&row.udid).is_some()
-                            || failed_until.contains_key(&row.udid)
+                        let Ok(observer_key) = crate::publish_commands::VerificationQueue::observer_key(&row) else {
+                            // Key selection must not fall back to a phone on invalid retained evidence.
+                            continue;
+                        };
+                        let device = registry.get(&row.udid);
+                        if !queue.available(&observer_key)
+                            || !crate::publish_commands::VerificationQueue::can_observe(
+                                &row, device.as_ref(), control.current_work_owner(&row.udid).is_some(),
+                            ).unwrap_or(false)
+                            || failed_until.contains_key(&observer_key)
                             || !row.is_due(chrono::Utc::now())
                         {
                             continue;
@@ -1792,7 +1794,7 @@ impl AppState {
                         };
                         let (control, db, events) = (control.clone(), db.clone(), events.clone());
                         let queued_acceptance = acceptance.clone();
-                        queue.push(row.udid.clone(), async move {
+                        queue.push(observer_key, async move {
                             let _admitted = admitted;
                             if !queued_acceptance.allows(
                                 crate::dev_acceptance::AcceptanceCapability::PublishVerification,
