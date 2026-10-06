@@ -445,17 +445,10 @@ struct ViewProducer {
     /// every keeper tick and holding it through a socket write would make a slow phone stall
     /// the reconciliation of every other one.
     control: Arc<tokio::sync::Mutex<tokio::net::tcp::OwnedWriteHalf>>,
-    /// Reads the device→host half and throws it away.
-    ///
-    /// With `clipboard_autosync` left at its default the phone sends a message every time
-    /// its clipboard changes. Measured: holding that socket unread for 75 s while the
-    /// clipboard changed twelve times did not disturb the server — `DeviceMessageSender`
-    /// offers onto a bounded queue and drops rather than blocking. So this is insurance, not
-    /// a load-bearing part: it keeps the socket honest over hours rather than minutes, and it
-    /// costs one idle task per phone.
-    ///
-    /// Tolerant by construction — it never parses, so it cannot object to a message type it
-    /// does not know, and objecting is the one thing that would be fatal.
+    /// One bounded keyboard operation per producer, including clipboard response wait.
+    keyboard: Arc<tokio::sync::Mutex<()>>,
+    clipboard_replies: Arc<Mutex<crate::scrcpy::ClipboardReplies>>,
+    /// Parses explicit clipboard replies; autosync is disabled at launch.
     control_drain: tokio::task::JoinHandle<()>,
 }
 

@@ -47,12 +47,25 @@ Kéo tiêu đề có số máy để di chuyển, kéo góc dưới phải để
 vẫn dùng được khi cửa sổ mở. Nút Đóng hoặc Escape đóng cửa sổ đang thao tác. Tìm chức năng lọc toàn bộ bảng;
 các lệnh chưa dùng được vẫn hiện lý do/trạng thái theo máy.
 
-Trên Android, chạm vào ô nhập trên màn hình điện thoại rồi nhấn **Ctrl+V** để dán
-chữ từ PC tại con trỏ. Có thể giữ bàn phím Samsung/Gboard đang dùng; thao tác dán
-không đổi bàn phím. Nếu máy còn hiện thanh Clear Text/Switch IME của bàn phím ADB,
-mở **Đổi bàn phím** và chọn bàn phím thông thường đã cài. Ctrl+V chỉ áp dụng khi
-vùng màn hình điện thoại đang được chọn và phiên điều khiển sẵn sàng. Khi bật
-đồng bộ nhóm, dùng ô **Nhập chữ**; dán trực tiếp hiện chỉ dành cho một máy Android.
+Trên Android, chạm vào ô nhập trên màn hình điện thoại rồi dùng bàn phím PC để
+gõ tại con trỏ. Backspace xoá phía trước, Delete xoá phía sau; phím mũi tên,
+Home/End và Shift hỗ trợ di chuyển/chọn chữ. Ctrl+A chọn tất cả, Ctrl+C/Ctrl+X
+đưa nội dung sao chép/cắt từ điện thoại về clipboard PC, Ctrl+V dán vào điện thoại.
+Enter/Tab và Ctrl+Z/Ctrl+Y được gửi xuống ứng dụng; hành vi phụ thuộc ô nhập và
+khả năng hoàn tác của ứng dụng đó. Giữ phím xoá/mũi tên để lặp thao tác.
+
+Bộ gõ tiếng Việt trên PC gửi phần chữ đã hoàn thành; giữ bàn phím Samsung/Gboard
+trên điện thoại, không cần đổi sang bàn phím ADB. Nếu còn thanh Clear Text/Switch
+IME, mở **Đổi bàn phím** và chọn bàn phím thông thường đã cài. Nhập Unicode/dán
+có thể thay nội dung clipboard điện thoại. Copy không có vùng chọn giữ hành vi
+clipboard của ứng dụng; không có kết quả mới không có nghĩa đã sao chép thành công.
+
+Phím chỉ đến điện thoại khi vùng màn hình của nó đang được chọn và phiên điều
+khiển sẵn sàng. Chuyển sang ô nhập của Riviu thì gõ/xoá chỉ tác động ô đó. Khi đổi
+máy, mất focus hoặc ngắt luồng hình, phần phím chưa gửi bị huỷ. Nếu báo kết quả
+chưa rõ, kiểm tra điện thoại rồi bấm lại màn hình để tiếp tục; không tự phát lại.
+Bàn phím trực tiếp hiện dành cho một máy Android. Khi đồng bộ nhóm, dùng ô
+**Nhập chữ** và các phím điều khiển nhóm.
 
 **PC → Điện thoại** mở hộp chọn một/nhiều tệp trên PC, sau đó mở thư mục điện thoại.
 Chọn thư mục đích rồi bấm **Đưa vào thư mục này**. Nếu có tệp lỗi, bấm lại chỉ gửi

@@ -498,6 +498,7 @@ pub fn run() {
             commands::device_swipe_path,
             commands::device_type_text,
             commands::device_paste_text,
+            commands::device_keyboard_input,
             commands::device_home,
             commands::device_key,
             commands::set_screen_locked,

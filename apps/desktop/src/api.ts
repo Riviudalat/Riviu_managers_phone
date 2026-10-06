@@ -271,6 +271,15 @@ export async function deviceSwipe(
 }
 
 /** Native cursor paste; completion means dispatched, not text readback. Never retry automatically. */
+export type PhoneKeyboardInput =
+  | { kind: "key"; key: string; shift: boolean; ctrl: boolean; alt: boolean; repeat: boolean }
+  | { kind: "text"; text: string }
+  | { kind: "copy"; cut: boolean };
+
+export async function deviceKeyboardInput(udid: string, generation: number, input: PhoneKeyboardInput) {
+  return invoke<{ text?: string }>("device_keyboard_input", { udid, generation, input });
+}
+
 export async function devicePasteText(udid: string, text: string, generation: number) {
   return invoke<void>("device_paste_text", { udid, text, generation });
 }

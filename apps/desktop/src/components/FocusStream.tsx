@@ -6,7 +6,6 @@ import { groupInputOutcome } from "../groupInput";
 import { getGroupSync, isNoopGroupSync, type ActiveGroupSync, type GroupSyncReadiness } from "../groupSync";
 import { recordSwipe, recordTap } from "../macroStore";
 import {
-  devicePasteText,
   deviceSwipe,
   deviceSwipePath,
   deviceTap,
@@ -62,6 +61,7 @@ import {
 } from "./Icons";
 import { withoutMenuIds, type DeviceMenuNode } from "../deviceMenu";
 import { DeviceFunctionList } from "./DeviceFunctionList";
+import { usePhoneKeyboard } from "./focus/usePhoneKeyboard";
 import { FocusTextInput } from "./focus/FocusTextInput";
 import { focusLayout } from "./focus/focusLayout";
 import { acquireControlSession, invalidateDisconnectedControlSession } from "./focus/controlSessions";
@@ -245,13 +245,14 @@ export function FocusStream({
     controlState.ready.length === targets.length &&
     failureCount === 0;
   const keyDisabled = busy || actionPending || pointerBusy || !sessionReady;
-  const pasteIdentity = useMemo(() => ({}), [device.udid, controlKey, viewSize?.generation, active, closing]);
-  const currentPasteIdentity = useRef<object | null>(pasteIdentity);
-  currentPasteIdentity.current = pasteIdentity;
-  useEffect(() => {
-    currentPasteIdentity.current = pasteIdentity;
-    return () => { currentPasteIdentity.current = null; };
-  }, [pasteIdentity]);
+  const phoneKeyboard = usePhoneKeyboard({
+    udid: device.udid, generation: viewSize?.generation,
+    enabled: active && !closing && sessionReady && hasView,
+    blocked: busy || actionPending || pointerBusy,
+    unsupported: activeSync?.masterUdid === device.udid ? "group" : device.platform === "ios" ? "ios" : undefined,
+    sessionKey: controlKey,
+    isExternallyBusy: () => inFlight.current || pointerBusyRef.current,
+  });
   const finishPointer = () => {
     pointerBusyRef.current = false;
     setPointerBusy(false);
@@ -402,7 +403,7 @@ export function FocusStream({
   }, [activeSync, controlState.ready, device.udid, failureCount, failures, onReadinessChange, targets]);
 
   const retryControl = async () => {
-    if (inFlight.current || pointerBusyRef.current || hasHelperRecovery) return;
+    if (phoneKeyboard.isBusy() || inFlight.current || pointerBusyRef.current || hasHelperRecovery) return;
     const busyUdids = Object.entries(failures)
       .filter(([, reason]) => canHandoffControl(reason))
       .map(([udid]) => udid);
@@ -421,7 +422,7 @@ export function FocusStream({
   };
 
   const runExclusive = async (work: () => Promise<void>, allowPointer = false) => {
-    if (inFlight.current || (pointerBusyRef.current && !allowPointer)) {
+    if (phoneKeyboard.isBusy() || inFlight.current || (pointerBusyRef.current && !allowPointer)) {
       pushToast("warn", "Máy đang xử lý thao tác trước", "Chờ thao tác hoàn tất rồi bấm lại.");
       return;
     }
@@ -449,7 +450,7 @@ export function FocusStream({
   ///
   /// Returns whether the work ran, so a caller cannot claim an outcome it did not get.
   const runBusy = async (work: () => Promise<void>): Promise<boolean> => {
-    if (inFlight.current || pointerBusyRef.current) {
+    if (phoneKeyboard.isBusy() || inFlight.current || pointerBusyRef.current) {
       pushToast(
         "warn",
         "Máy đang bận",
@@ -482,7 +483,7 @@ export function FocusStream({
     const wheelTargets = targetKey.split("\0").filter(Boolean);
     const masterUdid = activeSync?.masterUdid;
     const drain = async () => {
-      if (sending || disposed || inFlight.current || pointerBusyRef.current || !pendingTicks || !sessionReady) return;
+      if (phoneKeyboard.isBusy() || sending || disposed || inFlight.current || pointerBusyRef.current || !pendingTicks || !sessionReady) return;
       sending = true;
       try {
         while (pendingTicks && !disposed) {
@@ -539,7 +540,7 @@ export function FocusStream({
         return;
       }
       if (!encodedW || !encodedH || !sessionReady) return;
-      if (pointerBusyRef.current || (inFlight.current && !sending)) return;
+      if (phoneKeyboard.isBusy() || pointerBusyRef.current || (inFlight.current && !sending)) return;
       pendingTicks = Math.max(-3, Math.min(3, pendingTicks + Math.sign(event.deltaY)));
       void drain();
     };
@@ -948,47 +949,14 @@ export function FocusStream({
           data-testid="focus-screen"
           tabIndex={0}
           aria-label={`Màn hình ${device.name}`}
-          onPaste={event => {
-            if (event.target !== event.currentTarget || document.activeElement !== event.currentTarget || !active || closing) return;
-            event.preventDefault();
-            event.stopPropagation();
-            if (activeSync?.masterUdid === device.udid) {
-              pushToast("warn", "Chưa hỗ trợ dán vào nhóm máy", "Tắt đồng bộ nhóm rồi dán trên từng máy.");
-              return;
-            }
-            if (isIos) {
-              pushToast("warn", "Dán trực tiếp chỉ hỗ trợ Android");
-              return;
-            }
-            if (keyDisabled || inFlight.current || pointerBusyRef.current || !controlReady.current.has(device.udid)) {
-              pushToast("warn", "Chưa sẵn sàng dán", "Chờ máy rảnh và phiên điều khiển sẵn sàng.");
-              return;
-            }
-            if (!hasView || viewSize?.generation === undefined) {
-              pushToast("warn", "Chưa có luồng hình để dán");
-              return;
-            }
-            const text = event.clipboardData.getData("text/plain");
-            if (!text) return;
-            // Only the native paste event dispatches. No keydown/async clipboard read,
-            // trimming, replacement, or retry of a potentially delivered paste.
-            const identity = pasteIdentity;
-            void runExclusive(async () => {
-              try {
-                await devicePasteText(device.udid, text, viewSize.generation);
-              } catch (error) {
-                if (currentPasteIdentity.current === identity) {
-                  toastError("Chưa xác nhận dán; kiểm tra trên điện thoại trước khi dán lại", error);
-                }
-              }
-            });
-          }}
+          {...phoneKeyboard.surfaceProps}
           onContextMenu={event=>{event.preventDefault();event.stopPropagation();setContextMenu({x:event.clientX,y:event.clientY,udid:device.udid});}}
           style={{ width: layout.screenWidth, height: layout.screenHeight }}
           title="Ctrl + lăn chuột để phóng to / thu nhỏ"
           onPointerDown={(e) => {
-            if (busy || inFlight.current || pointerBusyRef.current || !sessionReady || e.button !== 0 || drag.current) return;
-            e.currentTarget.focus({ preventScroll: true });
+            if (phoneKeyboard.isBusy() || busy || inFlight.current || pointerBusyRef.current || !sessionReady || e.button !== 0 || drag.current) return;
+            e.preventDefault();
+            phoneKeyboard.focus();
             // Said out loud rather than dropped. A gesture needs the encoded frame size to
             // map through, and without it this handler used to return in silence -- so on a
             // phone that had not painted yet the operator could click the picture as long as
@@ -1169,6 +1137,14 @@ export function FocusStream({
             else finishPointer();
           }}
         >
+          <textarea
+            ref={phoneKeyboard.inputRef}
+            aria-label="Bàn phím điện thoại"
+            autoComplete="off" autoCorrect="off" autoCapitalize="off" spellCheck={false}
+            tabIndex={-1}
+            style={{ position: "absolute", width: 1, height: 1, opacity: 0, padding: 0, border: 0, pointerEvents: "none" }}
+            {...phoneKeyboard.inputProps}
+          />
           <PhoneCanvas
             udid={device.udid}
             surfaceId="overlay"

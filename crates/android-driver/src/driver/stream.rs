@@ -1023,16 +1023,22 @@ impl AndroidDriver {
         // in different places.
         let (mut control_read, control_write) = control.into_split();
         let control_write = Arc::new(tokio::sync::Mutex::new(control_write));
+        let clipboard_replies = Arc::new(Mutex::new(crate::scrcpy::ClipboardReplies::default()));
+        let replies = Arc::clone(&clipboard_replies);
         let drain_serial = serial.to_string();
         let control_drain = tokio::spawn(async move {
-            let mut scratch = [0u8; 1024];
-            // Read and discard, never parse. The only thing that arrives is a clipboard
-            // notification we did not ask for; the one thing that would be fatal is
-            // objecting to a message type we do not know, and a reader that never
-            // interprets cannot object.
-            while let Ok(read) = control_read.read(&mut scratch).await {
-                if read == 0 {
-                    break;
+            loop {
+                match crate::scrcpy::read_device_message(&mut control_read).await {
+                    Ok(crate::scrcpy::DeviceMessage::Clipboard(text)) => {
+                        replies.lock().receive(text);
+                    }
+                    // ACK/UHID are framed but never clipboard responses.
+                    Ok(crate::scrcpy::DeviceMessage::AckClipboard(_sequence)) => {}
+                    Ok(crate::scrcpy::DeviceMessage::UhidOutput) => {}
+                    Err(_) => {
+                        replies.lock().poison();
+                        break;
+                    }
                 }
             }
             tracing::debug!(serial = %drain_serial, "scrcpy control socket closed");
@@ -1048,6 +1054,8 @@ impl AndroidDriver {
                 reader,
                 frame_size,
                 control: control_write,
+                keyboard: Arc::new(tokio::sync::Mutex::new(())),
+                clipboard_replies,
                 control_drain,
             },
         );
@@ -1065,37 +1073,117 @@ impl AndroidDriver {
         if text.is_empty() {
             return Ok(());
         }
-        // Retain producer identity through one nonblocking write. Replacement removes
-        // this entry before stopping it; no socket await may hold the fleet map.
-        let views = self.views.lock().await;
-        let control = {
+        self.keyboard_packet(serial, generation, message, false)
+            .await?;
+        Ok(())
+    }
+
+    /// Dispatch a validated PC key/text event, or a fresh COPY/CUT clipboard read.
+    /// UI supplies FIFO; native refuses contention before effect rather than replaying.
+    pub async fn keyboard_input(
+        &self,
+        serial: &str,
+        generation: u64,
+        input: crate::scrcpy::KeyboardInput,
+    ) -> anyhow::Result<Option<String>> {
+        use crate::scrcpy::KeyboardInput;
+        let (message, copy) = match input {
+            KeyboardInput::Key {
+                key,
+                shift,
+                ctrl,
+                alt,
+                repeat,
+            } => (
+                crate::scrcpy::keyboard_key_message(&key, shift, ctrl, alt, repeat)?,
+                false,
+            ),
+            KeyboardInput::Text { text } => (crate::scrcpy::keyboard_text_message(&text)?, false),
+            KeyboardInput::Copy { cut } => {
+                (crate::scrcpy::clipboard_copy_message(cut).to_vec(), true)
+            }
+        };
+        self.keyboard_packet(serial, generation, message, copy)
+            .await
+    }
+
+    async fn keyboard_packet(
+        &self,
+        serial: &str,
+        generation: u64,
+        message: Vec<u8>,
+        copy: bool,
+    ) -> anyhow::Result<Option<String>> {
+        // No await between checking generation, registering a reply and writing.
+        // The map prevents producer replacement across that boundary; only a
+        // nonblocking socket write may run while the fleet map is held.
+        let (mut socket, replies, _keyboard, response, sent) = {
+            let views = self.views.lock().await;
             let producer = views
                 .get(serial)
-                .ok_or_else(|| anyhow!("No active scrcpy stream for paste"))?;
+                .ok_or_else(|| anyhow!("No active scrcpy stream for keyboard input"))?;
             anyhow::ensure!(
                 producer.generation == generation
                     && !producer.reader.is_finished()
                     && !producer.control_drain.is_finished(),
-                "Stream changed or stopped; paste was not sent"
+                "Stream changed or stopped; keyboard input was not sent"
             );
-            Arc::clone(&producer.control)
+            let keyboard = Arc::clone(&producer.keyboard)
+                .try_lock_owned()
+                .map_err(|_| anyhow!("Keyboard input busy; input was not sent"))?;
+            let socket = Arc::clone(&producer.control)
+                .try_lock_owned()
+                .map_err(|_| anyhow!("Scrcpy control busy; input was not sent"))?;
+            let replies = Arc::clone(&producer.clipboard_replies);
+            let mut pending = replies.lock();
+            pending.ensure_ready()?;
+            let response = if copy { Some(pending.begin()?) } else { None };
+            let sent = socket.try_write(&message);
+            if matches!(&sent, Err(error) if error.kind() == std::io::ErrorKind::WouldBlock) {
+                if copy {
+                    pending.not_sent();
+                }
+            } else if !matches!(&sent, Ok(written) if *written == message.len()) {
+                pending.poison();
+            }
+            drop(pending);
+            (socket, replies, keyboard, response, sent)
         };
-        // Refuse contention before sending, rather than queue a paste behind another action.
-        let mut socket = control
-            .try_lock()
-            .map_err(|_| anyhow!("Scrcpy control is busy; paste was not sent"))?;
-        let sent = socket.try_write(&message);
-        drop(views);
         match sent {
-            Ok(written) if written == message.len() => Ok(()),
+            Ok(written) if written == message.len() => {}
             Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
-                anyhow::bail!("Scrcpy control is not writable; paste was not sent");
+                anyhow::bail!("Scrcpy control not writable; input was not sent");
             }
             _ => {
-                // A partial packet poisons only this stream. Close it without holding
-                // the fleet map, and never replay on this socket or a replacement.
+                // Partial frame is never retried on this or a replacement stream.
                 let _ = tokio::time::timeout(Duration::from_secs(2), socket.shutdown()).await;
-                anyhow::bail!("Paste dispatch uncertain; inspect the phone before pasting again");
+                anyhow::bail!("Keyboard dispatch uncertain; inspect phone before another action");
+            }
+        }
+        drop(socket);
+        let Some(response) = response else {
+            return Ok(None);
+        };
+        match tokio::time::timeout(Duration::from_secs(2), response).await {
+            Ok(Ok(text)) => {
+                // A reply from a producer replaced while waiting cannot escape to the UI.
+                let views = self.views.lock().await;
+                anyhow::ensure!(
+                    views
+                        .get(serial)
+                        .is_some_and(|producer| producer.generation == generation
+                            && Arc::ptr_eq(&producer.clipboard_replies, &replies)
+                            && !producer.reader.is_finished()
+                            && !producer.control_drain.is_finished()),
+                    "Stream changed while copying; discard clipboard result"
+                );
+                Ok(Some(text))
+            }
+            _ => {
+                replies.lock().poison();
+                anyhow::bail!(
+                    "Clipboard result unavailable; copy/cut may have occurred; do not replay"
+                );
             }
         }
     }

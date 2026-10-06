@@ -6,19 +6,17 @@
 //! packets. 3.3.4 has no session packets; config is bit 63 and key is bit
 //! 62. Audio stays off.
 //!
-//! **Control is on, for exactly one message.** The socket exists so the host can send
+//! **Control is on.** The socket lets the host send keyboard/touch input and
 //! `RESET_VIDEO` and get a fresh keyframe without restarting the producer — one byte against
 //! ~11.5 s of black tile. That changes the handshake: the server accepts one socket per
 //! enabled channel and only then closes its listener, so the control socket must be opened
 //! **between** reading the dummy byte and reading the device name (see
 //! [`ScrcpyStream::try_accept`]). One `adb forward` serves both.
 //!
-//! **Input is split between the two paths, on purpose.** Taps, keys and text stay on
-//! uiautomator2 — `INJECT_TEXT` cannot type Vietnamese diacritics, and a discrete tap is not
-//! slow enough there to be worth the coordinate risk. The continuous middle of a drag goes
-//! through this socket, because it previously went nowhere at all: samples were buffered and
-//! replayed as one swipe on release, so the phone stood still under the operator's finger.
-//! See [`CONTROL_MESSAGE_INJECT_TOUCH`] for the coordinate trap and how it is closed.
+//! PC keyboard input uses scrcpy key/text packets and native clipboard paste for
+//! Unicode, without changing IME or helper ownership. Explicit clipboard reads use
+//! autosync=false and one pending response bound to the producer. Automation input
+//! remains on its existing UiSession path; continuous drag uses this socket too.
 //!
 //! 4.1 is not pinned: live Note 8 (API 26) dies in `dequeueOutputBuffer`
 //! on `OMX.Exynos.AVC.Encoder`. 3.3.4 on the same phone returns Annex-B.
@@ -313,21 +311,20 @@ pub fn server_argv(command: &str) -> &str {
 /// `CodecOption.parseOption` and exit before it binds the abstract socket
 /// — the tile then shows "exited before it accepted a connection".
 ///
-/// **Every option here is spent from a 254-byte budget** — see [`MAX_SERVER_ARGV`]. There
-/// are about fourteen bytes of headroom at the longest tuning, so an option cannot simply be
-/// added: one must come out first, and the guard test in this module is what says so before
-/// twenty phones do.
+/// **Every option here is spent from a 254-byte budget** — see [`MAX_SERVER_ARGV`]. The
+/// redundant video=true and video_codec=h264 defaults are omitted to make room for
+/// clipboard_autosync=false. The longest-tuning owner test retains the measured ceiling.
 pub fn launch_command(scid: u32, tuning: ViewTuning) -> String {
     format!(
         "CLASSPATH={REMOTE_SERVER} app_process / {MAIN_CLASS} {SERVER_VERSION} \
-         scid={scid:08x} tunnel_forward=true audio=false control=true video=true \
-         video_codec=h264 max_size={} max_fps={} video_bit_rate={} \
+         scid={scid:08x} tunnel_forward=true audio=false control=true clipboard_autosync=false \
+         max_size={} max_fps={} video_bit_rate={} \
          video_codec_options=i-frame-interval:int=1 cleanup=false",
         tuning.max_size, tuning.max_fps, tuning.bit_rate
     )
 }
 
-/// The one control message this project sends: **ask for a keyframe**.
+/// Ask for a keyframe on the existing control transport.
 ///
 /// `ControlMessage.TYPE_RESET_VIDEO = 17`, one byte, no payload — confirmed against the
 /// static values in the shipped jar. It reaches `Controller.resetVideo` ->
@@ -340,8 +337,7 @@ pub fn launch_command(scid: u32, tuning: ViewTuning) -> String {
 /// it is `ControlProtocolException` -> `Ln.e("Controller error")` -> `onTerminated` ->
 /// `Looper.quitSafely()`, which takes the **video** down too, on that phone. So this returns a
 /// whole message as one array and the caller sends it with a single `write_all` under a lock.
-/// There is deliberately no builder and no second message type: the blast radius of getting
-/// this stream wrong is every tile on the device going black.
+/// Malformed framing can stop both control and video for this producer.
 pub const fn reset_video() -> [u8; 1] {
     [17]
 }
@@ -392,7 +388,7 @@ pub fn hardware_key_message(key: riviu_core::HardwareKey) -> Vec<u8> {
 }
 
 /// scrcpy 3.3.4 SET_CLIPBOARD: type, u64 sequence, paste flag, u32 UTF-8 byte count.
-/// Sequence zero suppresses ACK (the control drain does not interpret replies).
+/// Sequence zero suppresses ACK; only explicit GET requests await clipboard replies.
 /// Reject oversize text intact instead of truncating Unicode or splitting one paste.
 pub fn clipboard_paste_message(text: &str) -> anyhow::Result<Vec<u8>> {
     anyhow::ensure!(
@@ -408,6 +404,186 @@ pub fn clipboard_paste_message(text: &str) -> anyhow::Result<Vec<u8>> {
     message.extend_from_slice(&(text.len() as u32).to_be_bytes());
     message.extend_from_slice(text.as_bytes());
     Ok(message)
+}
+
+/// PC keyboard IPC payload; raw shell/keycodes and unknown fields are not accepted.
+#[derive(Debug, serde::Deserialize)]
+#[serde(tag = "kind", rename_all = "camelCase", deny_unknown_fields)]
+pub enum KeyboardInput {
+    Key {
+        key: String,
+        shift: bool,
+        ctrl: bool,
+        alt: bool,
+        repeat: bool,
+    },
+    Text {
+        text: String,
+    },
+    Copy {
+        cut: bool,
+    },
+}
+
+/// Only browser key names below can become Android keycodes. Modifier bits belong to
+/// each event, never separate held modifier keys (including repeats and focus loss).
+pub fn keyboard_key_message(
+    key: &str,
+    shift: bool,
+    ctrl: bool,
+    alt: bool,
+    repeat: bool,
+) -> anyhow::Result<Vec<u8>> {
+    let code: u32 = match key {
+        "Backspace" => 67,
+        "Delete" => 112,
+        "Enter" => 66,
+        "Tab" => 61,
+        "Escape" => 111,
+        "ArrowUp" => 19,
+        "ArrowDown" => 20,
+        "ArrowLeft" => 21,
+        "ArrowRight" => 22,
+        "Home" => 122,
+        "End" => 123,
+        "PageUp" => 92,
+        "PageDown" => 93,
+        "a" | "A" if ctrl => 29,
+        "c" | "C" if ctrl => 31,
+        "x" | "X" if ctrl => 52,
+        "v" | "V" if ctrl => 50,
+        "z" | "Z" if ctrl => 54,
+        "y" | "Y" if ctrl => 53,
+        _ => anyhow::bail!("Unsupported keyboard key"),
+    };
+    let meta: u32 = u32::from(shift) | (u32::from(alt) << 1) | (u32::from(ctrl) << 12);
+    let mut bytes = vec![0; 28];
+    for (offset, action) in [(0, 0), (14, 1)] {
+        bytes[offset + 1] = action;
+        bytes[offset + 2..offset + 6].copy_from_slice(&code.to_be_bytes());
+        let count = if action == 0 { u32::from(repeat) } else { 0 };
+        bytes[offset + 6..offset + 10].copy_from_slice(&count.to_be_bytes());
+        bytes[offset + 10..offset + 14].copy_from_slice(&meta.to_be_bytes());
+    }
+    if shift {
+        // Android 9 ArrowKeyMovementMethod reads Shift from the editable buffer's
+        // MetaKeyKeyListener state, not only the arrow event's meta bits. Send a
+        // complete Shift chord in this same packet so selection works and no
+        // modifier remains held across blur, cancellation or stream replacement.
+        let mut chord = vec![0; 14];
+        chord[2..6].copy_from_slice(&59u32.to_be_bytes()); // SHIFT_LEFT down
+        chord[10..14].copy_from_slice(&meta.to_be_bytes());
+        chord.extend_from_slice(&bytes);
+        let mut release = [0; 14];
+        release[1] = 1;
+        release[2..6].copy_from_slice(&59u32.to_be_bytes());
+        release[10..14].copy_from_slice(&(meta & !1).to_be_bytes());
+        chord.extend_from_slice(&release);
+        return Ok(chord);
+    }
+    Ok(bytes)
+}
+
+/// Short ASCII text uses INJECT_TEXT (300 bytes); longer/composed text uses clipboard
+/// paste without switching IME. Clipboard replacement is intentional: asynchronous
+/// Android paste provides no completion barrier for safely restoring the old clipboard.
+pub fn keyboard_text_message(text: &str) -> anyhow::Result<Vec<u8>> {
+    if !text.is_ascii() || text.len() > 300 {
+        return clipboard_paste_message(text);
+    }
+    anyhow::ensure!(
+        text.bytes().all(|byte| {
+            (byte >= 0x20 && byte != 0x7f) || matches!(byte, b'\n' | b'\r' | b'\t')
+        }),
+        "Use key events for ASCII control characters"
+    );
+    let mut message = vec![1];
+    message.extend_from_slice(&(text.len() as u32).to_be_bytes());
+    message.extend_from_slice(text.as_bytes());
+    Ok(message)
+}
+
+/// GET_CLIPBOARD has no sequence field. Autosync MUST be off and at most one
+/// request may be outstanding for the lifetime of a producer.
+pub const fn clipboard_copy_message(cut: bool) -> [u8; 2] {
+    [8, if cut { 2 } else { 1 }]
+}
+
+#[derive(Debug, PartialEq, Eq)]
+pub(crate) enum DeviceMessage {
+    Clipboard(String),
+    AckClipboard(u64),
+    UhidOutput,
+}
+
+/// Framed 3.3.4 device messages. read_exact handles fragmentation; reject unknown
+/// framing, oversized allocation and invalid UTF-8 instead of reusing cached text.
+pub(crate) async fn read_device_message<R: AsyncRead + Unpin>(
+    reader: &mut R,
+) -> anyhow::Result<DeviceMessage> {
+    match reader.read_u8().await? {
+        0 => {
+            let len = reader.read_u32().await? as usize;
+            anyhow::ensure!(len <= 262_139, "Oversized scrcpy clipboard reply");
+            let mut text = vec![0; len];
+            reader.read_exact(&mut text).await?;
+            Ok(DeviceMessage::Clipboard(String::from_utf8(text)?))
+        }
+        1 => Ok(DeviceMessage::AckClipboard(reader.read_u64().await?)),
+        2 => {
+            let _id = reader.read_u16().await?;
+            let len = reader.read_u16().await? as usize;
+            let mut data = vec![0; len];
+            reader.read_exact(&mut data).await?;
+            Ok(DeviceMessage::UhidOutput)
+        }
+        _ => anyhow::bail!("Unknown scrcpy device message"),
+    }
+}
+
+/// A timed-out/cancelled request must not let its late, unsequenced reply satisfy
+/// a later copy. Poison is terminal until this producer is replaced.
+#[derive(Default)]
+pub(crate) struct ClipboardReplies {
+    pending: Option<tokio::sync::oneshot::Sender<String>>,
+    poisoned: bool,
+}
+
+impl ClipboardReplies {
+    pub(crate) fn ensure_ready(&self) -> anyhow::Result<()> {
+        anyhow::ensure!(
+            !self.poisoned && self.pending.is_none(),
+            "Keyboard channel unavailable; reopen stream before another action"
+        );
+        Ok(())
+    }
+
+    pub(crate) fn begin(&mut self) -> anyhow::Result<tokio::sync::oneshot::Receiver<String>> {
+        self.ensure_ready()?;
+        let (sender, receiver) = tokio::sync::oneshot::channel();
+        self.pending = Some(sender);
+        Ok(receiver)
+    }
+
+    pub(crate) fn receive(&mut self, text: String) {
+        match self.pending.take() {
+            Some(sender) if !self.poisoned => {
+                if sender.send(text).is_err() {
+                    self.poisoned = true;
+                }
+            }
+            _ => self.poisoned = true,
+        }
+    }
+
+    pub(crate) fn poison(&mut self) {
+        self.poisoned = true;
+        self.pending = None;
+    }
+
+    pub(crate) fn not_sent(&mut self) {
+        self.pending = None;
+    }
 }
 
 /// Which end of a gesture a touch message carries.
@@ -992,14 +1168,137 @@ mod tests {
         let packet = super::clipboard_paste_message("é\n🙂").unwrap();
         assert_eq!(
             packet,
-            vec![9, 0, 0, 0, 0, 0, 0, 0, 0, 1, 0, 0, 0, 7,
-                0xc3, 0xa9, 0x0a, 0xf0, 0x9f, 0x99, 0x82]
+            vec![
+                9, 0, 0, 0, 0, 0, 0, 0, 0, 1, 0, 0, 0, 7, 0xc3, 0xa9, 0x0a, 0xf0, 0x9f, 0x99, 0x82
+            ]
         );
         assert_eq!(
-            super::clipboard_paste_message(&"a".repeat(262_130)).unwrap().len(),
+            super::clipboard_paste_message(&"a".repeat(262_130))
+                .unwrap()
+                .len(),
             262_144
         );
         assert!(super::clipboard_paste_message(&"a".repeat(262_131)).is_err());
+    }
+
+    #[test]
+    fn keyboard_wire_preserves_edit_keys_modifiers_and_text_limits() {
+        for (key, code) in [
+            ("Backspace", 67),
+            ("Delete", 112),
+            ("Enter", 66),
+            ("Tab", 61),
+            ("Escape", 111),
+            ("ArrowUp", 19),
+            ("ArrowDown", 20),
+            ("ArrowLeft", 21),
+            ("ArrowRight", 22),
+            ("Home", 122),
+            ("End", 123),
+            ("PageUp", 92),
+            ("PageDown", 93),
+            ("a", 29),
+            ("c", 31),
+            ("x", 52),
+            ("v", 50),
+            ("z", 54),
+            ("y", 53),
+        ] {
+            assert_eq!(
+                keyboard_key_message(key, true, true, true, true).unwrap(),
+                vec![
+                    0, 0, 0, 0, 0, 59, 0, 0, 0, 0, 0, 0, 16, 3,
+                    0, 0, 0, 0, 0, code, 0, 0, 0, 1, 0, 0, 16, 3, 0, 1, 0, 0, 0, code, 0, 0, 0, 0,
+                    0, 0, 16, 3, 0, 1, 0, 0, 0, 59, 0, 0, 0, 0, 0, 0, 16, 2
+                ],
+                "{key}"
+            );
+        }
+        assert!(keyboard_key_message("a", false, false, false, false).is_err());
+        assert!(keyboard_key_message("KEYCODE_POWER", false, false, false, false).is_err());
+        assert_eq!(
+            keyboard_text_message("Ab").unwrap(),
+            vec![1, 0, 0, 0, 2, 65, 98]
+        );
+        assert_eq!(keyboard_text_message(&"a".repeat(300)).unwrap().len(), 305);
+        assert_eq!(keyboard_text_message(&"a".repeat(301)).unwrap()[0], 9);
+        assert_eq!(
+            keyboard_text_message("\u{e9}").unwrap(),
+            clipboard_paste_message("\u{e9}").unwrap()
+        );
+        assert_eq!(clipboard_copy_message(false), [8, 1]);
+        assert_eq!(clipboard_copy_message(true), [8, 2]);
+    }
+
+    #[tokio::test]
+    async fn device_message_parser_handles_fragmented_frames_without_reply_confusion() {
+        use tokio::io::AsyncWriteExt;
+        let (mut writer, mut reader) = tokio::io::duplex(1);
+        let sender = tokio::spawn(async move {
+            // ACK, UHID, UTF-8 clipboard, then empty clipboard: no cached fallback.
+            let bytes = [
+                1, 0, 0, 0, 0, 0, 0, 0, 7, 2, 0, 4, 0, 2, 0xff, 0xee, 0, 0, 0, 0, 2, 0xc3, 0xa9, 0,
+                0, 0, 0, 0,
+            ];
+            for byte in bytes {
+                writer.write_all(&[byte]).await.unwrap();
+            }
+        });
+        assert_eq!(
+            read_device_message(&mut reader).await.unwrap(),
+            DeviceMessage::AckClipboard(7)
+        );
+        assert_eq!(
+            read_device_message(&mut reader).await.unwrap(),
+            DeviceMessage::UhidOutput
+        );
+        assert_eq!(
+            read_device_message(&mut reader).await.unwrap(),
+            DeviceMessage::Clipboard("\u{e9}".into())
+        );
+        assert_eq!(
+            read_device_message(&mut reader).await.unwrap(),
+            DeviceMessage::Clipboard(String::new())
+        );
+        sender.await.unwrap();
+        for bytes in [
+            vec![0, 0, 4, 0, 0],
+            vec![0, 0, 0, 0, 1, 0xff],
+            vec![0, 0, 0, 0, 2, 65],
+            vec![99],
+        ] {
+            assert!(read_device_message(&mut Cursor::new(bytes)).await.is_err());
+        }
+    }
+
+    #[test]
+    fn clipboard_reply_owner_rejects_unsolicited_late_and_cancelled_responses() {
+        let mut replies = ClipboardReplies::default();
+        let mut first = replies.begin().unwrap();
+        assert!(replies.begin().is_err());
+        replies.receive("fresh".into());
+        assert_eq!(first.try_recv().unwrap(), "fresh");
+        let cancelled = replies.begin().unwrap();
+        drop(cancelled);
+        assert!(replies.begin().is_err());
+        replies.receive("late".into());
+        assert!(replies.begin().is_err());
+
+        let mut replies = ClipboardReplies::default();
+        replies.receive("unsolicited".into());
+        assert!(replies.begin().is_err());
+
+        let mut replies = ClipboardReplies::default();
+        let mut timed_out = replies.begin().unwrap();
+        replies.poison();
+        replies.receive("after timeout".into());
+        assert!(timed_out.try_recv().is_err());
+        assert!(replies.begin().is_err());
+
+        let mut replies = ClipboardReplies::default();
+        let _not_sent = replies.begin().unwrap();
+        replies.not_sent();
+        assert!(replies.begin().is_ok());
     }
 
     use super::*;
@@ -1014,7 +1313,9 @@ mod tests {
         assert!(command.contains(REMOTE_SERVER), "{command}");
         assert!(command.contains(" 3.3.4 "), "{command}");
         assert!(!command.contains(" 4.1 "), "{command}");
-        assert!(command.contains("video_codec=h264"), "{command}");
+        // v3.3.4 defaults: video=true, video_codec=h264 (omitted for argv budget).
+        assert!(!command.contains("video_codec="), "{command}");
+        assert!(!command.contains("video=false"), "{command}");
         assert!(command.contains("scid=00ab12cd"), "{command}");
         assert!(command.contains("tunnel_forward=true"), "{command}");
         assert!(command.contains("audio=false"), "{command}");
@@ -1116,31 +1417,13 @@ mod tests {
     }
 
     #[test]
-    fn turning_clipboard_autosync_off_would_not_fit_which_is_why_it_is_left_on() {
-        // The control socket itself fits with room to spare -- it is one byte CHEAPER than
-        // `control=false`. What does not fit is the option everyone assumes goes with it.
-        //
-        // `clipboard_autosync` defaults to TRUE, so with control enabled the phone pushes a
-        // message every time its clipboard changes. Turning that off costs 25 bytes against
-        // roughly 14 spare, which is what took twenty phones down when all three of
-        // `control=true clipboard_autosync=false power_on=false` were added at once
-        // (AGENTS.md 9.71, 9.74).
-        //
-        // So it stays on and the host drains the socket instead. Measured, 75 s soak on
-        // SM-G955F with the control socket deliberately never read and the clipboard changed
-        // twelve times: 2.2 MB of video, twelve keyframe requests all honoured, server alive.
+    fn explicit_clipboard_replies_fit_the_existing_launch_budget() {
         let command = launch_command(
             u32::MAX,
             ViewPreset::Overlay.tuned(riviu_core::StreamQuality::Extra, 30),
         );
-        assert!(
-            server_argv(&command).len() <= MAX_SERVER_ARGV,
-            "the control socket as shipped must fit"
-        );
-        assert!(
-            server_argv(&command).len() + " clipboard_autosync=false".len() > MAX_SERVER_ARGV,
-            "if this ever fits, the drain stops being a requirement and this comment is stale"
-        );
+        assert!(command.contains("clipboard_autosync=false"));
+        assert!(server_argv(&command).len() <= MAX_SERVER_ARGV);
     }
 
     #[test]

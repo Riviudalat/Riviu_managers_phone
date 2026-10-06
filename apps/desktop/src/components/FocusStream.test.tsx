@@ -9,6 +9,7 @@ import {
   deviceSwipePath,
   deviceTap,
   deviceKey,
+  deviceKeyboardInput,
   deviceControlBegin,
   deviceControlEnd,
   deviceListDir,
@@ -32,6 +33,7 @@ const pasteText = vi.hoisted(() => vi.fn(async (_udid: string, _text: string, _g
 
 vi.mock("../api", () => ({
   devicePasteText: pasteText,
+  deviceKeyboardInput: vi.fn(async () => ({})),
   backupDevice: vi.fn(),
   deviceControlBegin: vi.fn(async () => undefined),
   deviceControlEnd: vi.fn(async () => undefined),
@@ -1157,7 +1159,7 @@ describe("focused phone paste", () => {
     const pane = view.getByTestId("focus-screen");
     // No geometry means no device tap; pointer activation must still focus the surface.
     fireEvent.pointerDown(pane, { button: 0, pointerId: 1 });
-    expect(pane).toHaveFocus();
+    expect(view.getByRole("textbox", { name: "Bàn phím điện thoại" })).toHaveFocus();
     const text = "Chào bạn 👋\nDòng hai";
     let finish!: () => void;
     pasteText.mockImplementationOnce(() => new Promise(resolve => { finish = () => resolve(undefined); }));
@@ -1167,6 +1169,7 @@ describe("focused phone paste", () => {
     expect(pasteText).toHaveBeenCalledExactlyOnceWith(fixture.udid, text, 1);
     expect(deviceTypeText).not.toHaveBeenCalled();
     await act(async () => finish());
+    expect(pasteText).toHaveBeenCalledTimes(2);
   });
 
   it("refuses group paste and ignores paste outside the focused phone", async () => {
@@ -1179,7 +1182,7 @@ describe("focused phone paste", () => {
     const pane = view.getByTestId("focus-screen");
     pane.focus();
     fireEvent.paste(pane, { clipboardData: { getData: () => "group" } });
-    expect(await view.findByText("Chưa hỗ trợ dán vào nhóm máy")).toBeVisible();
+    expect(await view.findByText("Chưa hỗ trợ bàn phím PC cho nhóm máy")).toBeVisible();
     expect(pasteText).not.toHaveBeenCalled();
   });
 
@@ -1203,5 +1206,142 @@ describe("focused phone paste", () => {
     next.focus();
     fireEvent.paste(next, { clipboardData: { getData: () => "second" } });
     expect(pasteText).toHaveBeenLastCalledWith(other.udid, "second", 1);
+  });
+});
+
+
+describe("focused phone keyboard", () => {
+  beforeEach(() => {
+    vi.mocked(deviceControlBegin).mockReset().mockResolvedValue(undefined);
+    vi.mocked(deviceKeyboardInput).mockReset().mockResolvedValue({});
+    pasteText.mockReset().mockResolvedValue(undefined);
+    resetToasts();
+  });
+  async function setup() {
+    const view = render(<><FocusStream device={fixture} index={1} onClose={vi.fn()} devices={[fixture]} onSelectDevice={vi.fn()} /><textarea aria-label="Local editor" /><ActivityCenter /></>);
+    await waitForControlReady();
+    view.getByTestId("focus-screen").focus();
+    return { view, sink: view.getByRole("textbox", { name: "Bàn phím điện thoại" }) };
+  }
+  it("preserves fast text, selection/delete, repeat and paste in FIFO order", async () => {
+    const { view, sink } = await setup();
+    let finish!: () => void;
+    vi.mocked(deviceKeyboardInput).mockImplementationOnce(() => new Promise(resolve => { finish = () => resolve({}); }));
+    fireEvent.input(sink, { target: { value: "a" }, data: "a", inputType: "insertText" });
+    fireEvent.input(sink, { target: { value: "b" }, data: "b", inputType: "insertText" });
+    fireEvent.keyDown(sink, { key: "a", ctrlKey: true });
+    fireEvent.keyDown(sink, { key: "Delete", repeat: true });
+    vi.mocked(deviceTap).mockClear(); vi.mocked(deviceSwipe).mockClear();
+    const pane = view.getByTestId("focus-screen");
+    pane.setPointerCapture = vi.fn(); pane.releasePointerCapture = vi.fn();
+    mockRect(view.container.querySelector("canvas")!, { left: 0, top: 0, width: 288, height: 600 });
+    fireEvent.pointerDown(pane, { button: 0, clientX: 120, clientY: 240, pointerId: 1 });
+    fireEvent.pointerUp(pane, { button: 0, clientX: 120, clientY: 240, pointerId: 1 });
+    fireEvent.wheel(pane, { deltaY: 120 });
+    expect(deviceTap).not.toHaveBeenCalled(); expect(deviceSwipe).not.toHaveBeenCalled();
+    fireEvent.keyDown(sink, { key: "v", ctrlKey: true });
+    fireEvent.paste(sink, { clipboardData: { getData: () => "Việt\n👋" } });
+    expect(deviceKeyboardInput).toHaveBeenCalledTimes(1);
+    expect(pasteText).not.toHaveBeenCalled();
+    await act(async () => finish());
+    expect(vi.mocked(deviceKeyboardInput).mock.calls.map(call => call[2])).toEqual([
+      { kind: "text", text: "a" }, { kind: "text", text: "b" },
+      { kind: "key", key: "a", ctrl: true, shift: false, alt: false, repeat: false },
+      { kind: "key", key: "Delete", ctrl: false, shift: false, alt: false, repeat: true },
+    ]);
+    expect(pasteText).toHaveBeenCalledExactlyOnceWith(fixture.udid, "Việt\n👋", 1);
+  });
+  it("commits Vietnamese IME exactly once and keeps local editors local", async () => {
+    const { view, sink } = await setup();
+    fireEvent.compositionStart(sink);
+    fireEvent.keyDown(sink, { key: "a", keyCode: 229 });
+    fireEvent.input(sink, { target: { value: "Tie" }, isComposing: true });
+    fireEvent.compositionEnd(sink, { data: "Tiếng Việt" });
+    fireEvent.input(sink, { target: { value: "Tiếng Việt" }, data: "Tiếng Việt", inputType: "insertText" });
+    await act(async () => {});
+    expect(deviceKeyboardInput).toHaveBeenCalledExactlyOnceWith(fixture.udid, 1, { kind: "text", text: "Tiếng Việt" });
+    const local = view.getByRole("textbox", { name: "Local editor" });
+    local.focus(); fireEvent.input(local, { target: { value: "local" } }); fireEvent.keyDown(local, { key: "Backspace" });
+    expect(deviceKeyboardInput).toHaveBeenCalledTimes(1);
+  });
+  it("sends editing modifiers and writes only fresh phone copy/cut text", async () => {
+    const writeText = vi.fn(async () => undefined);
+    Object.defineProperty(navigator, "clipboard", { configurable: true, value: { writeText } });
+    const { sink } = await setup();
+    for (const key of ["Backspace", "Enter", "Tab", "ArrowLeft", "ArrowRight", "ArrowUp", "ArrowDown", "Home", "End", "PageUp", "PageDown"]) fireEvent.keyDown(sink, { key, shiftKey: true });
+    for (const key of ["z", "y"]) fireEvent.keyDown(sink, { key, ctrlKey: true });
+    await act(async () => {});
+    expect(vi.mocked(deviceKeyboardInput).mock.calls.slice(0, 11).every(call => call[2].kind === "key" && call[2].shift)).toBe(true);
+    fireEvent.keyDown(sink, { key: "ArrowLeft", ctrlKey: true, shiftKey: true });
+    await act(async () => {});
+    expect(deviceKeyboardInput).toHaveBeenLastCalledWith(fixture.udid, 1, { kind: "key", key: "ArrowLeft", ctrl: true, shift: true, alt: false, repeat: false });
+    vi.mocked(deviceKeyboardInput).mockResolvedValue({ text: "fresh phone text" });
+    fireEvent.keyDown(sink, { key: "c", ctrlKey: true });
+    fireEvent.keyDown(sink, { key: "x", ctrlKey: true });
+    fireEvent.keyDown(sink, { key: "x", ctrlKey: true, repeat: true });
+    await act(async () => {});
+    expect(writeText).toHaveBeenCalledTimes(2);
+    expect(writeText).toHaveBeenLastCalledWith("fresh phone text");
+    expect(deviceKeyboardInput).toHaveBeenLastCalledWith(fixture.udid, 1, { kind: "copy", cut: true });
+    writeText.mockRejectedValueOnce(new Error("clipboard denied"));
+    fireEvent.keyDown(sink, { key: "c", ctrlKey: true });
+    await waitFor(() => expect(testingScreen.getByText(/clipboard denied/)).toBeVisible());
+  });
+  it("clears queued work on blur and never replays after an uncertain action", async () => {
+    const { view, sink } = await setup();
+    let reject!: (e: Error) => void;
+    vi.mocked(deviceKeyboardInput).mockImplementationOnce(() => new Promise((_resolve, fail) => { reject = fail; }));
+    fireEvent.keyDown(sink, { key: "Backspace" }); fireEvent.keyDown(sink, { key: "Delete" });
+    view.getByRole("textbox", { name: "Local editor" }).focus();
+    await act(async () => reject(new Error("late failure")));
+    expect(deviceKeyboardInput).toHaveBeenCalledTimes(1);
+    expect(view.queryByText(/late failure/)).toBeNull();
+    sink.focus();
+    vi.mocked(deviceKeyboardInput).mockRejectedValueOnce(new Error("uncertain"));
+    fireEvent.keyDown(sink, { key: "Backspace" }); fireEvent.keyDown(sink, { key: "Delete" });
+    await act(async () => {});
+    fireEvent.keyDown(sink, { key: "Delete" });
+    expect(deviceKeyboardInput).toHaveBeenCalledTimes(2);
+    expect(view.getByText(/uncertain/)).toBeVisible();
+  });
+  it("bounds the queue and reports overflow once without partial replay", async () => {
+    const { view, sink } = await setup();
+    let finish!: () => void;
+    vi.mocked(deviceKeyboardInput).mockImplementationOnce(() => new Promise(resolve => { finish = () => resolve({}); }));
+    for (let i = 0; i < 300; i++) fireEvent.keyDown(sink, { key: "Backspace", repeat: true });
+    expect(view.getAllByText(/Hàng đợi bàn phím quá đầy/)).toHaveLength(1);
+    await act(async () => finish());
+    expect(deviceKeyboardInput).toHaveBeenCalledTimes(1);
+  });
+  it("invalidates pending edits on stream generation, device switch and close", async () => {
+    const other = { ...fixture, udid: "other" };
+    const props = { index: 1, onClose: vi.fn(), devices: [fixture, other], onSelectDevice: vi.fn() };
+    const view = render(<FocusStream {...props} device={fixture} />);
+    await waitForControlReady();
+    for (const transition of ["generation", "device", "close"]) {
+      view.getByTestId("focus-screen").focus();
+      const sink = view.getByRole("textbox", { name: "Bàn phím điện thoại" });
+      let finish!: () => void;
+      vi.mocked(deviceKeyboardInput).mockClear().mockImplementationOnce(() => new Promise(resolve => { finish = () => resolve({}); }));
+      fireEvent.keyDown(sink, { key: "Backspace" });
+      fireEvent.keyDown(sink, { key: "Delete" });
+      if (transition === "generation") { frame = { ...frame, generation: 2 }; view.rerender(<FocusStream {...props} device={fixture} />); }
+      if (transition === "device") view.rerender(<FocusStream {...props} device={other} />);
+      if (transition === "close") view.unmount();
+      await act(async () => finish());
+      expect(deviceKeyboardInput).toHaveBeenCalledTimes(1);
+      if (transition !== "close") await waitForControlReady();
+    }
+  });
+  it("refuses iOS keyboard input before any partial action", async () => {
+    const ios = { ...fixture, platform: "ios" as const };
+    const view = render(<><FocusStream device={ios} index={1} onClose={vi.fn()} devices={[ios]} onSelectDevice={vi.fn()} /><ActivityCenter /></>);
+    await waitForControlReady();
+    view.getByTestId("focus-screen").focus();
+    const sink = view.getByRole("textbox", { name: "Bàn phím điện thoại" });
+    fireEvent.keyDown(sink, { key: "Backspace" });
+    fireEvent.input(sink, { target: { value: "a" } });
+    expect(view.getByText("Bàn phím PC chỉ hỗ trợ Android")).toBeVisible();
+    expect(deviceKeyboardInput).not.toHaveBeenCalled();
   });
 });

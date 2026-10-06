@@ -704,6 +704,59 @@ pub async fn device_paste_text(
     result
 }
 
+#[derive(Serialize)]
+pub struct KeyboardInputResult {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub text: Option<String>,
+}
+
+#[tauri::command]
+pub async fn device_keyboard_input(
+    state: State<'_, AppState>,
+    udid: String,
+    generation: u64,
+    input: riviu_android_driver::scrcpy::KeyboardInput,
+) -> Result<KeyboardInputResult, CommandError> {
+    let _admission = state.ensure_accepting_work()?;
+    let device = state
+        .registry
+        .list()
+        .into_iter()
+        .find(|device| device.udid == udid)
+        .ok_or_else(|| CommandError::code("DeviceUnavailable", "Device is no longer connected"))?;
+    if device.platform != riviu_core::DevicePlatform::Android {
+        return Err(CommandError::code(
+            "UnsupportedOperation",
+            "PC keyboard requires Android",
+        ));
+    }
+    // Borrow the exact existing overlay context, retaining its ManualControl lease
+    // through dispatch AND clipboard response. Never open/recover a helper session.
+    let hold = state.overlay_ui_session(&udid).await.ok_or_else(|| {
+        CommandError::code(
+            "DeviceControlNotReady",
+            "Open a ready control overlay first",
+        )
+    })?;
+    if state.control.current_work_owner(&udid) != Some(DeviceWorkOwner::ManualControl) {
+        return Err(CommandError::code(
+            "DeviceBusy",
+            "Device is not owned by manual control",
+        ));
+    }
+    let android = state
+        .android
+        .as_ref()
+        .ok_or_else(|| CommandError::code("DeviceUnavailable", "Android is unavailable"))?;
+    let result = android
+        .keyboard_input(&udid, generation, input)
+        .await
+        .map(|text| KeyboardInputResult { text })
+        .map_err(CommandError::operation);
+    drop(hold);
+    result
+}
+
 #[tauri::command]
 pub async fn device_home(state: State<'_, AppState>, udid: String) -> Result<(), CommandError> {
     let _admission = state.ensure_accepting_work()?;
