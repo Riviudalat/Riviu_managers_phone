@@ -37,6 +37,13 @@ Khi máy tính có nhiều ADB server, Riviu đọc và gộp thiết bị ở c
 mỗi máy dùng cổng đang quản lý máy đó cho cả điều khiển và stream. Vì vậy dàn máy
 chia giữa hai server vẫn hiện đủ trong một lưới. Có thể giới hạn một cổng bằng
 `RIVIU_ADB_SERVER_PORT`.
+Nếu phần mềm khác (GenFarmer, scrcpy, Android Studio) khởi động lại ADB, mọi ô stream
+tắt cùng lúc. Nhật ký hoạt động báo **ADB bị phần mềm khác khởi động lại · N máy**, rồi
+**ADB đã chạy lại** khi server trả lời lại. Riviu không tự tắt ADB và không gửi lại thao
+tác chưa xác nhận. Stream tự mở lại sau tối đa 15 giây chờ, mỗi máy lỗi được thử lại
+giãn dần tới 30 giây. Muốn tách hẳn khỏi công cụ khác, đặt `RIVIU_ADB_SERVER_PORT` sang
+một cổng riêng trước khi mở Riviu. Hai server cùng tranh cổng USB của điện thoại, nên
+công cụ kia có thể không còn thấy máy; cần kiểm tra trên dàn máy thật trước khi dùng.
 
 Cửa sổ điện thoại có màn hình bên trái, bảng lệnh bên phải, phím điều hướng cố định
 phía dưới. Chỉ có một cửa sổ phóng to: chọn máy B khi A đang mở sẽ chuyển sang B
@@ -270,9 +277,57 @@ mà giữ bản nháp. Đóng/đổi tác vụ vẫn hỏi lưu nếu đã sửa
 đóng các vùng thao tác của chính máy đó. **Tiếp theo:** mở máy cần kiểm tra hoặc chuyển
 đến automation với phạm vi đã review; không coi đang hiển thị preview là đã pass action.
 
+## Thư viện ứng dụng: cài, gỡ và cài lại
+
+Trang **Trung tâm ứng dụng** chỉ thao tác với gói đã thêm vào thư viện; mã ứng dụng lấy từ chính gói,
+không nhập tay. Chọn phạm vi (máy cụ thể, nhóm hoặc toàn bộ) rồi bấm **Cài → N**,
+**Gỡ → N** hoặc **Cài lại → N**; chỉ máy cùng nền tảng với gói được tính.
+
+- **Gỡ** xoá ứng dụng cùng dữ liệu và tài khoản đang đăng nhập trên máy, nên luôn hỏi xác nhận.
+  **Cài lại** gỡ rồi cài đúng gói trong thư viện, giữ máy suốt hai bước.
+- Máy đang đăng bài, nuôi, tương tác hoặc còn bài chờ xác minh bị từ chối (**Máy bận, chưa gỡ**),
+  không chờ và không chen ngang. Riviu Helper, UiAutomator2 và agent iPhone không gỡ được từ đây.
+- **Đã xong** chỉ khi đọc lại danh sách ứng dụng không còn gói (và với Cài lại, bản cài được xác nhận).
+  **Chưa gỡ** nghĩa là chưa gửi lệnh. **Cần kiểm lại** nghĩa là lệnh đã gửi nhưng chưa chứng minh
+  kết quả; ứng dụng không tự gửi lại, hãy kiểm tra trên máy trước khi chạy lại.
+
 ## Chẩn đoán
 
 **Đầu vào:** thiết bị và nhóm cần kiểm tra. **Thao tác:** đọc transport, helper, quyền và
 bằng chứng foreground/stream; làm mới phép đo có chủ đích. **Kết quả:** từng điều kiện
 sẵn sàng, lỗi cụ thể và bằng chứng đo được. **Tiếp theo:** sửa đúng điều kiện thất bại,
 rồi kiểm tra lại. Repair/cài helper là lệnh riêng, không suy ra từ lỗi preview thoáng qua.
+
+## Số máy cố định và chuyển PC
+
+Riviu lưu số theo serial. Máy đã có số giữ số đó khi rút/cắm lại hoặc đổi box;
+serial mới nhận số tiếp theo, kể cả khi các máy cũ đang ngoại tuyến. Trong lúc
+chưa xác nhận cấp số, giao diện hiển thị **Đang gán số**, không mượn vị trí lưới.
+Đổi sang số đang được máy khác giữ sẽ bị từ chối; tên/số cũ không bị ghi đè.
+
+Trong **Nhóm máy → Chuyển danh sách máy sang PC khác**, xuất tệp JSON trên PC cũ,
+chọn tệp ở PC mới, xem xung đột rồi xác nhận nhập. Tệp chứa metadata thiết bị/nhóm,
+không chứa credential. Nếu kết quả nhập chưa rõ, dùng **Đọc lại kết quả nhập**;
+không gửi lại cùng yêu cầu. Đồng bộ hình nền của các máy nhập được tắt trước khi
+nhập để không tự tác động điện thoại khi kết quả chưa rõ.
+
+## Hình nền theo số
+
+**Công cụ → Thao tác nhanh → Đặt số làm hình nền** dùng số đã lưu, với logo R ở
+trên và số ở dưới. Chọn riêng máy 21–30 vẫn tạo hình nền 21–30, không đổi thành 1–10.
+Bật **Đồng bộ hình nền theo số máy** cho các máy được chọn nếu muốn cập nhật khi
+số thay đổi. Riviu cần đang mở; máy bận/ngoại tuyến chờ được nhả hoặc kết nối lại.
+Hình nền đã xác nhận không được gửi lại mỗi lần kiểm tra. Nếu mất xác nhận, xem
+điện thoại rồi dùng **Thử lại đồng bộ hình nền**; máy đã hoàn tất không bị chạy lại.
+Đặt ảnh nền tùy chọn sẽ tắt đồng bộ số trên máy đó.
+
+## Thông báo cập nhật và điều khiển
+
+Cập nhật tên TikTok thông thường đọc, đối soát và lưu rồi hiển thị một toast tổng
+hợp. Dòng dưới ghi số máy chưa cập nhật; **Chi tiết** giữ nguyên lý do và mã thao
+tác. Máy đã đúng được tính trong số đã xác nhận, tách khỏi máy thực sự thay đổi.
+Xung đột cần mở rộng phạm vi vẫn yêu cầu xác nhận. Mất xác nhận lưu không báo thành công.
+
+Cửa sổ điều khiển hiển thị lý do ngắn; mở **Chi tiết** để xem serial và lỗi đầy đủ.
+Nút chuyển quyền chỉ áp dụng khi tác vụ hiện tại cho phép nhả máy; mở cửa sổ không
+tự dừng tác vụ khác.

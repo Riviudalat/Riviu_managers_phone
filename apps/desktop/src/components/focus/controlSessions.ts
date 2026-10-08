@@ -1,5 +1,5 @@
 import { deviceControlBegin, deviceControlEnd } from "../../api";
-import { describeError } from "../../describeError";
+import { controlFailure } from "../../describeError";
 
 // Overlay and group control can share the same device. Only
 // the last subscriber releases its native session; a reopen waits for cleanup.
@@ -29,7 +29,7 @@ export function acquireControlSession(udid: string) {
         } catch (error) {
           if (
             attempt >= 19 ||
-            !/DeviceBusy.*IdleSweep/.test(describeError(error))
+            !controlFailure(error).transientIdleSweep
           )
             throw error;
           await new Promise((resolve) => setTimeout(resolve, 500));

@@ -1,3 +1,4 @@
+import { machineNumberLabel } from "../deviceNaming";
 import { useEffect, useMemo, useRef, useState, type ReactElement } from "react";
 import { createPortal } from "react-dom";
 import { DeviceContextMenu } from "./DeviceContextMenu";
@@ -18,7 +19,7 @@ import {
   operationPrepareDevices,
 } from "../api";
 import { Smartphone, Pin, PinOff, GripVertical, ArrowLeftRight, Volume2, Volume1, Image, Power, PackagePlus, ImageUp, FolderDown, TerminalSquare, TextCursorInput, Keyboard, Bell, RotateCcw, ScanLine } from "lucide-react";
-import { describeError, helperRecoveryMessage } from "../describeError";
+import { describeError, helperRecoveryMessage, controlFailure } from "../describeError";
 import { createLiveDragGroup, liveTap, type LiveDragGroup } from "../liveDrag";
 
 import { InstalledApps } from "./InstalledApps";
@@ -66,31 +67,6 @@ import { FocusTextInput } from "./focus/FocusTextInput";
 import { focusLayout } from "./focus/focusLayout";
 import { acquireControlSession, invalidateDisconnectedControlSession } from "./focus/controlSessions";
 
-function controlBusyOwner(reason: string): string | undefined {
-  return /DeviceBusy:.*? is busy with ([A-Za-z]+);/.exec(reason)?.[1];
-}
-
-function canHandoffControl(reason: string): boolean {
-  return ["Script", "Nurture", "Interaction"].includes(controlBusyOwner(reason) ?? "");
-}
-
-function controlFailureMessage(udid: string, reason: string): string {
-  const helper = helperRecoveryMessage(reason);
-  if (helper) return helper;
-  const owner = controlBusyOwner(reason);
-  if (owner === "Script") {
-    return `Máy ${udid} đang được tác vụ tự động giữ quyền điều khiển. Bấm Dừng tác vụ cũ và điều khiển để nhả máy; kết quả đã đăng được giữ lại.`;
-  }
-  if (owner && canHandoffControl(reason)) {
-    return `Máy ${udid} đang được ${owner} giữ quyền điều khiển. Có thể dừng tác vụ cũ trên máy bị lỗi rồi mở điều khiển.`;
-  }
-  if (owner) return `Máy ${udid} đang được ${owner} giữ quyền điều khiển. Đóng phiên điều khiển cũ hoặc chờ máy được nhả rồi thử lại.`;
-  if (/\/elements\b/.test(reason) && /timed out|timeout/i.test(reason)) {
-    return `Máy ${udid}: hết thời gian chờ agent đọc giao diện. Chưa xác định được trạng thái màn hình; đây không phải thông báo máy đang bị tác vụ khác giữ quyền. Chi tiết: ${reason}`;
-  }
-  return reason;
-}
-
 interface Props {
   active?: boolean;
   windowOrder?: number;
@@ -98,6 +74,7 @@ interface Props {
   device: DeviceInfo;
   /** 1-based index in the visible grid, shown in the sidebar header. */
   index: number;
+  deviceNumbers?: ReadonlyMap<string, number>;
   onClose: () => void;
   activeSync?: ActiveGroupSync | null;
   onReadinessChange?: (readiness: GroupSyncReadiness | null) => void;
@@ -140,6 +117,7 @@ export function FocusStream({
   onActivate,
   device,
   index,
+  deviceNumbers,
   onClose: onClosed,
   activeSync = null,
   onReadinessChange,
@@ -202,7 +180,7 @@ export function FocusStream({
   const pointerBusyRef = useRef(false);
   const [pointerBusy, setPointerBusy] = useState(false);
   const [actionPending, setActionPending] = useState(false);
-  const [controlState, setControlState] = useState<{ key: string; ready: string[]; errors: Record<string, string> }>({ key: "", ready: [], errors: {} });
+  const [controlState, setControlState] = useState<{ key: string; ready: string[]; errors: Record<string, unknown> }>({ key: "", ready: [], errors: {} });
   const [actionFailures, setActionFailures] = useState<Record<string, string>>({});
   const [controlRetry, setControlRetry] = useState(0);
   /// Devices whose overlay control session (`deviceControlBegin`) has finished opening.
@@ -239,7 +217,7 @@ export function FocusStream({
   );
   const failureCount = Object.keys(failures).length;
   const hasHelperRecovery = Object.values(failures).some(reason => helperRecoveryMessage(reason) !== null);
-  const hasBusyOwner = Object.values(failures).some(canHandoffControl);
+  const hasBusyOwner = Object.values(failures).some(reason => controlFailure(reason).canHandoff);
   const sessionReady =
     !disconnectedKey && controlState.key === controlKey &&
     controlState.ready.length === targets.length &&
@@ -374,7 +352,7 @@ export function FocusStream({
         })
         .catch((error) => {
           if (!cancelled) {
-            setControlState(current => ({ ...current, errors: { ...current.errors, [udid]: describeError(error) } }));
+            setControlState(current => ({ ...current, errors: { ...current.errors, [udid]: error } }));
           }
         });
     }
@@ -398,14 +376,14 @@ export function FocusStream({
           ? "active"
           : "preparing",
       readyUdids,
-      failures,
+      failures: Object.fromEntries(Object.entries(failures).map(([id, reason]) => [id, describeError(reason)])),
     });
   }, [activeSync, controlState.ready, device.udid, failureCount, failures, onReadinessChange, targets]);
 
   const retryControl = async () => {
     if (phoneKeyboard.isBusy() || inFlight.current || pointerBusyRef.current || hasHelperRecovery) return;
     const busyUdids = Object.entries(failures)
-      .filter(([, reason]) => canHandoffControl(reason))
+      .filter(([, reason]) => controlFailure(reason).canHandoff)
       .map(([udid]) => udid);
     inFlight.current = true;
     setActionPending(true);
@@ -1171,12 +1149,12 @@ export function FocusStream({
               onPointerDown={e=>{if(e.button!==0)return;e.currentTarget.setPointerCapture(e.pointerId);stageDrag.current={x:e.clientX,y:e.clientY,origin:{...stageOffset.current}};}}
               onPointerMove={e=>{const d=stageDrag.current;if(!d||!stageRef.current)return;const box=stageRef.current.getBoundingClientRect();const proposed={x:d.origin.x+e.clientX-d.x,y:d.origin.y+e.clientY-d.y};const dx=Math.max(12-box.left,Math.min(proposed.x-stageOffset.current.x,window.innerWidth-12-box.right));const dy=Math.max(12-box.top,Math.min(proposed.y-stageOffset.current.y,window.innerHeight-12-box.bottom));stageOffset.current={x:stageOffset.current.x+dx,y:stageOffset.current.y+dy};stageRef.current.style.transform=`translate(${stageOffset.current.x}px, ${stageOffset.current.y}px)`;}}
               onPointerUp={()=>{stageDrag.current=null;}} onPointerCancel={()=>{stageDrag.current=null;}}>
-              <GripVertical size={15} aria-hidden="true"/><span className="focus-machine-number">{index}</span>
-              <strong title={`Máy ${index} · ${device.name} (${device.udid})`}>{device.name}</strong>
+              <GripVertical size={15} aria-hidden="true"/><span className="focus-machine-number">{index > 0 ? index : machineNumberLabel(index)}</span>
+              <strong title={`${machineNumberLabel(index)} · ${device.name} (${device.udid})`}>{device.name}</strong>
             </div>
             {activeSync && (
               <span className="focus-menu-group">
-                Máy chính: Máy {index} · {targets.length - 1} máy nhận
+                Máy chính: {machineNumberLabel(index)} · {targets.length - 1} máy nhận
               </span>
             )}
             {/* Read-only, from the device poll that already carries it. `—` rather than a
@@ -1229,25 +1207,32 @@ export function FocusStream({
             <div className="focus-control-status" aria-live="polite" data-testid="focus-control-status">
               <strong>
                 {failureCount > 0
-                  ? `Cần xử lý ${failureCount} máy`
+                  ? `Chưa thể điều khiển · ${failureCount} máy`
                   : sessionReady
                     ? `Đang hoạt động ${targets.length}/${targets.length}`
                     : `Đang chuẩn bị ${controlState.ready.length}/${targets.length} máy`}
               </strong>
               {failureCount > 0 && (
-                <ul>
-                  {Object.entries(failures).map(([udid, reason]) => (
-                    <li key={udid}>
-                      <strong>{devices.find((candidate) => candidate.udid === udid)?.name ?? udid}</strong>
-                      <span>{controlFailureMessage(udid, reason)}</span>
-                      {onHelperMaintenance && helperRecoveryMessage(reason)
-                        && devices.find(candidate => candidate.udid === udid)?.platform === "android" && (
-                        <button type="button" disabled={actionPending || pointerBusy}
-                          onClick={() => onHelperMaintenance(udid)}>Khôi phục helper</button>
-                      )}
-                    </li>
+                <>
+                  <span className="focus-control-summary">{failureCount === 1 ? controlFailure(Object.values(failures)[0]).summary : "Một số máy chưa sẵn sàng"}</span>
+                  <details>
+                    <summary>Chi tiết</summary>
+                    <ul>
+                      {Object.entries(failures).map(([udid, reason]) => (
+                        <li key={udid}>
+                          <strong>{devices.find(candidate => candidate.udid === udid)?.name ?? udid} · {udid}</strong>
+                          <span>{controlFailure(reason).detail}</span>
+                        </li>
+                      ))}
+                    </ul>
+                  </details>
+                  {onHelperMaintenance && Object.entries(failures).filter(([udid, reason]) =>
+                    helperRecoveryMessage(reason) && devices.find(candidate => candidate.udid === udid)?.platform === "android",
+                  ).map(([udid]) => (
+                    <button key={udid} type="button" disabled={actionPending || pointerBusy}
+                      title={udid} onClick={() => onHelperMaintenance(udid)}>Khôi phục helper{failureCount > 1 ? ` · ${devices.find(candidate => candidate.udid === udid)?.name ?? udid}` : ""}</button>
                   ))}
-                </ul>
+                </>
               )}
               {failureCount > 0 && !hasHelperRecovery && (
                 <button type="button" disabled={actionPending || pointerBusy} onClick={() => void retryControl()}>
@@ -1303,7 +1288,7 @@ export function FocusStream({
                 {devices.length <= 1 ? (
                   <p className="hint">Chỉ có một máy đang hiển thị.</p>
                 ) : (
-                  devices.map((candidate, position) => (
+                  devices.map((candidate) => (
                     <button
                       key={candidate.udid}
                       type="button"
@@ -1321,7 +1306,7 @@ export function FocusStream({
                         setShowDevices(false);
                       }}
                     >
-                      <span className="focus-device-index">{position + 1}</span>
+                      <span className="focus-device-index">{machineNumberLabel(deviceNumbers?.get(candidate.udid) ?? (candidate.udid === device.udid ? index : undefined))}</span>
                       <span>{candidate.name}</span>
                     </button>
                   ))

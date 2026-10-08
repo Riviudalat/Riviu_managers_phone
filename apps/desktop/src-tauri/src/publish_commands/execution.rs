@@ -2278,17 +2278,36 @@ pub(super) async fn capture_confirmed_assignment_link(
                 db.claim_publish_processing_restart(observer)?
             } else { false }
         } else { false };
+        // Submitted proves only the Post boundary. Stop TikTok only after this intent's post
+        // was observed and the measured screen shows no composer/upload; else stay observational.
+        let restart_admission = if !shared_debt
+            && super::verification_restart::submitted_receipt(assignment, &package)
+        {
+            Some(super::verification_restart::admit_restart(
+                &guarded, assignment, &package, &language, &version, &identity.account).await)
+        } else { None };
+        let restart_refusal = match &restart_admission {
+            Some(Err(error)) => {
+                log::info!("publish verification restart not admitted assignment={}: {error:#}", assignment.id);
+                Some(serde_json::json!({"state":"keptRunning","reason":"uploadNotProvenSettled",
+                    "package":package,"error":format!("{error:#}")}))
+            }
+            _ => None,
+        };
+        let restart_admission = restart_admission.and_then(Result::ok);
         let restart_proof = if shared_debt {
             Some(super::verification_restart::admit_warm(&guarded, &package, &language, &version, &identity.account).await?)
-        } else { super::verification_restart::foreground(control, &context, &package, restart || processing_claimed, || {
+        } else { super::verification_restart::foreground(control, &context, &package,
+            restart_admission.is_some() || processing_claimed, || {
             super::verification_restart::authorize_restart(db, assignment, observer)
         }).await.map_err(|error| anyhow::Error::new(super::verification::VerificationObservation {
             code: "readFailed",
             reason: format!("Chưa mở lại TikTok để lấy link: {error}; thử lại sau 5 phút"),
             diagnostic: Some(serde_json::json!({"appRestart":{"state":"failed","package":package,"error":error.to_string()}})),
-        }))? };
+        }))?.or(restart_refusal) };
         let restart_proof = restart_proof.map(|mut proof| {
             if let Some(admission) = processing_admission { proof["processingAdmission"] = admission; }
+            if let Some(admission) = restart_admission { proof["restartAdmission"] = admission; }
             proof
         });
         if let Some(proof) = &restart_proof {
@@ -2754,10 +2773,15 @@ async fn post_one_assignment_owned(
         // media is still on the phone with no context to clean it from, which the operator
         // needs told rather than hidden inside `uncertain`.
         Err(error) => {
-            return finish(PostOutcome::NothingPublished(format!(
+            let mut attempt = finish(PostOutcome::NothingPublished(format!(
                 "{}: không mở được phiên ({error}); ảnh vẫn còn trên máy",
                 assignment.udid
-            )))
+            )));
+            // A lock screen in front of TikTok is a typed, retryable pre-Post reason
+            // (`device_screen_locked`), not the generic `post_refused_before_dispatch`.
+            // Nothing reached the composer, so retrying the same phone after unlock is safe.
+            attempt.recovery_failure = screen_locked_failure(&error);
+            return attempt;
         }
     };
     let session = match control.streaming_session(&context) {
@@ -3127,6 +3151,15 @@ pub(super) fn refuse_when_the_route_authorities_disagree(
              {preflight}, trong phiên: {session}) — không đăng khi chưa biết composer nào"
         ))
     })
+}
+
+/// The typed recovery failure for a session that could not open because the phone was locked,
+/// or `None` for every other open failure (which keeps its existing classification).
+pub(super) fn screen_locked_failure(
+    error: &anyhow::Error,
+) -> Option<riviu_core::publish_recovery::RecoveryFailure> {
+    let failure = riviu_core::publish_recovery::describe(error);
+    (failure.code == riviu_core::device_control::baseline::SCREEN_LOCKED_CODE).then_some(failure)
 }
 
 pub(super) fn state_for_outcome(

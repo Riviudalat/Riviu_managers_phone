@@ -74,6 +74,7 @@ impl AndroidHelperSetup {
                         let db = db.clone();
                         let serial = ticket.serial.clone();
                         async move {
+                            auto_apply_baseline(&android, &db, &serial).await;
                             record(&db, "agent.helper.setup.started", &serial,
                                 "Đang chuẩn bị Riviu Helper để điều khiển thiết bị.");
                             let result = async {
@@ -133,6 +134,37 @@ fn automatic_preparation_message(error: &anyhow::Error) -> String {
     } else {
         "Chưa xác minh được Riviu Helper hoạt động; đã giữ bản ghi để xử lý tiếp.".into()
     }
+}
+
+/// "Tự áp dụng khi máy kết nối": bring a newly connected (or re-plugged) phone to the
+/// "Cài đặt máy" baseline under this connection's Repair lease, so it runs before helper
+/// preparation and before the phone is admitted to publish/nurture/interaction work.
+///
+/// Idempotent -- a phone already at baseline is only read -- and never fatal: a phone that
+/// cannot be brought to baseline is still prepared, and the result goes to the operation log
+/// for the operator to read on the "Cài đặt máy" page.
+async fn auto_apply_baseline(android: &AndroidDriver, db: &Database, serial: &str) {
+    let config = match db.get_device_baseline_config() {
+        Ok(config) => config,
+        Err(error) => {
+            record(db, "device.baseline.auto.failed", serial,
+                &format!("Không đọc được cấu hình Cài đặt máy: {error:#}"));
+            return;
+        }
+    };
+    if !config.auto_apply_on_connect || config.settings.is_empty() {
+        return;
+    }
+    let result = match android.apply_baseline(serial, &config.settings).await {
+        Ok(items) => riviu_core::device_control::baseline::DeviceBaselineResult::from_items(serial, items),
+        Err(error) => riviu_core::device_control::baseline::DeviceBaselineResult::whole_device(
+            serial,
+            riviu_core::device_control::baseline::BaselineOutcome::Failed,
+            format!("không đọc được máy, chưa thay đổi gì: {error:#}"),
+        ),
+    };
+    record(db, "device.baseline.auto", serial,
+        &riviu_core::device_control::baseline::summarize(&result));
 }
 
 fn record(db: &Database, action: &str, serial: &str, message: &str) {

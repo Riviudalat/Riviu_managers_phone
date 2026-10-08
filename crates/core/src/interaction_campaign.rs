@@ -3372,6 +3372,14 @@ async fn run_cohort(
             }
             .await;
             let effect_claim_lost = matches!(&result, Ok(None));
+            // "Giữ bài": stay on the post once its actions are done, before the final read and
+            // app cleanup. A failed or lost attempt leaves at once, and Stop ends the hold early.
+            if matches!(&result, Ok(Some(_))) {
+                hold_post(request.post_dwell_seconds, || {
+                    campaign_is_cancelled(&db, &campaign_id).unwrap_or(true)
+                })
+                .await;
+            }
             // Even a failed/cancelled/unknown attempt gets a fresh diagnostic read while
             // this device session is owned. A CAS loser must not file a winner's evidence.
             let screenshot = if effect_claim_lost {
@@ -4449,6 +4457,27 @@ async fn dismiss_comment_drawer(session: &dyn crate::UiSession, gestures: &tokio
 
 /// `interaction_cancel` only flips the campaign row, so the running worker has
 /// to read it back to notice. Nothing else signals it.
+/// How often a post hold looks for Stop. Each look reads the campaign row, so this stays
+/// coarse; Stop is still honoured within half a second.
+const POST_HOLD_POLL: Duration = Duration::from_millis(500);
+
+/// Rest on the post for `seconds`, capped at [`crate::interaction::MAX_POST_DWELL_SECONDS`],
+/// until `cancelled` says Stop. Nothing is read or tapped. Returns how long it held.
+async fn hold_post(seconds: Option<u8>, cancelled: impl Fn() -> bool) -> Duration {
+    let seconds = seconds
+        .unwrap_or(0)
+        .min(crate::interaction::MAX_POST_DWELL_SECONDS);
+    let started = tokio::time::Instant::now();
+    let deadline = started + Duration::from_secs(u64::from(seconds));
+    loop {
+        let now = tokio::time::Instant::now();
+        if now >= deadline || cancelled() {
+            return started.elapsed();
+        }
+        tokio::time::sleep(POST_HOLD_POLL.min(deadline - now)).await;
+    }
+}
+
 fn campaign_is_cancelled(db: &crate::db::Database, campaign_id: &str) -> anyhow::Result<bool> {
     Ok(matches!(
         db.get_interaction_campaign(campaign_id)?
@@ -6036,6 +6065,51 @@ mod boundary_tests {
                 < tail.find("action_results.push(action)").unwrap(), "{action} evidence before advancing");
         }
 
+    }
+
+    /// "Giữ bài" is the operator's promise that the phone stays on the post once its actions
+    /// are done and before TikTok is closed. It was validated and documented but never read.
+    #[test]
+    fn the_runner_holds_the_post_after_its_actions_and_before_the_final_read() {
+        let source = include_str!("interaction_campaign.rs");
+        let start = source
+            .find("async fn run_cohort(")
+            .expect("the runner still exists");
+        let rest = &source[start..];
+        let runner = &rest[..rest.find("\n#[cfg(test)]").unwrap_or(rest.len())];
+        let hold = runner
+            .find("hold_post(request.post_dwell_seconds")
+            .expect("the runner never reads postDwellSeconds");
+        let final_read = runner
+            .find("let screenshot = if effect_claim_lost")
+            .expect("terminal read");
+        let actions = runner
+            .find("execute_like_action(")
+            .expect("actions run in the runner");
+        assert!(actions < hold && hold < final_read);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn the_post_hold_is_capped_skipped_when_unset_and_ended_by_stop() {
+        use super::{hold_post, POST_HOLD_POLL};
+        use std::sync::atomic::Ordering;
+        use std::time::Duration;
+
+        assert_eq!(hold_post(None, || false).await, Duration::ZERO);
+        assert_eq!(hold_post(Some(0), || false).await, Duration::ZERO);
+        assert_eq!(hold_post(Some(7), || false).await, Duration::from_secs(7));
+        assert_eq!(
+            hold_post(Some(u8::MAX), || false).await,
+            Duration::from_secs(u64::from(crate::interaction::MAX_POST_DWELL_SECONDS)),
+            "an over-long hold is capped, never trusted"
+        );
+        let looks = std::sync::atomic::AtomicUsize::new(0);
+        let held = hold_post(Some(60), || looks.fetch_add(1, Ordering::Relaxed) >= 2).await;
+        assert_eq!(
+            held,
+            POST_HOLD_POLL * 2,
+            "Stop ends the hold at the next look"
+        );
     }
 
     #[test]

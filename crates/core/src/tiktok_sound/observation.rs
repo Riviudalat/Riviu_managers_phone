@@ -30,6 +30,7 @@ pub(crate) async fn inspect_editor_and_caption(
         return Ok((inspect(session, plan, expected_title, false).await?, None));
     };
     let deadline = phase_deadline(READBACK_WINDOW);
+    clear_sound_popup(session, deadline, Some(plan.package)).await?;
     let mut cursor = Cursor::default();
     let Some(snapshot) = observation::observe(
         session,
@@ -161,6 +162,7 @@ pub(crate) async fn inspect(
         .map(|id| format!("{}{id}", plan.package))
         .collect();
     loop {
+        clear_sound_popup(session, deadline, Some(plan.package)).await?;
         observation::check(deadline, None)?;
         // Dynamic IDs are examined within ONE read; never combine independent generations.
         let query = SemanticLocator {

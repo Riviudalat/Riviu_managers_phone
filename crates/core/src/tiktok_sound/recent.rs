@@ -124,6 +124,7 @@ fn pool(tree: &Tree, plan: SoundPickerPlan) -> anyhow::Result<ObservedSoundPool>
 }
 
 async fn read(session: &dyn UiSession, plan: SoundPickerPlan, epoch: &str) -> anyhow::Result<Tree> {
+    clear_sound_popup(session, phase_deadline(SOUND_WINDOW), Some(plan.package)).await?;
     check_wait()?;
     require_session(session, plan, epoch).await?;
     let tree = Tree::parse(read_sound(session.hierarchy_source_snapshot()).await?)?;

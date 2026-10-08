@@ -229,7 +229,11 @@ const devices: DeviceInfo[] = [
   },
 ];
 
-function open(metas: Map<string, DeviceMeta> = new Map()) {
+// Machine numbers are committed roster data; an unnumbered phone reads "Đang gán số".
+const numbered = (...udids: string[]) =>
+  new Map<string, DeviceMeta>(udids.map((udid, index) => [udid, { udid, notes: "", tags: [], number: index + 1 }]));
+
+function open(metas: Map<string, DeviceMeta> = numbered("mock-1")) {
   render(
     <NurturePopup
       devices={devices}
@@ -723,7 +727,7 @@ describe("NurturePopup", () => {
     saved.saveSettings.mockResolvedValueOnce(settings);
     vi.mocked(api.nurtureStart).mockResolvedValueOnce(["mock-1"]);
     const second = { ...devices[0], udid: "mock-2", name: "Second phone" };
-    render(<NurturePopup devices={[devices[0], second]} selected={[]} metas={new Map()} surface="page" />);
+    render(<NurturePopup devices={[devices[0], second]} selected={[]} metas={numbered("mock-1", "mock-2")} surface="page" />);
     fireEvent.click(await screen.findByRole("button", { name: /^(?:Kiểm tra & bắt đầu|Bắt đầu)$/ }));
     expect(await screen.findByText("1/2 máy đã bắt đầu")).toBeVisible();
     expect(screen.getByText(/Không bắt đầu: Máy 2/)).toHaveTextContent("Second phone");
@@ -1476,7 +1480,7 @@ describe("independent nurture rates", () => {
       cleanupError: null,
     }]);
     render(
-      <NurturePopup devices={devices} selected={[]} metas={new Map()} surface="page" />,
+      <NurturePopup devices={devices} selected={[]} metas={numbered("mock-1")} surface="page" />,
     );
 
     fireEvent.click(await screen.findByRole("tab", { name: "Theo dõi" }));
@@ -1507,7 +1511,7 @@ describe("independent nurture rates", () => {
       cleanupError: "không đọc được trạng thái tiến trình",
     }]);
     render(
-      <NurturePopup devices={devices} selected={[]} metas={new Map()} surface="page" />,
+      <NurturePopup devices={devices} selected={[]} metas={numbered("mock-1")} surface="page" />,
     );
 
     fireEvent.click(await screen.findByRole("tab", { name: "Theo dõi" }));

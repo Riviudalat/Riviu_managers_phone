@@ -166,13 +166,8 @@ describe("GroupManagerPopup", () => {
     expect(saveGroup.mock.calls[0][0].name).toBe("Nhóm 2");
   });
 
-  /// **A fleet nobody has numbered still shows numbers.**
-  ///
-  /// Reported from the running app: with no `Change Number` anywhere, every chip rendered as
-  /// `— SM G955F`, which is twenty identical buttons on a fleet of twenty identical phones.
-  /// The wall numbers its tiles by position for this reason and this screen has to agree with
-  /// it, or the numbers an operator reads off the wall address nothing here.
-  it("numbers an unnumbered fleet by position, like the wall does", () => {
+  // Pending allocation keeps identities distinct without borrowing another machine's number.
+  it("keeps unnumbered devices pending while preserving their selectable identities", () => {
     const onChanged = vi.fn();
     render(
       <GroupManagerPopup
@@ -187,7 +182,8 @@ describe("GroupManagerPopup", () => {
       .getAllByRole("button")
       .map((element) => element.querySelector(".group-chip-num")?.textContent)
       .filter((value): value is string => Boolean(value));
-    expect(numbers).toEqual(["1", "2", "3"]);
+    expect(numbers).toEqual(["Đang gán số", "Đang gán số", "Đang gán số"]);
+    for (const name of ["A", "D", "E"]) expect(screen.getByTitle(name)).toBeEnabled();
   });
 
   /// **A phone in the open group wears that group's colour, not one shared accent.**

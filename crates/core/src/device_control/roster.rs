@@ -5,6 +5,17 @@
 use super::*;
 
 impl DeviceControlPlane {
+    /// Read-only lock-screen probe for preflight; see `DeviceDriver::screen_lock_blocker`.
+    pub async fn screen_lock_blocker(
+        &self,
+        udid: &str,
+    ) -> Result<Option<String>, DeviceControlError> {
+        self.driver
+            .screen_lock_blocker(udid)
+            .await
+            .map_err(|error| driver_error(udid, "screenLockBlocker", error))
+    }
+
     pub async fn verify_automation_readiness(&self, udid: &str) -> Result<(), DeviceControlError> {
         self.driver
             .verify_automation_readiness(udid)

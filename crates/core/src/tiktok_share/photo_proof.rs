@@ -62,7 +62,31 @@ pub(super) struct FullVideoCaptionMismatch {
 
 #[derive(Debug, thiserror::Error)]
 #[error("measured photo carousel viewer")]
-pub(super) struct PhotoCarouselViewer;
+pub(super) struct PhotoCarouselViewer {
+    /// This same snapshot showed the complete caption and a submission time inside
+    /// the attempt's window. Restart authority only; never link, Sheet or Post proof.
+    pub(super) caption_and_time_matched: bool,
+}
+
+/// Global45.7.3/en own-post carousel, assignment ordinal 27 trace gen 78 (08/10/2026):
+/// one snapshot carries the complete desc and the zwj time. Its expanded rey viewer
+/// has no time node, so this tile read is the only measured one-snapshot proof.
+fn global_photo_caption_and_time_match(
+    tree: &Tree,
+    package: &str,
+    caption: &str,
+    identity: &SubmissionIdentity,
+    now: chrono::DateTime<chrono::Utc>,
+) -> bool {
+    let ui_text = |value: &str| normalize(value.trim_matches(['\u{200e}', '\u{200f}']));
+    let captions = tree.matching(package, ElementQuery::ResourceIdSuffix(":id/desc"));
+    let times = tree.matching(package, ElementQuery::ResourceIdSuffix(":id/zwj"));
+    let ([visible], [time]) = (captions.as_slice(), times.as_slice()) else {
+        return false;
+    };
+    ui_text(tree.nodes[*visible].attr("text")) == ui_text(caption)
+        && relative_post_time_matches(tree.nodes[*time].attr("text"), &identity.submitted_at, now)
+}
 
 #[derive(Debug, thiserror::Error)]
 #[error("copied post ID predates the recorded preparation window")]
@@ -511,7 +535,16 @@ pub(super) async fn capture_visible_video_link_counted(
     let version = session.app_version(package).await.unwrap_or_default();
     if measured_global_photo_viewer(&tree, package, &version) {
         video_viewer_caption(&tree, package, &version, caption)?;
-        return Err(PhotoCarouselViewer.into());
+        return Err(PhotoCarouselViewer {
+            caption_and_time_matched: global_photo_caption_and_time_match(
+                &tree,
+                package,
+                caption,
+                identity,
+                chrono::Utc::now(),
+            ),
+        }
+        .into());
     }
     let (caption_id, share) = video_viewer_caption(&tree, package, &version, caption)?;
     let _ = caption_id;

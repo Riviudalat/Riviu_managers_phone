@@ -293,7 +293,59 @@ export type PageId =
   | "diagnostics"
   | "data"
   | "api"
-  | "settings";
+  | "settings"
+  | "deviceSettings";
+
+/** One setting of the "Cài đặt máy" fleet baseline (`riviu_core::device_control::baseline`). */
+export type BaselineSetting =
+  | "lockScreenDisabled"
+  | "autoRotateOff"
+  | "stayAwakeWhileCharging"
+  | "screenOffTimeoutMax"
+  | "animationsOff";
+
+/** What a read proved. `unknown` whenever the phone did not say; never folded into `ok`. */
+export type BaselineStatus = "ok" | "drift" | "unknown" | "needsManual";
+
+export interface BaselineSettingReading {
+  setting: BaselineSetting;
+  status: BaselineStatus;
+  observed: string;
+  detail?: string;
+}
+
+export interface DeviceBaselineReading {
+  udid: string;
+  settings: BaselineSettingReading[];
+  error?: string;
+}
+
+export type BaselineOutcome =
+  | "applied"
+  | "alreadyOk"
+  | "needsManual"
+  | "refusedBusy"
+  | "failed"
+  | "unsupported";
+
+export interface BaselineItemResult {
+  setting: BaselineSetting;
+  outcome: BaselineOutcome;
+  observed: string;
+  detail?: string;
+}
+
+export interface DeviceBaselineResult {
+  udid: string;
+  outcome: BaselineOutcome;
+  items: BaselineItemResult[];
+  detail?: string;
+}
+
+export interface DeviceBaselineConfig {
+  settings: BaselineSetting[];
+  autoApplyOnConnect: boolean;
+}
 
 export interface DeviceMeta {
   udid: string;
@@ -416,6 +468,37 @@ export interface AppInstallBatchResponse {
   target?: ResolvedTargetSnapshot;
   progress: AppInstallProgress[];
   results: AppInstallResult[];
+}
+
+/** Uninstall a library app, or uninstall it and install the same library artifact again. */
+export type AppRemovalMode = "uninstall" | "reinstall";
+
+/**
+ * Per-phone end state. `refusedBusy` and `failedBeforeEffect` sent nothing to the phone;
+ * `unknownAfterDispatch` sent something unproven and is never retried automatically.
+ */
+export type AppRemovalOutcome = "done" | "refusedBusy" | "failedBeforeEffect" | "unknownAfterDispatch";
+
+export interface AppRemovalRequest {
+  appId: string;
+  udids: string[];
+  mode: AppRemovalMode;
+}
+
+export interface AppRemovalResult {
+  udid: string;
+  outcome: AppRemovalOutcome;
+  /** A readback no longer listed the library package. */
+  removedVerified: boolean;
+  /** The install half of a reinstall, when it was reached. */
+  install?: AppInstallResult;
+  detail?: string;
+}
+
+export interface AppRemovalBatchResponse {
+  appId: string;
+  mode: AppRemovalMode;
+  results: AppRemovalResult[];
 }
 
 export interface ScheduleItem {
@@ -2601,7 +2684,8 @@ export type AppEvent =
   | { type: "interactionUpdated"; campaignId: string; revision: number }
   | { type: "publishUpdated"; campaignId: string; revision: number }
   | { type: "wdaExpiryWarning"; udid: string; daysRemaining: number }
-  | { type: "nurtureStatus"; status: NurtureSessionStatus };
+  | { type: "nurtureStatus"; status: NurtureSessionStatus }
+  | { type: "adbServerNotice"; port: number; change: "lost" | "returned"; transports: number; message: string };
 
 /**
  * Narrow an untyped payload off the Tauri channel.
@@ -2631,6 +2715,7 @@ export const APP_EVENT_TYPES = [
   "publishUpdated",
   "wdaExpiryWarning",
   "nurtureStatus",
+  "adbServerNotice",
 ] as const;
 
 

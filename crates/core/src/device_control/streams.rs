@@ -559,6 +559,8 @@ impl DeviceControlPlane {
                 recorded_package: None,
                 recovery_process: None,
                 recovery_stop: None,
+                pending_owned_stop: None,
+                cleanup_retry: None,
             }),
             cleanup: cleanup.clone(),
         };

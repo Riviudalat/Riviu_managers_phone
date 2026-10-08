@@ -359,6 +359,14 @@ struct StreamProducer {
     device_pid: u32,
 }
 
+/// Retained before awaiting exit, so cancellation cannot discard the child.
+struct PendingStreamStop {
+    marker: riviu_core::driver::OwnedStreamStopPending,
+    producer: StreamProducer,
+    stop_dispatched: bool,
+    forward_cleanup_attempted: bool,
+}
+
 /// One running scrcpy view. Separate from [`StreamProducer`]: a phone can keep
 /// this H.264 encode while nurture owns a minicap JPEG producer.
 /// The operator's quality choices, one per preset, plus the frame rate they share.
@@ -899,6 +907,8 @@ pub struct AndroidDriver {
     /// phone's start *and* stop. [`AndroidDriver::starting`] is what makes the
     /// short critical section safe.
     streams: tokio::sync::Mutex<HashMap<String, StreamProducer>>,
+    pending_stream_stops: Mutex<HashMap<String, Arc<tokio::sync::Mutex<PendingStreamStop>>>>,
+    completed_stream_stops: Mutex<HashMap<String, (riviu_core::driver::OwnedStreamStopPending, riviu_core::StreamStopProof)>>,
     /// serial -> the scrcpy view we started for it. Held only across map
     /// access, same rule as [`Self::streams`].
     views: tokio::sync::Mutex<HashMap<String, ViewProducer>>,
@@ -1046,6 +1056,19 @@ struct HelperRecoveryState {
 pub const HELPER_SETUP_FAILURE: &str = "Riviu Helper: runtime qualification failed; recovery required (no action replay)";
 
 impl AndroidDriver {
+    /// Queue behind short inventory readers, without sealing or dispatching maintenance.
+    /// Timeout/cancellation drops only this writer waiter; active work keeps its guard.
+    async fn lock_maintenance_inventory(
+        &self,
+        serial: &str,
+    ) -> Result<tokio::sync::OwnedRwLockWriteGuard<()>, tokio::time::error::Elapsed> {
+        tokio::time::timeout(
+            Duration::from_secs(5),
+            self.helper_inventory_lock(serial).write_owned(),
+        )
+        .await
+    }
+
     pub fn set_gui_reasoner(&self, reasoner: riviu_core::ui_automation::SharedReasoner) {
         *self.gui_reasoner.lock() = Some(reasoner);
     }
@@ -1210,6 +1233,17 @@ impl AndroidDriver {
     /// changed environment make diagnostics describe a binary this driver never used.
     pub fn adb_origin(&self) -> &'static str {
         self.adb_origin.label()
+    }
+
+    /// ADB server outages and returns seen by inventory since the last call. Read-only:
+    /// nothing here starts, stops or reconnects a server.
+    pub fn drain_adb_server_notices(&self) -> Vec<crate::AdbServerNotice> {
+        self.adb.drain_server_notices()
+    }
+
+    /// True while a server that carried phones is silent. See [`AdbProgram::server_outage`].
+    pub fn adb_server_outage(&self) -> bool {
+        self.adb.server_outage()
     }
 
     /// Read `adb version` without targeting a device. Failure is an unanswered diagnostic
@@ -1474,6 +1508,8 @@ impl AndroidDriver {
             trace: Mutex::new(None),
             view_sink: Mutex::new(None),
             streams: tokio::sync::Mutex::new(HashMap::new()),
+            pending_stream_stops: Mutex::new(HashMap::new()),
+            completed_stream_stops: Mutex::new(HashMap::new()),
             views: tokio::sync::Mutex::new(HashMap::new()),
             desired_presets: parking_lot::Mutex::new(HashMap::new()),
             view_starting: Mutex::new(HashSet::new()),
@@ -2168,7 +2204,8 @@ impl DeviceDriver for AndroidDriver {
                 let blocker = guard.blocker().unwrap_or("lock screen");
                 anyhow::ensure!(
                     self.dismiss_keyguard(udid).await?,
-                    "{udid} vẫn bị khóa ({blocker}); cần mở PIN/pattern trên máy trước khi lấy link"
+                    "{udid}: {} ({blocker}); cần mở PIN/pattern trên máy trước khi lấy link",
+                    riviu_core::device_control::baseline::SCREEN_LOCKED_MARKER
                 );
             }
         }
@@ -2299,7 +2336,7 @@ impl DeviceDriver for AndroidDriver {
     /// blind — and it starts no UI session and no producer, which is what the install-only
     /// contract asks for.
     async fn prepare_helper_maintenance(&self, udid: &str, maintenance_id: &str, effect_intent: serde_json::Value) -> anyhow::Result<serde_json::Value> {
-        let _inventory = self.helper_inventory_lock(udid).try_write_owned()
+        let _inventory = self.lock_maintenance_inventory(udid).await
             .map_err(|_| anyhow!("helper inventory work still draining"))?;
         anyhow::ensure!(self.automatic_setup_allowed, "maintenance disabled in diagnostic mode");
         let cached = self.helpers.lock().get(udid).cloned();
@@ -2327,9 +2364,16 @@ impl DeviceDriver for AndroidDriver {
         let retryable_busy = !observation_only
             && cached.as_ref().is_none_or(|helper| helper.require_unfenced().is_ok())
             && !state.join("maintenance-active.json").try_exists()?;
-        let _inventory = self.helper_inventory_lock(udid).try_write_owned()
-            .map_err(|_| if retryable_busy { anyhow!(crate::riviu_agent::HelperMaintenanceBusyBeforeDispatch) }
-                else { anyhow!("helper inventory work still draining") })?;
+        let _inventory = self.lock_maintenance_inventory(udid).await
+            .map_err(|_| {
+                // A holder may have sealed its plan while this writer was queued.
+                // An unreadable journal is unknown, never permission to retry effects.
+                let still_before_dispatch = retryable_busy
+                    && self.helpers.lock().get(udid).is_none_or(|helper| helper.require_unfenced().is_ok())
+                    && !state.join("maintenance-active.json").try_exists().unwrap_or(true);
+                if still_before_dispatch { anyhow!(crate::riviu_agent::HelperMaintenanceBusyBeforeDispatch) }
+                else { anyhow!("helper inventory work still draining") }
+            })?;
         anyhow::ensure!(self.automatic_setup_allowed, "maintenance disabled in diagnostic mode");
         let cached = self.helpers.lock().get(udid).cloned();
         let retryable_busy = retryable_busy
@@ -2691,6 +2735,10 @@ impl DeviceDriver for AndroidDriver {
         AndroidDriver::tiktok_build_with_preference(self, udid, preferred).await
     }
 
+    async fn screen_lock_blocker(&self, udid: &str) -> anyhow::Result<Option<String>> {
+        AndroidDriver::screen_lock_blocker(self, udid).await
+    }
+
     async fn verify_automation_readiness(&self, udid: &str) -> anyhow::Result<()> {
         // This stays read-only: no helper claim, repair, session or IME transition.
         // A healthy cached owner keeps runtime-owner.json until its exact release;
@@ -2953,10 +3001,10 @@ impl DeviceDriver for AndroidDriver {
                         } else {
                             self.interaction.clear(udid);
                             anyhow::bail!(
-                                "{udid} đang ở màn hình khoá ({blocker}) và không mở được bằng \
-                                 phím — máy này có PIN/pattern/vân tay. Màn hình có thể đang \
-                                 sáng, nhưng không app nào lên foreground được cho tới khi \
-                                 nó được mở khoá bằng tay"
+                                "{udid}: {} ({blocker}) và không mở được bằng phím — máy này có \
+                                 PIN/pattern/vân tay. Màn hình có thể đang sáng, nhưng không app \
+                                 nào lên foreground được cho tới khi nó được mở khoá bằng tay",
+                                riviu_core::device_control::baseline::SCREEN_LOCKED_MARKER
                             );
                         }
                     }
@@ -2990,6 +3038,22 @@ impl DeviceDriver for AndroidDriver {
             }
             if now >= deadline {
                 self.interaction.clear(udid);
+                // The latched check above ran once, at the start. A phone that re-locked during
+                // the wait (2026-10-08: focus=StatusBar, mDreamingLockscreen=true) fell through
+                // to the generic sentence below and settled as a terminal failure. One more read
+                // names it, so publish settles it as the typed, retryable
+                // `device_screen_locked`. An unreadable dump keeps the generic sentence.
+                if let Ok(state) = self.screen_guard_state(udid).await {
+                    if state.behind_lock_screen() {
+                        anyhow::bail!(
+                            "{udid}: {} ({}) nên {bundle_id} không lên foreground được trong \
+                             {}s; mở khóa máy (hoặc áp dụng Cài đặt máy) rồi chạy lại",
+                            riviu_core::device_control::baseline::SCREEN_LOCKED_MARKER,
+                            state.blocker().unwrap_or("lock screen"),
+                            FOREGROUND_PROOF_TIMEOUT.as_secs()
+                        );
+                    }
+                }
                 anyhow::bail!(
                     "{bundle_id} did not reach the foreground on {udid} within {}s; the phone is \
                      showing {observed}. A locked screen does this — `monkey` reports success \
@@ -3077,6 +3141,13 @@ impl DeviceDriver for AndroidDriver {
     /// This is the path the desktop sampler takes every time it finishes a
     /// background sample. Before it existed the Android tile ended every turn in
     /// `TileStreamState::Error`, because the trait default refused.
+    async fn reconcile_owned_stream_stop(
+        &self,
+        pending: &riviu_core::driver::OwnedStreamStopPending,
+    ) -> anyhow::Result<riviu_core::StreamStopProof> {
+        self.reconcile_pending_stream_stop(pending).await
+    }
+
     async fn park_owned_stream(
         &self,
         udid: &str,
@@ -3178,6 +3249,9 @@ pub async fn detect_driver(config: &AndroidDriverConfig) -> Result<Arc<AndroidDr
 mod borrowed_shutdown_tests;
 
 #[cfg(test)]
+mod view_start_tests;
+
+#[cfg(test)]
 mod tests {
     use super::*;
 
@@ -3187,17 +3261,99 @@ mod tests {
             "ownerGeneration":"fixture_generation_012345","nonce":"fixture_claim_nonce"})
     }
 
-    #[tokio::test]
+    #[tokio::test(start_paused = true)]
     async fn maintenance_cache_retires_clean_release_but_preserves_live_and_debt() {
-        // The control plane serializes the complete cause chain. Inventory
-        // contention must remain the exact public draining category.
-        let driver = AndroidDriver::with_adb(AdbProgram::at(PathBuf::from("never-run-adb")),
-            adb::AdbOrigin::Configured, &AndroidDriverConfig::default());
-        let held = driver.helper_inventory_lock("busy-fixture").read_owned().await;
-        let error = driver.prepare_helper_maintenance("busy-fixture", "fixture_maintenance_1234",
-            serde_json::json!({"operation":"fixture"})).await.unwrap_err();
-        assert_eq!(format!("{error:#}"), "helper inventory work still draining");
+        // Inventory readers may be ordinary polling, not unfinished helper input.
+        // Both entry points must queue fairly, yet leave no effect on timeout/cancel.
+        let root = std::env::temp_dir().join(format!("maintenance-admission-{}", uuid::Uuid::new_v4()));
+        let driver = AndroidDriver::with_adb(AdbProgram::at(root.join("never-run-adb")),
+            adb::AdbOrigin::Configured, &AndroidDriverConfig {
+                helper_state_dir: Some(root.clone()), automatic_setup_allowed: false,
+                ..Default::default()
+            });
+        for mode in ["prepare", "execute"] {
+            let inventory = driver.helper_inventory_lock("busy-fixture");
+            let operation = || async {
+                if mode == "prepare" {
+                    driver.prepare_helper_maintenance("busy-fixture", "fixture_maintenance_1234",
+                        serde_json::json!({"operation":"fixture"})).await
+                } else {
+                    driver.execute_helper_maintenance("busy-fixture", serde_json::json!({}), true, false).await
+                }
+            };
+            let held = inventory.clone().read_owned().await;
+            let mut waiting = Box::pin(operation());
+            tokio::select! {
+                biased;
+                result = &mut waiting => panic!("{mode} refused a short inventory reader instead of waiting: {result:?}"),
+                _ = tokio::time::sleep(Duration::from_millis(1)) => {}
+            }
+            assert!(inventory.clone().try_read_owned().is_err(), "queued writer must block new polling readers");
+            drop(held);
+            let error = waiting.await.unwrap_err();
+            assert_eq!(error.to_string(), "maintenance disabled in diagnostic mode",
+                "after admission all existing guards still apply before any ADB");
+
+            let held = inventory.clone().read_owned().await;
+            let mut waiting = Box::pin(operation());
+            tokio::select! {
+                biased;
+                result = &mut waiting => panic!("{mode} did not wait: {result:?}"),
+                _ = tokio::time::sleep(Duration::from_millis(1)) => {}
+            }
+            tokio::time::advance(Duration::from_millis(4_998)).await;
+            tokio::select! {
+                biased;
+                result = &mut waiting => panic!("{mode} expired before five seconds: {result:?}"),
+                _ = std::future::ready(()) => {}
+            }
+            tokio::time::advance(Duration::from_millis(1)).await;
+            let error = waiting.await.unwrap_err();
+            if mode == "execute" {
+                assert!(error.is::<crate::riviu_agent::HelperMaintenanceBusyBeforeDispatch>());
+            } else {
+                assert_eq!(format!("{error:#}"), "helper inventory work still draining");
+            }
+            assert!(inventory.clone().try_read_owned().is_ok(), "timeout must retire its queued writer");
+            drop(held);
+
+            let held = inventory.clone().read_owned().await;
+            let mut waiting = Box::pin(operation());
+            tokio::select! {
+                biased;
+                result = &mut waiting => panic!("{mode} did not queue: {result:?}"),
+                _ = tokio::time::sleep(Duration::from_millis(1)) => {}
+            }
+            drop(waiting);
+            assert!(inventory.clone().try_read_owned().is_ok(), "cancel must retire only its queued writer");
+            drop(held);
+            assert!(inventory.try_write_owned().is_ok());
+            assert!(!root.exists(), "admission alone must not write or seal any journal");
+        }
+        // A concurrent holder can dispatch while this caller waits. Its durable
+        // fence must override the earlier retryable-busy snapshot on timeout.
+        let serial = "sealed-while-waiting";
+        let inventory = driver.helper_inventory_lock(serial);
+        let held = inventory.clone().read_owned().await;
+        let mut waiting = Box::pin(driver.execute_helper_maintenance(
+            serial, serde_json::json!({}), true, false));
+        tokio::select! {
+            biased;
+            result = &mut waiting => panic!("execute did not queue: {result:?}"),
+            _ = tokio::time::sleep(Duration::from_millis(1)) => {}
+        }
+        let state = root.join("helper-runtime").join(riviu_core::frame_sha256(serial.as_bytes()));
+        std::fs::create_dir_all(&state).unwrap();
+        let intent = state.join("maintenance-active.json");
+        std::fs::write(&intent, b"retained-execution-intent").unwrap();
+        tokio::time::advance(Duration::from_secs(5)).await;
+        let error = waiting.await.unwrap_err();
+        assert!(!error.is::<crate::riviu_agent::HelperMaintenanceBusyBeforeDispatch>());
+        assert_eq!(error.to_string(), "helper inventory work still draining");
+        assert_eq!(std::fs::read(&intent).unwrap(), b"retained-execution-intent");
+        assert!(inventory.try_read_owned().is_ok());
         drop(held);
+        std::fs::remove_dir_all(&root).unwrap();
         for (closed, debt) in [(false, false), (true, false), (true, true)] {
             let root = std::env::temp_dir().join(format!("maintenance-cache-{}", uuid::Uuid::new_v4()));
             let serial = "fixture-maintenance-cache";
@@ -3348,7 +3504,9 @@ mod tests {
         // Supersession retires the old owner; only a qualified replacement clears
         // the failed preparation episode. It does not certify runtime readiness.
         assert_eq!(status.state, riviu_core::AgentState::RepairRequired);
-        assert_eq!(status.message.as_deref(), Some(HELPER_SETUP_FAILURE));
+        let message = status.message.as_deref().expect("failed preparation retains its diagnostic");
+        assert!(message.starts_with(HELPER_SETUP_FAILURE));
+        assert!(message.contains("stage=runtime_acquisition; category=recovery_required"));
         assert!(!status.features.iter().any(|f| f == "helperReady"));
         assert_eq!(std::fs::read(archive.join("runtime-owner.json")).unwrap(), record);
         assert_eq!(std::fs::read(archive.join("release-fixture_owner_0123456789.json")).unwrap(), release);
@@ -4224,6 +4382,48 @@ mod tests {
         );
         assert_eq!((proof.old_generation, proof.new_generation), (0, 1));
         assert!(proof.child_stopped && proof.new_generation > proof.old_generation);
+    }
+
+    #[tokio::test]
+    async fn pending_stop_wait_keeps_original_frame_fence_and_refuses_replacement() {
+        let sink = Arc::new(TestSink::default());
+        let driver = wired(&sink);
+        let mut command = tokio::process::Command::new(if cfg!(windows) { "cmd" } else { "sh" });
+        if cfg!(windows) { command.args(["/c", "exit 0"]); }
+        else { command.args(["-c", "exit 0"]); }
+        #[cfg(windows)]
+        command.creation_flags(0x0800_0000);
+        let child = command.stdin(Stdio::null()).stdout(Stdio::null()).stderr(Stdio::null()).spawn().unwrap();
+        let reader = tokio::spawn(std::future::pending::<()>());
+        reader.abort();
+        let fenced = riviu_core::FrameSink::clear_and_advance(sink.as_ref(), "fixture");
+        let marker = riviu_core::driver::OwnedStreamStopPending {
+            stop_id: uuid::Uuid::new_v4(), udid: "fixture".into(),
+            old_generation: 0, fenced_generation: fenced,
+        };
+        driver.pending_stream_stops.lock().insert("fixture".into(), Arc::new(tokio::sync::Mutex::new(PendingStreamStop {
+            marker: marker.clone(), producer: StreamProducer {
+                generation: 0, host_port: 1, child, reader, device_pid: 1,
+            }, stop_dispatched: true, forward_cleanup_attempted: true,
+        })));
+        assert!(driver.producer_absent("fixture").await.is_err());
+        assert!(driver.ensure_minicap_locked("fixture").await.is_err());
+        let repeated = driver.stop_owned_stream("fixture").await.unwrap_err();
+        assert_eq!(repeated.downcast_ref::<riviu_core::driver::OwnedStreamStopPending>(), Some(&marker));
+        let mut wrong = marker.clone(); wrong.stop_id = uuid::Uuid::new_v4();
+        assert!(driver.reconcile_owned_stream_stop(&wrong).await.is_err());
+        let proof = driver.reconcile_owned_stream_stop(&marker).await.unwrap();
+        assert!(proof.child_stopped);
+        assert_eq!((proof.old_generation, proof.new_generation), (0, fenced));
+        assert_eq!(sink.cleared.load(Ordering::Relaxed), 1, "no second frame invalidation");
+        assert!(driver.pending_stream_stops.lock().is_empty());
+        let repeated = driver.reconcile_owned_stream_stop(&marker).await.unwrap();
+        assert_eq!((repeated.old_generation, repeated.new_generation), (0, fenced));
+        assert_eq!(sink.cleared.load(Ordering::Relaxed), 1);
+        let mut absent = marker.clone(); absent.stop_id = uuid::Uuid::new_v4();
+        assert!(driver.reconcile_owned_stream_stop(&absent).await.is_err(), "missing exact receipt is not proof");
+        riviu_core::FrameSink::clear_and_advance(sink.as_ref(), "fixture");
+        assert!(driver.reconcile_owned_stream_stop(&marker).await.is_err(), "later generation cannot reuse old completion");
     }
 
     #[tokio::test]

@@ -20,7 +20,7 @@ test("shell keeps navigation, current page and fleet status usable at operator s
     if (await systemGroup.getAttribute("aria-expanded") === "false") await systemGroup.click();
     await openOperatorPage(page, "Cài đặt");
     await expect(page.getByTestId("page-title")).toHaveText("Cài đặt");
-    await expect(navigation.getByRole("button", { name: "Cài đặt" })).toHaveAttribute("aria-current", "page");
+    await expect(navigation.getByRole("button", { name: "Cài đặt", exact: true })).toHaveAttribute("aria-current", "page");
 
     await systemGroup.click();
     await expect(systemGroup).toHaveAttribute("aria-expanded", "false");

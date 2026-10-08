@@ -1,3 +1,4 @@
+import { machineNumberLabel } from "../deviceNaming";
 import { useEffect, useRef, useState } from "react";
 import { AppWindow, FolderOpen, Plus, RefreshCw, Trash2 } from "lucide-react";
 
@@ -10,6 +11,7 @@ import {
   installLibraryAppBatch,
   listAppsLibrary,
   listGroups,
+  uninstallLibraryAppBatch,
 } from "../api";
 import { TargetSelector } from "../components/TargetSelector";
 import { LibraryBatchMonitor } from "../components/LibraryBatchMonitor";
@@ -27,7 +29,16 @@ import {
   type StatusTone,
 } from "../components/WorkspacePrimitives";
 import { pickFile } from "../pickFile";
-import type { AppInstallResult, AppInstallStatus, AppLibraryItem, DeviceGroup, TargetRef } from "../types";
+import type {
+  AppInstallResult,
+  AppInstallStatus,
+  AppLibraryItem,
+  AppRemovalMode,
+  AppRemovalOutcome,
+  AppRemovalResult,
+  DeviceGroup,
+  TargetRef,
+} from "../types";
 import type { SelProps } from "./pageProps";
 import type { OperationSourceRef } from "../operationSource";
 
@@ -39,12 +50,21 @@ const INSTALL_STATUS: Record<AppInstallStatus, { label: string; tone: StatusTone
   cancelledBeforeDispatch: { label: "Đã hủy trước khi cài", tone: "neutral" },
 };
 
+const REMOVAL_OUTCOME: Record<AppRemovalOutcome, { label: string; tone: StatusTone }> = {
+  done: { label: "Đã xong", tone: "success" },
+  refusedBusy: { label: "Máy bận, chưa gỡ", tone: "warning" },
+  failedBeforeEffect: { label: "Chưa gỡ", tone: "error" },
+  unknownAfterDispatch: { label: "Cần kiểm lại", tone: "warning" },
+};
+
+const REMOVAL_VERB: Record<AppRemovalMode, string> = { uninstall: "Gỡ", reinstall: "Gỡ và cài lại" };
+
 function appVersion(app: AppLibraryItem): string {
   return app.versionName || app.version || "Chưa đọc được phiên bản";
 }
 
 /** The real app library and bounded, per-device installation results. */
-export function AppsPage({ devices, selected, operationSource }: SelProps & { operationSource?: OperationSourceRef }) {
+export function AppsPage({ devices, selected, operationSource, deviceNumbers }: SelProps & { operationSource?: OperationSourceRef; deviceNumbers?: ReadonlyMap<string, number> }) {
   const batch = useLibraryBatch("appInstall", operationSource?.kind === "appInstall" ? operationSource.operationId : undefined);
   const [importOpen, setImportOpen] = useState(false);
   const [items, setItems] = useState<AppLibraryItem[]>([]);
@@ -56,6 +76,7 @@ export function AppsPage({ devices, selected, operationSource }: SelProps & { op
   const [batchResults, setBatchResults] = useState<AppInstallResult[]>([]);
   const [batchLabels, setBatchLabels] = useState<Map<string,string>>(new Map());
   const [activeBatch, setActiveBatch] = useState<{ id: string; appId: string } | null>(null);
+  const [removal, setRemoval] = useState<{ mode: AppRemovalMode; appName: string; results: AppRemovalResult[] } | null>(null);
   const [allowDowngrade, setAllowDowngrade] = useState(false);
   const [itemsLoading, setItemsLoading] = useState(true);
   const [itemsError, setItemsError] = useState<string | null>(null);
@@ -114,7 +135,7 @@ export function AppsPage({ devices, selected, operationSource }: SelProps & { op
     const batchId = `app-install-${Date.now()}-${Math.random().toString(16).slice(2)}`;
     setBusy(true);
     setBatchResults([]);
-    setBatchLabels(new Map(udids.map((udid,index) => [udid,`Máy ${devices.findIndex((device) => device.udid === udid) + 1 || index + 1}`])));
+    setBatchLabels(new Map(udids.map(udid => [udid, `${machineNumberLabel(deviceNumbers?.get(udid))} · ${devices.find(device => device.udid === udid)?.name ?? udid}`])));
     setActiveBatch({ id: batchId, appId: app.id });
     try {
       const response = await installLibraryAppBatch({
@@ -125,8 +146,8 @@ export function AppsPage({ devices, selected, operationSource }: SelProps & { op
       });
       setBatchResults(response.results);
       if (operationSource) batch.follow(`appInstall:${response.batchId}`);
-      if (response.target) setBatchLabels(new Map(response.target.included.map((device,index) => [device.udid,
-        `Máy ${device.number ?? index + 1}${device.alias.trim() ? ` · ${device.alias.trim()}` : ""}`])));
+      if (response.target) setBatchLabels(new Map(response.target.included.map((device) => [device.udid,
+        `${machineNumberLabel(device.number)}${device.alias.trim() ? ` · ${device.alias.trim()}` : ""}`])));
       const succeeded = response.results.filter((result) => result.status === "succeeded").length;
       const uncertain = response.results.filter((result) => result.status === "uncertain").length;
       const failed = response.results.length - succeeded - uncertain;
@@ -144,13 +165,44 @@ export function AppsPage({ devices, selected, operationSource }: SelProps & { op
     }
   };
 
+  /**
+   * Uninstall is destructive: the app's data and the account logged in on that phone go with it.
+   * One confirm names that loss; the backend then gives every phone one attempt and never retries
+   * a dispatched uninstall or install on its own.
+   */
+  const runRemoval = async (app: AppLibraryItem, udids: string[], mode: AppRemovalMode) => {
+    if (!udids.length) return;
+    const confirmed = await requestConfirm({
+      title: mode === "uninstall" ? `Gỡ ${app.name} khỏi ${udids.length} máy?` : `Gỡ và cài lại ${app.name} trên ${udids.length} máy?`,
+      message: `Dữ liệu của ${app.name} và tài khoản đang đăng nhập trong ứng dụng trên ${udids.length} máy sẽ bị mất`
+        + (mode === "reinstall" ? `; sau đó cài lại ${appVersion(app)} từ thư viện.` : ".")
+        + " Máy đang đăng bài, nuôi hoặc tương tác sẽ bị từ chối, không chờ. Lệnh đã gửi sẽ không tự gửi lại.",
+      confirmLabel: mode === "uninstall" ? "Gỡ cài đặt" : "Gỡ và cài lại",
+      danger: true,
+    });
+    if (!confirmed) return;
+    setBusy(true);
+    setRemoval(null);
+    setBatchLabels(new Map(udids.map(udid => [udid, `${machineNumberLabel(deviceNumbers?.get(udid))} · ${devices.find(device => device.udid === udid)?.name ?? udid}`])));
+    try {
+      const response = await uninstallLibraryAppBatch({ appId: app.id, udids, mode });
+      setRemoval({ mode, appName: app.name, results: response.results });
+      const count = (outcome: AppRemovalOutcome) => response.results.filter((result) => result.outcome === outcome).length;
+      flash(`${REMOVAL_VERB[mode]}: ${count("done")} xong, ${count("refusedBusy")} máy bận, ${count("failedBeforeEffect")} chưa gỡ, ${count("unknownAfterDispatch")} cần kiểm lại`);
+    } catch (error) {
+      flashError(error);
+    } finally {
+      setBusy(false);
+    }
+  };
+
   const targets = resolveAutomationTarget(targetRef, devices, groups);
   const selectedCount = targets.length;
   const confirmedCount = batchResults.filter((result) => result.status === "succeeded").length;
 
   return (
     <div className="admin-workspace apps-workspace">
-      <TargetSelector devices={devices} groups={groups} selected={[]} onChange={() => undefined}
+      <TargetSelector deviceLabel={device => `${machineNumberLabel(deviceNumbers?.get(device.udid))} · ${device.name}`} devices={devices} groups={groups} selected={[]} onChange={() => undefined}
         targetRef={targetRef} onTargetRefChange={setTargetRef} requireChoice label="Phạm vi cài đặt" />
       {groupsLoading && <LoadingState label="Đang tải danh sách nhóm…" />}
       {groupsError && <StatusNotice tone="error" action={<button type="button" className="ghost" onClick={() => void reloadGroups()}>Thử lại danh sách nhóm</button>}>
@@ -301,6 +353,24 @@ export function AppsPage({ devices, selected, operationSource }: SelProps & { op
                           >
                             Cài → {installTargets.length} {platformName}
                           </button>
+                          <button
+                            type="button"
+                            className="ghost"
+                            disabled={!installTargets.length || busy || batch.active}
+                            title={`Gỡ ${app.name} khỏi ${installTargets.length} ${platformName}; dữ liệu và tài khoản trong ứng dụng sẽ mất`}
+                            onClick={() => void runRemoval(app, installTargets, "uninstall")}
+                          >
+                            Gỡ → {installTargets.length} {platformName}
+                          </button>
+                          <button
+                            type="button"
+                            className="ghost"
+                            disabled={!installTargets.length || busy || batch.active}
+                            title={`Gỡ rồi cài lại đúng gói ${appVersion(app)} trong thư viện lên ${installTargets.length} ${platformName}`}
+                            onClick={() => void runRemoval(app, installTargets, "reinstall")}
+                          >
+                            Cài lại → {installTargets.length} {platformName}
+                          </button>
                           {activeBatch?.appId === app.id && (
                             <button type="button" className="ghost" onClick={() => void cancelAppInstallBatch(activeBatch.id).catch(flashError)}>
                               Hủy máy chưa bắt đầu
@@ -382,6 +452,35 @@ export function AppsPage({ devices, selected, operationSource }: SelProps & { op
               />
             </FormSection>
           )}
+          {removal && removal.results.length > 0 && (
+            <FormSection
+              title={removal.mode === "uninstall" ? "Kết quả gỡ cài đặt" : "Kết quả gỡ và cài lại"}
+              description={`${removal.appName} · ${removal.results.filter((result) => result.outcome === "done").length}/${removal.results.length} máy đã xong`}
+            >
+              <ResponsiveTable
+                label="Kết quả gỡ gần nhất"
+                rows={removal.results}
+                keyForRow={(result) => result.udid}
+                columns={[
+                  {
+                    id: "device",
+                    label: "Thiết bị",
+                    render: (result) => batchLabels.get(result.udid) ?? "Máy trong lần chạy",
+                  },
+                  {
+                    id: "status",
+                    label: "Kết quả",
+                    render: (result) => <StatusChip tone={REMOVAL_OUTCOME[result.outcome].tone}>{REMOVAL_OUTCOME[result.outcome].label}</StatusChip>,
+                  },
+                  {
+                    id: "detail",
+                    label: "Chi tiết",
+                    render: (result) => result.detail ? <p className="admin-result-detail">{result.detail}</p> : "—",
+                  },
+                ]}
+              />
+            </FormSection>
+          )}
         </main>
 
         <SummaryRail title="Phạm vi cài đặt">
@@ -396,6 +495,7 @@ export function AppsPage({ devices, selected, operationSource }: SelProps & { op
             Cho phép hạ phiên bản
           </label>
           <p className="hint">Hạ phiên bản luôn yêu cầu xác nhận riêng trước khi cài.</p>
+          <p className="hint">Gỡ và cài lại làm mất dữ liệu và tài khoản trong ứng dụng; máy đang bận bị từ chối, không chờ.</p>
         </SummaryRail>
       </div>
     </div>

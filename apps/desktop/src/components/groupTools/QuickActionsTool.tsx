@@ -1,33 +1,15 @@
+import { setWallpaperSync, retryWallpaperSync, useWallpaperSyncState, applyNumberWallpaper, applyCustomWallpaper } from "../../wallpaperSync";
 import { useState } from "react";
 import type { HardwareKey } from "../../types";
-import { groupInput, setScreenLocked, setWallpaper, setWallpaperBytes } from "../../api";
+import { groupInput, listDeviceMetas, setScreenLocked } from "../../api";
 import { pickFiles } from "../../pickFile";
 import { groupInputOutcome } from "../../groupInput";
 import { getGroupSync } from "../../groupSync";
 import { pushToast, toastError } from "../../toastStore";
 import { fanOutReached, fanOutReasons } from "../../fanout";
 
-/** Render a tall PNG with a big number centred, for "set number as wallpaper" (A3). */
-async function numberWallpaperPng(label: string): Promise<Uint8Array> {
-  const canvas = document.createElement("canvas");
-  canvas.width = 1080;
-  canvas.height = 1920;
-  const ctx = canvas.getContext("2d");
-  if (!ctx) throw new Error("no 2d context");
-  ctx.fillStyle = "#0b0b0f";
-  ctx.fillRect(0, 0, canvas.width, canvas.height);
-  ctx.fillStyle = "#ff6a00";
-  ctx.textAlign = "center";
-  ctx.textBaseline = "middle";
-  ctx.font = "bold 620px system-ui, sans-serif";
-  ctx.fillText(label, canvas.width / 2, canvas.height / 2);
-  const blob: Blob = await new Promise((resolve, reject) =>
-    canvas.toBlob((b) => (b ? resolve(b) : reject(new Error("toBlob failed"))), "image/png"),
-  );
-  return new Uint8Array(await blob.arrayBuffer());
-}
-
 export function QuickActionsTool({ targets, scopeLabel }: { targets: string[]; scopeLabel: string }) {
+  const wallpaperSync = useWallpaperSyncState();
   const [busy, setBusy] = useState<string | null>(null);
 
   const KEYS: { label: string; key: HardwareKey }[] = [
@@ -65,23 +47,21 @@ export function QuickActionsTool({ targets, scopeLabel }: { targets: string[]; s
       return;
     }
     setBusy("wall-num");
-    const results = await Promise.allSettled(
-      targets.map(async (udid, i) => {
-        const png = await numberWallpaperPng(String(i + 1));
-        await setWallpaperBytes(udid, Array.from(png));
-      }),
-    );
-    setBusy(null);
-    const ok = fanOutReached(results);
-    if (ok === targets.length) pushToast("ok", "Đã đặt số làm hình nền", `${ok} máy`);
-    else
-      pushToast(
-        "warn",
-        `Đặt hình nền ${ok}/${targets.length} máy`,
-        // Was a fixed guess about the helper. Often right, and when wrong it hid the sentence
-        // the phone actually returned.
-        fanOutReasons(targets, results) ?? "Máy còn lại cần Riviu helper.",
-      );
+    try {
+      // Read committed numbers once for the operation, including devices outside this selection.
+      const metas = new Map((await listDeviceMetas()).map(meta => [meta.udid, meta]));
+      const results = await Promise.allSettled(targets.map(async udid => {
+        const number = metas.get(udid)?.number;
+        if (number == null) throw new Error("Máy chưa có số đã lưu; cập nhật danh sách rồi thử lại.");
+        await applyNumberWallpaper(udid, number);
+      }));
+      const ok = fanOutReached(results);
+      pushToast(ok === targets.length ? "ok" : "warn", `Đã đặt hình nền ${ok}/${targets.length} máy`, fanOutReasons(targets, results) ?? undefined);
+    } catch (error) {
+      toastError("Chưa đặt được hình nền theo số máy", error);
+    } finally {
+      setBusy(null);
+    }
   };
 
   const lock = async (locked: boolean) => {
@@ -115,7 +95,7 @@ export function QuickActionsTool({ targets, scopeLabel }: { targets: string[]; s
     if (!picked.length) return;
     const path = picked[0];
     setBusy("wall-img");
-    const results = await Promise.allSettled(targets.map((udid) => setWallpaper(udid, path)));
+    const results = await Promise.allSettled(targets.map((udid) => applyCustomWallpaper(udid, path)));
     setBusy(null);
     const ok = fanOutReached(results);
     if (ok === targets.length) pushToast("ok", "Đã đặt ảnh nền", `${ok} máy`);
@@ -162,6 +142,14 @@ export function QuickActionsTool({ targets, scopeLabel }: { targets: string[]; s
         Hình nền (Android, cần Riviu helper) — đánh số máy để nhận diện, hoặc đặt một ảnh
         chung.
       </p>
+      <label><input type="checkbox" checked={targets.length > 0 && targets.every(udid => wallpaperSync[udid]?.enabled)}
+        onChange={event => { try { setWallpaperSync(targets, event.target.checked); } catch (error) { toastError("Chưa lưu được đồng bộ hình nền", error); } }} /> Đồng bộ hình nền theo số máy</label>
+      <p className="hint">Áp dụng khi máy rảnh; máy ngoại tuyến chờ kết nối lại. Logo R ở trên, số đã lưu ở dưới.</p>
+      {targets.some(udid => ["pending", "needsReview"].includes(wallpaperSync[udid]?.state ?? "")) && <details>
+        <summary>Hình nền cần kiểm tra</summary>
+        <p>Lần đặt trước chưa xác nhận hoàn tất. Kiểm tra điện thoại trước khi thử lại.</p>
+        <button type="button" onClick={() => { try { retryWallpaperSync(targets); } catch (error) { toastError("Chưa lưu được yêu cầu thử lại", error); } }}>Thử lại đồng bộ hình nền</button>
+      </details>}
       <div className="nurture-float-actions">
         <button
           type="button"

@@ -92,6 +92,10 @@ giữ nguyên kiểu để chủ phase/dispatcher bỏ target cũ và xác minh 
 chấp nhận observation của phiên mới dưới binding cũ. Caption Unknown được đọc lại;
 nội dung khác thật hoặc mơ hồ vẫn từ chối. Bước nhạc có một deadline 180 giây chung
 cho các attempt/backoff; hết tổng budget không tự requeue để cấp lại cửa sổ mới.
+Lần đọc lại nhạc, caption và nút Đăng ngay trước Post dùng một deadline hữu hạn, đặt
+một lần: 1,5 lần thời gian chuẩn bị đo được của cùng phiên, tối thiểu 12 giây, tối đa
+16 giây. Thiếu dữ liệu, mơ hồ hoặc hết hạn vẫn là lỗi thử lại trước Post: chưa có intent
+và không bấm Đăng.
 
 Dispatcher giữ completion receipt đến khi SQLite xác nhận cùng
 assignment/campaign/run/attempt/device/phase/revision. Journal cạnh DB lưu receipt
@@ -409,6 +413,14 @@ scrcpy/minicap đều định tuyến theo serial. Máy trùng ở hai server gi
 máy mất kết nối vẫn giữ route phục vụ cleanup. Server đang quản lý máy mà lỗi đọc
 inventory không được biến thành danh sách rỗng. Cổng cấu hình tường minh chỉ dùng
 server đã chọn; không tự mở rộng phạm vi đó.
+`ServerWatch` chỉ diễn giải chính các lần đọc roster đó. Server từng có máy mà ngừng
+trả lời sẽ phát `AdbServerNotice` `lost`, rồi `returned` khi trả lời lại. Trong
+`OUTAGE_START_HOLD` (15 giây) keeper không mở stream mới, để tránh client adb tự khởi động
+daemon tranh với công cụ đang restart. Sau đó lần mở đầu tiên của mỗi máy giãn 2→30 giây
+khi lỗi. Mở view kiểm tra `get-state` trước mọi lệnh adb khác. Ghi kênh điều khiển scrcpy
+(chạm/phím/keyframe) có hạn 2 giây cho cả chờ khoá lẫn ghi. Hết hạn khi chờ khoá nghĩa là
+chưa gửi; hết hạn hoặc lỗi khi ghi nghĩa là không chắc đã tới máy, nên đóng socket và
+không gửi lại.
 
 My Apps dùng `AppWorkflowV1` (schema1) và revision bất biến; migration40 bổ sung bảng
 document/revision. Graph được kiểm ở biên lưu rồi biên dịch thành cấu hình native và
@@ -488,7 +500,7 @@ cho một lần đọc bổ sung/phase trong ngân sách và xóa snapshot cũ t
 
 
 `Submitted` chỉ chứng minh thao tác Đăng đã qua biên hiệu lực và TikTok trở lại feed.
-`Verifying` giữ media và nhịp xác minh (Android restart TikTok trước Copy); `Succeeded` đòi canonical link, đúng tài khoản
+`Verifying` giữ media và nhịp xác minh (Android chỉ restart TikTok khi upload đã được chứng minh xong); `Succeeded` đòi canonical link, đúng tài khoản
 đã đọc trước Post, caption và khoảng thời gian xuất bản sau intent. `effect_intent`
 giữ `expectedAccount`/`submittedAt` để phép xác minh sau restart không dựa đồng hồ lúc
 retry. Thiếu bằng chứng không được cold-start hoặc bấm Post lại.
@@ -555,8 +567,18 @@ không được background tự mở lại. Nhật ký verifying chỉ nói ki�
 Android ở trạng thái Connected sau restart vẫn được kiểm khi agent đã sẵn sàng;
 worker mở session qua control plane, không đòi mở điều khiển bằng tay để đổi
 trạng thái thành Ready. Máy Busy/Preparing/Error/offline vẫn chờ; iOS giữ điều kiện Ready.
-Với receipt Android `submitted`/`posted` chưa có link, `verification_restart` tắt đúng
-package đã ghi trong intent, kiểm proof hết tiến trình, mở lại và kiểm tiến trình đang
+Receipt `submitted` chỉ chứng minh biên Post, không chứng minh upload đã xong: lượt
+xác minh đầu vẫn chạy ngay nhưng chỉ quan sát, giữ TikTok chạy. Với receipt Android
+`submitted`/`posted` chưa có link, `verification_restart` chỉ tắt đúng package đã ghi
+trong intent khi `verificationBudget` của đúng intent đó đã có `publicationStage` 2 (một
+lượt trước đọc được caption đầy đủ và thời gian gửi trên cùng snapshot bài; với bài ảnh
+Global 45.7.3/en, snapshot viewer ảnh mở từ ô hồ sơ trước Copy cũng tính khi `desc` khớp
+đủ và `zwj` nằm trong cửa sổ gửi, không tap thêm; viewer ảnh mở rộng và Trill 38.3.2
+chưa đo được cả hai trên một snapshot nên không ghi) và hai
+snapshot mới cùng phiên cho thấy màn đã đo, không có composer/upload/ProgressBar.
+Thiếu một điều kiện thì giữ TikTok chạy, ghi `appRestart.state=keptRunning` và lượt
+vẫn chờ quan sát; không chuyển lỗi, không Post lại. Khi được phép, kiểm proof hết tiến
+trình, mở lại và kiểm tiến trình đang
 chạy trước Copy. Cùng lease giữ suốt chu kỳ; kiểm revision/stop trước và sau các await,
 không đóng máy còn bài khác đang giữ. Proof restart ghi vào `verificationDiagnostic.appRestart`.
 Android hẹn giờ bắt đầu kiểm khi phiên đăng nhả máy; lỗi restart cũng giữ nhịp 300 giây.
@@ -858,6 +880,9 @@ Picker Trill 38.3.2 có thể cắt hàng ordinal đã chọn ở mép trên khi
 bỏ ô chưa chọn hoặc dùng tọa độ extrapolate để tap. Test giữ ca chọn 12→13 ảnh.
 Chế độ dev `RIVIU_PUBLISH_PICKER_TRACE` nhận đường dẫn tuyệt đối và chỉ giữ một
 XML cuối cho mỗi album; bản phát hành không ghi trace này.
+Cây đọc xong mà không có node nào của package TikTok là app khác chiếm foreground,
+không phải cây picker thiếu: chẩn đoán ghi `foregroundNotTarget` cùng package đó,
+và bước dọn composer không bấm Back vào app khác; lượt sau khởi động sạch TikTok.
 
 
 Android mở ứng dụng đọc lại foreground. Nếu launcher chỉ đưa một task chứa ứng dụng
@@ -919,7 +944,10 @@ atomic publish, fsync hoặc tăng hàng đợi để che trace bị thiếu.
 Tìm kiếm Android giữ mapping card/grid/author theo build Global 45.4.3, 45.7.3,
 46.0.41, 46.1.3 và 46.4.3; chỉ mở card sau khi đọc lại đúng từ khóa và tab Videos.
 Picker album Trill 38.3.2/en cuộn trong RecyclerView h27 khi album import chưa ở
-viewport; tên album vẫn phải khớp duy nhất và ổn định. Nút Gửi trên đường hierarchy
+viewport; tên album vẫn phải khớp duy nhất và ổn định. Sau khi chạm dòng album, pill
+chỉ xác nhận khi một lần đọc xong ghi đúng tên. Đọc xong mà pill ghi album khác thì
+từ chối `AlbumNotConfirmed`; đọc không xong hoặc pill chưa có chữ là chưa biết và trả
+deadline quan sát có kiểu. Không chạm lại dòng album. Nút Gửi trên đường hierarchy
 được đọc từ một snapshot mới, gồm vị trí, định danh và bit enabled; thiếu bit hoặc
 nhiều node cùng khớp thì từ chối trước effect.
 

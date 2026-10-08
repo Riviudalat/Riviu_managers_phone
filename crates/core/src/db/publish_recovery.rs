@@ -9,13 +9,13 @@ fn read(conn: &Connection, id: &str) -> anyhow::Result<Option<(String, PublishRe
             [id],
             |r| Ok((r.get(0)?, r.get(1)?)),
         )
-        .optional()?;
+        .optional().context("publish_recovery read_state query")?;
     raw.map(|(token, raw)| Ok((token, serde_json::from_str(&raw)?)))
         .transpose()
 }
 fn write(conn: &Connection, id: &str, token: &str, s: &PublishRecoveryState) -> anyhow::Result<()> {
-    let previous = read(conn, id)?.map(|(_, s)| s);
-    conn.execute("INSERT INTO publish_recovery_state VALUES(?1,?2,?3) ON CONFLICT(assignment_id) DO UPDATE SET run_token=excluded.run_token,payload=excluded.payload",params![id,token,serde_json::to_string(s)?])?;
+    let previous = read(conn, id).context("publish_recovery write_state read_previous")?.map(|(_, s)| s);
+    conn.execute("INSERT INTO publish_recovery_state VALUES(?1,?2,?3) ON CONFLICT(assignment_id) DO UPDATE SET run_token=excluded.run_token,payload=excluded.payload",params![id,token,serde_json::to_string(s)?]).context("publish_recovery write_state upsert")?;
     if previous
         .as_ref()
         .is_none_or(|p| p.state != s.state || p.retries_used != s.retries_used || p.step != s.step)
@@ -28,7 +28,7 @@ fn write(conn: &Connection, id: &str, token: &str, s: &PublishRecoveryState) -> 
             }
             _ => format!("Tiếp tục bước {}", s.step),
         };
-        conn.execute("INSERT INTO operation_device_events(source_kind,source_id,udid,action,state,recorded_at,text,detail) SELECT 'publish',campaign_id,udid,'publishRecovery',?2,?3,?4,?5 FROM publish_assignments WHERE id=?1",params![id,s.state,Utc::now().to_rfc3339(),text,s.last_error])?;
+        conn.execute("INSERT INTO operation_device_events(source_kind,source_id,udid,action,state,recorded_at,text,detail) SELECT 'publish',campaign_id,udid,'publishRecovery',?2,?3,?4,?5 FROM publish_assignments WHERE id=?1",params![id,s.state,Utc::now().to_rfc3339(),text,s.last_error]).context("publish_recovery write_state event")?;
     }
     Ok(())
 }
@@ -162,13 +162,14 @@ impl Database {
         step: &str,
         checkpoint: Option<&str>,
     ) -> anyhow::Result<()> {
-        let mut conn = self.conn()?;
-        let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
+        let context = |boundary: &str| format!("publish_recovery operation=update_publish_recovery_step assignment={id} step={step} boundary={boundary}");
+        let mut conn = self.conn().with_context(|| context("connect"))?;
+        let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate).with_context(|| context("begin_immediate"))?;
         anyhow::ensure!(
-            current(&tx, id, token)?,
+            current(&tx, id, token).with_context(|| context("read_current_cas"))?,
             "Lượt đăng đã dừng hoặc đã có Post intent"
         );
-        let (_, mut s) = read(&tx, id)?.context("recovery state missing")?;
+        let (_, mut s) = read(&tx, id).with_context(|| context("read_state"))?.context("recovery state missing")?;
         if !step.is_empty() {
             s.step = step.into();
         }
@@ -178,8 +179,8 @@ impl Database {
         if let Some(c) = checkpoint {
             s.checkpoint = c.into()
         };
-        write(&tx, id, token, &s)?;
-        tx.commit()?;
+        write(&tx, id, token, &s).with_context(|| format!("{} step={}", context("write_state"), s.step))?;
+        tx.commit().with_context(|| format!("{} step={}", context("commit"), s.step))?;
         Ok(())
     }
     pub fn reserve_publish_step_retry(
@@ -197,20 +198,21 @@ impl Database {
         token: &str,
         failure: &RecoveryFailure,
     ) -> anyhow::Result<Option<Duration>> {
-        let mut conn = self.conn()?;
-        let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
+        let context = |boundary: &str| format!("publish_recovery operation=reserve_publish_step_retry_failure assignment={id} boundary={boundary}");
+        let mut conn = self.conn().with_context(|| context("connect"))?;
+        let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate).with_context(|| context("begin_immediate"))?;
         anyhow::ensure!(
-            current(&tx, id, token)?,
+            current(&tx, id, token).with_context(|| context("read_current_cas"))?,
             "Lượt đăng đã dừng hoặc đã có Post intent"
         );
-        let (_, mut s) = read(&tx, id)?.context("recovery state missing")?;
+        let (_, mut s) = read(&tx, id).with_context(|| context("read_state"))?.context("recovery state missing")?;
         anyhow::ensure!(
             failure.kind == FailureKind::Retryable,
             "Only an explicitly retryable failure may spend the automatic retry budget"
         );
         let delay = spend(&mut s, failure, Utc::now().timestamp_millis());
-        write(&tx, id, token, &s)?;
-        tx.commit()?;
+        write(&tx, id, token, &s).with_context(|| format!("{} step={}", context("write_state"), s.step))?;
+        tx.commit().with_context(|| format!("{} step={}", context("commit"), s.step))?;
         Ok(delay)
     }
     pub fn bind_publish_recovery_sound(
@@ -219,16 +221,17 @@ impl Database {
         token: &str,
         selection: Option<&crate::SoundSelectionEvidence>,
     ) -> anyhow::Result<Option<crate::SoundSelectionEvidence>> {
-        let mut conn = self.conn()?;
-        let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
+        let context = |boundary: &str| format!("publish_recovery operation=bind_publish_recovery_sound assignment={id} boundary={boundary}");
+        let mut conn = self.conn().with_context(|| context("connect"))?;
+        let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate).with_context(|| context("begin_immediate"))?;
         anyhow::ensure!(
-            current(&tx, id, token)?,
+            current(&tx, id, token).with_context(|| context("read_current_cas"))?,
             "Lượt đăng đã dừng hoặc đã có Post intent"
         );
-        let (_, mut s) = read(&tx, id)?.context("recovery state missing")?;
+        let (_, mut s) = read(&tx, id).with_context(|| context("read_state"))?.context("recovery state missing")?;
         if s.sound.is_none() {
             s.sound = selection.cloned();
-            write(&tx, id, token, &s)?;
+            write(&tx, id, token, &s).with_context(|| format!("{} step={}", context("write_state"), s.step))?;
         } else if let (Some(bound), Some(proof)) = (s.sound.as_mut(), selection) {
             // Re-observation may reorder the pool. Keep its original provenance
             // and promote only proof of the already bound identity, never a
@@ -240,10 +243,10 @@ impl Database {
                 && bound.artist == proof.artist
             {
                 bound.confirmed = true;
-                write(&tx, id, token, &s)?;
+                write(&tx, id, token, &s).with_context(|| format!("{} step={}", context("write_state"), s.step))?;
             }
         };
-        tx.commit()?;
+        tx.commit().with_context(|| format!("{} step={}", context("commit"), s.step))?;
         Ok(s.sound)
     }
     /// Called only after the previous worker has returned and released its permit.

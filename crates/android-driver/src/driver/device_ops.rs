@@ -935,6 +935,52 @@ impl AndroidDriver {
         })
     }
 
+    /// One baseline shell call with its own deadline. A non-zero exit is an error carrying the
+    /// phone's stderr; the caller's re-read, not this exit code, decides whether a write held.
+    async fn baseline_shell(&self, serial: &str, script: String) -> anyhow::Result<String> {
+        const BASELINE_SHELL_TIMEOUT: Duration = Duration::from_secs(20);
+        let out = self
+            .adb
+            .shell_output(serial, &script, BASELINE_SHELL_TIMEOUT)
+            .await?;
+        if out.exit_code != 0 {
+            let detail = format!("{}{}", out.stderr, out.stdout);
+            anyhow::bail!("exit {}: {}", out.exit_code, detail.trim());
+        }
+        Ok(out.stdout)
+    }
+
+    /// Read every "Cài đặt máy" baseline setting. Read-only: `dumpsys` and `settings get`, plus
+    /// `locksettings get-disabled` only on a phone proven to have no lock credential.
+    pub async fn read_baseline(
+        &self,
+        serial: &str,
+    ) -> anyhow::Result<Vec<riviu_core::device_control::baseline::BaselineSettingReading>> {
+        let mut shell = move |script: String| self.baseline_shell(serial, script);
+        crate::baseline::read_baseline_with(&mut shell).await
+    }
+
+    /// Bring this phone to `plan`, each write verified by a re-read. The caller holds the lease.
+    pub async fn apply_baseline(
+        &self,
+        serial: &str,
+        plan: &[riviu_core::device_control::baseline::BaselineSetting],
+    ) -> anyhow::Result<Vec<riviu_core::device_control::baseline::BaselineItemResult>> {
+        let mut shell = move |script: String| self.baseline_shell(serial, script);
+        crate::baseline::apply_baseline_with(&mut shell, plan).await
+    }
+
+    /// Read-only: the reason no key can open this phone's lock screen, or `None`.
+    /// See [`crate::baseline::lock_blocker`].
+    pub async fn screen_lock_blocker(&self, serial: &str) -> anyhow::Result<Option<String>> {
+        let stdout = self
+            .baseline_shell(serial, crate::baseline::BASELINE_READ_SCRIPT.to_string())
+            .await?;
+        Ok(crate::baseline::lock_blocker(
+            &crate::baseline::parse_snapshot(&stdout, None),
+        ))
+    }
+
     /// Take a screenshot and leave it *on the phone* (xiaowei "Screenshot to phone").
     ///
     /// The other screenshot command copies the picture to this machine; this one is the row

@@ -1,3 +1,5 @@
+import { listDeviceMetas } from "./api";
+import { applyNumberWallpaper } from "./wallpaperSync";
 import {
   deviceGetClipboard,
   previewAccountReconciliation,
@@ -12,7 +14,6 @@ import {
   importMedia,
   launchDeviceApp,
   installIpa,
-  listDeviceMetas,
   listInstalledApps,
   openSystemSettings,
   powerOffDevice,
@@ -57,7 +58,6 @@ import type { DeviceInfo, DeviceMeta, HardwareKey } from "./types";
 import { pickDirectory, pickFile } from "./pickFile";
 
 const accountReads = new Set<string>();
-let accountMetaReadRevision = 0;
 
 /** Reserve exact serials through read, conflict expansion, confirmation and apply. */
 export async function readAndAssignTikTokAccounts(targets: DeviceInfo[], deps: DeviceActionDeps) {
@@ -68,9 +68,18 @@ export async function readAndAssignTikTokAccounts(targets: DeviceInfo[], deps: D
     return;
   }
   const reserved = new Set(serials);
-  const label = (udid: string) => {
-    const number = deps.deviceNumbers?.get(udid) ?? deps.metaMap.get(udid)?.number;
-    return number == null ? udid : `Máy ${number} (${udid})`;
+  // Freeze labels before awaiting reads; filtering/reordering must not renumber results.
+  const numbers = new Map([...deps.metaMap].map(([id, meta]) => [id, meta.number]));
+  deps.deviceNumbers?.forEach((number, id) => numbers.set(id, number));
+  for (const [id, number] of numbers) {
+    if (number == null || !Number.isInteger(number) || number <= 0) numbers.delete(id);
+  }
+  const label = (udid: string) => numbers.get(udid) == null ? udid : `Máy ${numbers.get(udid)} (${udid})`;
+  const report = (title: string, detail: string, confirmed: Set<string> = new Set()) => {
+    const failed = [...reserved].filter(id => !confirmed.has(id));
+    const short = failed.slice(0, 5).map(id => numbers.get(id) ?? id.slice(-6)).join(", ");
+    pushToast(failed.length ? "warn" : "ok", title, detail,
+      failed.length ? `Máy chưa cập nhật: ${short}${failed.length > 5 ? `… +${failed.length - 5} máy` : ""}` : undefined);
   };
   serials.forEach(id => accountReads.add(id));
   try {
@@ -81,9 +90,8 @@ export async function readAndAssignTikTokAccounts(targets: DeviceInfo[], deps: D
       const error = plan.blocker as { accountConflict?: { conflictingDevices?: { udid: string }[] } };
       const conflicts = error.accountConflict?.conflictingDevices?.map(row => row.udid) ?? [];
       const additional = [...new Set(conflicts)].filter(id => !reserved.has(id));
-      for (const row of plan.rows) if (row.error) toastError(`Đọc nick thất bại · ${row.udid}`, row.error);
       if (!additional.length || additional.some(id => accountReads.has(id))) {
-        toastError("Chưa đối chiếu được tài khoản; giữ nguyên nick đã lưu", plan.blocker);
+        report("Chưa đối chiếu được tài khoản; giữ nguyên nick đã lưu", describeError(plan.blocker));
         return;
       }
       const consent = await requestConfirm({
@@ -95,29 +103,40 @@ export async function readAndAssignTikTokAccounts(targets: DeviceInfo[], deps: D
       additional.forEach(id => { reserved.add(id); accountReads.add(id); });
       plan = await previewAccountReconciliation([...reserved]);
     }
-    for (const row of plan.rows) if (row.error) toastError(`Đọc nick thất bại · ${row.udid}`, row.error);
-    const proved = plan.rows.filter(row => !row.error && row.observedHandle);
-    const confirmed = await requestConfirm({
-      title: "Cập nhật tài khoản TikTok đã đọc",
-      message: proved.map(row => `${label(row.udid)}: đã lưu ${row.expectedHandle ? `@${row.expectedHandle}` : "chưa gán"} → vừa đọc @${row.observedHandle} (${row.checkedAt})`).join("\n")
-        + `\n${plan.rows.length - proved.length} máy chưa đọc được giữ nguyên. Cập nhật tên tài khoản trong Riviu.`,
-      confirmLabel: "Lưu tài khoản đã đối chiếu",
-    });
-    if (!confirmed) return;
+    if (!plan.rows.some(row => !row.error && row.observedHandle && reserved.has(row.udid))) {
+      report(`Đã cập nhật thành công 0/${reserved.size}`, [
+        `0 máy thay đổi · 0 máy đã đúng · ${reserved.size} máy chưa cập nhật`,
+        ...[...reserved].map(id => {
+          const row = plan.rows.find(item => item.udid === id);
+          return `${label(id)}: ${row?.error ? describeError(row.error) : "Chưa đọc được tài khoản"}`;
+        }),
+      ].join("\n"));
+      return;
+    }
     let saved;
     try {
       saved = await applyAccountReconciliation(plan.operationId);
     } catch (error) {
       // Keep identity visible for ROOT/operator reconciliation after a lost ACK.
-      toastError(`Chưa xác nhận lưu tài khoản · mã thao tác ${plan.operationId}`, error);
+      toastError(`Chưa xác nhận cập nhật · mã thao tác ${plan.operationId}`, error);
       return;
     }
-    pushToast(saved.length === plan.rows.length ? "ok" : "warn", `Đã gán nick TikTok ${saved.length}/${plan.rows.length} máy`);
-    const revision = ++accountMetaReadRevision;
+    const confirmedRows = new Map(saved.filter(row => reserved.has(row.udid)).map(row => [row.udid, row]));
+    const confirmed = new Set(confirmedRows.keys());
+    const unchanged = [...confirmedRows.values()].filter(row => row.expectedHandle === row.observedHandle).length;
+    const failed = [...reserved].filter(id => !confirmed.has(id));
+    const details = [
+      `${confirmed.size - unchanged} máy thay đổi · ${unchanged} máy đã đúng · ${failed.length} máy chưa cập nhật`,
+      `Mã thao tác: ${plan.operationId}`,
+      ...failed.map(id => {
+        const row = plan.rows.find(item => item.udid === id);
+        return `${label(id)}: ${row?.error ? describeError(row.error) : "Chưa có xác nhận lưu"}`;
+      }),
+    ];
     try {
-      const metas = await listDeviceMetas();
-      if (revision === accountMetaReadRevision) deps.setMetas(metas);
-    } catch (error) { toastError("Đã lưu nick nhưng chưa cập nhật danh sách", error); }
+      await deps.refreshMetas();
+    } catch (error) { details.push(`Đã lưu nhưng chưa làm mới danh sách: ${describeError(error)}`); }
+    report(`Đã cập nhật thành công ${confirmed.size}/${reserved.size}`, details.join("\n"), confirmed);
   } catch (error) { toastError("Đọc/đối soát nick thất bại", error); }
   finally { reserved.forEach(id => accountReads.delete(id)); }
 }
@@ -136,8 +155,7 @@ export interface DeviceActionDeps {
   /** Re-read devices and jobs from the backend. */
   reload: () => Promise<void>;
   metaMap: Map<string, DeviceMeta>;
-  metas: DeviceMeta[];
-  setMetas: (next: DeviceMeta[]) => void;
+  refreshMetas: () => Promise<unknown>;
   /** Which device has the control centre open, if any. */
   controlCenter: string | null;
   setControlCenter: (udid: string | null) => void;
@@ -164,8 +182,7 @@ export function buildDeviceActions(
   const {
     reload,
     metaMap,
-    metas,
-    setMetas,
+    refreshMetas,
     controlCenter,
     setControlCenter,
     groupMode,
@@ -218,8 +235,9 @@ export function buildDeviceActions(
   const patchMeta = async (change: DeviceMetaChange, done: string) => {
     try {
       await patchDeviceMeta(device.udid, change);
-      setMetas(await listDeviceMetas().catch(() => metas));
       pushToast("ok", done);
+      try { await refreshMetas(); }
+      catch (error) { toastError("Đã lưu nhưng chưa làm mới danh sách", error); }
     } catch (error) {
       toastError("Lưu không thành công", error);
     }
@@ -247,7 +265,7 @@ export function buildDeviceActions(
     },
     {
       id: "rename",
-      label: "Đổi tên máy…",
+      label: "Đổi tên trong Riviu…",
       Icon: IconText,
       keywords: "change name doi ten",
       run: () => {
@@ -297,6 +315,23 @@ export function buildDeviceActions(
             { field: "number", value: parsed.number },
             parsed.number === null ? "Đã bỏ số máy" : `Đã đặt số máy ${parsed.number}`,
           );
+        })();
+      },
+    },
+    {
+      id: "number-wallpaper",
+      label: "Đặt hình nền theo số máy",
+      keywords: "wallpaper hinh nen so may",
+      androidOnly: true,
+      Icon: IconImage,
+      run: () => {
+        void (async () => {
+          try {
+            const record = (await listDeviceMetas()).find(row => row.udid === device.udid);
+            if (record?.number == null) throw new Error("Máy chưa có số đã lưu; cập nhật danh sách trước.");
+            await applyNumberWallpaper(device.udid, record.number);
+            pushToast("ok", `Đã đặt hình nền Máy ${record.number}`);
+          } catch (error) { toastError("Chưa đặt được hình nền theo số máy", error); }
         })();
       },
     },

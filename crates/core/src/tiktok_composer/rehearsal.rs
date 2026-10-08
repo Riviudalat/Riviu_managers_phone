@@ -792,6 +792,9 @@ impl UiSession for PrepareSession<'_> {
     fn gui_session_epoch(&self) -> String {
         self.session.gui_session_epoch()
     }
+    fn pin_read_session(&self) -> crate::driver::ReadSessionPin {
+        self.session.pin_read_session()
+    }
     async fn active_app_bundle(&self) -> anyhow::Result<String> {
         self.read(self.session.active_app_bundle()).await
     }

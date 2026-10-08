@@ -844,6 +844,25 @@ export async function installTauriMock(
     }));
     // The Settings panel can now write these, and `invoke` throws for anything unregistered.
     commandHandlers.set("set_stream_settings", (args) => clone(args?.settings ?? null));
+    // "Cài đặt máy": persisted baseline plus per-phone probes. Mocked phones read unknown and
+    // apply as refusedBusy, so a browser scenario can never claim a phone was changed.
+    let deviceBaseline: JsonRecord = { settings: ["lockScreenDisabled", "autoRotateOff"], autoApplyOnConnect: true };
+    commandHandlers.set("device_baseline_get_config", () => clone(deviceBaseline));
+    commandHandlers.set("device_baseline_save_config", (args) => {
+      deviceBaseline = clone((args?.config ?? deviceBaseline) as JsonRecord);
+      return clone(deviceBaseline);
+    });
+    commandHandlers.set("device_baseline_read", (args) => ({
+      udid: args?.udid,
+      settings: [],
+      error: "Trình duyệt mô phỏng không đọc được máy thật",
+    }));
+    commandHandlers.set("device_baseline_apply", (args) => ({
+      udid: args?.udid,
+      outcome: "refusedBusy",
+      items: [],
+      detail: "Trình duyệt mô phỏng không thay đổi máy",
+    }));
     commandHandlers.set("flow_action_catalog", () => clone(catalog));
     commandHandlers.set("gui_service_status", () => ({
       config: { enabled: true, baseUrl: "", model: "", maxRequests: 20 },

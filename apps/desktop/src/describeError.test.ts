@@ -1,6 +1,13 @@
 import { describe, expect, it } from "vitest";
 
-import { describeError } from "./describeError";
+import { describeError, controlFailure } from "./describeError";
+
+it("classifies ownership at one boundary without inferring an action from Script or a timeout", () => {
+  expect(controlFailure({ code: "DeviceBusy", currentOwner: "script", message: "owned" })).toMatchObject({ owner: "script", canHandoff: true, summary: "Tác vụ tự động đang giữ máy" });
+  expect(controlFailure("DeviceBusy: device x is busy with IdleSweep; wait")).toMatchObject({ owner: "idlesweep", transientIdleSweep: true, canHandoff: false });
+  expect(controlFailure({ code: "DeviceBusy", currentOwner: "manualControl", message: "device x is busy with Script; wait" })).toMatchObject({ owner: "manualcontrol", canHandoff: false });
+  expect(controlFailure("GET /elements timed out")).toMatchObject({ owner: undefined, canHandoff: false, summary: "Hết thời gian đọc giao diện" });
+});
 
 /**
  * The bug this module exists for, pinned.

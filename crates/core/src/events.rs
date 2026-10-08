@@ -87,6 +87,15 @@ pub enum AppEvent {
     NurtureStatus {
         status: NurtureSessionStatus,
     },
+    /// An ADB server that carried phones stopped answering (`lost`) or answers again
+    /// (`returned`). Observed from Riviu's own read-only roster polls; Riviu never kills
+    /// or restarts the server. `message` is Vietnamese operator text.
+    AdbServerNotice {
+        port: u16,
+        change: String,
+        transports: u32,
+        message: String,
+    },
 }
 
 #[derive(Clone)]

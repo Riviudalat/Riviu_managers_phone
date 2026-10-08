@@ -181,9 +181,11 @@ Sau Đăng, Theo dõi hiển thị lý do chưa xác minh, lần kiểm gần nh
 kế tiếp và số lượt đã dùng/giới hạn cho tìm bài không tiến triển và metadata.
 Đến giờ kiểm vẫn phải chờ đủ điều kiện xác minh; thiếu lịch được ghi rõ là chưa
 rõ. Khi bài đã xác minh, giao diện bỏ cảnh báo phục hồi cũ và hiện riêng trạng thái
-bài/Sheet. Trên Android, khi chưa giữ được link ứng viên, sau khi nhận kết quả đã
-gửi và máy rảnh, app tắt hẳn đúng TikTok rồi mở lại trước khi lấy link. Nếu chưa có
-link, chu kỳ tắt/mở và kiểm tra lặp sau 5 phút, tính từ cuối lần kiểm trước, trong ngân sách hữu hạn bên dưới.
+bài/Sheet. Trên Android, khi chưa giữ được link ứng viên, lượt kiểm đầu chạy ngay khi
+máy rảnh nhưng giữ TikTok chạy để bài đang tải không bị ngắt. App chỉ tắt hẳn đúng
+TikTok rồi mở lại trước khi lấy link khi một lượt trước đã thấy đúng bài (caption đầy
+đủ và thời gian gửi) và màn hiện tại không có soạn bài/tải lên. Nếu chưa có
+link, kiểm tra lặp sau 5 phút, tính từ cuối lần kiểm trước, trong ngân sách hữu hạn bên dưới.
 Nhật ký **Kiểm tra liên kết lần N** là kiểm thao tác đã có, không phải bấm Đăng thêm;
 **Chưa xác minh được liên kết** không khẳng định bài đã công khai. Media được giữ khi còn chờ link; link
 xác minh xong được gửi Sheet ngay. Chỉ sau khi bài và liên kết chính tắc được xác

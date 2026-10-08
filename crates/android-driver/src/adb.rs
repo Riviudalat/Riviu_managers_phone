@@ -285,6 +285,8 @@ pub struct AdbProgram {
     path: PathBuf,
     server_port: Option<u16>,
     server_routes: Option<Arc<parking_lot::RwLock<HashMap<String, u16>>>>,
+    /// Read-only interpretation of the roster reads below; shared by every clone.
+    server_watch: Option<Arc<parking_lot::Mutex<crate::adb_server::ServerWatch>>>,
 }
 
 /// One place `adb` might be, and where that guess came from.
@@ -457,6 +459,7 @@ impl AdbProgram {
                         path: candidate.path.clone(),
                         server_port: None,
                         server_routes: None,
+                        server_watch: None,
                     },
                     candidate.origin,
                 ));
@@ -471,6 +474,7 @@ impl AdbProgram {
                     path: candidate.path,
                     server_port: None,
                     server_routes: None,
+                    server_watch: None,
                 },
                 candidate.origin,
             ));
@@ -501,6 +505,7 @@ impl AdbProgram {
             path,
             server_port: None,
             server_routes: None,
+            server_watch: None,
         }
     }
 
@@ -520,6 +525,7 @@ impl AdbProgram {
             path,
             server_port: None,
             server_routes: None,
+            server_watch: None,
         }
     }
 
@@ -530,7 +536,26 @@ impl AdbProgram {
 
     pub(crate) fn with_server_discovery(mut self) -> Self {
         self.server_routes = Some(Arc::new(parking_lot::RwLock::new(HashMap::new())));
+        self.server_watch = Some(Arc::default());
         self
+    }
+
+    /// Notices about servers that went away or came back since the last drain.
+    pub fn drain_server_notices(&self) -> Vec<crate::adb_server::AdbServerNotice> {
+        self.server_watch
+            .as_ref()
+            .map(|watch| watch.lock().drain())
+            .unwrap_or_default()
+    }
+
+    /// True for a bounded window after a server that carried phones stopped answering.
+    /// Every adb client spawned then may auto-start a daemon of our own build and race
+    /// whichever tool is restarting it, so background starts wait -- but only for
+    /// [`crate::adb_server::OUTAGE_START_HOLD`].
+    pub fn server_outage(&self) -> bool {
+        self.server_watch
+            .as_ref()
+            .is_some_and(|watch| watch.lock().holding_starts(std::time::Instant::now()))
     }
 
     pub(crate) fn apply_server_for_serial(&self, command: &mut Command, serial: Option<&str>) {
@@ -788,6 +813,12 @@ impl AdbProgram {
             crate::adb_server::roster(5037),
             crate::adb_server::roster(5038)
         );
+        if let Some(watch) = &self.server_watch {
+            let now = std::time::Instant::now();
+            let mut watch = watch.lock();
+            watch.observe(5037, primary.as_deref().ok(), now);
+            watch.observe(5038, alternate.as_deref().ok(), now);
+        }
         if primary.is_err() && alternate.is_err() && routes.read().is_empty() {
             // A fresh installation has no daemon yet. Let the configured adb
             // start only its default server; never restart a known fleet server.
@@ -3377,6 +3408,43 @@ drwxr-xr-x  32 root   root       788 2009-01-01 07:00 ..\n";
         drop(held);
         assert_eq!(adb_transfer_slots().available_permits(), transfers_before);
         assert_eq!(adb_slots().available_permits(), global_before);
+    }
+
+    /// A transfer whose adb client never answers gives every permit back at its deadline.
+    ///
+    /// Asked on 08/10/2026 after a foreign adb restarted the 5037 server mid-publish and two
+    /// assignments then sat queued for 25 minutes next to `waited for an adb slot ...
+    /// limit=12 transfers=4`. Those two numbers are the configured caps printed by the log
+    /// line, not occupancy, and this pins the mechanism: permits are dropped with the call.
+    #[tokio::test]
+    async fn a_transfer_that_times_out_returns_every_permit() {
+        let _serial = slot_tests_run_one_at_a_time().lock().await;
+        let root = std::env::temp_dir().join(format!("riviu-slot-timeout-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir(&root).unwrap();
+        let executable = root.join(if cfg!(windows) { "adb-hang.cmd" } else { "adb-hang.sh" });
+        #[cfg(windows)]
+        std::fs::write(&executable, "@echo off\r\nping -n 3 127.0.0.1 >nul\r\n").unwrap();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::write(&executable, "#!/bin/sh\nsleep 2\n").unwrap();
+            std::fs::set_permissions(&executable, std::fs::Permissions::from_mode(0o700)).unwrap();
+        }
+        let serial = "queue-test-transfer-timeout";
+        let transfers_before = adb_transfer_slots().available_permits();
+        let global_before = adb_slots().available_permits();
+
+        let error = AdbProgram::at(executable)
+            .device(serial, &["push", "fixture.bin", "/sdcard/Download/riviu-test/"], Duration::from_millis(300))
+            .await
+            .unwrap_err();
+
+        assert!(error.to_string().contains("timed out"), "{error:#}");
+        assert_eq!(adb_transfer_slots().available_permits(), transfers_before);
+        assert_eq!(adb_slots().available_permits(), global_before);
+        let queue = adb_device_queues().lock().get(serial).cloned().expect("queue");
+        assert_eq!(queue.available_permits(), 1, "the phone's queue is open again");
+        let _ = std::fs::remove_dir_all(&root);
     }
 
     /// And an interactive call leaves the transfer sub-cap alone.

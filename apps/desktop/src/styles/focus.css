@@ -386,3 +386,10 @@ button.danger:hover:not(:disabled) {
 .focus-quick-keys button { flex: 1; min-height: 34px; display: grid; place-items: center; }
 
 .dev-phone-focused-message { position: absolute; inset: 0; display: grid; place-items: center; padding: 12px; text-align: center; background: var(--bg-stage); color: #e2e8f0; font-size: var(--text-sm); }
+
+.focus-control-status { flex: 0 0 auto; }
+.focus-control-status details { margin-top: 4px; }
+.focus-control-status summary { cursor: pointer; color: var(--text-2); }
+.focus-control-status details ul { max-height: 140px; overflow-y: auto; }
+.focus-control-status li { grid-template-columns: minmax(0, 1fr); gap: 2px; }
+.focus-control-summary { color: var(--text-2); }

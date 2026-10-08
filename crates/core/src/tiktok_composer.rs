@@ -114,6 +114,42 @@ pub const ARM_WINDOW: Duration = Duration::from_millis(4_000);
 /// upload — but TikTok does its own checks first, so it is not instant either.
 pub const POST_CONFIRM_WINDOW: Duration = Duration::from_millis(20_000);
 pub const POLL: Duration = Duration::from_millis(350);
+/// Floor of the one finite deadline over the final pre-Post sound reproof: fresh sound
+/// readback, return to the caption page, caption restore and the final Post button.
+///
+/// **Measured on campaign 1fc0b331** (07-08/10/2026, Trill 38.3.2 and Global 45.7.3;
+/// the `final sound reproof before cleanup` lines of its six controller logs, analysed in
+/// `target/pipeline-audit-20261008/concurrency-budget/`). The former unmeasured 8 s passed
+/// 26 of 74 reproofs. Successful phases, p50 / p90 / max in ms:
+///
+/// | phase | Trill 38.3.2 | Global 45.7.3 |
+/// |---|---|---|
+/// | fresh sound readback | 2898 / 3328 / 3441 | 2781 / 3444 / 3505 |
+/// | return to caption | 2802 / 3068 / 3504 | 3565 / 3750 / 3830 |
+/// | caption restore | 792 / 890 / 1023 | 504 / 671 / 769 |
+/// | final Post button | 886 / 1033 / 1232 | 1374 / 1525 / 1555 |
+///
+/// Phase maxima sum to 9.2 s and 9.7 s; 43 of the 48 failures expired in the last one
+/// or two phases. Re-measure from those log lines (now with `window_ms`) before moving it.
+const FINAL_REPROOF_FLOOR: Duration = Duration::from_secs(12);
+/// Ceiling of the same deadline. A slow session may lengthen the window, never past this:
+/// the proof must stay fresh at the Post gesture, and a stuck accessibility root (~10 s per
+/// read) still ends in the ordinary pre-Post retry.
+const FINAL_REPROOF_CEILING: Duration = Duration::from_secs(16);
+const _: () = assert!(
+    FINAL_REPROOF_FLOOR.as_millis() <= FINAL_REPROOF_CEILING.as_millis(),
+    "Duration::clamp panics when its floor is above its ceiling"
+);
+
+/// The final reproof window for a session whose keyboard and editor preparation just took
+/// `preparation` on the same screens.
+///
+/// Same campaign, same 74 reproofs: preparation p50 6.2 s, p90 8.3 s, max 11.3 s, and a
+/// successful reproof took 1.21x (p50) to 1.53x (p90) its own preparation. Computed once
+/// and never extended while the reproof runs.
+fn final_reproof_window(preparation: Duration) -> Duration {
+    (preparation.saturating_mul(3) / 2).clamp(FINAL_REPROOF_FLOOR, FINAL_REPROOF_CEILING)
+}
 
 /// The device screen, validated once so the geometry below cannot be built on nonsense.
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -362,6 +398,7 @@ impl std::error::Error for ComposerUnready {}
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct ComposerPlan {
     package: &'static str,
+    popup_profile: (&'static str, Option<&'static str>),
     wait_rendered_editor: bool,
     open: ElementQuery<'static>,
     shutter: ElementQuery<'static>,
@@ -479,6 +516,7 @@ impl ComposerPlan {
         let optional = |control: TikTokControl| labels.label(control).map(|label| label.to_query());
         Ok(Self {
             package: labels.package(),
+            popup_profile: (labels.language(), labels.resource_version()),
             wait_rendered_editor: labels.package() == "com.zhiliaoapp.musically"
                 && labels.resource_version() == Some("45.7.3")
                 && labels.language() == "en",
@@ -579,6 +617,7 @@ impl ComposerPlan {
             |control: TikTokControl| labels.label(control).expect("checked above").to_query();
         Ok(Self {
             package: labels.package(),
+            popup_profile: (labels.language(), labels.resource_version()),
             wait_rendered_editor: false,
             open: query(TikTokControl::ComposerOpen),
             shutter: query(TikTokControl::ComposerShutter),
@@ -1258,8 +1297,19 @@ impl<'a, P: TapPlanner> Composer<'a, P> {
     async fn tap_inside(&mut self, element: &ElementBox) -> anyhow::Result<()> {
         crate::tiktok_sound::check_wait()?;
         observation::check_session(self.session)?;
+        if self.session.supports_accessibility_readback() && observation::android(self.plan.package)
+        {
+            let epoch = self.session.gui_session_epoch();
+            let foreground =
+                crate::tiktok_sound::read_sound(self.session.active_app_bundle()).await?;
+            anyhow::ensure!(
+                foreground == self.plan.package && self.session.gui_session_epoch() == epoch,
+                "composer foreground/session changed before tap"
+            );
+        }
         let point = (self.plan_tap)(element);
-        let mut trace = StageDiagnosticOperation::start("tap", &self.session.gui_session_epoch(), None);
+        let mut trace =
+            StageDiagnosticOperation::start("tap", &self.session.gui_session_epoch(), None);
         trace.target(element, Some([point.x, point.y]));
         let result = {
             let mut timing = FinalReproofPhaseTiming::start("nextTapDispatch");
@@ -1724,22 +1774,22 @@ impl<'a, P: TapPlanner> Composer<'a, P> {
             return Ok(AlbumChoice::NotFound);
         }
         self.tap_inside(&row).await?;
-        // This bool predicate owns an ordinary "not confirmed" outcome. A
-        // sound stage scope would turn that outcome into a sound timeout when
-        // the pill finishes at its deadline. Bound the read only and preserve
-        // the album contract instead.
+        // A completed read naming another album remains unconfirmed. An exhausted
+        // read is unknown, not proof of a different album; never replay the tap here.
+        // `pill_reads` owns this deadline: a second read bounded by the same instant
+        // turned every completed negative into DeadlineExceeded.
         Ok(
-            match read_before_deadline(
-                self.pill_reads(album, stop),
-                total_deadline.min(Instant::now() + PICKER_WINDOW),
-                stop,
-            )
-            .await?
+            if self
+                .pill_reads(
+                    album,
+                    stop,
+                    total_deadline.min(Instant::now() + PICKER_WINDOW),
+                )
+                .await?
             {
-                ReadWaitResult::Ready(true) => AlbumChoice::Confirmed,
-                ReadWaitResult::Ready(false)
-                | ReadWaitResult::Cancelled
-                | ReadWaitResult::DeadlineExceeded => AlbumChoice::NotConfirmed,
+                AlbumChoice::Confirmed
+            } else {
+                AlbumChoice::NotConfirmed
             },
         )
     }
@@ -1758,11 +1808,21 @@ impl<'a, P: TapPlanner> Composer<'a, P> {
     ///
     /// [`UiSession::locate_all_described`] is the one that reads `text`, which is why the
     /// readback goes through it and the tap above does not.
-    async fn pill_reads(&self, album: &str, stop: &AtomicBool) -> anyhow::Result<bool> {
+    ///
+    /// `Ok(false)` needs a completed read whose one pill named another album. A read that
+    /// never completes, or completes without pill text, is unknown: at `deadline` it
+    /// returns the typed observation deadline instead.
+    async fn pill_reads(
+        &self,
+        album: &str,
+        stop: &AtomicBool,
+        deadline: Instant,
+    ) -> anyhow::Result<bool> {
         use crate::driver::{classify_read_failure, ReadFailureKind};
         use crate::ui_automation::runtime::{read_before_deadline, ReadWaitResult};
-        let deadline = crate::tiktok_sound::phase_deadline(PICKER_WINDOW);
+        let deadline = deadline.min(crate::tiktok_sound::phase_deadline(PICKER_WINDOW));
         let epoch = self.session.gui_session_epoch();
+        let mut named_another = false;
         loop {
             if stop.load(Ordering::Relaxed) {
                 return Ok(false);
@@ -1775,8 +1835,16 @@ impl<'a, P: TapPlanner> Composer<'a, P> {
             .await
             {
                 Ok(ReadWaitResult::Ready(pills)) => pills,
-                Ok(ReadWaitResult::Cancelled | ReadWaitResult::DeadlineExceeded) => {
-                    return Ok(false)
+                Ok(ReadWaitResult::Cancelled) => return Ok(false),
+                Ok(ReadWaitResult::DeadlineExceeded) => {
+                    if stop.load(Ordering::Relaxed) || named_another {
+                        return Ok(false);
+                    }
+                    anyhow::ensure!(self.session.gui_session_epoch() == epoch,
+                        "album pill session changed before read deadline");
+                    return Err(crate::publish_recovery::observation_deadline().context(
+                        "album pill observation unavailable",
+                    ));
                 }
                 Err(error) if classify_read_failure(&error) == ReadFailureKind::Transient => {
                     anyhow::ensure!(
@@ -1801,14 +1869,15 @@ impl<'a, P: TapPlanner> Composer<'a, P> {
                 pills.len() <= 1,
                 "album_pill_ambiguous: nhiều nút album khớp"
             );
-            if matches!(pills.as_slice(), [pill] if pill.description
-                .as_deref().is_some_and(|text| text.trim() == album))
-            {
-                return Ok(true);
+            if let [pill] = pills.as_slice() {
+                match pill.description.as_deref().map(str::trim) {
+                    Some(text) if text == album => return Ok(true),
+                    Some(text) if !text.is_empty() => named_another = true,
+                    // A pill without text yet says nothing about which album is open.
+                    _ => {}
+                }
             }
-            if Instant::now() >= deadline {
-                return Ok(false);
-            }
+            // The next read answers DeadlineExceeded once `deadline` has passed.
             sleep(
                 POLL.min(deadline.saturating_duration_since(Instant::now())),
                 stop,
@@ -2430,8 +2499,12 @@ impl<'a, P: TapPlanner> Composer<'a, P> {
         }
         use crate::ui_automation::runtime::{read_before_deadline, ReadWaitResult};
         let deadline = crate::tiktok_sound::phase_deadline(COMPOSER_WINDOW);
+        let mut popup = crate::app_automation::dialogs::PopupBudget::default();
         let button = loop {
             if stop.load(Ordering::Relaxed) {
+                return Ok(ComposerVerdict::Stopped);
+            }
+            if !self.popup_clear(&mut popup, deadline, stop, stop).await? {
                 return Ok(ComposerVerdict::Stopped);
             }
             match read_before_deadline(self.resolve_post_button(caption), deadline, stop).await? {
@@ -2453,6 +2526,7 @@ impl<'a, P: TapPlanner> Composer<'a, P> {
             return Ok(ComposerVerdict::NoPostButton);
         };
         let prepared_epoch = self.session.gui_session_epoch();
+        let preparation_started = Instant::now();
         if let Some((sound_plan, expected_title)) = self
             .pending_sound_proof
             .clone()
@@ -2481,11 +2555,16 @@ impl<'a, P: TapPlanner> Composer<'a, P> {
             self.session.gui_session_epoch() == prepared_epoch,
             "caption preparation session changed"
         );
+        // One finite deadline for every read and navigation below, set once from this
+        // session's measured preparation and never extended. Expiry stays a retryable
+        // pre-Post error: no effect intent exists yet and Post is never tapped.
+        let reproof_window = final_reproof_window(preparation_started.elapsed());
         let reproof_deadline = self
             .pending_sound_proof
             .as_ref()
-            .map(|_| Instant::now() + Duration::from_secs(8));
+            .map(|_| Instant::now() + reproof_window);
         let reproof_epoch = self.session.gui_session_epoch();
+        let mut final_caption_post = None;
         if let Some((sound_plan, expected_title)) = self.pending_sound_proof.clone() {
             // Record the failing read/navigation phase before leave() changes the screen.
             // Action trace images are cached frames, not proof of the failure screen.
@@ -2537,13 +2616,23 @@ impl<'a, P: TapPlanner> Composer<'a, P> {
                             ));
                         }
                         mark("restoreCaptionIfCleared");
-                        let caption_proof = self
-                            .restore_caption_cleared_by_editor(caption, stop)
-                            .await?;
-                        anyhow::ensure!(
-                            caption_proof == CaptionOutcome::Typed,
-                            "sound reproof: caption readback was not confirmed"
-                        );
+                        if self.session.supports_accessibility_readback()
+                            && self.plan.package == "com.zhiliaoapp.musically"
+                            && self.plan.popup_profile == ("en", Some("45.7.3"))
+                        {
+                            mark("finalCaptionAndPost");
+                            final_caption_post = self.await_final_caption_post(caption, stop).await?;
+                            anyhow::ensure!(final_caption_post.is_some(),
+                                "sound reproof: final caption/Post readback was not confirmed");
+                        } else {
+                            let caption_proof = self
+                                .restore_caption_cleared_by_editor(caption, stop)
+                                .await?;
+                            anyhow::ensure!(
+                                caption_proof == CaptionOutcome::Typed,
+                                "sound reproof: caption readback was not confirmed"
+                            );
+                        }
                         mark("captionAfterReturn");
                     }
                     mark("finalBudgetCheck");
@@ -2556,6 +2645,7 @@ impl<'a, P: TapPlanner> Composer<'a, P> {
                 session = %reproof_epoch, package = self.plan.package, phase,
                 elapsed_ms = started.elapsed().as_millis() as u64,
                 remaining_ms = reproof_deadline.map(|d| d.saturating_duration_since(Instant::now()).as_millis() as u64),
+                window_ms = reproof_window.as_millis() as u64,
                 phases = ?phases,
                 error = ?reproof.as_ref().err().map(|error| format!("{error:#}")),
                 "final sound reproof before cleanup"
@@ -2573,7 +2663,9 @@ impl<'a, P: TapPlanner> Composer<'a, P> {
         }
         // Resolve after all sound/continuity reads even without a sound policy.
         // A changed caption or disappearing text-only toolbar cannot reuse a prior target.
-        let button = if let Some(deadline) = reproof_deadline {
+        let button = if final_caption_post.is_some() {
+            final_caption_post
+        } else if let Some(deadline) = reproof_deadline {
             let started = Instant::now();
             let result = crate::tiktok_sound::with_deadline_budget(
                 stop,
@@ -2641,7 +2733,7 @@ impl<'a, P: TapPlanner> Composer<'a, P> {
         // propagates the first error, which this used to swallow with `.ok().flatten()` — so a
         // single transient agent failure on the first poll turned a live post into
         // `PostNotConfirmed`, permanently unclaimable, twenty seconds early.
-        let back_on_the_feed = self.await_feed(POST_CONFIRM_WINDOW).await;
+        let back_on_the_feed = self.await_feed(POST_CONFIRM_WINDOW, stop).await;
         Ok(if back_on_the_feed {
             self.emit_progress(PublishProgress::PostSubmitted);
             ComposerVerdict::Submitted
@@ -2679,17 +2771,103 @@ impl<'a, P: TapPlanner> Composer<'a, P> {
         Ok(trill_text_post_button(&tree, caption))
     }
 
-    async fn await_final_post_button(
-        &self,
+    /// Final Global45.7.3 proof shares the popup reader's new hierarchy.
+    /// No target survives dismissal, typing, waiting, or another generation.
+    async fn await_final_caption_post(
+        &mut self,
         caption: &str,
         stop: &AtomicBool,
     ) -> anyhow::Result<Option<ElementBox>> {
+        use crate::app_automation::dialogs::{step_before_deadline_with_tree, PopupBudget, PopupStep};
+        use crate::ui_automation::runtime::ReadWaitResult;
+        let tail = self.plan.publish.context("final caption plan missing")?;
+        let deadline = crate::tiktok_sound::phase_deadline(COMPOSER_WINDOW);
+        let epoch = self.session.gui_session_epoch();
+        anyhow::ensure!(!epoch.is_empty(), "final caption/Post session is unbound");
+        let labels = crate::tiktok_labels::controls_for_runtime(
+            self.plan.package, self.plan.popup_profile.0,
+            self.plan.popup_profile.1.unwrap_or_default(),
+        ).context("popup profile unavailable")?;
+        let mut popup = PopupBudget::default();
+        let mut previous_generation = None;
+        let mut restored = false;
+        loop {
+            if stop.load(Ordering::Relaxed) { return Ok(None); }
+            observation::check(deadline, Some(stop))?;
+            observation::check_session(self.session)?;
+            anyhow::ensure!(self.session.gui_session_epoch() == epoch,
+                "final caption/Post session changed");
+            let observed = step_before_deadline_with_tree(
+                self.session, labels, &mut popup, deadline, stop, stop,
+            ).await?;
+            let tree = match observed {
+                ReadWaitResult::Ready((PopupStep::Clear, Some(tree))) => Some(tree),
+                ReadWaitResult::Ready((PopupStep::Dismissed, None)) => None,
+                ReadWaitResult::Ready((PopupStep::Blocked, _)) =>
+                    anyhow::bail!("popup requires operator review; no background action permitted"),
+                ReadWaitResult::Ready(_) => anyhow::bail!("final popup snapshot unavailable"),
+                ReadWaitResult::Cancelled => return Ok(None),
+                ReadWaitResult::DeadlineExceeded => {
+                    observation::check(deadline, Some(stop))?;
+                    return Err(crate::publish_recovery::observation_deadline());
+                }
+            };
+            observation::check(deadline, Some(stop))?;
+            anyhow::ensure!(self.session.gui_session_epoch() == epoch,
+                "final caption/Post session changed during observation");
+            if let Some(tree) = tree {
+                anyhow::ensure!(previous_generation.is_none_or(|old| tree.generation > old),
+                    "final caption/Post snapshot stale");
+                observation::check_tree_generation(self.session, tree.generation)?;
+                previous_generation = Some(tree.generation);
+                let (state, button) = observation::final_caption_post_from_tree(
+                    &tree, self.plan.package, tail.caption, tail.post_button, caption,
+                )?;
+                match state {
+                    observation::CaptionState::Confirmed => {
+                        if button.is_some() { return Ok(button); }
+                    }
+                    observation::CaptionState::Cleared if caption.trim().is_empty() => {
+                        if button.is_some() { return Ok(button); }
+                    }
+                    observation::CaptionState::Cleared => {
+                        // Existing owner types only the approved draft once. Discard this target.
+                        anyhow::ensure!(!restored, "caption restore was not retained");
+                        restored = true;
+                        anyhow::ensure!(
+                            Box::pin(self.type_caption(caption, stop)).await? == CaptionOutcome::Typed,
+                            "caption restore was not confirmed; chưa bấm Đăng");
+                    }
+                    observation::CaptionState::Mismatch => anyhow::bail!("sound reproof: caption changed"),
+                    observation::CaptionState::Unknown => {}
+                }
+            }
+            sleep(POLL.min(deadline.saturating_duration_since(Instant::now())), stop).await;
+        }
+    }
+
+    async fn await_final_post_button(
+        &mut self,
+        caption: &str,
+        stop: &AtomicBool,
+    ) -> anyhow::Result<Option<ElementBox>> {
+        if self.pending_sound_proof.is_some()
+            && self.session.supports_accessibility_readback()
+            && self.plan.package == "com.zhiliaoapp.musically"
+            && self.plan.popup_profile == ("en", Some("45.7.3"))
+        {
+            return Box::pin(self.await_final_caption_post(caption, stop)).await;
+        }
         use crate::ui_automation::runtime::{read_before_deadline, ReadWaitResult};
         let deadline = crate::tiktok_sound::phase_deadline(COMPOSER_WINDOW);
         let epoch = self.session.gui_session_epoch();
         let mut waited = false;
+        let mut popup = crate::app_automation::dialogs::PopupBudget::default();
         loop {
             if stop.load(Ordering::Relaxed) || Instant::now() >= deadline {
+                return Ok(None);
+            }
+            if !self.popup_clear(&mut popup, deadline, stop, stop).await? {
                 return Ok(None);
             }
             let button =
@@ -3051,6 +3229,17 @@ impl<'a, P: TapPlanner> Composer<'a, P> {
 
     async fn leave_with_stop(&self, stop: &AtomicBool) -> bool {
         use crate::ui_automation::runtime::{read_before_deadline, ReadWaitResult};
+        // ce0517155ab38c390d, 08/10/2026 04:28:09-13Z: the picker's last complete read was
+        // Threads' challenge, and eight cleanup Backs all went to Threads, which stayed in
+        // front. Back walks this composer only; the next clean start owns the target app.
+        if self
+            .last_selection_diagnostic
+            .as_ref()
+            .and_then(|diagnostic| diagnostic.last_completed_snapshot.as_ref())
+            .is_some_and(|snapshot| snapshot.foreground_package.is_some())
+        {
+            return false;
+        }
         let deadline = Instant::now() + COMPOSER_WINDOW;
         let epoch = self.session.gui_session_epoch();
         for _ in 0..8 {
@@ -3115,14 +3304,22 @@ impl<'a, P: TapPlanner> Composer<'a, P> {
     /// The one wait in this module that must not give up on a transport error: it runs after
     /// the Post tap, where "I could not read the screen" and "the post did not go" are
     /// different facts and only the second is worth reporting.
-    async fn await_feed(&self, window: Duration) -> bool {
+    async fn await_feed(&self, window: Duration, stop: &AtomicBool) -> bool {
         use crate::ui_automation::runtime::{read_before_deadline, ReadWaitResult};
         let deadline = Instant::now() + window;
         let reconcile_stop = AtomicBool::new(false);
         let epoch = self.session.gui_session_epoch();
+        let mut popup = crate::app_automation::dialogs::PopupBudget::default();
         loop {
             // A submitted Post cannot be undone by Stop. Only reconciliation
             // reads are bounded here, and a late feed never proves submission.
+            if !self
+                .popup_clear(&mut popup, deadline, &reconcile_stop, stop)
+                .await
+                .unwrap_or(false)
+            {
+                return false;
+            }
             match read_before_deadline(
                 self.session.locate(self.plan.open),
                 deadline,
@@ -3223,6 +3420,136 @@ impl<'a, P: TapPlanner> Composer<'a, P> {
         }
     }
 
+    fn camera_gallery_snapshot_query(&self, query: ElementQuery<'_>) -> bool {
+        self.session.supports_accessibility_readback()
+            && matches!((self.plan.package, self.plan.popup_profile),
+                ("com.ss.android.ugc.trill", ("en", Some("38.3.2")))
+                    | ("com.zhiliaoapp.musically", ("en", Some("45.7.3"))))
+            && (query == self.plan.shutter
+                || self.plan.gallery_entry == Some(query)
+                || query == self.plan.album_menu)
+    }
+
+    /// These measured controls and covering dialogs must come from the same tree.
+    /// A second serialized /element query can consume the entire stabilization
+    /// window even when the current XML already contains the exact target.
+    async fn camera_gallery_rows(
+        &self,
+        query: ElementQuery<'_>,
+        deadline: Instant,
+        stop: &AtomicBool,
+        popup: &mut crate::app_automation::dialogs::PopupBudget,
+    ) -> anyhow::Result<crate::ui_automation::runtime::ReadWaitResult<Vec<ElementBox>>> {
+        use crate::ui_automation::runtime::{read_before_deadline, ReadWaitResult};
+        use crate::app_automation::dialogs;
+        let epoch = self.session.gui_session_epoch();
+        let labels = crate::tiktok_labels::controls_for(
+            self.plan.package, self.plan.popup_profile.0,
+            self.plan.popup_profile.1.unwrap_or_default(),
+        ).context("camera/gallery profile unavailable")?;
+        let mut previous_generation = None;
+        loop {
+            let observed = read_before_deadline(crate::tiktok_sound::read_sound(async {
+                let foreground = self.session.active_app_bundle().await?;
+                let tree = crate::ui_automation::tree::Tree::parse(
+                    self.session.hierarchy_source_snapshot().await?,
+                )?;
+                anyhow::ensure!(self.session.gui_session_epoch() == epoch,
+                    "camera/gallery observation session changed");
+                Ok((foreground, tree))
+            }), deadline, stop).await?;
+            let (foreground, tree) = match observed {
+                ReadWaitResult::Ready(value) => value,
+                ReadWaitResult::Cancelled => return Ok(ReadWaitResult::Cancelled),
+                ReadWaitResult::DeadlineExceeded => return Ok(ReadWaitResult::DeadlineExceeded),
+            };
+            anyhow::ensure!(previous_generation.is_none_or(|old| tree.generation > old),
+                "camera/gallery observation is stale after popup");
+            let modal = dialogs::optional_decline(&tree, labels).is_some()
+                || dialogs::account_blocker(&tree, labels).is_some()
+                || tree.nodes.iter().enumerate().any(|(index, node)| {
+                    node.visibility() != Some(false) && tree.ancestors_visible(index)
+                        && node.rect().is_some()
+                        && (node.attr("content-desc") == "Dialog"
+                            || node.attr("resource-id") == "com.android.packageinstaller:id/dialog_container")
+                });
+            if modal {
+                previous_generation = Some(tree.generation);
+                if !self.popup_clear(popup, deadline, stop, stop).await? {
+                    return Ok(if stop.load(Ordering::Relaxed) {
+                        ReadWaitResult::Cancelled
+                    } else { ReadWaitResult::DeadlineExceeded });
+                }
+                // A cleared modal is not arrival proof; require a new target tree.
+                continue;
+            }
+            anyhow::ensure!(foreground == self.plan.package,
+                "camera/gallery foreground does not match target");
+            let current = read_before_deadline(
+                crate::tiktok_sound::read_sound(self.session.active_app_bundle()), deadline, stop,
+            ).await?;
+            match current {
+                ReadWaitResult::Ready(package) => anyhow::ensure!(package == self.plan.package
+                    && self.session.gui_session_epoch() == epoch,
+                    "camera/gallery foreground or session changed during observation"),
+                ReadWaitResult::Cancelled => return Ok(ReadWaitResult::Cancelled),
+                ReadWaitResult::DeadlineExceeded => return Ok(ReadWaitResult::DeadlineExceeded),
+            }
+            // The live picker keeps the camera subtree displayed underneath it.
+            // Its measured album control has priority over shutter/gallery anchors.
+            if query != self.plan.album_menu
+                && !tree.matching(self.plan.package, self.plan.album_menu).is_empty() {
+                return Ok(ReadWaitResult::Ready(Vec::new()));
+            }
+            let indices = tree.matching(self.plan.package, query);
+            let mut rows = Vec::with_capacity(indices.len());
+            for index in indices {
+                // A malformed match cannot be silently removed to prove uniqueness.
+                rows.push(tree.nodes[index].rect().context("camera/gallery target bounds unavailable")?);
+            }
+            return Ok(ReadWaitResult::Ready(rows));
+        }
+    }
+
+    /// Clear only measured optional modals inside this caller's existing wait.
+    async fn popup_clear(
+        &self,
+        budget: &mut crate::app_automation::dialogs::PopupBudget,
+        deadline: Instant,
+        stop: &AtomicBool,
+        effect_stop: &AtomicBool,
+    ) -> anyhow::Result<bool> {
+        use crate::app_automation::dialogs::{step_before_deadline, PopupStep};
+        use crate::ui_automation::runtime::ReadWaitResult;
+        if !self.session.supports_accessibility_readback() {
+            return Ok(true);
+        }
+        let labels = crate::tiktok_labels::controls_for_runtime(
+            self.plan.package,
+            self.plan.popup_profile.0,
+            self.plan.popup_profile.1.unwrap_or_default(),
+        )
+        .context("popup profile unavailable")?;
+        loop {
+            match step_before_deadline(self.session, labels, budget, deadline, stop, effect_stop)
+                .await?
+            {
+                ReadWaitResult::Ready(PopupStep::Clear) => return Ok(true),
+                ReadWaitResult::Ready(PopupStep::Blocked) => {
+                    anyhow::bail!("popup requires operator review; no background action permitted")
+                }
+                ReadWaitResult::Ready(PopupStep::Dismissed) => {
+                    sleep(
+                        POLL.min(deadline.saturating_duration_since(Instant::now())),
+                        stop,
+                    )
+                    .await;
+                }
+                ReadWaitResult::Cancelled | ReadWaitResult::DeadlineExceeded => return Ok(false),
+            }
+        }
+    }
+
     /// Only pre-Post navigation distinguishes absent from ambiguous targets.
     /// `None` retains the measured gallery lookup's same-epoch local fallback.
     async fn await_navigation_target(
@@ -3239,6 +3566,7 @@ impl<'a, P: TapPlanner> Composer<'a, P> {
             "composer navigation target unmeasured"
         );
         let epoch = self.session.gui_session_epoch();
+        let mut popup = crate::app_automation::dialogs::PopupBudget::default();
         loop {
             if stop.load(Ordering::Relaxed) {
                 return Ok(None);
@@ -3256,14 +3584,27 @@ impl<'a, P: TapPlanner> Composer<'a, P> {
                     None => Ok(None),
                 };
             }
+            if !self.camera_gallery_snapshot_query(query)
+                && !self.popup_clear(&mut popup, deadline, stop, stop).await? {
+                if stop.load(Ordering::Relaxed) {
+                    return Ok(None);
+                }
+                anyhow::ensure!(self.session.gui_session_epoch() == epoch,
+                    "composer navigation session changed");
+                if Instant::now() >= deadline {
+                    return Err(crate::publish_recovery::observation_deadline());
+                }
+                return Ok(None);
+            }
             let mut trace = StageDiagnosticOperation::start("locate", &epoch, Some(deadline));
             trace.query(query);
-            let observed = read_before_deadline(
-                crate::tiktok_sound::read_sound(self.session.locate_all(query)),
-                deadline,
-                stop,
-            )
-            .await;
+            let observed = if self.camera_gallery_snapshot_query(query) {
+                self.camera_gallery_rows(query, deadline, stop, &mut popup).await
+            } else {
+                read_before_deadline(
+                    crate::tiktok_sound::read_sound(self.session.locate_all(query)), deadline, stop,
+                ).await
+            };
             if stop.load(Ordering::Relaxed) {
                 trace.finish("cancelled");
                 return Ok(None);
@@ -3352,6 +3693,7 @@ impl<'a, P: TapPlanner> Composer<'a, P> {
         use crate::ui_automation::runtime::{read_before_deadline, ReadWaitResult};
         let epoch = self.session.gui_session_epoch();
         let mut last_error = None;
+        let mut popup = crate::app_automation::dialogs::PopupBudget::default();
         loop {
             // **Stop first.** With the order reversed a control that happened to be on screen
             // won over an already-set stop flag, so asking the run to stop while the Post
@@ -3361,14 +3703,26 @@ impl<'a, P: TapPlanner> Composer<'a, P> {
             }
             // Only the read is cancellable. Already-dispatched device gestures
             // must drain and are never handed to this helper.
+            if !self.camera_gallery_snapshot_query(query)
+                && !self.popup_clear(&mut popup, deadline, stop, stop).await? {
+                return Ok(None);
+            }
             let mut trace = StageDiagnosticOperation::start("locate", &epoch, Some(deadline));
             trace.query(query);
-            let observed = read_before_deadline(
-                crate::tiktok_sound::read_sound(self.session.locate(query)),
-                deadline,
-                stop,
-            )
-            .await;
+            let observed = if self.camera_gallery_snapshot_query(query) {
+                self.camera_gallery_rows(query, deadline, stop, &mut popup).await.map(|read| match read {
+                    ReadWaitResult::Ready(rows) => ReadWaitResult::Ready(match rows.as_slice() {
+                        [only] => Some(only.clone()),
+                        _ => None,
+                    }),
+                    ReadWaitResult::Cancelled => ReadWaitResult::Cancelled,
+                    ReadWaitResult::DeadlineExceeded => ReadWaitResult::DeadlineExceeded,
+                })
+            } else {
+                read_before_deadline(
+                    crate::tiktok_sound::read_sound(self.session.locate(query)), deadline, stop,
+                ).await
+            };
             match &observed {
                 Ok(ReadWaitResult::Ready(Some(element))) => { trace.target(element, None); trace.finish("found"); }
                 Ok(ReadWaitResult::Ready(None)) => trace.finish("absentOrAmbiguous"),
@@ -3867,23 +4221,32 @@ where
                         observed = None;
                     }
                     if observed.is_none() {
+                        let allow_current_recommended =
+                            (selected.is_none()
+                                && matches!(sound_policy,
+                                    PublishSoundPolicy::Default | PublishSoundPolicy::TrendingAny { .. }))
+                                || selected.as_ref().is_some_and(|choice| {
+                                    matches!(&choice.section, crate::publish::SoundSectionKind::Recommended)
+                                });
                         if sound_sheet_may_be_open {
                             observed = Some(
-                                crate::tiktok_sound::resume_open_sounds(
+                                crate::tiktok_sound::resume_open_sounds_current(
                                     session,
                                     sound_plan,
                                     visible_pool,
+                                    allow_current_recommended,
                                 )
                                 .await?,
                             );
                         } else {
                             let mut before_open = || sound_sheet_may_be_open = true;
                             observed = Some(
-                                crate::tiktok_sound::open_and_observe_sounds_armed(
+                                crate::tiktok_sound::open_and_observe_sounds_armed_current(
                                     session,
                                     sound_plan,
                                     visible_pool,
                                     &mut before_open,
+                                    allow_current_recommended,
                                 )
                                 .await?,
                             );
@@ -3892,7 +4255,12 @@ where
                     if let Some(selection) = selected.as_ref() {
                         let pool = observed.as_ref().context("sound pool missing")?;
                         if !pool.candidates.iter().any(|candidate| {
-                            candidate.title == selection.title
+                            candidate.section.eq_ignore_ascii_case(match &selection.section {
+                                crate::publish::SoundSectionKind::Recommended => "recommended",
+                                crate::publish::SoundSectionKind::Trending => "trending",
+                                crate::publish::SoundSectionKind::Popular => "popular",
+                            })
+                                && candidate.title == selection.title
                                 && candidate.artist == selection.artist
                         }) {
                             if matches!(
@@ -4079,7 +4447,12 @@ fn current_sound_target_index(
         .iter()
         .enumerate()
         .filter(|(_, candidate)| {
-            candidate.title == selection.title && candidate.artist == selection.artist
+            candidate.section.eq_ignore_ascii_case(match &selection.section {
+                crate::publish::SoundSectionKind::Recommended => "recommended",
+                crate::publish::SoundSectionKind::Trending => "trending",
+                crate::publish::SoundSectionKind::Popular => "popular",
+            })
+                && candidate.title == selection.title && candidate.artist == selection.artist
         })
         .map(|(index, _)| index)
         .collect();
@@ -5007,6 +5380,9 @@ mod tests {
         /// failure this module treats as consequential: tapping the shutter, or the effects
         /// circles beside it, counted as opening the gallery.
         exit_rect: Option<ElementBox>,
+        /// A measured hierarchy this screen serves verbatim, for the steps that read only
+        /// fresh XML. Its nodes also answer element queries; see `FakeSession::xml_matches`.
+        xml: Option<&'static str>,
     }
 
     fn scene(elements: Vec<(&str, ElementBox)>, exit: Option<&str>) -> Scene {
@@ -5018,6 +5394,7 @@ mod tests {
             texts: HashMap::new(),
             exit: exit.map(str::to_string),
             exit_rect: None,
+            xml: None,
         }
     }
 
@@ -5031,6 +5408,12 @@ mod tests {
         /// Navigate only when a tap lands inside this rectangle.
         fn leaving_by(mut self, rect: ElementBox) -> Self {
             self.exit_rect = Some(rect);
+            self
+        }
+
+        /// Serve this measured hierarchy as the whole screen.
+        fn measured(mut self, xml: &'static str) -> Self {
+            self.xml = Some(xml);
             self
         }
     }
@@ -5117,6 +5500,30 @@ mod tests {
             .insert(":id/so9".into(), box_at(300.0, 150.0));
         scene
     }
+
+    /// Trill 38.3.2/en sound sheet as read on the device: `Recommended` selected and its
+    /// first row already marked (`:id/jk1`). The same artifact the snapshot tests read.
+    const TRILL_SOUND_SHEET: &str =
+        include_str!("../fixtures/tiktok-publish/trill-38.3.2-en/actual-failure-tree-3.xml");
+    /// The Trill 38.3.2/en editor read after Back closed that sheet: one enabled
+    /// `:id/c_4` sound entry, and the `:id/so9` chip naming the sheet's first row.
+    const TRILL_SOUND_EDITOR: &str =
+        include_str!("../fixtures/tiktok-publish/trill-38.3.2-en/sound3-postback-editor.xml");
+
+    /// The measured editor. `exit` is the control whose tap leaves it: `:id/c_4` opens the
+    /// sound sheet, `fixture-edit-next` moves on like `edit_step`.
+    fn trill_sound_editor(exit: &str) -> Scene {
+        let mut scene = edit_step().measured(TRILL_SOUND_EDITOR);
+        // `:id/c_4` bounds [278,134][703,250] in the measured editor XML.
+        scene
+            .elements
+            .insert(":id/c_4".into(), labelled("", 278.0, 134.0, 425.0, 116.0));
+        scene.exit = Some(exit.into());
+        scene
+    }
+    fn trill_sound_sheet() -> Scene {
+        scene(Vec::new(), None).measured(TRILL_SOUND_SHEET)
+    }
     fn post_screen() -> Scene {
         scene(
             vec![
@@ -5136,7 +5543,14 @@ mod tests {
     /// a per-query queue cannot say.
     #[derive(Default)]
     struct FakeSession {
+        modal_readback: bool,
+        hierarchy_delay: Duration,
+        foreground_override: Option<String>,
+        epoch_override: Option<String>,
+        snapshot_generations: Mutex<std::collections::VecDeque<u64>>,
         snapshot_overrides: Mutex<std::collections::VecDeque<String>>,
+        /// Last generation served from a measured scene; every such read is a new one.
+        measured_generation: std::sync::atomic::AtomicU64,
         list_omits_armed_flags: bool,
         stale_list_geometry: bool,
         post_reproof_gaps: Mutex<std::collections::VecDeque<bool>>,
@@ -5170,6 +5584,12 @@ mod tests {
         lose_next_ack: bool,
         arrival_read_failure: bool,
         caption_return_delay: Duration,
+        /// Delays for successive reads on the returned caption page (screen 2), unlike
+        /// `caption_return_delay`, which slows every read there equally.
+        caption_return_reads: Mutex<std::collections::VecDeque<Duration>>,
+        /// Answer `keyboard_shown` (hidden) after this delay. Zero keeps the trait's
+        /// Unsupported answer that every other fixture relies on.
+        keyboard_read_delay: Duration,
         repair_on_locate: bool,
         repaired: AtomicBool,
         sound_entry_failures: Mutex<std::collections::VecDeque<Duration>>,
@@ -5204,6 +5624,16 @@ mod tests {
             Self {
                 screens,
                 ..Default::default()
+            }
+        }
+        async fn pause_on_caption_return_read(&self) {
+            let once = if *self.at.lock() == 2 {
+                self.caption_return_reads.lock().pop_front()
+            } else {
+                None
+            };
+            if let Some(delay) = once {
+                tokio::time::sleep(delay).await;
             }
         }
 
@@ -5287,11 +5717,46 @@ mod tests {
         fn on_screen(&self) -> usize {
             *self.at.lock()
         }
+
+        /// What a measured screen's own tree answers for `query`: visible bound-package
+        /// nodes, each carrying its rendered `text`, as the device projection does.
+        ///
+        /// `None` when the screen has no measured tree or the tree has no such node, so
+        /// fixture-plan keys (`fixture-edit-next`, …) still come from `elements`.
+        fn xml_matches(&self, query: ElementQuery<'_>) -> Option<Vec<ElementBox>> {
+            let xml = self.screens.get(*self.at.lock())?.xml?;
+            let tree =
+                crate::ui_automation::tree::Tree::parse(crate::driver::HierarchySourceSnapshot {
+                    generation: 1,
+                    xml: xml.into(),
+                })
+                .ok()?;
+            let found: Vec<_> = tree
+                .matching("com.ss.android.ugc.trill", query)
+                .into_iter()
+                .filter_map(|index| tree.nodes[index].rect())
+                .collect();
+            (!found.is_empty()).then_some(found)
+        }
     }
 
     #[async_trait::async_trait]
     impl UiSession for FakeSession {
+        fn supports_accessibility_readback(&self) -> bool {
+            self.modal_readback
+        }
+        async fn keyboard_shown(&self) -> anyhow::Result<bool> {
+            if self.keyboard_read_delay.is_zero() {
+                return Err(crate::driver::UnsupportedCapability {
+                    capability: "keyboardShown",
+                }
+                .into());
+            }
+            tokio::time::sleep(self.keyboard_read_delay).await;
+            Ok(false)
+        }
         fn gui_session_epoch(&self) -> String {
+            if let Some(epoch) = &self.epoch_override { return epoch.clone(); }
             if self.repair_on_locate {
                 if self.repaired.load(Ordering::Relaxed) {
                     "repaired"
@@ -5303,12 +5768,23 @@ mod tests {
                 String::new()
             }
         }
+        async fn ui_language(&self) -> Option<String> {
+            Some("en".into())
+        }
+        async fn app_version(&self, _: &str) -> Option<String> {
+            Some("38.3.2".into())
+        }
         async fn active_app_bundle(&self) -> anyhow::Result<String> {
-            Ok("com.ss.android.ugc.trill".into())
+            Ok(self
+                .foreground_override
+                .clone()
+                .unwrap_or_else(|| "com.ss.android.ugc.trill".into()))
         }
         async fn hierarchy_source_snapshot(
             &self,
         ) -> anyhow::Result<crate::driver::HierarchySourceSnapshot> {
+            self.pause_on_caption_return_read().await;
+            tokio::time::sleep(self.hierarchy_delay).await;
             {
                 let mut snapshots = self.snapshot_overrides.lock();
                 if let Some(xml) = if snapshots.len() > 1 {
@@ -5316,8 +5792,18 @@ mod tests {
                 } else {
                     snapshots.front().cloned()
                 } {
-                    return Ok(crate::driver::HierarchySourceSnapshot { generation: 1, xml });
+                    return Ok(crate::driver::HierarchySourceSnapshot { generation: self.snapshot_generations.lock().pop_front().unwrap_or(1), xml });
                 }
+            }
+            let measured = self
+                .screens
+                .get(*self.at.lock())
+                .and_then(|scene| scene.xml);
+            if let Some(xml) = measured {
+                return Ok(crate::driver::HierarchySourceSnapshot {
+                    generation: self.measured_generation.fetch_add(1, Ordering::Relaxed) + 1,
+                    xml: xml.into(),
+                });
             }
             let count = *self.selected_cells.lock();
             let scene = self.screens.get(*self.at.lock());
@@ -5345,6 +5831,7 @@ mod tests {
             })
         }
         async fn locate_all(&self, query: ElementQuery<'_>) -> anyhow::Result<Vec<ElementBox>> {
+            self.pause_on_caption_return_read().await;
             if query == ElementQuery::ResourceIdSuffix(":id/c_4") {
                 let delay = self.sound_entry_failures.lock().pop_front();
                 if let Some(delay) = delay {
@@ -5367,6 +5854,9 @@ mod tests {
                     *self.typed.lock() = Some("Caption changed during toolbar transition".into());
                 }
                 return Ok(Vec::new());
+            }
+            if let Some(found) = self.xml_matches(query) {
+                return Ok(found);
             }
             let mut found: Vec<_> = self.locate(query).await?.into_iter().collect();
             let wanted = match query {
@@ -5465,7 +5955,7 @@ mod tests {
                 anyhow::bail!("the agent is not answering");
             }
             let mut at = self.at.lock();
-            if self.sound_sheet_back_to_next_scene && self.screens.get(*at).is_some_and(|s|s.elements.contains_key(":id/ta8")) {
+            if self.sound_sheet_back_to_next_scene && self.screens.get(*at).is_some_and(|s|s.xml == Some(TRILL_SOUND_SHEET)) {
                 *at=(*at+1).min(self.screens.len().saturating_sub(1));
             } else { *at = at.saturating_sub(1); }
             Ok(())
@@ -5490,6 +5980,7 @@ mod tests {
             self.tap(target.centre()).await
         }
         async fn locate(&self, query: ElementQuery<'_>) -> anyhow::Result<Option<ElementBox>> {
+            self.pause_on_caption_return_read().await;
             if *self.at.lock() == 2 && !self.caption_return_delay.is_zero() {
                 tokio::time::sleep(self.caption_return_delay).await;
             }
@@ -5554,12 +6045,16 @@ mod tests {
                 | ElementQuery::ResourceIdSuffix(value)
                 | ElementQuery::Semantic(value) => value,
             };
+            if let Some(found) = self.xml_matches(query) {
+                return Ok(found.into_iter().next());
+            }
             Ok(self.current().get(wanted).cloned())
         }
         async fn locate_all_described(
             &self,
             query: ElementQuery<'_>,
         ) -> anyhow::Result<Vec<ElementBox>> {
+            self.pause_on_caption_return_read().await;
             tokio::time::sleep(self.described_delay).await;
             if query == ElementQuery::ResourceIdSuffix(":id/so9") {
                 let delay = self.sound_read_delays.lock().pop_front();
@@ -5640,6 +6135,9 @@ mod tests {
                     });
                 }
                 return Ok(rows);
+            }
+            if let Some(found) = self.xml_matches(query) {
+                return Ok(found);
             }
             if let Some(rows) = self.rows.lock().get(wanted) {
                 return Ok(rows.clone());
@@ -5892,29 +6390,15 @@ mod tests {
                 true,
             ),
         ] {
-            // Reuse the measured inline-sheet shape: already selected marker, then
-            // Back closes the sheet onto the editor with the exact selected title.
+            // The measured Trill 38.3.2 inline sheet: its first row is already marked,
+            // then Back closes the sheet onto the editor whose chip names that row.
+            // Trill reads this sheet only from fresh XML of a bound session.
             let mut session = FakeSession::full_walk("album");
-            let mut editor = sound_edit_step("Sound A");
-            editor
-                .elements
-                .insert(":id/c_4".into(), box_at(100.0, 100.0));
-            editor.exit = Some(":id/c_4".into());
-            let sheet = scene(
-                vec![
-                    ("Recommended", box_at(0.0, 0.0)),
-                    (":id/ta8", labelled("", 0.0, 100.0, 800.0, 200.0)),
-                    (":id/title", box_at(100.0, 120.0)),
-                    (":id/rr5", box_at(100.0, 200.0)),
-                    (":id/dfu", box_at(500.0, 120.0)),
-                ],
-                None,
-            )
-            .texted("Recommended", "Recommended")
-            .texted(":id/title", "Sound A")
-            .texted(":id/rr5", "Artist A");
+            session.epoch_override = Some("trill-sound-sheet-fixture".into());
             session.screens.truncate(7);
-            session.screens.extend([editor, sheet]);
+            session
+                .screens
+                .extend([trill_sound_editor(":id/c_4"), trill_sound_sheet()]);
             let journal = std::sync::Arc::new(Journal::default());
             let prior = SoundSelectionEvidence {
                 section: crate::publish::SoundSectionKind::Trending,
@@ -7226,8 +7710,9 @@ mod tests {
             *session.typed.lock() = Some("caption".into());
             // Live 081: editor image with a partial caption-layout tree lacking
             // both eej and so9; a later observation restores the editor title.
-            // The saved 8075 ms request exceeds the final 8-second budget;
-            // it must refuse. Shorter transitions retain success/stop coverage.
+            // The saved 8075 ms request lands in editor preparation and exceeds
+            // its 8-second budget; it must refuse. Shorter transitions retain
+            // success/stop coverage.
             session
                 .sound_read_delays
                 .lock()
@@ -7293,7 +7778,7 @@ mod tests {
             sound_edit_step("Sound A"),
             post_screen(),
         ]);
-        session.caption_return_delay = Duration::from_secs(9);
+        session.caption_return_delay = FINAL_REPROOF_CEILING + Duration::from_secs(1);
         *session.typed.lock() = Some("caption".into());
         let mut composer = Composer::new(&session, plan(), |e: &ElementBox| e.centre());
         composer.pending_sound_proof = Some((
@@ -7317,7 +7802,117 @@ mod tests {
         assert_eq!(intents, 0);
         assert_eq!(post_button_taps(&session), 0);
         assert_eq!(session.typed.lock().as_deref(), Some("caption"));
-        assert!(started.elapsed() <= Duration::from_secs(8));
+        assert!(started.elapsed() <= FINAL_REPROOF_CEILING);
+    }
+
+    /// The final reproof deadline is finite, keeps the measured floor, and grows with a
+    /// slow session's own preparation only up to the ceiling.
+    #[test]
+    fn final_sound_reproof_window_is_finite_and_clamped() {
+        assert_eq!(final_reproof_window(Duration::ZERO), FINAL_REPROOF_FLOOR);
+        // Median measured preparation (6.2 s) stays on the floor.
+        assert_eq!(
+            final_reproof_window(Duration::from_millis(6_200)),
+            FINAL_REPROOF_FLOOR
+        );
+        assert_eq!(
+            final_reproof_window(Duration::from_secs(10)),
+            Duration::from_secs(15)
+        );
+        assert_eq!(
+            final_reproof_window(Duration::from_secs(60)),
+            FINAL_REPROOF_CEILING
+        );
+        assert_eq!(final_reproof_window(Duration::MAX), FINAL_REPROOF_CEILING);
+    }
+
+    /// Campaign 1fc0b331: every successful reproof phase summed to at most 9.2 s (Trill
+    /// 38.3.2) and 9.7 s (Global 45.7.3), past the former fixed 8 s; slower sessions took
+    /// up to 1.53x their own preparation. Each phase keeps its own 8 s read bound (the
+    /// measured return phase peaked at 3.8 s), so the slow time is spread over the reads
+    /// on the returned caption page. A measured-length reproof still reaches one Post; a
+    /// longer one, or one past the ceiling, refuses with no intent.
+    #[tokio::test(start_paused = true)]
+    async fn final_sound_reproof_window_follows_measured_session_pace() {
+        // (keyboard ms, slow editor sound read ms, caption-page read delays ms, posts)
+        let cases: [(u64, Option<u64>, &[u64], bool); 5] = [
+            // About 9.5 s of reproof: past the former 8 s, inside the 12 s floor.
+            (0, None, &[6_000, 3_500], true),
+            // About 13 s with a short preparation: past the floor.
+            (0, None, &[6_000, 7_000], false),
+            // About 10 s of preparation scales the window to about 15 s; 12.5 s fits.
+            (5_000, Some(5_000), &[6_000, 6_500], true),
+            // About 12 s of preparation would scale to 18 s; the 16 s ceiling refuses 17 s.
+            (7_000, Some(5_000), &[6_000, 6_000, 5_000], false),
+            // The same slow session still posts inside the ceiling.
+            (7_000, Some(5_000), &[6_000, 6_000, 2_500], true),
+        ];
+        for (keyboard_ms, editor_ms, return_ms, posts) in cases {
+            let mut caption_page = post_screen();
+            caption_page
+                .elements
+                .insert(":id/aun".into(), box_at(20.0, 70.0));
+            caption_page.exit = Some(":id/aun".into());
+            let mut session = FakeSession::with(vec![
+                caption_page,
+                sound_edit_step("Sound A"),
+                post_screen(),
+                feed(),
+            ]);
+            session.keyboard_read_delay = Duration::from_millis(keyboard_ms);
+            session
+                .sound_read_delays
+                .lock()
+                .extend(editor_ms.map(Duration::from_millis));
+            session
+                .caption_return_reads
+                .lock()
+                .extend(return_ms.iter().copied().map(Duration::from_millis));
+            *session.typed.lock() = Some("caption".into());
+            let mut composer = Composer::new(&session, plan(), |e: &ElementBox| e.centre());
+            composer.pending_sound_proof = Some((
+                SoundPickerPlan::resolve("com.ss.android.ugc.trill", "en", "38.3.2").unwrap(),
+                "Sound A".into(),
+            ));
+            let mut intents = 0;
+            let started = Instant::now();
+            let result = composer
+                .post_with_effect_intent("caption", &AtomicBool::new(false), &mut || {
+                    intents += 1;
+                    Ok(())
+                })
+                .await;
+            let case = (keyboard_ms, editor_ms, return_ms);
+            assert!(
+                session.sound_read_delays.lock().is_empty(),
+                "{case:?}: editor delay unused"
+            );
+            if posts {
+                assert!(
+                    session.caption_return_reads.lock().is_empty(),
+                    "{case:?}: return delays unused"
+                );
+                let verdict = result
+                    .unwrap_or_else(|error| panic!("{case:?}: measured pace must post: {error:#}"));
+                assert!(verdict.is_submitted(), "{case:?}");
+            } else {
+                let error = result.expect_err("a reproof past the window cannot permit Post");
+                assert_eq!(
+                    crate::publish_recovery::describe(&error).kind,
+                    crate::publish_recovery::FailureKind::Retryable,
+                    "{case:?}: {error:#}"
+                );
+            }
+            assert_eq!(intents, usize::from(posts), "{case:?}");
+            assert_eq!(post_button_taps(&session), usize::from(posts), "{case:?}");
+            assert_eq!(*session.backs.lock(), 0, "{case:?}");
+            assert_eq!(session.typed.lock().as_deref(), Some("caption"), "{case:?}");
+            // Preparation keeps its own two 8 s budgets; the reproof never exceeds 16 s.
+            assert!(
+                started.elapsed() <= Duration::from_secs(8 + 8 + 16),
+                "{case:?}"
+            );
+        }
     }
 
     #[tokio::test(start_paused = true)]
@@ -7612,13 +8207,12 @@ mod tests {
     #[tokio::test(start_paused = true)]
     async fn rehearsal_full_production_media_sound_caption_reaches_denied_post_boundary() {
         let mut session=FakeSession::full_walk("riviu-fixture");
+        // Measured Trill 38.3.2 sheet and editor; Trill reads them only from fresh XML of a bound session.
+        session.epoch_override=Some("trill-sound-sheet-fixture".into());
         session.sound_sheet_back_to_next_scene=true;
-        let mut editor=sound_edit_step("Sound A"); editor.elements.insert(":id/c_4".into(),box_at(100.0,100.0)); editor.exit=Some(":id/c_4".into());
-        let sheet=scene(vec![("Recommended",box_at(0.0,0.0)),(":id/ta8",labelled("",0.0,100.0,800.0,200.0)),(":id/title",box_at(100.0,120.0)),(":id/rr5",box_at(100.0,200.0)),(":id/dfu",box_at(500.0,120.0))],None)
-            .texted("Recommended","Recommended").texted(":id/title","Sound A").texted(":id/rr5","Artist A");
-        session.screens.truncate(7);session.screens.extend([editor,sheet]);
+        session.screens.truncate(7);session.screens.extend([trill_sound_editor(":id/c_4"),trill_sound_sheet()]);
         let mut caption=post_screen(); caption.elements.insert(":id/aun".into(),box_at(20.0,70.0));caption.exit=Some(":id/aun".into());
-        session.screens.extend([sound_edit_step("Sound A"),caption,sound_edit_step("Sound A"),post_screen(),feed()]);
+        session.screens.extend([trill_sound_editor("fixture-edit-next"),caption,trill_sound_editor("fixture-edit-next"),post_screen(),feed()]);
         let mut reached=0;
         let result=publish_selected_media_with_sound_effect_intent(&session,plan(),SoundPickerPlan::resolve("com.ss.android.ugc.trill","en","38.3.2").unwrap(),&PublishSoundPolicy::TrendingAny{pool_size:1,seed:1},|r:&ElementBox|r.centre(),PickerSelection{album:"riviu-fixture",count:1,screen:screen(),video:true},"fixture caption",&AtomicBool::new(false),|sound|{assert!(sound.confirmed);reached+=1;anyhow::bail!("rehearsal full path stops before Post");},&|_|{},&|_|{},false).await;
         assert!(result.is_err(), "expected final denied boundary, result={result:?}, scene={}, taps={:?}, backs={}", *session.at.lock(), session.taps.lock(), *session.backs.lock());
@@ -7880,6 +8474,263 @@ mod tests {
     }
 
     #[tokio::test(start_paused = true)]
+    async fn sound_popup_declines_once_without_opening_covered_music_entry() {
+        let session =
+            FakeSession {
+                modal_readback: true,
+                snapshot_overrides: Mutex::new(
+                    [include_str!(
+                        "../fixtures/tiktok-publish/contacts-sync-trill-38.3.2-en.fixture"
+                    )
+                    .to_owned()]
+                    .into(),
+                ),
+                ..FakeSession::with(vec![feed()])
+            };
+        let plan = SoundPickerPlan::resolve("com.ss.android.ugc.trill", "en", "38.3.2").unwrap();
+        let result = crate::tiktok_sound::with_observation_budget(
+            &AtomicBool::new(false),
+            Duration::from_secs(1),
+            crate::tiktok_sound::open_and_observe_sounds(&session, plan, 1),
+        )
+        .await;
+        assert!(result.is_err(), "unchanged modal must block sound entry");
+        assert_eq!(
+            session.taps.lock().len(),
+            1,
+            "decline once; never tap covered music entry"
+        );
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn measured_camera_gallery_snapshot_avoids_serial_locator_timeout() {
+        // Exact relevant-node projections of ROOT's saved 2026-10-07 trees 9 and 5.
+        // Tree 5 is a later observation than screenshot 5; no paired-frame claim.
+        let camera = r#"<hierarchy><node package="com.ss.android.ugc.trill" class="android.widget.Button" text="" content-desc="Record video" resource-id="com.ss.android.ugc.trill:id/n1a" clickable="true" enabled="true" bounds="[382,1583][697,1898]" displayed="true" /><node package="com.ss.android.ugc.trill" class="android.widget.FrameLayout" text="" resource-id="com.ss.android.ugc.trill:id/bos" clickable="true" enabled="true" bounds="[770,1635][980,1845]" displayed="true" /></hierarchy>"#;
+        let gallery = r#"<hierarchy><node package="com.ss.android.ugc.trill" class="android.widget.Button" text="" content-desc="Record video" resource-id="com.ss.android.ugc.trill:id/n1a" clickable="true" enabled="true" bounds="[395,1591][684,1880]" displayed="true" /><node package="com.ss.android.ugc.trill" class="android.widget.FrameLayout" text="" resource-id="com.ss.android.ugc.trill:id/bos" clickable="true" enabled="true" bounds="[770,1631][980,1841]" displayed="true" /><node package="com.ss.android.ugc.trill" class="android.widget.TextView" text="All" resource-id="com.ss.android.ugc.trill:id/snr" clickable="false" enabled="true" bounds="[489,100][543,150]" displayed="true" /></hierarchy>"#;
+        let labels = crate::tiktok_labels::controls_for("com.ss.android.ugc.trill", "en", "38.3.2").unwrap();
+        let measured = ComposerPlan::resolve(&labels).unwrap();
+        for (xml, query, expected) in [
+            (camera, measured.shutter, (382.0, 1583.0)),
+            (camera, measured.gallery_entry.unwrap(), (770.0, 1635.0)),
+            (gallery, measured.album_menu, (489.0, 100.0)),
+        ] {
+            let session = FakeSession {
+                modal_readback: true,
+                locate_delay: Duration::from_secs(11),
+                snapshot_overrides: Mutex::new([xml.to_owned()].into()),
+                ..Default::default()
+            };
+            let composer = Composer::new(&session, measured, |r: &ElementBox| r.centre());
+            let deadline = Instant::now() + Duration::from_secs(3);
+            let stop = AtomicBool::new(false);
+            let found = if query == measured.album_menu {
+                composer.await_condition_until(deadline, query, &stop, |_| true).await
+            } else {
+                composer.await_navigation_target(deadline, query, &stop, None).await
+            }.expect("one fresh XML observation must fit the existing deadline")
+                .expect("measured control exists in saved live tree");
+            assert_eq!((found.x, found.y), expected);
+            assert!(session.taps.lock().is_empty(), "recognition never dispatches a gesture");
+        }
+        // Negative mutations protect the new observation route, not new UI measurements.
+        for (xml, foreign) in [
+            (gallery.to_owned(), false), // picker covers the camera anchor
+            (camera.replace("</hierarchy>", &camera.replace("<hierarchy>", "")), false),
+            (camera.to_owned(), true),
+            (camera.replace("</hierarchy>", r#"<node package="com.ss.android.ugc.trill" content-desc="Dialog" bounds="[100,200][900,1200]" displayed="true"/></hierarchy>"#), false),
+        ] {
+            let session = FakeSession {
+                modal_readback: true,
+                foreground_override: foreign.then(|| "com.instagram.barcelona".into()),
+                snapshot_overrides: Mutex::new([xml].into()),
+                ..Default::default()
+            };
+            let composer = Composer::new(&session, measured, |r: &ElementBox| r.centre());
+            let result = composer.await_navigation_target(Instant::now() + Duration::from_secs(1),
+                measured.shutter, &AtomicBool::new(false), None).await;
+            assert!(!result.is_ok_and(|target| target.is_some()), "covered/ambiguous/foreign target accepted");
+            assert!(session.taps.lock().is_empty());
+        }
+
+    }
+
+    // Actual native21 generation64, XML SHA256
+    // 1831b96fec796a27e889a20206c636587728ce781f57d90ad6b1f2ea82097193.
+    // Raw native XML is the portable fixture; its receipt remains in audit artifacts.
+    const NATIVE_FINAL_CAPTION_XML: &str = include_str!("../fixtures/tiktok-publish/native-final-caption-global45.7.3-en.xml");
+    const NATIVE_FINAL_CAPTION_TEXT: &str = r####"vừa đi đà lạt về, ghi lại liền mấy chỗ đáng đi nè 🥰
+
+Lưu list này để có lịch đi Đà Lạt gọn hơn, dễ chọn điểm theo buổi và đỡ mất thời gian mò từng nơi.
+
+#riviudalat #dalat #dalatreview #spotlightdalat #reviewdalat "####;
+
+    fn final_caption_session(xml: Vec<String>, generations: Vec<u64>) -> FakeSession {
+        FakeSession {
+            modal_readback: true,
+            epoch_override: Some("bound-final-caption-test".into()),
+            foreground_override: Some("com.zhiliaoapp.musically".into()),
+            snapshot_overrides: Mutex::new(xml.into()),
+            snapshot_generations: Mutex::new(generations.into()),
+            ..FakeSession::with(vec![scene(vec![("Post", labelled("Post", 550.0, 1936.0, 498.0, 126.0))], None)])
+        }
+    }
+
+    fn final_caption_composer(session: &FakeSession) -> Composer<'_, fn(&ElementBox) -> TapPoint> {
+        let labels = crate::tiktok_labels::controls_for("com.zhiliaoapp.musically", "en", "45.7.3").unwrap();
+        let planner: fn(&ElementBox) -> TapPoint = |r| r.centre();
+        let mut composer = Composer::new(session, ComposerPlan::resolve(&labels).unwrap(), planner);
+        composer.pending_sound_proof = Some((
+            SoundPickerPlan::resolve("com.zhiliaoapp.musically", "en", "45.7.3").unwrap(),
+            "sound proof is supplied by the enclosing owner".into(),
+        ));
+        composer
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn final_caption_post_owner_shared_snapshot_fits_original_deadline() {
+        let mut session = final_caption_session(vec![NATIVE_FINAL_CAPTION_XML.into()], vec![64]);
+        session.hierarchy_delay = Duration::from_millis(500);
+        session.locate_delay = Duration::from_millis(500);
+        let mut composer = final_caption_composer(&session);
+        let stop = AtomicBool::new(false);
+        let start = Instant::now();
+        let result = crate::tiktok_sound::with_deadline_budget(&stop, start + Duration::from_secs(8), async {
+            // Recorded arrival leaves1248ms. Advance virtual time inside the SAME8s budget.
+            tokio::time::sleep(Duration::from_millis(6751)).await;
+            composer.await_final_post_button(NATIVE_FINAL_CAPTION_TEXT, &stop).await
+        }).await;
+        let target = result.expect("one shared fresh caption/Post snapshot must fit original8s")
+            .expect("actual native64 caption and unique enabled/clickable Post are present");
+        assert_eq!((target.x, target.y, target.width, target.height), (550.0, 1936.0, 498.0, 126.0));
+        assert!(target.enabled && target.clickable);
+        assert!(start.elapsed() < Duration::from_secs(8));
+        assert!(session.taps.lock().is_empty(), "proof read must not dispatch Post");
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn final_caption_post_owner_rejects_changed_unknown_and_ambiguous_proof() {
+        let original = NATIVE_FINAL_CAPTION_XML;
+        let start = original.find("resource-id=\"com.zhiliaoapp.musically:id/sa3\"").unwrap();
+        let opening = original[..start].rfind('<').unwrap();
+        let end = start + original[start..].find('>').unwrap() + 1;
+        let duplicate = original[opening..end].trim_end_matches('>').trim_end_matches('/').to_owned() + "/>";
+        let duplicate = duplicate.replace("[550,1936][1048,2062]", "invalid-bounds");
+        for xml in [
+            original.replace("text=\"v", "text=\"caption changed:v"),
+            original.replace("showing-hint=\"false\"", "showing-hint=\"true\""),
+            original.replace("password=\"false\"", "password=\"true\""),
+            original.replace("enabled=\"true\"", "enabled=\"false\""),
+            original.replace("</hierarchy>", &format!("{duplicate}</hierarchy>")),
+        ] {
+            let session = final_caption_session(vec![xml], vec![64, 65, 66, 67]);
+            let mut composer = final_caption_composer(&session);
+            let stop = AtomicBool::new(false);
+            let result = crate::tiktok_sound::with_deadline_budget(&stop, Instant::now() + Duration::from_millis(250),
+                composer.await_final_post_button(NATIVE_FINAL_CAPTION_TEXT, &stop)).await;
+            assert!(!result.is_ok_and(|target| target.is_some()), "unknown/ambiguous proof must not authorize Post");
+            assert!(session.taps.lock().is_empty());
+        }
+        let mut session = final_caption_session(vec![original.into()], vec![64]);
+        session.epoch_override = Some(String::new());
+        let mut composer = final_caption_composer(&session);
+        assert!(composer.await_final_post_button(NATIVE_FINAL_CAPTION_TEXT, &AtomicBool::new(false)).await.is_err());
+        assert!(session.taps.lock().is_empty());
+        let session = final_caption_session(vec![original.into()], vec![0]);
+        let mut composer = final_caption_composer(&session);
+        assert!(composer.await_final_post_button(NATIVE_FINAL_CAPTION_TEXT, &AtomicBool::new(false)).await.is_err());
+        assert!(session.taps.lock().is_empty());
+        let mut session = final_caption_session(vec![original.into()], vec![64]);
+        session.foreground_override = Some("com.instagram.barcelona".into());
+        let mut composer = final_caption_composer(&session);
+        assert!(composer.await_final_post_button(NATIVE_FINAL_CAPTION_TEXT, &AtomicBool::new(false)).await.is_err());
+        assert!(session.taps.lock().is_empty());
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn modal_navigation_never_returns_covered_target_or_repeats_decline() {
+        let xml = include_str!("../fixtures/tiktok-publish/contacts-sync-trill-38.3.2-en.fixture");
+        let labels =
+            crate::tiktok_labels::controls_for("com.ss.android.ugc.trill", "en", "38.3.2").unwrap();
+        for foreign in [false, true] {
+            let session = FakeSession {
+                modal_readback: true,
+                foreground_override: foreign.then(|| "com.instagram.barcelona".into()),
+                snapshot_overrides: Mutex::new([xml.to_owned()].into()),
+                ..FakeSession::with(vec![feed()])
+            };
+            let composer = Composer::new(
+                &session,
+                ComposerPlan::resolve(&labels).unwrap(),
+                |element: &ElementBox| element.centre(),
+            );
+            let result = composer
+                .await_navigation_target(
+                    Instant::now() + Duration::from_secs(1),
+                    plan().open,
+                    &AtomicBool::new(false),
+                    None,
+                )
+                .await;
+            assert!(
+                result.is_err(),
+                "covered/foreign target was accepted: {result:?}"
+            );
+            assert_eq!(session.taps.lock().len(), usize::from(!foreign));
+        }
+        // Final Global caption/Post proof must discard targets under a dismissed popup.
+        // Popup shape is the existing screenshot-derived negative contract, NOT live XML.
+        let package = "com.zhiliaoapp.musically";
+        let popup = format!(r#"<node package="{package}" content-desc="Dialog" displayed="true" bounds="[100,200][900,1200]">
+          <node package="{package}" class="android.widget.TextView" text="Turn on precise location" displayed="true" bounds="[150,250][850,350]"/>
+          <node package="{package}" class="android.widget.Button" text="Don't allow" displayed="true" enabled="true" clickable="true" bounds="[150,950][450,1050]"/>
+          <node package="{package}" class="android.widget.Button" text="OK" displayed="true" enabled="true" clickable="true" bounds="[550,950][850,1050]"/>
+        </node>"#);
+        let covered = NATIVE_FINAL_CAPTION_XML.replace("</hierarchy>", &format!("{popup}</hierarchy>"));
+        let changed = NATIVE_FINAL_CAPTION_XML.replace("vừa đi", "caption changed:");
+        for generation in [64, 65] {
+            let session = final_caption_session(vec![covered.clone(), changed.clone()], vec![64, generation]);
+            let mut composer = final_caption_composer(&session);
+            let stop = AtomicBool::new(false);
+            let result = crate::tiktok_sound::with_deadline_budget(&stop, Instant::now() + Duration::from_secs(1),
+                composer.await_final_post_button(NATIVE_FINAL_CAPTION_TEXT, &stop)).await;
+            assert!(result.is_err(), "dismissed target or changed caption cannot authorize Post");
+            assert_eq!(session.taps.lock().len(), 1, "only the safe decline drains; no repeated decline or Post");
+        }
+        // An unreadable modal observation is not positive target absence.
+        for stopped in [false, true] {
+            let session = FakeSession {
+                modal_readback: true,
+                hierarchy_delay: Duration::from_secs(2),
+                ..FakeSession::with(vec![feed()])
+            };
+            let composer = Composer::new(&session, ComposerPlan::resolve(&labels).unwrap(), |r: &ElementBox| r.centre());
+            let stop = AtomicBool::new(false);
+            let start = Instant::now();
+            let (result, ()) = tokio::join!(
+                composer.await_navigation_target(start + Duration::from_secs(1), plan().open, &stop, None),
+                async {
+                    if stopped {
+                        tokio::time::sleep(Duration::from_millis(100)).await;
+                        stop.store(true, Ordering::Relaxed);
+                    }
+                },
+            );
+            if stopped {
+                assert!(result.unwrap().is_none());
+            } else {
+                let error = result.expect_err("popup read deadline must not become target absence");
+                let failure = crate::publish_recovery::describe(&error);
+                assert_eq!(failure.code, "publish_observation_deadline");
+                assert_eq!(failure.kind, crate::publish_recovery::FailureKind::Retryable);
+            }
+            assert!(start.elapsed() <= Duration::from_secs(1));
+            assert!(session.taps.lock().is_empty());
+        }
+
+    }
+
+    #[tokio::test(start_paused = true)]
     async fn a_condition_read_cannot_outlive_its_window() {
         for sound_scope in [false, true] {
             let session = FakeSession {
@@ -8018,11 +8869,40 @@ mod tests {
             element.centre()
         });
         let start = Instant::now();
-        assert!(!composer
-            .pill_reads("riviu-abc", &AtomicBool::new(false))
+        // A pill read that never completed is unknown: it neither confirms the album
+        // nor proves a different one, so it keeps the typed observation deadline.
+        let error = composer
+            .pill_reads("riviu-abc", &AtomicBool::new(false), start + PICKER_WINDOW)
             .await
-            .unwrap());
+            .expect_err("a late pill read cannot answer the album question");
+        let failure = crate::publish_recovery::describe(&error);
+        assert_eq!(failure.code, "publish_observation_deadline");
+        assert_eq!(
+            failure.kind,
+            crate::publish_recovery::FailureKind::Retryable
+        );
         assert!(start.elapsed() <= PICKER_WINDOW);
+
+        // A completed read whose pill has no text yet is not another album either.
+        let blank = FakeSession::with(vec![
+            picker("All", Some("fixture-album-menu")),
+            picker("", None),
+        ])
+        .rows("riviu-abc", vec![box_at(0.0, 400.0)]);
+        let mut composer = Composer::new(&blank, plan(), |element: &ElementBox| element.centre());
+        let error = composer
+            .select_album("riviu-abc", &AtomicBool::new(false))
+            .await
+            .expect_err("an unreadable pill is not a different album");
+        assert_eq!(
+            crate::publish_recovery::describe(&error).code,
+            "publish_observation_deadline"
+        );
+        assert_eq!(
+            blank.taps.lock().len(),
+            2,
+            "menu and row once; the row tap is never replayed"
+        );
     }
 
     #[tokio::test(start_paused = true)]
@@ -8035,7 +8915,11 @@ mod tests {
             element.centre()
         });
         let start = Instant::now();
-        assert!(!composer.await_feed(POST_CONFIRM_WINDOW).await);
+        assert!(
+            !composer
+                .await_feed(POST_CONFIRM_WINDOW, &AtomicBool::new(false))
+                .await
+        );
         assert!(start.elapsed() <= POST_CONFIRM_WINDOW);
     }
 

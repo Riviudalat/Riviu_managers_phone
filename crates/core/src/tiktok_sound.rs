@@ -51,6 +51,8 @@ const SOUND_WINDOW: Duration = Duration::from_secs(180);
 struct SoundBudget {
     deadline: Instant,
     stopped: Arc<AtomicBool>,
+    popup: Arc<tokio::sync::Mutex<crate::app_automation::dialogs::PopupBudget>>,
+    popup_package: Arc<tokio::sync::Mutex<Option<&'static str>>>,
 }
 tokio::task_local! { static SOUND_BUDGET: SoundBudget; }
 
@@ -72,6 +74,7 @@ pub(crate) async fn reopen_failed_sound_sheet(
     session: &dyn UiSession,
     plan: SoundPickerPlan,
 ) -> anyhow::Result<bool> {
+    let _pin = hold_sound_session(session);
     anyhow::ensure!(
         selection_recovery::measured(plan),
         "sound network recovery unmeasured"
@@ -119,6 +122,8 @@ pub(crate) async fn with_deadline_budget<T>(
     if let Ok(budget) = SOUND_BUDGET.try_with(|parent| SoundBudget {
         deadline: parent.deadline.min(deadline),
         stopped: parent.stopped.clone(),
+        popup: parent.popup.clone(),
+        popup_package: parent.popup_package.clone(),
     }) {
         return SOUND_BUDGET
             .scope(budget, async {
@@ -131,6 +136,8 @@ pub(crate) async fn with_deadline_budget<T>(
     let budget = SoundBudget {
         deadline,
         stopped: stopped.clone(),
+        popup: Default::default(),
+        popup_package: Default::default(),
     };
     let task = SOUND_BUDGET.scope(
         budget,
@@ -163,10 +170,14 @@ pub(crate) async fn with_stage_budget<T>(
         .try_with(|parent| SoundBudget {
             deadline: parent.deadline.min(stage_deadline),
             stopped: parent.stopped.clone(),
+            popup: parent.popup.clone(),
+            popup_package: parent.popup_package.clone(),
         })
         .unwrap_or_else(|_| SoundBudget {
             deadline: stage_deadline,
             stopped: Arc::new(AtomicBool::new(false)),
+            popup: Default::default(),
+            popup_package: Default::default(),
         });
     SOUND_BUDGET
         .scope(budget, async {
@@ -252,6 +263,65 @@ pub(crate) async fn read_sound<T>(
     check_wait()?;
     Ok(value)
 }
+/// All nested music waits share the operation's decline budget and Stop flag.
+async fn clear_sound_popup(
+    session: &dyn UiSession,
+    deadline: Instant,
+    expected: Option<&'static str>,
+) -> anyhow::Result<()> {
+    use crate::app_automation::dialogs::{step_before_deadline, PopupStep};
+    use crate::ui_automation::runtime::ReadWaitResult;
+    if !session.supports_accessibility_readback() {
+        return Ok(());
+    }
+    let Ok((deadline, stopped, popup, bound_package)) = SOUND_BUDGET.try_with(|budget| {
+        (
+            deadline.min(budget.deadline),
+            budget.stopped.clone(),
+            budget.popup.clone(),
+            budget.popup_package.clone(),
+        )
+    }) else {
+        // Unscoped diagnostics are read-only: never create an independent popup controller.
+        return Ok(());
+    };
+    let mut binding = bound_package.lock().await;
+    if let Some(expected) = expected {
+        anyhow::ensure!(
+            (*binding).is_none_or(|bound| bound == expected),
+            "sound popup target changed"
+        );
+        *binding = Some(expected);
+    }
+    let package = (*binding).context("sound popup target is not bound")?;
+    drop(binding);
+    let version =
+        read_sound(async { Ok(session.app_version(package).await.unwrap_or_default()) }).await?;
+    let language =
+        read_sound(async { Ok(session.ui_language().await.unwrap_or_default()) }).await?;
+    let labels = crate::tiktok_labels::controls_for_runtime(package, &language, &version)
+        .context("sound popup profile unavailable")?;
+    let mut popup = popup.lock().await;
+    loop {
+        match step_before_deadline(session, labels, &mut popup, deadline, &stopped, &stopped)
+            .await?
+        {
+            ReadWaitResult::Ready(PopupStep::Clear) => return Ok(()),
+            ReadWaitResult::Ready(PopupStep::Dismissed) => {
+                tokio::time::sleep(POLL.min(deadline.saturating_duration_since(Instant::now())))
+                    .await;
+            }
+            ReadWaitResult::Ready(PopupStep::Blocked) => {
+                anyhow::bail!("sound popup requires operator review")
+            }
+            ReadWaitResult::Cancelled => return Err(SoundStopped.into()),
+            ReadWaitResult::DeadlineExceeded => {
+                return Err(crate::publish_recovery::observation_deadline())
+            }
+        }
+    }
+}
+
 async fn sound_tap(session: &dyn UiSession, point: crate::TapPoint) -> anyhow::Result<()> {
     sound_tap_armed(session, point, &mut || {}).await
 }
@@ -266,6 +336,16 @@ async fn sound_tap_armed(
     session.tap(point).await?;
     check_wait()
 }
+/// Every pool, tab and row this flow proves is bound to one session epoch, and the composer's
+/// sound stage ends on any epoch change. A read-side session replacement can only end the
+/// attempt here: #22/#29/#30 on Global 45.7.3 (2026-10-08) each lost the attempt to one, while
+/// the replacement read the same unreadable root. So each public sound step holds its session,
+/// and an unreadable root stays an unknown read that the existing loops observe again within
+/// their unchanged deadlines. Nothing is rebound; no target outlives a session change.
+fn hold_sound_session(session: &dyn UiSession) -> crate::driver::ReadSessionPin {
+    session.pin_read_session()
+}
+
 fn transient_sound_read(error: &anyhow::Error) -> bool {
     matches!(
         crate::driver::classify_read_failure(error),
@@ -294,7 +374,6 @@ pub struct SoundPickerPlan {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum SoundPickerLayout {
-    ElementQueries,
     TabbedSnapshot(SoundSnapshotLayout),
 }
 
@@ -419,7 +498,10 @@ const MEASURED_SOUND_PICKERS: &[MeasuredSoundPicker] = &[
             artist_id: ":id/rr5",
             // dfu is the trim scissors, not a choose control (live 2026-09-06).
             choose_id: None,
-            layout: SoundPickerLayout::ElementQueries,
+            layout: SoundPickerLayout::TabbedSnapshot(SoundSnapshotLayout {
+                tab_id: ":id/q_g", viewport_id: ":id/tka",
+                boundary_rows: SoundBoundaryRows::RequireCompleteText,
+            }),
             selection: SoundSelectionMode::Inline {
                 marker_ids: &[":id/dfu", ":id/jk1"],
             },
@@ -529,7 +611,6 @@ impl SoundPickerPlan {
 
     fn snapshot_layout(self) -> Option<SoundSnapshotLayout> {
         match self.layout {
-            SoundPickerLayout::ElementQueries => None,
             SoundPickerLayout::TabbedSnapshot(layout) => Some(layout),
         }
     }
@@ -622,6 +703,20 @@ pub async fn open_and_observe_sounds_armed(
     maximum_visible: usize,
     before_open: &mut (dyn FnMut() + Send),
 ) -> anyhow::Result<ObservedSoundPool> {
+    open_and_observe_sounds_armed_current(session, plan, maximum_visible, before_open, false).await
+}
+
+/// A fresh Any choice or the same frozen Recommended choice may observe For You.
+/// A frozen Hot choice must use the original Hot path.
+pub async fn open_and_observe_sounds_armed_current(
+    session: &dyn UiSession,
+    plan: SoundPickerPlan,
+    maximum_visible: usize,
+    before_open: &mut (dyn FnMut() + Send),
+    allow_recommended: bool,
+) -> anyhow::Result<ObservedSoundPool> {
+    let _pin = hold_sound_session(session);
+    clear_sound_popup(session, phase_deadline(SOUND_WINDOW), Some(plan.package)).await?;
     anyhow::ensure!(
         (1..=5).contains(&maximum_visible),
         "sound observer limit must be within 1..=5"
@@ -648,12 +743,12 @@ pub async fn open_and_observe_sounds_armed(
         return observe_sound_pool(session, plan, maximum_visible).await;
     }
     match visual::open_loading_entry(session, plan, before_open).await {
-        Ok(true) => return observe_measured_sound_pool(session, plan, maximum_visible).await,
+        Ok(true) => return observe_measured_sound_pool(session, plan, maximum_visible, allow_recommended).await,
         Err(error)
             if selection_recovery::measured(plan)
                 && error.is::<crate::driver::ScreenshotReadUnavailable>() =>
         {
-            return open_sound_without_image(session, plan, maximum_visible, before_open).await;
+            return open_sound_without_image(session, plan, maximum_visible, before_open, allow_recommended).await;
         }
         Err(error) => return Err(error),
         Ok(false) => {}
@@ -688,8 +783,13 @@ pub async fn open_and_observe_sounds_armed(
         .await
         .context("open sound picker")?;
 
+    if session.gui_reasoner().is_none() {
+        if let Some(pool) = observe_current_recommended(session, plan, maximum_visible, allow_recommended).await? {
+            return Ok(pool);
+        }
+    }
     if selection_recovery::measured(plan) && session.gui_reasoner().is_some() {
-        return observe_measured_sound_pool(session, plan, maximum_visible).await;
+        return observe_measured_sound_pool(session, plan, maximum_visible, allow_recommended).await;
     }
     if plan.snapshot_layout().is_some() {
         snapshot::select_section_tab(session, plan).await?;
@@ -703,11 +803,15 @@ async fn open_sound_without_image(
     plan: SoundPickerPlan,
     maximum_visible: usize,
     before_open: &mut (dyn FnMut() + Send),
+    allow_recommended: bool,
 ) -> anyhow::Result<ObservedSoundPool> {
     let epoch = session.gui_session_epoch();
     anyhow::ensure!(!epoch.is_empty(), "sound sheet session missing");
     let entry = prove_sound_entry_xml(session, plan, &epoch).await?;
     sound_tap_armed(session, entry.centre(), before_open).await?;
+    if let Some(pool) = observe_current_recommended(session, plan, maximum_visible, allow_recommended).await? {
+        return checked_measured_sound_observation(session, plan, &epoch, Ok(pool)).await;
+    }
     // With no screenshot, only an already-selected Hot tab in two fresh XML
     // pools can authorize a row. Do not enter the image-based tab recovery.
     let pool = async {
@@ -727,10 +831,13 @@ async fn prove_sound_entry_xml(
     let mut previous: Option<(u64, ElementBox)> = None;
     let mut stable = 0usize;
     loop {
+        clear_sound_popup(session, deadline, Some(plan.package)).await?;
         check_wait()?;
-        anyhow::ensure!(session.gui_session_epoch() == epoch
-            && read_sound(session.active_app_bundle()).await? == plan.package,
-            "sound app/session changed before opening picker");
+        anyhow::ensure!(
+            session.gui_session_epoch() == epoch
+                && read_sound(session.active_app_bundle()).await? == plan.package,
+            "sound app/session changed before opening picker"
+        );
         let source = read_sound(session.hierarchy_source_snapshot()).await?;
         let tree = crate::ui_automation::tree::Tree::parse(source)?;
         let current = unique_sound_entry(&tree, plan.package, &[plan.entry_id]);
@@ -777,8 +884,27 @@ pub async fn resume_open_sounds(
     plan: SoundPickerPlan,
     maximum: usize,
 ) -> anyhow::Result<ObservedSoundPool> {
+    resume_open_sounds_current(session, plan, maximum, false).await
+}
+
+pub async fn resume_open_sounds_current(
+    session: &dyn UiSession,
+    plan: SoundPickerPlan,
+    maximum: usize,
+    allow_recommended: bool,
+) -> anyhow::Result<ObservedSoundPool> {
+    let _pin = hold_sound_session(session);
+    if !allow_recommended || !selection_recovery::measured(plan) {
+        clear_sound_popup(session, phase_deadline(SOUND_WINDOW), Some(plan.package)).await?;
+    }
     if selection_recovery::measured(plan) && session.gui_reasoner().is_some() {
-        return observe_measured_sound_pool(session, plan, maximum).await;
+        return observe_measured_sound_pool(session, plan, maximum, allow_recommended).await;
+    }
+    if let Some(pool) = observe_current_recommended(session, plan, maximum, allow_recommended).await? {
+        return Ok(pool);
+    }
+    if allow_recommended && selection_recovery::measured(plan) {
+        clear_sound_popup(session, phase_deadline(SOUND_WINDOW), Some(plan.package)).await?;
     }
     if let Some(layout) = plan.snapshot_layout() {
         if !read_sound(session.locate_all(ElementQuery::ResourceIdSuffix(layout.tab_id)))
@@ -802,6 +928,7 @@ pub(crate) async fn recover_frozen_sound_pool(
     plan: SoundPickerPlan,
     selection: &crate::SoundSelectionEvidence,
 ) -> anyhow::Result<ObservedSoundPool> {
+    let _pin = hold_sound_session(session);
     with_stage_budget(
         Duration::from_secs(60),
         recent::recover(session, plan, selection),
@@ -863,6 +990,7 @@ async fn observe_measured_sound_pool(
     session: &dyn UiSession,
     plan: SoundPickerPlan,
     maximum: usize,
+    allow_recommended: bool,
 ) -> anyhow::Result<ObservedSoundPool> {
     anyhow::ensure!(
         selection_recovery::measured(plan)
@@ -876,6 +1004,9 @@ async fn observe_measured_sound_pool(
         scope: session.gui_scope(), epoch: epoch.clone(),
         deadline: SOUND_BUDGET.try_with(|budget| budget.deadline).ok(), events: 0,
     };
+    if let Some(pool) = observe_current_recommended(session, plan, maximum, allow_recommended).await? {
+        return checked_measured_sound_observation(session, plan, &epoch, Ok(pool)).await;
+    }
     // The measured 45.7.3 sheet can expose a complete Hot hierarchy even
     // when local OCR is unavailable. Require two fresh, stable XML pools from
     // this same app/session before returning; an incomplete root falls back
@@ -952,6 +1083,27 @@ async fn observe_measured_sound_pool(
     pool
 }
 
+async fn observe_current_recommended(
+    session: &dyn UiSession,
+    plan: SoundPickerPlan,
+    maximum: usize,
+    allow_recommended: bool,
+) -> anyhow::Result<Option<ObservedSoundPool>> {
+    if !allow_recommended || !selection_recovery::measured(plan) {
+        return Ok(None);
+    }
+    let current = SoundPickerPlan {
+        section_label: "For You",
+        canonical_section: "recommended",
+        ..plan
+    };
+    let Some(mut pool) = snapshot::observe_current_recommended_until_loaded(session, current, maximum).await? else {
+        return Ok(None);
+    };
+    pool.effective_plan = Some(current);
+    Ok(Some(pool))
+}
+
 async fn checked_measured_sound_observation<T>(
     session: &dyn UiSession,
     plan: SoundPickerPlan,
@@ -983,6 +1135,7 @@ pub async fn recover_sound_selection(
     pool: &ObservedSoundPool,
     index: usize,
 ) -> anyhow::Result<()> {
+    let _pin = hold_sound_session(session);
     let plan = pool.effective_plan(plan);
     if recent::measured(plan) && plan.section_label == "Recent" {
         // The exact row was just proved on Recent; an editor read while that
@@ -1078,6 +1231,7 @@ async fn open_dynamic_sounds(
         .collect();
     let deadline = phase_deadline(SOUND_WINDOW);
     let button = loop {
+        clear_sound_popup(session, deadline, Some(plan.package)).await?;
         let source = crate::ui_automation::tree::Tree::parse(
             read_sound(session.hierarchy_source_snapshot()).await?,
         )?;
@@ -1145,6 +1299,32 @@ async fn observe_sound_pool(
     plan: SoundPickerPlan,
     maximum_visible: usize,
 ) -> anyhow::Result<ObservedSoundPool> {
+    Box::pin(observe_sound_pool_until(session, plan, maximum_visible, phase_deadline(SOUND_WINDOW))).await
+}
+
+async fn observe_sound_pool_until(
+    session: &dyn UiSession,
+    plan: SoundPickerPlan,
+    maximum_visible: usize,
+    deadline: Instant,
+) -> anyhow::Result<ObservedSoundPool> {
+    let deadline = deadline.min(phase_deadline(SOUND_WINDOW));
+    check_wait()?;
+    // Scope read deadlines without cancelling a popup dismissal already dispatched.
+    let result = Box::pin(with_deadline_budget(&AtomicBool::new(false), deadline,
+        Box::pin(observe_sound_pool_inner(session, plan, maximum_visible, deadline)))).await;
+    check_wait()?;
+    if Instant::now() >= deadline { return Err(crate::publish_recovery::observation_deadline()); }
+    result
+}
+
+async fn observe_sound_pool_inner(
+    session: &dyn UiSession,
+    plan: SoundPickerPlan,
+    maximum_visible: usize,
+    deadline: Instant,
+) -> anyhow::Result<ObservedSoundPool> {
+    clear_sound_popup(session, deadline, Some(plan.package)).await?;
     if recent::measured(plan) && plan.section_label == "Recent" {
         return tokio::time::timeout(Duration::from_secs(30), recent::observe(session, plan))
             .await
@@ -1152,11 +1332,11 @@ async fn observe_sound_pool(
             .map_err(classify_recent_observation_error);
     }
     if plan.snapshot_layout().is_some() {
-        return snapshot::observe(session, plan, maximum_visible).await;
+        return Box::pin(snapshot::observe_until(session, plan, maximum_visible, deadline)).await;
     }
-    let deadline = phase_deadline(SOUND_WINDOW);
     let mut previous: Option<ObservedSoundPool> = None;
     loop {
+        clear_sound_popup(session, deadline, Some(plan.package)).await?;
         check_wait()?;
         let section = read_sound(session.locate_all_described(ElementQuery::Text {
             value: plan.section_label,
@@ -1231,6 +1411,7 @@ pub(crate) async fn choose_provisional_sound(
     recovering: bool,
     row_proved: &mut bool,
 ) -> anyhow::Result<String> {
+    let _pin = hold_sound_session(session);
     visual::choose_provisional(
         session,
         pool.effective_plan(plan),
@@ -1248,6 +1429,7 @@ pub async fn choose_and_confirm_sound(
     pool: &ObservedSoundPool,
     index: usize,
 ) -> anyhow::Result<()> {
+    let _pin = hold_sound_session(session);
     let plan = pool.effective_plan.unwrap_or(plan);
     let serial = session.gui_scope().map(|scope| scope.device_id);
     let epoch = session.gui_session_epoch();
@@ -1305,12 +1487,12 @@ pub async fn choose_and_confirm_sound(
             let mut recovered = false;
             let mut network_observation_used = false;
             let mut post_row_observations = 0u8;
-            loop {
+            while fresh.selected_index != Some(index) {
                 phase = "postRow";
                 let observation = if selection_recovery::measured(plan) {
-                    snapshot::observe_after_selection(session, plan, pool.maximum_visible).await
+                    snapshot::observe_after_selection(session, plan, pool.maximum_visible, deadline).await
                 } else {
-                    observe_sound_pool(session, plan, pool.maximum_visible).await
+                    observe_sound_pool_until(session, plan, pool.maximum_visible, deadline).await
                 };
                 if post_row_observations < 2 {
                     post_row_observations += 1;
@@ -1344,6 +1526,7 @@ pub async fn choose_and_confirm_sound(
                     }
                     Err(error) => return Err(error),
                 };
+                if Instant::now() >= deadline { return Err(crate::publish_recovery::observation_deadline()); }
                 reproof_target(pool, &selected_pool, index)?;
                 if selected_pool.selected_index == Some(index) {
                     break;
@@ -1400,6 +1583,13 @@ pub async fn choose_and_confirm_sound(
                 }
                 tokio::time::sleep(POLL).await;
             }
+            check_wait()?;
+            anyhow::ensure!(session.gui_session_epoch() == epoch,
+                "sound session changed before closing picker");
+            anyhow::ensure!(read_sound(session.active_app_bundle()).await? == plan.package,
+                "sound app changed before closing picker");
+            anyhow::ensure!(session.gui_session_epoch() == epoch,
+                "sound session changed during close proof");
             check_wait()?;
             phase = "closePicker";
             session.back().await.context("close inline sound picker")?;
@@ -1496,6 +1686,12 @@ fn assemble_pool(
             .as_deref()
             .map(normalize_artist)
             .unwrap_or_default();
+        if selection_recovery::measured(plan)
+            && plan.section_label == "For You"
+            && plan.canonical_section == "recommended"
+        {
+            anyhow::ensure!(!artist.is_empty(), "sound artist is empty");
+        }
         let target = if plan.choose_id.is_some() {
             exactly_one(
                 inside(&row, &choices),
@@ -1703,6 +1899,9 @@ mod tests {
                     r#"<hierarchy><node package="com.ss.android.ugc.trill" resource-id="com.ss.android.ugc.trill:id/c_4" bounds="{bounds}" enabled="true" clickable="true" displayed="true"/></hierarchy>"#
                 )
             };
+            let xml = if self.slow_trill == Some("pool") && self.taps.load(Ordering::Relaxed) == 1 {
+                inline_fixture_xml("Tung Zin Zin", None)
+            } else { xml };
             let xml = if self.slow_trill == Some("ambiguous") {
                 xml.replace("</hierarchy>", r#"<node package="com.ss.android.ugc.trill" resource-id="com.ss.android.ugc.trill:id/c_4" bounds="[700,100][900,216]" enabled="true" clickable="true" displayed="true"/></hierarchy>"#)
             } else {
@@ -1856,6 +2055,8 @@ mod tests {
         let budget = SoundBudget {
             deadline: Instant::now(),
             stopped: Arc::new(AtomicBool::new(false)),
+            popup: Default::default(),
+            popup_package: Default::default(),
         };
         let result = SOUND_BUDGET
             .scope(
@@ -1941,7 +2142,15 @@ mod tests {
         }
     }
 
+    fn inline_fixture_xml(title: &str, marker: Option<&str>) -> String {
+        let package = "com.ss.android.ugc.trill";
+        let mark = marker.map(|id| format!(r#"<node package="{package}" resource-id="{package}{id}" bounds="[10,110][20,120]" displayed="true" enabled="true"/>"#)).unwrap_or_default();
+        format!(r#"<hierarchy><node package="{package}" resource-id="{package}:id/q_g" text="Recommended" selected="true" bounds="[0,0][100,40]" displayed="true" enabled="true"/><node package="{package}" resource-id="{package}:id/tka" bounds="[0,80][300,400]" displayed="true" enabled="true"><node package="{package}" resource-id="{package}:id/ta8" bounds="[0,100][300,300]" displayed="true" enabled="true"><node package="{package}" resource-id="{package}:id/title" text="{title}" bounds="[30,120][200,150]" displayed="true" enabled="true"/><node package="{package}" resource-id="{package}:id/rr5" text="Artist" bounds="[30,180][200,210]" displayed="true" enabled="true"/>{mark}</node></node></hierarchy>"#)
+    }
+
     struct InlineSession {
+        list_reads: AtomicUsize,
+        list_read_limit: usize,
         selected: AtomicBool,
         closed: AtomicBool,
         taps: AtomicUsize,
@@ -1952,6 +2161,18 @@ mod tests {
 
     #[async_trait::async_trait]
     impl UiSession for InlineSession {
+        fn gui_session_epoch(&self) -> String { "inline-fixture".into() }
+        async fn active_app_bundle(&self) -> anyhow::Result<String> { Ok("com.ss.android.ugc.trill".into()) }
+        async fn hierarchy_source_snapshot(&self) -> anyhow::Result<crate::HierarchySourceSnapshot> {
+            static GENERATION: AtomicUsize = AtomicUsize::new(1);
+            let read = self.list_reads.fetch_add(1, Ordering::Relaxed);
+            anyhow::ensure!(read < self.list_read_limit, "redundant list snapshot unavailable");
+            Ok(crate::HierarchySourceSnapshot {
+                generation: GENERATION.fetch_add(1, Ordering::Relaxed) as u64,
+                xml: inline_fixture_xml("One", self.selected.load(Ordering::Relaxed).then_some(self.marker_id)),
+            })
+        }
+
         async fn tap(&self, _: crate::TapPoint) -> anyhow::Result<()> {
             self.taps.fetch_add(1, Ordering::Relaxed);
             if self.select_takes {
@@ -2021,6 +2242,8 @@ mod tests {
     async fn inline_sound_desired_state_never_toggles_an_already_selected_track_off() {
         for selected in [false, true] {
             let session = InlineSession {
+                list_reads: AtomicUsize::new(0),
+                list_read_limit: if selected { 4 } else { usize::MAX },
                 selected: AtomicBool::new(selected),
                 closed: AtomicBool::new(false),
                 taps: AtomicUsize::new(0),
@@ -2043,6 +2266,8 @@ mod tests {
     #[tokio::test(start_paused = true)]
     async fn unconfirmed_sound_selection_stops_without_another_tap_or_closing_picker() {
         let session = InlineSession {
+                list_reads: AtomicUsize::new(0),
+                list_read_limit: usize::MAX,
             selected: AtomicBool::new(false),
             closed: AtomicBool::new(false),
             taps: AtomicUsize::new(0),
@@ -2065,6 +2290,8 @@ mod tests {
         // ta8 row; dfu is absent. Editor so9 must still confirm the exact title.
         for selected in [false, true] {
             let session = InlineSession {
+                list_reads: AtomicUsize::new(0),
+                list_read_limit: usize::MAX,
                 selected: AtomicBool::new(selected),
                 closed: AtomicBool::new(false),
                 taps: AtomicUsize::new(0),
@@ -2087,6 +2314,8 @@ mod tests {
     #[tokio::test(start_paused = true)]
     async fn carousel_marker_does_not_replace_editor_title_readback() {
         let session = InlineSession {
+                list_reads: AtomicUsize::new(0),
+                list_read_limit: usize::MAX,
             selected: AtomicBool::new(false),
             closed: AtomicBool::new(false),
             taps: AtomicUsize::new(0),
@@ -2250,6 +2479,8 @@ mod tests {
             ..base
         };
         let session = InlineSession {
+                list_reads: AtomicUsize::new(0),
+                list_read_limit: usize::MAX,
             selected: AtomicBool::new(true),
             closed: AtomicBool::new(false),
             taps: AtomicUsize::new(0),

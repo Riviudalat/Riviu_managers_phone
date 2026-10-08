@@ -25,6 +25,8 @@ pub enum SelectionReason {
     ScrollAnchorMissing,
     ScrollGeometryMissing,
     ScrollReadbackUnproven,
+    /// The last completed read belonged to another app, so no picker proof was possible.
+    ForegroundNotTarget,
     HierarchyReadFailed,
     SnapshotParseFailed,
     TapFailed,
@@ -90,6 +92,10 @@ pub struct SelectionSnapshotEvidence {
     pub next_count: Option<usize>,
     pub selector_bounds: Vec<SelectionBounds>,
     pub next_bounds: Vec<SelectionBounds>,
+    /// Package of a complete read holding no node of the picker's package. `None` when the
+    /// picker package was present or the tree named no package at all (unknown, not foreign).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub foreground_package: Option<String>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -359,6 +365,31 @@ fn snapshot_has_album(
     };
     Ok((!matched.is_empty())
         .then(|| matched.len() == 1 && tree.nodes[matched[0]].attr("text").trim() == album))
+}
+
+/// The app owning a complete read that holds no node of the picker's package.
+///
+/// Trill 38.3.2, ce0517155ab38c390d, 08/10/2026: a corner tap's `/actions` took 24071 ms,
+/// then generations 21..43 (one SHA256, 93299fde…) were Threads' `com.instagram.barcelona`
+/// mobile-number challenge with no Trill node. That is another app, not a partial picker
+/// tree. A tree naming no package at all stays unknown (`None`), never foreign.
+fn foreign_foreground(xml: &str, package: &str) -> anyhow::Result<Option<String>> {
+    let tree = crate::ui_automation::tree::Tree::parse(crate::HierarchySourceSnapshot {
+        generation: 1,
+        xml: xml.into(),
+    })?;
+    if tree
+        .nodes
+        .iter()
+        .any(|node| node.attr("package") == package)
+    {
+        return Ok(None);
+    }
+    Ok(tree
+        .nodes
+        .iter()
+        .find(|node| !node.is_hierarchy_wrapper && !node.attr("package").is_empty())
+        .map(|node| node.attr("package").to_owned()))
 }
 
 /// How far an extrapolated row may sit from `previous row + pitch` and still be the grid.
@@ -717,6 +748,9 @@ impl PickerTrace {
             Ok(ReadWaitResult::Ready(_)) if self.diagnostic.album_matches == Some(false) => {
                 attempt.finish("albumMismatch")
             }
+            Ok(ReadWaitResult::Ready(_)) if self.last_read_foreign() => {
+                attempt.finish("foregroundNotTarget")
+            }
             Ok(ReadWaitResult::Ready(_)) => attempt.finish("partial"),
             Ok(ReadWaitResult::Cancelled) => attempt.finish("cancelled"),
             Ok(ReadWaitResult::DeadlineExceeded) => attempt.finish(if read_started {
@@ -796,6 +830,13 @@ impl PickerTrace {
         if matched != Some(true) {
             self.reason(SelectionReason::AlbumMismatch);
         }
+        // Only a read with no picker control and no album can belong to another app.
+        let foreground_package = if matched.is_none() && parsed.0.is_empty() && parsed.1.is_empty()
+        {
+            foreign_foreground(&snapshot.xml, controls.package)?
+        } else {
+            None
+        };
         self.diagnostic.last_completed_snapshot = Some(SelectionSnapshotEvidence {
             generation: snapshot.generation,
             sha256: crate::frame_sha256(snapshot.xml.as_bytes()),
@@ -805,8 +846,17 @@ impl PickerTrace {
             next_count: self.diagnostic.next_count,
             selector_bounds: self.diagnostic.selector_bounds.clone(),
             next_bounds: self.diagnostic.next_bounds.clone(),
+            foreground_package,
         });
         Ok((matched == Some(true)).then_some(parsed))
+    }
+
+    /// Whether the last completed read was another app's tree.
+    fn last_read_foreign(&self) -> bool {
+        self.diagnostic
+            .last_completed_snapshot
+            .as_ref()
+            .is_some_and(|snapshot| snapshot.foreground_package.is_some())
     }
 
     fn verified(&mut self, count: usize) {
@@ -877,6 +927,11 @@ impl<P: TapPlanner> Composer<'_, P> {
             .select_verified_inner(controls, screen, album, stop, &mut trace)
             .await;
         if !matches!(&result, Ok(Selection::Armed { .. })) {
+            // A refusal whose last completed read was another app is not a picker that
+            // failed to prove itself: keep the counts, name the cause.
+            if matches!(&result, Ok(Selection::NotEnoughSelected)) && trace.last_read_foreign() {
+                trace.reason(SelectionReason::ForegroundNotTarget);
+            }
             trace.persist();
             if let Some(observer) = self.selection_diagnostics {
                 observer(&trace.diagnostic);
@@ -937,7 +992,20 @@ impl<P: TapPlanner> Composer<'_, P> {
                     return Ok(Selection::Stopped);
                 }
                 Ok(ReadWaitResult::DeadlineExceeded) => {
+                    if stop.load(Ordering::Relaxed) {
+                        trace.reason(SelectionReason::Stopped);
+                        return Ok(Selection::Stopped);
+                    }
                     trace.reason(SelectionReason::HierarchyReadFailed);
+                    if session.gui_session_epoch() == epoch
+                        && trace.diagnostic.last_completed_snapshot.is_none()
+                    {
+                        // No initial observation completed and no image tap was
+                        // dispatched. Preserve unknown as a typed read failure.
+                        return Err(crate::publish_recovery::observation_deadline().context(
+                            "initial picker observation unavailable before selection",
+                        ));
+                    }
                     return Ok(Selection::NotEnoughSelected);
                 }
                 Err(error) if classify_read_failure(&error) == ReadFailureKind::Transient => {
@@ -1381,7 +1449,10 @@ mod tests {
         partial_after_scroll: Mutex<bool>,
         unproven_after_scroll: Mutex<bool>,
         wrong_after_fifth: bool,
+        /// After the fifth tap every read is another app's complete tree.
+        foreign_after_fifth: bool,
         swipes: Mutex<usize>,
+        backs: Mutex<usize>,
     }
     impl Picker {
         fn new(drop_at: Option<usize>) -> Self {
@@ -1406,7 +1477,9 @@ mod tests {
                 partial_after_scroll: Mutex::new(false),
                 unproven_after_scroll: Mutex::new(false),
                 wrong_after_fifth: false,
+                foreign_after_fifth: false,
                 swipes: Mutex::new(0),
+                backs: Mutex::new(0),
             }
         }
         /// A thirteen-photo album on the measured phone: five rows fit, four once the tray
@@ -1561,6 +1634,12 @@ mod tests {
                         xml: "<hierarchy/>".into(),
                     });
                 }
+                if self.foreign_after_fifth {
+                    return Ok(crate::HierarchySourceSnapshot {
+                        generation: reads as u64 + 1,
+                        xml: FOREIGN_TREE.into(),
+                    });
+                }
             }
             let album = if self.wrong_album
                 || (self.wrong_after_fifth && self.taps.lock().len() >= 5)
@@ -1628,6 +1707,7 @@ mod tests {
             Ok(())
         }
         async fn back(&self) -> anyhow::Result<()> {
+            *self.backs.lock() += 1;
             Ok(())
         }
         async fn find_and_tap(&self, _: &str) -> anyhow::Result<()> {
@@ -1693,6 +1773,10 @@ mod tests {
             })
         }
     }
+    /// Threads' mobile-number challenge read on ce0517155ab38c390d, 08/10/2026 04:27:57Z
+    /// (generation 21, SHA256 93299fde…): its root and title as measured. Every one of
+    /// that tree's 33 nodes was `com.instagram.barcelona`; none was the picker's.
+    const FOREIGN_TREE: &str = r#"<hierarchy rotation="0"><node package="com.instagram.barcelona" class="android.widget.FrameLayout" text="" bounds="[0,0][1080,2220]" displayed="true"><node package="com.instagram.barcelona" class="android.view.View" text="Enter your mobile number" bounds="[176,284][904,369]" displayed="true"/></node></hierarchy>"#;
     async fn run_picker(session: &Picker) -> Selection {
         let screen = Screen::new(1080.0, 2220.0).unwrap();
         let plan =
@@ -2235,6 +2319,9 @@ mod tests {
     async fn initial_picker_read_is_bounded_before_any_selection() {
         let mut session = Picker::new(None);
         session.initial_read_delay = PICKER_WINDOW + Duration::from_secs(1);
+        let plan = ComposerPlan::resolve(&crate::tiktok_labels::every_publish_control_measured()).unwrap();
+        let mut composer = Composer::new(&session, plan, |r: &ElementBox| r.centre());
+        let stop = AtomicBool::new(false);
         let start = Instant::now();
         let (result, diagnostics) = with_stage_diagnostics(
             StageDiagnosticContext {
@@ -2244,13 +2331,26 @@ mod tests {
                 queue_wait_ms: None,
             },
             None,
-            run_picker(&session),
+            composer.select_verified(
+                PickerControls {
+                    package: "fixture",
+                    selector: ElementQuery::ResourceIdSuffix(":id/h4b"),
+                    next: ElementQuery::ResourceIdSuffix(":id/q4g"),
+                },
+                Screen::new(1080.0, 2220.0).unwrap(), session.total, "album", &stop,
+            ),
         )
         .await;
-        assert!(
-            !matches!(result, Selection::Armed { .. }),
-            "late initial picker evidence authorized selection"
-        );
+        let error = result.expect_err("unreadable initial picker must retain typed deadline, not a count mismatch");
+        let failure = crate::publish_recovery::describe(&error);
+        assert_eq!(failure.code, "publish_observation_deadline");
+        assert_eq!(failure.kind, crate::publish_recovery::FailureKind::Retryable);
+        let diagnostic = composer.last_selection_diagnostic().unwrap();
+        assert_eq!(diagnostic.stage, SelectionStage::Initial);
+        assert_eq!(diagnostic.reason_code, SelectionReason::HierarchyReadFailed);
+        assert!(diagnostic.last_completed_snapshot.is_none());
+        assert_eq!(diagnostic.last_verified_count, 0);
+        assert_eq!(*session.swipes.lock(), 0);
         assert!(session.taps.lock().is_empty());
         assert!(start.elapsed() <= PICKER_WINDOW);
         let read = diagnostics
@@ -2290,6 +2390,7 @@ mod tests {
             "wrong-album",
             "dropped-tap",
             "never-recovers",
+            "foreign-foreground",
             "read-timeout",
             "stopped",
         ] {
@@ -2302,23 +2403,33 @@ mod tests {
             });
             session.wrong_after_fifth = mode == "wrong-album";
             session.partial_forever = mode == "never-recovers";
+            session.foreign_after_fifth = mode == "foreign-foreground";
             let start = Instant::now();
             let stop = AtomicBool::new(false);
             let plan =
                 ComposerPlan::resolve(&crate::tiktok_labels::every_publish_control_measured())
                     .unwrap();
             let mut composer = Composer::new(&session, plan, |r: &ElementBox| r.centre());
-            let (result, ()) = tokio::join!(
-                composer.select_verified(
-                    PickerControls {
-                        package: "fixture",
-                        selector: ElementQuery::ResourceIdSuffix(":id/h4b"),
-                        next: ElementQuery::ResourceIdSuffix(":id/q4g")
+            let ((result, diagnostics), ()) = tokio::join!(
+                with_stage_diagnostics(
+                    StageDiagnosticContext {
+                        request_id: "request-fixture".into(),
+                        operation_id: "operation-fixture".into(),
+                        udid: "device-fixture".into(),
+                        queue_wait_ms: None,
                     },
-                    Screen::new(1080.0, 2220.0).unwrap(),
-                    8,
-                    "album",
-                    &stop,
+                    None,
+                    composer.select_verified(
+                        PickerControls {
+                            package: "fixture",
+                            selector: ElementQuery::ResourceIdSuffix(":id/h4b"),
+                            next: ElementQuery::ResourceIdSuffix(":id/q4g")
+                        },
+                        Screen::new(1080.0, 2220.0).unwrap(),
+                        8,
+                        "album",
+                        &stop,
+                    ),
                 ),
                 async {
                     if mode == "stopped" {
@@ -2380,6 +2491,46 @@ mod tests {
                     5,
                     "never replay the uncertain fifth tap"
                 );
+                // Asserted on the persisted evidence shape the trace export carries.
+                let evidence =
+                    serde_json::to_value(composer.last_selection_diagnostic().unwrap()).unwrap();
+                let foreground = evidence["lastCompletedSnapshot"]["foregroundPackage"].clone();
+                if mode == "foreign-foreground" {
+                    let foreign = crate::frame_sha256(FOREIGN_TREE.as_bytes());
+                    let foreign_reads: std::collections::BTreeSet<_> = diagnostics
+                        .events
+                        .iter()
+                        .filter(|event| {
+                            event.operation == "pickerHierarchyRead"
+                                && event.snapshot_sha256.as_deref() == Some(foreign.as_str())
+                        })
+                        .map(|event| event.outcome.clone())
+                        .collect();
+                    let left = composer.leave().await;
+                    assert_eq!(
+                        (
+                            evidence["stage"].as_str(),
+                            evidence["reasonCode"].as_str(),
+                            foreground.as_str(),
+                            foreign_reads,
+                            left,
+                            *session.backs.lock(),
+                        ),
+                        (
+                            Some("tapReadback"),
+                            Some("foregroundNotTarget"),
+                            Some("com.instagram.barcelona"),
+                            std::collections::BTreeSet::from(["foregroundNotTarget".to_string()]),
+                            false,
+                            0,
+                        ),
+                        "another app's complete tree is named, and cleanup never presses Back into it"
+                    );
+                } else {
+                    // An empty or picker-package tree is unknown or partial, never foreign.
+                    assert!(foreground.is_null(), "{mode}");
+                    assert_ne!(evidence["reasonCode"], "foregroundNotTarget", "{mode}");
+                }
             }
             assert_eq!(*session.swipes.lock(), 0);
             assert!(

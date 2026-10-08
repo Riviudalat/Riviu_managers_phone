@@ -37,7 +37,236 @@ pub struct AccountMappingObservation {
     pub observed_handle: String,
 }
 
+/// Portable operator metadata only; no credentials or runtime/device state.
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct DeviceMetadataTransfer {
+    pub namespace: String,
+    pub version: u32,
+    pub high_water: u32,
+    pub devices: Vec<crate::DeviceMeta>,
+    pub groups: Vec<crate::DeviceGroup>,
+}
+
+#[derive(Debug, Clone, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct DeviceMetadataImportPreview {
+    pub conflicts: Vec<String>,
+    pub applied: bool,
+}
+
 impl Database {
+    pub fn export_device_metadata(&self) -> anyhow::Result<DeviceMetadataTransfer> {
+        let mut conn = self.conn()?;
+        let tx = conn.transaction()?;
+        let devices = read_device_metas(&tx)?;
+        let mut groups = {
+            let mut stmt = tx.prepare("SELECT id,name,color,created_at FROM groups ORDER BY id")?;
+            let rows = stmt
+                .query_map([], |r| {
+                    Ok(crate::DeviceGroup {
+                        id: r.get(0)?,
+                        name: r.get(1)?,
+                        color: r.get(2)?,
+                        created_at: r.get(3)?,
+                        udids: Vec::new(),
+                    })
+                })?
+                .collect::<rusqlite::Result<Vec<_>>>()?;
+            rows
+        };
+        for group in &mut groups {
+            let mut stmt =
+                tx.prepare("SELECT udid FROM group_members WHERE group_id=?1 ORDER BY udid")?;
+            group.udids = stmt
+                .query_map([&group.id], |r| r.get(0))?
+                .collect::<rusqlite::Result<Vec<_>>>()?;
+        }
+        let high_water = tx.query_row(
+            "SELECT high_water FROM device_number_sequence WHERE id=1",
+            [],
+            |r| r.get(0),
+        )?;
+        tx.commit()?;
+        Ok(DeviceMetadataTransfer {
+            namespace: "riviu.device-meta".into(),
+            version: 1,
+            high_water,
+            devices,
+            groups,
+        })
+    }
+
+    /// Preview and apply share validation. Apply rechecks under the same write lock;
+    /// different existing mappings must be resolved explicitly, never overwritten.
+    pub fn import_device_metadata(
+        &self,
+        input: &DeviceMetadataTransfer,
+        apply: bool,
+    ) -> anyhow::Result<DeviceMetadataImportPreview> {
+        anyhow::ensure!(
+            input.namespace == "riviu.device-meta" && input.version == 1,
+            "unsupported device metadata namespace/version"
+        );
+        anyhow::ensure!(
+            input.devices.len() <= 10000
+                && input.groups.len() <= 10000
+                && input.groups.iter().all(|group| group.udids.len() <= 10000),
+            "device metadata import too large"
+        );
+        let mut conn = self.conn()?;
+        let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
+        let mut conflicts = Vec::new();
+        let mut serials = std::collections::HashSet::new();
+        let mut numbers = std::collections::HashSet::new();
+        for meta in &input.devices {
+            if meta.udid.trim().is_empty() || !serials.insert(&meta.udid) {
+                conflicts.push(format!("duplicate or empty serial: {}", meta.udid));
+            }
+            if let Some(number) = meta.number {
+                if number == 0 || number > input.high_water || !numbers.insert(number) {
+                    conflicts.push(format!("invalid or duplicate device number: {number}"));
+                }
+                let owner: Option<String> = tx.query_row("SELECT udid FROM device_meta WHERE number=?1 AND udid<>?2 ORDER BY udid LIMIT 1",
+                    params![number,meta.udid],|r|r.get(0)).optional()?;
+                if let Some(owner) = owner {
+                    conflicts.push(format!("device number {number} belongs to {owner}"));
+                }
+            }
+            let old = tx
+                .query_row(
+                    &format!(
+                        "SELECT {} FROM device_meta WHERE udid=?1",
+                        Self::DEVICE_META_COLUMNS
+                    ),
+                    [&meta.udid],
+                    Self::device_meta_from_row,
+                )
+                .optional()?;
+            if let Some(old) = old {
+                if serde_json::to_value(old)? != serde_json::to_value(meta)? {
+                    conflicts.push(format!("saved metadata differs for {}", meta.udid));
+                }
+            }
+            // Legacy group_id is independent of authoritative group_members.
+            // write_group/delete_group do not synchronize it; preserve it verbatim.
+        }
+        let mut group_ids = std::collections::HashSet::new();
+        let mut members = std::collections::HashSet::new();
+        for group in &input.groups {
+            if group.id.trim().is_empty() || !group_ids.insert(&group.id) {
+                conflicts.push(format!("duplicate or empty group: {}", group.id));
+            }
+            let old: Option<(String, String, String)> = tx
+                .query_row(
+                    "SELECT name,color,created_at FROM groups WHERE id=?1",
+                    [&group.id],
+                    |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
+                )
+                .optional()?;
+            if let Some(old) = old {
+                let mut stmt =
+                    tx.prepare("SELECT udid FROM group_members WHERE group_id=?1 ORDER BY udid")?;
+                let old_members = stmt
+                    .query_map([&group.id], |r| r.get::<_, String>(0))?
+                    .collect::<rusqlite::Result<Vec<_>>>()?;
+                let mut expected = group.udids.clone();
+                expected.sort();
+                if old
+                    != (
+                        group.name.clone(),
+                        group.color.clone(),
+                        group.created_at.clone(),
+                    )
+                    || old_members != expected
+                {
+                    conflicts.push(format!("saved group differs: {}", group.id));
+                }
+            }
+            for serial in &group.udids {
+                if serial.trim().is_empty() || !members.insert(serial) {
+                    conflicts.push(format!("duplicate or empty group member: {serial}"));
+                }
+                let owner: Option<String> = tx
+                    .query_row(
+                        "SELECT group_id FROM group_members WHERE udid=?1 AND group_id<>?2 LIMIT 1",
+                        params![serial, group.id],
+                        |r| r.get(0),
+                    )
+                    .optional()?;
+                if let Some(owner) = owner {
+                    conflicts.push(format!("{serial} belongs to group {owner}"));
+                }
+            }
+        }
+        if apply {
+            anyhow::ensure!(
+                conflicts.is_empty(),
+                "device metadata import conflicts: {}",
+                conflicts.join("; ")
+            );
+            for meta in &input.devices {
+                write_device_meta(&tx, meta)?;
+            }
+            for group in &input.groups {
+                write_group(&tx, group)?;
+            }
+            tx.execute(
+                "UPDATE device_number_sequence SET high_water=MAX(high_water,?1) WHERE id=1",
+                [input.high_water],
+            )?;
+            tx.commit()?;
+        }
+        Ok(DeviceMetadataImportPreview {
+            conflicts,
+            applied: apply,
+        })
+    }
+
+    /// Allocate only missing numbers under one SQLite write lock. The sequence includes
+    /// offline rows and survives explicit clearing, lowering or deleting a saved number.
+    /// Return the complete saved roster so consumers retain offline mappings.
+    pub fn ensure_device_numbers(
+        &self,
+        udids: &[String],
+    ) -> anyhow::Result<Vec<crate::DeviceMeta>> {
+        anyhow::ensure!(
+            udids.iter().all(|id| !id.trim().is_empty()),
+            "device identifier missing"
+        );
+        let serials: std::collections::BTreeSet<_> = udids.iter().collect();
+        let mut conn = self.conn()?;
+        let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
+        let mut highest: u32 = tx.query_row(
+            "SELECT high_water FROM device_number_sequence WHERE id=1",
+            [],
+            |row| row.get(0),
+        )?;
+        for udid in serials {
+            let current: Option<Option<u32>> = tx
+                .query_row(
+                    "SELECT number FROM device_meta WHERE udid=?1",
+                    [udid],
+                    |row| row.get(0),
+                )
+                .optional()?;
+            if current.flatten().is_some() {
+                continue;
+            }
+            highest = highest
+                .checked_add(1)
+                .context("device number allocation exhausted")?;
+            tx.execute(
+                "INSERT INTO device_meta(udid,number) VALUES(?1,?2)
+                 ON CONFLICT(udid) DO UPDATE SET number=excluded.number",
+                params![udid, highest],
+            )?;
+        }
+        let rows = read_device_metas(&tx)?;
+        tx.commit()?;
+        Ok(rows)
+    }
+
     /// Validate the complete final mapping before writing any slot. Callers own
     /// observation provenance/freshness; this boundary owns exact CAS and collisions.
     pub fn reconcile_account_mappings(
@@ -119,6 +348,11 @@ impl Database {
         }
         if apply {
             for item in observations {
+                // CAS and collision checks above still cover unchanged observations.
+                // Keep them in the command receipt without issuing redundant writes.
+                if item.expected_handle == item.observed_handle {
+                    continue;
+                }
                 tx.execute("INSERT INTO device_meta(udid,handle) VALUES(?1,?2) ON CONFLICT(udid) DO UPDATE SET handle=excluded.handle",
                     params![item.udid, item.observed_handle])?;
             }
@@ -170,51 +404,16 @@ impl Database {
     /// Every phone this app has a record for, in one read.
     ///
     /// The grid needs the alias and the number of *twenty* phones to draw one frame, and
-    /// asking per device is twenty IPC round trips for a table that fits in a page. Rows
-    /// exist only for phones somebody has edited, so a fleet with no records answers empty
-    /// and every tile falls back to what the phone reports.
+    /// asking per device is twenty IPC round trips for a table that fits in a page.
+    /// Discovery persists rows before numeric labels are used; offline rows remain here.
     pub fn list_device_metas(&self) -> anyhow::Result<Vec<crate::types::DeviceMeta>> {
         let conn = self.conn()?;
-        let mut stmt = conn.prepare(&format!(
-            "SELECT {} FROM device_meta",
-            Self::DEVICE_META_COLUMNS
-        ))?;
-        // **`filter_map(|row| row.ok())` made corruption look like absence.** A phone whose
-        // `tags_json` is malformed, or whose `number` is outside the target type, produced an
-        // error from `device_meta_from_row`; discarding it returned `Ok` with every *other*
-        // phone, and the UI then treated that phone as simply having no stored metadata and
-        // fell back to device-reported values. Its notes, tags, group, handle and alias were
-        // silently ignored while the row sat in the database intact.
-        //
-        // That also defeats `narrow`, which exists in this file specifically to fail closed on
-        // an out-of-range integer rather than truncate it.
-        //
-        // Found by an independent review on 27/08/2026.
-        let rows = stmt.query_map([], Self::device_meta_from_row)?;
-        rows.collect::<Result<Vec<_>, _>>()
-            .context("đọc device_meta: có dòng không đọc được")
+        read_device_metas(&conn)
     }
+
     pub fn upsert_device_meta(&self, meta: &crate::types::DeviceMeta) -> anyhow::Result<()> {
         let conn = self.conn()?;
-        conn.execute(
-            r#"INSERT INTO device_meta (udid, notes, tags_json, group_id, handle, alias, number)
-               VALUES (?1,?2,?3,?4,?5,?6,?7)
-               ON CONFLICT(udid) DO UPDATE SET
-                 notes=excluded.notes, tags_json=excluded.tags_json,
-                 group_id=excluded.group_id,
-                 handle=excluded.handle, alias=excluded.alias,
-                 number=excluded.number"#,
-            params![
-                meta.udid,
-                meta.notes,
-                serde_json::to_string(&meta.tags)?,
-                meta.group_id,
-                meta.handle,
-                meta.alias,
-                meta.number
-            ],
-        )?;
-        Ok(())
+        write_device_meta(&conn, meta)
     }
 
     pub fn patch_device_meta(
@@ -387,4 +586,37 @@ impl Database {
         transaction.commit()?;
         Ok(())
     }
+}
+
+fn write_device_meta(conn: &Connection, meta: &crate::DeviceMeta) -> anyhow::Result<()> {
+    conn.execute(
+        r#"INSERT INTO device_meta (udid, notes, tags_json, group_id, handle, alias, number)
+               VALUES (?1,?2,?3,?4,?5,?6,?7)
+               ON CONFLICT(udid) DO UPDATE SET
+                 notes=excluded.notes, tags_json=excluded.tags_json,
+                 group_id=excluded.group_id,
+                 handle=excluded.handle, alias=excluded.alias,
+                 number=excluded.number"#,
+        params![
+            meta.udid,
+            meta.notes,
+            serde_json::to_string(&meta.tags)?,
+            meta.group_id,
+            meta.handle,
+            meta.alias,
+            meta.number
+        ],
+    )?;
+    Ok(())
+}
+
+// All roster consumers retain offline rows and fail closed on unreadable metadata.
+fn read_device_metas(conn: &Connection) -> anyhow::Result<Vec<crate::DeviceMeta>> {
+    let mut stmt = conn.prepare(&format!(
+        "SELECT {} FROM device_meta ORDER BY udid",
+        Database::DEVICE_META_COLUMNS
+    ))?;
+    let rows = stmt.query_map([], Database::device_meta_from_row)?;
+    rows.collect::<rusqlite::Result<Vec<_>>>()
+        .context("read device_meta: unreadable row")
 }

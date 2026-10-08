@@ -607,6 +607,7 @@ describe("production publish wizard", () => {
       />,
     );
     await prepareOne();
+    await waitFor(() => expect(screen.getByRole("button", { name: "Kiểm tra & đăng" })).toBeEnabled());
     await userEvent.click(
       screen.getByRole("button", { name: "Kiểm tra & đăng" }),
     );
@@ -642,6 +643,7 @@ describe("production publish wizard", () => {
       />,
     );
     await prepareOne();
+    await waitFor(() => expect(screen.getByRole("button", { name: "Kiểm tra & đăng" })).toBeEnabled());
     await userEvent.click(
       screen.getByRole("button", { name: "Kiểm tra & đăng" }),
     );
@@ -681,6 +683,7 @@ describe("production publish wizard", () => {
       <PublishPage devices={devices} selected={[]} onSelectUdids={() => {}} />,
     );
     await prepareOne();
+    await waitFor(() => expect(screen.getByRole("button", { name: "Kiểm tra & đăng" })).toBeEnabled());
     await userEvent.click(
       screen.getByRole("button", { name: "Kiểm tra & đăng" }),
     );
@@ -697,6 +700,7 @@ describe("production publish wizard", () => {
       <PublishPage devices={devices} selected={[]} onSelectUdids={() => {}} />,
     );
     await prepareOne();
+    await waitFor(() => expect(screen.getByRole("button", { name: "Kiểm tra & đăng" })).toBeEnabled());
     await userEvent.click(
       screen.getByRole("button", { name: "Kiểm tra & đăng" }),
     );
@@ -971,7 +975,7 @@ describe("publish campaign monitoring", () => {
   it("shows a backend handoff refusal at Start without a legacy execute", async () => {
     vi.mocked(publishStart).mockImplementationOnce(async (_request,requestId)=>({requestId,state:"failed",stage:"preparingDevices",campaignId:null,error:{code:"DeviceBusy",message:"Tác vụ cũ chưa nhả thiết bị"}}) as never);
     render(<PublishPage devices={devices} selected={[]} onSelectUdids={() => {}} />);
-    await prepareOne(); await userEvent.click(screen.getByRole("button",{name:"Kiểm tra & đăng"}));
+    await prepareOne(); await waitFor(() => expect(screen.getByRole("button", { name: "Kiểm tra & đăng" })).toBeEnabled()); await userEvent.click(screen.getByRole("button",{name:"Kiểm tra & đăng"}));
     const confirm=await screen.findByRole("button",{name:"Xác nhận đăng công khai 1 bài"});
     await waitFor(()=>expect(confirm).toBeEnabled()); await userEvent.click(confirm);
     await waitFor(()=>expect(screen.getAllByRole("alert").some(x=>x.textContent?.includes("Tác vụ cũ chưa nhả thiết bị"))).toBe(true));

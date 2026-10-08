@@ -132,12 +132,12 @@ describe("FleetDiagnosticsPage", () => {
 
     rerender(<FleetDiagnosticsPage devices={[replacement]} metas={[]} />);
     await waitFor(() => expect(readHealth).toHaveBeenCalledTimes(3));
-    expect(await screen.findByRole("row", { name: /Máy 1 · Redmi 13C/ })).toBeVisible();
+    expect(await screen.findByRole("row", { name: /Đang gán số · Redmi 13C/ })).toBeVisible();
 
     resolveRetry(report({ tiktokVersion: "stale-retry" }));
     await Promise.resolve();
     expect(screen.queryByText("stale-retry")).toBeNull();
-    expect(screen.getByRole("row", { name: /Máy 1 · Redmi 13C/ })).toBeVisible();
+    expect(screen.getByRole("row", { name: /Đang gán số · Redmi 13C/ })).toBeVisible();
   });
 
   it("shows the empty state without starting any device command", () => {

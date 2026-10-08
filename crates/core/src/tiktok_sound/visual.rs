@@ -383,6 +383,7 @@ async fn capture_sheet(
     plan: SoundPickerPlan,
     generation: u64,
 ) -> anyhow::Result<(image::RgbImage, Vec<OcrLine>, Vec<OcrRect>, String)> {
+    clear_sound_popup(session, phase_deadline(SOUND_WINDOW), Some(plan.package)).await?;
     visual_diagnostic(|state| {
         state.generation = generation;
         state.request_id = None;

@@ -1,3 +1,4 @@
+import { FleetMetadataTransfer } from "./FleetMetadataTransfer";
 import { useMemo, useState } from "react";
 
 import { deleteGroup, saveGroup } from "../api";
@@ -179,6 +180,7 @@ export function GroupManagerPopup({
             <IconClose size={14} />
           </button>
         </header>
+        <FleetMetadataTransfer onChanged={onChanged} />
 
         <div className="nurture-float-body">
           {/* No name field: groups are addressed by number and nothing else, so asking for
@@ -253,7 +255,7 @@ export function GroupManagerPopup({
                           style={{ background: owner.color }}
                         />
                       )}
-                      <span className="group-chip-num">{row.number}</span>
+                      <span className="group-chip-num">{row.number > 0 ? row.number : "Đang gán số"}</span>
                     </button>
                   );
                 })}

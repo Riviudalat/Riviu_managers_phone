@@ -21,15 +21,13 @@ export function tileName(device: DeviceInfo, meta: DeviceMeta | undefined): stri
   return alias ? alias : device.name;
 }
 
-/**
- * The big number on the tile: the operator's, or the tile's 1-based position.
- *
- * `position` is what every tile showed before numbering existed, and it stays the fallback
- * rather than a blank — a grid of twenty tiles with no numbers is harder to talk about over
- * a shoulder than one numbered by accident of order.
- */
-export function tileNumber(position: number, meta: DeviceMeta | undefined): number {
-  return meta?.number ?? position;
+/** Zero denotes allocation pending, never a temporary physical machine number. */
+export function tileNumber(_position: number, meta: DeviceMeta | undefined): number {
+  return meta?.number ?? 0;
+}
+
+export function machineNumberLabel(number: number | null | undefined): string {
+  return number != null && number > 0 ? `Máy ${number}` : "Đang gán số";
 }
 
 /**
@@ -72,4 +70,11 @@ export function parseDeviceNumber(raw: string): { number: number | null } | { er
   if (value < 1) return { error: "Số máy phải từ 1 trở lên." };
   if (value > 9999) return { error: "Số máy tối đa là 9999." };
   return { number: value };
+}
+
+/** One roster projection for tiles, pickers and operation summaries. */
+export function deviceNumbersByUdid(devices: DeviceInfo[], metas: Map<string, DeviceMeta>): Map<string, number> {
+  return new Map(orderDevicesByNumber(devices, metas).map((device, index) =>
+    [device.udid, tileNumber(index + 1, metas.get(device.udid))],
+  ));
 }

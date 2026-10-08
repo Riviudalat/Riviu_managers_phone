@@ -65,6 +65,135 @@ pub(crate) fn merge_rosters(
     (devices, routes)
 }
 
+/// What happened to an ADB server Riviu was using, from Riviu's own roster reads.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum AdbServerChange {
+    /// A server that carried phones stopped answering. Riviu never runs `kill-server`
+    /// (contracts.md), so the cause is outside this process: another tool's adb of a
+    /// different build replaced it, or the server crashed.
+    Lost,
+    /// The port answers again after [`Self::Lost`]. Transports and forwards made through
+    /// the old server are gone; scrcpy/minicap readers and agents must reconnect.
+    Returned,
+}
+
+/// One operator-facing notice. Text is Vietnamese because it is shown as-is.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AdbServerNotice {
+    pub port: u16,
+    pub change: AdbServerChange,
+    /// Phones the server carried at the last good read before it went away.
+    pub transports: usize,
+    /// Only for [`AdbServerChange::Returned`]: how long the port was silent.
+    pub down_for: Option<std::time::Duration>,
+    pub message: String,
+}
+
+#[derive(Debug, Clone, Copy)]
+enum PortSeen {
+    Up { transports: usize },
+    /// One missed read. `roster` gives up after 600 ms, and a loaded server can be that
+    /// slow once; a single miss is not called an outage.
+    Suspect { since: std::time::Instant, transports: usize },
+    Down { since: std::time::Instant, transports: usize },
+}
+
+/// Bounded so a flapping server cannot grow memory; the oldest notice goes first.
+const MAX_PENDING_NOTICES: usize = 16;
+
+/// How long background stream starts hold off after a populated server goes away.
+///
+/// A cap, not a measurement. Every adb client spawned while no server listens runs
+/// `daemon not running; starting now` with Riviu's build and races the tool that is
+/// restarting it (08/10/2026: 30 phones' view starts did exactly that for ~70 s). But the
+/// hold must end: if that tool killed the server and exited, the next adb call is the only
+/// thing that will ever bring it back, so after this window the keeper's own per-phone
+/// backoff takes over.
+pub const OUTAGE_START_HOLD: std::time::Duration = std::time::Duration::from_secs(15);
+
+/// Read-only watch over the servers [`crate::AdbProgram::inventory_read`] already polls.
+///
+/// It only interprets reads that happen anyway, so it adds no adb traffic and can never
+/// start, stop or reconnect anything. A port that never carried a phone is not reported:
+/// a missing companion server on 5038 is the normal state of most machines.
+#[derive(Debug, Default)]
+pub struct ServerWatch {
+    ports: std::collections::HashMap<u16, PortSeen>,
+    pending: std::collections::VecDeque<AdbServerNotice>,
+}
+
+impl ServerWatch {
+    pub fn observe(&mut self, port: u16, roster: Option<&str>, now: std::time::Instant) {
+        let previous = self.ports.get(&port).copied();
+        let next = match (roster, previous) {
+            (Some(text), Some(PortSeen::Down { since, transports })) => {
+                self.push(AdbServerNotice {
+                    port,
+                    change: AdbServerChange::Returned,
+                    transports,
+                    down_for: Some(now.saturating_duration_since(since)),
+                    message: format!(
+                        "ADB server cổng {port} đã chạy lại sau {} giây. Riviu đang mở lại \
+                         stream và phiên điều khiển; thao tác đang dở trên máy chưa được xác \
+                         nhận sẽ không tự gửi lại.",
+                        now.saturating_duration_since(since).as_secs()
+                    ),
+                });
+                PortSeen::Up { transports: count_transports(text) }
+            }
+            (Some(text), _) => PortSeen::Up { transports: count_transports(text) },
+            (None, Some(PortSeen::Up { transports })) if transports > 0 => {
+                PortSeen::Suspect { since: now, transports }
+            }
+            (None, Some(PortSeen::Suspect { since, transports })) => {
+                self.push(AdbServerNotice {
+                    port,
+                    change: AdbServerChange::Lost,
+                    transports,
+                    down_for: None,
+                    message: format!(
+                        "Phần mềm khác vừa khởi động lại hoặc tắt ADB (cổng {port}) khi Riviu \
+                         đang dùng {transports} máy. Riviu không tự tắt ADB; stream và phiên \
+                         điều khiển sẽ tự nối lại khi ADB chạy lại. Nếu đang mở GenFarmer, \
+                         scrcpy hoặc Android Studio, hãy đóng chúng hoặc cho Riviu dùng cổng \
+                         ADB riêng (RIVIU_ADB_SERVER_PORT)."
+                    ),
+                });
+                PortSeen::Down { since, transports }
+            }
+            (None, Some(down @ PortSeen::Down { .. })) => down,
+            (None, _) => return,
+        };
+        self.ports.insert(port, next);
+    }
+
+    /// True for at most [`OUTAGE_START_HOLD`] after a populated server went away.
+    pub fn holding_starts(&self, now: std::time::Instant) -> bool {
+        self.ports.values().any(|seen| match seen {
+            PortSeen::Down { since, .. } => now.saturating_duration_since(*since) < OUTAGE_START_HOLD,
+            PortSeen::Up { .. } | PortSeen::Suspect { .. } => false,
+        })
+    }
+
+    pub fn drain(&mut self) -> Vec<AdbServerNotice> {
+        self.pending.drain(..).collect()
+    }
+
+    fn push(&mut self, notice: AdbServerNotice) {
+        if self.pending.len() == MAX_PENDING_NOTICES {
+            self.pending.pop_front();
+        }
+        self.pending.push_back(notice);
+    }
+}
+
+fn count_transports(roster: &str) -> usize {
+    roster
+        .lines()
+        .filter(|line| line.split_whitespace().nth(1).is_some())
+        .count()
+}
+
 fn populated(roster: Option<&str>) -> bool {
     roster.is_some_and(|text| {
         text.lines().any(|line| {
@@ -138,6 +267,75 @@ mod tests {
             "remember disconnected routes for owned cleanup"
         );
     }
+    #[test]
+    fn a_foreign_restart_of_a_populated_server_is_reported_once_each_way() {
+        // Shape of 08/10/2026 15:51:53Z: GenFarmer's own adb replaced the 5037 server while
+        // Riviu streamed 30 phones; 5038 never existed on that host.
+        let start = std::time::Instant::now();
+        let mut watch = ServerWatch::default();
+        let thirty: String = (0..30).map(|n| format!("ce{n:016} device model:SM_G955F\n")).collect();
+        watch.observe(5037, Some(&thirty), start);
+        watch.observe(5038, None, start);
+        assert!(watch.drain().is_empty(), "a healthy read and an absent companion say nothing");
+
+        watch.observe(5037, None, start + std::time::Duration::from_secs(2));
+        watch.observe(5037, None, start + std::time::Duration::from_secs(4));
+        assert!(watch.holding_starts(start + std::time::Duration::from_secs(4)));
+        assert!(
+            !watch.holding_starts(start + std::time::Duration::from_secs(2) + OUTAGE_START_HOLD),
+            "the hold is finite even if nothing ever restarts the server"
+        );
+        let lost = watch.drain();
+        assert_eq!(lost.len(), 1, "one notice per loss, not per poll: {lost:?}");
+        assert_eq!(lost[0].change, AdbServerChange::Lost);
+        assert_eq!((lost[0].port, lost[0].transports), (5037, 30));
+        assert!(lost[0].message.starts_with("Phần mềm khác vừa khởi động lại hoặc tắt ADB (cổng 5037)"));
+
+        watch.observe(5037, Some(""), start + std::time::Duration::from_secs(70));
+        assert!(
+            !watch.holding_starts(start + std::time::Duration::from_secs(70)),
+            "answering again ends the outage even before phones re-attach"
+        );
+        let back = watch.drain();
+        assert_eq!(back.len(), 1);
+        assert_eq!(back[0].change, AdbServerChange::Returned);
+        assert_eq!(back[0].down_for, Some(std::time::Duration::from_secs(68)));
+        assert!(watch.drain().is_empty());
+    }
+
+    #[test]
+    fn one_slow_read_is_not_an_outage() {
+        let now = std::time::Instant::now();
+        let mut watch = ServerWatch::default();
+        watch.observe(5037, Some("phone device\n"), now);
+        watch.observe(5037, None, now);
+        assert!(!watch.holding_starts(now));
+        watch.observe(5037, Some("phone device\n"), now);
+        assert!(watch.drain().is_empty(), "a single 600 ms roster timeout says nothing");
+    }
+
+    #[test]
+    fn an_empty_server_going_away_is_not_an_outage() {
+        let now = std::time::Instant::now();
+        let mut watch = ServerWatch::default();
+        watch.observe(5038, Some(""), now);
+        watch.observe(5038, None, now);
+        assert!(!watch.holding_starts(now));
+        assert!(watch.drain().is_empty());
+    }
+
+    #[test]
+    fn a_flapping_server_cannot_grow_the_notice_queue() {
+        let now = std::time::Instant::now();
+        let mut watch = ServerWatch::default();
+        for _ in 0..100 {
+            watch.observe(5037, Some("phone device\n"), now);
+            watch.observe(5037, None, now);
+            watch.observe(5037, None, now);
+        }
+        assert_eq!(watch.drain().len(), MAX_PENDING_NOTICES);
+    }
+
     #[test]
     fn uses_companion_server_only_when_primary_has_no_transports() {
         assert_eq!(

@@ -1,4 +1,4 @@
-/* Cross-page outcomes live in a user-opened activity center instead of appearing over work. */
+/* Compact outcomes with persistent, operator-opened diagnostics. */
 .activity-center {
   position: relative;
   display: flex;
@@ -12,7 +12,17 @@
 }
 
 .activity-center-current {
-  max-width: 280px;
+  position: fixed;
+  right: 12px;
+  bottom: 12px;
+  z-index: var(--z-flyout);
+  width: min(420px, calc(100vw - 24px));
+  padding: 12px;
+  border: 1px solid var(--line-strong);
+  border-radius: var(--radius);
+  background: var(--bg-elevated);
+  box-shadow: var(--shadow-lg);
+  -webkit-app-region: no-drag;
   display: flex;
   min-width: 0;
   align-items: center;
@@ -36,8 +46,8 @@
 .activity-center-current-copy > strong,
 .activity-center-current-copy > small {
   overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
+  white-space: normal;
+  overflow-wrap: anywhere;
 }
 
 .activity-center-current-copy > strong {
@@ -80,9 +90,9 @@
 }
 
 .activity-center-panel {
-  position: absolute;
-  top: calc(100% + var(--space-2));
-  right: 0;
+  position: fixed;
+  top: 60px;
+  right: 12px;
   z-index: var(--z-flyout);
   width: min(420px, calc(100vw - var(--space-6)));
   max-height: min(620px, calc(100vh - 84px));
@@ -267,11 +277,9 @@
   font-size: var(--text-sm);
 }
 
-@media (max-width: 1100px) {
-  .activity-center-current {
-    display: none;
-  }
-}
+.activity-center-current > button { flex: 0 0 auto; }
+.activity-center-current-copy { flex: 1; }
+.activity-center-copy p { white-space: pre-wrap; }
 
 /* ——— Confirm dialog · replace window.confirm ——— */
 .confirm-layer {

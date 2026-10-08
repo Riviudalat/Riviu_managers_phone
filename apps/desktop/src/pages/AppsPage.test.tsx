@@ -72,6 +72,11 @@ vi.mock("../api", () => ({
   pushMaterial: vi.fn(async () => undefined),
   saveSchedule: vi.fn(async () => undefined),
   saveScript: vi.fn(async () => undefined),
+  uninstallLibraryAppBatch: vi.fn(async (request: { appId: string; udids: string[]; mode: "uninstall" | "reinstall" }) => ({
+    appId: request.appId,
+    mode: request.mode,
+    results: request.udids.map((udid) => ({ udid, outcome: "done" as const, removedVerified: true })),
+  })),
 }));
 
 vi.mock("../pickFile", () => ({
@@ -254,6 +259,80 @@ describe("AppsPage install targets", () => {
     expect(api.cancelAppInstallBatch).toHaveBeenCalledWith(request.batchId);
     finish({ batchId: request.batchId, progress: [], results: [] });
     await waitFor(() => expect(cancel).not.toBeInTheDocument());
+  });
+});
+
+describe("AppsPage uninstall and reinstall", () => {
+  it("names the lost app data and account before uninstalling, and sends nothing when declined", async () => {
+    const api = await import("../api");
+    vi.mocked(requestConfirm).mockResolvedValueOnce(false);
+    renderApps([iphone, android], [iphone.udid, android.udid]);
+
+    await userEvent.click(await screen.findByRole("button", { name: "Gỡ → 1 iPhone" }));
+
+    expect(requestConfirm).toHaveBeenCalledWith({
+      title: "Gỡ TikTok.ipa khỏi 1 máy?",
+      message: expect.stringContaining("Dữ liệu của TikTok.ipa và tài khoản đang đăng nhập trong ứng dụng trên 1 máy sẽ bị mất"),
+      confirmLabel: "Gỡ cài đặt",
+      danger: true,
+    });
+    expect(api.uninstallLibraryAppBatch).not.toHaveBeenCalled();
+  });
+
+  it("uninstalls the library app by id on same-platform phones and renders every typed outcome", async () => {
+    const api = await import("../api");
+    const second = { ...iphone, udid: "second-iphone", name: "iPhone 8 (2)" };
+    const third = { ...iphone, udid: "third-iphone", name: "iPhone 8 (3)" };
+    const fourth = { ...iphone, udid: "fourth-iphone", name: "iPhone 8 (4)" };
+    vi.mocked(api.uninstallLibraryAppBatch).mockResolvedValueOnce({
+      appId: "app-1",
+      mode: "uninstall",
+      results: [
+        { udid: iphone.udid, outcome: "done", removedVerified: true },
+        { udid: second.udid, outcome: "refusedBusy", removedVerified: false, detail: "Máy đang bận (Nurture)" },
+        { udid: third.udid, outcome: "failedBeforeEffect", removedVerified: false, detail: "Máy chưa kết nối" },
+        { udid: fourth.udid, outcome: "unknownAfterDispatch", removedVerified: false, detail: "adb: device offline" },
+      ],
+    });
+    const fleet = [iphone, android, second, third, fourth];
+    renderApps(fleet, fleet.map((device) => device.udid));
+
+    await userEvent.click(await screen.findByRole("button", { name: "Gỡ → 4 iPhone" }));
+
+    expect(api.uninstallLibraryAppBatch).toHaveBeenCalledOnce();
+    expect(api.uninstallLibraryAppBatch).toHaveBeenCalledWith({
+      appId: "app-1",
+      udids: [iphone.udid, second.udid, third.udid, fourth.udid],
+      mode: "uninstall",
+    });
+    expect(api.installLibraryAppBatch).not.toHaveBeenCalled();
+    expect(await screen.findByText("Kết quả gỡ cài đặt")).toBeVisible();
+    expect(screen.getByText("Đã xong")).toBeVisible();
+    expect(screen.getByText("Máy bận, chưa gỡ")).toBeVisible();
+    expect(screen.getByText("Chưa gỡ")).toBeVisible();
+    expect(screen.getByText("Cần kiểm lại")).toBeVisible();
+    expect(screen.getByText("adb: device offline")).toBeVisible();
+  });
+
+  it("reinstalls only on Android phones for an Android package after its own confirm", async () => {
+    const api = await import("../api");
+    vi.mocked(listAppsLibrary).mockResolvedValue(androidLibrary);
+    renderApps([iphone, android], [iphone.udid, android.udid]);
+
+    await userEvent.click(await screen.findByRole("button", { name: "Cài lại → 1 Android" }));
+
+    expect(requestConfirm).toHaveBeenCalledWith(expect.objectContaining({
+      title: "Gỡ và cài lại TikTok.apkm trên 1 máy?",
+      message: expect.stringContaining("tài khoản đang đăng nhập"),
+      confirmLabel: "Gỡ và cài lại",
+      danger: true,
+    }));
+    expect(api.uninstallLibraryAppBatch).toHaveBeenCalledWith({
+      appId: "android-app-1",
+      udids: [android.udid],
+      mode: "reinstall",
+    });
+    expect(await screen.findByText("Kết quả gỡ và cài lại")).toBeVisible();
   });
 });
 

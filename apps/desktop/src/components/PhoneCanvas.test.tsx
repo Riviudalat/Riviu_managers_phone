@@ -9,6 +9,8 @@ const detach = vi.fn();
 vi.mock("../viewStore", () => ({
   attachViewCanvas: (...args: unknown[]) => attach(...args),
   detachViewCanvas: (...args: unknown[]) => detach(...args),
+  // A constant epoch: no worker is replaced here, so only udid/surface changes rebuild.
+  useViewWorkerEpoch: () => 0,
 }));
 
 beforeEach(() => {

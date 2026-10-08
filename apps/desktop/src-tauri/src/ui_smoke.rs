@@ -218,6 +218,7 @@ fn smoke_read_command(command: &str) -> bool {
             | "android_unavailable_reason"
             | "android_tool_problems"
             | "get_stream_settings"
+            | "device_baseline_get_config"
             | "agent_get_settings"
             | "agent_list_statuses"
             | "list_groups"
@@ -484,6 +485,9 @@ mod tests {
             "gui_service_status",
             "interaction_resolve_links",
             "device_tap",
+            "device_baseline_read",
+            "device_baseline_apply",
+            "device_baseline_save_config",
             "new_unreviewed_command",
             "plugin:updater|check",
         ] {
@@ -501,6 +505,7 @@ mod tests {
             "flow_list",
             "publish_list",
             "app_log_directory",
+            "device_baseline_get_config",
         ] {
             assert!(policy.check_command(command).is_ok(), "{command}");
         }

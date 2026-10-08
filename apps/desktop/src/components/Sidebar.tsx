@@ -18,6 +18,7 @@ const MENU: { label: string; items: { id: PageId; label: string }[] }[] = [
     label: "Thiết bị",
     items: [
       { id: "control", label: "Control Center" },
+      { id: "deviceSettings", label: "Cài đặt máy" },
     ],
   },
   {

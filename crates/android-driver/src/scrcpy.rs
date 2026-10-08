@@ -669,18 +669,35 @@ pub fn socket_name(scid: u32) -> String {
     format!("scrcpy_{scid:08x}")
 }
 
-/// Push the JAR when the on-device byte count differs. Same size-only check
-/// as minicap: the host file is already SHA-256 pinned in the installer
-/// manifest, so a matching length is enough to skip a 120 s push.
-pub async fn ensure_server(adb: &AdbProgram, serial: &str, local: &Path) -> anyhow::Result<()> {
+/// Refuse a view start before any other adb call when the transport is not `device`.
+///
+/// **First, and alone.** Measured 08/10/2026 on the 30-phone S8 farm: after a hub re-plug
+/// every start for a vanished phone ran `dumpsys power`, `input keyevent KEYCODE_WAKEUP`
+/// and only then `get-state` -- three adb processes to learn one fact, 174 times in one
+/// session, while publish waited behind the same twelve adb slots. One `get-state` answers
+/// it, and when the server itself has just been restarted by another tool every extra
+/// client is one more `daemon not running; starting now` racing that tool.
+pub async fn require_device_transport(adb: &AdbProgram, serial: &str) -> anyhow::Result<()> {
     let state = adb
         .device(serial, &["get-state"], Duration::from_secs(5))
         .await
-        .with_context(|| format!("Kiểm tra kết nối ADB của {serial} trước khi mở stream"))?;
+        .with_context(|| {
+            format!("Kiểm tra kết nối ADB của {serial} trước khi mở stream (chưa gửi lệnh nào khác)")
+        })?;
     anyhow::ensure!(
         state.trim() == "device",
-        "Mất kết nối ADB với {serial} (device offline); chờ máy kết nối lại"
+        "Mất kết nối ADB với {serial} (trạng thái {}); chờ máy kết nối lại",
+        state.trim()
     );
+    Ok(())
+}
+
+/// Push the JAR when the on-device byte count differs. Same size-only check
+/// as minicap: the host file is already SHA-256 pinned in the installer
+/// manifest, so a matching length is enough to skip a 120 s push.
+///
+/// The caller has already passed [`require_device_transport`].
+pub async fn ensure_server(adb: &AdbProgram, serial: &str, local: &Path) -> anyhow::Result<()> {
     let local_len = tokio::fs::metadata(local)
         .await
         .with_context(|| format!("read {}", local.display()))?

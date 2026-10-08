@@ -591,6 +591,27 @@ impl Database {
     ) -> anyhow::Result<()> {
         self.set_setting("stream.settings.v1", &serde_json::to_string(settings)?)
     }
+    /// The "Cài đặt máy" baseline and its auto-apply switch, or the defaults (lock screen off
+    /// and auto-rotate off, applied on connect). Same no-migration key/value rule as
+    /// `get_stream_settings`, and the same strictness about a stored value that cannot be read.
+    pub fn get_device_baseline_config(
+        &self,
+    ) -> anyhow::Result<crate::device_control::baseline::DeviceBaselineConfig> {
+        match self.get_setting("device.baseline.v1")? {
+            Some(raw) => serde_json::from_str(&raw)
+                .context("invalid JSON in stored setting device.baseline.v1"),
+            None => Ok(crate::device_control::baseline::DeviceBaselineConfig::default()),
+        }
+    }
+    pub fn save_device_baseline_config(
+        &self,
+        config: &crate::device_control::baseline::DeviceBaselineConfig,
+    ) -> anyhow::Result<()> {
+        self.set_setting(
+            "device.baseline.v1",
+            &serde_json::to_string(&config.clone().normalized())?,
+        )
+    }
     pub fn add_nurture_comment_attempt(
         &self,
         attempt: &crate::types::NurtureCommentAttempt,

@@ -323,7 +323,59 @@ const MIGRATIONS: &[Migration] = &[
         apply: apply_migration_48,
         rebuilds_tables: false,
     },
+    Migration {
+        version: 49,
+        name: "persistent-device-numbers",
+        apply: apply_migration_49,
+        rebuilds_tables: false,
+    },
 ];
+
+fn apply_migration_49(tx: &Transaction<'_>) -> anyhow::Result<()> {
+    // Never repair legacy duplicates by renumbering. Triggers prevent new collisions
+    // even when a legacy database cannot yet accept a unique index.
+    tx.execute_batch(
+        "CREATE TABLE device_number_sequence (
+            id INTEGER PRIMARY KEY CHECK(id=1),
+            high_water INTEGER NOT NULL CHECK(high_water>=0)
+        );
+        INSERT INTO device_number_sequence(id,high_water)
+            SELECT 1, MAX(0, COALESCE(MAX(number),0)) FROM device_meta;
+        CREATE INDEX idx_device_meta_number ON device_meta(number);
+        CREATE TRIGGER device_number_insert_guard BEFORE INSERT ON device_meta
+        WHEN NEW.number IS NOT NULL AND NOT EXISTS (
+            SELECT 1 FROM device_meta WHERE udid=NEW.udid AND number IS NEW.number
+        ) BEGIN
+            SELECT RAISE(ABORT,'device number must be a positive u32')
+                WHERE typeof(NEW.number)<>'integer' OR NEW.number<1 OR NEW.number>4294967295;
+            SELECT RAISE(ABORT,'device number already assigned')
+                WHERE EXISTS(SELECT 1 FROM device_meta WHERE number=NEW.number AND udid<>NEW.udid);
+        END;
+        CREATE TRIGGER device_number_update_guard BEFORE UPDATE OF number ON device_meta
+        WHEN NEW.number IS NOT NULL AND NEW.number IS NOT OLD.number BEGIN
+            SELECT RAISE(ABORT,'device number must be a positive u32')
+                WHERE typeof(NEW.number)<>'integer' OR NEW.number<1 OR NEW.number>4294967295;
+            SELECT RAISE(ABORT,'device number already assigned')
+                WHERE EXISTS(SELECT 1 FROM device_meta WHERE number=NEW.number AND udid<>NEW.udid);
+        END;
+        CREATE TRIGGER device_number_insert_water AFTER INSERT ON device_meta
+        WHEN NEW.number IS NOT NULL BEGIN
+            UPDATE device_number_sequence SET high_water=MAX(high_water,NEW.number) WHERE id=1;
+        END;
+        CREATE TRIGGER device_number_update_water AFTER UPDATE OF number ON device_meta
+        WHEN NEW.number IS NOT NULL BEGIN
+            UPDATE device_number_sequence SET high_water=MAX(high_water,NEW.number) WHERE id=1;
+        END;",
+    )?;
+    let duplicates: bool = tx.query_row(
+        "SELECT EXISTS(SELECT 1 FROM device_meta WHERE number IS NOT NULL GROUP BY number HAVING COUNT(*)>1)",
+        [], |row| row.get(0),
+    )?;
+    if !duplicates {
+        tx.execute_batch("CREATE UNIQUE INDEX idx_device_meta_number_unique ON device_meta(number) WHERE number IS NOT NULL;")?;
+    }
+    Ok(())
+}
 
 fn apply_migration_48(tx: &Transaction<'_>) -> anyhow::Result<()> {
     tx.execute_batch(

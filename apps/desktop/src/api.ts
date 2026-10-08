@@ -50,6 +50,10 @@ import type {
   AppLibraryItem,
   AppInstallBatchResponse,
   AppInstallRequest,
+  AppRemovalBatchResponse,
+  AppRemovalMode,
+  AppRemovalRequest,
+  AppRemovalResult,
   AppleIdConfig,
   ClipboardRead,
   DeviceDirListing,
@@ -134,6 +138,10 @@ import type {
   OrchestrationRevisionRecord,
   OrchestrationSummary,
   TargetRef,
+  BaselineSetting,
+  DeviceBaselineConfig,
+  DeviceBaselineReading,
+  DeviceBaselineResult,
 } from "./types";
 import { asAppEvent } from "./types";
 
@@ -500,6 +508,28 @@ export async function wakeScreen(udid: string) {
   return invoke<void>("wake_screen", { udid });
 }
 
+/** "Cài đặt máy": read one phone's baseline settings. A device probe, so never cached. */
+export async function deviceBaselineRead(udid: string) {
+  return invoke<DeviceBaselineReading>("device_baseline_read", { udid });
+}
+
+/**
+ * Bring one phone to the chosen baseline settings. Takes the phone's lease: a phone busy with
+ * other work comes back as `refusedBusy`, never preempted. Every write is verified by re-read.
+ */
+export async function deviceBaselineApply(udid: string, settings: BaselineSetting[]) {
+  return invoke<DeviceBaselineResult>("device_baseline_apply", { udid, settings });
+}
+
+export async function deviceBaselineGetConfig() {
+  return invoke<DeviceBaselineConfig>("device_baseline_get_config");
+}
+
+/** Save the baseline; resolves with the persisted readback (sorted, de-duplicated). */
+export async function deviceBaselineSaveConfig(config: DeviceBaselineConfig) {
+  return invoke<DeviceBaselineConfig>("device_baseline_save_config", { config });
+}
+
 /// Screenshot into the phone's own gallery (xiaowei "Screenshot to phone"). Returns the
 /// device path. `screenshot` above is the other row: that one copies to this machine.
 export async function screenshotToDevice(udid: string) {
@@ -776,8 +806,9 @@ export function agentHelperMaintenancePending(udid: string) {
   return invoke<{ plan: HelperMaintenancePlan; observationOnly: boolean } | null>("agent_helper_maintenance_pending", { udid });
 }
 
-export function agentHelperMaintenanceExecute(plan: HelperMaintenancePlan, confirmed: boolean, reconcileOnly = false) {
-  return invoke<HelperMaintenanceReceipt>("agent_helper_maintenance_execute", { plan, confirmed, reconcileOnly });
+// Manual recovery qualifies the replacement; native callers retain the maintenance-only default.
+export function agentHelperMaintenanceExecute(plan: HelperMaintenancePlan, confirmed: boolean, reconcileOnly = false, qualifyReplacement = true) {
+  return invoke<HelperMaintenanceReceipt>("agent_helper_maintenance_execute", { plan, confirmed, reconcileOnly, qualifyReplacement });
 }
 
 // UI projections only; native owns the full binding and validates prepared identity.
@@ -963,6 +994,25 @@ export async function getDeviceMeta(udid: string) {
 
 /// Every phone this app has a record for, in one call — what the grid reads to label and
 /// order tiles. Phones nobody has edited have no row, so an untouched fleet answers empty.
+export interface DeviceMetadataTransfer {
+  namespace: "riviu.device-meta"; version: 1; highWater: number;
+  devices: DeviceMeta[]; groups: DeviceGroup[];
+}
+export interface DeviceMetadataImportPreview { conflicts: string[]; applied: boolean; }
+export const exportDeviceMetadata = () => invoke<DeviceMetadataTransfer>("export_device_metadata");
+export async function importDeviceMetadata(input: DeviceMetadataTransfer, apply: boolean) {
+  const result = await invoke<DeviceMetadataImportPreview>("import_device_metadata", { input, apply });
+  if (result.applied) await invalidateReadScope(["deviceMetadata"]).catch(() => undefined);
+  return result;
+}
+
+/** Allocate persistent numbers at the backend; never assign from visible positions. */
+export async function ensureDeviceNumbers(udids: string[]): Promise<DeviceMeta[]> {
+  const metas = await invoke<DeviceMeta[]>("ensure_device_numbers", { udids });
+  await readQueryClient.invalidateQueries({ queryKey: ["deviceMetadata"] });
+  return metas;
+}
+
 export async function listDeviceMetas() {
   return readQueryClient.fetchQuery({ queryKey: ["deviceMetadata", "all"], staleTime: 2_000, queryFn: () => invoke<DeviceMeta[]>("list_device_metas") });
 }
@@ -991,7 +1041,8 @@ export async function previewAccountReconciliation(udids: string[]) {
 }
 export async function applyAccountReconciliation(operationId: string) {
   const result = await invoke<{ udid: string; expectedHandle: string; observedHandle: string }[]>("apply_account_reconciliation", { operationId });
-  await invalidateReadScope(["deviceMetadata"]);
+  // A confirmed mutation receipt survives a failed cache refresh; the caller reports its explicit read separately.
+  await invalidateReadScope(["deviceMetadata"]).catch(() => undefined);
   return result;
 }
 
@@ -1099,6 +1150,23 @@ export async function installLibraryAppBatch(request: AppInstallRequest) {
 
 export async function cancelAppInstallBatch(batchId: string) {
   return invoke<void>("cancel_app_install_batch", { batchId });
+}
+
+/**
+ * Uninstall a library app (or uninstall then install the same library artifact) on one phone.
+ * The app is named by its library id only; the backend resolves the package and refuses a busy
+ * phone instead of waiting for it.
+ */
+export async function uninstallLibraryApp(udid: string, appId: string, mode: AppRemovalMode) {
+  return invoke<AppRemovalResult>("uninstall_library_app", { udid, appId, mode });
+}
+
+export async function uninstallLibraryAppToGroup(groupId: string, appId: string, mode: AppRemovalMode) {
+  return invoke<AppRemovalBatchResponse>("uninstall_library_app_to_group", { groupId, appId, mode });
+}
+
+export async function uninstallLibraryAppBatch(request: AppRemovalRequest) {
+  return invoke<AppRemovalBatchResponse>("uninstall_library_app_batch", { request });
 }
 
 export async function listSchedules() {

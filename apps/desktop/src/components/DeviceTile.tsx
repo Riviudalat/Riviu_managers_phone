@@ -1,3 +1,4 @@
+import { machineNumberLabel } from "../deviceNaming";
 import { memo } from "react";
 import { Maximize2 } from "lucide-react";
 import { deviceOperationalView } from "../deviceWork";
@@ -84,7 +85,7 @@ function DeviceTileInner({
       aria-selected={selected}
       tabIndex={0}
       aria-roledescription="thẻ thiết bị"
-      aria-label={`Máy ${index}, ${displayName}, ${operationalLabel}${operational.step ? `, ${operational.step}` : ""}${selected ? ", đã chọn" : ""}`}
+      aria-label={`${machineNumberLabel(index)}, ${displayName}, ${operationalLabel}${operational.step ? `, ${operational.step}` : ""}${selected ? ", đã chọn" : ""}`}
       style={{ width, height: width * 2 }}
       onClick={(e) => onSelect(device.udid, e.metaKey || e.ctrlKey || e.shiftKey)}
       onKeyDown={(event) => {
@@ -122,7 +123,7 @@ function DeviceTileInner({
         <button
           type="button"
           className="dev-phone-open"
-          aria-label={`Mở màn hình Máy ${index}`}
+          aria-label={`Mở màn hình ${machineNumberLabel(index)}`}
           title="Mở màn hình"
           onClick={(event) => {
             event.stopPropagation();
@@ -148,7 +149,7 @@ function DeviceTileInner({
         )}
 
         <div className="dev-phone-info">
-          <span className="dev-phone-index">Máy {index}</span>
+          <span className="dev-phone-index">{machineNumberLabel(index)}</span>
           <span className="dev-phone-name" title={displayName}>
             {displayName}
           </span>

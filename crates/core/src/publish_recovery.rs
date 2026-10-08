@@ -109,6 +109,11 @@ impl RecoveryFailure {
         let kind = classify(&message);
         let code = match kind {
             FailureKind::Disconnected => "legacy_device_disconnected",
+            FailureKind::Retryable
+                if crate::device_control::baseline::mentions_screen_locked(&message) =>
+            {
+                crate::device_control::baseline::SCREEN_LOCKED_CODE
+            }
             FailureKind::Retryable if unavailable_android_agent_status(&message) => {
                 "agent_status_unavailable"
             }
@@ -303,6 +308,11 @@ pub fn classify(message: &str) -> FailureKind {
     .any(|x| s.contains(x))
     {
         return FailureKind::Terminal;
+    }
+    // A lock screen refused the app before anything reached TikTok. Retrying the same phone
+    // is safe once someone unlocks it (or the "Cài đặt máy" baseline turns the lock off).
+    if crate::device_control::baseline::mentions_screen_locked(message) {
+        return FailureKind::Retryable;
     }
     if s.contains("device offline")
         || s.contains("no devices/emulators found")
@@ -539,6 +549,25 @@ mod tests {
         );
         assert_eq!(
             RecoveryFailure::legacy("account mismatch after timeout").kind,
+            FailureKind::Terminal
+        );
+    }
+
+    #[test]
+    fn a_lock_screen_refusal_is_a_typed_retryable_pre_post_reason() {
+        // 2026-10-08: publish failed its foreground proof with focus=StatusBar and
+        // mDreamingLockscreen=true, and settled as the generic `legacy_terminal`.
+        let message = "cleanAppSession failed for device ce0717171c2a64d50d: \
+            startInteractionSession failed for device ce0717171c2a64d50d: ce0717171c2a64d50d: \
+            máy đang khóa màn hình (StatusBar) nên com.ss.android.ugc.trill không lên \
+            foreground được trong 40s; mở khóa máy (hoặc áp dụng Cài đặt máy) rồi chạy lại";
+        let failure = RecoveryFailure::legacy(message);
+        assert_eq!(failure.code, "device_screen_locked");
+        assert_eq!(failure.kind, FailureKind::Retryable);
+        assert_eq!(describe(&anyhow::anyhow!(message.to_string())).code, "device_screen_locked");
+        // An operator stop still wins: a stopped run is not retried because a phone was locked.
+        assert_eq!(
+            classify(&format!("đã dừng; {message}")),
             FailureKind::Terminal
         );
     }

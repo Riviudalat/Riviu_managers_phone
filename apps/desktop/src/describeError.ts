@@ -109,3 +109,22 @@ export function describeError(cause: unknown): string {
   }
   return String(cause);
 }
+
+/** Shared typed ownership boundary, with one narrow legacy-string compatibility parser. */
+export function controlFailure(cause: unknown) {
+  const detail = describeError(cause);
+  const record = cause && typeof cause === "object" ? cause as Record<string, unknown> : null;
+  const legacy = /^DeviceBusy:.*? is busy with ([A-Za-z]+);/.exec(detail)?.[1];
+  const owner = record?.code === "DeviceBusy" && typeof record.currentOwner === "string"
+    ? record.currentOwner.toLowerCase() : legacy?.toLowerCase();
+  const helper = helperRecoveryMessage(cause) !== null;
+  const canHandoff = !helper && ["script", "nurture", "interaction"].includes(owner ?? "");
+  const summary = helper ? "Helper cần khôi phục"
+    : owner === "script" ? "Tác vụ tự động đang giữ máy"
+    : owner === "nurture" ? "Đang nuôi tài khoản"
+    : owner === "interaction" ? "Đang tương tác"
+    : owner ? "Máy đang có phiên điều khiển"
+    : /\/elements\b/.test(detail) && /timed out|timeout/i.test(detail) ? "Hết thời gian đọc giao diện"
+    : "Chưa thể điều khiển";
+  return { owner, canHandoff, helper, summary, detail, transientIdleSweep: !helper && owner === "idlesweep" };
+}

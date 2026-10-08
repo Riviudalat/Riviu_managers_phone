@@ -464,3 +464,101 @@ pub async fn arp_scan(state: State<'_, AppState>) -> Result<Vec<ArpEntry>, Comma
         .map(|(ip, mac)| ArpEntry { ip, mac })
         .collect())
 }
+
+/// The roster's platform for this phone, or the same "no longer connected" refusal its
+/// neighbours give. Baseline commands branch on it so an iPhone gets `Unsupported` with no
+/// effect instead of an adb call against a serial that is not one.
+fn baseline_platform(
+    state: &AppState,
+    udid: &str,
+) -> Result<riviu_core::DevicePlatform, CommandError> {
+    state
+        .registry
+        .list()
+        .into_iter()
+        .find(|device| device.udid == udid)
+        .map(|device| device.platform)
+        .ok_or_else(|| CommandError::code("DeviceUnavailable", "Thiết bị không còn kết nối"))
+}
+
+/// Read this phone's "Cài đặt máy" baseline (lock screen, rotation, stay-awake, timeout,
+/// animations). A failed read comes back as `error` with no settings: unknown, never "OK".
+#[tauri::command]
+pub async fn device_baseline_read(
+    state: State<'_, AppState>,
+    udid: String,
+) -> Result<riviu_core::device_control::baseline::DeviceBaselineReading, CommandError> {
+    let _admission = state.ensure_accepting_work()?;
+    if baseline_platform(&state, &udid)? != riviu_core::DevicePlatform::Android {
+        return Ok(riviu_core::device_control::baseline::DeviceBaselineReading {
+            udid,
+            settings: Vec::new(),
+            error: Some("iOS chưa hỗ trợ Cài đặt máy".into()),
+        });
+    }
+    let android = state.require_android()?;
+    Ok(match android.read_baseline(&udid).await {
+        Ok(settings) => riviu_core::device_control::baseline::DeviceBaselineReading {
+            udid,
+            settings,
+            error: None,
+        },
+        Err(error) => riviu_core::device_control::baseline::DeviceBaselineReading {
+            udid,
+            settings: Vec::new(),
+            error: Some(format!("Không đọc được cài đặt máy: {error}")),
+        },
+    })
+}
+
+/// Bring one phone to the chosen baseline settings, each write verified by a re-read.
+///
+/// **Refused, not preempted, when the phone is busy** -- the same rule as every command here,
+/// reported as a typed `refusedBusy` result rather than an error so a group/all run keeps going
+/// and shows which phones were skipped. iOS is `unsupported` with no effect.
+#[tauri::command]
+pub async fn device_baseline_apply(
+    state: State<'_, AppState>,
+    udid: String,
+    settings: Vec<riviu_core::device_control::baseline::BaselineSetting>,
+) -> Result<riviu_core::device_control::baseline::DeviceBaselineResult, CommandError> {
+    use riviu_core::device_control::baseline::{BaselineOutcome, DeviceBaselineResult};
+    let _admission = state.ensure_accepting_work()?;
+    if baseline_platform(&state, &udid)? != riviu_core::DevicePlatform::Android {
+        return Ok(DeviceBaselineResult::whole_device(
+            &udid,
+            BaselineOutcome::Unsupported,
+            "iOS chưa hỗ trợ Cài đặt máy; không thay đổi gì trên máy",
+        ));
+    }
+    let _hold = match hold_this_phone(&state, &udid).await {
+        Ok(hold) => hold,
+        Err(error) if error.code == "DeviceBusy" => {
+            let owner = error
+                .current_owner
+                .map(|owner| format!("{owner:?}"))
+                .unwrap_or_else(|| "việc khác".into());
+            return Ok(DeviceBaselineResult::whole_device(
+                &udid,
+                BaselineOutcome::RefusedBusy,
+                format!("Máy đang bận ({owner}); không chiếm quyền, chưa thay đổi gì"),
+            ));
+        }
+        Err(error) => return Err(error),
+    };
+    let android = state.require_android()?;
+    let result = match android.apply_baseline(&udid, &settings).await {
+        Ok(items) => DeviceBaselineResult::from_items(&udid, items),
+        Err(error) => DeviceBaselineResult::whole_device(
+            &udid,
+            BaselineOutcome::Failed,
+            format!("Không đọc được cài đặt máy trước khi áp dụng; chưa thay đổi gì: {error}"),
+        ),
+    };
+    log::info!(
+        "Cài đặt máy {udid}: {:?} ({} mục)",
+        result.outcome,
+        result.items.len()
+    );
+    Ok(result)
+}

@@ -18,6 +18,7 @@ import {
   groupInput,
   viewInjectTouch,
   setScreenRotation,
+  operationPrepareDevices,
 } from "../api";
 import { FocusStream } from "./FocusStream";
 import { ActivityCenter } from "./ActivityCenter";
@@ -53,6 +54,7 @@ vi.mock("../api", () => ({
   saveViewSnapshot: vi.fn(),
   screenshot: vi.fn(),
   setScreenRotation: vi.fn(async () => 0),
+  operationPrepareDevices: vi.fn(async () => undefined),
   viewInjectTouch: vi.fn(async () => liveTouchAvailable),
   viewRequestKeyframe: vi.fn(async () => true),
   viewSetPreset: vi.fn(async () => undefined),
@@ -119,6 +121,23 @@ async function waitForControlReady() {
 }
 
 describe("FocusStream hit mapping", () => {
+  it("keeps typed busy ownership locked until an explicit successful handoff", async () => {
+    vi.mocked(deviceControlBegin).mockClear().mockRejectedValueOnce({ code: "DeviceBusy", currentOwner: "script", message: "owned by task" });
+    let release!: () => void;
+    vi.mocked(operationPrepareDevices).mockClear().mockImplementationOnce(() => new Promise(resolve => { release = () => resolve({ operationId: "handoff", state: "closed", devices: [] }); }));
+    render(<FocusStream device={fixture} index={20} onClose={vi.fn()} devices={[fixture]} onSelectDevice={vi.fn()} />);
+    const handoff = await testingScreen.findByRole("button", { name: "Dừng tác vụ cũ và điều khiển" });
+    expect(operationPrepareDevices).not.toHaveBeenCalled();
+    expect(testingScreen.getByRole("button", { name: "Home" })).toBeDisabled();
+    expect(testingScreen.getByTestId("focus-control-status").querySelector("details")).not.toHaveAttribute("open");
+    fireEvent.click(handoff);
+    expect(operationPrepareDevices).toHaveBeenCalledExactlyOnceWith([fixture.udid], true);
+    expect(deviceControlBegin).toHaveBeenCalledTimes(1);
+    expect(testingScreen.getByRole("button", { name: "Home" })).toBeDisabled();
+    await act(async () => release());
+    await waitForControlReady();
+    expect(deviceControlBegin).toHaveBeenCalledTimes(2);
+  });
   it("offers helper recovery after an owner conflict without retrying control", async () => {
     const recover = vi.fn();
     vi.mocked(deviceControlBegin).mockClear().mockRejectedValueOnce({
@@ -130,7 +149,8 @@ describe("FocusStream hit mapping", () => {
     };
     render(<FocusStream {...props} />);
     const status = await testingScreen.findByTestId("focus-control-status");
-    expect(status).not.toHaveTextContent(/DeviceControlFailed|owner_conflict/);
+    expect(status.querySelector("details")).not.toHaveAttribute("open");
+    expect(status.querySelector("summary")).toHaveTextContent("Chi tiết");
     expect(within(status).queryByRole("button", { name: "Thử lại điều khiển" })).toBeNull();
     fireEvent.click(await within(status).findByRole("button", { name: "Khôi phục helper" }));
     expect(recover).toHaveBeenCalledExactlyOnceWith(fixture.udid);
@@ -1113,9 +1133,10 @@ describe("active group sync input", () => {
     await waitForControlReady();
     fireEvent.click(view.getByRole("button", { name: "Home" }));
     await waitFor(() =>
-      expect(view.getByTestId("focus-control-status")).toHaveTextContent("Cần xử lý 1 máy"),
+      expect(view.getByTestId("focus-control-status")).toHaveTextContent("Chưa thể điều khiển · 1 máy"),
     );
-    expect(view.getByTestId("focus-control-status")).toHaveTextContent("device offline");
+    fireEvent.click(within(view.getByTestId("focus-control-status")).getByText("Chi tiết"));
+    expect(view.getByTestId("focus-control-status")).toHaveTextContent("đang offline");
     expect(view.getByRole("button", { name: "Home" })).toBeDisabled();
     expect(groupInput).toHaveBeenCalledOnce();
 
@@ -1285,6 +1306,7 @@ describe("focused phone keyboard", () => {
     expect(deviceKeyboardInput).toHaveBeenLastCalledWith(fixture.udid, 1, { kind: "copy", cut: true });
     writeText.mockRejectedValueOnce(new Error("clipboard denied"));
     fireEvent.keyDown(sink, { key: "c", ctrlKey: true });
+    fireEvent.click(await testingScreen.findByRole("button", { name: "Chi tiết" }));
     await waitFor(() => expect(testingScreen.getByText(/clipboard denied/)).toBeVisible());
   });
   it("clears queued work on blur and never replays after an uncertain action", async () => {
@@ -1302,6 +1324,7 @@ describe("focused phone keyboard", () => {
     await act(async () => {});
     fireEvent.keyDown(sink, { key: "Delete" });
     expect(deviceKeyboardInput).toHaveBeenCalledTimes(2);
+    fireEvent.click(view.getByRole("button", { name: "Chi tiết" }));
     expect(view.getByText(/uncertain/)).toBeVisible();
   });
   it("bounds the queue and reports overflow once without partial replay", async () => {

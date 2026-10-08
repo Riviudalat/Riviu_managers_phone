@@ -1,3 +1,4 @@
+import { machineNumberLabel } from "../deviceNaming";
 import { useEffect, useMemo, useRef, useState } from "react";
 import { ImagePlus, RefreshCw, Send, Trash2 } from "lucide-react";
 
@@ -34,7 +35,7 @@ function formatBytes(bytes: number): string {
 }
 
 /** Material library backed by the managed artifact store and a bounded fleet transfer. */
-export function MaterialPage({ devices, selected, operationSource }: SelProps & { operationSource?: OperationSourceRef }) {
+export function MaterialPage({ devices, selected, operationSource, deviceNumbers }: SelProps & { operationSource?: OperationSourceRef; deviceNumbers?: ReadonlyMap<string, number> }) {
   const batch = useLibraryBatch("materialTransfer", operationSource?.kind === "materialTransfer" ? operationSource.operationId : undefined);
   const [targetRef, setTargetRef] = useState<TargetRef>(() => ({ type: "explicit", udids: [...selected] }));
   const [groups, setGroups] = useState<DeviceGroup[]>([]);
@@ -57,20 +58,14 @@ export function MaterialPage({ devices, selected, operationSource }: SelProps & 
       .catch((error) => { if (active) setGroupError(describeError(error)); });
     return () => { active = false; };
   }, [groupRetry]);
-  const deviceNames = useMemo(
-    () => new Map(devices.map((device, index) => [device.udid, `Máy ${index + 1} · ${device.name}`])),
-    [devices],
-  );
   const batchDeviceNames = useMemo(() => {
     if (!lastBatch) return new Map<string, string>();
-    return new Map(lastBatch.target.included.map((device, index) => {
+    return new Map(lastBatch.target.included.map((device) => {
       const alias = device.alias.trim();
-      const number = device.number ?? index + 1;
-      const stableName = alias ? `Máy ${number} · ${alias}`
-        : device.number ? `Máy ${number}` : deviceNames.get(device.udid) || `Máy ${number}`;
+      const stableName = `${machineNumberLabel(device.number)} · ${alias || devices.find(row => row.udid === device.udid)?.name || device.udid}`;
       return [device.udid, stableName];
     }));
-  }, [deviceNames, lastBatch]);
+  }, [devices, lastBatch]);
 
   const reload = async () => {
     const ticket = ++loadTicket.current;
@@ -205,7 +200,7 @@ export function MaterialPage({ devices, selected, operationSource }: SelProps & 
                   <summary>Xem máy bị loại</summary>
                   {lastBatch.target.excluded.map(({ device, reason }) => (
                     <code key={`${device.udid}:${reason}`}>
-                      {device.alias || (device.number ? `Máy ${device.number}` : device.udid)}
+                      {`${machineNumberLabel(device.number)} · ${device.alias || device.udid}`}
                       {" · "}
                       {reason === "not_in_roster" ? "không còn kết nối" : "bị lặp trong phạm vi"}
                     </code>
@@ -251,7 +246,7 @@ export function MaterialPage({ devices, selected, operationSource }: SelProps & 
           </button>
           </div>
         </header>
-        <TargetSelector devices={devices} groups={groups} selected={[]} onChange={() => undefined}
+        <TargetSelector deviceLabel={device => `${machineNumberLabel(deviceNumbers?.get(device.udid))} · ${device.name}`} devices={devices} groups={groups} selected={[]} onChange={() => undefined}
           targetRef={targetRef} onTargetRefChange={setTargetRef} requireChoice label="Phạm vi chuyển nội dung" />
         <div className="resource-scope-summary" role="status">
           <StatusChip tone={targets.length ? "info" : "neutral"}>{targets.length} máy nhận nội dung</StatusChip>

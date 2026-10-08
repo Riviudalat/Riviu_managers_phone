@@ -1,3 +1,4 @@
+import { deviceNumbersByUdid } from "../deviceNaming";
 import {
   useCallback,
   useEffect,
@@ -18,7 +19,7 @@ import {
 } from "../api";
 import { describeError } from "../describeError";
 import { requestConfirm } from "../confirmStore";
-import { orderDevicesByNumber, tileName, tileNumber } from "../deviceNaming";
+import { tileName } from "../deviceNaming";
 import { parseMentions, resolveMentionActors, unionActors } from "../interactionMentions";
 import { useDeviceHandles } from "../useDeviceHandles";
 import {
@@ -141,13 +142,7 @@ export function InteractionPopup({
   // picker and the wall disagreed, and "máy số 7" meant two different phones depending on
   // which one you were looking at. On a fleet of twenty identical SM-G950Fs that is the only
   // handle an operator has.
-  const deviceNumber = useMemo(() => {
-    const map = new Map<string, number>();
-    orderDevicesByNumber(devices, metas).forEach((device, index) =>
-      map.set(device.udid, tileNumber(index + 1, metas.get(device.udid))),
-    );
-    return map;
-  }, [devices, metas]);
+  const deviceNumber = useMemo(() => deviceNumbersByUdid(devices, metas), [devices, metas]);
   /// What the operator calls each phone, or what the phone reports if they never renamed it.
   ///
   /// Same `tileName` the grid uses, so renaming a phone renames it here too.

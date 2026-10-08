@@ -282,6 +282,23 @@ fn advance_verification_budget(
     })
 }
 
+/// Destructive verifier restart authority only. An earlier observation of this exact
+/// intent read the target's full caption and submission time on one own-post snapshot,
+/// so TikTok already holds the post and its upload is no longer in flight. A submitted
+/// receipt alone is not this proof. Never publication, link, Sheet or Post authority.
+pub fn publish_upload_settled(intent: Option<&str>, evidence: Option<&str>) -> bool {
+    let evidence: serde_json::Value = evidence
+        .and_then(|raw| serde_json::from_str(raw).ok())
+        .unwrap_or_default();
+    let budget = &evidence["verificationBudget"];
+    intent.is_some()
+        && budget["version"] == 1
+        && budget["intentSha256"] == new_verification_budget(intent)["intentSha256"]
+        && budget["publicationStage"]
+            .as_u64()
+            .is_some_and(|stage| stage >= 2)
+}
+
 /// A copied candidate permits bounded network reads, never publication or Sheet authority.
 fn retained_metadata_observation(
     conn: &Connection,

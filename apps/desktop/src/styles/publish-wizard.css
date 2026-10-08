@@ -540,11 +540,6 @@
   max-width: 35%;
   overflow-wrap: anywhere;
 }
-.pw-muted {
-  font-size: var(--text-xs);
-  color: var(--text-3);
-  margin: 8px 0;
-}
 .publish-dialog {
   max-width: calc(100vw - 32px);
   width: 580px;
@@ -715,10 +710,6 @@
 }
 .pw-error {
   color: var(--danger-strong);
-}
-.pw-run-order {
-  font-size: var(--text-sm);
-  color: var(--text-3);
 }
 .pw-quick-list {
   max-height: 35dvh;

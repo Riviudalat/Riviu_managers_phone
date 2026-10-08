@@ -2,7 +2,7 @@ import { useEffect, useMemo, useRef, useState } from "react";
 import { CalendarClock, GripVertical, Search, Undo2, Unlink, X, Zap } from "lucide-react";
 import { publishScheduleCreate, publishSchedulePreflight } from "../../api";
 import { describeError } from "../../describeError";
-import { orderDevicesByNumber, tileNumber, tileName } from "../../deviceNaming";
+import { orderDevicesByNumber, machineNumberLabel, tileName } from "../../deviceNaming";
 import type { DeviceInfo, DeviceMeta, PublishBundle, PublishDeviceGuards, PublishScheduleReport, PublishScheduleRequest, PublishSoundPolicy } from "../../types";
 import { deviceGuardBlock, deviceGuardPending } from "./publishDeviceGuardState";
 import { PublishMedia } from "./PublishMedia";
@@ -65,7 +65,7 @@ export function PublishSchedulePlanner(p: Props) {
   const readyIds = inScope.filter(d => d.status === "ready" && !deviceGuardBlock(p.deviceGuards,d.udid)).map(d => d.udid);
   const label = (udid: string) => {
     const index = ordered.findIndex(d => d.udid === udid);
-    return index >= 0 ? `Máy ${tileNumber(index + 1, p.metas.get(udid))}` : "Máy đã ngắt kết nối";
+    return index >= 0 ? machineNumberLabel(p.metas.get(udid)?.number) : "Máy đã ngắt kết nối";
   };
   const name = (id: string) => p.bundles.find(b => b.id === id)?.name ?? "Bài không còn trong nguồn";
   const persist = (next: ScheduleDraft) => {

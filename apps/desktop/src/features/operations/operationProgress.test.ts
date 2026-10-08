@@ -47,8 +47,12 @@ describe("operation progress", () => {
     expect(runProgress({ ...pending, state: "partial", retryScope: "linkAndSheet", completedItems: 10 }, [])).toBeNull();
     expect(deviceRows([{ id: "pending", udid: "a", kind: "assignment", state: "partial", errorCode: "post_verification_pending" } as OperationRunItem])[0])
       .toMatchObject({ fraction: null, pendingPublish: true });
+    expect(deviceRows([{ id: "posting", udid: "a", kind: "assignment", state: "running", errorCode: "post_verification_pending" } as OperationRunItem])[0])
+      .toMatchObject({ state: "running", fraction: null, pendingPublish: true });
+    expect(deviceRows([{ id: "posted", udid: "a", kind: "assignment", state: "succeeded", errorCode: "post_verification_pending" } as OperationRunItem])[0])
+      .toMatchObject({ state: "uncertain", fraction: null, pendingPublish: true });
     expect(logMessage({ id: "pending", at: null, action: "publish", state: "verifying", text: null, detail: null }))
-      .toBe("Đã bấm Đăng — chờ TikTok hoàn tất và xác minh liên kết bài");
+      .toBe("Đang kiểm tra kết quả thao tác Đăng đã có — không bấm Đăng lại");
   });
   it("keeps publication needing review out of active progress without displaying completion", () => {
     const review = { ...run, kind: "publish", state: "uncertain", retryScope: "linkAndSheet" } as OperationRunSummary;

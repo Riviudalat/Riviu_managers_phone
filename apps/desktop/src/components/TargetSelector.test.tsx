@@ -213,3 +213,9 @@ describe("TargetSelector", () => {
     expect(screen.getByRole("checkbox", { name: "Máy 1 · ONE-02" })).not.toBeChecked();
   });
 });
+
+it("does not invent physical machine numbers without metadata", async () => {
+  render(<TargetSelector devices={devices} groups={[]} selected={["serial-a"]} onChange={vi.fn()} />);
+  expect(screen.getByRole("checkbox", { name: /Đang gán số.*ONE-01/ })).toBeTruthy();
+  expect(screen.queryByRole("checkbox", { name: /Máy 1/ })).toBeNull();
+});

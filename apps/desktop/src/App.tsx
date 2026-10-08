@@ -1,3 +1,6 @@
+import { machineNumberLabel } from "./deviceNaming";
+import { useNumberWallpaperSync } from "./wallpaperSync";
+import { deviceNumbersByUdid } from "./deviceNaming";
 import {
   lazy,
   Suspense,
@@ -87,6 +90,7 @@ import { forgetDepartedViews, useViewClient } from "./viewStore";
 import { ApiPage } from "./pages/ApiPage";
 import { AppsPage } from "./pages/AppsPage";
 import { DataPage } from "./pages/DataPage";
+import { DeviceSettingsPage } from "./pages/DeviceSettingsPage";
 import { MaterialPage } from "./pages/MaterialPage";
 import { HelpPage } from "./pages/HelpPage";
 import type { AgentStatus, DeviceInfo, DeviceWorkOwner, DeviceWorkState, PageId, TargetRef } from "./types";
@@ -122,6 +126,7 @@ const PAGE_TITLE: Partial<Record<PageId, string>> = {
   data: "Dữ liệu",
   api: "API",
   settings: "Cài đặt",
+  deviceSettings: "Cài đặt máy",
 };
 
 type DeviceWorkOwnerProjection =
@@ -159,7 +164,10 @@ function App() {
     devices,
     groups,
     metas,
-    setMetas,
+    refreshMetas,
+    numberAllocationError,
+    retryDeviceNumbers,
+    retryingNumbers,
     jobs,
     reload,
     startupIssue,
@@ -237,6 +245,8 @@ function App() {
   const [deviceSearch, setDeviceSearch] = useState("");
   const [deviceStatusFilter, setDeviceStatusFilter] = useState<DeviceOperationalFilter>("all");
   useViewClient();
+
+  useNumberWallpaperSync(devices);
 
   const rosterKey = devices.map((device) => device.udid).join("\u0000");
   useEffect(() => {
@@ -465,20 +475,14 @@ function App() {
     () => orderDevicesByNumber(devices, metaMap),
     [devices, metaMap],
   );
-  const fleetNumberByUdid = useMemo(() => {
-    const numbers = new Map<string, number>();
-    orderedDevices.forEach((device, index) => {
-      numbers.set(device.udid, tileNumber(index + 1, metaMap.get(device.udid)));
-    });
-    return numbers;
-  }, [metaMap, orderedDevices]);
+  const fleetNumberByUdid = useMemo(() => deviceNumbersByUdid(devices, metaMap), [devices, metaMap]);
   const automationDeviceLabels = useMemo(() => {
     const labels = new Map<string, string>();
     orderedDevices.forEach((device, index) => {
       const meta = metaMap.get(device.udid);
       labels.set(
         device.udid,
-        `Máy ${tileNumber(index + 1, meta)} · ${tileName(device, meta)}`,
+        `${machineNumberLabel(tileNumber(index + 1, meta))} · ${tileName(device, meta)}`,
       );
     });
     return labels;
@@ -509,7 +513,7 @@ function App() {
         deviceMatchesFleetFilter(
           device,
           currentDeviceWorkOwner(device.udid),
-          fleetNumberByUdid.get(device.udid) ?? 1,
+          fleetNumberByUdid.get(device.udid) ?? 0,
           tileName(device, metaMap.get(device.udid)),
           deviceSearch,
           deviceStatusFilter,
@@ -672,8 +676,7 @@ function App() {
         deviceNumbers: fleetNumberByUdid,
         reload,
         metaMap,
-        metas,
-        setMetas,
+        refreshMetas,
         controlCenter,
         setControlCenter,
         groupMode: activeSync !== null,
@@ -683,9 +686,7 @@ function App() {
         setSyslogFor,
         setHealthFor,
       }),
-    // Setters straight from `useState` are stable and stay out of the list. `setMetas` is
-    // in it because it now arrives through `useFleet`'s return object, where the rule cannot
-    // see that it is a setter — including it is free and cheaper than an exemption.
+    // Metadata refreshes share useFleet publication sequencing.
     // The stale-closure note that used to sit here still applies and now lives with the
     // catalog: a stale `metas` pre-fills the rename dialog with the value just replaced.
     // The three surface openers come from `useDeviceSurface` now, not from `useState`, so the
@@ -698,8 +699,7 @@ function App() {
       fleetNumberByUdid,
       activeSync,
       metaMap,
-      metas,
-      setMetas,
+      refreshMetas,
       setAdbFor,
       setSyslogFor,
       setHealthFor,
@@ -836,7 +836,7 @@ function App() {
     [jobs],
   );
   const syncStatusLabel = activeSync
-    ? `Máy chính: Máy ${fleetNumberByUdid.get(activeSync.masterUdid) ?? "?"} · ${activeSync.targetUdids.length - 1} máy nhận · ${
+    ? `Máy chính: ${machineNumberLabel(fleetNumberByUdid.get(activeSync.masterUdid))} · ${activeSync.targetUdids.length - 1} máy nhận · ${
         syncReadiness?.state === "active"
           ? `Đang hoạt động ${syncReadiness.readyUdids.length}/${activeSync.targetUdids.length}`
           : syncReadiness?.state === "degraded"
@@ -938,6 +938,11 @@ function App() {
           className={`content content-${page} ${page === "scripts" ? "content-flow" : ""}`}
         >
           {draftStorageError && <Banner tone="error">{draftStorageError}</Banner>}
+          {numberAllocationError && <Banner tone="warn" action={
+            <button type="button" disabled={retryingNumbers} onClick={() => void retryDeviceNumbers()}>
+              {retryingNumbers ? "Đang kiểm tra số máy…" : "Kiểm tra và thử gán số lại"}
+            </button>
+          }>{numberAllocationError}</Banner>}
           {bootError && (
             <Banner
               tone="error"
@@ -994,7 +999,7 @@ function App() {
               <ControlCenterRail tileWidth={tileWidth} onTileWidth={setTileWidth} connection={connectionFilter} onConnection={setConnectionFilter}
                 pinned={displayPinned} onPinnedChange={next => { setDisplayPinned(next); try { localStorage.setItem("riviu.control.displayPinned", String(next)); } catch { /* optional preference */ } }}
                 groups={tabs.map(tab => ({ ...tab, udids: groups.find(group => group.id === tab.id)?.udids }))} group={groupTab} onGroup={setGroupTab}
-                machines={devices.map(d=>({id:d.udid,number:fleetNumberByUdid.get(d.udid)??1,name:tileName(d,metaMap.get(d.udid)),selected:selected.includes(d.udid),connection:d.connection}))}
+                machines={devices.map(d=>({id:d.udid,number:fleetNumberByUdid.get(d.udid)??0,name:tileName(d,metaMap.get(d.udid)),selected:selected.includes(d.udid),connection:d.connection}))}
                 onSelect={id=>onSelect(id,true)} onSettings={()=>{setSettingsSection("control");void requestPage("settings");}}
                 onGroups={()=>setGroupsOpen(true)} onRotate={()=>void(async()=>{const targets=selectedDevices.filter(device=>device.platform==="android");if(!targets.length){pushToast("info","Chọn máy Android để xoay");return;}const results=await Promise.allSettled(targets.map(device=>setScreenRotation(device.udid,1)));const confirmed=results.filter(result=>result.status==="fulfilled"&&result.value===1).length;pushToast(confirmed===targets.length?"ok":"warn",`Đã xác nhận xoay ${confirmed}/${targets.length} máy`);})()}/>
               <div className="device-browser-toolbar">
@@ -1307,7 +1312,7 @@ function App() {
                   <tbody>
                     {visibleDevices.map((device) => {
                       const sel = selected.includes(device.udid);
-                      const machineNumber = fleetNumberByUdid.get(device.udid) ?? 1;
+                      const machineNumber = fleetNumberByUdid.get(device.udid) ?? 0;
                       const meta = metaMap.get(device.udid);
                       const currentOwner = currentDeviceWorkOwner(device.udid);
                       const status = deviceOperationalView(
@@ -1325,7 +1330,7 @@ function App() {
                           key={device.udid}
                           className={sel ? "selected" : ""}
                           tabIndex={0}
-                          aria-label={`Máy ${machineNumber}, ${tileName(device, meta)}, ${statusLabel}${status.step ? `, ${status.step}` : ""}${sel ? ", đã chọn" : ""}`}
+                          aria-label={`${machineNumberLabel(machineNumber)}, ${tileName(device, meta)}, ${statusLabel}${status.step ? `, ${status.step}` : ""}${sel ? ", đã chọn" : ""}`}
                           onClick={(e) => selectDevice(device.udid, e.metaKey || e.ctrlKey)}
                           onKeyDown={(event) => {
                             if (event.target !== event.currentTarget) return;
@@ -1338,14 +1343,14 @@ function App() {
                           <td>
                             <input
                               type="checkbox"
-                              aria-label={`Chọn Máy ${machineNumber}`}
+                              aria-label={`Chọn ${machineNumberLabel(machineNumber)}`}
                               checked={sel}
                               onChange={() => onSelect(device.udid, true)}
                               onClick={(e) => e.stopPropagation()}
                             />
                           </td>
                           <td>
-                            <strong>Máy {machineNumber}</strong>
+                            <strong>{machineNumberLabel(machineNumber)}</strong>
                             <span className="device-table-alias">{tileName(device, meta)}</span>
                           </td>
                           <td>
@@ -1374,7 +1379,7 @@ function App() {
                               <button
                                 type="button"
                                 className="icon-button"
-                                aria-label={`Xem chi tiết Máy ${machineNumber}`}
+                                aria-label={`Xem chi tiết ${machineNumberLabel(machineNumber)}`}
                                 title="Xem chi tiết"
                                 onClick={(event) => {
                                   event.stopPropagation();
@@ -1418,7 +1423,7 @@ function App() {
                       key={device.udid}
                       device={device}
                       width={tileWidth}
-                      index={fleetNumberByUdid.get(device.udid) ?? 1}
+                      index={fleetNumberByUdid.get(device.udid) ?? 0}
                       name={tileName(device, metaMap.get(device.udid))}
                       handle={metaMap.get(device.udid)?.handle}
                       operational={deviceOperationalView(
@@ -1512,6 +1517,7 @@ function App() {
 
           {page === "material" && (
             <MaterialPage
+              deviceNumbers={fleetNumberByUdid}
               operationSource={operationSource?.kind === "materialTransfer" ? operationSource : undefined}
               devices={devices}
               selected={selected}
@@ -1520,6 +1526,7 @@ function App() {
           )}
           {page === "apps" && (
             <AppsPage
+              deviceNumbers={fleetNumberByUdid}
               operationSource={operationSource?.kind === "appInstall" ? operationSource : undefined}
               devices={devices}
               selected={selected}
@@ -1639,6 +1646,7 @@ function App() {
           {page === "savedTasks" && <SavedTasksPage devices={devices} />}
           {page === "help" && <HelpPage onOpenPage={(destination) => void requestPage(destination)} />}
           {page === "data" && <DataPage />}
+          {page === "deviceSettings" && <DeviceSettingsPage devices={devices} />}
           {page === "api" && <ApiPage onOpenSettings={() => {
             setSettingsSection("integration");
             void requestPage("settings", true);
@@ -1668,7 +1676,7 @@ function App() {
       {detailsFor && detailsDevice && (
         <DeviceDetailsDrawer
           device={detailsDevice}
-          machineLabel={`Máy ${fleetNumberByUdid.get(detailsDevice.udid) ?? 1}`}
+          machineLabel={machineNumberLabel(fleetNumberByUdid.get(detailsDevice.udid))}
           currentOwner={currentDeviceWorkOwner(detailsDevice.udid)}
           ownerReadFailed={deviceWorkOwners.state !== "known"}
           onClose={() => setDetailsFor(null)}
@@ -1692,7 +1700,8 @@ function App() {
           active={focusUdid === udid}
           windowOrder={windowOrder}
           onActivate={() => deviceWindows.activate(udid)}
-          index={fleetNumberByUdid.get(udid) ?? 1}
+          index={fleetNumberByUdid.get(udid) ?? 0}
+          deviceNumbers={fleetNumberByUdid}
           onClose={() => deviceWindows.close(udid)}
           activeSync={activeSync?.masterUdid === udid ? activeSync : null}
           onReadinessChange={activeSync?.masterUdid === udid ? setSyncReadiness : undefined}

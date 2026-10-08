@@ -1,3 +1,4 @@
+import { machineNumberLabel } from "../deviceNaming";
 import { useCallback, useEffect, useMemo, useRef, useState, type ReactNode } from "react";
 import type { UnlistenFn } from "@tauri-apps/api/event";
 import { RefreshCw, Search, ListChecks, ArrowUpRight, CircleAlert, X } from "lucide-react";
@@ -483,7 +484,7 @@ function deviceDisplayName(
   const device = ordered[index];
   const meta = metas.get(udid);
   return device
-    ? `Máy ${tileNumber(index + 1, meta)} · ${tileName(device, meta)}`
+    ? `${machineNumberLabel(tileNumber(index + 1, meta))} · ${tileName(device, meta)}`
     : "Máy chưa kết nối";
 }
 

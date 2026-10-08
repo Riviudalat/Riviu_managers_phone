@@ -861,12 +861,13 @@ impl Capture<'_> {
         if self.expired() {
             return Err(VerificationReason::SearchBudgetExhausted);
         }
-        if self
+        let foreground = self
             .session
             .active_app_bundle()
             .await
-            .map_err(|_| VerificationReason::ReadFailed)?
-            != self.plan.labels.package()
+            .map_err(|_| VerificationReason::ReadFailed)?;
+        if foreground != self.plan.labels.package()
+            && foreground != "com.google.android.packageinstaller"
         {
             return Err(VerificationReason::WrongApp);
         }
@@ -877,6 +878,12 @@ impl Capture<'_> {
                 .map_err(|_| VerificationReason::ReadFailed)?,
         )
         .map_err(|_| VerificationReason::ReadFailed)?;
+        if foreground != self.plan.labels.package()
+            && crate::app_automation::dialogs::decline_optional_location(&tree, self.plan.labels)
+                .is_none()
+        {
+            return Err(VerificationReason::WrongApp);
+        }
         if self.expired() {
             return Err(VerificationReason::SearchBudgetExhausted);
         }
@@ -922,10 +929,41 @@ impl Capture<'_> {
     async fn profile(&mut self, restoring: bool) -> Result<Tree, VerificationReason> {
         let start = Instant::now();
         let mut actions = 0;
+        let mut popup = crate::app_automation::dialogs::PopupBudget::default();
+        let popup_stop = std::sync::atomic::AtomicBool::new(false);
         let mut last_screen = None;
         let mut last_action_at: Option<Instant> = None;
         loop {
             let mut tree = self.read().await?;
+            if crate::app_automation::dialogs::optional_decline(&tree, self.plan.labels).is_some() {
+                use crate::app_automation::dialogs::{step_before_deadline, PopupStep};
+                use crate::ui_automation::runtime::ReadWaitResult;
+                match step_before_deadline(
+                    self.session,
+                    self.plan.labels,
+                    &mut popup,
+                    (start + RECOVERY_WINDOW).min(self.started + CAPTURE_WINDOW),
+                    &popup_stop,
+                    &popup_stop,
+                )
+                .await
+                .map_err(|_| VerificationReason::ReadFailed)?
+                {
+                    ReadWaitResult::Ready(PopupStep::Clear) => continue,
+                    ReadWaitResult::Ready(PopupStep::Dismissed) => {
+                        actions += 1;
+                        self.diagnostic.navigation_actions += 1;
+                        if actions >= MAX_RECOVERY_ACTIONS {
+                            return Err(VerificationReason::NavigationBudgetExhausted);
+                        }
+                        continue;
+                    }
+                    ReadWaitResult::Ready(PopupStep::Blocked) => {
+                        return Err(VerificationReason::UnrecognizedDialog)
+                    }
+                    _ => return Err(VerificationReason::SearchBudgetExhausted),
+                }
+            }
             let mut screen = classify(&tree, self.plan);
             if restoring && screen == Screen::Unknown {
                 if let Some(surface) = hidden_post_restore_surface(&tree, self.plan) {
@@ -998,21 +1036,8 @@ impl Capture<'_> {
                 if last_screen.as_ref() != Some(&screen)
                     || last_action_at.is_some_and(|at| at.elapsed() >= Duration::from_secs(5))
                 {
-                    let facebook_prompt = control == TikTokControl::DialogDismiss
-                        && decline_facebook_permission(&tree, self.plan).is_some();
-                    let mut button = if facebook_prompt {
-                        decline_facebook_permission(&tree, self.plan)
-                    } else {
-                        tree.control(self.plan.labels.package(), self.plan.labels.label(control))
-                    };
-                    if button.is_none() && control == TikTokControl::DialogDismiss {
-                        button = decline_facebook_permission(&tree, self.plan).or_else(|| {
-                            crate::app_automation::dialogs::decline_contacts(
-                                &tree,
-                                self.plan.labels,
-                            )
-                        });
-                    }
+                    let mut button =
+                        tree.control(self.plan.labels.package(), self.plan.labels.label(control));
                     if button.is_none() && control == TikTokControl::ProfileTab {
                         let budget = RECOVERY_WINDOW
                             .saturating_sub(start.elapsed())
@@ -1034,19 +1059,6 @@ impl Capture<'_> {
                         last_action_at = Some(Instant::now());
                         actions += 1;
                         self.diagnostic.navigation_actions += 1;
-                        if facebook_prompt {
-                            let wait_started = Instant::now();
-                            loop {
-                                let fresh = self.read().await?;
-                                if decline_facebook_permission(&fresh, self.plan).is_none() {
-                                    break;
-                                }
-                                if wait_started.elapsed() >= Duration::from_secs(5) {
-                                    return Err(VerificationReason::UnrecognizedDialog);
-                                }
-                                tokio::time::sleep(POLL).await;
-                            }
-                        }
                     }
                 }
             } else if screen == Screen::Unknown
@@ -1423,7 +1435,20 @@ impl Capture<'_> {
                 Ok(Some(link))
             }
             Err(error) => {
-                if error.is::<super::photo_proof::PhotoCarouselViewer>() {
+                if let Some(viewer) =
+                    error.downcast_ref::<super::photo_proof::PhotoCarouselViewer>()
+                {
+                    // Photo carousels copy before `post_proof`. Only this complete
+                    // one-snapshot read may advance the restart frontier; it never
+                    // selects a link or proves publication.
+                    if viewer.caption_and_time_matched {
+                        let evidence = self
+                            .diagnostic
+                            .publication_evidence
+                            .get_or_insert_with(Default::default);
+                        evidence.caption_matched = true;
+                        evidence.submission_time_matched = true;
+                    }
                     let photo = super::photo_proof::capture_expanded_photo_link_counted(
                         self.session,
                         self.plan.labels.package(),

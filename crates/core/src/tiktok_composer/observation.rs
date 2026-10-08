@@ -45,6 +45,20 @@ pub(crate) fn check_session(session: &dyn UiSession) -> anyhow::Result<()> {
         .unwrap_or(Ok(()))
 }
 
+/// A raw final tree must advance beyond the phase's last semantic evidence.
+/// Its native generation is checked locally; no observation ID is fabricated.
+pub(super) fn check_tree_generation(session: &dyn UiSession, generation: u64) -> anyhow::Result<()> {
+    check_session(session)?;
+    let epoch = session.gui_session_epoch();
+    anyhow::ensure!(!epoch.is_empty() && generation > 0, "final tree binding unavailable");
+    PHASE_CURSOR.try_with(|shared| {
+        anyhow::ensure!(shared.borrow().previous.as_ref()
+            .is_none_or(|(previous, _)| generation > *previous),
+            "final tree is stale within sound reproof");
+        Ok::<_, anyhow::Error>(())
+    }).unwrap_or(Ok(()))
+}
+
 pub(crate) fn android(package: &str) -> bool {
     matches!(
         package,
@@ -288,14 +302,23 @@ pub(crate) fn caption_values(
     package: &str,
     id: &str,
 ) -> anyhow::Result<Option<Vec<String>>> {
-    if !positive_query_known(snapshot) {
+    caption_values_from_matches(&snapshot.matches, snapshot.unknown_match_count, package, id)
+}
+
+fn caption_values_from_matches(
+    matches: &[crate::ui_automation::SemanticNode],
+    unknown_match_count: usize,
+    package: &str,
+    id: &str,
+) -> anyhow::Result<Option<Vec<String>>> {
+    if unknown_match_count != 0 || matches.is_empty() {
         return Ok(None);
     }
-    if snapshot.matches.len() > 1 {
+    if matches.len() > 1 {
         anyhow::bail!("caption observation ambiguous");
     }
     let mut values = Vec::new();
-    for node in &snapshot.matches {
+    for node in matches {
         if node.id.as_deref() != Some(id)
             || node.package.as_deref() != Some(package)
             || node.visible != Some(true)
@@ -361,10 +384,19 @@ pub(crate) enum CaptionState {
 }
 
 fn snapshot_caption_cleared(snapshot: &UiObservation, package: &str, id: &str) -> bool {
-    let [node] = snapshot.matches.as_slice() else {
+    caption_cleared_from_matches(&snapshot.matches, snapshot.unknown_match_count, package, id)
+}
+
+fn caption_cleared_from_matches(
+    matches: &[crate::ui_automation::SemanticNode],
+    unknown_match_count: usize,
+    package: &str,
+    id: &str,
+) -> bool {
+    let [node] = matches else {
         return false;
     };
-    positive_query_known(snapshot)
+    unknown_match_count == 0
         && node.id.as_deref() == Some(id)
         && node.package.as_deref() == Some(package)
         && node.class_name.as_deref() == Some("android.widget.EditText")
@@ -388,11 +420,21 @@ fn snapshot_caption_state(
     id: &str,
     expected: &str,
 ) -> anyhow::Result<CaptionState> {
-    anyhow::ensure!(snapshot.matches.len() <= 1, "caption observation ambiguous");
-    if snapshot_caption_cleared(snapshot, package, id) {
+    caption_state_from_matches(&snapshot.matches, snapshot.unknown_match_count, package, id, expected)
+}
+
+fn caption_state_from_matches(
+    matches: &[crate::ui_automation::SemanticNode],
+    unknown_match_count: usize,
+    package: &str,
+    id: &str,
+    expected: &str,
+) -> anyhow::Result<CaptionState> {
+    anyhow::ensure!(matches.len() <= 1, "caption observation ambiguous");
+    if caption_cleared_from_matches(matches, unknown_match_count, package, id) {
         return Ok(CaptionState::Cleared);
     }
-    let values = caption_values(snapshot, package, id)?;
+    let values = caption_values_from_matches(matches, unknown_match_count, package, id)?;
     Ok(match values.as_deref() {
         Some([value]) if super::caption_readback_matches(value, expected) => {
             CaptionState::Confirmed
@@ -400,6 +442,51 @@ fn snapshot_caption_state(
         Some([_]) => CaptionState::Mismatch,
         _ => CaptionState::Unknown,
     })
+}
+
+/// Local projection of ONE already popup-screened tree; no reads or synthetic evidence IDs.
+pub(super) fn final_caption_post_from_tree(
+    tree: &crate::ui_automation::tree::Tree,
+    package: &str,
+    caption_query: ElementQuery<'_>,
+    post_query: ElementQuery<'_>,
+    expected: &str,
+) -> anyhow::Result<(CaptionState, Option<ElementBox>)> {
+    use crate::ui_automation::resolver::resolve_observation;
+    anyhow::ensure!(tree.generation > 0, "final caption/Post snapshot has no generation");
+    let ElementQuery::ResourceIdSuffix(suffix) = caption_query else {
+        anyhow::bail!("final caption semantic locator unmeasured");
+    };
+    let id = format!("{package}{suffix}");
+    let request = |query| ObservationRequest {
+        query,
+        scope: Some(ObservationScope { package: Some(package.into()), root: None }),
+        fields: ObservationFieldMask::default(),
+        remaining_ms: 0, // Local resolution performs no transport.
+    };
+    let caption = resolve_observation(tree, &request(SemanticLocator {
+        id: Some(id.clone()), role: Some("textbox".into()), ..Default::default()
+    }))?;
+    let state = caption_state_from_matches(
+        &caption.matches, caption.unknown_match_count, package, &id, expected,
+    )?;
+    let query = match post_query {
+        ElementQuery::Text { value, exact: true } => SemanticLocator {
+            text: Some(value.into()), ..Default::default()
+        },
+        _ => anyhow::bail!("final Post semantic locator unmeasured"),
+    };
+    let post = resolve_observation(tree, &request(query))?;
+    // Lossless resolver keeps malformed bounds and unknown states in cardinality.
+    let button = match post.matches.as_slice() {
+        [node] if post.unknown_match_count == 0
+            && node.package.as_deref() == Some(package)
+            && node.visible == Some(true)
+            && node.enabled == Some(true)
+            && node.clickable == Some(true) => tree.nodes[node.node_id].rect(),
+        _ => None,
+    };
+    Ok((state, button))
 }
 
 /// One supported snapshot distinguishes a positive empty/hint from unknown text.

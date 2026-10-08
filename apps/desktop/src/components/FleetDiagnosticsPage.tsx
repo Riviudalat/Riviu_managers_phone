@@ -1,3 +1,4 @@
+import { machineNumberLabel } from "../deviceNaming";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { Download, RefreshCw, Search } from "lucide-react";
 
@@ -50,19 +51,19 @@ const STATUS_WEIGHT: Record<HealthStatus, number> = {
   notApplicable: 0,
 };
 
-function deviceLabel(device: DeviceInfo, meta: DeviceMeta | undefined, position: number): string {
-  const number = meta?.number ?? position + 1;
+function deviceLabel(device: DeviceInfo, meta: DeviceMeta | undefined, _position: number): string {
+  const number = meta?.number;
   const alias = meta?.alias?.trim() || device.name;
-  return `Máy ${number} · ${alias} · ${device.model}`;
+  return `${machineNumberLabel(number)} · ${alias} · ${device.model}`;
 }
 
 function primaryDeviceLabel(
   device: DeviceInfo,
   meta: DeviceMeta | undefined,
-  position: number,
+  _position: number,
 ): { name: string; model: string } {
   return {
-    name: `Máy ${meta?.number ?? position + 1} · ${meta?.alias?.trim() || device.name}`,
+    name: `${machineNumberLabel(meta?.number)} · ${meta?.alias?.trim() || device.name}`,
     model: device.model,
   };
 }
@@ -262,7 +263,7 @@ export function FleetDiagnosticsPage({
           {
             id: "device",
             label: "Thiết bị",
-            sortValue: (row) => metasByUdid.get(row.device.udid)?.number ?? rows.indexOf(row) + 1,
+            sortValue: (row) => metasByUdid.get(row.device.udid)?.number ?? Infinity,
             render: (row) => {
               const position = rows.indexOf(row);
               const label = primaryDeviceLabel(row.device, metasByUdid.get(row.device.udid), position);

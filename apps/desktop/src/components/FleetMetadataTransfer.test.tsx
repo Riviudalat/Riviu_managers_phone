@@ -1,0 +1,28 @@
+import { fireEvent, render, screen, waitFor } from "@testing-library/react";
+import { beforeEach, expect, it, vi } from "vitest";
+const api = vi.hoisted(() => ({exportDeviceMetadata: vi.fn(), importDeviceMetadata: vi.fn()}));
+vi.mock("../api", () => api);
+vi.mock("../wallpaperSync", () => ({pauseImportedWallpapers: vi.fn()}));
+import { pauseImportedWallpapers } from "../wallpaperSync";
+import { FleetMetadataTransfer } from "./FleetMetadataTransfer";
+const body = {namespace:"riviu.device-meta",version:1,highWater:21,devices:[{udid:"a",number:21,notes:"",tags:[]}],groups:[]};
+beforeEach(() => {localStorage.clear();vi.clearAllMocks();});
+it("keeps an uncertain import across reopen and reads it back without replay or wallpaper effects", async () => {
+  api.importDeviceMetadata.mockResolvedValueOnce({conflicts:[],applied:false}).mockRejectedValueOnce(new Error("lost ACK"));
+  api.exportDeviceMetadata.mockResolvedValue(body);
+  const onChanged=vi.fn();let view=render(<FleetMetadataTransfer onChanged={onChanged}/>);
+  const file=new File([JSON.stringify(body)],"fleet.json",{type:"application/json"});Object.defineProperty(file,"text",{value:async()=>JSON.stringify(body)});
+  fireEvent.change(screen.getByLabelText("Nhập tệp JSON"),{target:{files:[file]}});
+  await waitFor(()=>expect(screen.getByText("Xác nhận nhập danh sách")).toBeInTheDocument());
+  fireEvent.click(screen.getByText("Xác nhận nhập danh sách"));
+  await waitFor(()=>expect(screen.getByText("Đọc lại kết quả nhập")).toBeInTheDocument());
+  expect(pauseImportedWallpapers).toHaveBeenCalledWith(["a"]);
+  expect(localStorage.getItem("riviu.pendingMetadataImport.v1")).not.toBeNull();
+  view.unmount();view=render(<FleetMetadataTransfer onChanged={onChanged}/>);
+  fireEvent.click(screen.getByText("Đọc lại kết quả nhập"));
+  await waitFor(()=>expect(localStorage.getItem("riviu.pendingMetadataImport.v1")).toBeNull());
+  expect(api.importDeviceMetadata).toHaveBeenCalledTimes(2);
+  expect(api.exportDeviceMetadata).toHaveBeenCalledTimes(1);
+  expect(onChanged).toHaveBeenCalledTimes(1);
+  view.unmount();
+});

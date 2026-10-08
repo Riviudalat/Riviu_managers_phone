@@ -1227,6 +1227,11 @@ impl AppState {
         } else {
             initial_devices
         };
+        let number_udids = devices.iter().map(|device| device.udid.clone()).collect::<Vec<_>>();
+        if let Err(error) = db.storage_write(move |db| db.ensure_device_numbers(&number_udids)).await {
+            // Discovery remains available; UI keeps numbers pending and exposes allocation retry.
+            log::warn!("allocate initial device numbers: {error:#}");
+        }
         registry.upsert_many(devices);
 
         let command_admission = Arc::new(CommandAdmissionState::new(false));
@@ -1978,8 +1983,11 @@ impl AppState {
             let view_hub = self.view_hub.clone();
             let view_paint = self.view_paint.clone();
             let view_recovery = self.view_recovery.clone();
+            let events = self.events.clone();
             tauri::async_runtime::spawn(async move {
                 let mut interval = tokio::time::interval(Duration::from_secs(2));
+                // Failed FIRST starts only; restarts keep their own gate and backoff.
+                let mut start_backoff = crate::view_watchdog::ViewStartBackoff::default();
                 // Retune history stays task-local: it is a per-preset floor, not a recovery,
                 // and it does not consume the fleet ceiling because it is not triggered by a
                 // fault. Restart history moved into `ViewRecoveryGate`, which is where it has
@@ -1996,6 +2004,22 @@ impl AppState {
                     let Ok(_admitted) = command_admission.ensure_accepting_work() else {
                         return;
                     };
+                    // Read-only: what the inventory poll saw happen to the ADB server. Riviu
+                    // never restarts it; the operator is told who did and what to expect.
+                    for notice in android.drain_adb_server_notices() {
+                        log::warn!("{}", notice.message);
+                        events.emit(riviu_core::AppEvent::AdbServerNotice {
+                            port: notice.port,
+                            change: match notice.change {
+                                riviu_android_driver::AdbServerChange::Lost => "lost",
+                                riviu_android_driver::AdbServerChange::Returned => "returned",
+                            }
+                            .to_string(),
+                            transports: u32::try_from(notice.transports).unwrap_or(u32::MAX),
+                            message: notice.message,
+                        });
+                    }
+                    let server_outage = android.adb_server_outage();
                     // Say out loud whether the fine rule has anything to work with. When
                     // nobody is reporting paints the watchdog correctly falls back to the
                     // byte rule -- and that fallback is invisible, so a dead reporting path
@@ -2023,6 +2047,9 @@ impl AppState {
                         }
                         if device.platform != riviu_core::DevicePlatform::Android {
                             continue;
+                        }
+                        if device.status == riviu_core::DeviceStatus::Disconnected {
+                            start_backoff.forget(&device.udid);
                         }
                         if matches!(
                             device.status,
@@ -2219,6 +2246,7 @@ impl AppState {
                                     permit,
                                 )
                                 .await;
+                                None
                             }));
                             continue;
                         }
@@ -2229,18 +2257,29 @@ impl AppState {
                         // start of the fleet take 55 s instead of 15 s (AGENTS.md 9.72).
                         // `view_start_in_flight`, checked above, is what stops two of these
                         // racing for the same device.
+                        //
+                        // Not rationed, but spaced: a phone whose start just failed waits its
+                        // own backoff, and nothing starts while a server that carried phones is
+                        // being restarted by another tool (bounded hold, see the driver).
+                        if server_outage || !start_backoff.is_due(&device.udid, Instant::now()) {
+                            continue;
+                        }
                         let android = android.clone();
                         let registry = registry.clone();
                         let udid = device.udid.clone();
                         starts.push(tokio::spawn(async move {
-                            let _ = crate::view_watchdog::start_android_view(
+                            let started = crate::view_watchdog::start_android_view(
                                 &android, &registry, &udid,
                             )
-                            .await;
+                            .await
+                            .is_ok();
+                            Some((udid, started))
                         }));
                     }
                     for start in starts {
-                        let _ = start.await;
+                        if let Ok(Some((udid, started))) = start.await {
+                            start_backoff.record(&udid, started, Instant::now());
+                        }
                     }
                 }
             });
@@ -2259,6 +2298,7 @@ impl AppState {
         let helper_android = self.android.clone();
         let helper_admission = self.command_admission.clone();
         let helper_db = self.db.clone();
+        let numbering_db = self.db.clone();
         let automatic_device_workers_frozen = self.dev_acceptance.automatic_device_workers_frozen();
         tauri::async_runtime::spawn(async move {
             let mut interval = tokio::time::interval(Duration::from_millis(250));
@@ -2287,6 +2327,11 @@ impl AppState {
                 if last_scan.elapsed() >= Duration::from_secs(3) {
                     last_scan = Instant::now();
                     if let Ok(devices) = control.list_devices().await {
+                        let number_udids = devices.iter().map(|device| device.udid.clone()).collect::<Vec<_>>();
+                        if let Err(error) = numbering_db.storage_write(move |db| db.ensure_device_numbers(&number_udids)).await {
+                            // Keep discovery visible; UI retains null/stale numbers until commit.
+                            log::warn!("device number allocation failed: {error:#}");
+                        }
                         if let Some(setup) = &mut helper_setup {
                             setup.tick_latest();
                         }

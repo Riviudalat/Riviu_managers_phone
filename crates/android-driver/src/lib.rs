@@ -33,6 +33,7 @@
 pub mod adb;
 mod adb_server;
 pub mod agent;
+pub mod baseline;
 mod capability;
 pub mod driver;
 pub mod frames;
@@ -43,6 +44,7 @@ pub mod session;
 pub mod view;
 
 pub use adb::{AdbCandidate, AdbOrigin, AdbProgram};
+pub use adb_server::{AdbServerChange, AdbServerNotice};
 pub use agent::{AgentClient, Locator, Rect};
 pub use driver::{create_driver, detect_driver, AndroidDriver, AndroidDriverConfig};
 pub use frames::{MinicapBanner, MinicapOptions, MinicapStream, Projection};

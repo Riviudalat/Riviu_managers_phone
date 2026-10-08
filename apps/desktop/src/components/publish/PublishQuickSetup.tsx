@@ -1,3 +1,4 @@
+import { machineNumberLabel } from "../../deviceNaming";
 import { useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 import { ArrowLeft, ArrowRight, Check, FolderOpen, ListFilter, LoaderCircle, Music2, Pencil, Search, Undo2, Zap, X } from "lucide-react";
 import type { PublishWizardProps } from "./PublishWizard";
@@ -155,7 +156,7 @@ export function PublishQuickSetup(p: QuickProps) {
   const assignedByDevice = new Map(selected.filter(b => p.assignments[b.id]).map(b => [p.assignments[b.id], b]));
   const label = (udid: string) => {
     const found = deviceIndex.get(udid);
-    return found ? `Máy ${tileNumber(found.index + 1, p.metas.get(udid))} · ${tileName(found.device, p.metas.get(udid))}` : `Máy không còn trong danh sách · ${udid}`;
+    return found ? `${machineNumberLabel(tileNumber(found.index + 1, p.metas.get(udid)))} · ${tileName(found.device, p.metas.get(udid))}` : `Máy không còn trong danh sách · ${udid}`;
   };
   const assign = async (id: string, udid: string, contextual = false) => {
     const start = latest.current;

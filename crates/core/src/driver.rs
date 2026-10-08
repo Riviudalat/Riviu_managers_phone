@@ -6,11 +6,49 @@ use parking_lot::Mutex;
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
-/// A read exhausted the Android driver's own recovery. Effects never carry this type.
+/// A read exhausted the Android driver's own recovery, or a [`ReadSessionPin`] declined it.
+/// Effects never carry this type.
 #[derive(Debug, Error)]
 #[error("{message}")]
 pub struct AccessibilityReadUnavailable {
     pub message: String,
+}
+
+/// Keeps a UI session's identity while an epoch-bound owner reads.
+///
+/// While any pin is alive, the driver must not replace its session to finish a read: a tree it
+/// cannot read is reported as unavailable and [`UiSession::gui_session_epoch`] stays as it was.
+/// An owner that already ends on any epoch change gains nothing from a read-side replacement,
+/// and loses every proof it holds. Dropping the pin restores the driver's own read recovery.
+/// Effects are unaffected: they are never repeated after a session replacement either way.
+#[must_use = "the session is pinned only while this value is alive"]
+pub struct ReadSessionPin {
+    _held: Option<Box<dyn std::any::Any + Send + Sync>>,
+}
+
+impl ReadSessionPin {
+    /// For drivers whose reads never replace their session.
+    pub fn inert() -> Self {
+        Self { _held: None }
+    }
+
+    /// Released when this pin is dropped.
+    pub fn holding(guard: impl std::any::Any + Send + Sync) -> Self {
+        Self {
+            _held: Some(Box::new(guard)),
+        }
+    }
+}
+
+/// Exact identity of an already-dispatched owned stream stop. This is not a
+/// release proof and must never authorize a fresh stop or producer replacement.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Error)]
+#[error("owned stream stop pending for {udid}; original={old_generation}; fenced={fenced_generation}")]
+pub struct OwnedStreamStopPending {
+    pub stop_id: uuid::Uuid,
+    pub udid: String,
+    pub old_generation: u64,
+    pub fenced_generation: u64,
 }
 
 /// An Android screenshot returned bytes that cannot be used as a PNG.
@@ -360,6 +398,14 @@ pub trait DeviceDriver: Send + Sync {
     async fn stop_owned_stream(&self, _udid: &str) -> anyhow::Result<StreamStopProof> {
         unsupported("stopOwnedStream")
     }
+    /// Wait/read only for the exact retained stop. Never kill, advance frames,
+    /// remove a forward, or infer exit from an empty registry. Unsupported retains ownership.
+    async fn reconcile_owned_stream_stop(
+        &self,
+        _pending: &OwnedStreamStopPending,
+    ) -> anyhow::Result<StreamStopProof> {
+        unsupported("reconcileOwnedStreamStop")
+    }
     /// Stop a bounded background producer while retaining the last decoded
     /// frame for the desktop tile. The generation still advances so buffered
     /// bytes from the parked producer cannot be published after the stop.
@@ -494,6 +540,15 @@ pub trait DeviceDriver: Send + Sync {
     /// Observe transport conflicts without opening or replacing a UI session.
     async fn verify_automation_transport(&self, _udid: &str) -> anyhow::Result<()> {
         Ok(())
+    }
+
+    /// Read-only: `Some(reason)` when a lock screen no key can dismiss (a PIN, pattern or
+    /// password, or a credential that could not be read) stands in front of every app. The
+    /// reason carries `device_control::baseline::SCREEN_LOCKED_MARKER`. A swipe-only lock is
+    /// `None`, because session start dismisses it, and so is a backend without the probe:
+    /// unknown is never reported as locked.
+    async fn screen_lock_blocker(&self, _udid: &str) -> anyhow::Result<Option<String>> {
+        Ok(None)
     }
 
     /// Read-only readiness. Does not wake, unlock, open a session or repair an agent.
@@ -818,6 +873,10 @@ pub trait UiSession: Send + Sync {
     /// Changes whenever a UI session is replaced; responses from an older epoch are discarded.
     fn gui_session_epoch(&self) -> String {
         String::new()
+    }
+    /// Hold this session's epoch against read-side replacement; see [`ReadSessionPin`].
+    fn pin_read_session(&self) -> ReadSessionPin {
+        ReadSessionPin::inert()
     }
     fn gui_compatibility_pack(
         &self,

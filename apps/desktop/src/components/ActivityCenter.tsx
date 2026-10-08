@@ -42,11 +42,11 @@ function formatActivityTime(value: number): string {
 }
 
 /**
- * Operator-controlled history for cross-page outcomes. New entries only update the badge;
- * they never float over the current task or disappear before the operator can inspect them.
+ * Persistent history and a dismissible compact outcome; diagnostics stay in the history.
  */
 export function ActivityCenter() {
   const activities = useToasts();
+  const [dismissedId, setDismissedId] = useState(0);
   const [open, setOpen] = useState(false);
   const [filter, setFilter] = useState<ActivityFilter>("all");
   const [lastSeenId, setLastSeenId] = useState(0);
@@ -98,19 +98,20 @@ export function ActivityCenter() {
 
   return (
     <div className="activity-center" ref={rootRef}>
-      {latest && (
+      {latest && latest.id > dismissedId && (
         <div
           className={`activity-center-current is-${latest.kind}`}
-          role={latest.kind === "error" ? "alert" : "status"}
-          aria-live={latest.kind === "error" ? "assertive" : "polite"}
+          role="status"
+          aria-live="polite"
           aria-atomic="true"
-          title={latest.detail ? `${latest.title}: ${latest.detail}` : latest.title}
         >
           <ActivityIcon kind={latest.kind} />
           <span className="activity-center-current-copy">
             <strong>{latest.title}</strong>
-            {latest.detail && <small>{latest.detail}</small>}
+            {latest.summary && <small>{latest.summary}</small>}
           </span>
+          <button type="button" onClick={() => { setFilter("all"); setOpen(true); }}>Chi tiết</button>
+          <button type="button" className="icon-btn" aria-label="Đóng thông báo" onClick={() => setDismissedId(latest.id)}><X size={16} aria-hidden="true" /></button>
         </div>
       )}
       <button

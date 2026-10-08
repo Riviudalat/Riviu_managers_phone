@@ -1466,6 +1466,7 @@ mod tests {
             E::PublishPreflightProgress { .. } => "publishPreflightProgress",
             E::WdaExpiryWarning { .. } => "wdaExpiryWarning",
             E::NurtureStatus { .. } => "nurtureStatus",
+            E::AdbServerNotice { .. } => "adbServerNotice",
         }
     }
 
@@ -1475,7 +1476,7 @@ mod tests {
     /// the compiler already made someone write next to the variant, and
     /// `the_tag_names_are_the_ones_serde_writes` checks the naming convention against real
     /// serialised output rather than against this list.
-    const EVERY_EVENT_TAG: [&str; 11] = [
+    const EVERY_EVENT_TAG: [&str; 12] = [
         "devicesUpdated",
         "deviceUpdated",
         "jobUpdated",
@@ -1487,6 +1488,7 @@ mod tests {
         "publishPreflightProgress",
         "wdaExpiryWarning",
         "nurtureStatus",
+        "adbServerNotice",
     ];
 
     #[test]
@@ -1513,6 +1515,12 @@ mod tests {
             riviu_core::AppEvent::WdaExpiryWarning {
                 udid: String::new(),
                 days_remaining: 0,
+            },
+            riviu_core::AppEvent::AdbServerNotice {
+                port: 5037,
+                change: "lost".into(),
+                transports: 30,
+                message: String::new(),
             },
         ];
         for event in &samples {

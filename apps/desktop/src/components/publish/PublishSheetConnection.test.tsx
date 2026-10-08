@@ -9,5 +9,5 @@ it("renders the Google-only compact row and restores only the saved URL", async 
   const ready = vi.fn(); render(<PublishSheetConnection onReadyChange={ready} />);
   await waitFor(() => expect(screen.getByRole("textbox", { name: "Link Google Sheet" })).toHaveValue("https://docs.google.com/spreadsheets/d/old/edit#gid=0"));
   expect(screen.getAllByRole("button").map(b => b.textContent)).toEqual(["Đăng nhập Google", "Kiểm tra kết nối"]);
-  expect(screen.queryByText(/Apps Script|nâng cao|Cấu hình/)).toBeNull(); expect(publishSheetCheck).not.toHaveBeenCalled(); expect(ready).toHaveBeenLastCalledWith(false);
+  expect(screen.queryByText(/Apps Script|nâng cao|Cấu hình/)).toBeNull(); expect(publishSheetCheck).not.toHaveBeenCalled(); await waitFor(() => expect(ready).toHaveBeenLastCalledWith(false, expect.any(String)));
 });

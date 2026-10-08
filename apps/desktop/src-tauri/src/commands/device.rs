@@ -106,6 +106,15 @@ pub async fn refresh_devices(state: State<'_, AppState>) -> Result<Vec<DeviceInf
         .list_devices()
         .await
         .map_err(CommandError::from)?;
+    let udids = devices
+        .iter()
+        .map(|device| device.udid.clone())
+        .collect::<Vec<_>>();
+    state
+        .db
+        .storage_write(move |db| db.ensure_device_numbers(&udids))
+        .await
+        .map_err(err)?;
     state.registry.upsert_many(devices.clone());
     Ok(devices)
 }
@@ -1491,6 +1500,38 @@ pub async fn device_health(
 
 fn report_agent_features(agent: &riviu_core::AgentStatus) -> Vec<String> {
     agent.features.clone()
+}
+
+/// The persisted "Cài đặt máy" baseline: which settings it holds and whether a phone is
+/// brought to it when it connects. A stored value that cannot be read is an error, not the
+/// defaults -- the operator chose something and should be told it was lost.
+#[tauri::command]
+pub fn device_baseline_get_config(
+    state: State<'_, AppState>,
+) -> Result<riviu_core::device_control::baseline::DeviceBaselineConfig, CommandError> {
+    let _admission = state.ensure_accepting_work()?;
+    state
+        .db
+        .get_device_baseline_config()
+        .map_err(CommandError::operation)
+}
+
+/// Save the baseline and return what was stored (sorted, de-duplicated), so the page shows
+/// the persisted readback rather than its own draft.
+#[tauri::command]
+pub fn device_baseline_save_config(
+    state: State<'_, AppState>,
+    config: riviu_core::device_control::baseline::DeviceBaselineConfig,
+) -> Result<riviu_core::device_control::baseline::DeviceBaselineConfig, CommandError> {
+    let _admission = state.ensure_accepting_work()?;
+    state
+        .db
+        .save_device_baseline_config(&config)
+        .map_err(CommandError::operation)?;
+    state
+        .db
+        .get_device_baseline_config()
+        .map_err(CommandError::operation)
 }
 
 #[cfg(test)]

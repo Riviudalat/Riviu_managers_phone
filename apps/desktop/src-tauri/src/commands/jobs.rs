@@ -377,6 +377,7 @@ fn bounded_trace_value(value: &serde_json::Value, depth: usize) -> Option<serde_
                         | "observedOrdinals"
                         | "nextCount"
                         | "albumMatches"
+                        | "foregroundPackage"
                         | "scrollCount"
                         | "viewport"
                         | "snapshotGeneration"
@@ -1046,7 +1047,7 @@ mod nurture_history_tests {
         let snapshot = json!({"generation": 7, "sha256": "snapshot", "sessionEpoch": "epoch",
             "albumMatches": true, "observedOrdinals": [1, 2], "nextCount": 2,
             "selectorBounds": [{"x": 1, "y": 2, "width": 3, "height": 4}],
-            "nextBounds": [], "album": "SECRET"});
+            "nextBounds": [], "foregroundPackage": "com.instagram.barcelona", "album": "SECRET"});
         let event = json!({"phase": "picker", "operation": "read", "sessionEpoch": "epoch",
             "startedMs": 10, "elapsedMs": 20, "remainingBudgetMs": 30, "remainingAfterMs": 10,
             "outcome": "completed", "selector": "text", "bounds": [1,2,3,4],

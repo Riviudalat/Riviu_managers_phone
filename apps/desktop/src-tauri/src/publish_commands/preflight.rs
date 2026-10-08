@@ -39,6 +39,36 @@ where
         .collect()
 }
 
+/// The read-only readiness guard, then the read-only lock-screen probe.
+///
+/// A phone behind a lock no key can open (proven PIN/password/pattern) is reported here as
+/// `device_screen_locked` instead of failing the foreground proof after the run starts
+/// (2026-10-08: focus=StatusBar, mDreamingLockscreen=true). An unreadable probe is not a lock:
+/// the session-start foreground proof stays the backstop and names the lock itself.
+async fn readiness_with_lock(control: &DeviceControlPlane, udid: &str) -> Option<String> {
+    if let Err(error) = control.verify_automation_readiness(udid).await {
+        return Some(error.to_string());
+    }
+    match control.screen_lock_blocker(udid).await {
+        Ok(Some(reason)) => Some(format!("{udid}: {reason}")),
+        Ok(None) => None,
+        Err(error) => {
+            log::debug!("publish preflight {udid}: lock-screen probe unreadable: {error}");
+            None
+        }
+    }
+}
+
+/// The typed preflight code for a readiness failure: a lock screen is its own retryable
+/// pre-Post reason, everything else stays `device_not_ready`.
+pub(super) fn readiness_issue_code(message: &str) -> &'static str {
+    if riviu_core::device_control::baseline::mentions_screen_locked(message) {
+        riviu_core::device_control::baseline::SCREEN_LOCKED_CODE
+    } else {
+        "device_not_ready"
+    }
+}
+
 async fn observe_preflight_device(
     control: &DeviceControlPlane,
     registry: &riviu_core::DeviceRegistry,
@@ -90,11 +120,7 @@ async fn observe_preflight_device(
             // A claim/cleanup journal can change without a roster event. Recheck the
             // cheap read-only readiness guard even while metadata remains cached.
             let mut observation = entry.observation.clone();
-            observation.readiness_error = control
-                .verify_automation_readiness(udid)
-                .await
-                .err()
-                .map(|error| error.to_string());
+            observation.readiness_error = readiness_with_lock(control, udid).await;
             preparation::progress(
                 udid,
                 "checkingDevices",
@@ -134,11 +160,7 @@ async fn observe_preflight_device(
         2,
         storage.as_ref().and_then(|s| s.as_ref().err()).cloned(),
     );
-    let readiness_error = control
-        .verify_automation_readiness(udid)
-        .await
-        .err()
-        .map(|e| e.to_string());
+    let readiness_error = readiness_with_lock(control, udid).await;
     preparation::progress(
         udid,
         "checkingDevices",
@@ -893,7 +915,7 @@ fn evaluate_device_observation(
     let (package_name, version, locale, composer_ok, sound_picker_ok) = if android {
         if let Some(error) = observed.readiness_error {
             row_issues.push(preflight_issue(
-                "device_not_ready",
+                readiness_issue_code(&error),
                 udid,
                 &bundle.id,
                 &error,
@@ -1182,6 +1204,23 @@ mod sheet_choice_tests {
         control.shutdown_cleanup().await.unwrap();
         drop(db);
         std::fs::remove_file(path).unwrap();
+    }
+}
+
+#[cfg(test)]
+mod screen_lock_preflight_tests {
+    use super::readiness_issue_code;
+
+    #[test]
+    fn a_locked_phone_is_its_own_typed_preflight_reason() {
+        assert_eq!(
+            readiness_issue_code(
+                "ce0717171c2a64d50d: máy đang khóa màn hình và máy có mã PIN/mật khẩu/hình vẽ; \
+                 mở khóa máy bằng tay rồi kiểm tra lại"
+            ),
+            "device_screen_locked"
+        );
+        assert_eq!(readiness_issue_code("helper recovery required"), "device_not_ready");
     }
 }
 

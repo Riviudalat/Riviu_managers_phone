@@ -1,3 +1,4 @@
+import { machineNumberLabel } from "../deviceNaming";
 import {
   Grid2X2,
   Monitor,
@@ -160,12 +161,12 @@ export function ControlCenterRail(p: Props) {
           <button
             key={m.id}
             type="button"
-            aria-label={`Chọn nhanh Máy ${m.number} · ${m.name}`}
-            title={`Máy ${m.number} · ${m.name}`}
+            aria-label={`Chọn nhanh ${machineNumberLabel(m.number)} · ${m.name}`}
+            title={`${machineNumberLabel(m.number)} · ${m.name}`}
             aria-pressed={m.selected}
             onClick={() => p.onSelect(m.id)}
           >
-            {m.number}
+            {m.number > 0 ? m.number : machineNumberLabel(m.number)}
           </button>
         ))}
           </div></div></div>

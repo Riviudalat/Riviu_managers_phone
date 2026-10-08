@@ -606,6 +606,13 @@ impl StreamBudgetManager {
         Ok(())
     }
 
+    /// Drop a producer record whose stop was never proved, once the control plane has
+    /// spent its finite cleanup budget on it. The driver still refuses to start a second
+    /// producer over an unconfirmed child, so this frees the slot, not the phone's child.
+    pub fn forget_unconfirmed(&self, token: Uuid) -> bool {
+        self.inner.lock().remove(token).is_some()
+    }
+
     pub fn reservation_udid(&self, token: Uuid) -> Option<String> {
         self.inner
             .lock()

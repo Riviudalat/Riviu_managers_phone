@@ -493,6 +493,7 @@ struct Session {
     rendered_caption: Option<String>,
     video_surface: bool,
     photo_counter: bool,
+    global_photo_viewer: bool,
     tile_opens_later: bool,
     pending_post_reads: AtomicU64,
     expand_to: Option<String>,
@@ -528,6 +529,7 @@ impl Default for Session {
             rendered_caption: None,
             video_surface: false,
             photo_counter: false,
+            global_photo_viewer: false,
             tile_opens_later: false,
             pending_post_reads: AtomicU64::new(0),
             expand_to: None,
@@ -679,6 +681,24 @@ impl Session {
                 <node package="{PACKAGE}" class="android.widget.TextView" text="1" bounds="[900,100][950,160]"/>
                 <node package="{PACKAGE}" class="android.widget.TextView" text=" / " bounds="[950,100][1000,160]"/>
                 <node package="{PACKAGE}" class="android.widget.TextView" text="8" bounds="[1000,100][1050,160]"/>
+            </node>"#
+            )
+        } else if page == "post" && self.global_photo_viewer {
+            // Global45.7.3/en own-post carousel, assignment ordinal 27 trace gen 78,
+            // 08/10/2026: ids, classes and geometry of the Photo label and q9x dot rail.
+            let dots = (0..7)
+                .map(|i| {
+                    let x = 436 + 32 * i;
+                    format!(
+                        r#"<node package="{PACKAGE}" class="android.widget.ImageView" bounds="[{x},1433][{},1449]" displayed="true"/>"#,
+                        x + 16
+                    )
+                })
+                .collect::<String>();
+            format!(
+                r#"<node package="{PACKAGE}" resource-id="{PACKAGE}:id/widget_container" bounds="[0,0][1080,1965]" displayed="true">
+                <node package="{PACKAGE}" class="android.widget.LinearLayout" resource-id="{PACKAGE}:id/q9x" bounds="[436,1433][644,1449]" displayed="true">{dots}</node>
+                <node package="{PACKAGE}" class="android.widget.TextView" resource-id="{PACKAGE}:id/zm7" text="Photo" bounds="[375,1484][475,1541]" displayed="true"/>
             </node>"#
             )
         } else {
@@ -953,6 +973,125 @@ async fn delayed_video_with_wrong_caption_never_opens_copy_or_caption_drawer() {
         .lock()
         .iter()
         .any(|action| action == "expandCaption" || action == "tap:share"));
+}
+
+/// Reads the photo path once from an opened Global 45.7.3 own-post tile and returns the
+/// restart evidence it recorded. The read itself must never tap or touch the clipboard.
+async fn global_photo_tile_evidence(
+    session: &Session,
+    identity: &SubmissionIdentity,
+) -> serde_json::Value {
+    let plan = PublishVerificationPlan::for_build(PACKAGE, "en", "45.7.3").unwrap();
+    *session.page.lock() = "post";
+    let mut capture = Capture {
+        session,
+        plan: &plan,
+        caption: CAPTION,
+        identity,
+        other_publication_urls: &[],
+        started: Instant::now(),
+        caption_expanded: false,
+        public_link: None,
+        trace_nonce: [0; 16],
+        diagnostic: VerificationDiagnostic {
+            captured_metadata_candidate: None,
+            publication_evidence: None,
+            expanded_photo_error: None,
+            candidate_trace: Vec::new(),
+            contract_version: 1,
+            package: PACKAGE.into(),
+            locale: "en".into(),
+            version: "45.7.3".into(),
+            stage: "postProof",
+            reason_code: VerificationReason::PostNotVisible,
+            snapshot_generation: 0,
+            caption_candidates: 0,
+            time_candidates: 0,
+            time_label: None,
+            navigation_actions: 0,
+            candidates_visited: 1,
+            viewports_visited: 1,
+            copy_attempts: 0,
+            elapsed_ms: 0,
+            navigation_matches: 0,
+            navigation_enabled: 0,
+            navigation_clickable: 0,
+            screen_state: String::new(),
+            unknown_screen_shape: None,
+        },
+    };
+    let _ = capture.visible_video().await;
+    assert!(
+        session.actions.lock().is_empty() && session.writes.lock().is_empty(),
+        "reading the tile never taps or writes the clipboard: {:?}",
+        session.actions.lock()
+    );
+    serde_json::to_value(&capture.diagnostic).unwrap()["publicationEvidence"].clone()
+}
+
+/// Photo carousels copy through the expanded viewer before `post_proof`, so the
+/// restart frontier (publicationStage 2) needs the same one-snapshot proof here.
+/// Measured Global45.7.3/en ordinal 27 gen 78 (08/10/2026) carries the complete desc
+/// and zwj together; the measured expanded rey viewer and Trill38.3.2 tiles never do.
+#[tokio::test(start_paused = true)]
+async fn global_45_7_3_photo_tile_records_caption_and_time_restart_evidence_before_copy() {
+    let photo_tile = || Session {
+        global_45_7_3: true,
+        video_surface: true,
+        global_photo_viewer: true,
+        ..Default::default()
+    };
+    assert_eq!(
+        global_photo_tile_evidence(&photo_tile(), &identity()).await,
+        serde_json::json!({"captionMatched": true, "submissionTimeMatched": true}),
+        "complete caption and submission time on one photo tile snapshot"
+    );
+    let recent = SubmissionIdentity {
+        submitted_at: (chrono::Utc::now() - chrono::Duration::minutes(1)).to_rfc3339(),
+        ..identity()
+    };
+    let folded = format!("{}…", CAPTION.chars().take(40).collect::<String>());
+    for (case, session, identity) in [
+        ("time older than this submission", photo_tile(), recent),
+        (
+            "folded caption",
+            Session {
+                rendered_caption: Some(folded),
+                ..photo_tile()
+            },
+            identity(),
+        ),
+        (
+            "changed caption suffix",
+            Session {
+                rendered_caption: Some(format!("{CAPTION} changed")),
+                ..photo_tile()
+            },
+            identity(),
+        ),
+        (
+            "unmeasured time",
+            Session {
+                malformed_time: true,
+                ..photo_tile()
+            },
+            identity(),
+        ),
+        (
+            "two captions",
+            Session {
+                duplicate_caption: true,
+                ..photo_tile()
+            },
+            identity(),
+        ),
+    ] {
+        assert_eq!(
+            global_photo_tile_evidence(&session, &identity).await,
+            serde_json::Value::Null,
+            "{case}: a partial or ambiguous read records nothing"
+        );
+    }
 }
 
 #[tokio::test(start_paused = true)]

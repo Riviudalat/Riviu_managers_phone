@@ -17,6 +17,11 @@
 //!    returns what the healthy backends know plus a per-backend reason for the
 //!    one that did not answer, because a phone missing from the grid looks
 //!    unplugged rather than undiagnosed.
+//! 3. **Teardown follows the backend that owns the producer, not the last listing.**
+//!    Stopping an owned stream or forgetting a session is host-side cleanup of
+//!    something one backend started. A USB blip that drops a phone from one listing
+//!    must not turn that cleanup into "device is not connected", or the plane keeps
+//!    the lease it was trying to release.
 
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
@@ -57,6 +62,10 @@ pub struct MultiplexDriver {
     backends: Vec<Backend>,
     /// udid -> index into `backends`. Rebuilt from every successful listing.
     routes: RwLock<HashMap<String, usize>>,
+    /// Every route a listing ever produced, for owned-resource teardown only. Still
+    /// built from listings (rule 1); an unplugged phone keeps the backend that started
+    /// its producer, while new work keeps going through `routes`.
+    owned_routes: RwLock<HashMap<String, usize>>,
     health: RwLock<Vec<BackendHealth>>,
 }
 
@@ -75,6 +84,7 @@ impl MultiplexDriver {
                 .map(|(name, driver)| Backend { name, driver })
                 .collect(),
             routes: RwLock::new(HashMap::new()),
+            owned_routes: RwLock::new(HashMap::new()),
             health: RwLock::new(health),
         }
     }
@@ -106,6 +116,19 @@ impl MultiplexDriver {
     fn try_route(&self, udid: &str) -> Option<&Arc<dyn DeviceDriver>> {
         let index = *self.routes.read().get(udid)?;
         self.backends.get(index).map(|backend| &backend.driver)
+    }
+
+    /// Route for tearing down what a backend already owns (rule 3). Never used to
+    /// start work on a phone the current listing does not show.
+    fn owned_route(&self, udid: &str) -> anyhow::Result<&Arc<dyn DeviceDriver>> {
+        let index = self.routes.read().get(udid).copied();
+        let index = index
+            .or_else(|| self.owned_routes.read().get(udid).copied())
+            .ok_or_else(|| anyhow::anyhow!("device is not connected: {udid}"))?;
+        self.backends
+            .get(index)
+            .map(|backend| &backend.driver)
+            .ok_or_else(|| anyhow::anyhow!("device is not connected: {udid}"))
     }
 }
 
@@ -170,6 +193,9 @@ impl DeviceDriver for MultiplexDriver {
             *self.health.write() = health;
             anyhow::bail!("no device backend answered: {reasons}");
         }
+        self.owned_routes
+            .write()
+            .extend(routes.iter().map(|(udid, index)| (udid.clone(), *index)));
         *self.routes.write() = routes;
         *self.health.write() = health;
         Ok(devices)
@@ -245,11 +271,20 @@ impl DeviceDriver for MultiplexDriver {
     }
 
     async fn stop_owned_stream(&self, udid: &str) -> anyhow::Result<StreamStopProof> {
-        self.route(udid)?.stop_owned_stream(udid).await
+        self.owned_route(udid)?.stop_owned_stream(udid).await
+    }
+
+    async fn reconcile_owned_stream_stop(
+        &self,
+        pending: &crate::driver::OwnedStreamStopPending,
+    ) -> anyhow::Result<StreamStopProof> {
+        self.owned_route(&pending.udid)?
+            .reconcile_owned_stream_stop(pending)
+            .await
     }
 
     async fn park_owned_stream(&self, udid: &str) -> anyhow::Result<StreamStopProof> {
-        self.route(udid)?.park_owned_stream(udid).await
+        self.owned_route(udid)?.park_owned_stream(udid).await
     }
 
     async fn start_stream_after_session(&self, udid: &str) -> anyhow::Result<StreamStartProof> {
@@ -579,7 +614,7 @@ impl DeviceDriver for MultiplexDriver {
     }
 
     fn invalidate_ui_session(&self, udid: &str) {
-        if let Some(driver) = self.try_route(udid) {
+        if let Ok(driver) = self.owned_route(udid) {
             driver.invalidate_ui_session(udid);
         }
     }
@@ -609,6 +644,8 @@ mod tests {
         text_comments: bool,
         fail_listing: bool,
         checked_installs: Arc<parking_lot::Mutex<Vec<String>>>,
+        unplugged: std::sync::atomic::AtomicBool,
+        owned_stops: std::sync::atomic::AtomicUsize,
     }
 
     impl StubDriver {
@@ -618,6 +655,8 @@ mod tests {
                 text_comments,
                 fail_listing: false,
                 checked_installs: Arc::new(parking_lot::Mutex::new(Vec::new())),
+                unplugged: Default::default(),
+                owned_stops: Default::default(),
             })
         }
 
@@ -627,6 +666,8 @@ mod tests {
                 text_comments: false,
                 fail_listing: true,
                 checked_installs: Arc::new(parking_lot::Mutex::new(Vec::new())),
+                unplugged: Default::default(),
+                owned_stops: Default::default(),
             })
         }
     }
@@ -655,7 +696,19 @@ mod tests {
             if self.fail_listing {
                 anyhow::bail!("backend is down");
             }
+            if self.unplugged.load(std::sync::atomic::Ordering::SeqCst) {
+                return Ok(Vec::new());
+            }
             Ok(self.udids.iter().map(|udid| device(udid)).collect())
+        }
+        async fn stop_owned_stream(&self, _udid: &str) -> anyhow::Result<StreamStopProof> {
+            self.owned_stops
+                .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            Ok(StreamStopProof {
+                old_generation: 0,
+                new_generation: 1,
+                child_stopped: true,
+            })
         }
 
         // Only the backend that says it can enumerate does. The other inherits the
@@ -864,6 +917,8 @@ mod tests {
             text_comments: true,
             fail_listing: false,
             checked_installs: Arc::clone(&log),
+            unplugged: Default::default(),
+            owned_stops: Default::default(),
         });
         let driver = MultiplexDriver::new(vec![("android".to_string(), android)]);
         driver.list_devices().await.expect("list");
@@ -921,6 +976,44 @@ mod tests {
         assert!(driver.refresh_device("droid-a").await.is_err());
         driver.list_devices().await.expect("list");
         assert_eq!(driver.backend_name("droid-a").as_deref(), Some("android"));
+    }
+
+    /// Measured on the 2026-10-08 controller: a ~1 s USB hub drop removed phones #22/#30
+    /// from one listing while their publish attempt still owned a minicap producer. The
+    /// close then failed with "device is not connected" before reaching the Android
+    /// backend, and the Script lease was retained for good.
+    #[tokio::test]
+    async fn owned_stream_teardown_reaches_its_backend_after_the_phone_drops_off_the_listing() {
+        let android = Arc::new(StubDriver {
+            udids: vec!["droid-a".to_string()],
+            text_comments: true,
+            fail_listing: false,
+            checked_installs: Arc::new(parking_lot::Mutex::new(Vec::new())),
+            unplugged: Default::default(),
+            owned_stops: Default::default(),
+        });
+        let backend: Arc<dyn DeviceDriver> = android.clone();
+        let driver = MultiplexDriver::new(vec![("android".to_string(), backend)]);
+        driver.list_devices().await.expect("list");
+        android
+            .unplugged
+            .store(true, std::sync::atomic::Ordering::SeqCst);
+        assert!(driver.list_devices().await.expect("list").is_empty());
+
+        // New work still sees an unplugged phone ...
+        assert!(driver.refresh_device("droid-a").await.is_err());
+        assert!(driver.ensure_stream("droid-a").await.is_err());
+        // ... but stopping the producer that backend already owns is host-side teardown.
+        driver
+            .stop_owned_stream("droid-a")
+            .await
+            .expect("owned producer teardown must reach the backend that started it");
+        assert_eq!(
+            android.owned_stops.load(std::sync::atomic::Ordering::SeqCst),
+            1
+        );
+        // A udid no listing ever named still has no route at all.
+        assert!(driver.stop_owned_stream("never-listed").await.is_err());
     }
 
     #[tokio::test]

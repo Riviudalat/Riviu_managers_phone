@@ -23,6 +23,8 @@ use uuid::Uuid;
 
 use crate::state::AppState;
 
+pub mod app_removal;
+
 /// Resolve a flat library file and prove that it is a regular file directly
 /// inside the expected managed root. Database paths are data, not authority to
 /// read or delete elsewhere on the machine.
@@ -1243,6 +1245,45 @@ pub fn get_device_meta(
 #[tauri::command]
 pub fn list_device_metas(state: State<'_, AppState>) -> Result<Vec<DeviceMeta>, CommandError> {
     state.db.list_device_metas().map_err(err)
+}
+
+/// Persist serial numbering before UI consumers render numeric labels.
+#[tauri::command]
+pub async fn ensure_device_numbers(
+    state: State<'_, AppState>,
+    udids: Vec<String>,
+) -> Result<Vec<DeviceMeta>, CommandError> {
+    let _admission = state.ensure_accepting_work()?;
+    state
+        .db
+        .storage_write(move |db| db.ensure_device_numbers(&udids))
+        .await
+        .map_err(err)
+}
+
+#[tauri::command]
+pub async fn export_device_metadata(
+    state: State<'_, AppState>,
+) -> Result<riviu_core::db::DeviceMetadataTransfer, CommandError> {
+    state
+        .db
+        .storage_read(|db| db.export_device_metadata())
+        .await
+        .map_err(err)
+}
+
+#[tauri::command]
+pub async fn import_device_metadata(
+    state: State<'_, AppState>,
+    input: riviu_core::db::DeviceMetadataTransfer,
+    apply: bool,
+) -> Result<riviu_core::db::DeviceMetadataImportPreview, CommandError> {
+    let _admission = state.ensure_accepting_work()?;
+    state
+        .db
+        .storage_write(move |db| db.import_device_metadata(&input, apply))
+        .await
+        .map_err(err)
 }
 
 #[tauri::command]
@@ -2677,6 +2718,7 @@ pub fn api_docs() -> String {
 - list_groups / save_group / delete_group
 - list_materials / add_material / delete_material / push_material / push_material_batch
 - list_apps_library / add_app_library / delete_app_library / install_library_app / uninstall_app
+- uninstall_library_app / uninstall_library_app_to_group / uninstall_library_app_batch (mode uninstall|reinstall)
 - list_schedules / save_schedule / delete_schedule
 - publish_scan_folder / publish_create_campaign / publish_list / publish_get / publish_readiness
 - publish_sheet_get_config / publish_sheet_save_config

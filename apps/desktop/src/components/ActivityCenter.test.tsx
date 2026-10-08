@@ -7,15 +7,24 @@ import { ActivityCenter } from "./ActivityCenter";
 afterEach(() => resetToasts());
 
 describe("ActivityCenter", () => {
-  it("shows the latest outcome without covering the workspace", () => {
+  it("announces one compact outcome with dismiss and persistent details", () => {
     render(<ActivityCenter />);
 
     act(() => {
       pushToast("error", "Không khởi động được", "Máy 3 đang bận");
     });
 
-    expect(screen.getByRole("alert")).toHaveTextContent("Không khởi động được");
-    expect(screen.getByRole("button", { name: "Hoạt động, 1 mục chưa xem" })).toBeTruthy();
+    expect(screen.getByRole("status")).toHaveTextContent("Không khởi động được");
+    expect(screen.getByRole("status")).not.toHaveTextContent("Máy 3 đang bận");
+    fireEvent.click(screen.getByRole("button", { name: "Chi tiết" }));
+    expect(within(screen.getByRole("dialog")).getByText("Máy 3 đang bận")).toBeTruthy();
+    fireEvent.click(screen.getByRole("button", { name: "Đóng trung tâm hoạt động" }));
+    fireEvent.click(screen.getByRole("button", { name: "Đóng thông báo" }));
+    expect(screen.queryByRole("status")).toBeNull();
+    expect(screen.getByRole("button", { name: "Hoạt động" })).toBeTruthy();
+    fireEvent.click(screen.getByRole("button", { name: "Hoạt động" }));
+    expect(within(screen.getByRole("dialog")).getByText("Máy 3 đang bận")).toBeTruthy();
+    fireEvent.keyDown(document, { key: "Escape" });
     expect(document.querySelector(".activity-center-panel")).toBeNull();
   });
 

@@ -327,9 +327,76 @@ struct UploadDriver {
     fail_stop: bool,
     wrong_proof: bool,
     actions: parking_lot::Mutex<Vec<String>>,
+    screen: Option<&'static str>,
+    launched: Arc<std::sync::atomic::AtomicBool>,
 }
 
 struct UploadSession;
+
+/// Global 45.7.3/en screen served until TikTok is launched. Reads after that
+/// decision fail, so a capture test ends before navigation or Copy.
+struct ScreenSession {
+    xml: &'static str,
+    reads: std::sync::atomic::AtomicU64,
+    launched: Arc<std::sync::atomic::AtomicBool>,
+}
+
+impl ScreenSession {
+    fn before_launch(&self) -> anyhow::Result<()> {
+        anyhow::ensure!(
+            !self.launched.load(std::sync::atomic::Ordering::SeqCst),
+            "fixture ends after the restart decision"
+        );
+        Ok(())
+    }
+}
+
+#[async_trait::async_trait]
+impl riviu_core::UiSession for ScreenSession {
+    async fn tap(&self, _: riviu_core::TapPoint) -> anyhow::Result<()> {
+        anyhow::bail!("unexpected tap")
+    }
+    async fn swipe(&self, _: riviu_core::SwipeGesture) -> anyhow::Result<()> {
+        anyhow::bail!("unexpected swipe")
+    }
+    async fn type_text(&self, _: &str) -> anyhow::Result<()> {
+        anyhow::bail!("unexpected type")
+    }
+    async fn home(&self) -> anyhow::Result<()> {
+        anyhow::bail!("unexpected Home")
+    }
+    async fn find_and_tap(&self, _: &str) -> anyhow::Result<()> {
+        anyhow::bail!("unexpected tap")
+    }
+    async fn assert_visible(&self, _: &str) -> anyhow::Result<()> {
+        anyhow::bail!("unexpected read")
+    }
+    async fn ui_language(&self) -> Option<String> {
+        Some("en".into())
+    }
+    async fn app_version(&self, _: &str) -> Option<String> {
+        Some("45.7.3".into())
+    }
+    fn gui_session_epoch(&self) -> String {
+        "fixture".into()
+    }
+    async fn active_app_bundle(&self) -> anyhow::Result<String> {
+        self.before_launch()?;
+        Ok("com.zhiliaoapp.musically".into())
+    }
+    async fn hierarchy_source_snapshot(
+        &self,
+    ) -> anyhow::Result<riviu_core::HierarchySourceSnapshot> {
+        self.before_launch()?;
+        Ok(riviu_core::HierarchySourceSnapshot {
+            generation: self.reads.fetch_add(1, std::sync::atomic::Ordering::SeqCst) + 1,
+            xml: self.xml.into(),
+        })
+    }
+    fn stream_url(&self) -> Option<String> {
+        None
+    }
+}
 
 #[async_trait::async_trait]
 impl riviu_core::UiSession for UploadSession {
@@ -379,6 +446,8 @@ impl riviu_core::DeviceDriver for UploadDriver {
     async fn launch_app(&self, _: &str, _: &str) -> anyhow::Result<()> {
         if self.restart_test {
             self.actions.lock().push("launch".into());
+            self.launched
+                .store(true, std::sync::atomic::Ordering::SeqCst);
             return Ok(());
         }
         anyhow::bail!("unexpected launch")
@@ -420,7 +489,17 @@ impl riviu_core::DeviceDriver for UploadDriver {
         anyhow::bail!("unexpected reboot")
     }
     async fn start_ui_session(&self, _: &str) -> anyhow::Result<Box<dyn riviu_core::UiSession>> {
-        Ok(Box::new(UploadSession))
+        Ok(match self.screen {
+            Some(xml) => Box::new(ScreenSession {
+                xml,
+                reads: std::sync::atomic::AtomicU64::new(0),
+                launched: self.launched.clone(),
+            }),
+            None => Box::new(UploadSession),
+        })
+    }
+    async fn resolve_tiktok_package(&self, _: &str) -> anyhow::Result<String> {
+        Ok("com.zhiliaoapp.musically".into())
     }
     async fn start_interaction_session(
         &self,
@@ -575,6 +654,38 @@ fn verification_restart_requires_submitted_android_receipt_without_verified_link
         "Legacy intent missing package stays observational without restarting"
     );
     row.effect_intent = Some(r#"{"package":"com.zhiliaoapp.musically"}"#.into());
+    // #21 receipt shape (campaign 1fc0b331, 2026-10-08): Post left TikTok uploading.
+    row.evidence_json = Some(
+        serde_json::json!({"post":{"state":"submitted","publicationVerified":false},
+            "cleanup":{"appCleanup":{"state":"leftRunning",
+                "reason":"upload_or_processing_may_still_be_active"}}})
+        .to_string(),
+    );
+    assert!(
+        !super::super::verification_restart::requested(&row, "com.zhiliaoapp.musically"),
+        "a submitted receipt alone never proves the upload ended"
+    );
+    use sha2::Digest;
+    let intent_sha256 = format!(
+        "{:x}",
+        sha2::Sha256::digest(row.effect_intent.as_deref().unwrap().as_bytes())
+    );
+    let observed = |stage: u64, intent_sha256: &str| {
+        Some(serde_json::json!({"post":{"state":"submitted","publicationVerified":false},
+            "verificationBudget":{"version":1,"intentSha256":intent_sha256,"publicationStage":stage}})
+        .to_string())
+    };
+    row.evidence_json = observed(1, &intent_sha256);
+    assert!(
+        !super::super::verification_restart::requested(&row, "com.zhiliaoapp.musically"),
+        "a caption without its submission time is not a published post"
+    );
+    row.evidence_json = observed(2, &"0".repeat(64));
+    assert!(
+        !super::super::verification_restart::requested(&row, "com.zhiliaoapp.musically"),
+        "another intent's observation cannot settle this upload"
+    );
+    row.evidence_json = observed(2, &intent_sha256);
     assert!(super::super::verification_restart::requested(
         &row,
         "com.zhiliaoapp.musically"
@@ -587,6 +698,175 @@ fn verification_restart_requires_submitted_android_receipt_without_verified_link
         &row,
         "com.ss.iphone.ugc.Ame"
     ));
+}
+
+/// Minimal Global 45.7.3/en Home controls from the #21 verifier read at
+/// 2026-10-08T00:47:54Z (trace observation 503).
+const GLOBAL_HOME_FEED: &str = r#"<hierarchy index="0" class="hierarchy" rotation="0" width="1080" height="2094">
+  <node package="com.zhiliaoapp.musically" class="android.widget.FrameLayout" enabled="true" displayed="true" bounds="[0,0][1080,2220]">
+    <node package="com.zhiliaoapp.musically" class="android.view.View" resource-id="com.zhiliaoapp.musically:id/long_press_layout" content-desc="Video" clickable="true" enabled="true" displayed="true" bounds="[0,0][1080,1965]"/>
+    <node package="com.zhiliaoapp.musically" class="android.widget.TextView" resource-id="android:id/text1" text="For You" selected="true" enabled="true" displayed="true" bounds="[752,63][933,215]"/>
+    <node package="com.zhiliaoapp.musically" class="android.widget.FrameLayout" resource-id="com.zhiliaoapp.musically:id/nr_" content-desc="Home" selected="true" clickable="true" enabled="true" displayed="true" bounds="[0,1965][216,2094]"/>
+    <node package="com.zhiliaoapp.musically" class="android.widget.FrameLayout" resource-id="com.zhiliaoapp.musically:id/nrb" content-desc="Profile" selected="false" clickable="true" enabled="true" displayed="true" bounds="[864,1965][1080,2094]"/>
+  </node>
+</hierarchy>"#;
+
+const GLOBAL_HOME_FEED_UPLOADING: &str = r#"<hierarchy index="0" class="hierarchy" rotation="0" width="1080" height="2094">
+  <node package="com.zhiliaoapp.musically" class="android.widget.FrameLayout" enabled="true" displayed="true" bounds="[0,0][1080,2220]">
+    <node package="com.zhiliaoapp.musically" class="android.view.View" resource-id="com.zhiliaoapp.musically:id/long_press_layout" content-desc="Video" clickable="true" enabled="true" displayed="true" bounds="[0,0][1080,1965]"/>
+    <node package="com.zhiliaoapp.musically" class="android.widget.ProgressBar" enabled="true" displayed="true" bounds="[24,96][120,192]"/>
+    <node package="com.zhiliaoapp.musically" class="android.widget.TextView" resource-id="android:id/text1" text="For You" selected="true" enabled="true" displayed="true" bounds="[752,63][933,215]"/>
+    <node package="com.zhiliaoapp.musically" class="android.widget.FrameLayout" resource-id="com.zhiliaoapp.musically:id/nr_" content-desc="Home" selected="true" clickable="true" enabled="true" displayed="true" bounds="[0,1965][216,2094]"/>
+    <node package="com.zhiliaoapp.musically" class="android.widget.FrameLayout" resource-id="com.zhiliaoapp.musically:id/nrb" content-desc="Profile" selected="false" clickable="true" enabled="true" displayed="true" bounds="[864,1965][1080,2094]"/>
+  </node>
+</hierarchy>"#;
+
+/// Campaign 1fc0b331 #21 (2026-10-08): the first verification pass stopped Global
+/// TikTok 23 s after Post while the upload could still run; two posts followed.
+#[tokio::test]
+async fn verification_stops_tiktok_only_after_the_submitted_upload_is_proven_settled() {
+    use sha2::Digest;
+    for (case, settled, screen, expected) in [
+        (
+            "#21 receipt, upload on screen",
+            false,
+            GLOBAL_HOME_FEED_UPLOADING,
+            &["launch"][..],
+        ),
+        (
+            "#21 receipt, idle feed",
+            false,
+            GLOBAL_HOME_FEED,
+            &["launch"][..],
+        ),
+        (
+            "settled receipt, upload on screen",
+            true,
+            GLOBAL_HOME_FEED_UPLOADING,
+            &["launch"][..],
+        ),
+        (
+            "settled receipt, measured feed",
+            true,
+            GLOBAL_HOME_FEED,
+            &["terminate", "launch", "inspect"][..],
+        ),
+    ] {
+        let path = std::env::temp_dir().join(format!("verify-restart-{}.db", uuid::Uuid::new_v4()));
+        let db = Database::open(&path).unwrap();
+        let caption = "Fixture caption for the submitted photo post";
+        let bundle = riviu_core::PublishBundle {
+            id: "bundle".into(),
+            source_path: "C:/fixture/bundle".into(),
+            name: "bundle".into(),
+            media_kind: riviu_core::PublishMediaKind::Image,
+            images: Vec::new(),
+            video: None,
+            caption_path: "C:/fixture/bundle/caption.txt".into(),
+            caption: caption.into(),
+            caption_sha256: format!("{:x}", sha2::Sha256::digest(caption.as_bytes())),
+            total_bytes: 0,
+            partners: Vec::new(),
+        };
+        let request = riviu_core::PublishCampaignRequest {
+            request_id: uuid::Uuid::new_v4().to_string(),
+            source_root: "C:/fixture".into(),
+            bundle_ids: vec![bundle.id.clone()],
+            udids: vec!["phone".into()],
+            run_at: None,
+            visibility: riviu_core::PublishVisibility::Public,
+            cleanup_policy: riviu_core::PublishCleanupPolicy::KeepImportedAssets,
+            network: riviu_core::SocialNetwork::TikTok,
+            sound_policy: riviu_core::PublishSoundPolicy::Default,
+            sheet_enabled: false,
+            execution_confirmed: true,
+            target_snapshot: None,
+            sheet_delivery: None,
+            verification_contract_version: None,
+            verification_builds: vec![],
+        };
+        let campaign = db
+            .create_publish_campaign(&request, std::slice::from_ref(&bundle))
+            .unwrap()
+            .id;
+        let id = db
+            .get_publish_campaign(&campaign)
+            .unwrap()
+            .unwrap()
+            .assignments[0]
+            .id
+            .clone();
+        let intent = serde_json::json!({"effectIntent":"post_carousel","package":"com.zhiliaoapp.musically",
+            "expectedAccount":"fixture.account","submittedAt":chrono::Utc::now().to_rfc3339()});
+        let evidence = serde_json::json!({"post":{"state":"submitted","publicationVerified":false},
+            "cleanup":{"appCleanup":{"state":"leftRunning","reason":"upload_or_processing_may_still_be_active"}}});
+        rusqlite::Connection::open(&path).unwrap().execute(
+            "UPDATE publish_assignments SET state='verifying',effect_intent=?2,evidence_json=?3 WHERE id=?1",
+            rusqlite::params![id, intent.to_string(), evidence.to_string()],
+        ).unwrap();
+        if settled {
+            // The production writer records an observed caption and submission time.
+            let observed = db
+                .publish_verifications_for_campaign(&campaign, 10)
+                .unwrap()
+                .remove(0);
+            assert!(
+                db.record_publish_verification_diagnostic(
+                    &observed,
+                    "caption and time matched; link pending",
+                    "clipboardUnchanged",
+                    Some(&serde_json::json!({"publicationEvidence":
+                    {"captionMatched":true,"submissionTimeMatched":true}}))
+                )
+                .unwrap(),
+                "{case}"
+            );
+        }
+        let assignment = db
+            .get_publish_assignment_detail(&campaign, &id)
+            .unwrap()
+            .unwrap()
+            .assignments
+            .into_iter()
+            .find(|row| row.id == id)
+            .unwrap();
+        let driver = Arc::new(UploadDriver {
+            restart_test: true,
+            screen: Some(screen),
+            ..Default::default()
+        });
+        let control = DeviceControlPlane::new(
+            driver.clone(),
+            Arc::new(riviu_core::DeviceWorkCoordinator::new()),
+            Arc::new(riviu_core::StreamBudgetManager::new(1).unwrap()),
+        );
+        let result = tokio::time::timeout(
+            Duration::from_secs(30),
+            capture_confirmed_assignment_link(&db, &control, &assignment, &bundle, None),
+        )
+        .await;
+        assert!(
+            matches!(result, Ok(Err(_))),
+            "{case}: the fixture has no link to capture"
+        );
+        assert_eq!(*driver.actions.lock(), expected, "{case}");
+        let row = db
+            .get_publish_assignment_detail(&campaign, &id)
+            .unwrap()
+            .unwrap()
+            .assignments
+            .into_iter()
+            .find(|row| row.id == id)
+            .unwrap();
+        assert_eq!(
+            row.state,
+            riviu_core::PublishCampaignState::Verifying,
+            "{case}: never failed or reposted"
+        );
+        assert_eq!(row.effect_intent, assignment.effect_intent, "{case}");
+        drop(db);
+        let _ = std::fs::remove_file(path);
+    }
 }
 
 #[tokio::test]

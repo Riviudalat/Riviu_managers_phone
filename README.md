@@ -13,7 +13,7 @@ bị mất. Chỉ sử dụng trên thiết bị/tài khoản bạn được ph�
 
 | Nhu cầu | Chức năng |
 |---|---|
-| Quản lý thiết bị | Control Center, nhóm, trạng thái kết nối, preview, điều khiển, tệp và chẩn đoán |
+| Quản lý thiết bị | Control Center, nhóm, trạng thái kết nối, preview, điều khiển, tệp, thư viện ứng dụng (cài/gỡ/cài lại) và chẩn đoán |
 | TikTok | Nuôi, Tương tác và Đăng bài với capability/preflight theo từng thiết bị |
 | Đăng nội dung | Ảnh/video, caption, ghép bài–máy, nhạc, hẹn giờ, canonical link và báo cáo Sheet |
 | Workflow | Flow thiết bị, Macro, My Apps và Điều phối; revision/ledger riêng cho từng lượt |
@@ -50,6 +50,36 @@ may. Đọc [WDA safety](docs/agents/02-wda-doc-truoc-khi-sua.md) trước mọi
 4. **Bảo trì → Sửa Riviu Agent** là thao tác riêng có xác nhận, không phải bước
    kiểm tra chỉ đọc. Không chạy hai controller trên cùng thiết bị.
 5. Chọn đúng phạm vi trước Nuôi/Tương tác/Đăng bài; đọc preflight và xác nhận cuối.
+
+### Cài đặt máy (chuẩn hệ thống Android)
+
+**Thiết bị → Cài đặt máy** giữ một chuẩn cài đặt hệ thống cho cả đội máy Android và
+áp dụng/kiểm tra theo một máy, một nhóm hoặc toàn bộ:
+
+| Cài đặt | Lệnh trên máy | Mặc định |
+|---|---|---|
+| Tắt khóa màn hình | `locksettings set-disabled true`, rồi `wm dismiss-keyguard` | Bật |
+| Tắt tự xoay | `settings put system accelerometer_rotation 0` và `user_rotation 0` | Bật |
+| Luôn sáng khi sạc | `settings put global stay_on_while_plugged_in 7` | Tắt |
+| Tắt màn hình sau 30 phút | `settings put system screen_off_timeout 1800000` | Tắt |
+| Tắt hiệu ứng | ba khóa `*_animation_scale`/`animator_duration_scale` = 0 | Tắt |
+
+- **Kiểm tra** chỉ đọc. Máy không trả lời được hiện **Chưa rõ**, không bao giờ được coi
+  là đã đúng chuẩn.
+- **Áp dụng** giữ quyền điều khiển máy như mọi thao tác thủ công: máy đang Đăng bài,
+  Nuôi hoặc Tương tác bị từ chối (**Máy đang bận**), không bị chiếm quyền. Mỗi cài
+  đặt chỉ được ghi khi chưa đúng và chỉ báo **Đã áp dụng** khi đọc lại đúng giá trị.
+- Máy có mã PIN/mật khẩu/hình vẽ báo **Cần làm tay** và không bị gửi `locksettings`
+  (trên Android 9–11 lệnh đó tính là một lần nhập sai mã). Không đọc được loại khóa
+  cũng là **Cần làm tay**. Riviu không mở khóa máy có mã.
+- **Tự áp dụng khi máy kết nối** (mặc định bật) áp chuẩn đã lưu mỗi lần máy Android
+  cắm lại, trong lượt chuẩn bị Riviu Helper và trước khi máy nhận việc; kết quả ghi
+  vào nhật ký thao tác. Máy còn chờ trong hàng chuẩn bị chưa được áp chuẩn.
+- Danh mục không có gì đụng tới tài khoản, mạng, quyền gỡ lỗi USB hay dữ liệu ứng
+  dụng. iPhone hiện **Chưa hỗ trợ** và không bị thay đổi.
+- Đăng bài: máy có mã đang khóa bị preflight chặn với mã `device_screen_locked`; máy
+  khóa lại giữa chừng trước Post kết thúc **trước khi gửi**, cùng mã, và được phép
+  thử lại sau khi mở khóa. Không có Post nào được gửi lại vì lý do này.
 
 Bundled Python, Android tools và giấy phép: [Android tools](sidecars/android/README.md),
 [WDA/runtime](sidecars/wda/README.md), [NOTICE](NOTICE). Máy người dùng không cần

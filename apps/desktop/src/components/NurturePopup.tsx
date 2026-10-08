@@ -1,3 +1,4 @@
+import { machineNumberLabel } from "../deviceNaming";
 import {
   useCallback,
   useEffect,
@@ -263,7 +264,7 @@ function deviceLabel(
   }
   const ordered = orderDevicesByNumber(devices, metas);
   const position = ordered.findIndex((device) => device.udid === udid) + 1;
-  return `Máy ${tileNumber(position || 1, meta)} · ${tileName(d, meta)}`;
+  return `${machineNumberLabel(tileNumber(position || 1, meta))} · ${tileName(d, meta)}`;
 }
 
 function CleanupStatus({ status }: { status: NurtureSessionStatus }) {

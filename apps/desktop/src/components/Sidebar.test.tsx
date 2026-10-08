@@ -32,7 +32,7 @@ describe("Sidebar information architecture", () => {
     renderSidebar();
 
     const navigation = screen.getByRole("navigation", { name: "Điều hướng chính" });
-    expect(within(navigation).getAllByTestId("nav-item")).toHaveLength(16);
+    expect(within(navigation).getAllByTestId("nav-item")).toHaveLength(17);
     expect(within(navigation).queryByRole("button", {name:"Dữ liệu"})).toBeNull();
     expect(within(navigation).queryByRole("button", {name:"Mạng & Router"})).toBeNull();
     expect(within(navigation).getByRole("button", { name: "My Apps" })).toBeVisible();

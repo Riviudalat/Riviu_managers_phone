@@ -10,6 +10,7 @@ vi.mock("./api", () => ({
   listJobs: vi.fn(async () => []),
   listGroups: vi.fn(async () => []),
   listDeviceMetas: vi.fn(async () => []),
+  ensureDeviceNumbers: vi.fn(async () => []),
   driverDegradedReason: vi.fn(async () => null),
   // Added with the bundled-tools banner. An export missing from this mock returns `undefined`,
   // and `.catch` on that throws synchronously inside the boot effect — the same silence that
@@ -42,6 +43,7 @@ describe("useFleet", () => {
     mocked.listJobs.mockResolvedValue([]);
     mocked.listGroups.mockResolvedValue([]);
     mocked.listDeviceMetas.mockResolvedValue([]);
+    mocked.ensureDeviceNumbers.mockResolvedValue([]);
     mocked.driverDegradedReason.mockResolvedValue(null);
     mocked.androidUnavailableReason.mockResolvedValue(null);
     mocked.startupError.mockResolvedValue(null);
@@ -95,6 +97,60 @@ describe("useFleet", () => {
 
     expect(result.current.startupIssue).toBe("vẫn chưa cấu hình");
     expect(mocked.listenRiviuEvents).not.toHaveBeenCalled();
+  });
+
+  it("retains committed numbers when a metadata refresh fails", async () => {
+    mocked.listDeviceMetas.mockResolvedValue([{udid: "a", number: 21, notes: "", tags: []}]);
+    const { result } = renderHook(() => useFleet());
+    await waitFor(() => expect(result.current.metas[0]?.number).toBe(21));
+    mocked.listDeviceMetas.mockRejectedValue(new Error("metadata unavailable"));
+    await act(async () => { await result.current.reload(); });
+    expect(result.current.metas[0]?.number).toBe(21);
+    expect(result.current.bootError).toContain("metadata unavailable");
+  });
+
+  it("does not publish an allocation snapshot over a newer metadata read", async () => {
+    let finish!: (rows: unknown[]) => void;
+    mocked.listDevices.mockResolvedValue([{ udid: "a" }]);
+    mocked.listDeviceMetas.mockResolvedValue([{ udid: "a", number: 21, alias: "imported" }]);
+    mocked.ensureDeviceNumbers.mockImplementationOnce(() => new Promise(resolve => { finish = resolve; }));
+    const { result } = renderHook(() => useFleet());
+    await waitFor(() => expect(result.current.metas[0]?.number).toBe(21));
+    await act(async () => { finish([{ udid: "a", number: 1, alias: "old" }]); });
+    expect(result.current.metas[0]?.number).toBe(21);
+    expect(result.current.metas[0]?.alias).toBe("imported");
+  });
+
+  it("ignores an older overlapping refresh after the newer read is published", async () => {
+    const { result } = renderHook(() => useFleet());
+    await waitFor(() => expect(result.current.fleetSettled).toBe(true));
+    let finish!: (rows: unknown[]) => void;
+    mocked.listDeviceMetas.mockImplementationOnce(() => new Promise(resolve => { finish = resolve; }));
+    let older!: Promise<void>;
+    act(() => { older = result.current.reload(); });
+    await waitFor(() => expect(finish).toBeDefined());
+    mocked.listDeviceMetas.mockResolvedValueOnce([{ udid: "a", number: 22 }]);
+    await act(async () => { await result.current.reload(); });
+    await act(async () => { finish([{ udid: "a", number: 2 }]); await older; });
+    expect(result.current.metas[0]?.number).toBe(22);
+  });
+
+  it("reconciles an unknown allocation ACK before explicitly retrying only missing serials", async () => {
+    mocked.listDevices.mockResolvedValue([{ udid: "a" }, { udid: "b" }]);
+    mocked.ensureDeviceNumbers.mockRejectedValueOnce(new Error("lost ACK"));
+    const { result } = renderHook(() => useFleet());
+    await waitFor(() => expect(result.current.numberAllocationError).toContain("lost ACK"));
+    mocked.listDeviceMetas.mockResolvedValue([{ udid: "a", number: 21 }]);
+    mocked.ensureDeviceNumbers.mockImplementationOnce(async () => {
+      mocked.listDeviceMetas.mockResolvedValue([{ udid: "a", number: 21 }, { udid: "b", number: 22 }]);
+      return [];
+    });
+    await act(async () => { await result.current.retryDeviceNumbers(); });
+    expect(mocked.ensureDeviceNumbers).toHaveBeenNthCalledWith(2, ["b"]);
+    expect(result.current.metas.map(row => row.number)).toEqual([21, 22]);
+    expect(result.current.numberAllocationError).toBeNull();
+    await act(async () => { await result.current.retryDeviceNumbers(); });
+    expect(mocked.ensureDeviceNumbers).toHaveBeenCalledTimes(2);
   });
 
   it("keeps the phones when the group list fails", async () => {

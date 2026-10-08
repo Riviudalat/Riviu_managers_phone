@@ -1,3 +1,4 @@
+import { machineNumberLabel } from "../deviceNaming";
 import { useId, useMemo, useState } from "react";
 import { CheckCheck, Search, X } from "lucide-react";
 
@@ -20,8 +21,8 @@ export interface TargetSelectorProps {
   requireChoice?: boolean;
 }
 
-function defaultDeviceLabel(device: DeviceInfo, index: number): string {
-  return `Máy ${index + 1} · ${device.name}`;
+function defaultDeviceLabel(device: DeviceInfo): string {
+  return `${machineNumberLabel(undefined)} · ${device.name}`;
 }
 
 /**

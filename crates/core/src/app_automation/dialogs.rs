@@ -1,4 +1,4 @@
-//! Decline only the measured contact-sync dialog. Never accept contact access.
+//! Measured negative popup actions shared by caller-owned automation stages.
 use crate::{tiktok_labels::TikTokControls, ui_automation::tree::Tree, ElementBox, ElementQuery};
 
 pub fn decline_contacts(tree: &Tree, labels: TikTokControls) -> Option<ElementBox> {
@@ -306,6 +306,267 @@ pub fn account_blocker(tree: &Tree, labels: TikTokControls) -> Option<AccountBlo
         .then_some(AccountBlocker::UnrecognizedDialog)
 }
 
+use crate::ui_automation::runtime::{read_before_deadline, ReadWaitResult};
+use std::sync::atomic::{AtomicBool, Ordering};
+use tokio::time::Instant;
+
+/// One caller-owned stage budget. An attempted decline is spent even if its ACK fails.
+#[derive(Debug, Clone, Default)]
+pub struct PopupBudget {
+    epoch: Option<String>,
+    spent: u8,
+    last_action_generation: Option<u64>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PopupStep {
+    Clear,
+    Dismissed,
+    Blocked,
+}
+
+/// Negative actions shared across stages; provenance stays with each detector.
+pub fn optional_decline(tree: &Tree, labels: TikTokControls) -> Option<(u8, ElementBox)> {
+    decline_optional_location(tree, labels)
+        .map(|button| (1, button))
+        .or_else(|| decline_contacts(tree, labels).map(|button| (2, button)))
+        .or_else(|| decline_facebook_permission(tree, labels).map(|button| (4, button)))
+        .or_else(|| decline_precise_location(tree, labels).map(|button| (8, button)))
+}
+
+/// Screenshot-derived contract, NOT a measured XML/resource profile. A future
+/// observation must prove the full modal before this rule can authorize decline.
+fn decline_precise_location(tree: &Tree, labels: TikTokControls) -> Option<ElementBox> {
+    let package = labels.package();
+    if labels.language() != "en"
+        || !matches!(
+            (package, labels.resource_version()),
+            ("com.ss.android.ugc.trill", Some("38.3.2"))
+                | ("com.zhiliaoapp.musically", Some("45.7.3"))
+        )
+    {
+        return None;
+    }
+    let dialogs = tree.matching(
+        package,
+        ElementQuery::Description {
+            value: "Dialog",
+            exact: true,
+        },
+    );
+    let [dialog] = dialogs.as_slice() else {
+        return None;
+    };
+    let container = tree.nodes[*dialog].rect()?;
+    if tree.nodes[*dialog].visibility() != Some(true) {
+        return None;
+    }
+    let unique = |text: &str, class: &str| {
+        let found = tree.matching(
+            package,
+            ElementQuery::Text {
+                value: text,
+                exact: true,
+            },
+        );
+        let [index] = found.as_slice() else {
+            return None;
+        };
+        let node = &tree.nodes[*index];
+        let rect = node.rect()?;
+        (tree.inside(*index, *dialog)
+            && node.visibility() == Some(true)
+            && node.attr("class") == class
+            && rect.x >= container.x
+            && rect.y >= container.y
+            && rect.x + rect.width <= container.x + container.width
+            && rect.y + rect.height <= container.y + container.height)
+            .then_some((*index, rect))
+    };
+    let (heading, _) = unique("Turn on precise location", "android.widget.TextView")?;
+    let negatives: Vec<_> = ["Don't allow", "Don\u{2019}t allow"]
+        .into_iter()
+        .flat_map(|text| {
+            tree.matching(
+                package,
+                ElementQuery::Text {
+                    value: text,
+                    exact: true,
+                },
+            )
+        })
+        .collect();
+    let [negative] = negatives.as_slice() else {
+        return None;
+    };
+    let (deny, button) = unique(tree.nodes[*negative].attr("text"), "android.widget.Button")?;
+    let (allow, affirmative) = unique("OK", "android.widget.Button")?;
+    if button.x < affirmative.x + affirmative.width
+        && affirmative.x < button.x + button.width
+        && button.y < affirmative.y + affirmative.height
+        && affirmative.y < button.y + button.height
+    {
+        return None;
+    }
+    if !button.enabled || !button.clickable || !affirmative.enabled || !affirmative.clickable {
+        return None;
+    }
+    // A challenge, destructive decision, public-effect confirmation, or additional
+    // actionable choice is not this optional popup, even with the same title.
+    for (index, node) in tree.nodes.iter().enumerate() {
+        if index != *dialog && !tree.inside(index, *dialog) {
+            continue;
+        }
+        if node.visibility() == Some(false) || !tree.ancestors_visible(index) {
+            continue;
+        }
+        if index != deny && index != allow && node.rect().is_some_and(|r| r.clickable) {
+            return None;
+        }
+        let text = format!("{} {}", node.attr("text"), node.attr("content-desc")).to_lowercase();
+        if [
+            "captcha", "verify", "security", "log in", "delete", "discard", "terms", "publish",
+            "post", "account",
+        ]
+        .iter()
+        .any(|word| text.contains(word))
+        {
+            return None;
+        }
+        if !node.attr("text").is_empty()
+            && index != heading
+            && index != deny
+            && index != allow
+            && node.attr("class") == "android.widget.Button"
+        {
+            return None;
+        }
+    }
+    Some(button)
+}
+
+fn modal_present(tree: &Tree) -> bool {
+    tree.nodes.iter().enumerate().any(|(index, node)| {
+        node.visibility() != Some(false)
+            && tree.ancestors_visible(index)
+            && node.rect().is_some()
+            && (node.attr("content-desc") == "Dialog"
+                || node.attr("resource-id") == "com.android.packageinstaller:id/dialog_container")
+    })
+}
+
+/// Run before accepting an underlying navigation target. The caller must observe again
+/// after Dismissed; it is not destination proof. Unknown modals never authorize Back.
+/// No gesture is wrapped in a cancellable timeout and no public effect is dispatched.
+pub async fn step_before_deadline(
+    session: &dyn crate::UiSession,
+    labels: TikTokControls,
+    budget: &mut PopupBudget,
+    deadline: Instant,
+    stop: &AtomicBool,
+    effect_stop: &AtomicBool,
+) -> anyhow::Result<ReadWaitResult<PopupStep>> {
+    Ok(match step_before_deadline_with_tree(
+        session, labels, budget, deadline, stop, effect_stop,
+    ).await? {
+        ReadWaitResult::Ready((step, _)) => ReadWaitResult::Ready(step),
+        ReadWaitResult::Cancelled => ReadWaitResult::Cancelled,
+        ReadWaitResult::DeadlineExceeded => ReadWaitResult::DeadlineExceeded,
+    })
+}
+
+/// Clear carries the same tree screened by the existing popup/foreground gates.
+/// Dismissed and Blocked never expose an underlying action target.
+pub(crate) async fn step_before_deadline_with_tree(
+    session: &dyn crate::UiSession,
+    labels: TikTokControls,
+    budget: &mut PopupBudget,
+    deadline: Instant,
+    stop: &AtomicBool,
+    effect_stop: &AtomicBool,
+) -> anyhow::Result<ReadWaitResult<(PopupStep, Option<Tree>)>> {
+    let epoch = session.gui_session_epoch();
+    if let Some(bound) = &budget.epoch {
+        anyhow::ensure!(bound == &epoch, "popup session changed");
+    } else {
+        budget.epoch = Some(epoch.clone());
+    }
+    macro_rules! read {
+        ($future:expr) => {
+            match read_before_deadline($future, deadline, stop).await? {
+                ReadWaitResult::Ready(value) => {
+                    anyhow::ensure!(
+                        session.gui_session_epoch() == epoch,
+                        "popup session changed"
+                    );
+                    value
+                }
+                ReadWaitResult::Cancelled => return Ok(ReadWaitResult::Cancelled),
+                ReadWaitResult::DeadlineExceeded => return Ok(ReadWaitResult::DeadlineExceeded),
+            }
+        };
+    }
+    let foreground = read!(session.active_app_bundle());
+    let tree = Tree::parse(read!(session.hierarchy_source_snapshot()))?;
+    if budget
+        .last_action_generation
+        .is_some_and(|generation| tree.generation <= generation)
+    {
+        return Ok(ReadWaitResult::Ready((PopupStep::Blocked, None)));
+    }
+    let candidate = optional_decline(&tree, labels);
+    // The measured OS location modal owns foreground itself. Every other case
+    // requires the exact selected TikTok package, never a substring or recents.
+    anyhow::ensure!(
+        foreground == labels.package()
+            || (foreground == "com.google.android.packageinstaller"
+                && candidate.as_ref().is_some_and(|(kind, _)| *kind == 1)),
+        "popup foreground does not match target package"
+    );
+    let fresh_foreground = read!(session.active_app_bundle());
+    anyhow::ensure!(
+        fresh_foreground == foreground,
+        "popup foreground changed during observation"
+    );
+    let Some((kind, button)) = candidate else {
+        let blocked = modal_present(&tree)
+            || matches!(
+                account_blocker(&tree, labels),
+                Some(AccountBlocker::LoginRequired | AccountBlocker::SecurityPrompt)
+            );
+        return Ok(ReadWaitResult::Ready(if blocked {
+            (PopupStep::Blocked, None)
+        } else {
+            (PopupStep::Clear, Some(tree))
+        }));
+    };
+    if effect_stop.load(Ordering::Relaxed) || budget.spent & kind != 0 {
+        return Ok(ReadWaitResult::Ready((PopupStep::Blocked, None)));
+    }
+    let fresh_foreground = read!(session.active_app_bundle());
+    anyhow::ensure!(
+        fresh_foreground == foreground,
+        "popup foreground changed before decline"
+    );
+    if stop.load(Ordering::Relaxed) {
+        return Ok(ReadWaitResult::Cancelled);
+    }
+    if Instant::now() >= deadline {
+        return Ok(ReadWaitResult::DeadlineExceeded);
+    }
+    if effect_stop.load(Ordering::Relaxed) {
+        return Ok(ReadWaitResult::Ready((PopupStep::Blocked, None)));
+    }
+    budget.spent |= kind;
+    budget.last_action_generation = Some(tree.generation);
+    session.tap(button.centre()).await?;
+    anyhow::ensure!(
+        session.gui_session_epoch() == epoch,
+        "popup session changed after decline"
+    );
+    Ok(ReadWaitResult::Ready((PopupStep::Dismissed, None)))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -317,6 +578,41 @@ mod tests {
     }
     fn tree(xml: String) -> Tree {
         Tree::parse(crate::HierarchySourceSnapshot { generation: 1, xml }).unwrap()
+    }
+
+    #[test]
+    fn screenshot_precise_location_semantics_require_one_safe_modal() {
+        // Synthetic contract only: title/buttons come from the screenshot; XML,
+        // hierarchy, classes and bounds below are NOT a live measurement.
+        let xml = r#"<hierarchy><node package="com.ss.android.ugc.trill" content-desc="Dialog" displayed="true" bounds="[100,200][900,1200]">
+          <node package="com.ss.android.ugc.trill" class="android.widget.TextView" text="Turn on precise location" displayed="true" bounds="[150,250][850,350]"/>
+          <node package="com.ss.android.ugc.trill" class="android.widget.Button" text="Don't allow" displayed="true" enabled="true" clickable="true" bounds="[150,950][450,1050]"/>
+          <node package="com.ss.android.ugc.trill" class="android.widget.Button" text="OK" displayed="true" enabled="true" clickable="true" bounds="[550,950][850,1050]"/>
+        </node></hierarchy>"#;
+        for (package, version) in [(PACKAGE, "38.3.2"), ("com.zhiliaoapp.musically", "45.7.3")] {
+            let labels = crate::tiktok_labels::controls_for(package, "en", version).unwrap();
+            let xml = xml.replace(PACKAGE, package);
+            let (_, button) = optional_decline(&tree(xml.clone()), labels)
+                .expect("strict screenshot-derived negative action");
+            assert_eq!((button.x, button.y), (150.0, 950.0));
+            assert!(optional_decline(
+                &tree(xml.replace("Don't allow", "Don\u{2019}t allow")),
+                labels
+            )
+            .is_some());
+            for changed in [
+                xml.replace("Turn on precise location", "Confirm publication"),
+                xml.replace("Don't allow", "Allow"),
+                xml.replace("text=\"OK\"", "text=\"Post\""),
+                xml.replace("enabled=\"true\"", "enabled=\"false\""),
+                xml.replace("content-desc=\"Dialog\"", "content-desc=\"Background\""),
+                xml.replace("[150,950][450,1050]", "[10,950][450,1050]"),
+                xml.replace("</hierarchy>", &format!(r#"<node package="{package}" class="android.widget.Button" text="Don't allow" displayed="true" enabled="true" clickable="true" bounds="[150,950][450,1050]"/></hierarchy>"#)),
+                xml.replace("text=\"Turn on precise location\"", "text=\"Turn on precise location\" content-desc=\"Verify your account\""),
+            ] { assert!(optional_decline(&tree(changed), labels).is_none()); }
+            assert!(crate::tiktok_labels::controls_for(package, "vi", version)
+                .is_none_or(|other| optional_decline(&tree(xml), other).is_none()));
+        }
     }
 
     #[test]

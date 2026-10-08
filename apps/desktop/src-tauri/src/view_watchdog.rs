@@ -633,6 +633,54 @@ impl ViewRecoveryGate {
     }
 }
 
+/// First wait after a failed **first** start of one phone's view; doubles per consecutive
+/// failure up to [`VIEW_START_RETRY_MAX`].
+///
+/// Before 08/10/2026 a first start had no backoff at all: the keeper ticks every 2 s, and a
+/// phone that had dropped off a re-plugged hub but was not yet `Disconnected` in the registry
+/// was started on every tick. Measured on the 30-phone farm: 174 failed starts in one session,
+/// median 2 s apart for the same phone, each costing three adb processes against the shared
+/// twelve-slot cap that publish was also waiting on. Two seconds keeps a clean re-plug as fast
+/// as before -- the first retry still lands on the next tick.
+pub(crate) const VIEW_START_RETRY_BASE: Duration = Duration::from_secs(2);
+/// A cap, not a target: a phone that keeps failing is retried twice a minute, which is
+/// enough to come back on its own without spending the fleet's adb slots on it.
+pub(crate) const VIEW_START_RETRY_MAX: Duration = Duration::from_secs(30);
+
+/// Per-phone spacing of failed first starts. Owned by the keeper task, like its retune
+/// history, because nothing else starts views on its own schedule.
+#[derive(Debug, Default)]
+pub(crate) struct ViewStartBackoff {
+    failures: HashMap<String, (Instant, u32)>,
+}
+
+impl ViewStartBackoff {
+    pub(crate) fn is_due(&self, udid: &str, now: Instant) -> bool {
+        let Some((at, failures)) = self.failures.get(udid).copied() else {
+            return true;
+        };
+        let factor = 1u32 << failures.saturating_sub(1).min(5);
+        now.saturating_duration_since(at)
+            >= VIEW_START_RETRY_BASE
+                .saturating_mul(factor)
+                .min(VIEW_START_RETRY_MAX)
+    }
+
+    pub(crate) fn record(&mut self, udid: &str, started: bool, now: Instant) {
+        if started {
+            self.failures.remove(udid);
+            return;
+        }
+        let failures = self.failures.get(udid).map(|(_, n)| *n).unwrap_or(0) + 1;
+        self.failures.insert(udid.to_string(), (now, failures));
+    }
+
+    /// The phone left the fleet; when it returns, its first start is immediate.
+    pub(crate) fn forget(&mut self, udid: &str) {
+        self.failures.remove(udid);
+    }
+}
+
 /// Bring up a producer for a device that has none. **Takes no permit, deliberately.**
 ///
 /// A first start is not a recovery, and the distinction is the whole reason the ceiling can
@@ -720,6 +768,30 @@ mod tests {
             since_paint,
             reported_at: Instant::now(),
         }
+    }
+
+    #[test]
+    fn a_failing_first_start_backs_off_and_a_clean_one_resets() {
+        let start = Instant::now();
+        let mut backoff = ViewStartBackoff::default();
+        assert!(backoff.is_due("phone", start), "a first start never waits");
+        backoff.record("phone", false, start);
+        assert!(!backoff.is_due("phone", start + Duration::from_secs(1)));
+        assert!(backoff.is_due("phone", start + VIEW_START_RETRY_BASE), "one keeper tick later");
+        let mut at = start;
+        for _ in 0..10 {
+            at += VIEW_START_RETRY_MAX;
+            backoff.record("phone", false, at);
+        }
+        assert!(!backoff.is_due("phone", at + VIEW_START_RETRY_MAX - Duration::from_millis(1)));
+        assert!(backoff.is_due("phone", at + VIEW_START_RETRY_MAX), "capped, never unbounded");
+        // 174 failed starts over ~8 h at 2 s spacing is what the old keeper did; the same
+        // outage under this schedule costs 2+4+8+16 s and then two attempts a minute.
+        backoff.record("phone", true, at);
+        assert!(backoff.is_due("phone", at), "a clean start clears the history");
+        backoff.record("phone", false, at);
+        backoff.forget("phone");
+        assert!(backoff.is_due("phone", at), "a phone that left and returned starts at once");
     }
 
     #[test]

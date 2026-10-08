@@ -66,6 +66,7 @@ quyết định thiết kế Riviu, không phải tuyên bố parity toàn bộ 
 | Trang | Bố cục chính | Bộ lọc/đầu vào | Đầu ra và đường đi tiếp | Kiểm tra bắt buộc |
 |---|---|---|---|---|
 | Thiết bị | toolbar, group tabs, grid/table, drawer | nhóm, trạng thái, tìm kiếm, máy chọn | trạng thái máy; mở máy hoặc Chẩn đoán | tập lọc giống grid/table; tile/canvas không đổi |
+| Cài đặt máy | chuẩn cài đặt (checkbox + tự áp dụng), phạm vi, bảng kết quả theo máy | danh mục cài đặt, máy/nhóm/toàn bộ | trạng thái đọc từng cài đặt; kết quả applied/alreadyOk/needsManual/refusedBusy/failed | đọc lỗi là “Chưa rõ”, máy bận bị từ chối không chiếm quyền, iOS “Chưa hỗ trợ” không gọi máy, áp dụng chỉ sau khi đã lưu |
 | Chẩn đoán | bảng điều kiện, detail bằng chứng | máy/phạm vi | readiness/lỗi; sửa đúng điều kiện | không tự repair từ health false-negative |
 | Nuôi | Thiết lập/Hẹn giờ/Theo dõi | scope, nhịp, effect, lịch | phiên/máy/effect; đọc bằng chứng | credential riêng, draft/readiness, target isolation |
 | Tương tác | Thiết lập/Theo dõi, assignment | URL hiện tại, actors, nội dung | campaign/outcome; source retry | URL parse stale, profile identity, uncertain |
@@ -77,7 +78,7 @@ quyết định thiết kế Riviu, không phải tuyên bố parity toàn bộ 
 | Quản lý tài khoản | bảng và form tài khoản | tên, handle, nền tảng, máy | bản ghi đã lưu/đối chiếu | response kind cũ không ghi đè; không coi handle nhập là login proof |
 | Lịch chạy | bảng lịch và cấu hình | thời gian local, trạng thái | lần chạy kế tiếp/kết quả | lưu/bật lịch không chạy ngay; giữ revision |
 | Kho nội dung | bảng metadata, bulk toolbar | artifact và target | ledger từng máy | restore monitor, cancel queued, no uncertain retry |
-| Trung tâm ứng dụng | bảng package, contextual action | package/version/target | batch/item result | artifact snapshot, restart uncertainty |
+| Trung tâm ứng dụng | bảng package, contextual action | package/version/target | batch/item result; gỡ/cài lại theo máy | artifact snapshot, restart uncertainty; gỡ có confirm mất dữ liệu/tài khoản, máy bận bị từ chối, không tự gửi lại |
 | Dữ liệu | năng lực, tác vụ 24 giờ, nhật ký gần nhất | tìm kiếm trong tối đa 200 log đã tải | số liệu theo phạm vi; tra cứu sâu tại Tác vụ | hiển thị giới hạn và phạm vi lọc/xuất |
 | API | listener status, config section | địa chỉ/credential | actual bind/restart | config khác listener; lỗi bind hiển thị |
 | Cài đặt | section rõ, lưu từng vùng | form/credential | persisted readback | stale response, draft guard, restart indication |

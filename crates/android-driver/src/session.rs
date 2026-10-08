@@ -552,6 +552,9 @@ impl UiSession for AndroidUiSession {
     fn gui_session_epoch(&self) -> String {
         format!("{}:{}", self.gui_epoch, self.agent.session_identity())
     }
+    fn pin_read_session(&self) -> riviu_core::driver::ReadSessionPin {
+        riviu_core::driver::ReadSessionPin::holding(self.agent.pin_reads())
+    }
     fn gui_compatibility_pack(
         &self,
         package: &str,
@@ -1168,12 +1171,9 @@ impl UiSession for AndroidUiSession {
             return self.semantic_nodes(role).await;
         }
         let locator = to_agent_locator(query);
-        let ids = self.agent.find_all(&locator).await?;
-        let mut found = Vec::with_capacity(ids.len());
-        for id in ids {
-            // This result has no partial marker. A failed read (including a stale
-            // reference) cannot silently remove a row and prove it absent.
-            let rect = self.agent.rect(&id).await?;
+        let rectangles = self.agent.find_all_with_rect(&locator).await?;
+        let mut found = Vec::with_capacity(rectangles.len());
+        for rect in rectangles {
             found.push(riviu_core::ElementBox {
                 x: rect.x,
                 y: rect.y,

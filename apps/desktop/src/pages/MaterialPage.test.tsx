@@ -146,8 +146,8 @@ describe("MaterialPage list states", () => {
       target: { type: "explicit", udids: ["phone-1", "phone-2"] },
     });
     const results = within(await screen.findByRole("region", { name: "Kết quả chuyển gần nhất" }));
-    expect(results.getByText("Máy 1 · Galaxy A")).toBeVisible();
-    expect(results.getByText("Máy 2 · Galaxy B")).toBeVisible();
+    expect(results.getByText("Đang gán số · Galaxy A")).toBeVisible();
+    expect(results.getByText("Đang gán số · Galaxy B")).toBeVisible();
     expect(screen.getByText("Thất bại")).toBeVisible();
 
     await user.click(screen.getByRole("button", { name: "Thử lại 1 máy lỗi" }));
@@ -156,7 +156,7 @@ describe("MaterialPage list states", () => {
       target: { type: "explicit", udids: ["phone-2"] },
     });
     expect(await screen.findByText("Máy 2 · Ca chiều")).toBeVisible();
-    expect(results.queryByText("Máy 1 · Galaxy A")).toBeNull();
+    expect(results.queryByText("Đang gán số · Galaxy A")).toBeNull();
     expect(screen.queryByRole("button", { name: "Thử lại 1 máy lỗi" })).toBeNull();
   });
 

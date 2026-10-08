@@ -1,3 +1,4 @@
+import { machineNumberLabel } from "../../deviceNaming";
 import { useState, type ReactNode } from "react";
 import { Search } from "lucide-react";
 import { changeDistribution, distributionOf, nurtureActions } from "../../nurtureDistribution";
@@ -65,7 +66,7 @@ export function NurtureMachinePicker({ devices, metas, targets, onTargetRefChang
   const available = ordered.filter(({ device }) => device.status === "ready" || device.status === "busy" || device.status === "connected");
   const unavailable = devices.length - available.length;
   const setTargets = (udids: string[]) => onTargetRefChange?.({ type: "explicit", udids });
-  const names = ordered.filter(({ device }) => selected.has(device.udid)).map(({ number, name }) => `${number} · ${name}`).join(", ");
+  const names = ordered.filter(({ device }) => selected.has(device.udid)).map(({ number, name }) => `${machineNumberLabel(number)} · ${name}`).join(", ");
   return <>
     <div className="nurture-scope-bar" role="group" aria-label="Phạm vi Nuôi TikTok">
       <strong>Máy thực hiện</strong>
@@ -91,7 +92,7 @@ export function NurtureMachinePicker({ devices, metas, targets, onTargetRefChang
         const ready = device.status === "ready" || device.status === "busy" || device.status === "connected";
         const checked = selected.has(device.udid);
         return <MachineChoice key={device.udid} number={number} name={name} status={device.status} reason={device.lastError} checked={checked}
-          label={`Chọn Máy ${number} · ${name}`} disabled={!onTargetRefChange || (!ready && !checked)}
+          label={`Chọn ${machineNumberLabel(number)} · ${name}`} disabled={!onTargetRefChange || (!ready && !checked)}
           onChange={(selected) => setTargets(selected ? [...targets, device.udid] : targets.filter(id => id !== device.udid))}
           detail={metas.get(device.udid)?.handle ? <span>@{metas.get(device.udid)?.handle?.replace(/^@+/, "")}</span> : undefined} />;
       })}

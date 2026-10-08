@@ -69,6 +69,9 @@ struct Session {
     selected_marker: bool,
     select_on_tap: bool,
     changed_app: bool,
+    /// Another app takes the foreground only after the row tap, so the pool
+    /// proof that precedes the tap still reads the bound TikTok package.
+    changed_app_after_tap: bool,
     unreadable_tab: bool,
     missing_tab_readback: bool,
     empty_tab_before_navigation: bool,
@@ -102,6 +105,7 @@ impl Session {
             selected_marker: false,
             select_on_tap: false,
             changed_app: false,
+            changed_app_after_tap: false,
             unreadable_tab: false,
             missing_tab_readback: false,
             empty_tab_before_navigation: false,
@@ -190,7 +194,9 @@ impl UiSession for Session {
         Some(self.ocr.clone())
     }
     async fn active_app_bundle(&self) -> anyhow::Result<String> {
-        Ok(if self.changed_app {
+        Ok(if self.changed_app
+            || (self.changed_app_after_tap && self.taps.load(Ordering::Relaxed) > 0)
+        {
             "com.other.app"
         } else {
             "com.zhiliaoapp.musically"
@@ -1086,7 +1092,7 @@ async fn lost_sound_selection_read_recovers_editor_without_selecting_again() {
 async fn recovery_refuses_stale_ocr_missing_tabs_and_changed_app() {
     for mode in 0..3 {
         let mut s = Session::new();
-        s.changed_app = mode == 2;
+        s.changed_app_after_tap = mode == 2;
         s.ocr = Arc::new(Ocr {
             bad_binding: mode == 0,
             missing_tab: mode == 1,
@@ -1097,6 +1103,12 @@ async fn recovery_refuses_stale_ocr_missing_tabs_and_changed_app() {
         assert_eq!(s.taps.load(Ordering::Relaxed), 1);
         assert_eq!(s.backs.load(Ordering::Relaxed), 0);
     }
+    // A foreign foreground before the pool proof is refused before any row tap.
+    let mut s = Session::new();
+    s.changed_app = true;
+    assert!(observe_sound_pool(&s, plan(), 5).await.is_err());
+    assert_eq!(s.taps.load(Ordering::Relaxed), 0);
+    assert_eq!(s.backs.load(Ordering::Relaxed), 0);
 }
 #[tokio::test(start_paused = true)]
 async fn recovery_never_accepts_the_wrong_editor_title() {

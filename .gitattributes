@@ -33,3 +33,11 @@ sidecars/android/** -text
 # Keep their hashes stable on Windows clones without renormalizing runtime assets.
 .claude/skills/rust-best-practices/** text eol=lf
 .claude/skills/systematic-debugging/** text eol=lf
+
+# Captured UI trees whose exact bytes (CRLF included) are hashed by tests via include_str!.
+crates/core/fixtures/tiktok-publish/musically-45.7.3-en/current-song-machine22-loading-generation34.xml -text
+crates/core/fixtures/tiktok-publish/musically-45.7.3-en/current-song-machine22-loading-generation35.xml -text
+crates/core/fixtures/tiktok-publish/musically-45.7.3-en/current-song-machine22-loading-generation36.xml -text
+crates/core/fixtures/tiktok-publish/native-final-caption-global45.7.3-en.xml -text
+crates/core/fixtures/tiktok-publish/trill-38.3.2-en/actual-failure-tree-3.xml -text
+crates/core/fixtures/tiktok-publish/trill-38.3.2-en/sound3-postback-editor.xml -text

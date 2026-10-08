@@ -273,7 +273,7 @@ mod tests {
             .optional()
             .unwrap()
             .is_none());
-        assert_eq!(migrated.schema_version().unwrap(), 48);
+        assert_eq!(migrated.schema_version().unwrap(), crate::db::migrations::latest_version());
         assert_eq!(
             migrated
                 .get_setting("fixture.before.binding")
@@ -338,7 +338,7 @@ mod tests {
             .optional()
             .unwrap()
             .is_none());
-        assert_eq!(migrated.schema_version().unwrap(), 48);
+        assert_eq!(migrated.schema_version().unwrap(), crate::db::migrations::latest_version());
         assert_eq!(
             migrated
                 .get_setting("fixture.direct.v43")
@@ -391,7 +391,7 @@ mod tests {
                 .unwrap(),
             "kept"
         );
-        assert_eq!(migrated.schema_version().unwrap(), 48);
+        assert_eq!(migrated.schema_version().unwrap(), crate::db::migrations::latest_version());
         assert_eq!(
             migrated
                 .get_setting("fixture.legacy.v1")
@@ -435,7 +435,7 @@ mod tests {
                 .unwrap(),
             "must survive"
         );
-        assert_eq!(migrated.schema_version().unwrap(), 48);
+        assert_eq!(migrated.schema_version().unwrap(), crate::db::migrations::latest_version());
         drop(backup_connection);
         drop(migrated);
         let _ = std::fs::remove_file(path);
@@ -463,7 +463,7 @@ mod tests {
         }
         barrier.wait();
         for thread in threads {
-            assert_eq!(thread.join().unwrap().unwrap(), 48);
+            assert_eq!(thread.join().unwrap().unwrap(), crate::db::migrations::latest_version());
         }
         let backup = path.with_extension("pre-device-app-v43.db");
         assert_eq!(

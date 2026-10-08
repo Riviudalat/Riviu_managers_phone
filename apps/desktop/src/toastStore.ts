@@ -9,6 +9,7 @@ export interface ToastRecord {
   kind: ToastKind;
   title: string;
   detail?: string;
+  summary?: string;
   createdAt: number;
 }
 
@@ -37,13 +38,14 @@ export function dismissToast(id: number) {
 }
 
 /** Append an entry to the operator-controlled activity history. */
-export function pushToast(kind: ToastKind, title: string, detail?: string): number {
+export function pushToast(kind: ToastKind, title: string, detail?: string, summary?: string): number {
   const id = nextId++;
   const record: ToastRecord = {
     id,
     kind,
     title,
     detail: detail || undefined,
+    summary: summary || undefined,
     createdAt: Date.now(),
   };
   commit([record, ...toasts].slice(0, MAX_RECORDS));

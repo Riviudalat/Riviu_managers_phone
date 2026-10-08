@@ -40,14 +40,14 @@ describe("tileName", () => {
 });
 
 describe("tileNumber", () => {
-  it("uses the operator's number, or the tile's position when unnumbered", () => {
+  it("uses committed numbers and marks unassigned devices pending", () => {
     expect(tileNumber(7, meta("a", { number: 21 }))).toBe(21);
-    expect(tileNumber(7, meta("a"))).toBe(7);
-    expect(tileNumber(7, undefined)).toBe(7);
+    expect(tileNumber(7, meta("a"))).toBe(0);
+    expect(tileNumber(7, undefined)).toBe(0);
   });
 
   it("does not mistake a null number for a missing record", () => {
-    expect(tileNumber(4, meta("a", { number: null }))).toBe(4);
+    expect(tileNumber(4, meta("a", { number: null }))).toBe(0);
   });
 });
 

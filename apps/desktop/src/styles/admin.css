@@ -653,6 +653,36 @@
   overflow: auto;
 }
 
+/* "Cài đặt máy": one checkbox row per baseline setting, then a per-phone status table. */
+.device-settings-catalogue {
+  display: grid;
+  gap: 10px;
+}
+
+.device-settings-item span {
+  display: grid;
+  gap: 2px;
+  min-width: 0;
+}
+
+.device-settings-workspace .form-section-body {
+  max-width: 100%;
+  overflow-x: auto;
+}
+
+.device-settings-table {
+  width: 100%;
+  border-collapse: collapse;
+}
+
+.device-settings-table th,
+.device-settings-table td {
+  padding: 6px 8px;
+  border-bottom: 1px solid var(--line);
+  text-align: left;
+  vertical-align: top;
+}
+
 @media (max-width: 1024px) {
   .admin-split,
   .settings-page {

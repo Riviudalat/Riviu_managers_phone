@@ -19,6 +19,7 @@
 //! is already the shape of `UiSession` — `find_and_tap`, `assert_visible` and
 //! `read_text` are all targeted queries.
 
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -283,6 +284,18 @@ impl Rect {
 /// Matched as a substring because the message carries a varying millisecond count.
 const STALE_TREE_MARKER: &str = "waiting for the root AccessibilityNodeInfo";
 
+fn stale_geometry_error(error: &anyhow::Error) -> bool {
+    let message = error.to_string();
+    [
+        "does not exist in DOM anymore",
+        "do not exist in DOM anymore",
+        "is not linked to the same object in DOM anymore",
+        "is not present in the cache or has expired",
+    ]
+    .iter()
+    .any(|marker| message.contains(marker))
+}
+
 fn observation_deadline_error() -> anyhow::Error {
     riviu_core::driver::UiError::new(
         riviu_core::driver::UiErrorKind::Timeout,
@@ -361,7 +374,19 @@ pub struct AgentClient {
     /// Shared and swappable, so recycling a degraded session fixes **every** clone —
     /// including the `AndroidUiSession` already handed to a running loop.
     session_id: Arc<Mutex<String>>,
+    /// Live [`riviu_core::driver::ReadSessionPin`]s. Shared like `session_id`, because a
+    /// replacement through any clone changes the epoch every pinned owner is bound to.
+    read_pins: Arc<AtomicUsize>,
     observation_mode: AndroidObservationMode,
+}
+
+/// One pinned read owner; see [`AgentClient::pin_reads`].
+pub(crate) struct AgentReadPin(Arc<AtomicUsize>);
+
+impl Drop for AgentReadPin {
+    fn drop(&mut self) {
+        self.0.fetch_sub(1, Ordering::SeqCst);
+    }
 }
 
 impl AgentClient {
@@ -423,6 +448,7 @@ impl AgentClient {
             base,
             serial: serial.into(),
             session_id: Arc::new(Mutex::new(session_id)),
+            read_pins: Arc::default(),
             observation_mode,
         };
         client.prime_session().await?;
@@ -549,6 +575,16 @@ impl AgentClient {
         self.session_id.lock().clone()
     }
 
+    /// Keep this session for an epoch-bound read owner until the pin is dropped.
+    pub(crate) fn pin_reads(&self) -> AgentReadPin {
+        self.read_pins.fetch_add(1, Ordering::SeqCst);
+        AgentReadPin(Arc::clone(&self.read_pins))
+    }
+
+    fn reads_pinned(&self) -> bool {
+        self.read_pins.load(Ordering::SeqCst) > 0
+    }
+
     pub fn observation_mode(&self) -> AndroidObservationMode {
         self.observation_mode
     }
@@ -588,7 +624,12 @@ impl AgentClient {
             .observation_request(method.clone(), suffix, body.clone(), deadline)
             .await
         {
-            Err(error) if allow_recovery && error.to_string().contains(STALE_TREE_MARKER) => {
+            // A pinned owner reads as if without recovery: its session must outlive the read.
+            Err(error)
+                if allow_recovery
+                    && !self.reads_pinned()
+                    && error.to_string().contains(STALE_TREE_MARKER) =>
+            {
                 // This never touches instrumentation or repeats an input route. The
                 // changed session identity invalidates any observation/action target
                 // bound before recovery, even if the reread succeeds.
@@ -757,6 +798,18 @@ impl AgentClient {
                 if stale_tree_retry_is_safe(&method, suffix)
                     && error.to_string().contains(STALE_TREE_MARKER) =>
             {
+                if self.reads_pinned() {
+                    // A pinned owner is bound to this session; a replacement would end its
+                    // phase. On an animated screen the fresh session meets the same root
+                    // wait anyway (Global 45.7.3 sound sheet, 2026-10-08), so stay unknown.
+                    tracing::warn!(serial = %self.serial, route = suffix,
+                        "kept a pinned agent session; accessibility root unreadable");
+                    return Err(anyhow::Error::new(
+                        riviu_core::driver::AccessibilityReadUnavailable {
+                            message: error.to_string(),
+                        },
+                    ));
+                }
                 // One retry, on one specific server message and only for an allowlisted read.
                 // Effectful routes propagate the first error because the device may have acted.
                 self.recreate_session().await?;
@@ -943,17 +996,60 @@ impl AgentClient {
                 Ok(rect) => return Ok(Some((id, rect))),
                 Err(error)
                     if attempt == 0
-                        && [
-                            "does not exist in DOM anymore",
-                            "is not linked to the same object in DOM anymore",
-                            "is not present in the cache or has expired",
-                        ]
-                        .iter()
-                        .any(|message| error.to_string().contains(message)) => {}
+                        && stale_geometry_error(&error) => {}
                 Err(error) => return Err(error),
             }
         }
         unreachable!("second geometry attempt returns")
+    }
+
+    /// Re-resolve the whole locator once after explicit stale-cache geometry.
+    /// Partial rectangles and observations from a replaced session are unusable.
+    pub(crate) async fn find_all_with_rect(&self, locator: &Locator) -> anyhow::Result<Vec<Rect>> {
+        let epoch = self.session_identity();
+        let check_epoch = || -> anyhow::Result<()> {
+            if self.session_identity() != epoch {
+                return Err(riviu_core::driver::UiError::new(
+                    riviu_core::driver::UiErrorKind::Session,
+                    "observe",
+                    "bulk geometry observation session changed",
+                ).into());
+            }
+            Ok(())
+        };
+        let mut stale = None;
+        for attempt in 0..2 {
+            check_epoch()?;
+            let ids = self.find_all(locator).await?;
+            check_epoch()?;
+            if ids.is_empty() {
+                // An empty requery cannot prove the previously stale observation absent.
+                if let Some(error) = stale { return Err(error); }
+                return Ok(Vec::new());
+            }
+            let mut found = Vec::with_capacity(ids.len());
+            let mut retry = None;
+            for id in ids {
+                check_epoch()?;
+                let geometry = self.rect(&id).await;
+                check_epoch()?;
+                match geometry {
+                    Ok(rect) => found.push(rect),
+                    Err(error) if attempt == 0 && stale_geometry_error(&error) => {
+                        retry = Some(error);
+                        break;
+                    }
+                    Err(error) => return Err(error),
+                }
+            }
+            if let Some(error) = retry {
+                // Drop every collected rectangle; repeat the locator, never the UUID.
+                stale = Some(error);
+                continue;
+            }
+            return Ok(found);
+        }
+        unreachable!("second bulk geometry attempt returns")
     }
 
     pub async fn rect(&self, element: &str) -> anyhow::Result<Rect> {
@@ -1298,6 +1394,99 @@ fn element_id_from(element: &Value) -> Option<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    // The real bulk UiSession boundary owns completeness; single-result recovery cannot prove it.
+    #[tokio::test]
+    async fn bulk_stale_geometry_requeries_complete_locator_once_without_effects() {
+        use riviu_core::{ElementQuery, driver::UiSession};
+        use tokio::{io::{AsyncReadExt, AsyncWriteExt}, net::TcpListener};
+        const STALE: &str = "Cached elements 'By.AndroidUiAutomator: new UiSelector().resourceIdMatches(\".*:id/dou\")' do not exist in DOM anymore";
+        for case in ["recovered", "persistent", "unrelated", "empty", "epoch", "deadline"] {
+            let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+            let base = format!("http://{}", listener.local_addr().unwrap());
+            let routes = Arc::new(Mutex::new(Vec::<(String, String)>::new()));
+            let calls = routes.clone();
+            let identity = Arc::new(Mutex::new("fixed".to_string()));
+            let server_identity = identity.clone();
+            let error = json!({"value":{"error":"stale element reference","message":if case == "unrelated" {"permission denied"} else {STALE}}}).to_string();
+            let server = tokio::spawn(async move {
+                let replies = vec![
+                    ("200 OK", json!({"value":[{"ELEMENT":"old-first"},{"ELEMENT":"old-stale"}]}).to_string()),
+                    ("200 OK", json!({"value":{"x":1,"y":2,"width":3,"height":4}}).to_string()),
+                    ("404 Not Found", error.clone()),
+                    ("200 OK", if case == "empty" {json!({"value":[]}).to_string()} else {json!({"value":[{"ELEMENT":"fresh"}]}).to_string()}),
+                    (if case == "persistent" {"404 Not Found"} else {"200 OK"},
+                     if case == "persistent" {error} else {json!({"value":{"x":71,"y":83,"width":42,"height":24}}).to_string()}),
+                ];
+                for (index, (status, body)) in replies.into_iter().enumerate() {
+                    let (mut socket, _) = listener.accept().await.unwrap();
+                    let mut bytes = Vec::new();
+                    loop {
+                        let mut chunk = [0; 8192];
+                        let n = socket.read(&mut chunk).await.unwrap();
+                        if n == 0 { break; }
+                        bytes.extend_from_slice(&chunk[..n]);
+                        if let Some(end) = bytes.windows(4).position(|w| w == b"\r\n\r\n") {
+                            let header = String::from_utf8_lossy(&bytes[..end]);
+                            let length: usize = header.lines().find_map(|line| line.to_ascii_lowercase().strip_prefix("content-length:").map(|v| v.trim().parse().unwrap())).unwrap_or(0);
+                            if bytes.len() >= end + 4 + length { break; }
+                        }
+                    }
+                    let request = String::from_utf8(bytes).unwrap();
+                    let (header, payload) = request.split_once("\r\n\r\n").unwrap();
+                    calls.lock().push((header.lines().next().unwrap().to_string(), payload.to_string()));
+                    if case == "epoch" && index == 2 { *server_identity.lock() = "replaced".into(); }
+                    if case == "deadline" && index == 4 {
+                        std::future::pending::<()>().await;
+                    }
+                    socket.write_all(format!("HTTP/1.1 {status}\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}", body.len()).as_bytes()).await.unwrap();
+                }
+            });
+            let client = AgentClient {
+                http: reqwest::Client::builder().timeout(Duration::from_secs(2)).build().unwrap(),
+                base, serial: "bulk-fixture".into(), session_id: identity.clone(),
+                read_pins: Arc::default(),
+                observation_mode: AndroidObservationMode::Legacy,
+            };
+            let session = crate::session::AndroidUiSession::new(
+                client, crate::adb::AdbProgram::at("no-adb-bulk-fixture".into()),
+                "bulk-fixture".into(), (1080.0, 2220.0),
+            );
+            let result = tokio::time::timeout(
+                Duration::from_millis(500),
+                session.locate_all(ElementQuery::ResourceIdSuffix(":id/dou")),
+            ).await;
+            server.abort();
+            let _ = server.await;
+            let calls = routes.lock().clone();
+            let expected = match case { "unrelated" | "epoch" => 3, "empty" => 4, _ => 5 };
+            match case {
+                "recovered" => {
+                    let found = result.unwrap().expect("whole locator must recover the actual plural stale cache error");
+                    assert_eq!(found.len(), 1, "discard the previously collected rectangle");
+                    assert_eq!((found[0].x, found[0].y), (71.0, 83.0));
+                }
+                "deadline" => assert!(result.is_err(), "the enclosing read deadline must cancel requery geometry"),
+                _ => {
+                    let error = result.unwrap().expect_err("stale/empty/non-stale/epoch failures are not absent or partial success");
+                    if case == "persistent" { assert!(error.to_string().contains(STALE)); }
+                    if case == "unrelated" { assert!(error.to_string().contains("permission denied")); }
+                    if case == "epoch" { assert_eq!(riviu_core::driver::ui_error_kind(&error), riviu_core::driver::UiErrorKind::Session); }
+                }
+            }
+            assert_eq!(calls.len(), expected, "{case}: bounded reads only");
+            let paths: Vec<_> = calls.iter().map(|(route, _)| route.as_str()).collect();
+            assert_eq!(&paths[..3], ["POST /session/fixed/elements HTTP/1.1", "GET /session/fixed/element/old-first/rect HTTP/1.1", "GET /session/fixed/element/old-stale/rect HTTP/1.1"]);
+            if calls.len() >= 4 {
+                assert_eq!(paths[3], "POST /session/fixed/elements HTTP/1.1");
+                assert_eq!(calls[0].1, calls[3].1, "re-resolve the SAME locator, never a UUID");
+                let locator: Value = serde_json::from_str(&calls[3].1).unwrap();
+                assert_eq!(locator["selector"], "new UiSelector().resourceIdMatches(\".*:id/dou\")");
+            }
+            if calls.len() == 5 { assert_eq!(paths[4], "GET /session/fixed/element/fresh/rect HTTP/1.1"); }
+            assert_eq!(&*identity.lock(), if case == "epoch" {"replaced"} else {"fixed"});
+        }
+    }
+
 
     #[tokio::test]
     async fn stale_geometry_requeries_node_once_without_recreating_session_or_tapping() {
@@ -1341,6 +1530,7 @@ mod tests {
             base,
             serial: "fixture".into(),
             session_id: Arc::new(Mutex::new("fixed".into())),
+            read_pins: Arc::default(),
             observation_mode: AndroidObservationMode::Legacy,
         };
         let (id, rect) = client
@@ -1413,6 +1603,7 @@ mod tests {
             base,
             serial: "fixture".into(),
             session_id: Arc::new(Mutex::new("fixed".into())),
+            read_pins: Arc::default(),
             observation_mode: AndroidObservationMode::Legacy,
         };
         let result = client.find_with_rect(&Locator::Text("Next".into())).await;
@@ -1549,6 +1740,7 @@ mod tests {
             base,
             serial: "fixture-device".into(),
             session_id: Arc::new(Mutex::new("fixture".into())),
+            read_pins: Arc::default(),
             observation_mode: AndroidObservationMode::Legacy,
         };
         (client, routes, server)
@@ -1737,6 +1929,7 @@ mod tests {
             base,
             serial: "fixture-device".into(),
             session_id: Arc::new(Mutex::new("old".into())),
+            read_pins: Arc::default(),
             observation_mode: AndroidObservationMode::Legacy,
         };
         (client, routes, server)
@@ -1805,6 +1998,136 @@ mod tests {
             vec!["GET /session/old/source HTTP/1.1"],
             "a resumed wait may not spend a second session repair"
         );
+    }
+
+    /// Serve `script` in order to the session named "old"; unscripted requests get a 500.
+    async fn scripted_agent_fixture(
+        script: Vec<(&'static str, Value)>,
+    ) -> (
+        AgentClient,
+        Arc<Mutex<Vec<String>>>,
+        tokio::task::JoinHandle<()>,
+    ) {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        use tokio::net::TcpListener;
+
+        let listener = TcpListener::bind(("127.0.0.1", 0)).await.unwrap();
+        let base = format!("http://{}", listener.local_addr().unwrap());
+        let routes = Arc::new(Mutex::new(Vec::new()));
+        let observed = Arc::clone(&routes);
+        let server = tokio::spawn(async move {
+            let mut script = script.into_iter();
+            loop {
+                let (mut socket, _) = listener.accept().await.unwrap();
+                let mut request = Vec::new();
+                let header_end = loop {
+                    let mut buffer = [0_u8; 2048];
+                    let read = socket.read(&mut buffer).await.unwrap();
+                    assert!(read > 0, "fixture request ended before its headers");
+                    request.extend_from_slice(&buffer[..read]);
+                    if let Some(end) = request.windows(4).position(|p| p == b"\r\n\r\n") {
+                        break end + 4;
+                    }
+                };
+                let headers = String::from_utf8_lossy(&request[..header_end]).into_owned();
+                let content_length = headers
+                    .lines()
+                    .find_map(|line| {
+                        line.to_ascii_lowercase()
+                            .strip_prefix("content-length:")
+                            .map(str::trim)
+                            .and_then(|v| v.parse::<usize>().ok())
+                    })
+                    .unwrap_or(0);
+                while request.len() < header_end + content_length {
+                    let mut buffer = [0_u8; 2048];
+                    let read = socket.read(&mut buffer).await.unwrap();
+                    assert!(read > 0, "fixture request ended before its body");
+                    request.extend_from_slice(&buffer[..read]);
+                }
+                observed
+                    .lock()
+                    .push(headers.lines().next().unwrap().to_string());
+                let (status, body) = script.next().unwrap_or((
+                    "500 Internal Server Error",
+                    json!({"value":{"message":"unscripted fixture request"}}),
+                ));
+                let body = body.to_string();
+                let response = format!("HTTP/1.1 {status}\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}", body.len());
+                socket.write_all(response.as_bytes()).await.unwrap();
+                socket.shutdown().await.unwrap();
+            }
+        });
+        let client = AgentClient {
+            http: reqwest::Client::builder()
+                .timeout(Duration::from_secs(2))
+                .build()
+                .unwrap(),
+            base,
+            serial: "fixture-device".into(),
+            session_id: Arc::new(Mutex::new("old".into())),
+            read_pins: Arc::default(),
+            observation_mode: AndroidObservationMode::Legacy,
+        };
+        (client, routes, server)
+    }
+
+    async fn read_pinned_fixture(client: &AgentClient, bounded: bool) -> anyhow::Result<String> {
+        if bounded {
+            let read = client
+                .observation_read(None, std::time::Instant::now() + Duration::from_secs(2))
+                .await?;
+            anyhow::ensure!(
+                read.repaired_session.is_none(),
+                "pinned read repaired its session"
+            );
+            Ok(read.value["value"].as_str().unwrap_or_default().to_owned())
+        } else {
+            client.source().await
+        }
+    }
+
+    /// Global 45.7.3 sound sheet, controller log 2026-10-08 04:40:35–04:41:01 (#29/#30): the
+    /// replacement session hit the same root wait, and the replacement alone ended the
+    /// epoch-bound sound read. A pinned owner keeps its session and observes the root again.
+    #[tokio::test]
+    async fn pinned_root_timeout_keeps_the_session_and_observes_again() {
+        let root_timeout = json!({"value":{"message":format!(
+            "Timed out after 10504ms {STALE_TREE_MARKER} in the active window"
+        )}});
+        for bounded in [false, true] {
+            let (client, routes, server) = scripted_agent_fixture(vec![
+                ("500 Internal Server Error", root_timeout.clone()),
+                ("200 OK", json!({"value":"<hierarchy/>"})),
+            ])
+            .await;
+            let pin = client.pin_reads();
+            let first = read_pinned_fixture(&client, bounded).await;
+            let second = read_pinned_fixture(&client, bounded).await;
+            drop(pin);
+            server.abort();
+            let _ = server.await;
+            assert_eq!(
+                *routes.lock(),
+                vec!["GET /session/old/source HTTP/1.1"; 2],
+                "bounded={bounded}: a pinned read may not replace the agent session"
+            );
+            assert_eq!(client.session_identity(), "old");
+            let first = first.expect_err("an unreadable root is not hierarchy evidence");
+            assert!(
+                matches!(
+                    riviu_core::driver::classify_read_failure(&first),
+                    riviu_core::driver::ReadFailureKind::Transient
+                        | riviu_core::driver::ReadFailureKind::Unavailable
+                ),
+                "bounded={bounded}: the root timeout must stay an unknown read: {first:#}"
+            );
+            assert_eq!(second.unwrap(), "<hierarchy/>");
+            assert!(
+                !client.reads_pinned(),
+                "dropping the pin restores read recovery"
+            );
+        }
     }
 
     #[tokio::test]
@@ -1891,6 +2214,7 @@ mod tests {
             base,
             serial: "fixture-device".to_owned(),
             session_id: Arc::new(Mutex::new("fixture-session".to_owned())),
+            read_pins: Arc::default(),
             observation_mode: AndroidObservationMode::Legacy,
         };
 

@@ -132,7 +132,9 @@ fn legacy_empty_recipient_picker(tree: &riviu_core::ui_automation::tree::Tree) -
     })
 }
 
-pub(super) fn requested(assignment: &PublishAssignmentRecord, package: &str) -> bool {
+/// A submitted Android TikTok receipt without a verified link: the only receipt a
+/// verifier restart can serve. It proves the Post boundary, not a finished upload.
+pub(super) fn submitted_receipt(assignment: &PublishAssignmentRecord, package: &str) -> bool {
     if !matches!(
         package,
         "com.zhiliaoapp.musically" | "com.ss.android.ugc.trill"
@@ -161,6 +163,17 @@ pub(super) fn requested(assignment: &PublishAssignmentRecord, package: &str) -> 
     matches!(post["state"].as_str(), Some("submitted" | "posted"))
         && post["publicationVerified"] != true
         && post["postUrl"].as_str().is_none_or(str::is_empty)
+}
+
+/// Campaign 1fc0b331 #21 (2026-10-08): the first pass stopped Global TikTok 23 s after
+/// Post while its upload could still run, and two posts followed. Stop is requested only
+/// after an earlier observation proved this intent's post exists (`publish_upload_settled`).
+pub(super) fn requested(assignment: &PublishAssignmentRecord, package: &str) -> bool {
+    submitted_receipt(assignment, package)
+        && riviu_core::db::publish_upload_settled(
+            assignment.effect_intent.as_deref(),
+            assignment.evidence_json.as_deref(),
+        )
 }
 
 pub(super) fn processing_restart_requested(
@@ -660,19 +673,20 @@ fn global_warm_surface(tree: &riviu_core::ui_automation::tree::Tree) -> Option<&
         .then_some("ownPostViewer")
 }
 
-/// Read-only admission, not proof that either pending publication succeeded.
-pub(super) async fn admit_warm(
+/// Two fresh same-epoch reads of one measured TikTok surface with no composer,
+/// upload, processing or progress. Admission only, never publication proof.
+async fn measured_surface(
     session: &dyn riviu_core::UiSession,
     package: &str,
     locale: &str,
     version: &str,
     account: &str,
-) -> anyhow::Result<serde_json::Value> {
+) -> anyhow::Result<&'static str> {
     anyhow::ensure!(
         matches!((package, locale, version),
             ("com.ss.android.ugc.trill", "en", "38.3.2")
                 | ("com.zhiliaoapp.musically", "en", "45.7.3")),
-        "shared-debt warm surface not measured for this build"
+        "warm surface not measured for this build"
     );
     let epoch = session.gui_session_epoch();
     anyhow::ensure!(!epoch.is_empty(), "warm session epoch missing");
@@ -706,8 +720,42 @@ pub(super) async fn admit_warm(
         "foreground changed; keep unchanged"
     );
     anyhow::ensure!(session.gui_session_epoch() == epoch, "warm session changed");
+    previous
+        .map(|(_, surface)| surface)
+        .ok_or_else(|| anyhow::anyhow!("warm surface missing"))
+}
+
+/// Read-only admission, not proof that either pending publication succeeded.
+pub(super) async fn admit_warm(
+    session: &dyn riviu_core::UiSession,
+    package: &str,
+    locale: &str,
+    version: &str,
+    account: &str,
+) -> anyhow::Result<serde_json::Value> {
+    let surface = measured_surface(session, package, locale, version, account).await?;
     Ok(
-        serde_json::json!({"state":"keptRunning","reason":"sharedPublicationDebt","surface":previous.map(|(_, s)| s),"package":package}),
+        serde_json::json!({"state":"keptRunning","reason":"sharedPublicationDebt","surface":surface,"package":package}),
+    )
+}
+
+/// Read-only admission for a destructive restart: the settled receipt (`requested`)
+/// plus the measured upload-free surface. Any refusal keeps TikTok running.
+pub(super) async fn admit_restart(
+    session: &dyn riviu_core::UiSession,
+    assignment: &PublishAssignmentRecord,
+    package: &str,
+    locale: &str,
+    version: &str,
+    account: &str,
+) -> anyhow::Result<serde_json::Value> {
+    anyhow::ensure!(
+        requested(assignment, package),
+        "upload not proven settled; keep TikTok running"
+    );
+    let surface = measured_surface(session, package, locale, version, account).await?;
+    Ok(
+        serde_json::json!({"state":"admitted","reason":"uploadSettled","surface":surface,"package":package}),
     )
 }
 

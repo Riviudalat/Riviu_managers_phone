@@ -537,6 +537,10 @@ pub fn run() {
             commands::power_off_device,
             commands::open_system_settings,
             commands::wake_screen,
+            commands::device_baseline_read,
+            commands::device_baseline_apply,
+            commands::device_baseline_get_config,
+            commands::device_baseline_save_config,
             commands::screenshot_to_device,
             commands::set_input_method,
             commands::launch_device_app,
@@ -583,6 +587,9 @@ pub fn run() {
             commands::update_install,
             farm_commands::get_device_meta,
             farm_commands::list_device_metas,
+            farm_commands::ensure_device_numbers,
+            farm_commands::export_device_metadata,
+            farm_commands::import_device_metadata,
             farm_commands::save_device_meta,
             farm_commands::save_device_handle,
             farm_commands::preview_account_reconciliation,
@@ -602,6 +609,9 @@ pub fn run() {
             farm_commands::install_library_app,
             farm_commands::install_library_app_to_group,
             farm_commands::install_library_app_batch,
+            farm_commands::app_removal::uninstall_library_app,
+            farm_commands::app_removal::uninstall_library_app_to_group,
+            farm_commands::app_removal::uninstall_library_app_batch,
             farm_commands::cancel_app_install_batch,
             farm_commands::list_schedules,
             farm_commands::save_schedule,
@@ -1295,6 +1305,10 @@ mod tests {
         ("commands/system.rs", include_str!("commands/system.rs")),
         ("commands/view.rs", include_str!("commands/view.rs")),
         ("farm_commands.rs", include_str!("farm_commands.rs")),
+        (
+            "farm_commands/app_removal.rs",
+            include_str!("farm_commands/app_removal.rs"),
+        ),
         ("flow_commands.rs", include_str!("flow_commands.rs")),
         (
             "inspector_commands.rs",
@@ -1373,6 +1387,11 @@ mod tests {
             "public_cleanup_commands.rs",
             include_str!("public_cleanup_commands.rs"),
         ),
+        ("no_public.rs", include_str!("no_public.rs")),
+        ("no_public_inspect.rs", include_str!("no_public_inspect.rs")),
+        ("no_public_interaction.rs", include_str!("no_public_interaction.rs")),
+        ("no_public_publish_commands.rs", include_str!("no_public_publish_commands.rs")),
+        ("agent_quarantine_commands.rs", include_str!("agent_quarantine_commands.rs")),
     ];
 
     /// Commands that may skip `ensure_accepting_work()`, each with the reason it may.
@@ -1382,6 +1401,18 @@ mod tests {
     /// down. That is the inversion — see the test below for why the previous shape could not
     /// work.
     const ADMISSION_EXEMPT: &[(&str, &str)] = &[
+        ("no_public_reconcile_setup", "no-public diagnostic: binds ensure_accepting_work() inside its scoped block, after the rehearsal scope checks and before any device lease"),
+        ("no_public_prepare_interaction", "no-public diagnostic: binds ensure_accepting_work() inside its scoped block, after the rehearsal scope checks and before any device lease"),
+        ("no_public_prepare_publish", "no-public diagnostic: binds ensure_accepting_work() inside its scoped block, after the rehearsal scope checks and before any device lease"),
+        ("no_public_status", "no-public diagnostic: reads the pinned rehearsal scope and roster only"),
+        ("no_public_shutdown", "no-public diagnostic: drives its own cleanup and exit, so it must run while admission closes"),
+        ("no_public_metadata", "no-public diagnostic: reads the installed TikTok build; no input or execution"),
+        ("no_public_run_status", "no-public diagnostic: reads an in-memory rehearsal run status"),
+        ("no_public_cancel", "no-public diagnostic: cancel must stay available while admission closes"),
+        ("agent_quarantine_snapshot", "cleanup maintenance: holds ensure_cleanup_maintenance, which stays open during shutdown"),
+        ("agent_quarantine_prepare", "cleanup maintenance: holds ensure_cleanup_maintenance, which stays open during shutdown"),
+        ("agent_quarantine_execute", "cleanup maintenance: holds ensure_cleanup_maintenance, which stays open during shutdown"),
+        ("agent_quarantine_receipt", "read-only receipt lookup that remains available after work admission closes"),
         ("publish_start_status", "reads durable start receipt; no device or execution changes"),
         ("gui_service_status", "reads perception configuration and process status; no device or configuration changes"),
         // Reads. They answer from the DB, from memory, or from a frame already captured, and
@@ -1426,6 +1457,7 @@ mod tests {
         ("update_check", "read: asks GitHub, touches no device"),
         ("get_device_meta", "read: DB"),
         ("list_device_metas", "read: DB"),
+        ("export_device_metadata", "read: transactional metadata snapshot; no device IO"),
         ("list_groups", "read: DB"),
         ("list_materials", "read: DB"),
         ("list_apps_library", "read: DB"),
@@ -1532,6 +1564,7 @@ mod tests {
     /// memory. Anything that touches a device, the database or the filesystem belongs in the
     /// other list.
     const INFALLIBLE_COMMANDS: &[(&str, &str)] = &[
+        ("no_public_run_status", "reads an in-memory rehearsal run status; absence is None, there is no failure to report"),
         ("agent_get_settings", "returns settings held in memory"),
         ("agent_list_statuses", "returns the cached status map"),
         ("android_tool_problems", "returns a stored Vec<String>"),
@@ -1816,6 +1849,11 @@ mod tests {
             "read-only: one `ls -la`, changes nothing",
         ),
         (
+            "device_baseline_read",
+            "read-only: `dumpsys`/`settings get`, and `locksettings get-disabled` only on a \
+             phone proven to have no lock credential; writes nothing",
+        ),
+        (
             "device_pull_path",
             "reads the phone and writes this host. Leasing it would block a running session \
              for up to the 300 s transfer timeout, which is worse than the interleaving it \
@@ -1842,6 +1880,15 @@ mod tests {
     /// commands were unreachable from `api.ts`, including the two that fix a fleet-wide iOS
     /// outage the app already detects.
     const UNREACHABLE_EXEMPT: &[(&str, &str)] = &[
+        ("no_public_status", "no-public diagnostic mode (StartupPolicy::rehearsal) is driven by the acceptance scripts over CDP, never by the operator UI"),
+        ("no_public_metadata", "no-public diagnostic mode (StartupPolicy::rehearsal) is driven by the acceptance scripts over CDP, never by the operator UI"),
+        ("no_public_shutdown", "no-public diagnostic mode (StartupPolicy::rehearsal) is driven by the acceptance scripts over CDP, never by the operator UI"),
+        ("no_public_reconcile_setup", "no-public diagnostic mode (StartupPolicy::rehearsal) is driven by the acceptance scripts over CDP, never by the operator UI"),
+        ("no_public_inspect", "no-public diagnostic mode (StartupPolicy::rehearsal) is driven by the acceptance scripts over CDP, never by the operator UI"),
+        ("no_public_run_status", "no-public diagnostic mode (StartupPolicy::rehearsal) is driven by the acceptance scripts over CDP, never by the operator UI"),
+        ("no_public_cancel", "no-public diagnostic mode (StartupPolicy::rehearsal) is driven by the acceptance scripts over CDP, never by the operator UI"),
+        ("no_public_prepare_interaction", "no-public diagnostic mode (StartupPolicy::rehearsal) is driven by the acceptance scripts over CDP, never by the operator UI"),
+        ("no_public_prepare_publish", "no-public diagnostic mode (StartupPolicy::rehearsal) is driven by the acceptance scripts over CDP, never by the operator UI"),
         (
             "resign_wda",
             "iOS, deliberately not wired this pass. The cost is written down: WDA signing \

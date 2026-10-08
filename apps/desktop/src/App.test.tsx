@@ -62,6 +62,7 @@ vi.mock("./api", () => ({
   // was meant to make this failure cost only the labels — and the whole boot reported an
   // error instead. Three banner tests failed with nothing in them changed.
   listDeviceMetas: vi.fn(async () => []),
+  ensureDeviceNumbers: vi.fn(async () => []),
   getDeviceMeta: vi.fn(async (udid: string) => ({ udid, notes: "", tags: [] })),
   saveDeviceMeta: vi.fn(async () => undefined),
   patchDeviceMeta: vi.fn(async () => undefined),
@@ -167,9 +168,21 @@ afterEach(() => {
   resetToasts();
 });
 
-beforeEach(() => {
+beforeEach(async () => {
   vi.clearAllMocks();
+  const api = await import("./api");
+  // Persisted fixture identity is independent of the filtered/connected roster.
+  vi.mocked(api.listDeviceMetas).mockResolvedValue([
+    { udid: androidPhone.udid, number: 1, notes: "", tags: [] },
+    { udid: iphone.udid, number: 2, notes: "", tags: [] },
+  ]);
 });
+
+async function openActivityDetails() {
+  const details = await screen.findByRole("button", { name: "Chi tiết" });
+  fireEvent.click(details);
+  return screen.getByRole("dialog", { name: "Hoạt động" });
+}
 
 // The sidebar is a known visible subtree. Scoped accessible queries avoid walking
 // every mounted workspace and recomputing jsdom CSS for unrelated controls.
@@ -389,7 +402,8 @@ describe("device operational identity", () => {
       await userEvent.click(screen.getByRole("button", { name: "Sửa Riviu Agent" }));
       await clickConfirmation("Sửa agent");
       expect(await screen.findByText("Agent: 0 sẵn sàng, 1 cần xử lý")).toBeVisible();
-      expect(screen.getByText(/Máy 8.*Máy từ xa.*Chưa điều khiển được thiết bị: lỗi sửa fixture/)).toBeVisible();
+      const activity = await openActivityDetails();
+      expect(within(activity).getByText(/Máy 8.*Máy từ xa.*Chưa điều khiển được thiết bị: lỗi sửa fixture/)).toBeVisible();
       expect(screen.queryByText("Agent: 1 sẵn sàng, 0 cần xử lý")).toBeNull();
       expect(api.agentBulkRepair).toHaveBeenCalledExactlyOnceWith([androidPhone.udid]);
       expect(api.agentHelperMaintenancePrepare).not.toHaveBeenCalled();
@@ -558,6 +572,11 @@ describe("device operational identity", () => {
       name: "Kệ cuối",
     };
     vi.mocked(api.listDevices).mockResolvedValue([androidPhone, warningPhone, busyPhone]);
+    vi.mocked(api.listDeviceMetas).mockResolvedValue([
+      { udid: androidPhone.udid, number: 1, notes: "", tags: [] },
+      { udid: warningPhone.udid, number: 2, notes: "", tags: [] },
+      { udid: busyPhone.udid, number: 3, notes: "", tags: [] },
+    ]);
     vi.mocked(api.listDeviceWorkStates).mockResolvedValue([
       { udid: busyPhone.udid, currentOwner: "nurture" },
     ]);
@@ -710,7 +729,9 @@ describe("a per-phone panel whose phone leaves the fleet", () => {
       expect(screen.queryByRole("dialog", { name: dialog })).toBeNull(),
     );
     // 2. and it says which phone, and what it closed — silence is what made this a bug report
-    expect(await screen.findByText(new RegExp(`Redmi.*${label}`))).toBeInTheDocument();
+    const activity = await openActivityDetails();
+    expect(within(activity).getByText(new RegExp(`Redmi.*${label}`))).toBeInTheDocument();
+    fireEvent.click(within(activity).getByRole("button", { name: "Đóng trung tâm hoạt động" }));
 
     // 3. and the row works again when the phone comes back
     await rosterBecomes([androidPhone, other]);
@@ -1157,7 +1178,8 @@ describe("buttons that used to fail in silence", () => {
     await userEvent.click(screen.getByTitle("Quét lại thiết bị"));
 
     expect(await screen.findByText("Không làm mới được danh sách máy")).toBeInTheDocument();
-    expect(await screen.findByText("adb server is not running")).toBeInTheDocument();
+    const activity = await openActivityDetails();
+    expect(within(activity).getByText("adb server is not running")).toBeInTheDocument();
   });
 
   it("reports the phones that did not start, and does not call a partial start a success", async () => {
@@ -1195,7 +1217,8 @@ describe("buttons that used to fail in silence", () => {
     await userEvent.click(await screen.findByRole("button", { name: "Thử lại" }));
 
     expect(await screen.findByText("Không mở lại được Redmi")).toBeInTheDocument();
-    expect(await screen.findByText("scrcpy server refused")).toBeInTheDocument();
+    const activity = await openActivityDetails();
+    expect(within(activity).getByText("scrcpy server refused")).toBeInTheDocument();
   });
 });
 

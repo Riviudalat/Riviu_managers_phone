@@ -179,6 +179,7 @@ pub async fn agent_helper_maintenance_execute(
     plan: HelperMaintenancePlan,
     confirmed: bool,
     reconcile_only: Option<bool>,
+    qualify_replacement: Option<bool>,
 ) -> Result<HelperMaintenanceReceipt, CommandError> {
     let _admission = state.ensure_accepting_work()?;
     if !confirmed {
@@ -188,7 +189,24 @@ pub async fn agent_helper_maintenance_execute(
     let context = state.control
         .try_acquire_exclusive(&plan.udid, DeviceWorkOwner::Repair)
         .await?;
-    execute_helper_maintenance_admitted(&state.control, &state.db, &context, plan, confirmed, reconcile_only).await
+    let receipt = execute_helper_maintenance_admitted(
+        &state.control, &state.db, &context, plan, confirmed, reconcile_only,
+    ).await?;
+    if qualify_replacement.unwrap_or(false) {
+        // Settlement is already durable. Qualification cannot undo its receipt or
+        // authorize replay of the archived maintenance/claim/clipboard effects.
+        let android = state.android.as_ref().ok_or_else(|| CommandError::code(
+            "HelperReplacementQualificationUnavailable",
+            "Đã lưu kết quả khôi phục; backend Android chưa sẵn sàng để xác minh phiên helper mới.",
+        ))?;
+        android.prepare_helper_runtime(&receipt.udid).await.map_err(|_| CommandError::code(
+            "HelperReplacementQualificationFailed",
+            "Đã lưu kết quả khôi phục; chưa xác minh được phiên helper mới. Kiểm tra chẩn đoán của đúng máy.",
+        ))?;
+    }
+    // Keep the same exclusive Repair context and admission through qualification.
+    drop(context);
+    Ok(receipt)
 }
 
 async fn execute_helper_maintenance_admitted(

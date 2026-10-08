@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 
 import {
   androidToolProblems,
@@ -6,6 +6,7 @@ import {
   appLogDirectory,
   driverDegradedReason,
   listDeviceMetas,
+  ensureDeviceNumbers,
   listDevices,
   listGroups,
   listJobs,
@@ -13,8 +14,10 @@ import {
   retryStartup,
   startupError,
 } from "./api";
+import { readQueryClient } from "./readQuery";
 import { describeError } from "./describeError";
 import { NurtureFailureWatch } from "./nurtureFailureWatch";
+import { announceAdbServerNotice } from "./adbServerNotice";
 import type { DeviceGroup, DeviceInfo, DeviceMeta, JobRecord } from "./types";
 
 /**
@@ -25,6 +28,7 @@ import type { DeviceGroup, DeviceInfo, DeviceMeta, JobRecord } from "./types";
  * ever remounted — which is the shape that turns one toast into several.
  */
 const failureWatch = new NurtureFailureWatch();
+class SupersededMetadataRead extends Error {}
 
 /**
  * The fleet as the shell sees it, and whether the backend came up at all.
@@ -40,7 +44,10 @@ export interface Fleet {
   devices: DeviceInfo[];
   groups: DeviceGroup[];
   metas: DeviceMeta[];
-  setMetas: React.Dispatch<React.SetStateAction<DeviceMeta[]>>;
+  refreshMetas: () => Promise<DeviceMeta[]>;
+  numberAllocationError: string | null;
+  retryDeviceNumbers: () => Promise<void>;
+  retryingNumbers: boolean;
   jobs: JobRecord[];
   /// Re-read devices, jobs, groups and records from the backend.
   reload: () => Promise<void>;
@@ -65,7 +72,42 @@ export interface Fleet {
 export function useFleet(): Fleet {
   const [devices, setDevices] = useState<DeviceInfo[]>([]);
   const [groups, setGroups] = useState<DeviceGroup[]>([]);
-  const [metas, setMetas] = useState<DeviceMeta[]>([]);
+  const [metas, setMetasState] = useState<DeviceMeta[]>([]);
+  const metadataEpoch = useRef({ version: 0, mounted: true });
+  useEffect(() => {
+    const epoch = metadataEpoch.current;
+    epoch.mounted = true;
+    return () => { epoch.mounted = false; epoch.version++; };
+  }, []);
+  const refreshMetas = useCallback(async () => {
+    const revision = ++metadataEpoch.current.version;
+    // Do not join a cached/in-flight read started before the acknowledging mutation.
+    await readQueryClient.cancelQueries({ queryKey: ["deviceMetadata"] });
+    if (revision !== metadataEpoch.current.version || !metadataEpoch.current.mounted) throw new SupersededMetadataRead("Đã có lượt đọc metadata mới hơn; giữ dữ liệu hiện tại.");
+    await readQueryClient.invalidateQueries({ queryKey: ["deviceMetadata"], refetchType: "none" });
+    if (revision !== metadataEpoch.current.version || !metadataEpoch.current.mounted) throw new SupersededMetadataRead();
+    const rows = await listDeviceMetas();
+    if (!metadataEpoch.current.mounted || revision !== metadataEpoch.current.version) throw new SupersededMetadataRead("Đã có lượt đọc metadata mới hơn; giữ dữ liệu hiện tại.");
+    setMetasState(rows);
+    return rows;
+  }, []);
+  const [numberAllocationError, setNumberAllocationError] = useState<string | null>(null);
+  const [retryingNumbers, setRetryingNumbers] = useState(false);
+  const numberRetry = useRef(false);
+  const allocationQueue = useRef<Promise<void>>(Promise.resolve());
+  const allocateNumbers = useCallback((serials: string[], active: () => boolean) => {
+    const task = allocationQueue.current.catch(() => undefined).then(async () => {
+      if (!active()) return;
+      // The mutation response is a historical snapshot, never a publishable read model.
+      await ensureDeviceNumbers(serials);
+      if (active()) {
+        await refreshMetas();
+        setNumberAllocationError(null);
+      }
+    });
+    allocationQueue.current = task;
+    return task;
+  }, [refreshMetas]);
   const [jobs, setJobs] = useState<JobRecord[]>([]);
   const [bootError, setBootError] = useState<string | null>(null);
   const [fleetSettled, setFleetSettled] = useState(false);
@@ -84,6 +126,38 @@ export function useFleet(): Fleet {
   /// immediately torn down.
   const [startupAttempt, setStartupAttempt] = useState(0);
 
+  // Allocation is keyed by serials, not arrival order; the backend owns the transaction.
+  const rosterSerials = JSON.stringify([...new Set(devices.map(device => device.udid))].sort());
+  useEffect(() => {
+    const serials: string[] = JSON.parse(rosterSerials);
+    if (!serials.length) return;
+    let cancelled = false;
+    void allocateNumbers(serials, () => !cancelled && metadataEpoch.current.mounted).catch(error => {
+      if (!cancelled && !(error instanceof SupersededMetadataRead)) setNumberAllocationError(`Chưa xác nhận gán số máy: ${describeError(error)}`);
+    });
+    return () => { cancelled = true; };
+  }, [rosterSerials, allocateNumbers]);
+
+  const retryDeviceNumbers = useCallback(async () => {
+    if (numberRetry.current) return;
+    numberRetry.current = true;
+    setRetryingNumbers(true);
+    try {
+      await allocationQueue.current.catch(() => undefined);
+      // Reconcile a possibly committed allocation before requesting missing serials only.
+      const rows = await refreshMetas();
+      const missing = (JSON.parse(rosterSerials) as string[]).filter(id =>
+        !rows.some(row => row.udid === id && row.number != null && row.number > 0));
+      if (missing.length) await allocateNumbers(missing, () => metadataEpoch.current.mounted);
+      if (metadataEpoch.current.mounted) setNumberAllocationError(null);
+    } catch (error) {
+      if (metadataEpoch.current.mounted) setNumberAllocationError(`Chưa xác nhận gán số máy: ${describeError(error)}`);
+    } finally {
+      numberRetry.current = false;
+      if (metadataEpoch.current.mounted) setRetryingNumbers(false);
+    }
+  }, [rosterSerials, refreshMetas, allocateNumbers]);
+
   const reload = useCallback(async () => {
     setFleetSettled(false);
     try {
@@ -97,9 +171,13 @@ export function useFleet(): Fleet {
       // every phone, so this failure degrades to "no groups".
       setGroups(await listGroups().catch(() => []));
       // Same reasoning as the groups above, and the same failure mode to avoid: a records
-      // read that throws must cost the grid its labels, never its phones.
-      setMetas(await listDeviceMetas().catch(() => []));
-      setBootError(null);
+      // failed read keeps committed labels and reports stale metadata.
+      try {
+        await refreshMetas();
+        if (metadataEpoch.current.mounted) setBootError(null);
+      } catch (error) {
+        if (metadataEpoch.current.mounted && !(error instanceof SupersededMetadataRead)) setBootError(`Chưa cập nhật số/tên máy; giữ dữ liệu đã đọc: ${describeError(error)}`);
+      }
       // An empty list can mean "nothing plugged in" or "the device sidecar never
       // started". Ask which, so the UI does not report the wrong one.
       setDriverIssue(await driverDegradedReason().catch(() => null));
@@ -115,7 +193,7 @@ export function useFleet(): Fleet {
     } finally {
       setFleetSettled(true);
     }
-  }, []);
+  }, [refreshMetas]);
 
   useEffect(() => {
     let cancelled = false;
@@ -148,6 +226,10 @@ export function useFleet(): Fleet {
             // "14 sẵn sàng" — that chip counts phones that stream, and a locked phone
             // streams its lock screen perfectly.
             failureWatch.observe(event.status);
+          } else if (event.type === "adbServerNotice") {
+            // Same always-mounted listener: a server restart blacks out every tile at once,
+            // and the reason has to reach the activity history whichever page is open.
+            announceAdbServerNotice(event);
           } else if (event.type === "jobUpdated") {
             const { job } = event;
             setJobs((prev) => {
@@ -208,7 +290,10 @@ export function useFleet(): Fleet {
     devices,
     groups,
     metas,
-    setMetas,
+    refreshMetas,
+    numberAllocationError,
+    retryDeviceNumbers,
+    retryingNumbers,
     jobs,
     reload,
     startupIssue,

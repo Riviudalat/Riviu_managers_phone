@@ -31,7 +31,10 @@ mod conversation;
 mod device_activity;
 pub use device_activity::{DeviceActivityProgress, DeviceActivityScope};
 mod fleet;
-pub use fleet::{AccountAssignmentConflict, AccountMappingObservation, ConflictingAccountDevice};
+pub use fleet::{
+    AccountAssignmentConflict, AccountMappingObservation, ConflictingAccountDevice,
+    DeviceMetadataImportPreview, DeviceMetadataTransfer,
+};
 mod flow_connectors;
 mod flow_runs;
 mod flows;
@@ -88,8 +91,8 @@ pub use publish_report::InternalPublishReportPage;
 pub use publish_sheet::{SheetOutboxRow, SheetOutboxSettlement, SheetOutboxState};
 pub use publish_sheet_delivery::{SheetDeliveryClaim, SheetDeliveryKind, SheetDeliveryPayload};
 pub use publish_verification::{
-    publish_campaign_input_digest, PendingPublishVerification, PublishDeviceGuard,
-    PublishDeviceHold, PublishRecoveryCapabilities, PublishRecoveryCapability,
+    publish_campaign_input_digest, publish_upload_settled, PendingPublishVerification,
+    PublishDeviceGuard, PublishDeviceHold, PublishRecoveryCapabilities, PublishRecoveryCapability,
     PublishResumeVerificationResult, PublishResumeVerificationState,
 };
 
@@ -1084,6 +1087,209 @@ mod device_meta_tests {
     }
 
     #[test]
+    fn device_number_allocation_preserves_offline_metadata_and_high_water_across_restart() {
+        let (db, path) = fixture();
+        let saved = crate::DeviceMeta {
+            number: Some(20),
+            alias: "shelf".into(),
+            notes: "keep".into(),
+            tags: vec!["tag".into()],
+            group_id: Some("group".into()),
+            handle: "account".into(),
+            ..meta("offline")
+        };
+        db.upsert_device_meta(&saved).unwrap();
+        let rows = db
+            .ensure_device_numbers(&["b".into(), "a".into(), "a".into()])
+            .unwrap();
+        assert_eq!(
+            rows.iter()
+                .map(|r| (r.udid.as_str(), r.number))
+                .collect::<Vec<_>>(),
+            vec![("a", Some(21)), ("b", Some(22)), ("offline", Some(20))]
+        );
+        assert_eq!(
+            serde_json::to_value(db.get_device_meta("offline").unwrap()).unwrap(),
+            serde_json::to_value(saved).unwrap()
+        );
+        db.patch_device_meta("b", &crate::DeviceMetaChange::Number(None))
+            .unwrap();
+        db.patch_device_meta("a", &crate::DeviceMetaChange::Number(Some(1)))
+            .unwrap();
+        drop(db);
+        let db = Database::open(&path).unwrap();
+        db.ensure_device_numbers(&["b".into(), "c".into()]).unwrap();
+        assert_eq!(db.get_device_meta("b").unwrap().number, Some(23));
+        assert_eq!(db.get_device_meta("c").unwrap().number, Some(24));
+        assert_eq!(db.ensure_device_numbers(&[]).unwrap().len(), 4);
+        assert!(db.ensure_device_numbers(&["d".into(), " ".into()]).is_err());
+        assert_eq!(db.get_device_meta("d").unwrap().number, None);
+        db.patch_device_meta(
+            "limit",
+            &crate::DeviceMetaChange::Number(Some(u32::MAX - 1)),
+        )
+        .unwrap();
+        assert!(db.ensure_device_numbers(&["x".into(), "y".into()]).is_err());
+        assert_eq!(db.get_device_meta("x").unwrap().number, None);
+        drop(db);
+        let _ = std::fs::remove_file(path);
+    }
+
+    #[test]
+    fn metadata_transfer_previews_conflicts_and_revalidates_atomically() {
+        let (source, source_path) = fixture();
+        source
+            .upsert_device_meta(&crate::DeviceMeta {
+                number: Some(20),
+                alias: "keep".into(),
+                group_id: Some("legacy-removed-group".into()),
+                ..meta("a")
+            })
+            .unwrap();
+        source
+            .upsert_group(&crate::DeviceGroup {
+                id: "group".into(),
+                name: "shelf".into(),
+                color: "orange".into(),
+                created_at: "now".into(),
+                udids: vec!["a".into()],
+            })
+            .unwrap();
+        source
+            .patch_device_meta("a", &crate::DeviceMetaChange::Number(Some(2)))
+            .unwrap();
+        let transfer = source.export_device_metadata().unwrap();
+        let (target, path) = fixture();
+        assert!(target
+            .import_device_metadata(&transfer, false)
+            .unwrap()
+            .conflicts
+            .is_empty());
+        assert!(target.list_device_metas().unwrap().is_empty());
+        assert!(
+            target
+                .import_device_metadata(&transfer, true)
+                .unwrap()
+                .applied
+        );
+        assert_eq!(
+            serde_json::to_value(target.export_device_metadata().unwrap()).unwrap(),
+            serde_json::to_value(&transfer).unwrap()
+        );
+        assert!(
+            target
+                .import_device_metadata(&transfer, true)
+                .unwrap()
+                .applied
+        );
+        target.ensure_device_numbers(&["b".into()]).unwrap();
+        assert_eq!(target.get_device_meta("b").unwrap().number, Some(21));
+        let mut incoming = transfer.clone();
+        incoming.devices.push(crate::DeviceMeta {
+            number: Some(3),
+            ..meta("c")
+        });
+        assert!(target
+            .import_device_metadata(&incoming, false)
+            .unwrap()
+            .conflicts
+            .is_empty());
+        target
+            .patch_device_meta("racer", &crate::DeviceMetaChange::Number(Some(3)))
+            .unwrap();
+        assert!(target.import_device_metadata(&incoming, true).is_err());
+        assert_eq!(target.get_device_meta("c").unwrap().number, None);
+        incoming.devices[0].alias = "overwrite".into();
+        assert!(!target
+            .import_device_metadata(&incoming, false)
+            .unwrap()
+            .conflicts
+            .is_empty());
+        assert_eq!(target.get_device_meta("a").unwrap().alias, "keep");
+        drop((source, target));
+        let _ = std::fs::remove_file(source_path);
+        let _ = std::fs::remove_file(path);
+    }
+
+    #[test]
+    fn concurrent_device_number_allocation_uses_one_sequence_across_connections() {
+        let (db, path) = fixture();
+        let db = std::sync::Arc::new(db);
+        let barrier = std::sync::Arc::new(std::sync::Barrier::new(2));
+        std::thread::scope(|scope| {
+            for serial in ["a", "b"] {
+                let db = db.clone();
+                let barrier = barrier.clone();
+                scope.spawn(move || {
+                    barrier.wait();
+                    db.ensure_device_numbers(&[serial.into(), "shared".into()])
+                        .unwrap();
+                });
+            }
+        });
+        let mut numbers: Vec<_> = db
+            .list_device_metas()
+            .unwrap()
+            .into_iter()
+            .map(|m| m.number.unwrap())
+            .collect();
+        numbers.sort();
+        assert_eq!(numbers, vec![1, 2, 3]);
+        drop(db);
+        let _ = std::fs::remove_file(path);
+    }
+
+    #[test]
+    fn device_number_migration_preserves_legacy_duplicates_and_guards_new_assignments() {
+        let path = std::env::temp_dir().join(format!("riviu-device-meta-{}.db", Uuid::new_v4()));
+        let mut conn = Connection::open(&path).unwrap();
+        migrations::initialize_through(&mut conn, 48).unwrap();
+        conn.execute_batch("INSERT INTO device_meta(udid,number,alias) VALUES('old-a',7,'keep'),('old-b',7,'other');").unwrap();
+        drop(conn);
+        let db = Database::open(&path).unwrap();
+        assert_eq!(db.get_device_meta("old-a").unwrap().number, Some(7));
+        assert_eq!(db.get_device_meta("old-b").unwrap().number, Some(7));
+        db.patch_device_meta("old-a", &crate::DeviceMetaChange::Number(Some(7)))
+            .unwrap();
+        db.upsert_device_meta(&db.get_device_meta("old-a").unwrap())
+            .unwrap();
+        db.ensure_device_numbers(&["new".into()]).unwrap();
+        assert_eq!(db.get_device_meta("new").unwrap().number, Some(8));
+        assert!(db
+            .patch_device_meta("new", &crate::DeviceMetaChange::Number(Some(7)))
+            .is_err());
+        db.patch_device_meta("old-b", &crate::DeviceMetaChange::Number(Some(9)))
+            .unwrap();
+        assert_eq!(db.get_device_meta("old-a").unwrap().alias, "keep");
+        drop(db);
+        let _ = std::fs::remove_file(path);
+    }
+
+    #[test]
+    fn device_numbers_reject_collisions_without_mutating_metadata() {
+        let (db, path) = fixture();
+        db.patch_device_meta("offline", &crate::DeviceMetaChange::Number(Some(20)))
+            .unwrap();
+        db.patch_device_meta("new", &crate::DeviceMetaChange::Alias("keep".into()))
+            .unwrap();
+        let error = db
+            .patch_device_meta("new", &crate::DeviceMetaChange::Number(Some(20)))
+            .expect_err("an offline device still owns its number");
+        assert!(error.to_string().contains("number"));
+        assert_eq!(db.get_device_meta("new").unwrap().number, None);
+        assert_eq!(db.get_device_meta("new").unwrap().alias, "keep");
+        assert!(db
+            .upsert_device_meta(&crate::types::DeviceMeta {
+                number: Some(20),
+                ..meta("new")
+            })
+            .is_err());
+        assert_eq!(db.get_device_meta("new").unwrap().alias, "keep");
+        drop(db);
+        let _ = std::fs::remove_file(path);
+    }
+
+    #[test]
     fn an_unnumbered_phone_reads_back_as_unnumbered_rather_than_zero() {
         // `None` and `Some(0)` are different facts: the grid falls back to a tile's position
         // for the first and would print "0" for the second.
@@ -1229,6 +1435,37 @@ mod stream_settings_tests {
             raw,
             r#"{"fps":18,"gridQuality":"extra","focusQuality":"low"}"#
         );
+        std::fs::remove_file(path).expect("remove fixture database");
+    }
+
+    #[test]
+    fn device_baseline_defaults_to_lock_and_rotation_on_connect_and_survives_a_restart() {
+        use crate::device_control::baseline::{BaselineSetting, DeviceBaselineConfig};
+        let (db, path) = fixture();
+        let fresh = db.get_device_baseline_config().expect("absent key is the default");
+        assert!(fresh.auto_apply_on_connect);
+        assert_eq!(
+            fresh.settings,
+            vec![BaselineSetting::LockScreenDisabled, BaselineSetting::AutoRotateOff]
+        );
+        let chosen = DeviceBaselineConfig {
+            settings: vec![
+                BaselineSetting::AnimationsOff,
+                BaselineSetting::AutoRotateOff,
+                BaselineSetting::AnimationsOff,
+            ],
+            auto_apply_on_connect: false,
+        };
+        db.save_device_baseline_config(&chosen).expect("save");
+        let loaded = db.get_device_baseline_config().expect("load");
+        assert!(!loaded.auto_apply_on_connect);
+        assert_eq!(
+            loaded.settings,
+            vec![BaselineSetting::AutoRotateOff, BaselineSetting::AnimationsOff]
+        );
+        db.set_setting("device.baseline.v1", "{not json")
+            .expect("store a corrupt blob");
+        assert!(db.get_device_baseline_config().is_err());
         std::fs::remove_file(path).expect("remove fixture database");
     }
 

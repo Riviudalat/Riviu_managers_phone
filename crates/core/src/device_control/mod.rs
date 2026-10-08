@@ -155,6 +155,7 @@ pub enum AppCompletionDisposition {
 }
 
 mod apps;
+pub mod baseline;
 mod leases;
 mod roster;
 mod sessions;
@@ -724,6 +725,8 @@ impl UiWithStreamContext {
             recorded_package: None,
             recovery_process: None,
             recovery_stop: None,
+            pending_owned_stop: None,
+            cleanup_retry: None,
         })
     }
 }
@@ -745,7 +748,35 @@ struct DeviceCleanupTicket {
     recorded_package: Option<String>,
     recovery_process: Option<ProcessAbsenceProof>,
     recovery_stop: Option<StreamStopProof>,
+    pending_owned_stop: Option<crate::driver::OwnedStreamStopPending>,
+    /// Set only when the worker's own cleanup failed; deliberate quarantines keep `None`.
+    cleanup_retry: Option<CleanupRetry>,
 }
+
+/// A failed cleanup of a lease that has no operator recovery path.
+#[derive(Debug, Clone, Copy)]
+struct CleanupRetry {
+    failures: usize,
+    due: tokio::time::Instant,
+}
+
+/// Retry schedule for a failed non-Interaction cleanup, then the lease is released.
+///
+/// About two minutes in all: the 2026-10-08 USB hub drop (phones #22/#30) lasted ~1 s and
+/// adb listed the hub again within ~20 s, and the publish journal's reconnect window is
+/// 120 s. The attempt that owned the lease has already returned and recorded its outcome.
+const RETAINED_CLEANUP_RETRY_DELAYS: [std::time::Duration; 6] = [
+    std::time::Duration::from_secs(1),
+    std::time::Duration::from_secs(2),
+    std::time::Duration::from_secs(5),
+    std::time::Duration::from_secs(10),
+    std::time::Duration::from_secs(30),
+    std::time::Duration::from_secs(60),
+];
+
+/// No single cleanup attempt holds a lease longer than this. The Android owned stop is
+/// bounded by its 2 s child wait plus a 30 s adb forward removal.
+const CLEANUP_ATTEMPT_DEADLINE: std::time::Duration = std::time::Duration::from_secs(45);
 
 impl DeviceCleanupTicket {
     fn into_context(
@@ -1136,6 +1167,31 @@ impl QuarantineStore {
         self.cleanup.lock().len() + self.contexts.lock().len() + self.sessions.lock().len()
     }
 
+    fn next_cleanup_retry(&self) -> Option<tokio::time::Instant> {
+        self.cleanup
+            .lock()
+            .iter()
+            .filter_map(|ticket| ticket.cleanup_retry.map(|retry| retry.due))
+            .min()
+    }
+
+    fn take_due_cleanup_retries(&self, now: tokio::time::Instant) -> Vec<DeviceCleanupTicket> {
+        let mut tickets = self.cleanup.lock();
+        let mut due = Vec::new();
+        let mut index = 0;
+        while index < tickets.len() {
+            if tickets[index]
+                .cleanup_retry
+                .is_some_and(|retry| retry.due <= now)
+            {
+                due.push(tickets.remove(index));
+            } else {
+                index += 1;
+            }
+        }
+        due
+    }
+
     fn count(&self) -> usize {
         self.context_activity_count() + self.backgrounds.lock().len()
     }
@@ -1233,7 +1289,60 @@ async fn run_cleanup_worker(
     recovery_ledger_guard: Arc<Mutex<Option<Arc<InteractionRecoveryLedgerGuard>>>>,
 ) {
     let mut tasks = tokio::task::JoinSet::new();
-    while let Some(command) = rx.recv().await {
+    loop {
+        // A sleep is armed only while a failed cleanup awaits its retry, so an idle
+        // worker never advances paused test time.
+        let changed = quarantined.changed.notified();
+        tokio::pin!(changed);
+        changed.as_mut().enable();
+        let next_retry = quarantined.next_cleanup_retry();
+        let command = tokio::select! {
+            command = rx.recv() => match command {
+                Some(command) => command,
+                None => break,
+            },
+            _ = &mut changed => continue,
+            _ = sleep_until_retry(next_retry) => {
+                while tasks.try_join_next().is_some() {}
+                let now = tokio::time::Instant::now();
+                for mut ticket in quarantined.take_due_cleanup_retries(now) {
+                    let driver = driver.clone();
+                    let work = work.clone();
+                    let streams = streams.clone();
+                    let quarantined = quarantined.clone();
+                    let operation_locks = operation_locks.clone();
+                    tasks.spawn(async move {
+                        let udid = ticket.lease.udid().to_owned();
+                        let _operation = operation_locks.lock_one(&udid).await;
+                        let failures = ticket.cleanup_retry.map_or(0, |retry| retry.failures);
+                        match clean_ticket_bounded(&driver, &streams, &mut ticket, Some(&work))
+                            .await
+                        {
+                            Ok(proof) => {
+                                tracing::info!(
+                                    udid,
+                                    owner = ?proof.owner,
+                                    failures,
+                                    stopped_generation = proof.stopped_generation,
+                                    "retained device cleanup completed; lease released"
+                                );
+                                drop(ticket);
+                            }
+                            Err(error) => {
+                                retain_failed_cleanup(
+                                    &driver,
+                                    &streams,
+                                    &quarantined,
+                                    ticket,
+                                    &error,
+                                );
+                            }
+                        }
+                    });
+                }
+                continue;
+            }
+        };
         while tasks.try_join_next().is_some() {}
         match command {
             WorkerCommand::PrepareInteractionRecovery {
@@ -1395,18 +1504,19 @@ async fn run_cleanup_worker(
                 response,
             } => {
                 let driver = driver.clone();
+                let work = work.clone();
                 let streams = streams.clone();
                 let quarantined = quarantined.clone();
                 let operation_locks = operation_locks.clone();
                 tasks.spawn(async move {
                     let _operation = operation_locks.lock_one(ticket.lease.udid()).await;
-                    match clean_ticket(&driver, &streams, &mut ticket).await {
+                    match clean_ticket_bounded(&driver, &streams, &mut ticket, Some(&work)).await {
                         Ok(proof) => {
                             drop(ticket);
                             let _ = response.send(Ok(proof));
                         }
                         Err(error) => {
-                            quarantined.push_cleanup(ticket);
+                            retain_failed_cleanup(&driver, &streams, &quarantined, ticket, &error);
                             let _ = response.send(Err(error));
                         }
                     }
@@ -1476,12 +1586,13 @@ async fn run_cleanup_worker(
             }
             WorkerCommand::Cleanup(ticket) => {
                 let driver = driver.clone();
+                let work = work.clone();
                 let streams = streams.clone();
                 let quarantined = quarantined.clone();
                 let operation_locks = operation_locks.clone();
                 tasks.spawn(async move {
                     let _operation = operation_locks.lock_one(ticket.lease.udid()).await;
-                    clean_or_quarantine(&driver, &streams, &quarantined, ticket).await;
+                    clean_or_quarantine(&driver, &streams, &quarantined, ticket, Some(&work)).await;
                 });
             }
             WorkerCommand::DrainBackground { ack } => {
@@ -2058,7 +2169,7 @@ async fn process_guarded_clipboard(
                 .or_else(|| stop.map(|proof| proof.new_generation));
             let context = if let Some(generation) = destructive_generation {
                 ticket.expected_generation = Some(generation);
-                clean_or_quarantine(driver, streams, quarantined, ticket).await;
+                clean_or_quarantine(driver, streams, quarantined, ticket, None).await;
                 None
             } else {
                 Some(ticket.into_context(plane_id, cleanup, original_stream, None))
@@ -2165,24 +2276,199 @@ async fn clean_or_quarantine(
     streams: &Arc<StreamBudgetManager>,
     quarantined: &Arc<QuarantineStore>,
     mut ticket: DeviceCleanupTicket,
+    work: Option<&DeviceWorkCoordinator>,
 ) {
-    if clean_ticket(driver, streams, &mut ticket).await.is_err() {
-        quarantined.push_cleanup(ticket);
+    if let Err(error) = clean_ticket_bounded(driver, streams, &mut ticket, work).await {
+        retain_failed_cleanup(driver, streams, quarantined, ticket, &error);
     }
+}
+
+async fn sleep_until_retry(due: Option<tokio::time::Instant>) {
+    match due {
+        Some(due) => tokio::time::sleep_until(due).await,
+        None => std::future::pending().await,
+    }
+}
+
+/// [`clean_ticket`] with a deadline. A cancelled stop leaves the backend's pending-stop
+/// record, so the next attempt only reconciles it; nothing is dispatched twice.
+async fn clean_ticket_bounded(
+    driver: &Arc<dyn DeviceDriver>,
+    streams: &Arc<StreamBudgetManager>,
+    ticket: &mut DeviceCleanupTicket,
+    work: Option<&DeviceWorkCoordinator>,
+) -> Result<DeviceReleaseProof, DeviceControlError> {
+    let udid = ticket.lease.udid().to_owned();
+    tokio::time::timeout(
+        CLEANUP_ATTEMPT_DEADLINE,
+        clean_ticket(driver, streams, ticket, work),
+    )
+    .await
+    .map_err(|_| {
+        driver_error(
+            &udid,
+            "cleanupDeadline",
+            anyhow::anyhow!("device cleanup exceeded its deadline"),
+        )
+    })?
+}
+
+/// Keep a failed cleanup's lease, but never forever.
+///
+/// Interaction keeps the explicit, ledger-bound operator recovery in `sessions.rs`. Every
+/// other owner has no such path, so its ticket is retried on a finite schedule and then
+/// released: before this, one transient "device is not connected" left `currentOwner`
+/// set until the controller restarted.
+fn retain_failed_cleanup(
+    driver: &Arc<dyn DeviceDriver>,
+    streams: &StreamBudgetManager,
+    quarantined: &QuarantineStore,
+    mut ticket: DeviceCleanupTicket,
+    error: &DeviceControlError,
+) {
+    let udid = ticket.lease.udid().to_owned();
+    let owner = ticket.lease.owner();
+    if owner == DeviceWorkOwner::Interaction {
+        tracing::warn!(
+            udid,
+            ?owner,
+            %error,
+            "device cleanup failed; lease retained for operator recovery"
+        );
+        quarantined.push_cleanup(ticket);
+        return;
+    }
+    let failures = ticket.cleanup_retry.map_or(0, |retry| retry.failures) + 1;
+    let Some(delay) = RETAINED_CLEANUP_RETRY_DELAYS.get(failures - 1).copied() else {
+        release_exhausted_cleanup(driver, streams, ticket, failures, error);
+        return;
+    };
+    tracing::warn!(
+        udid,
+        ?owner,
+        failures,
+        retry_in_ms = delay.as_millis() as u64,
+        %error,
+        "device cleanup failed; lease retained for a bounded retry"
+    );
+    ticket.cleanup_retry = Some(CleanupRetry {
+        failures,
+        due: tokio::time::Instant::now() + delay,
+    });
+    quarantined.push_cleanup(ticket);
+}
+
+/// The finite end of a failed non-Interaction cleanup. Touches no phone: it forgets the
+/// producer slot and the cached UI session, then drops the lease so one new owner may
+/// acquire. The backend still refuses to start over an unconfirmed owned child.
+fn release_exhausted_cleanup(
+    driver: &Arc<dyn DeviceDriver>,
+    streams: &StreamBudgetManager,
+    ticket: DeviceCleanupTicket,
+    failures: usize,
+    error: &DeviceControlError,
+) {
+    let udid = ticket.lease.udid().to_owned();
+    let owner = ticket.lease.owner();
+    let slot_forgotten = streams.forget_unconfirmed(ticket.reservation.token());
+    driver.invalidate_ui_session(&udid);
+    tracing::warn!(
+        udid,
+        ?owner,
+        failures,
+        slot_forgotten,
+        %error,
+        "device cleanup retry budget exhausted; lease released without a stop proof"
+    );
+    drop(ticket);
+}
+
+/// Continue only an already-dispatched Script stop. No new lease, gesture,
+/// process termination, or generic quarantine retry is admitted by this path.
+async fn reconcile_cleanup_stop(
+    driver: &Arc<dyn DeviceDriver>,
+    streams: &StreamBudgetManager,
+    work: &DeviceWorkCoordinator,
+    ticket: &mut DeviceCleanupTicket,
+    pending: &crate::driver::OwnedStreamStopPending,
+) -> Result<StreamStopProof, DeviceControlError> {
+    let udid = ticket.lease.udid().to_owned();
+    let epoch = ticket.session.gui_session_epoch();
+    let bound = |ticket: &DeviceCleanupTicket| {
+        ticket.lease.owner() == DeviceWorkOwner::Script
+            && work.validate_token(&udid, ticket.lease.token()).ok() == Some(DeviceWorkOwner::Script)
+            && ticket.reservation.udid() == udid
+            && ticket.reservation.owner() == DeviceWorkOwner::Script
+            && streams.reservation_udid(ticket.reservation.token()).as_deref() == Some(udid.as_str())
+            && ticket.pending_owned_stop.as_ref() == Some(pending)
+            && pending.udid == udid && !pending.stop_id.is_nil()
+            && ticket.expected_generation == Some(pending.old_generation)
+            && pending.fenced_generation > pending.old_generation
+            && !epoch.is_empty() && ticket.session.gui_session_epoch() == epoch
+    };
+    if !bound(ticket) { return Err(driver_error(&udid, "reconcileOwnedStreamStop", anyhow::anyhow!("retained stop binding changed"))); }
+    let ready = tokio::time::timeout(std::time::Duration::from_secs(2),
+        ticket.session.verify_owned_cleanup_ready(&udid, &epoch)).await
+        .map_err(|_| driver_error(&udid, "verifyOwnedCleanupReady", anyhow::anyhow!("cleanup proof deadline; retained")))?
+        .map_err(|error| driver_error(&udid, "verifyOwnedCleanupReady", error))?;
+    if ready.udid != udid || ready.session_epoch != epoch || !ready.input_sealed
+        || ready.clipboard_pending || ready.baseline_pending
+        || ready.helper_owner_id.is_empty() || ready.helper_instance.is_empty()
+        || ready.helper_generation.is_empty() || !bound(ticket)
+    { return Err(driver_error(&udid, "reconcileOwnedStreamStop", anyhow::anyhow!("retained input/helper cleanup unproved"))); }
+    for _ in 0..2 {
+        if !bound(ticket) { return Err(driver_error(&udid, "reconcileOwnedStreamStop", anyhow::anyhow!("retained stop binding changed"))); }
+        match tokio::time::timeout(std::time::Duration::from_secs(3), driver.reconcile_owned_stream_stop(pending)).await {
+            Ok(Ok(proof)) => {
+                if proof.old_generation != pending.old_generation
+                    || proof.new_generation != pending.fenced_generation || !proof.child_stopped || !bound(ticket) {
+                    return Err(driver_error(&udid, "reconcileOwnedStreamStop", anyhow::anyhow!("retained stop completion identity changed")));
+                }
+                // Persist the original completion on the still-owned ticket
+                // before any further await. Helper failure cannot erase it.
+                ticket.recovery_stop = Some(proof);
+                let after = tokio::time::timeout(std::time::Duration::from_secs(2),
+                    ticket.session.verify_owned_cleanup_ready(&udid, &epoch)).await
+                    .map_err(|_| driver_error(&udid, "verifyOwnedCleanupReady", anyhow::anyhow!("cleanup proof deadline; retained")))?
+                    .map_err(|error| driver_error(&udid, "verifyOwnedCleanupReady", error))?;
+                if after != ready || !bound(ticket) {
+                    return Err(driver_error(&udid, "reconcileOwnedStreamStop", anyhow::anyhow!("retained helper cleanup changed during wait")));
+                }
+                return Ok(proof);
+            }
+            Ok(Err(error)) if error.downcast_ref::<crate::driver::OwnedStreamStopPending>() == Some(pending) => {}
+            Ok(Err(error)) => return Err(driver_error(&udid, "reconcileOwnedStreamStop", error)),
+            Err(_) => return Err(driver_error(&udid, "reconcileOwnedStreamStop", anyhow::anyhow!("retained child wait deadline; no replay"))),
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+    }
+    Err(driver_error(&udid, "reconcileOwnedStreamStop", pending.clone().into()))
 }
 
 async fn clean_ticket(
     driver: &Arc<dyn DeviceDriver>,
     streams: &Arc<StreamBudgetManager>,
     ticket: &mut DeviceCleanupTicket,
+    work: Option<&DeviceWorkCoordinator>,
 ) -> Result<DeviceReleaseProof, DeviceControlError> {
     let udid = ticket.lease.udid().to_string();
     let owner = ticket.lease.owner();
     let stop = streams.begin_stop(ticket.reservation.token())?;
-    let proof = driver
-        .stop_owned_stream(&udid)
-        .await
-        .map_err(|error| driver_error(&udid, "stopOwnedStream", error))?;
+    let proof = match driver.stop_owned_stream(&udid).await {
+        Ok(proof) => proof,
+        Err(error) => {
+            // Inspect the typed cause BEFORE driver_error removes its type.
+            let pending = error.downcast_ref::<crate::driver::OwnedStreamStopPending>().cloned();
+            let Some(pending) = pending else {
+                return Err(driver_error(&udid, "stopOwnedStream", error));
+            };
+            ticket.pending_owned_stop = Some(pending.clone());
+            let Some(work) = work else {
+                return Err(driver_error(&udid, "stopOwnedStream", error));
+            };
+            reconcile_cleanup_stop(driver, streams, work, ticket, &pending).await?
+        }
+    };
     let expected = ticket
         .expected_generation
         .ok_or_else(|| DeviceControlError::StopGenerationUnknown { udid: udid.clone() })?;
@@ -2259,6 +2545,9 @@ mod tests {
         invalidate_calls: AtomicUsize,
         stop_generation: AtomicU64,
         unconfirmed_stops: AtomicBool,
+        unplugged: AtomicBool,
+        pending_stop_fixture: Mutex<Option<crate::driver::OwnedStreamStopPending>>,
+        reconcile_calls: AtomicUsize,
         block_sessions: AtomicBool,
         block_streams: AtomicBool,
         block_background_streams: AtomicBool,
@@ -2302,6 +2591,9 @@ mod tests {
                 invalidate_calls: AtomicUsize::new(0),
                 stop_generation: AtomicU64::new(7),
                 unconfirmed_stops: AtomicBool::new(false),
+                unplugged: AtomicBool::new(false),
+                pending_stop_fixture: Mutex::new(None),
+                reconcile_calls: AtomicUsize::new(0),
                 block_sessions: AtomicBool::new(false),
                 block_streams: AtomicBool::new(false),
                 block_background_streams: AtomicBool::new(false),
@@ -2549,6 +2841,15 @@ mod tests {
 
     #[async_trait]
     impl crate::UiSession for TestSession {
+        fn gui_session_epoch(&self) -> String { "fixture-session".into() }
+        async fn verify_owned_cleanup_ready(&self, udid: &str, epoch: &str) -> anyhow::Result<crate::driver::OwnedSessionCleanupProof> {
+            Ok(crate::driver::OwnedSessionCleanupProof {
+                udid: udid.into(), session_epoch: epoch.into(), helper_owner_id: "owner".into(),
+                helper_instance: "instance".into(), helper_generation: "generation".into(),
+                input_sealed: true, clipboard_pending: false, baseline_pending: false,
+            })
+        }
+
         async fn tap(&self, _point: TapPoint) -> anyhow::Result<()> {
             Ok(())
         }
@@ -2672,7 +2973,12 @@ mod tests {
             Ok(())
         }
 
-        async fn stop_owned_stream(&self, _udid: &str) -> anyhow::Result<StreamStopProof> {
+        async fn stop_owned_stream(&self, udid: &str) -> anyhow::Result<StreamStopProof> {
+            if self.unplugged.load(Ordering::SeqCst) {
+                // The fleet router's answer for a phone missing from the last listing.
+                self.stop_calls.fetch_add(1, Ordering::SeqCst);
+                anyhow::bail!("device is not connected: {udid}");
+            }
             if self.block_guarded_clipboard.load(Ordering::SeqCst)
                 && self.guarded_clipboard_completions.load(Ordering::SeqCst) == 0
             {
@@ -2688,6 +2994,9 @@ mod tests {
                 .expect("test stop semaphore remains open");
             permit.forget();
             let generation = self.stop_generation.load(Ordering::SeqCst);
+            if let Some(marker) = self.pending_stop_fixture.lock().clone() {
+                return Err(marker.into());
+            }
             if self.unconfirmed_stops.load(Ordering::SeqCst) {
                 return Ok(StreamStopProof {
                     old_generation: generation,
@@ -2700,6 +3009,12 @@ mod tests {
                 new_generation: generation + 1,
                 child_stopped: true,
             })
+        }
+
+        async fn reconcile_owned_stream_stop(&self, marker: &crate::driver::OwnedStreamStopPending) -> anyhow::Result<StreamStopProof> {
+            self.reconcile_calls.fetch_add(1, Ordering::SeqCst);
+            anyhow::ensure!(self.pending_stop_fixture.lock().as_ref() == Some(marker), "fixture marker mismatch");
+            Ok(StreamStopProof { old_generation: marker.old_generation, new_generation: marker.fenced_generation, child_stopped: true })
         }
 
         async fn confirm_interaction_stream_stopped(
@@ -3232,15 +3547,22 @@ mod tests {
         let control = control_plane(Arc::clone(&driver), 1);
 
         control.shutdown_cleanup().await.expect("first shutdown");
+        assert_eq!(
+            driver.shutdown_owned_process_calls.load(Ordering::SeqCst),
+            1,
+            "the backend teardown runs once before shutdown reports completion"
+        );
         control
             .shutdown_cleanup()
             .await
             .expect("idempotent shutdown");
 
+        // A stopped plane cannot prove the earlier teardown succeeded, so a repeated
+        // shutdown retries the retained owner exactly once more (streams.rs).
         assert_eq!(
             driver.shutdown_owned_process_calls.load(Ordering::SeqCst),
-            1,
-            "the backend teardown runs once before shutdown reports completion"
+            2,
+            "a repeated shutdown retries the driver teardown once"
         );
     }
 
@@ -4001,6 +4323,105 @@ mod tests {
         .await
         .expect("confirmed stop should release the device");
         assert_eq!(control.reserved_stream_capacity(), 0);
+    }
+
+    #[tokio::test]
+    async fn retained_script_stop_reconciles_only_exact_pending_marker_without_redispatch() {
+        for owner in [DeviceWorkOwner::Script, DeviceWorkOwner::Interaction] {
+            let driver = Arc::new(TestDriver::default());
+            let control = control_plane(driver.clone(), 1);
+            let context = streaming_context(&control, "fixture-pending", owner).await;
+            *driver.pending_stop_fixture.lock() = Some(crate::driver::OwnedStreamStopPending {
+                stop_id: Uuid::new_v4(), udid: "fixture-pending".into(),
+                old_generation: context.stream_proof().generation,
+                fenced_generation: context.stream_proof().generation + 1,
+            });
+            let before = driver.stop_calls.load(Ordering::SeqCst);
+            driver.complete_stop();
+            let result = control.close_ui_context(context).await;
+            assert_eq!(driver.stop_calls.load(Ordering::SeqCst), before + 1, "only one stop dispatch");
+            if owner == DeviceWorkOwner::Script {
+                assert!(result.is_ok(), "exact pending stop should complete: {result:?}");
+                assert_eq!(driver.reconcile_calls.load(Ordering::SeqCst), 1);
+                assert_eq!(control.current_work_owner("fixture-pending"), None);
+                assert_eq!(control.reserved_stream_capacity(), 0);
+            } else {
+                assert!(result.is_err());
+                assert_eq!(driver.reconcile_calls.load(Ordering::SeqCst), 0);
+                assert_eq!(control.current_work_owner("fixture-pending"), Some(owner));
+                assert_eq!(control.reserved_stream_capacity(), 1);
+            }
+        }
+    }
+
+    /// Controller log 2026-10-08 15:46:30Z: phones #22/#30 left USB for ~1 s during the
+    /// sound step. The publish close failed with "device is not connected", the Script
+    /// ticket was retained without any recovery path, and `currentOwner=script` outlived
+    /// the attempt by 80+ minutes while the dispatcher deferred the retry as device_busy.
+    #[tokio::test(start_paused = true)]
+    async fn failed_script_cleanup_releases_after_reconnect_without_a_second_owner() {
+        let driver = Arc::new(TestDriver::default());
+        let control = control_plane(driver.clone(), 1);
+        let context =
+            streaming_context(&control, "unplugged", crate::DeviceWorkOwner::Script).await;
+        driver.allow_stop.add_permits(64);
+        driver.unplugged.store(true, Ordering::SeqCst);
+
+        assert!(control.close_ui_context(context).await.is_err());
+        // While the phone is away the retained ticket is still the only owner.
+        assert!(matches!(
+            control
+                .try_acquire_exclusive("unplugged", crate::DeviceWorkOwner::Repair)
+                .await,
+            Err(DeviceControlError::Busy(crate::DeviceBusy {
+                current_owner: crate::DeviceWorkOwner::Script,
+                ..
+            }))
+        ));
+
+        driver.unplugged.store(false, Ordering::SeqCst);
+        timeout(Duration::from_secs(600), async {
+            while control.current_work_owner("unplugged").is_some() {
+                tokio::time::sleep(Duration::from_millis(100)).await;
+            }
+        })
+        .await
+        .expect("a failed Script cleanup must end within a finite budget");
+        assert_eq!(control.reserved_stream_capacity(), 0);
+        assert_eq!(control.cleanup_quarantine_count(), 0);
+        assert_eq!(driver.reconcile_calls.load(Ordering::SeqCst), 0);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn unprovable_script_cleanup_ends_its_lease_but_interaction_stays_retained() {
+        for owner in [
+            crate::DeviceWorkOwner::Script,
+            crate::DeviceWorkOwner::Interaction,
+        ] {
+            let driver = Arc::new(TestDriver::default());
+            let control = control_plane(driver.clone(), 1);
+            let context = streaming_context(&control, "never-proved", owner).await;
+            driver.allow_stop.add_permits(64);
+            driver.set_stop_generation(6);
+
+            assert!(control.close_ui_context(context).await.is_err());
+            tokio::time::sleep(Duration::from_secs(600)).await;
+            let stops = driver.stop_calls.load(Ordering::SeqCst);
+            if owner == crate::DeviceWorkOwner::Script {
+                assert_eq!(control.current_work_owner("never-proved"), None);
+                assert_eq!(control.reserved_stream_capacity(), 0);
+                assert_eq!(control.cleanup_quarantine_count(), 0);
+                assert!(stops > 1 && stops < 16, "finite retry budget, got {stops}");
+            } else {
+                // Interaction keeps its semantic quarantine for explicit operator recovery.
+                assert_eq!(control.current_work_owner("never-proved"), Some(owner));
+                assert_eq!(control.cleanup_quarantine_count(), 1);
+                assert_eq!(
+                    stops, 1,
+                    "an Interaction ticket is never retried automatically"
+                );
+            }
+        }
     }
 
     #[tokio::test]

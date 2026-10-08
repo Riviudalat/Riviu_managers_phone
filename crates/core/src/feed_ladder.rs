@@ -169,6 +169,7 @@ pub const FEED_LADDER: [LadderRung; 4] = [
 pub struct LadderSpend {
     /// Non-repeatable rungs already fired, by control ordinal position in [`FEED_LADDER`].
     fired: [bool; FEED_LADDER.len()],
+    popup: crate::app_automation::dialogs::PopupBudget,
     /// Back presses spent.
     pub backs: u32,
     /// How many Back presses this caller allows in total.
@@ -188,6 +189,7 @@ impl LadderSpend {
     pub fn new(back_limit: u32) -> Self {
         Self {
             fired: [false; FEED_LADDER.len()],
+            popup: Default::default(),
             backs: 0,
             back_limit,
             allow_back: false,
@@ -333,69 +335,38 @@ async fn step_inner(
             }
         };
     }
+    let idle_stop = AtomicBool::new(false);
+    let (deadline, stop) = budget.unwrap_or((
+        Instant::now() + std::time::Duration::from_secs(5),
+        &idle_stop,
+    ));
+    if session.supports_accessibility_readback() {
+        match crate::app_automation::dialogs::step_before_deadline(
+            session,
+            labels,
+            &mut spend.popup,
+            deadline,
+            stop,
+            stop,
+        )
+        .await?
+        {
+            ReadWaitResult::Ready(crate::app_automation::dialogs::PopupStep::Clear) => {}
+            ReadWaitResult::Ready(crate::app_automation::dialogs::PopupStep::Dismissed) => {
+                return Ok(ReadWaitResult::Ready(LadderStep::Tapped {
+                    control: TikTokControl::DialogDismiss,
+                    says: "từ chối hộp thoại tùy chọn đã đo; chờ đọc lại màn hình",
+                }))
+            }
+            ReadWaitResult::Ready(crate::app_automation::dialogs::PopupStep::Blocked) => {
+                return Ok(ReadWaitResult::Ready(LadderStep::Stuck))
+            }
+            ReadWaitResult::Cancelled => return Ok(ReadWaitResult::Cancelled),
+            ReadWaitResult::DeadlineExceeded => return Ok(ReadWaitResult::DeadlineExceeded),
+        }
+    }
     if read!(locate_checked(session, labels, TikTokControl::FeedTab)).is_some() {
         return Ok(ReadWaitResult::Ready(LadderStep::OnFeed));
-    }
-
-    if session.supports_accessibility_readback()
-        && read!(session.locate(crate::ElementQuery::ResourceIdSuffix(
-            "com.android.packageinstaller:id/permission_message",
-        )))
-        .is_some()
-    {
-        let snapshot = read!(session.hierarchy_source_snapshot());
-        let tree = crate::ui_automation::tree::Tree::parse(snapshot)?;
-        if let Some(button) = crate::app_automation::dialogs::decline_optional_location(&tree, labels) {
-            if let Some(stopped) = stopped_before_effect(budget) {
-                return Ok(stopped);
-            }
-            anyhow::ensure!(session.gui_session_epoch() == epoch, "feed ladder session changed");
-            let result = session.tap(button.centre()).await;
-            return Ok(ReadWaitResult::Ready(match result {
-                Ok(()) => LadderStep::Tapped {
-                    control: TikTokControl::DialogDismiss,
-                    says: "từ chối quyền vị trí không cần thiết để xem TikTok",
-                },
-                Err(error) => LadderStep::TapFailed {
-                    control: TikTokControl::DialogDismiss,
-                    error: error.to_string(),
-                },
-            }));
-        }
-    }
-
-    if labels.package() == "com.ss.android.ugc.trill"
-        && labels.resource_version() == Some("38.3.2")
-        && labels.language() == "en"
-        && session.supports_accessibility_readback()
-        && read!(session.locate(crate::ElementQuery::Description {
-            value: "Dialog",
-            exact: true,
-        }))
-        .is_some()
-    {
-        let snapshot = read!(session.hierarchy_source_snapshot());
-        let tree = crate::ui_automation::tree::Tree::parse(snapshot)?;
-        if let Some(button) = crate::app_automation::dialogs::decline_contacts(&tree, labels) {
-            if let Some(stopped) = stopped_before_effect(budget) {
-                return Ok(stopped);
-            }
-            anyhow::ensure!(
-                session.gui_session_epoch() == epoch,
-                "feed ladder session changed"
-            );
-            let result = session.tap(button.centre()).await;
-            return Ok(ReadWaitResult::Ready(match result {
-                Ok(()) => LadderStep::Tapped {
-                    control: TikTokControl::DialogDismiss,
-                    says: "từ chối đồng bộ danh bạ trong hộp thoại TikTok",
-                },
-                Err(error) => LadderStep::TapFailed {
-                    control: TikTokControl::DialogDismiss,
-                    error: error.to_string(),
-                },
-            }));
-        }
     }
 
     for (index, rung) in FEED_LADDER.iter().enumerate() {
@@ -412,6 +383,15 @@ async fn step_inner(
             session.gui_session_epoch() == epoch,
             "feed ladder session changed"
         );
+        if session.supports_accessibility_readback() {
+            anyhow::ensure!(
+                read!(session.active_app_bundle()) == labels.package(),
+                "feed foreground changed before effect"
+            );
+            if let Some(stopped) = stopped_before_effect(budget) {
+                return Ok(stopped);
+            }
+        }
         spend.mark_fired(index);
         let result = session.tap(element).await;
         return Ok(ReadWaitResult::Ready(match result {
@@ -434,6 +414,15 @@ async fn step_inner(
             session.gui_session_epoch() == epoch,
             "feed ladder session changed"
         );
+        if session.supports_accessibility_readback() {
+            anyhow::ensure!(
+                read!(session.active_app_bundle()) == labels.package(),
+                "feed foreground changed before effect"
+            );
+            if let Some(stopped) = stopped_before_effect(budget) {
+                return Ok(stopped);
+            }
+        }
         spend.backs += 1;
         // The already-dispatched gesture drains; its ACK is not a screen-state proof.
         let _ = session.back().await;
@@ -538,6 +527,9 @@ mod tests {
 
     #[async_trait::async_trait]
     impl UiSession for FakePhone {
+        async fn active_app_bundle(&self) -> anyhow::Result<String> {
+            Ok("com.ss.android.ugc.trill".into())
+        }
         fn supports_accessibility_readback(&self) -> bool {
             self.xml.is_some()
         }
@@ -695,14 +687,20 @@ mod tests {
             (xml.replace("text=\"Allow\"", "text=\"Other\""), 0),
             (xml.replace("</hierarchy>", r#"<node package="com.google.android.packageinstaller" resource-id="com.android.packageinstaller:id/permission_deny_button" class="android.widget.Button" text="Deny" clickable="true" enabled="true" displayed="true" bounds="[1,1][2,2]"/></hierarchy>"#), 0),
         ] {
-            let phone = FakePhone { xml: Some(xml), ..Default::default() };
-            let result = step(&phone, measured(), &mut LadderSpend::new(0)).await;
+            // The modal can leave the underlying feed tab visible. It must win,
+            // and an unchanged modal must never receive a second decline tap.
+            let phone = FakePhone { xml: Some(xml), ..FakePhone::showing_desc(if expected_taps == 1 { &["For You"] } else { &[] }) };
+            let mut spend = LadderSpend::new(0);
+            let result = step(&phone, measured(), &mut spend).await;
             assert_eq!(phone.taps(), expected_taps, "{result:?}");
             assert_eq!(phone.backs.load(Ordering::Relaxed), 0);
             if expected_taps == 1 {
                 assert!(matches!(result, LadderStep::Tapped { control: TikTokControl::DialogDismiss, .. }));
                 let points = phone.tapped.lock().unwrap();
                 assert_eq!((points[0].x, points[0].y), (710.0, 1176.0));
+                drop(points);
+                assert_eq!(step(&phone, measured(), &mut spend).await, LadderStep::Stuck);
+                assert_eq!(phone.taps(), 1, "unchanged modal must not be replayed");
             } else {
                 assert_eq!(result, LadderStep::Stuck);
             }

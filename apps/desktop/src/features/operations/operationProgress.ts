@@ -88,7 +88,10 @@ export function deviceRows(items: OperationRunItem[]) {
       : states.size > 1 ? "partial" : work[0]?.state ?? "queued";
     const pendingPublish = work.some((item) => item.errorCode === "post_verification_pending");
     const reviewPublish = work.some((item) => item.errorCode === "post_verification_needs_review");
-    return { udid, entries, state: pendingPublish || reviewPublish ? "uncertain" as const : state, pendingPublish, reviewPublish, fraction: pendingPublish || reviewPublish ? null : work.length ? work.filter((item) => !activeRun(item)).length / work.length : null };
+    // A post awaiting proof never counts as complete, but a device still working on it stays
+    // waiting/running; only a review or a finished device awaiting proof needs a check.
+    const proofState = reviewPublish || (pendingPublish && !activeRun({ state })) ? "uncertain" as const : state;
+    return { udid, entries, state: proofState, pendingPublish, reviewPublish, fraction: pendingPublish || reviewPublish ? null : work.length ? work.filter((item) => !activeRun(item)).length / work.length : null };
   });
 }
 

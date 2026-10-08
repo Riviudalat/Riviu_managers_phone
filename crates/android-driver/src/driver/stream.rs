@@ -14,9 +14,62 @@ use super::*;
 static FIRST_FRAME_DECODE_SLOTS: std::sync::LazyLock<Arc<tokio::sync::Semaphore>> =
     std::sync::LazyLock::new(|| Arc::new(tokio::sync::Semaphore::new(4)));
 
+/// Ceiling on one scrcpy control message: first the wait for the producer's control lock,
+/// then the write itself. 2 s is the bound `inject_hardware_key` already used for its write;
+/// before 08/10/2026 touch and RESET_VIDEO had no bound at all and the lock wait had none on
+/// any path, so one wedged socket could hold a drag, every key and the keeper's keyframe
+/// request indefinitely.
+const CONTROL_WRITE_BUDGET: Duration = Duration::from_secs(2);
+
+/// Write one whole control message, or say exactly how much is known about it.
+///
+/// A lock that is not had within the budget means **nothing was written**, so the caller may
+/// say "not sent". A write that errors or outlives the budget may have left part of a frame
+/// on a stream the device reads without framing, so the socket is shut down rather than
+/// reused and the outcome is reported as uncertain -- never replayed (ACK is not proof, and
+/// neither is a timeout).
+async fn send_control_message<W>(
+    control: &tokio::sync::Mutex<W>,
+    message: &[u8],
+    serial: &str,
+    what: &str,
+    budget: Duration,
+) -> anyhow::Result<()>
+where
+    W: tokio::io::AsyncWrite + Unpin,
+{
+    let Ok(mut socket) = tokio::time::timeout(budget, control.lock()).await else {
+        anyhow::bail!(
+            "Kênh điều khiển scrcpy của {serial} bận quá {} ms; {what} chưa được gửi",
+            budget.as_millis()
+        );
+    };
+    let sent = tokio::time::timeout(budget, async {
+        socket.write_all(message).await?;
+        socket.flush().await
+    })
+    .await;
+    match sent {
+        Ok(Ok(())) => Ok(()),
+        other => {
+            let _ = tokio::time::timeout(budget, socket.shutdown()).await;
+            let cause = match other {
+                Err(_) => format!("quá {} ms", budget.as_millis()),
+                Ok(Err(error)) => error.to_string(),
+                Ok(Ok(())) => String::new(),
+            };
+            anyhow::bail!(
+                "Không chắc {what} đã tới {serial} (kênh scrcpy: {cause}); không gửi lại.                  Xem màn hình máy trước thao tác tiếp theo"
+            )
+        }
+    }
+}
+
 impl AndroidDriver {
     /// Claim the exclusive right to start a producer for `serial`.
     pub(super) fn claim_start(&self, serial: &str) -> anyhow::Result<StartClaim<'_>> {
+        anyhow::ensure!(!self.pending_stream_stops.lock().contains_key(serial),
+            "owned stream stop pending; producer replacement refused");
         if !self.starting.lock().insert(serial.to_string()) {
             anyhow::bail!("a minicap start for {serial} is already in flight");
         }
@@ -34,6 +87,8 @@ impl AndroidDriver {
         if self.starting.lock().contains(serial) {
             anyhow::bail!("a minicap start for {serial} is already in flight");
         }
+        anyhow::ensure!(!self.pending_stream_stops.lock().contains_key(serial),
+            "owned stream stop pending; absence unproved");
         if self.streams.lock().await.contains_key(serial) {
             anyhow::bail!(
                 "{serial} still owns a minicap producer; stop_owned_stream must run first"
@@ -376,81 +431,132 @@ impl AndroidDriver {
         }
         Ok(())
     }
-    /// Kill a feed and drop its forward. Best effort by design: the caller has
-    /// already removed it from the registry, so failing here must not strand the
-    /// device with a producer nobody owns.
-    async fn stop_producer(&self, serial: &str, mut producer: StreamProducer) -> bool {
-        producer.reader.abort();
-        // Ignore the kill error: the child may already have been reaped by an
-        // earlier `try_wait`, and that is a stopped child, not a failure.
-        let _ = producer.child.start_kill();
+    /// Stop dispatch happens exactly once. Keep the child in the pending record
+    /// across failed/cancelled waits; subsequent reconciliation is WAIT/READ only.
+    async fn stop_producer(&self, serial: &str, pending: &mut PendingStreamStop) -> bool {
+        debug_assert!(pending.stop_dispatched);
         let confirmed = matches!(
-            tokio::time::timeout(CHILD_EXIT_TIMEOUT, producer.child.wait()).await,
+            tokio::time::timeout(CHILD_EXIT_TIMEOUT, pending.producer.child.wait()).await,
             Ok(Ok(_))
         );
         if !confirmed {
-            tracing::warn!(
-                serial,
-                device_pid = producer.device_pid,
-                "could not confirm the minicap child exited"
-            );
+            tracing::warn!(serial, device_pid=pending.producer.device_pid,
+                stop_id=%pending.marker.stop_id, "owned minicap child exit remains unconfirmed");
         }
-        if let Err(error) =
-            crate::frames::remove_forward(&self.adb, serial, producer.host_port).await
-        {
-            tracing::warn!(serial, port = producer.host_port, %error, "could not remove the minicap forward");
+        if !pending.forward_cleanup_attempted {
+            pending.forward_cleanup_attempted = true;
+            if let Err(error) = crate::frames::remove_forward(
+                &self.adb, serial, pending.producer.host_port,
+            ).await {
+                tracing::warn!(serial, %error, "owned minicap forward removal unconfirmed; no replay");
+            }
         }
         confirmed
     }
-    /// Remove whatever producer we own for `serial` and kill it.
-    ///
-    /// `true` means the driver is confirmed to own no live producer afterwards —
-    /// **including when it owned none to begin with**. That is not laxity: the
-    /// control plane's `StreamStopProof::confirms_stop` requires
-    /// `child_stopped && new > old`, and reporting `false` for "there was nothing to
-    /// stop" would quarantine the lease on every teardown that follows a failed
-    /// stream start. iOS answers the same way.
-    async fn take_and_stop_producer(&self, serial: &str) -> bool {
-        let producer = self.streams.lock().await.remove(serial);
-        match producer {
-            Some(producer) => self.stop_producer(serial, producer).await,
-            None => true,
+
+    pub(super) async fn reconcile_pending_stream_stop(
+        &self,
+        marker: &riviu_core::driver::OwnedStreamStopPending,
+    ) -> anyhow::Result<riviu_core::StreamStopProof> {
+        let completed = self.completed_stream_stops.lock().get(&marker.udid).cloned();
+        if let Some((identity, proof)) = completed {
+            if identity == *marker {
+                let starting = self.starting.lock().contains(&marker.udid);
+                let producer_present = self.streams.lock().await.contains_key(&marker.udid);
+                anyhow::ensure!(self.sink()?.generation(&marker.udid) == proof.new_generation
+                    && !starting && !producer_present,
+                    "completed owned stop generation or producer changed");
+                return Ok(proof);
+            }
         }
+        let retained = self.pending_stream_stops.lock().get(&marker.udid).cloned()
+            .context("pending owned child missing; no absence inference")?;
+        let mut pending = retained.lock().await;
+        let sink = self.sink()?;
+        let starting = self.starting.lock().contains(&marker.udid);
+        let producer_present = self.streams.lock().await.contains_key(&marker.udid);
+        anyhow::ensure!(pending.marker == *marker && pending.stop_dispatched
+            && !marker.stop_id.is_nil() && marker.fenced_generation > marker.old_generation
+            && sink.generation(&marker.udid) == marker.fenced_generation
+            && !starting && !producer_present,
+            "pending stream stop identity or generation changed");
+        let confirmed = matches!(
+            tokio::time::timeout(CHILD_EXIT_TIMEOUT, pending.producer.child.wait()).await,
+            Ok(Ok(_))
+        );
+        anyhow::ensure!(sink.generation(&marker.udid) == marker.fenced_generation,
+            "pending stream stop generation changed during wait");
+        if !confirmed { return Err(marker.clone().into()); }
+        let proof = riviu_core::StreamStopProof {
+            old_generation: marker.old_generation,
+            new_generation: marker.fenced_generation,
+            child_stopped: true,
+        };
+        self.interaction.record_stopped(&marker.udid, marker.fenced_generation);
+        let mut registry = self.pending_stream_stops.lock();
+        anyhow::ensure!(registry.get(&marker.udid).is_some_and(|record| Arc::ptr_eq(record, &retained)),
+            "pending owned stream record replaced");
+        // Keep the last exact completion per serial even if core's subsequent
+        // helper validation/cancellation refuses release. No action on readback.
+        self.completed_stream_stops.lock().insert(marker.udid.clone(), (marker.clone(), proof));
+        registry.remove(&marker.udid);
+        Ok(proof)
     }
-    /// The one place a teardown advances a generation.
-    ///
-    /// `retain_last_frame` distinguishes park from stop: both must make every frame
-    /// the dead producer still holds unpublishable, but park keeps the tile's last
-    /// image instead of blanking it.
+
+    /// Invalidate old frames immediately, even if the owned child has not exited.
+    /// The original->fenced transition is retained and never advanced a second time.
     pub(super) async fn teardown_stream(
         &self,
         serial: &str,
         retain_last_frame: bool,
-    ) -> anyhow::Result<riviu_core::stream_budget::StreamStopProof> {
+    ) -> anyhow::Result<riviu_core::StreamStopProof> {
+        let existing = self.pending_stream_stops.lock().get(serial).cloned();
+        if let Some(existing) = existing {
+            return Err(existing.lock().await.marker.clone().into());
+        }
         let sink = self.sink()?;
-        let child_stopped = self.take_and_stop_producer(serial).await;
-        // Read the old generation separately: `FrameSink` returns only the new one,
-        // deliberately. Safe because every advance for this serial happens either in
-        // the producer-map critical section or under a start claim, and the control
-        // plane holds a per-UDID operation lock across the whole sequence.
+        let mut producers = self.streams.lock().await;
+        anyhow::ensure!(!self.pending_stream_stops.lock().contains_key(serial),
+            "owned stream stop already pending");
+        let producer = producers.remove(serial);
+        if let Some(producer) = &producer { producer.reader.abort(); }
+        // No await between removing the producer, fencing frames, requesting its
+        // one kill and storing the handle. Cancellation cannot split this transfer.
         let old_generation = sink.generation(serial);
         let new_generation = if retain_last_frame {
             sink.park_and_advance(serial)
-        } else {
-            sink.clear_and_advance(serial)
-        };
-        if child_stopped {
-            // Recording the stop lets the plane's recovery path start a session
-            // straight after a stop without confirming the handoff again.
+        } else { sink.clear_and_advance(serial) };
+        let Some(mut producer) = producer else {
             self.interaction.record_stopped(serial, new_generation);
-        } else {
+            return Ok(riviu_core::StreamStopProof { old_generation, new_generation, child_stopped: true });
+        };
+        let marker = riviu_core::driver::OwnedStreamStopPending {
+            stop_id: uuid::Uuid::new_v4(), udid: serial.to_owned(),
+            old_generation, fenced_generation: new_generation,
+        };
+        let _ = producer.child.start_kill();
+        let retained = Arc::new(tokio::sync::Mutex::new(PendingStreamStop {
+            marker: marker.clone(), producer, stop_dispatched: true,
+            forward_cleanup_attempted: false,
+        }));
+        self.pending_stream_stops.lock().insert(serial.to_owned(), retained.clone());
+        drop(producers);
+        let mut pending = retained.lock().await;
+        let confirmed = self.stop_producer(serial, &mut pending).await;
+        anyhow::ensure!(sink.generation(serial) == new_generation,
+            "owned stream generation changed during stop");
+        if !confirmed {
             self.interaction.clear(serial);
+            return Err(marker.into());
         }
-        Ok(riviu_core::stream_budget::StreamStopProof {
-            old_generation,
-            new_generation,
-            child_stopped,
-        })
+        self.interaction.record_stopped(serial, new_generation);
+        let mut registry = self.pending_stream_stops.lock();
+        anyhow::ensure!(registry.get(serial).is_some_and(|record| Arc::ptr_eq(record, &retained)),
+            "owned stream stop record replaced");
+        let proof = riviu_core::StreamStopProof { old_generation, new_generation, child_stopped: true };
+        self.completed_stream_stops.lock().insert(serial.to_owned(), (marker, proof));
+        registry.remove(serial);
+        Ok(proof)
     }
     /// Start or reuse the tile feed for one device.
     ///
@@ -481,9 +587,8 @@ impl AndroidDriver {
             return Ok(());
         }
         // Whatever is there is stale; killing it happens outside the map lock.
-        self.take_and_stop_producer(serial).await;
-
-        let generation = sink.clear_and_advance(serial);
+        // Pending stop returns a typed refusal; never replace an unconfirmed child.
+        let generation = self.teardown_stream(serial, false).await?.new_generation;
         let started = self
             .spawn_producer(serial, generation, StreamReadiness::BestEffort)
             .await;
@@ -765,6 +870,9 @@ impl AndroidDriver {
         // **17.8 s of no frames at all** after double-clicking a phone, and the only way to
         // know which of these five adb round trips to attack is to charge each of them.
         let spawn_started = std::time::Instant::now();
+        // Transport before wake: a phone that is gone costs one adb call, not three.
+        crate::scrcpy::require_device_transport(&self.adb, serial).await?;
+        let transport = spawn_started.elapsed();
         self.wake_display_for_capture(serial).await;
         let woke = spawn_started.elapsed();
 
@@ -897,8 +1005,15 @@ impl AndroidDriver {
                 "scrcpy never accepted a connection after 40 attempts{said}"
             )));
         };
-        // Set in the same arm as `stream`, so this cannot be reached without it.
-        let control = control.expect("try_accept returns both sockets or neither");
+        // Set in the same arm as `stream`. Still not an `expect`: release builds abort on
+        // panic, and a broken invariant here must cost one tile, not every phone.
+        let Some(control) = control else {
+            crate::frames::remove_forward(&self.adb, serial, host_port)
+                .await
+                .ok();
+            let _ = child.kill().await;
+            anyhow::bail!("scrcpy accepted a video socket without its control socket");
+        };
         let first =
             match tokio::time::timeout(Duration::from_secs(8), stream.next_sync_sample()).await {
                 Ok(Ok(sample)) => sample,
@@ -951,6 +1066,7 @@ impl AndroidDriver {
             // Cumulative, so each is "by the time this step finished". Differences are the
             // per-step cost; the total is what the operator waits when a preset switch takes
             // their picture away.
+            transport_ms = transport.as_millis() as u64,
             wake_ms = woke.as_millis() as u64,
             jar_ms = served.as_millis() as u64,
             sweep_ms = swept.as_millis() as u64,
@@ -1203,19 +1319,8 @@ impl AndroidDriver {
             }
         };
         let message = crate::scrcpy::hardware_key_message(key);
-        let mut socket = control.lock().await;
-        let sent = tokio::time::timeout(Duration::from_secs(2), async {
-            socket.write_all(&message).await?;
-            socket.flush().await
-        })
-        .await;
-        match sent {
-            Ok(Ok(())) => Ok(true),
-            other => {
-                let _ = socket.shutdown().await;
-                anyhow::bail!("Gửi phím qua scrcpy tới {serial} thất bại: {other:?}");
-            }
-        }
+        send_control_message(&control, &message, serial, "phím", CONTROL_WRITE_BUDGET).await?;
+        Ok(true)
     }
 
     /// Put one touch event on the phone, in the coordinate space of the picture on screen.
@@ -1262,18 +1367,11 @@ impl AndroidDriver {
         let clamped_x = scaled_x.clamp(0.0, f64::from(frame_w - 1)) as i32;
         let clamped_y = scaled_y.clamp(0.0, f64::from(frame_h - 1)) as i32;
         let message = crate::scrcpy::inject_touch(action, clamped_x, clamped_y, frame_w, frame_h);
-        let mut socket = control.lock().await;
         // ONE `write_all`, under the lock, for the same reason as RESET_VIDEO: the reader on
         // the device has no framing, so an interleaved write desynchronises it permanently
         // and takes the video down with it.
-        socket
-            .write_all(&message)
-            .await
-            .with_context(|| format!("send touch to {serial}"))?;
-        socket
-            .flush()
-            .await
-            .with_context(|| format!("flush touch to {serial}"))?;
+        send_control_message(&control, &message, serial, "thao tác chạm", CONTROL_WRITE_BUDGET)
+            .await?;
         Ok(true)
     }
     /// Ask the phone for a fresh keyframe, without restarting anything.
@@ -1297,18 +1395,63 @@ impl AndroidDriver {
             }
         };
         let message = crate::scrcpy::reset_video();
-        let mut socket = control.lock().await;
         // ONE `write_all`, under the lock. The device's reader has no framing, so a partial
         // or interleaved write desynchronises it permanently — and that is not a lost
         // message, it is the whole server going down, video included.
-        socket
-            .write_all(&message)
-            .await
-            .with_context(|| format!("send RESET_VIDEO to {serial}"))?;
-        socket
-            .flush()
-            .await
-            .with_context(|| format!("flush RESET_VIDEO to {serial}"))?;
+        send_control_message(&control, &message, serial, "yêu cầu khung hình", CONTROL_WRITE_BUDGET)
+            .await?;
         Ok(true)
+    }
+}
+
+#[cfg(test)]
+mod control_write_tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn a_held_control_lock_is_refused_as_not_sent_within_the_budget() {
+        let (writer, mut reader) = tokio::io::duplex(64);
+        let control = tokio::sync::Mutex::new(writer);
+        let _held = control.lock().await;
+        let started = std::time::Instant::now();
+        let error = send_control_message(&control, b"touch", "fixture", "thao tác chạm", Duration::from_millis(50))
+            .await
+            .unwrap_err();
+        assert!(started.elapsed() < Duration::from_secs(1), "the wait is bounded");
+        assert!(error.to_string().contains("chưa được gửi"), "{error}");
+        drop(_held);
+        drop(control);
+        let mut seen = Vec::new();
+        reader.read_to_end(&mut seen).await.unwrap();
+        assert!(seen.is_empty(), "nothing reached the socket");
+    }
+
+    #[tokio::test]
+    async fn a_stalled_write_is_uncertain_and_the_socket_is_retired() {
+        // One-byte pipe nobody reads: the write blocks after the first byte, which is a
+        // partial frame on a stream the device reads without framing.
+        let (writer, _reader) = tokio::io::duplex(1);
+        let control = tokio::sync::Mutex::new(writer);
+        let started = std::time::Instant::now();
+        let error = send_control_message(&control, &[0u8; 32], "fixture", "thao tác chạm", Duration::from_millis(50))
+            .await
+            .unwrap_err();
+        assert!(started.elapsed() < Duration::from_secs(1), "the write is bounded");
+        let message = error.to_string();
+        assert!(message.contains("Không chắc thao tác chạm đã tới fixture"), "{message}");
+        assert!(message.contains("không gửi lại"), "{message}");
+    }
+
+    #[tokio::test]
+    async fn a_whole_message_is_written_once() {
+        let (writer, mut reader) = tokio::io::duplex(64);
+        let control = tokio::sync::Mutex::new(writer);
+        send_control_message(&control, b"abc", "fixture", "phím", CONTROL_WRITE_BUDGET)
+            .await
+            .unwrap();
+        drop(control);
+        let mut seen = Vec::new();
+        reader.read_to_end(&mut seen).await.unwrap();
+        assert_eq!(seen, b"abc");
     }
 }

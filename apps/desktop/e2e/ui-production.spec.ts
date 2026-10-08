@@ -3,7 +3,7 @@ import { installTauriMock, mockCommandCalls } from "./fixtures/tauriMock";
 import { openOperatorPage } from "./fixtures/operatorNavigation";
 
 const pages = [
-  ["Thiết bị", "Thiết bị"], ["Nuôi TikTok", "Nuôi TikTok"],
+  ["Thiết bị", "Thiết bị"], ["Cài đặt máy", "Cài đặt máy"], ["Nuôi TikTok", "Nuôi TikTok"],
   ["Tương tác", "Tương tác"], ["Đăng bài", "Đăng bài"],
   ["My Apps", "My Apps"], ["Tác vụ", "Lượt chạy"],
   ["Tác vụ đã lưu", "Tác vụ đã lưu"], ["Flow", "Flow"],
@@ -37,7 +37,7 @@ test("light workspace keeps its chosen navigation readable on a dark operating s
 });
 
 for (const viewport of [{ width: 1440, height: 900 }, { width: 1024, height: 768 }, { width: 820, height: 560 }]) {
-  test(`all 16 pages share the readable workspace at ${viewport.width}`, async ({ page }, testInfo) => {
+  test(`all 17 pages share the readable workspace at ${viewport.width}`, async ({ page }, testInfo) => {
     test.setTimeout(150_000);
     await page.setViewportSize(viewport);
     await page.emulateMedia({ reducedMotion: "reduce", colorScheme: "dark" });

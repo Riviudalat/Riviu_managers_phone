@@ -201,7 +201,7 @@ describe("InteractionMonitorTab", () => {
     const image = { id: "art-1", kind: "comment-root-evidence", mimeType: "image/jpeg", base64: "AAAA" };
     vi.mocked(api.interactionGet).mockResolvedValueOnce(detail as never).mockResolvedValueOnce(nextDetail as never);
     vi.mocked(api.interactionListArtifacts).mockResolvedValueOnce([
-      { id: "art-1", assignmentId: "a1", relativePath: "a1.jpg" },
+      { id: "art-1", assignmentId: "a1", kind: "interaction-terminal-evidence", relativePath: "a1.jpg", sha256: "a".repeat(64), createdAt: "2026-10-06T10:01:00Z" },
     ] as never).mockResolvedValueOnce([]);
     vi.mocked(api.interactionReadArtifact).mockReturnValueOnce(pending.promise);
     const { rerender } = render(selectedCampaign("campaign-1"));
@@ -209,13 +209,13 @@ describe("InteractionMonitorTab", () => {
     fireEvent.click(await screen.findByRole("button", { name: "Ảnh" }));
     if (state === "loaded") {
       await act(async () => { pending.resolve(image); });
-      expect(screen.getByRole("img", { name: "Ảnh màn hình khay bình luận" })).toBeVisible();
+      expect(screen.getByRole("img", { name: "Ảnh màn hình sau tương tác" })).toBeVisible();
     }
     rerender(selectedCampaign("campaign-2"));
     await openFirstLog();
     await screen.findByText("nội dung chiến dịch mới");
     if (state === "pending") await act(async () => { pending.resolve(image); });
-    expect(screen.queryByRole("img", { name: "Ảnh màn hình khay bình luận" })).toBeNull();
+    expect(screen.queryByRole("img", { name: "Ảnh màn hình sau tương tác" })).toBeNull();
     expect(screen.getByRole("button", { name: "Dừng" })).toBeEnabled();
   });
 

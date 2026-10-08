@@ -1,6 +1,6 @@
 import { act, cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import { afterEach, beforeEach, expect, it, vi } from "vitest";
-import { operationDeviceLog, operationGetRun, operationQueryRuns, operationStop, operationStopStatus, publishStartStatus } from "../../api";
+import { operationDeviceLog, operationGetRun, operationQueryRuns, operationStop, operationStopStatus, publishCancelUnacceptedStart, publishCheckLinks, publishResumeVerification, publishRetryAssignment, publishRetrySheetAssignment, publishStartStatus } from "../../api";
 import { observePendingPublishStart } from "./publishStartBridge";
 import type { OperationRunDetail, OperationRunSummary } from "../../types";
 import { OperationProgressCenter } from "./OperationProgressCenter";
@@ -133,10 +133,16 @@ async function openDevices(wide = false) {
 it("opens run, exact device and HH:mm:ss log without dispatching work", async () => {
   await openDevices();
   expect(screen.getByRole("progressbar", { name: "Tiến độ công việc" })).toHaveAttribute("aria-valuenow", "50");
-  expect(operationDeviceLog).not.toHaveBeenCalled();
+  // Publish rows read their own device timeline for per-device progress. Opening the monitor
+  // may read this run's devices, but it never dispatches a stop, retry, link check or Sheet write.
+  expect(vi.mocked(operationDeviceLog).mock.calls.every(([operationId, udid]) => operationId === run.id && ["a", "b"].includes(udid))).toBe(true);
+  for (const effect of [operationStop, publishCancelUnacceptedStart, publishRetryAssignment, publishRetrySheetAssignment, publishCheckLinks, publishResumeVerification]) {
+    expect(effect).not.toHaveBeenCalled();
+  }
   fireEvent.click(screen.getByRole("button", { name: /Máy 2/ }));
   expect(await screen.findByText("12:34:56")).toBeVisible();
-  expect(operationDeviceLog).toHaveBeenLastCalledWith("publish:run", "a");
+  expect(operationDeviceLog).toHaveBeenCalledWith("publish:run", "a");
+  expect(within(screen.getByLabelText("Chi tiết máy")).getByText(labels.get("a")!)).toBeVisible();
   fireEvent.keyDown(screen.getByLabelText("Tiến trình công việc"), { key: "Escape" });
   await waitFor(() => expect(screen.getByLabelText("Chi tiết máy")).not.toBeVisible());
 });
@@ -148,9 +154,8 @@ it.each(["running", "partial"] as const)("does not display complete progress for
     ...detail.items[1], state, errorCode: "post_verification_pending",
   }] });
   await openDevices();
-  const progress = screen.getByRole("progressbar", { name: "Tiến độ công việc" });
-  if (state === "running") expect(progress).toHaveAttribute("aria-valuenow", "50");
-  else expect(progress).not.toHaveAttribute("aria-valuenow");
+  // A post awaiting proof makes the whole run indeterminate, running or not: no percentage.
+  expect(screen.getByRole("progressbar", { name: "Tiến độ công việc" })).not.toHaveAttribute("aria-valuenow");
   expect(screen.queryByText("100%")).toBeNull();
   expect(screen.getByRole("button", { name: /Máy 5.*Chờ xác minh bài đăng/ })).toBeVisible();
   expect(screen.getByLabelText("Kết quả từng máy")).toHaveTextContent("1 hoàn tất");
@@ -194,10 +199,18 @@ it("ignores a late log from the previously selected phone", async () => {
 });
 
 it("shows an inline retry for logs and does not turn a read error into an empty success", async () => {
-  vi.mocked(operationDeviceLog).mockRejectedValueOnce(new Error("read failed"));
+  // The device row polls the same timeline, so keep the read failing until the operator retries.
+  let failing = true;
+  const succeed = vi.mocked(operationDeviceLog).getMockImplementation()!;
+  vi.mocked(operationDeviceLog).mockImplementation(async (operationId, udid) => {
+    if (failing && udid === "a") throw new Error("read failed");
+    return succeed(operationId, udid);
+  });
   await openDevices();
   fireEvent.click(screen.getByRole("button", { name: /Máy 2/ }));
   expect(await screen.findByRole("alert")).toHaveTextContent("read failed");
+  expect(screen.queryByText("Chưa có nhật ký cho máy này.")).toBeNull();
+  failing = false;
   fireEvent.click(screen.getByRole("button", { name: "Thử lại" }));
   expect(await screen.findByText("12:34:56")).toBeVisible();
 });
