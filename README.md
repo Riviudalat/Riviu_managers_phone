@@ -70,8 +70,10 @@ may. Đọc [WDA safety](docs/agents/02-wda-doc-truoc-khi-sua.md) trước mọi
   Nuôi hoặc Tương tác bị từ chối (**Máy đang bận**), không bị chiếm quyền. Mỗi cài
   đặt chỉ được ghi khi chưa đúng và chỉ báo **Đã áp dụng** khi đọc lại đúng giá trị.
 - Máy có mã PIN/mật khẩu/hình vẽ báo **Cần làm tay** và không bị gửi `locksettings`
-  (trên Android 9–11 lệnh đó tính là một lần nhập sai mã). Không đọc được loại khóa
-  cũng là **Cần làm tay**. Riviu không mở khóa máy có mã.
+  (trên Android 9–11 lệnh đó tính là một lần nhập sai mã). Android 9 (đội Galaxy S8+)
+  không in loại khóa, nên Riviu coi máy là không có mã chỉ khi mã bảo mật Gatekeeper
+  (`SID`) của mọi người dùng đều bằng 0. Không đọc được loại khóa cũng là
+  **Cần làm tay**. Riviu không mở khóa máy có mã.
 - **Tự áp dụng khi máy kết nối** (mặc định bật) áp chuẩn đã lưu mỗi lần máy Android
   cắm lại, trong lượt chuẩn bị Riviu Helper và trước khi máy nhận việc; kết quả ghi
   vào nhật ký thao tác. Máy còn chờ trong hàng chuẩn bị chưa được áp chuẩn.

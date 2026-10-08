@@ -44,7 +44,7 @@ const ANIMATION_KEYS: [&str; 3] = [
 ///
 /// No `locksettings` here -- see the module docs; it runs only in [`LOCK_DISABLED_READ`] once
 /// the credential is proven absent.
-pub const BASELINE_READ_SCRIPT: &str = "echo '@@credential'; dumpsys lock_settings | grep -E 'CredentialType'; \
+pub const BASELINE_READ_SCRIPT: &str = "echo '@@credential'; dumpsys lock_settings | grep -E 'CredentialType|^ *User [0-9]+$|^ *SID = '; \
 echo '@@accelerometer_rotation'; settings get system accelerometer_rotation; \
 echo '@@user_rotation'; settings get system user_rotation; \
 echo '@@stay_on_while_plugged_in'; settings get global stay_on_while_plugged_in; \
@@ -141,11 +141,39 @@ fn value_is(value: &SettingValue, target: &str) -> Option<bool> {
 /// `1` pattern, `2` password, `3` pin). Every user is checked and **any** credential counts:
 /// a false "has credential" costs a manual step, a false "none" costs a wrong-PIN attempt.
 ///
-/// `None` when no line says -- unknown, including Android 9 builds whose dump does not print the
-/// field (unverified on this fleet; see REPORT).
+/// Android 9 prints no `CredentialType` (SM-G955F/N fleet, 08/10/2026). Its dump lists each
+/// `User <id>` with `SID = <hex>`, the Gatekeeper secure user id, which is enrolled with a
+/// credential and cleared when the credential is removed. So a zero SID for **every** listed
+/// user proves "none", any non-zero SID is a credential, and a user whose SID did not print (or
+/// did not parse) leaves the answer unknown.
+///
+/// `None` when nothing says -- unknown, never a guess.
 pub fn parse_lock_credential(dump: &str) -> Option<bool> {
     let mut seen_none = false;
+    let mut users = 0usize;
+    let mut zero_sids = 0usize;
+    let mut sid_pending = false;
     for line in dump.lines() {
+        let trimmed = line.trim();
+        if let Some(id) = trimmed.strip_prefix("User ") {
+            if !id.is_empty() && id.bytes().all(|b| b.is_ascii_digit()) {
+                users += 1;
+                sid_pending = true;
+            }
+            continue;
+        }
+        if let Some(sid) = trimmed.strip_prefix("SID = ") {
+            if !sid_pending {
+                continue;
+            }
+            sid_pending = false;
+            match u64::from_str_radix(sid.trim(), 16) {
+                Ok(0) => zero_sids += 1,
+                Ok(_) => return Some(true),
+                Err(_) => {}
+            }
+            continue;
+        }
         let Some(index) = line.find("CredentialType:") else {
             continue;
         };
@@ -158,7 +186,10 @@ pub fn parse_lock_credential(dump: &str) -> Option<bool> {
             _ => return Some(true),
         }
     }
-    seen_none.then_some(false)
+    if seen_none {
+        return Some(false);
+    }
+    (users > 0 && zero_sids == users).then_some(false)
 }
 
 /// `locksettings get-disabled` prints exactly `true` or `false`.
@@ -717,6 +748,29 @@ mod tests {
         );
         assert_eq!(parse_lock_credential("Quality: 0\nSID: 0\n"), None);
         assert_eq!(parse_lock_credential(""), None);
+    }
+
+    #[test]
+    fn android_9_dump_without_credential_type_reads_the_gatekeeper_sid_of_every_user() {
+        // SM-G955F, Android 9, swipe lock disabled (Riviu #24, 08/10/2026), as filtered by
+        // BASELINE_READ_SCRIPT: no `CredentialType` line at all.
+        let no_credential = "    User 0\r\n        SID = 0\r\n";
+        assert_eq!(parse_lock_credential(no_credential), Some(false));
+        // Gatekeeper enrolls a secure user id with the credential and clears it on removal.
+        assert_eq!(parse_lock_credential("    User 0\n        SID = 5a1f03c2e9b7d410\n"), Some(true));
+        assert_eq!(
+            parse_lock_credential("    User 0\n        SID = 0\n    User 150\n        SID = 3e8\n"),
+            Some(true),
+            "a work profile's credential counts"
+        );
+        // A user whose SID was not printed (the dump's RemoteException branch) stays unknown.
+        assert_eq!(parse_lock_credential("    User 0\n        SID = 0\n    User 150\n"), None);
+        assert_eq!(parse_lock_credential("    User 0\n        SID = zz\n"), None);
+        // A printed CredentialType still decides on builds that have it.
+        assert_eq!(
+            parse_lock_credential("    User 0\n        SID = 0\nCredentialType: PIN\n"),
+            Some(true)
+        );
     }
 
     #[test]
