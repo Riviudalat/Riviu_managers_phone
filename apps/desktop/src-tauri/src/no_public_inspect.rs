@@ -134,6 +134,7 @@ fn persist_evidence(path: &std::path::Path, bytes: &[u8]) -> anyhow::Result<()> 
     Ok(())
 }
 
+#[cfg(test)]
 fn persist_baseline_xml(
     directory: &std::path::Path,
     observation: &riviu_core::HierarchySourceSnapshot,
