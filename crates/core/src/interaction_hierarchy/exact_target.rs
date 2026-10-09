@@ -5,16 +5,18 @@ use anyhow::Context;
 use tokio::time::Instant;
 
 use super::{
-    confirm_target_from_share_link, read_author_label, read_target_identity_caption, TargetArrival,
-    TargetCardContinuityLost, TargetLinkMismatch,
+    bare_author_label, confirm_target_from_share_link, read_author_label,
+    read_target_identity_caption, TargetArrival, TargetCardContinuityLost, TargetLinkMismatch,
 };
 use crate::driver::{ElementQuery, UiSession};
 use crate::tiktok_labels::{TikTokControl, TikTokControls};
+use crate::ui_automation::tree::Tree;
 use crate::ResolvedTikTokTarget;
 
 // SM-G955F/Trill 38.3.2, 14/09/2026: the blank loading surface and a feed
-// LIVE placeholder can outlast 14s. Keep one URL dispatch and wait up to 30s;
-// only a copied canonical URL authorizes the requested post.
+// LIVE placeholder can outlast 14s. Keep one URL dispatch and wait up to 30s.
+// On the measured detail route the post id in the dispatched link authorizes the
+// post; elsewhere only a copied canonical URL does.
 const CARD_WINDOW: Duration = Duration::from_secs(30);
 const CARD_POLL: Duration = Duration::from_millis(350);
 const DISPATCH_SETTLE: Duration = Duration::from_millis(900);
@@ -34,11 +36,37 @@ enum CardObservationError {
     AuthorUnreadable,
     #[error("caption: measured identity missing, empty, ambiguous or unreadable")]
     CaptionUnreadable,
+    #[error("hierarchy: snapshot unreadable")]
+    HierarchyUnreadable,
+    #[error("detail: post detail page not shown")]
+    NotDetailPage,
 }
 
-/// Prove the current post by its own copied URL, or open the pinned URL once and prove it.
-/// Author/caption are continuity evidence, never authority for a particular post. Navigation
-/// uses only Share/Copy link and the pinned URL; it never taps a public-action control.
+// Measured on TikTok Global 45.7.3/en, SM-G955F ce0417143cef30280d (Riviu #46),
+// 09/10/2026 (apply-apk-20261009/share-deeplink-probe, B3b/B3e):
+// `snssdk1233://aweme/detail/<id>` opens DetailActivity on exactly that post. The
+// page has a top-left `bj1` "Back" and no Home tab; the For You feed, where the
+// https form lands instead (B2g), has the Home tab and no `bj1`.
+const DETAIL_PACKAGE: &str = "com.zhiliaoapp.musically";
+const DETAIL_VERSION: &str = "45.7.3";
+const DETAIL_BACK_ID: &str = "com.zhiliaoapp.musically:id/bj1";
+const DETAIL_BACK_LABEL: &str = "Back";
+/// Longest numeric post id accepted into the detail link. Real ids are 19 digits.
+const MAX_CONTENT_ID_DIGITS: usize = 32;
+
+/// Open the target post and prove it is the one on screen. It never taps a public-action
+/// control.
+///
+/// On the measured detail route (Global 45.7.3/en) the post is opened by its id from the
+/// campaign link, and the opened detail page is the proof: **the share sheet is never
+/// opened**. TikTok very likely counts `Copy link` as a public share (probe 09/10/2026: the
+/// share counter went 0 -> 1 about a minute after one copy), so routine interaction must not
+/// copy a link it already has. See [`open_detail_target`].
+///
+/// Other builds keep the legacy proof: the current post's own copied URL, or the pinned URL
+/// opened once and then copied. Effects are refused on those builds by the fleet allowlist,
+/// so only read paths (comment verification, inspection) can reach it. Author and caption
+/// are continuity evidence there, never authority for a particular post.
 pub async fn open_exact_target_by_hierarchy(
     session: &dyn UiSession,
     labels: TikTokControls,
@@ -62,6 +90,9 @@ async fn open_target(
         labels.label(TikTokControl::Comments).is_some(),
         "target_exact_open: comments control unmeasured"
     );
+    if detail_route_measured(labels, target_package) {
+        return open_detail_target(session, labels, target_package, expected, stop).await;
+    }
 
     if inspect_current
         && readable_card_in_foreground(session, labels, target_package, false)
@@ -186,6 +217,258 @@ async fn open_target(
         }
         tokio::time::sleep(CARD_POLL.min(deadline.saturating_duration_since(Instant::now()))).await;
     }
+}
+
+fn detail_route_measured(labels: TikTokControls, target_package: &str) -> bool {
+    target_package == DETAIL_PACKAGE
+        && labels.package() == DETAIL_PACKAGE
+        && labels.resource_version() == Some(DETAIL_VERSION)
+        && labels.language() == "en"
+}
+
+fn detail_link(content_id: &str) -> anyhow::Result<String> {
+    anyhow::ensure!(
+        !content_id.is_empty()
+            && content_id.len() <= MAX_CONTENT_ID_DIGITS
+            && content_id.bytes().all(|b| b.is_ascii_digit()),
+        "target_detail_open: post id is not numeric"
+    );
+    Ok(format!("snssdk1233://aweme/detail/{content_id}"))
+}
+
+/// What one snapshot of a detail page says about the post on it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct DetailCard {
+    author: String,
+    caption: String,
+}
+
+/// Open the target by its post id and prove it without the share sheet.
+///
+/// The authority is the id in the dispatched link, and it holds only for a detail page that
+/// **this dispatch created**:
+///
+/// 1. Before the dispatch TikTok must be foreground on a screen that is not a detail page.
+///    Otherwise the app is restarted once (force-stop clears every stacked page) and the
+///    check repeated; a detail page that survives that is refused, because a link that
+///    failed silently would leave it up and it could be any post.
+/// 2. After the dispatch, two snapshots of increasing generation must both show the detail
+///    page (`bj1` Back, no Home tab, Comments) with the same author and one caption.
+/// 3. "This video is unavailable", a feed card, another app or an unreadable card refuse
+///    once the loading window ends. The link may be dispatched one more time when no detail
+///    page has appeared; that is navigation, never a public action.
+async fn open_detail_target(
+    session: &dyn UiSession,
+    labels: TikTokControls,
+    target_package: &str,
+    expected: &ResolvedTikTokTarget,
+    stop: &AtomicBool,
+) -> anyhow::Result<TargetArrival> {
+    let link = detail_link(&expected.content_id)?;
+    if !detail_baseline_clear(session, labels, target_package).await {
+        ensure_not_cancelled(stop)?;
+        session
+            .restart_app(target_package)
+            .await
+            .context("target_detail_open: app restart failed")?;
+        tokio::time::sleep(DISPATCH_SETTLE).await;
+        ensure_not_cancelled(stop)?;
+        anyhow::ensure!(
+            detail_baseline_clear(session, labels, target_package).await,
+            "target_detail_open: a post detail page was still open before the link; refusing to take it as the target"
+        );
+    }
+    ensure_not_cancelled(stop)?;
+    session
+        .open_url_in_app(&link, target_package)
+        .await
+        .context("target_detail_open: detail link dispatch failed")?;
+
+    let mut deadline = Instant::now() + CARD_WINDOW;
+    let mut redispatched = false;
+    let mut declined_contacts = false;
+    let mut previous: Option<(u64, DetailCard)> = None;
+    tokio::time::sleep(DISPATCH_SETTLE).await;
+    loop {
+        ensure_not_cancelled(stop)?;
+        match observe_detail_in_foreground(session, labels, target_package).await {
+            Ok((generation, card)) => {
+                if previous
+                    .as_ref()
+                    .is_some_and(|(seen, first)| generation > *seen && *first == card)
+                {
+                    ensure_not_cancelled(stop)?;
+                    ensure_foreground(session, target_package).await?;
+                    return Ok(TargetArrival::Identified {
+                        author_label: card.author,
+                    });
+                }
+                previous = Some((generation, card));
+            }
+            Err((CardObservationError::PostUnavailable, _)) => {
+                return Err(CardObservationError::PostUnavailable.into());
+            }
+            Err((CardObservationError::CommentsUnreadable, Some(tree))) if !declined_contacts => {
+                previous = None;
+                if let Some(button) =
+                    crate::app_automation::dialogs::decline_contacts(&tree, labels)
+                {
+                    ensure_not_cancelled(stop)?;
+                    ensure_foreground(session, target_package).await?;
+                    session.tap(button.centre()).await?;
+                    declined_contacts = true;
+                    tokio::time::sleep(CARD_POLL).await;
+                    continue;
+                }
+            }
+            Err((CardObservationError::NotDetailPage, _))
+                if !redispatched
+                    && deadline.saturating_duration_since(Instant::now())
+                        <= Duration::from_secs(20) =>
+            {
+                // A cold launch can swallow the first VIEW. Dispatch the same id once more.
+                ensure_not_cancelled(stop)?;
+                session
+                    .open_url_in_app(&link, target_package)
+                    .await
+                    .context("target_detail_open: detail link redispatch failed")?;
+                redispatched = true;
+                previous = None;
+                deadline = Instant::now() + CARD_WINDOW;
+                tokio::time::sleep(DISPATCH_SETTLE).await;
+                continue;
+            }
+            Err(_) => previous = None,
+        }
+        if Instant::now() >= deadline {
+            let last_check =
+                match observe_detail_in_foreground(session, labels, target_package).await {
+                    Ok(_) => "detail page did not hold still across two reads".to_string(),
+                    Err((error, _)) => error.to_string(),
+                };
+            anyhow::bail!(
+                "target_detail_open: post {} not proven on a detail page within {} seconds; last check: {last_check}",
+                expected.content_id,
+                CARD_WINDOW.as_secs()
+            );
+        }
+        tokio::time::sleep(CARD_POLL.min(deadline.saturating_duration_since(Instant::now()))).await;
+    }
+}
+
+/// True only when TikTok is foreground on a readable screen that is not a detail page.
+async fn detail_baseline_clear(
+    session: &dyn UiSession,
+    labels: TikTokControls,
+    target_package: &str,
+) -> bool {
+    if !matches!(session.active_app_bundle().await, Ok(package) if package == target_package) {
+        return false;
+    }
+    let Ok(snapshot) = session.hierarchy_source_snapshot().await else {
+        return false;
+    };
+    let Ok(tree) = Tree::parse(snapshot) else {
+        return false;
+    };
+    is_detail_page(&tree, labels) == Some(false)
+}
+
+/// `Some(true)` for the measured detail page, `Some(false)` for a screen with the Home tab or
+/// without the detail Back, `None` when the Home tab is unmeasured.
+fn is_detail_page(tree: &Tree, labels: TikTokControls) -> Option<bool> {
+    let package = labels.package();
+    let home = labels.label(TikTokControl::HomeTab)?;
+    let back = tree
+        .matching(
+            package,
+            ElementQuery::Description {
+                value: DETAIL_BACK_LABEL,
+                exact: true,
+            },
+        )
+        .into_iter()
+        .any(|index| tree.nodes[index].attr("resource-id") == DETAIL_BACK_ID);
+    Some(back && tree.matching(package, home.to_query()).is_empty())
+}
+
+type DetailObservation = Result<(u64, DetailCard), (CardObservationError, Option<Tree>)>;
+
+async fn observe_detail_in_foreground(
+    session: &dyn UiSession,
+    labels: TikTokControls,
+    target_package: &str,
+) -> DetailObservation {
+    match session.active_app_bundle().await {
+        Ok(package) if package == target_package => {}
+        Ok(package) => {
+            return Err((
+                CardObservationError::WrongForeground(package.chars().take(128).collect()),
+                None,
+            ));
+        }
+        Err(_) => return Err((CardObservationError::ForegroundUnreadable, None)),
+    }
+    let Ok(snapshot) = session.hierarchy_source_snapshot().await else {
+        return Err((CardObservationError::HierarchyUnreadable, None));
+    };
+    let Ok(tree) = Tree::parse(snapshot) else {
+        return Err((CardObservationError::HierarchyUnreadable, None));
+    };
+    match observe_detail(&tree, labels) {
+        Ok(card) => Ok((tree.generation, card)),
+        Err(error) => Err((error, Some(tree))),
+    }
+}
+
+/// Every predicate is read from one snapshot, so the card cannot change between them.
+fn observe_detail(tree: &Tree, labels: TikTokControls) -> Result<DetailCard, CardObservationError> {
+    let package = labels.package();
+    let unavailable = ElementQuery::Text {
+        value: UNAVAILABLE_TEXT,
+        exact: true,
+    };
+    if !tree.matching(package, unavailable).is_empty() {
+        return Err(CardObservationError::PostUnavailable);
+    }
+    let comments = labels
+        .label(TikTokControl::Comments)
+        .ok_or(CardObservationError::CommentsUnreadable)?;
+    if tree.matching(package, comments.to_query()).is_empty() {
+        return Err(CardObservationError::CommentsUnreadable);
+    }
+    if is_detail_page(tree, labels) != Some(true) {
+        return Err(CardObservationError::NotDetailPage);
+    }
+    let mut authors = Vec::new();
+    for control in [TikTokControl::AuthorProfileLink, TikTokControl::Follow] {
+        let Some(label) = labels.label(control) else {
+            continue;
+        };
+        for index in tree.matching(package, label.to_query()) {
+            if let Some(bare) = bare_author_label(tree.nodes[index].attr("content-desc"), label) {
+                if !authors.contains(&bare) {
+                    authors.push(bare);
+                }
+            }
+        }
+    }
+    let [author] = authors.as_slice() else {
+        return Err(CardObservationError::AuthorUnreadable);
+    };
+    let captions: Vec<String> = tree
+        .matching(package, ElementQuery::ResourceIdSuffix(":id/desc"))
+        .into_iter()
+        .map(|index| tree.nodes[index].attr("text").trim().to_string())
+        .filter(|text| !text.is_empty())
+        .collect();
+    let [caption] = captions.as_slice() else {
+        return Err(CardObservationError::CaptionUnreadable);
+    };
+    Ok(DetailCard {
+        author: author.clone(),
+        caption: caption.clone(),
+    })
 }
 
 /// Open the saved target after a clean app start. The initial feed is not a candidate.
@@ -940,5 +1223,373 @@ mod tests {
                 .count(),
             512
         );
+    }
+}
+
+#[cfg(test)]
+mod detail_route_tests {
+    use std::sync::atomic::{AtomicU64, AtomicUsize};
+
+    use parking_lot::Mutex;
+
+    use super::*;
+    use crate::driver::ElementBox;
+    use crate::tiktok_labels::controls_for;
+    use crate::{SwipeGesture, TapPoint};
+
+    const GLOBAL: &str = "com.zhiliaoapp.musically";
+    const LAUNCHER: &str = "com.sec.android.app.launcher";
+    const TARGET_URL: &str = "https://www.tiktok.com/@fixture/photo/7694508176024112405";
+    const DETAIL_LINK: &str = "snssdk1233://aweme/detail/7694508176024112405";
+
+    /// Screens shaped like the 45.7.3/en probe dumps (B2g feed, B3e detail), names replaced.
+    #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+    enum Screen {
+        Launcher,
+        Feed,
+        Detail(&'static str),
+        /// A detail page whose author changes on every read.
+        Flapping,
+        Unavailable,
+    }
+
+    struct DetailPhone {
+        screen: Mutex<Screen>,
+        after_open: Screen,
+        after_restart: Screen,
+        events: Mutex<Vec<String>>,
+        generation: AtomicU64,
+        restarts: AtomicUsize,
+    }
+
+    impl DetailPhone {
+        fn new(start: Screen, after_open: Screen) -> Self {
+            Self {
+                screen: Mutex::new(start),
+                after_open,
+                after_restart: Screen::Feed,
+                events: Mutex::new(Vec::new()),
+                generation: AtomicU64::new(0),
+                restarts: AtomicUsize::new(0),
+            }
+        }
+
+        fn opens(&self) -> Vec<String> {
+            self.events
+                .lock()
+                .iter()
+                .filter_map(|event| event.strip_prefix("open ").map(str::to_string))
+                .collect()
+        }
+
+        fn xml(&self, generation: u64) -> String {
+            let node = |id: &str, text: &str, desc: &str, bounds: &str| {
+                format!(
+                    r#"<node package="{GLOBAL}" resource-id="{GLOBAL}:id/{id}" class="android.view.View" text="{text}" content-desc="{desc}" displayed="true" enabled="true" clickable="true" bounds="{bounds}"/>"#
+                )
+            };
+            let card = |author: &str, caption: &str| {
+                [
+                    node(
+                        "user_avatar",
+                        "",
+                        &format!("{author} profile"),
+                        "[942,1011][1059,1128]",
+                    ),
+                    node(
+                        "i_m",
+                        "",
+                        &format!("Follow {author}"),
+                        "[921,1082][1080,1171]",
+                    ),
+                    node(
+                        "eb7",
+                        "",
+                        "Read or add comments. 3 comments",
+                        "[912,1329][1080,1487]",
+                    ),
+                    node("fpv", "", "Share video. 0 shares", "[912,1645][1080,1803]"),
+                    node("desc", caption, "", "[32,1711][870,1861]"),
+                ]
+                .concat()
+            };
+            let back = node("bj1", "", "Back", "[15,63][151,199]");
+            let body = match *self.screen.lock() {
+                Screen::Launcher => format!(
+                    r#"<node package="{LAUNCHER}" text="Phone" bounds="[0,1900][200,2000]"/>"#
+                ),
+                Screen::Feed => [
+                    node("nr_", "", "Home", "[0,1965][216,2094]"),
+                    node("nrb", "", "Profile", "[864,1965][1080,2094]"),
+                    card(
+                        "Feed Author",
+                        "Some other post that happened to be on the feed",
+                    ),
+                ]
+                .concat(),
+                Screen::Detail(author) => [
+                    back,
+                    card(author, "The target caption, as the detail page shows it"),
+                    node("e7q", "Add comment...", "", "[64,1976][1036,2054]"),
+                ]
+                .concat(),
+                Screen::Flapping => {
+                    let author = if generation.is_multiple_of(2) {
+                        "Even"
+                    } else {
+                        "Odd"
+                    };
+                    [back, card(author, "A caption")].concat()
+                }
+                Screen::Unavailable => [
+                    back,
+                    node("u", "This video is unavailable", "", "[100,900][980,960]"),
+                ]
+                .concat(),
+            };
+            format!("<hierarchy>{body}</hierarchy>")
+        }
+
+        fn found(&self, query: ElementQuery<'_>, described_by_text: bool) -> Vec<ElementBox> {
+            let generation = self.generation.load(Ordering::Relaxed).max(1);
+            let tree = Tree::parse(crate::HierarchySourceSnapshot {
+                generation,
+                xml: self.xml(generation),
+            })
+            .unwrap();
+            let key = if described_by_text {
+                "text"
+            } else {
+                "content-desc"
+            };
+            tree.matching(GLOBAL, query)
+                .into_iter()
+                .filter_map(|index| {
+                    let node = &tree.nodes[index];
+                    let mut found = node.rect()?;
+                    found.description =
+                        Some(node.attr(key).to_string()).filter(|value| !value.is_empty());
+                    Some(found)
+                })
+                .collect()
+        }
+    }
+
+    #[async_trait::async_trait]
+    impl UiSession for DetailPhone {
+        async fn active_app_bundle(&self) -> anyhow::Result<String> {
+            Ok(match *self.screen.lock() {
+                Screen::Launcher => LAUNCHER.into(),
+                _ => GLOBAL.into(),
+            })
+        }
+
+        async fn hierarchy_source_snapshot(
+            &self,
+        ) -> anyhow::Result<crate::HierarchySourceSnapshot> {
+            let generation = self.generation.fetch_add(1, Ordering::Relaxed) + 1;
+            Ok(crate::HierarchySourceSnapshot {
+                generation,
+                xml: self.xml(generation),
+            })
+        }
+
+        async fn open_url_in_app(&self, url: &str, bundle: &str) -> anyhow::Result<()> {
+            assert_eq!(bundle, GLOBAL);
+            self.events.lock().push(format!("open {url}"));
+            *self.screen.lock() = self.after_open;
+            Ok(())
+        }
+
+        async fn reopen_url_in_app(&self, url: &str, _: &str) -> anyhow::Result<()> {
+            panic!("the detail route dispatches without clearing the task: {url}")
+        }
+
+        async fn restart_app(&self, bundle: &str) -> anyhow::Result<()> {
+            assert_eq!(bundle, GLOBAL);
+            self.events.lock().push("restart".into());
+            self.restarts.fetch_add(1, Ordering::Relaxed);
+            *self.screen.lock() = self.after_restart;
+            Ok(())
+        }
+
+        async fn tap(&self, point: TapPoint) -> anyhow::Result<()> {
+            panic!("a known link needs no tap, so no Share or Copy link: {point:?}")
+        }
+
+        async fn set_clipboard(&self, _: &str, _: &[u8]) -> anyhow::Result<()> {
+            panic!("a known link never touches the clipboard")
+        }
+
+        async fn get_clipboard(&self, _: usize) -> anyhow::Result<(String, Vec<u8>)> {
+            panic!("a known link never reads the clipboard")
+        }
+
+        async fn locate(&self, query: ElementQuery<'_>) -> anyhow::Result<Option<ElementBox>> {
+            Ok(self.found(query, false).into_iter().next())
+        }
+
+        async fn locate_all(&self, query: ElementQuery<'_>) -> anyhow::Result<Vec<ElementBox>> {
+            Ok(self.found(query, false))
+        }
+
+        async fn locate_all_described(
+            &self,
+            query: ElementQuery<'_>,
+        ) -> anyhow::Result<Vec<ElementBox>> {
+            Ok(self.found(query, true))
+        }
+
+        fn supports_accessibility_readback(&self) -> bool {
+            true
+        }
+
+        async fn swipe(&self, _: SwipeGesture) -> anyhow::Result<()> {
+            panic!("exact target proof must not swipe")
+        }
+
+        async fn type_text(&self, _: &str) -> anyhow::Result<()> {
+            panic!("exact target proof must not type")
+        }
+
+        async fn home(&self) -> anyhow::Result<()> {
+            panic!("exact target proof has no Home prerequisite")
+        }
+
+        async fn back(&self) -> anyhow::Result<()> {
+            panic!("exact target proof does not navigate back")
+        }
+
+        async fn find_and_tap(&self, _: &str) -> anyhow::Result<()> {
+            panic!("exact target proof uses no generic tap")
+        }
+
+        async fn assert_visible(&self, _: &str) -> anyhow::Result<()> {
+            panic!("exact target proof uses no generic assert")
+        }
+
+        fn stream_url(&self) -> Option<String> {
+            None
+        }
+    }
+
+    fn global() -> TikTokControls {
+        controls_for(GLOBAL, "en", "45.7.3").unwrap()
+    }
+
+    fn target() -> ResolvedTikTokTarget {
+        crate::parse_tiktok_links(TARGET_URL)
+            .remove(0)
+            .target
+            .unwrap()
+    }
+
+    async fn exact(phone: &DetailPhone) -> anyhow::Result<TargetArrival> {
+        open_exact_target_by_hierarchy(phone, global(), GLOBAL, &target(), &AtomicBool::new(false))
+            .await
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn known_link_opens_the_detail_route_and_never_touches_the_share_sheet() {
+        // The campaign entry point: the watch and Like proofs both go through it.
+        let phone = DetailPhone::new(Screen::Feed, Screen::Detail("Fixture"));
+        let proof = crate::interaction_campaign::open_hierarchy_target_confirmed(
+            &phone,
+            global(),
+            &target(),
+            GLOBAL,
+        )
+        .await
+        .unwrap();
+        assert!(matches!(
+            proof,
+            crate::interaction_campaign::TargetProof::Identified
+        ));
+        assert_eq!(phone.opens(), vec![DETAIL_LINK.to_string()]);
+        assert_eq!(phone.restarts.load(Ordering::Relaxed), 0);
+
+        // Comment verification and inspection open the pinned target the same way.
+        let phone = DetailPhone::new(Screen::Launcher, Screen::Detail("Fixture"));
+        let arrival = open_pinned_target_by_hierarchy(
+            &phone,
+            global(),
+            GLOBAL,
+            &target(),
+            &AtomicBool::new(false),
+        )
+        .await
+        .unwrap();
+        assert_eq!(
+            arrival,
+            TargetArrival::Identified {
+                author_label: "Fixture".into()
+            }
+        );
+        // TikTok was not foreground, so a stale page could be waiting in its task.
+        assert_eq!(
+            *phone.events.lock(),
+            vec!["restart".to_string(), format!("open {DETAIL_LINK}")]
+        );
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn a_detail_page_left_from_an_earlier_proof_is_cleared_before_the_link() {
+        // Watch then Like: the second proof starts on the page the first one opened.
+        let phone = DetailPhone::new(Screen::Detail("Fixture"), Screen::Detail("Fixture"));
+        assert!(matches!(
+            exact(&phone).await.unwrap(),
+            TargetArrival::Identified { .. }
+        ));
+        assert_eq!(
+            *phone.events.lock(),
+            vec!["restart".to_string(), format!("open {DETAIL_LINK}")]
+        );
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn a_detail_page_that_survives_the_restart_refuses_before_any_dispatch() {
+        let mut phone = DetailPhone::new(Screen::Detail("Someone Else"), Screen::Detail("Fixture"));
+        phone.after_restart = Screen::Detail("Someone Else");
+        let error = exact(&phone).await.unwrap_err();
+        assert!(
+            error.to_string().contains("still open before the link"),
+            "{error:#}"
+        );
+        assert!(phone.opens().is_empty());
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn a_link_that_lands_on_the_feed_is_not_proof_of_the_post() {
+        // The https form lands on For You (probe B2g) and a swallowed link leaves the feed
+        // up. Either way the card on screen is not authorized by the id.
+        let phone = DetailPhone::new(Screen::Feed, Screen::Feed);
+        let error = exact(&phone).await.unwrap_err();
+        assert!(
+            error.to_string().contains("detail page not shown"),
+            "{error:#}"
+        );
+        assert_eq!(
+            phone.opens(),
+            vec![DETAIL_LINK.to_string(), DETAIL_LINK.to_string()]
+        );
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn an_unstable_or_unavailable_detail_page_fails_closed() {
+        let phone = DetailPhone::new(Screen::Feed, Screen::Flapping);
+        let error = exact(&phone).await.unwrap_err();
+        assert!(
+            error.to_string().contains("did not hold still"),
+            "{error:#}"
+        );
+        assert_eq!(phone.opens(), vec![DETAIL_LINK.to_string()]);
+
+        let phone = DetailPhone::new(Screen::Feed, Screen::Unavailable);
+        let error = exact(&phone).await.unwrap_err();
+        assert!(matches!(
+            error.downcast_ref::<CardObservationError>(),
+            Some(CardObservationError::PostUnavailable)
+        ));
+        assert_eq!(phone.opens(), vec![DETAIL_LINK.to_string()]);
     }
 }

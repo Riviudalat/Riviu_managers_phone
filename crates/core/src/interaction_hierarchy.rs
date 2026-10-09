@@ -343,6 +343,11 @@ fn target_diagnostic_url(value: &str) -> String {
 
 /// Prove a structurally opened card by its own copied link when its nickname is not a handle.
 /// No Like/Save/Send is used. The author and caption must survive opening/closing Share.
+///
+/// Legacy proof for builds without the measured detail route. It opens the share sheet
+/// and taps `Copy link`, which TikTok very likely counts as a public share, so routine
+/// interaction on the fleet build opens the post by id instead (see
+/// [`open_exact_target_by_hierarchy`]).
 pub async fn confirm_target_from_share_link(
     session: &dyn UiSession,
     labels: TikTokControls,

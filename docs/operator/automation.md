@@ -104,16 +104,21 @@ trước khi mở ứng dụng và lúc quay về feed; hộp thoại chưa nh�
 
 ## Tương tác
 
-Nếu bằng chứng tác giả/nội dung thay đổi trong lúc copy link trước tương tác, app
-lấy lại toàn bộ bằng chứng đúng bài một lần trong thời hạn hiện có. Chỉ tiếp tục
-khi canonical link và trạng thái bài đều khớp. Kết quả Like/Send đã gửi không được
-tự lặp lại khi chưa rõ kết quả.
+Trên TikTok Global 45.7.3, Riviu mở đúng bài bằng ID trong link của campaign và
+chứng minh bài trên trang chi tiết của bài, **không bấm Chia sẻ hay Sao chép liên
+kết**, vì TikTok có thể tính thao tác đó là một lượt chia sẻ. Nếu đang mở sẵn một
+trang chi tiết bài, TikTok được khởi động lại một lần trước khi mở link. Riviu dừng
+trước tương tác khi màn mở ra không phải trang chi tiết, bài không còn, hoặc tác
+giả/nội dung đổi giữa hai lần đọc. Kết quả Like/Send đã gửi không được tự lặp lại
+khi chưa rõ kết quả.
 
 Riviu tự lấy và lưu ID bình luận sau khi xác minh trên TikTok Android `45.7.3/en`.
 Khi có ID đã lưu, lượt reply mở và đối chiếu lại ID của câu đang hiển thị; người dùng
 không cần lấy ID thủ công. Nếu không lấy được ID trong thời hạn, Riviu giữ cách tìm
-bằng nội dung và tác giả đã xác minh. Câu không xuất hiện trên tài khoản trả lời vẫn
-báo lỗi/chờ kiểm tra, và bình luận đã gửi không tự gửi lại.
+bằng nội dung và tác giả đã xác minh. Lấy ID và mở lại ID khi reply đều dùng Sao
+chép liên kết của bình luận, nên có thể được TikTok tính là lượt chia sẻ. Câu không
+xuất hiện trên tài khoản trả lời vẫn báo lỗi/chờ kiểm tra, và bình luận đã gửi không
+tự gửi lại.
 
 **Phân bổ số lượt và cụm hội thoại** cho nhập Tim/Lưu/Share riêng trên mỗi bài.
 Tim/Lưu đã có được bỏ qua và bù bằng máy khác trong phạm vi đã chọn; hết máy thì

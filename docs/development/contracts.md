@@ -393,13 +393,26 @@ trả `conversationAccounts`; tạo campaign kiểm cùng bộ validator trong t
 SQLite, áp dụng cả lịch và Điều phối. Trước câu và tại gate Send kiểm lại metadata
 của người gửi và các vai được tag; không sửa snapshot lịch sử.
 Worker xác minh dùng chung `open_exact_target_by_hierarchy`, không mở URL lần nữa
-trước resolver. Trong cửa sổ 30 giây, chỉ mở lại cùng link một lần nếu đọc được
+trước resolver. Trên Global 45.7.3/en, resolver mở bài bằng ID trong link của
+campaign qua `snssdk1233://aweme/detail/<id>` và không mở bảng Chia sẻ, vì TikTok
+rất có thể tính Copy link là một lượt chia sẻ công khai (probe 09/10/2026: bộ đếm
+chia sẻ từ 0 lên 1 khoảng một phút sau một lần Copy link). Trước khi gửi link,
+TikTok phải ở foreground trên màn không phải trang chi tiết bài. Nếu TikTok không ở
+foreground hoặc còn trang chi tiết cũ, Riviu khởi động lại TikTok một lần; vẫn còn
+trang chi tiết thì từ chối mà không gửi link. Sau khi gửi, hai snapshot có generation
+tăng dần phải cùng là trang chi tiết (`bj1` Back, không có tab Home, có Comments)
+với cùng tác giả và đúng một caption. Feed, ứng dụng khác, "This video is
+unavailable" hoặc thẻ đổi giữa hai lần đọc đều từ chối trước thao tác công khai.
+Chỉ gửi lại cùng link một lần khi chưa thấy trang chi tiết. Các bản khác chỉ còn
+đường đọc, vì thao tác công khai đã bị danh sách bản được phép chặn, và giữ proof
+bằng link sao chép: trong cửa sổ 30 giây, chỉ mở lại cùng link một lần nếu đọc được
 Home/Profile và thẻ LIVE sau ít nhất 10 giây mà chưa có nút bình luận. Không mở
 lại với sai package, bài báo không tồn tại hoặc lỗi clipboard. Android dựng lại
 navigation task bằng NEW_TASK|CLEAR_TASK trong nhánh này để thoát SplashActivity
 giữ intent cũ; không xóa dữ liệu ứng dụng. Một lượt quan sát tối đa 75 giây trong
-ngân sách 120 giây đã lưu; lease 150 giây gồm mở phiên và cleanup. Link sao chép
-phải khớp trước thao tác công khai. Lượt gửi chưa xác minh không được gửi lại.
+ngân sách 120 giây đã lưu; lease 150 giây gồm mở phiên và cleanup. Ở nhánh này
+link sao chép phải khớp trước thao tác công khai. Lượt gửi chưa xác minh không được
+gửi lại.
 
 Inspector dùng `ui_automation::inspector::ElementSelector` và `inspector_commands`.
 UI và `scripts/riviu_agent_mcp.mjs` gọi cùng observe/tap/record qua Tauri hoặc
@@ -420,6 +433,10 @@ ElementVisible chỉ chứng minh UI; không thay proof nghiệp vụ
 
 Xác minh bài ảnh đọc caption trong viewer, lấy link bằng clipboard sentinel,
 đối chiếu toàn bộ caption, tài khoản và content ID với metadata oEmbed công khai.
+Đây là chỗ duy nhất cần Copy link vì link của bài vừa đăng chưa có ở nguồn nào
+khác. Mỗi lần Copy link có thể bị TikTok tính là một lượt chia sẻ của chính bài đó:
+`verificationDiagnostic.copyAttempts` đếm số lần và `copyLinkCountsAsShare` đánh dấu
+chúng là thao tác tính lượt chia sẻ trong evidence.
 Nếu viewer đã ẩn caption, chỉ mở Share trên màn bài có nút Back và Comments đã
 nhận diện; metadata công khai vẫn phải khớp toàn bộ nội dung. ID bài hỗ trợ đối chiếu
 phiên: TikTok có thể cấp ID trước nút Đăng; mốc dưới lấy từ sự kiện `opening_app`
@@ -858,6 +875,9 @@ trên máy khác cùng campaign sau khi chứng minh tác giả. `udid` kiểm m
 thuộc campaign; không dùng cùng `captureUdid`. Không có thao tác gửi/xóa. Reply mở link HTTPS
 chứa `share_item_id`/`share_comment_id` (musically45.7.3 không nhận scheme `aweme`),
 sao chép lại link của hàng vừa tới và yêu cầu ID khớp trước dùng nút Reply.
+Cả hai lần đều đi qua Copy link của bảng chia sẻ bình luận, có thể bị tính là lượt
+chia sẻ; ID bình luận không đọc được từ màn hình nên vẫn giữ. `commentLink` có trong
+evidence nghĩa là đã có một lần Copy link như vậy.
 
 Migration37 thêm `interaction_comment_verification` và lịch quan sát lại parent.
 Trước khi nâng từ schema36, DB được sao lưu bằng SQLite `VACUUM INTO` sang file
