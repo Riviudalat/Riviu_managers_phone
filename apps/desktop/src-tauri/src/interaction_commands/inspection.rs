@@ -185,7 +185,9 @@ pub(super) async fn read_account(
     Ok(reading)
 }
 
-pub(super) async fn read_account_from_session(
+/// Lease-aware: reads through a session the caller already owns. Also the handle proof of
+/// the TikTok reinstall + login command (`tiktok_account_commands`).
+pub(crate) async fn read_account_from_session(
     control: &DeviceControlPlane,
     db: &riviu_core::db::Database,
     udid: &str,

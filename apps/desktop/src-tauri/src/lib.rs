@@ -43,6 +43,7 @@ mod publish_commands;
 mod publish_scheduler;
 mod sheet_bootstrap;
 mod state;
+mod tiktok_account_commands;
 mod ui_smoke;
 mod view_hub;
 mod view_watchdog;
@@ -612,6 +613,10 @@ pub fn run() {
             farm_commands::app_removal::uninstall_library_app,
             farm_commands::app_removal::uninstall_library_app_to_group,
             farm_commands::app_removal::uninstall_library_app_batch,
+            tiktok_account_commands::tiktok_credentials_list,
+            tiktok_account_commands::tiktok_credential_set,
+            tiktok_account_commands::tiktok_credential_clear,
+            tiktok_account_commands::tiktok_reinstall_and_login,
             farm_commands::cancel_app_install_batch,
             farm_commands::list_schedules,
             farm_commands::save_schedule,
@@ -1093,12 +1098,17 @@ mod tests {
     /// verbatim in a column called `password_hash` and compared it as plaintext, and the next
     /// attempt would not have to be called `auth_login` to repeat that.
     ///
-    /// **One** command legitimately touches a password, and it is named here rather than
+    /// **Two** commands legitimately touch a password, and they are named here rather than
     /// skipped, because that is a decision someone made and can be re-read:
     ///
     /// - `set_apple_id` takes the Apple ID app-specific password needed to resign WDA. It
     ///   hands it to the OS credential store, never to `state.db`, and `get_apple_id` reads
     ///   back only `has_password` — asserted below.
+    /// - `tiktok_credential_set` takes the TikTok password the operator typed for one account.
+    ///   It wraps it in `SecretText` at once and hands it only to `store_login`, which writes
+    ///   the credential store first and then the non-secret index entry, which has no field
+    ///   for a password — asserted below. Its reader, the reinstall + login command, takes no
+    ///   password over IPC.
     ///
     /// It used to be two. `export_proxy_config` printed a proxy password the operator had
     /// typed in, and the entry argued -- correctly -- that a proxy password cannot be hashed
@@ -1154,6 +1164,14 @@ mod tests {
                 "interaction_commands.rs",
                 include_str!("interaction_commands.rs"),
             ),
+            (
+                "tiktok_account_commands.rs",
+                include_str!("tiktok_account_commands.rs"),
+            ),
+            (
+                "tiktok_account_commands/relogin.rs",
+                include_str!("tiktok_account_commands/relogin.rs"),
+            ),
         ];
         let mut holders = Vec::new();
         for (file, source) in surfaces {
@@ -1168,7 +1186,13 @@ mod tests {
             .map(|(file, name, _)| format!("{file}::{name}"))
             .collect::<Vec<_>>();
         named.sort();
-        assert_eq!(named, vec!["commands/system.rs::set_apple_id".to_string()],);
+        assert_eq!(
+            named,
+            vec![
+                "commands/system.rs::set_apple_id".to_string(),
+                "tiktok_account_commands.rs::tiktok_credential_set".to_string(),
+            ],
+        );
         let (_, _, apple) = holders
             .iter()
             .find(|(_, name, _)| *name == "set_apple_id")
@@ -1176,6 +1200,29 @@ mod tests {
         assert!(
             apple.contains("state.signing") && !apple.contains("state.db"),
             "set_apple_id must hand the password to the credential store, not the database:\n{apple}"
+        );
+        let (_, _, tiktok) = holders
+            .iter()
+            .find(|(_, name, _)| *name == "tiktok_credential_set")
+            .expect("tiktok_credential_set");
+        assert!(
+            tiktok.matches("password").count() == 2
+                && tiktok.contains("SecretText::new(password)")
+                && tiktok.contains("store_login(&state.secrets,"),
+            "tiktok_credential_set may name the password only as its argument and inside \
+             SecretText::new, and must hand it to store_login:\n{tiktok}"
+        );
+        let store = include_str!("tiktok_account_commands.rs")
+            .split("fn store_login(")
+            .nth(1)
+            .and_then(|rest| rest.split("\nfn ").next())
+            .expect("store_login");
+        let secret = store.find("secrets.set_tiktok_login(login)");
+        let index = store.find("db.upsert_tiktok_credential_index(&login.index_entry(");
+        assert!(
+            secret.is_some() && index.is_some() && secret < index && !store.contains("password"),
+            "store_login must write the credential store first and give SQLite only the \
+             non-secret index entry:\n{store}"
         );
     }
 
@@ -1298,6 +1345,10 @@ mod tests {
             include_str!("commands/device_handoff.rs"),
         ),
         ("commands/jobs.rs", include_str!("commands/jobs.rs")),
+        (
+            "tiktok_account_commands.rs",
+            include_str!("tiktok_account_commands.rs"),
+        ),
         (
             "commands/operation_stop.rs",
             include_str!("commands/operation_stop.rs"),

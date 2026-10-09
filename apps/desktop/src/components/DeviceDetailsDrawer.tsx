@@ -5,6 +5,7 @@ import { describeError } from "../describeError";
 import type { CapabilityEvidenceState, DeviceActionCapabilities, DeviceAppChoices } from "../generated-ipc";
 import { useModalFocus } from "./useModalFocus";
 import { StatusChip } from "./WorkspacePrimitives";
+import { TikTokLoginSection } from "./TikTokLoginSection";
 
 import { deviceWorkOwnerLabel } from "../deviceWork";
 import { deviceOsLabel } from "../types";
@@ -135,6 +136,7 @@ export function DeviceDetailsDrawer({
             </div>)}</dl>
           </>}
         </section>
+        {device.platform === "android" && <TikTokLoginSection udid={device.udid} busy={currentOwner !== null} />}
       </aside>
     </div>
   );

@@ -25,7 +25,7 @@ use riviu_core::interaction_campaign::{
 #[path = "interaction_commands/live_canary.rs"]
 mod live_canary;
 
-mod inspection;
+pub(crate) mod inspection;
 
 /// Capture the ID of a verified comment, or open/re-prove that exact ID on an actor.
 /// This command cannot create a comment, reply, Share message or Delete action.

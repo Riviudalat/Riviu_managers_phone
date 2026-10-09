@@ -1170,6 +1170,36 @@ export async function uninstallLibraryAppBatch(request: AppRemovalRequest) {
   return invoke<AppRemovalBatchResponse>("uninstall_library_app_batch", { request });
 }
 
+/** Saved TikTok logins: masked identifier and presence only, never the password. */
+export async function tiktokCredentialsList() {
+  return invoke<TikTokCredentialSummary[]>("tiktok_credentials_list");
+}
+
+/** Store one account's login in the OS credential store. The password is sent once and never returned. */
+export async function tiktokCredentialSet(username: string, password: string) {
+  return invoke<TikTokCredentialSummary>("tiktok_credential_set", { username, password });
+}
+
+export async function tiktokCredentialClear(handle: string) {
+  return invoke<void>("tiktok_credential_clear", { handle });
+}
+
+export type TikTokReloginStage = "preflight" | "logout" | "uninstall" | "install" | "firstRun" | "login" | "securitySheet" | "proveHandle";
+export interface TikTokReloginStageResult {
+  stage: TikTokReloginStage; outcome: "done" | "skipped" | "failed" | "uncertain"; detail: string; at: string;
+}
+export interface TikTokReloginReport {
+  runId: string; udid: string; handle: string; completed: boolean; observedHandle: string | null; stages: TikTokReloginStageResult[];
+}
+
+/**
+ * "Cài lại TikTok 45.7.3 + đăng nhập" on one phone: uses the phone's assigned nick and its saved
+ * login. Every stage is recorded by the backend; an uncertain stage is never retried.
+ */
+export async function tiktokReinstallAndLogin(udid: string, appId: string) {
+  return invoke<TikTokReloginReport>("tiktok_reinstall_and_login", { udid, appId });
+}
+
 export async function listSchedules() {
   return readQueryClient.fetchQuery({ queryKey: ["schedules", "script", "all"], queryFn: () => invoke<ScheduleItem[]>("list_schedules") });
 }
@@ -1957,7 +1987,7 @@ export function googleSheetsDisconnect() {
 export interface PublishLimits { transfer: number; compose: number; verify: number; deviceTotal: number }
 export function publishGetLimits() { return invoke<PublishLimits>("publish_get_limits"); }
 export function publishSetLimits(limits: PublishLimits) { return invoke<void>("publish_set_limits", { limits }); }
-import type { TypeSafeSettings, TypeSafeVerdict } from "./generated-ipc";
+import type { TikTokCredentialSummary, TypeSafeSettings, TypeSafeVerdict } from "./generated-ipc";
 
 export function typesafeGetSettings() {
   return invoke<TypeSafeSettings>("typesafe_get_settings");

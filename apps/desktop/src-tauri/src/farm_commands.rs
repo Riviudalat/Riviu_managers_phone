@@ -784,7 +784,7 @@ fn safe_container_layout(
     })
 }
 
-struct MaterializedInstallSet {
+pub(crate) struct MaterializedInstallSet {
     root: Option<PathBuf>,
     paths: Vec<PathBuf>,
 }

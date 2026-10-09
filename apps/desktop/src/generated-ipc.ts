@@ -37,3 +37,6 @@ export type OperationDeviceLogEntry = { id: string, at: string | null, action: s
 export type TypeSafeSettings = { revision: number, enabled: boolean, hasApiKey: boolean, };
 export type TypeSafeSupport = "supported" | "contradicted" | "insufficient";
 export type TypeSafeVerdict = { support: TypeSafeSupport, confidence: number, probabilities: { [key in string]: number }, model: string, inputTokens: number, outputTokens: number, elapsedMs: number, };
+export type TikTokIdentifierKind = "email" | "username" | "phone";
+export type TikTokCredentialPresence = "stored" | "missing" | "unreadable";
+export type TikTokCredentialSummary = { handle: string, identifierKind: TikTokIdentifierKind, maskedIdentifier: string, updatedAt: string, cooldownUntil: string | null, lastStatus: string | null, presence: TikTokCredentialPresence, };

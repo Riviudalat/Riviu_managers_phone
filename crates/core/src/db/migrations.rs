@@ -329,7 +329,34 @@ const MIGRATIONS: &[Migration] = &[
         apply: apply_migration_49,
         rebuilds_tables: false,
     },
+    Migration {
+        version: 50,
+        name: "tiktok-credential-index",
+        apply: apply_migration_50,
+        rebuilds_tables: false,
+    },
 ];
+
+/// The non-secret half of a stored TikTok login. The identifier and the secret live only
+/// in the OS credential store under `tiktok-login:<handle>`; this table records that an
+/// entry was written, which kind of identifier it holds and its masked form. It has no
+/// column that could hold a secret, and none may be added.
+fn apply_migration_50(tx: &Transaction<'_>) -> anyhow::Result<()> {
+    tx.execute_batch(
+        "CREATE TABLE tiktok_credential_index (
+            handle TEXT PRIMARY KEY
+                CHECK(length(handle) BETWEEN 2 AND 24
+                      AND handle NOT GLOB '*[^a-z0-9._]*'
+                      AND handle NOT LIKE '%.'),
+            identifier_kind TEXT NOT NULL CHECK(identifier_kind IN ('email','username','phone')),
+            masked_identifier TEXT NOT NULL CHECK(length(masked_identifier) BETWEEN 1 AND 300),
+            updated_at TEXT NOT NULL,
+            cooldown_until TEXT,
+            last_status TEXT
+        );",
+    )?;
+    Ok(())
+}
 
 fn apply_migration_49(tx: &Transaction<'_>) -> anyhow::Result<()> {
     // Never repair legacy duplicates by renumbering. Triggers prevent new collisions

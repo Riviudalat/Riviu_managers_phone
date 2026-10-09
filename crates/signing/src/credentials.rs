@@ -76,7 +76,8 @@ impl CredentialStore {
     ///
     /// Namespaced under `app-secret:` so a caller cannot reach — or collide with — the four
     /// purpose-built accounts above (the agent tokens and the Apple ID pair), each of which has
-    /// its own reasoning and its own test.
+    /// its own reasoning and its own test. TikTok logins have their own `tiktok-login:`
+    /// namespace in [`crate::tiktok`].
     pub fn app_secret(&self, name: &str) -> anyhow::Result<Option<String>> {
         self.backend.get(&Self::app_secret_account(name))
     }

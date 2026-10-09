@@ -1,8 +1,10 @@
 //! Free Apple ID signing helpers (anisette-based free signing via sidecar).
 
 pub mod credentials;
+pub mod tiktok;
 
 pub use credentials::{CredentialBackend, CredentialStore};
+pub use tiktok::{SecretText, TikTokLogin};
 
 use std::path::{Path, PathBuf};
 use std::process::Stdio;

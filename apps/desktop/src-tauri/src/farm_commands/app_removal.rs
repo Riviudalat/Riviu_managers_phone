@@ -31,7 +31,7 @@ use riviu_core::db::Database;
 use riviu_core::{
     AndroidInstallDeviceSpec, AppInstallResult, AppInstallStatus, AppLibraryItem,
     AppLibraryPlatform, AppPackageFormat, DeviceAppInstallRequest, DeviceControlError,
-    DeviceControlPlane, DeviceExclusiveContext, DevicePlatform, DeviceWorkOwner, InstallEffectGate,
+    DeviceControlPlane, DeviceLeaseRef, DevicePlatform, DeviceWorkOwner, InstallEffectGate,
 };
 use serde::{Deserialize, Serialize};
 use std::collections::{HashMap, HashSet};
@@ -182,16 +182,16 @@ fn package_listed(apps: &[riviu_core::InstalledApp], package: &str) -> bool {
     apps.iter().any(|app| app.bundle_id == package)
 }
 
-enum PreparedInstall {
+pub(crate) enum PreparedInstall {
     Android(MaterializedInstallSet),
     Ios(PathBuf),
 }
 
 /// Everything the install half needs, built inside the lease and before the uninstall, so a
 /// broken artifact or a phone whose spec cannot be read stops the reinstall with the app intact.
-async fn prepare_reinstall(
+pub(crate) async fn prepare_reinstall(
     control: &DeviceControlPlane,
-    context: &DeviceExclusiveContext,
+    context: DeviceLeaseRef<'_>,
     plan: &RemovalPlan<'_>,
 ) -> Result<PreparedInstall, String> {
     let item = plan.item;
@@ -299,7 +299,7 @@ pub(crate) async fn remove_on_device(
         }
     }
     let prepared = if plan.mode == AppRemovalMode::Reinstall {
-        match prepare_reinstall(control, &context, plan).await {
+        match prepare_reinstall(control, (&context).into(), plan).await {
             Ok(prepared) => Some(prepared),
             Err(detail) => {
                 return outcome(
@@ -314,61 +314,13 @@ pub(crate) async fn remove_on_device(
     } else {
         None
     };
-    let present = match control.list_installed_apps(&udid).await {
-        Ok(apps) => package_listed(&apps, package),
-        Err(error) => {
-            return outcome(
-                &udid,
-                FailedBeforeEffect,
-                false,
-                None,
-                format!("Chưa đọc được danh sách ứng dụng trên máy; chưa gỡ: {error}"),
-            );
-        }
-    };
-    let note = if present {
-        if let Err(error) = db.log_op("app.uninstall.dispatch", &format!("{udid} {package}")) {
-            return outcome(
-                &udid,
-                FailedBeforeEffect,
-                false,
-                None,
-                format!("Chưa ghi được ý định gỡ; chưa gửi lệnh tới máy: {error}"),
-            );
-        }
-        if let Err(error) = control.uninstall_app(&context, package).await {
-            return outcome(
-                &udid,
-                UnknownAfterDispatch,
-                false,
-                None,
-                format!("Đã gửi lệnh gỡ {package} nhưng không nhận được xác nhận; cần kiểm lại trên máy, không tự gỡ lại: {error}"),
-            );
-        }
-        match control.list_installed_apps(&udid).await {
-            Ok(apps) if !package_listed(&apps, package) => {}
-            Ok(_) => {
-                return outcome(
-                    &udid,
-                    UnknownAfterDispatch,
-                    false,
-                    None,
-                    format!("Lệnh gỡ đã chạy nhưng {package} vẫn còn trong danh sách ứng dụng; cần kiểm lại trên máy."),
-                );
-            }
-            Err(error) => {
-                return outcome(
-                    &udid,
-                    UnknownAfterDispatch,
-                    false,
-                    None,
-                    format!("Đã gửi lệnh gỡ nhưng chưa đọc lại được danh sách ứng dụng; cần kiểm lại: {error}"),
-                );
-            }
-        }
-        None
-    } else {
-        Some(format!("{package} không có trên máy; không cần gỡ."))
+    let note = match uninstall_confirmed(control, db, (&context).into(), &udid, package).await {
+        UninstallStep::Removed => None,
+        UninstallStep::NotPresent => Some(format!("{package} không có trên máy; không cần gỡ.")),
+        UninstallStep::Failed {
+            outcome: failed,
+            detail,
+        } => return outcome(&udid, failed, false, None, detail),
     };
     let Some(prepared) = prepared else {
         return AppRemovalResult {
@@ -388,18 +340,107 @@ pub(crate) async fn remove_on_device(
             format!("Đã gỡ {package} nhưng chưa ghi được ý định cài lại nên chưa cài; cần cài lại thủ công: {error}"),
         );
     }
-    let install = match prepared {
+    let install = install_prepared(control, (&context).into(), plan.item, prepared, &udid).await;
+    if install.status == AppInstallStatus::Succeeded {
+        AppRemovalResult {
+            udid,
+            outcome: Done,
+            removed_verified: true,
+            install: Some(install),
+            detail: note,
+        }
+    } else {
+        let detail = format!(
+            "Đã gỡ {package} nhưng cài lại chưa được xác nhận ({:?}); cần kiểm lại trên máy, không tự cài lại: {}",
+            install.status,
+            install.detail.as_deref().unwrap_or("không có chi tiết")
+        );
+        outcome(&udid, UnknownAfterDispatch, true, Some(install), detail)
+    }
+}
+
+/// What one uninstall attempt proved. `Failed` carries the per-phone outcome and the
+/// operator line; nothing in it is retried.
+pub(crate) enum UninstallStep {
+    /// The app list read before dispatch did not contain the package.
+    NotPresent,
+    /// Dispatched, and a readback no longer lists the package.
+    Removed,
+    Failed {
+        outcome: AppRemovalOutcome,
+        detail: String,
+    },
+}
+
+/// Read the app list, record the intent, uninstall once, read the list back.
+pub(crate) async fn uninstall_confirmed(
+    control: &DeviceControlPlane,
+    db: &Database,
+    context: DeviceLeaseRef<'_>,
+    udid: &str,
+    package: &str,
+) -> UninstallStep {
+    use AppRemovalOutcome::*;
+    let failed = |outcome, detail: String| UninstallStep::Failed { outcome, detail };
+    let present = match control.list_installed_apps(udid).await {
+        Ok(apps) => package_listed(&apps, package),
+        Err(error) => {
+            return failed(
+                FailedBeforeEffect,
+                format!("Chưa đọc được danh sách ứng dụng trên máy; chưa gỡ: {error}"),
+            );
+        }
+    };
+    if !present {
+        return UninstallStep::NotPresent;
+    }
+    if let Err(error) = db.log_op("app.uninstall.dispatch", &format!("{udid} {package}")) {
+        return failed(
+            FailedBeforeEffect,
+            format!("Chưa ghi được ý định gỡ; chưa gửi lệnh tới máy: {error}"),
+        );
+    }
+    if let Err(error) = control.uninstall_app(context, package).await {
+        return failed(
+            UnknownAfterDispatch,
+            format!("Đã gửi lệnh gỡ {package} nhưng không nhận được xác nhận; cần kiểm lại trên máy, không tự gỡ lại: {error}"),
+        );
+    }
+    match control.list_installed_apps(udid).await {
+        Ok(apps) if !package_listed(&apps, package) => UninstallStep::Removed,
+        Ok(_) => failed(
+            UnknownAfterDispatch,
+            format!("Lệnh gỡ đã chạy nhưng {package} vẫn còn trong danh sách ứng dụng; cần kiểm lại trên máy."),
+        ),
+        Err(error) => failed(
+            UnknownAfterDispatch,
+            format!("Đã gửi lệnh gỡ nhưng chưa đọc lại được danh sách ứng dụng; cần kiểm lại: {error}"),
+        ),
+    }
+}
+
+/// Install a prepared library artifact once. An error after the effect gate was claimed is
+/// `Uncertain`, never retried.
+pub(crate) async fn install_prepared(
+    control: &DeviceControlPlane,
+    context: DeviceLeaseRef<'_>,
+    item: &AppLibraryItem,
+    prepared: PreparedInstall,
+    udid: &str,
+) -> AppInstallResult {
+    let udid = udid.to_string();
+    match prepared {
         PreparedInstall::Android(set) => {
             let gate = InstallEffectGate::new();
             let request = DeviceAppInstallRequest {
                 apk_paths: set.paths.clone(),
-                application_id: plan.item.application_id.clone(),
-                version_name: plan.item.version_name.clone(),
-                version_code: plan.item.version_code.clone(),
+                application_id: item.application_id.clone(),
+                version_name: item.version_name.clone(),
+                version_code: item.version_code.clone(),
                 allow_downgrade: false,
                 effect_gate: Some(gate.clone()),
             };
-            match control.install_app_set_checked(&context, &request).await {
+            match control.install_app_set_checked(context, &request).await {
                 Ok(result) => result,
                 Err(error) => AppInstallResult {
                     udid: udid.clone(),
@@ -415,7 +456,7 @@ pub(crate) async fn remove_on_device(
                 },
             }
         }
-        PreparedInstall::Ios(path) => match control.install_app(&context, &path).await {
+        PreparedInstall::Ios(path) => match control.install_app(context, &path).await {
             Ok(()) => AppInstallResult {
                 udid: udid.clone(),
                 status: AppInstallStatus::Succeeded,
@@ -433,23 +474,44 @@ pub(crate) async fn remove_on_device(
                 detail: Some(error.to_string()),
             },
         },
-    };
-    if install.status == AppInstallStatus::Succeeded {
-        AppRemovalResult {
-            udid,
-            outcome: Done,
-            removed_verified: true,
-            install: Some(install),
-            detail: note,
-        }
-    } else {
-        let detail = format!(
-            "Đã gỡ {package} nhưng cài lại chưa được xác nhận ({:?}); cần kiểm lại trên máy, không tự cài lại: {}",
-            install.status,
-            install.detail.as_deref().unwrap_or("không có chi tiết")
-        );
-        outcome(&udid, UnknownAfterDispatch, true, Some(install), detail)
     }
+}
+
+/// A library artifact copied into its own scratch and re-hashed against its import, for one
+/// dedicated reinstall that is not a removal batch (the TikTok reinstall + login command).
+/// The scratch is removed when this is dropped.
+pub(crate) struct ReinstallArtifact {
+    scratch: BatchScratch,
+    pub item: AppLibraryItem,
+}
+
+impl ReinstallArtifact {
+    pub(crate) fn plan<'a>(&'a self, package: &'a str) -> RemovalPlan<'a> {
+        RemovalPlan {
+            item: &self.item,
+            package,
+            mode: AppRemovalMode::Reinstall,
+            scratch: Some(self.scratch.path()),
+        }
+    }
+}
+
+/// Snapshot `item` the way a reinstall batch does: same scratch root, same SHA-256 and size
+/// check against the import.
+pub(crate) fn snapshot_reinstall_artifact(
+    state: &AppState,
+    item: AppLibraryItem,
+    batch_id: &str,
+) -> Result<ReinstallArtifact, CommandError> {
+    let scratch = BatchScratch::create(&state.artifacts_dir, batch_id)?;
+    let source = snapshot_managed_app_artifact(&item, scratch.path())?;
+    Ok(ReinstallArtifact {
+        scratch,
+        item: AppLibraryItem {
+            path: source.display().to_string(),
+            ..item
+        },
+    })
 }
 
 async fn run_removal_batch(

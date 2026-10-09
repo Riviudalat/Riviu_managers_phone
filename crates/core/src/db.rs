@@ -64,6 +64,7 @@ mod publish_helper_maintenance;
 pub use publish_helper_maintenance::HelperMaintenanceSubmittedBinding;
 mod publish_pipeline;
 mod publish_recovery;
+mod tiktok_credentials;
 mod typesafe;
 pub use google_connection::{
     GoogleSheetConnection, GOOGLE_CONNECTION_SETTING, GOOGLE_MIGRATION_SETTING,
