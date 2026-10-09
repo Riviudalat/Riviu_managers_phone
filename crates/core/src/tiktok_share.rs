@@ -616,6 +616,18 @@ pub async fn navigate_own_profile(
                     .await;
                     continue;
                 }
+                crate::ui_automation::runtime::ReadWaitResult::Ready(
+                    crate::app_automation::dialogs::PopupStep::Clear,
+                ) => {
+                    // The question closed between this read and the step's own (the step
+                    // re-reads a fading window for a bounded time and found TikTok): not a
+                    // departure, so read the foreground again instead of failing.
+                    tracing::info!(
+                        package = labels.package(),
+                        "điều hướng tài khoản: hộp thoại quyền hệ thống đã đóng; đọc lại foreground"
+                    );
+                    continue;
+                }
                 _ => anyhow::bail!(
                     "account navigation left TikTok: {}",
                     permission_popups.says().unwrap_or(PERMISSION_WINDOW_SAYS)

@@ -68,6 +68,19 @@ pub enum TikTokForeground {
     Other,
 }
 
+/// How long a permission-package foreground whose focused window does not prove
+/// `GrantPermissionsActivity` is re-read before it counts as [`TikTokForeground::Other`].
+///
+/// Box 31-50, 10/10/2026 (nurture on ce031713aadf361905, run box3150d, 21:34:38-39): right
+/// after our own Deny the package read still named the permission package while the dialog
+/// faded out or the second question (with "Don't ask again") animated in. The focused
+/// window in that second is not evidence either way, so the read is repeated under the
+/// caller's deadline until the question is proven or TikTok itself is back. Nothing here
+/// answers the question, and Allow is never pressed.
+pub const PERMISSION_TRANSITION_WINDOW: std::time::Duration = std::time::Duration::from_secs(3);
+/// Gap between two reads inside [`PERMISSION_TRANSITION_WINDOW`].
+const PERMISSION_TRANSITION_POLL: std::time::Duration = std::time::Duration::from_millis(450);
+
 /// Classify `active` (an [`crate::UiSession::active_app_bundle`] read) against `target`.
 ///
 /// Box 31-50, Global 45.7.3, 10/10/2026: the contacts question kept coming back over every
@@ -75,6 +88,12 @@ pub enum TikTokForeground {
 /// bailed as "left TikTok" before any popup step could Deny it. Only the permission
 /// package named with `GrantPermissionsActivity` counts; an unreadable activity, a missed
 /// deadline or any other window stays [`TikTokForeground::Other`].
+///
+/// A permission package whose focused window does not prove the question is re-read for
+/// [`PERMISSION_TRANSITION_WINDOW`] at most (and never past `deadline`): it becomes
+/// [`TikTokForeground::TikTok`] when the package read returns to `target`,
+/// [`TikTokForeground::PermissionWindow`] once the activity is proven, and
+/// [`TikTokForeground::Other`] when the window runs out or any other package shows up.
 pub async fn foreground_is_tiktok_or_permission_window(
     session: &dyn crate::UiSession,
     target: &str,
@@ -87,11 +106,54 @@ pub async fn foreground_is_tiktok_or_permission_window(
     if active != RUNTIME_PERMISSION_PACKAGE {
         return TikTokForeground::Other;
     }
-    match tokio::time::timeout_at(deadline, session.active_app_component()).await {
-        Ok(Ok(focused)) if runtime_permission_over_measured_tiktok(target, &focused) => {
-            TikTokForeground::PermissionWindow
+    let started = tokio::time::Instant::now();
+    let transition_until = (started + PERMISSION_TRANSITION_WINDOW).min(deadline);
+    let mut reads: u32 = 0;
+    loop {
+        match tokio::time::timeout_at(deadline, session.active_app_component()).await {
+            Ok(Ok(focused)) if runtime_permission_over_measured_tiktok(target, &focused) => {
+                if reads > 0 {
+                    tracing::info!(
+                        package = target,
+                        reads,
+                        elapsed_ms = started.elapsed().as_millis() as u64,
+                        "hộp thoại quyền hệ thống đã hiện rõ sau khi chuyển cảnh; bước popup chung sẽ trả lời"
+                    );
+                }
+                return TikTokForeground::PermissionWindow;
+            }
+            Ok(_) => {}
+            Err(_) => return TikTokForeground::Other,
         }
-        _ => TikTokForeground::Other,
+        if tokio::time::Instant::now() >= transition_until {
+            return TikTokForeground::Other;
+        }
+        if reads == 0 {
+            tracing::info!(
+                package = target,
+                window_ms = PERMISSION_TRANSITION_WINDOW.as_millis() as u64,
+                "foreground là gói quyền hệ thống nhưng cửa sổ chưa rõ (đang chuyển cảnh) — không bấm gì; đọc lại foreground"
+            );
+        }
+        reads = reads.saturating_add(1);
+        tokio::time::sleep(
+            PERMISSION_TRANSITION_POLL
+                .min(transition_until.saturating_duration_since(tokio::time::Instant::now())),
+        )
+        .await;
+        match tokio::time::timeout_at(deadline, session.active_app_bundle()).await {
+            Ok(Ok(package)) if package == target => {
+                tracing::info!(
+                    package = target,
+                    reads,
+                    elapsed_ms = started.elapsed().as_millis() as u64,
+                    "TikTok đã trở lại foreground sau khi hộp thoại quyền hệ thống chuyển cảnh"
+                );
+                return TikTokForeground::TikTok;
+            }
+            Ok(Ok(package)) if package == RUNTIME_PERMISSION_PACKAGE => {}
+            _ => return TikTokForeground::Other,
+        }
     }
 }
 

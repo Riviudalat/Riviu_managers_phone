@@ -298,6 +298,33 @@ fn os_do_not_ask_checkbox(tree: &Tree, container: usize) -> Option<Option<(usize
 /// `com.android.packageinstaller` prefix.
 const OS_PERMISSION_PACKAGE: &str = "com.google.android.packageinstaller";
 
+/// How long a permission-package foreground whose tree names no measured OS question is
+/// re-read before it counts as a foreign window.
+///
+/// Box 31-50, 10/10/2026, nurture on ce031713aadf361905 (SM-G955F, Android 9, Global
+/// 45.7.3/en; run box3150d, 21:34:38-39): one second after Deny on the first-time contacts
+/// question (no "Don't ask again" yet) the foreground was still
+/// `com.google.android.packageinstaller` but the tree matched no OS question: the dialog
+/// was fading out, or the second one with the checkbox was still animating in. Five other
+/// phones passed the same Deny. Such a read is a transition, not a verdict: within this
+/// window the step re-reads foreground and tree, and acts only on a measured question or
+/// on TikTok itself. An unrecognised permission tree is never tapped.
+const OS_PERMISSION_TRANSITION_WINDOW: std::time::Duration = std::time::Duration::from_secs(3);
+/// Gap between two reads inside [`OS_PERMISSION_TRANSITION_WINDOW`]; an Android 9 dialog
+/// fade is shorter than this, so the second read already sees the settled screen.
+const OS_PERMISSION_TRANSITION_POLL: std::time::Duration = std::time::Duration::from_millis(450);
+
+/// Whether `candidate` is one of the measured OS permission questions, the only trees that
+/// may own a `com.google.android.packageinstaller` foreground.
+fn os_permission_candidate(candidate: Option<&(u64, ElementBox)>) -> bool {
+    candidate.is_some_and(|(kind, _)| {
+        matches!(
+            *kind,
+            OS_LOCATION_KIND | OS_CONTACTS_KIND | OS_CONTACTS_DO_NOT_ASK_KIND
+        )
+    })
+}
+
 /// Positive blockers shared by pre-Post account proof and post-link verification.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum AccountBlocker {
@@ -1409,15 +1436,58 @@ pub(crate) async fn step_before_deadline_with_tree(
             }
         };
     }
-    let foreground = read!(session.active_app_bundle());
-    let tree = Tree::parse(read!(session.hierarchy_source_snapshot()))?;
-    if budget
-        .last_action_generation
-        .is_some_and(|generation| tree.generation <= generation)
-    {
-        return Ok(ReadWaitResult::Ready((PopupStep::Blocked, None)));
-    }
-    let candidate = optional_decline(&tree, labels);
+    // A permission-package foreground without a measured OS question is re-read for a
+    // bounded window (see [`OS_PERMISSION_TRANSITION_WINDOW`]) under the same deadline,
+    // Stop and epoch checks. The loop leaves with a settled read: the measured question
+    // (then answered as usual), TikTok itself, or still unrecognised, which fails below
+    // exactly as a foreign window does.
+    let transition_started = Instant::now();
+    let transition_until = (transition_started + OS_PERMISSION_TRANSITION_WINDOW).min(deadline);
+    let mut transition_reads: u32 = 0;
+    let (foreground, tree, candidate) = loop {
+        let foreground = read!(session.active_app_bundle());
+        let tree = Tree::parse(read!(session.hierarchy_source_snapshot()))?;
+        if budget
+            .last_action_generation
+            .is_some_and(|generation| tree.generation <= generation)
+        {
+            return Ok(ReadWaitResult::Ready((PopupStep::Blocked, None)));
+        }
+        let candidate = optional_decline(&tree, labels);
+        let settled = foreground != OS_PERMISSION_PACKAGE
+            || os_permission_candidate(candidate.as_ref())
+            || Instant::now() >= transition_until;
+        if settled {
+            if transition_reads > 0 {
+                tracing::info!(
+                    package = labels.package(),
+                    foreground = %foreground,
+                    recognised = os_permission_candidate(candidate.as_ref()),
+                    reads = transition_reads,
+                    elapsed_ms = transition_started.elapsed().as_millis() as u64,
+                    generation = tree.generation,
+                    "đọc lại màn hình sau khi hộp thoại quyền hệ thống chuyển cảnh"
+                );
+            }
+            break (foreground, tree, candidate);
+        }
+        if transition_reads == 0 {
+            tracing::info!(
+                package = labels.package(),
+                foreground = %foreground,
+                generation = tree.generation,
+                window_ms = OS_PERMISSION_TRANSITION_WINDOW.as_millis() as u64,
+                "hộp thoại quyền hệ thống đang chuyển cảnh (chưa nhận ra nút nào) — không bấm gì; đọc lại màn hình"
+            );
+        }
+        transition_reads = transition_reads.saturating_add(1);
+        let pause = OS_PERMISSION_TRANSITION_POLL
+            .min(transition_until.saturating_duration_since(Instant::now()));
+        read!(async {
+            tokio::time::sleep(pause).await;
+            anyhow::Ok(())
+        });
+    };
     let first_run = candidate
         .is_none()
         .then(|| first_run_screen(&tree, labels))
@@ -1431,13 +1501,7 @@ pub(crate) async fn step_before_deadline_with_tree(
     // other case requires the exact selected TikTok package, never a substring or recents.
     anyhow::ensure!(
         foreground == labels.package()
-            || (foreground == OS_PERMISSION_PACKAGE
-                && candidate.as_ref().is_some_and(|(kind, _)| {
-                    matches!(
-                        *kind,
-                        OS_LOCATION_KIND | OS_CONTACTS_KIND | OS_CONTACTS_DO_NOT_ASK_KIND
-                    )
-                }))
+            || (foreground == OS_PERMISSION_PACKAGE && os_permission_candidate(candidate.as_ref()))
             || (foreground == NOTIFICATION_PROMPT_PACKAGE
                 && matches!(first_run, Some((FirstRunScreen::NotificationPermission, _)))),
         "popup foreground does not match target package"

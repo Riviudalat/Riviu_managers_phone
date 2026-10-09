@@ -1858,6 +1858,12 @@ pub(super) async fn ensure_tiktok_foreground(
 /// front (see [`crate::tiktok_target::runtime_permission_over_measured_tiktok`]): the launch
 /// worked, and the shared popup step owns the question and may only Deny it. Any other
 /// foreign window, an unreadable activity or a backend that cannot name one still blocks.
+///
+/// A permission package caught mid-transition (right after the step's own Deny, before the
+/// next question or TikTok has settled) is re-read by the shared classifier for a bounded
+/// window rather than relaunched; TikTok coming back during that window counts too. The
+/// window is bounded by `deadline` and by the classifier's own cap; `stop` is honoured
+/// before it opens and by the callers' next read.
 async fn permission_over_tiktok(
     session: &dyn UiSession,
     bundle_id: &str,
@@ -1865,13 +1871,16 @@ async fn permission_over_tiktok(
     deadline: tokio::time::Instant,
     stop: &AtomicBool,
 ) -> bool {
-    if package != crate::tiktok_target::RUNTIME_PERMISSION_PACKAGE {
+    if package != crate::tiktok_target::RUNTIME_PERMISSION_PACKAGE || stop.load(Ordering::Relaxed) {
         return false;
     }
     matches!(
-        read_before_deadline(session.active_app_component(), deadline, stop).await,
-        Ok(ReadWaitResult::Ready(focused))
-            if crate::tiktok_target::runtime_permission_over_measured_tiktok(bundle_id, &focused)
+        crate::tiktok_target::foreground_is_tiktok_or_permission_window(
+            session, bundle_id, package, deadline,
+        )
+        .await,
+        crate::tiktok_target::TikTokForeground::TikTok
+            | crate::tiktok_target::TikTokForeground::PermissionWindow
     )
 }
 
