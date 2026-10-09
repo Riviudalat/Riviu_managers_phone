@@ -1,5 +1,6 @@
 """NxString decoding and @<decimal> token resolution on synthetic tables."""
 
+import json
 import struct
 import tempfile
 import unittest
@@ -7,6 +8,7 @@ import zipfile
 from collections import defaultdict
 from pathlib import Path
 
+import find_string
 import nxstring
 import resolve_desc
 
@@ -125,6 +127,24 @@ class LocaleTests(unittest.TestCase):
             self.assertEqual(rows[1:], [[f"@{back}", "0x7f110000", "Back", "Quay lại", "argv"],
                                         [f"@{hot}", "0x7f110001", "Hot", "", "argv"]])
             self.assertEqual(resolve_desc.main(["@2131000000", "--apk", str(apk), "--out", str(out)]), 1)
+
+    def test_find_string_matches_labels_in_tiers_and_lists_layout_refs(self):
+        with tempfile.TemporaryDirectory() as temp:
+            apk = Path(temp) / "base.apk"
+            synthetic_apk(apk)
+            index = Path(temp) / "layout_index.jsonl"
+            index.write_text(json.dumps({"id": "dop", "dir": "layout", "layout": "top_bar", "tag": "TextView",
+                                         "attrs": {"contentDescription": "@0x7f110000"}}) + "\n", encoding="utf-8")
+            out = Path(temp) / "out.tsv"
+            args = ["--apk", str(apk), "--index", str(index), "--out", str(out)]
+            self.assertEqual(find_string.main(["Quay lại", "post", "o", *args]), 0)
+            rows = [line.split("\t") for line in out.read_text(encoding="utf-8").splitlines()]
+            self.assertEqual(rows[1:], [["Quay lại", "exact", "0x7f110000", "Back", "Quay lại", "layout/top_bar/dop:contentDescription"],
+                                        ["post", "ci", "0x7f110002", "Post", "Đăng (vi)", ""],
+                                        ["o", "contains", "0x7f110001", "Hot", "", ""],
+                                        ["o", "contains", "0x7f110002", "Post", "Đăng (vi)", ""]])
+            self.assertEqual(find_string.main(["Missing", *args]), 1)
+            self.assertEqual(out.read_text(encoding="utf-8").splitlines()[1], "Missing\tnone\t\t\t\t")
 
 
 class TokenScanTests(unittest.TestCase):

@@ -55,7 +55,7 @@ APK gốc và đưa ra **ứng viên** cho người duyệt; ứng viên không 
    `--id`. Cột `near_version` chỉ là ước lượng theo khoảng cách dòng.
 
    ```powershell
-   $OLD = "target	iktok-<cũ>-research"
+   $OLD = "target\tiktok-<cũ>-research"
    py -3.12 -I tools/tiktok-apk/riviu_ids.py --index "$OLD\layout_index.jsonl" --resources-dump "$OLD\aapt2-resources.txt" --version <cũ> --id s0v --out "$T\ids_old.tsv"
    ```
 6. **So hai build.** Công cụ xếp hạng ứng viên theo layout, vị trí trong cây, chuỗi gắn kèm
@@ -73,7 +73,15 @@ APK gốc và đưa ra **ứng viên** cho người duyệt; ứng viên không 
 8. **Duyệt ứng viên.** Ghi kết luận vào `$T`, không ghi vào docs. `high` chỉ có nghĩa là
    "đo id này trước". Id `code-only`, chẳng hạn `s0v` hoặc `nr_`/`nrb`, không có bằng chứng
    layout nên phải tìm bằng dump runtime. Id chung như `title`, `tv_title`, `desc` hay `bix`
-   luôn cần scope. Chỉ khi cần đọc code thì mới decompile, và chỉ decompile dex chứa hằng
+   luôn cần scope. Muốn biết một nhãn thấy trên màn hình (tiếng Anh hoặc tiếng Việt) ứng
+   với string id nào và layout nào dùng id đó thì chạy lệnh dưới. Một nhãn thường có nhiều
+   id; cột `layouts` để trống nghĩa là chuỗi được gán từ code.
+
+   ```powershell
+   py -3.12 -I tools/tiktok-apk/find_string.py --apk "$T\base.apk" --locale vi-VN --index "$T\layout_index.jsonl" "Add sound" "Thêm âm thanh"
+   ```
+
+   Chỉ khi cần đọc code thì mới decompile, và chỉ decompile dex chứa hằng
    số: `dex_lookup.py const <apk> 0x7f0a....`, sau đó `dex_lookup.py classdef`.
 9. **Đo trên một máy thật**, theo từng trường và từng ngôn ngữ đang hỗ trợ. Thêm fixture
    đã sanitize (không chứa secret hay tài khoản thật), thêm negative case, rồi mới sửa bảng
