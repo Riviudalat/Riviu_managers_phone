@@ -299,6 +299,16 @@ pub(crate) fn helper_maintenance_is_pending(
         .any(|entry| entry.phase != HelperMaintenancePhase::Settled))
 }
 
+/// Where automatic maintenance stopped. Preparation is observation-only and persists
+/// nothing before the driver plan exists; execution may have dispatched an effect.
+#[derive(Debug)]
+pub(crate) enum AutomaticMaintenanceError {
+    /// Refused before any plan was executed; no device effect was attempted.
+    Prepare(CommandError),
+    /// Execution was reached (fresh or resumed plan). Never retried automatically.
+    Execute(CommandError),
+}
+
 /// User-authorized automatic policy, under the caller's exclusive Repair lease.
 /// A pending identity is resumed, never replaced; executionStarted is observation-only.
 pub(crate) async fn automatic_helper_maintenance(
@@ -306,14 +316,17 @@ pub(crate) async fn automatic_helper_maintenance(
     db: &std::sync::Arc<riviu_core::db::Database>,
     context: &riviu_core::DeviceExclusiveContext,
     serial: &str,
-) -> Result<(), CommandError> {
-    let pending = load_maintenance_ledger(db, serial)?.into_iter()
+) -> Result<(), AutomaticMaintenanceError> {
+    let pending = load_maintenance_ledger(db, serial).map_err(AutomaticMaintenanceError::Prepare)?
+        .into_iter()
         .find(|entry| entry.phase != HelperMaintenancePhase::Settled);
     let plan = match pending {
         Some(entry) => entry.public,
-        None => prepare_helper_maintenance_admitted(control, db, context, serial.into()).await?,
+        None => prepare_helper_maintenance_admitted(control, db, context, serial.into()).await
+            .map_err(AutomaticMaintenanceError::Prepare)?,
     };
-    execute_helper_maintenance_admitted(control, db, context, plan, true, None).await?;
+    execute_helper_maintenance_admitted(control, db, context, plan, true, None).await
+        .map_err(AutomaticMaintenanceError::Execute)?;
     Ok(())
 }
 
@@ -757,6 +770,39 @@ mod tests {
         assert_eq!(driver.ordinary_session_calls(), 0);
         assert_eq!(driver.fresh_text_session_calls(), 0);
         assert_eq!(driver.stream_restart_calls(), 0);
+    }
+
+    #[tokio::test]
+    async fn automatic_maintenance_names_the_stage_it_stopped_in() {
+        let control = DeviceControlPlane::new(
+            Arc::new(MockIosDriver::new()),
+            Arc::new(DeviceWorkCoordinator::new()),
+            Arc::new(StreamBudgetManager::default()),
+        );
+        let (database, path) = database();
+        let db = Arc::new(database);
+        let context = control.try_acquire_exclusive("fixture", DeviceWorkOwner::Repair).await
+            .expect("repair lease");
+        // No plan yet: the driver refuses preparation, before anything is persisted.
+        let error = automatic_helper_maintenance(&control, &db, &context, "fixture").await
+            .expect_err("fixture driver cannot prepare");
+        assert!(matches!(error, AutomaticMaintenanceError::Prepare(_)), "{error:?}");
+        assert!(!helper_maintenance_is_pending(&db, "fixture").unwrap());
+        // A pending plan resumes into execution; that failure is never a prepare failure.
+        let plan = HelperMaintenancePlan {
+            maintenance_id: "fixture_maintenance_1234".into(), udid: "fixture".into(), submitted: Vec::new(),
+        };
+        save_maintenance_ledger(&db, "fixture", &[PreparedHelperMaintenance {
+            public: plan, driver_plan: serde_json::json!({"fixture": true}),
+            prepared_at_ms: 0, phase: HelperMaintenancePhase::Prepared,
+        }]).await.unwrap();
+        let error = automatic_helper_maintenance(&control, &db, &context, "fixture").await
+            .expect_err("fixture driver cannot execute");
+        assert!(matches!(error, AutomaticMaintenanceError::Execute(_)), "{error:?}");
+        assert!(helper_maintenance_is_pending(&db, "fixture").unwrap(), "execution start stays recorded");
+        drop(context);
+        drop(db);
+        let _ = std::fs::remove_file(path);
     }
 
     #[tokio::test]

@@ -11,6 +11,7 @@ use std::sync::Arc;
 use riviu_android_driver::AndroidDriver;
 use riviu_android_driver::driver::{HelperRecoveryGeneration, HELPER_SETUP_FAILURE};
 use riviu_android_driver::riviu_agent::HelperShellIdentityRefused;
+use crate::agent_commands::AutomaticMaintenanceError;
 use riviu_core::db::Database;
 use riviu_core::{
     DeviceControlError, DeviceControlPlane, DeviceInfo, DevicePlatform, DeviceStatus,
@@ -22,6 +23,10 @@ use tokio::time::{Duration, Instant};
 use super::CommandAdmissionState;
 
 const MAX_CONCURRENT_INSTALLS: usize = 2;
+/// Finite backoff for observation-only preparation refusals on one connection: the
+/// operator may fix the phone (e.g. `adb unroot`) without replugging it. Then terminal.
+const PREPARE_RETRY_DELAYS: [Duration; 3] =
+    [Duration::from_secs(30), Duration::from_secs(120), Duration::from_secs(300)];
 
 pub(super) struct AndroidHelperSetup {
     control: Arc<DeviceControlPlane>,
@@ -78,21 +83,30 @@ impl AndroidHelperSetup {
                             auto_apply_baseline(&android, &db, &serial).await;
                             record(&db, "agent.helper.setup.started", &serial,
                                 "Đang chuẩn bị Riviu Helper để điều khiển thiết bị.");
+                            let automatic_failure = |error: &anyhow::Error| crate::command_error::CommandError::code(
+                                "HelperAutomaticPreparationFailed", automatic_preparation_message(&serial, error));
                             let result = async {
-                                if !crate::agent_commands::helper_maintenance_is_pending(&db, &serial)? {
-                                match android.prepare_helper_runtime(&serial).await {
-                                    Ok(_) => return Ok(()),
-                                    Err(error) if error.is::<riviu_android_driver::riviu_agent::HelperRecoveryRequired>() => {}
-                                    Err(error) => return Err(crate::command_error::CommandError::code(
-                                        "HelperAutomaticPreparationFailed", automatic_preparation_message(&serial, &error))),
+                                let pending = crate::agent_commands::helper_maintenance_is_pending(&db, &serial)
+                                    .map_err(|error| (SetupStop::PreEffect, error))?;
+                                if !pending {
+                                    match android.prepare_helper_runtime(&serial).await {
+                                        Ok(_) => return Ok(()),
+                                        Err(error) if error.is::<riviu_android_driver::riviu_agent::HelperRecoveryRequired>() => {}
+                                        // Proved before any install or claim on this phone.
+                                        Err(error) if error.is::<HelperShellIdentityRefused>() =>
+                                            return Err((SetupStop::PreEffect, automatic_failure(&error))),
+                                        Err(error) => return Err((SetupStop::Terminal, automatic_failure(&error))),
+                                    }
                                 }
-                                }
-                                crate::agent_commands::automatic_helper_maintenance(
-                                    &control, &db, &context, &serial).await?;
+                                crate::agent_commands::automatic_helper_maintenance(&control, &db, &context, &serial).await
+                                    .map_err(|error| match error {
+                                        AutomaticMaintenanceError::Prepare(error) => (SetupStop::PreEffect, error),
+                                        AutomaticMaintenanceError::Execute(error) => (SetupStop::Terminal, error),
+                                    })?;
+                                // After an execution the replacement claim is never retried here.
                                 android.prepare_helper_runtime(&serial).await
                                     .map(|_| ())
-                                    .map_err(|error| crate::command_error::CommandError::code(
-                                        "HelperAutomaticPreparationFailed", automatic_preparation_message(&serial, &error)))
+                                    .map_err(|error| (SetupStop::Terminal, automatic_failure(&error)))
                             }.await;
                             match result {
                                 Ok(()) => {
@@ -100,17 +114,25 @@ impl AndroidHelperSetup {
                                         "Đã xác minh Riviu Helper hoạt động.");
                                     AttemptOutcome::Finished
                                 }
-                                Err(error) => {
+                                Err((stop, error)) => {
+                                    let disposition = failure_disposition(stop, &error.code);
+                                    let note = match disposition {
+                                        FailureDisposition::RetryPrepare => " Sẽ tự kiểm tra lại sau ít phút (tối đa 3 lần); chưa thực hiện khôi phục.",
+                                        FailureDisposition::Deferred | FailureDisposition::Terminal => "",
+                                    };
                                     record(&db, "agent.helper.setup.failed", &serial,
-                                        &format!("{}: {}", error.code, error.message));
-                                    if matches!(error.code.as_str(), "HelperMaintenanceDraining"
-                                        | "HelperMaintenanceBusyBeforeDispatch") {
-                                        AttemptOutcome::Deferred
-                                    } else {
-                                        // Uncertain dispatch, USB refusal and unproved ownership are
-                                        // terminal for this connection, never automatic effect retries.
-                                        android.record_helper_preparation_failure(&serial);
-                                        AttemptOutcome::Failed(android.helper_recovery_snapshot().get(&serial).copied())
+                                        &format!("{}: {}{note}", error.code, error.message));
+                                    match disposition {
+                                        FailureDisposition::Deferred => AttemptOutcome::Deferred,
+                                        disposition => {
+                                            android.record_helper_preparation_failure(&serial);
+                                            let generation = android.helper_recovery_snapshot().get(&serial).copied();
+                                            if disposition == FailureDisposition::RetryPrepare {
+                                                AttemptOutcome::RetryPrepare(generation)
+                                            } else {
+                                                AttemptOutcome::Failed(generation)
+                                            }
+                                        }
                                     }
                                 }
                             }
@@ -125,6 +147,36 @@ impl AndroidHelperSetup {
     /// Let an admitted package install finish before shutting its driver down.
     pub(super) async fn drain(&mut self) {
         self.queue.drain().await;
+    }
+}
+
+/// Where an automatic attempt stopped, as far as device effects are concerned.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum SetupStop {
+    /// Refused before any install, claim or maintenance execution: observation only.
+    PreEffect,
+    /// Maintenance execution was reached, or a claim may have been dispatched.
+    Terminal,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum FailureDisposition {
+    /// Admission or pre-dispatch contention: the short contention backoff.
+    Deferred,
+    /// Observation-only refusal (root adb shell, unreadable inventory, unsettled owner):
+    /// retried on `PREPARE_RETRY_DELAYS`, then terminal for this connection.
+    RetryPrepare,
+    /// Uncertain dispatch, USB refusal and unproved ownership: never an automatic retry.
+    Terminal,
+}
+
+fn failure_disposition(stop: SetupStop, code: &str) -> FailureDisposition {
+    if matches!(code, "HelperMaintenanceDraining" | "HelperMaintenanceBusyBeforeDispatch") {
+        FailureDisposition::Deferred
+    } else if stop == SetupStop::PreEffect && code != "HelperMaintenanceDisabled" {
+        FailureDisposition::RetryPrepare
+    } else {
+        FailureDisposition::Terminal
     }
 }
 
@@ -208,6 +260,8 @@ struct Connection {
     finished: bool,
     recovery_generation: Option<HelperRecoveryGeneration>,
     deferred: u32,
+    /// Prepare-stage retries already scheduled for this connection and failure episode.
+    prepare_retries: usize,
     retry_at: Instant,
 }
 
@@ -215,6 +269,8 @@ struct Connection {
 enum AttemptOutcome {
     Deferred,
     Failed(Option<HelperRecoveryGeneration>),
+    /// Refused before any effect; `PREPARE_RETRY_DELAYS` decides whether it runs again.
+    RetryPrepare(Option<HelperRecoveryGeneration>),
     Finished,
 }
 
@@ -263,6 +319,7 @@ impl SetupQueue {
                         finished: false,
                         recovery_generation: self.recovery.get(serial).copied(),
                         deferred: 0,
+                        prepare_retries: 0,
                         retry_at: Instant::now(),
                     },
                 );
@@ -280,6 +337,7 @@ impl SetupQueue {
                     connection.recovery_generation = Some(generation);
                     connection.finished = false;
                     connection.deferred = 0;
+                    connection.prepare_retries = 0;
                     connection.retry_at = Instant::now();
                 }
             }
@@ -288,11 +346,16 @@ impl SetupQueue {
             if self.tasks.len() >= MAX_CONCURRENT_INSTALLS {
                 break;
             }
+            let Some(connection) = self.connections.get(&device.udid) else {
+                continue;
+            };
+            // A scheduled prepare retry runs while the roster shows its own latched failure.
             if device.platform != DevicePlatform::Android
                 || !(matches!(device.status, DeviceStatus::Connected | DeviceStatus::Ready)
                     || (device.status == DeviceStatus::Error
-                        && self.recovery.contains_key(&device.udid)
-                        && device.last_error.as_deref() == Some(HELPER_SETUP_FAILURE)))
+                        && (connection.prepare_retries > 0
+                            || (self.recovery.contains_key(&device.udid)
+                                && device.last_error.as_deref() == Some(HELPER_SETUP_FAILURE)))))
                 || !available(&device.udid)
                 || self
                     .tickets
@@ -301,9 +364,6 @@ impl SetupQueue {
             {
                 continue;
             }
-            let Some(connection) = self.connections.get(&device.udid) else {
-                continue;
-            };
             if connection.finished || Instant::now() < connection.retry_at {
                 continue;
             }
@@ -336,6 +396,16 @@ impl SetupQueue {
                         // The attempt itself can first observe failure. Consume that
                         // episode here so its next roster publication cannot retry it.
                         if generation.is_some() { connection.recovery_generation = generation; }
+                    }
+                    AttemptOutcome::RetryPrepare(generation) => {
+                        if generation.is_some() { connection.recovery_generation = generation; }
+                        match PREPARE_RETRY_DELAYS.get(connection.prepare_retries) {
+                            Some(delay) => {
+                                connection.prepare_retries += 1;
+                                connection.retry_at = Instant::now() + *delay;
+                            }
+                            None => connection.finished = true,
+                        }
                     }
                     AttemptOutcome::Deferred => {
                         connection.deferred = connection.deferred.saturating_add(1);
@@ -433,6 +503,50 @@ mod tests {
             complete_ready(&mut queue).await;
         }
         queue.drain().await;
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn prepare_refusals_retry_on_a_finite_backoff_while_the_roster_shows_the_latch() {
+        let mut queue = SetupQueue::default();
+        let mut devices = vec![phone("a", DeviceStatus::Ready)];
+        let generation = Some(HelperRecoveryGeneration(1));
+        queue.tick(&devices, |_| true, move |_| async move { AttemptOutcome::RetryPrepare(generation) });
+        complete_ready(&mut queue).await;
+        // The roster now publishes the categorized latch for this phone.
+        queue.recovery.insert("a".into(), HelperRecoveryGeneration(1));
+        devices[0].status = DeviceStatus::Error;
+        devices[0].last_error = Some(format!("{HELPER_SETUP_FAILURE}; stage=runtime_acquisition; category=shell_root; fixture"));
+        for delay in [30, 120, 300] {
+            tokio::time::advance(Duration::from_secs(delay - 1)).await;
+            queue.tick(&devices, |_| true, |_| async { panic!("backoff not due") });
+            assert!(queue.tasks.is_empty());
+            tokio::time::advance(Duration::from_secs(1)).await;
+            let mut attempts = 0;
+            queue.tick(&devices, |_| true, |_| {
+                attempts += 1;
+                async move { AttemptOutcome::RetryPrepare(generation) }
+            });
+            assert_eq!(attempts, 1, "retry due after {delay}s");
+            complete_ready(&mut queue).await;
+        }
+        tokio::time::advance(Duration::from_secs(3600)).await;
+        queue.tick(&devices, |_| true, |_| async { panic!("retries exhausted") });
+        assert!(queue.tasks.is_empty());
+        assert!(queue.connections["a"].finished);
+    }
+
+    #[test]
+    fn only_observation_only_refusals_are_retried_and_never_after_execution() {
+        for code in ["HelperMaintenanceShellRoot", "HelperMaintenanceAdbUnavailable",
+            "HelperMaintenancePrepareFailed", "HelperAutomaticPreparationFailed"] {
+            assert_eq!(failure_disposition(SetupStop::PreEffect, code), FailureDisposition::RetryPrepare, "{code}");
+            // Execution started (or a claim may have been sent): never an automatic retry.
+            assert_eq!(failure_disposition(SetupStop::Terminal, code), FailureDisposition::Terminal, "{code}");
+        }
+        assert_eq!(failure_disposition(SetupStop::Terminal, "HelperMaintenanceExecutionUnproved"), FailureDisposition::Terminal);
+        assert_eq!(failure_disposition(SetupStop::PreEffect, "HelperMaintenanceDisabled"), FailureDisposition::Terminal);
+        assert_eq!(failure_disposition(SetupStop::PreEffect, "HelperMaintenanceDraining"), FailureDisposition::Deferred);
+        assert_eq!(failure_disposition(SetupStop::Terminal, "HelperMaintenanceBusyBeforeDispatch"), FailureDisposition::Deferred);
     }
 
     #[tokio::test]
