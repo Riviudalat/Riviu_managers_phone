@@ -306,6 +306,13 @@ không nhập tay. Chọn phạm vi (máy cụ thể, nhóm hoặc toàn bộ) r
 - **Đã xong** chỉ khi đọc lại danh sách ứng dụng không còn gói (và với Cài lại, bản cài được xác nhận).
   **Chưa gỡ** nghĩa là chưa gửi lệnh. **Cần kiểm lại** nghĩa là lệnh đã gửi nhưng chưa chứng minh
   kết quả; ứng dụng không tự gửi lại, hãy kiểm tra trên máy trước khi chạy lại.
+- Sau khi cài mới TikTok Global 45.7.3 (giao diện tiếng Anh), lúc đưa máy về feed Riviu chỉ làm
+  một thao tác từ chối cho mỗi màn mở đầu đã đo: **Skip** ở trang chọn chủ đề, vuốt lên một lần
+  để tắt lớp hướng dẫn "Swipe up for more", **Close** ở bảng kiểm tra bảo mật nhanh (không
+  bấm **Continue**) và **Don’t allow** ở hộp xin quyền thông báo. Hộp đồng ý Điều khoản dịch vụ
+  chỉ được báo để người vận hành tự xử lý; Riviu không bao giờ bấm **Agree and continue**.
+  Trong cùng một lượt, màn vẫn còn sau thao tác đó hoặc màn lạ thì dừng và báo,
+  không bấm lại hay bấm Back.
 
 ## Chẩn đoán
 
