@@ -106,7 +106,16 @@ xác nhận trước khi thực thi; phiên đang thuộc controller khác vẫn
 Kế hoạch cũ đã thực thi chỉ được đối soát, không dừng helper lần nữa. Bản ghi và
 nghĩa vụ chưa rõ vẫn được giữ; khôi phục không tự đăng/gửi lại, không xác nhận clipboard
 cũ đã được khôi phục và không tự biến máy thành sẵn sàng. **Bảo trì → Khôi phục helper**
-vẫn dùng phạm vi đã chọn; **Sửa Riviu Agent** là thao tác riêng.
+dùng phạm vi đã chọn; khi chưa chọn máy nào, lối này chỉ chạy trên các máy Android đang
+báo cần khôi phục helper, và báo rõ khi không có máy nào như vậy thay vì chuẩn bị cho
+mọi máy. **Sửa Riviu Agent** là thao tác riêng: chỉ sửa agent điều khiển (UiAutomator2
+trên Android), không khôi phục helper. Kết quả đếm máy đã sửa và máy lỗi; máy đã sửa
+agent nhưng helper vẫn lỗi được nêu riêng kèm lời nhắc chọn **Khôi phục helper**.
+
+Nếu adb shell của máy chạy quyền root (uid 0), ví dụ box bật `adb root` khi khởi động,
+helper từ chối và ô máy hiện **Cần khôi phục helper** với hướng dẫn chạy
+`adb -s <serial> unroot` hoặc tắt adb root khi khởi động. Máy đang ở người dùng Android
+khác người dùng chính cũng được báo riêng. Helper không có đường lùi chạy bằng root.
 
 Phiên helper đã lỗi có thể được khôi phục khi thao tác cũ đã kết thúc và không còn
 clipboard cần đối soát; chỉ còn bản ghi trong bộ nhớ không có nghĩa máy đang bận.
@@ -127,13 +136,20 @@ khiển sẽ chờ đến khi rảnh; stream vẫn giữ nguyên. Máy đã có 
 không cài lại mỗi lần quét. Cài xong phải đọc lại phiên bản, kiểm quyền sở hữu và
 xác minh clipboard có khôi phục trước khi báo hoàn tất. Quyền cài USB bị ROM từ
 chối hoặc bản ghi thao tác cũ chưa đối soát được sẽ hiện trên đúng máy; app không
-lặp cài liên tục. Kế hoạch khôi phục đã thực thi chỉ được đọc lại kết quả. Nút
-**Khôi phục helper** vẫn có để xử lý trường hợp cần người vận hành kiểm tra.
+lặp cài liên tục. Kế hoạch khôi phục đã thực thi chỉ được đọc lại kết quả. Lỗi được
+chứng minh trước mọi thao tác trên máy (chuẩn bị kế hoạch khôi phục chỉ đọc, adb shell
+sai quyền trước khi cài hoặc nhận phiên) được tự kiểm tra lại sau 30 giây, 2 phút và
+5 phút rồi dừng, nên sửa máy (như `adb unroot`) không cần cắm lại cáp. Khi việc khôi
+phục đã bắt đầu thực thi, app không tự thử lại. Nút **Khôi phục helper** vẫn có để xử
+lý trường hợp cần người vận hành kiểm tra.
 
 Lỗi chuẩn bị helper phân biệt `runtime_acquisition` (nhận phiên runtime) và
 `clipboard_qualification` (xác minh clipboard). Thông báo chỉ dùng các nhóm nguyên
-nhân cố định: `clipboard_not_qualified`, `recovery_required` hoặc `unknown`; nhật ký
-kèm mã thiết bị để đối chiếu đúng máy. Lỗi khôi phục còn phân biệt kế hoạch đã đổi
+nhân cố định: `shell_root`, `shell_uid`, `android_user`, `clipboard_not_qualified`,
+`recovery_required` hoặc `unknown`; nhật ký kèm mã thiết bị để đối chiếu đúng máy.
+Lỗi chuẩn bị khôi phục được ghi nhật ký với `stage=maintenance_prepare` và nhóm nguyên
+nhân, ví dụ `shell_root`, `recovery_required`, `adb_unavailable` (không đọc được máy
+qua ADB) hoặc `unknown`. Lỗi khôi phục còn phân biệt kế hoạch đã đổi
 (`binding_changed`) và tiến trình vẫn còn khi đối soát (`process_present`).
 `unknown` nghĩa là chưa xác định nguyên nhân, không chứng minh máy thuộc PC khác.
 Các thông báo này giữ nguyên yêu cầu đối soát và bản ghi cũ, không cho phép gửi lại
