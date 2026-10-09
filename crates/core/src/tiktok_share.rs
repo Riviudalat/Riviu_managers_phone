@@ -37,6 +37,17 @@
 //! must already have the intended post on screen — and the route from a just-published
 //! carousel back to its own post page is **not measured on any build**, which is why nothing
 //! in the publish path calls this yet.
+//!
+//! # `Copy link` is a share, not a read
+//!
+//! TikTok very likely counts every `Copy link` as a public share of the post: on Global
+//! 45.7.3 a probe (09/10/2026) saw the share counter go from 0 to 1 about a minute after a
+//! single copy, and the sheet puts **Repost** right beside the row. So this module is used
+//! only where the link cannot be had any other way, which today means the canonical URL of a
+//! post we just published. Each attempt is counted in the evidence
+//! (`VerificationDiagnostic::copy_attempts`, marked `copy_link_counts_as_share`). Interaction
+//! never copies the link of a post it already has a link for: on the measured build it opens
+//! the post by id instead (`interaction_hierarchy::open_exact_target_by_hierarchy`).
 
 use anyhow::Context;
 use std::time::Duration;

@@ -306,7 +306,13 @@ pub struct VerificationDiagnostic {
     pub navigation_actions: u32,
     pub candidates_visited: u32,
     pub viewports_visited: u32,
+    /// Taps of TikTok's `Copy link` on the just-published post. TikTok very likely counts
+    /// each one as a public share of that post (Global 45.7.3, 09/10/2026: the share counter
+    /// went 0 -> 1 about a minute after one copy), so they are not free reads.
     pub copy_attempts: u32,
+    /// Always true: marks `copy_attempts` in the stored evidence as share-counting actions,
+    /// so a share count on our own post is never read as organic.
+    pub copy_link_counts_as_share: bool,
     pub elapsed_ms: u64,
     pub navigation_matches: usize,
     pub navigation_enabled: usize,
@@ -1906,6 +1912,7 @@ pub async fn capture_submission_link_excluding(
             candidates_visited: 0,
             viewports_visited: 0,
             copy_attempts: 0,
+            copy_link_counts_as_share: true,
             expanded_photo_error: None,
             candidate_trace: Vec::new(),
             elapsed_ms: 0,

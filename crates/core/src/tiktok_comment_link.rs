@@ -6,6 +6,11 @@
 //! `share_comment_id` in its query. This parser accepts either that final URL or
 //! the internal `aweme://aweme/detail?id=...&cid=...` form used by comment history.
 //! It never treats a post-only URL as a comment identity.
+//!
+//! **Each capture and each reply-time re-check is one `Copy link` through TikTok's share
+//! menu**, which TikTok may count as a share (see `crate::tiktok_share`). It stays because
+//! the comment id is not shown anywhere on screen. A `commentLink` in the stored evidence
+//! records that one such copy was made.
 
 use crate::tiktok_labels::TikTokControls;
 use crate::ui_automation::tree::Tree;

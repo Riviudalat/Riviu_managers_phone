@@ -162,6 +162,7 @@ fn short_ellipsized_caption_requests_expansion_without_accepting_a_prefix() {
             candidates_visited: 0,
             viewports_visited: 0,
             copy_attempts: 0,
+            copy_link_counts_as_share: true,
             elapsed_ms: 0,
             navigation_matches: 0,
             navigation_enabled: 0,
@@ -250,6 +251,7 @@ async fn earlier_copied_photo_is_a_rejected_old_candidate_not_an_unresolved_capt
             candidates_visited: 0,
             viewports_visited: 0,
             copy_attempts: 0,
+            copy_link_counts_as_share: true,
             elapsed_ms: 0,
             navigation_matches: 0,
             navigation_enabled: 0,
@@ -393,6 +395,7 @@ async fn comments_recovery_observes_post_before_grid_and_never_backs_from_compos
                 candidates_visited: 0,
                 viewports_visited: 0,
                 copy_attempts: 0,
+                copy_link_counts_as_share: true,
                 expanded_photo_error: None,
                 elapsed_ms: 0,
                 navigation_matches: 0,
@@ -1012,6 +1015,7 @@ async fn global_photo_tile_evidence(
             candidates_visited: 1,
             viewports_visited: 1,
             copy_attempts: 0,
+            copy_link_counts_as_share: true,
             elapsed_ms: 0,
             navigation_matches: 0,
             navigation_enabled: 0,
@@ -1205,6 +1209,10 @@ async fn copy_retry_uses_fresh_proof_and_sentinel_without_leaving_post() {
     let captured = capture_submission_link(&session, &plan(), CAPTION, &identity()).await;
     assert_eq!(captured.outcome, OwnPostLink::Captured(URL.into()));
     assert_eq!(captured.diagnostic.copy_attempts, 2);
+    // Both copies are share-counting actions on our own post, and the evidence says so.
+    let evidence = serde_json::to_value(&captured.diagnostic).unwrap();
+    assert_eq!(evidence["copyAttempts"], 2);
+    assert_eq!(evidence["copyLinkCountsAsShare"], true);
     let writes = session.writes.lock();
     assert_eq!(writes.len(), 2);
     assert_ne!(writes[0], writes[1]);
@@ -1784,6 +1792,7 @@ fn a_changed_post_snapshot_cannot_combine_prior_caption_with_new_time() {
             candidates_visited: 0,
             viewports_visited: 0,
             copy_attempts: 0,
+            copy_link_counts_as_share: true,
             elapsed_ms: 0,
         },
     };
