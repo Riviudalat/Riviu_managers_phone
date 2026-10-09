@@ -15,6 +15,7 @@ Tài liệu đứng yên về kiến trúc và an toàn thiết bị. Không cò
 | [09-fleet-android.md](09-fleet-android.md) | Fleet Android |
 | [10-thiet-bi-moi.md](10-thiet-bi-moi.md) | Thiết bị mới |
 | [11-build-tiktok-moi.md](11-build-tiktok-moi.md) | Build TikTok mới: đọc APK, đối chiếu id |
+| [tiktok-builds/musically-45.7.3.md](tiktok-builds/musically-45.7.3.md) | TikTok Global 45.7.3: id, màn hình, đăng nhập, mục audit |
 | [agent-runbook.md](agent-runbook.md) | Thứ tự làm việc của agent |
 
 Hướng dẫn sản phẩm: [`../operator-guide.md`](../operator-guide.md), [`../developer-guide.md`](../developer-guide.md), root [`../../README.md`](../../README.md).

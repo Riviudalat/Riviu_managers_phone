@@ -6,6 +6,9 @@ TikTok bắt cập nhật, không được chép bảng selector từ build cũ 
 [`tools/tiktok-apk/`](../../tools/tiktok-apk/) dùng Python 3.12 thuần stdlib. Nó chỉ đọc
 APK gốc và đưa ra **ứng viên** cho người duyệt; ứng viên không phải bằng chứng.
 
+Kiến thức đã đo của từng build nằm trong [`tiktok-builds/`](tiktok-builds/). Build đang dùng:
+[TikTok Global 45.7.3](tiktok-builds/musically-45.7.3.md).
+
 ### Ràng buộc
 
 - Chỉ đọc APK gốc lấy từ máy. Không sửa, ký lại hay cài bất kỳ APK nào đã bị sửa.

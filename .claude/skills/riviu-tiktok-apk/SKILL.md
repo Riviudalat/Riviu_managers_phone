@@ -6,7 +6,7 @@ description: >
   gì (layout, id, chuỗi theo ngôn ngữ, token @<số>). Phân tích chỉ đọc APK gốc kéo
   từ máy bằng tools/tiktok-apk theo runbook build mới; ứng viên không phải bằng
   chứng. Không sửa, ký lại hay cài APK đã sửa, không đưa mã decompile vào repo,
-  không dùng deep-link/intent để bỏ qua màn hình.
+  không tự thêm deep-link/intent bỏ qua màn hình khi chưa được duyệt.
 metadata:
   version: "1.0.0"
   origin: local
@@ -19,6 +19,7 @@ Skill tự soạn cho Riviu. Nó giúp tìm **ứng viên** id/chuỗi của m�
 
 - Runbook gốc, giữ lệnh đầy đủ: [Build TikTok mới](../../../docs/agents/11-build-tiktok-moi.md). Skill này chỉ tóm tắt; khi lệnh hai nơi khác nhau thì runbook đúng.
 - Công cụ: [`tools/tiktok-apk/`](../../../tools/tiktok-apk/), Python 3.12 thuần stdlib, chạy bằng `py -3.12 -I`.
+- Kiến thức đã đo của build đang dùng: [TikTok Global 45.7.3](../../../docs/agents/tiktok-builds/musically-45.7.3.md) (danh tính APK, bảng id, màn mở đầu, sound picker, deep link, đăng nhập, các mục audit). Khi phân tích build mới, so với tài liệu này và viết tài liệu cùng dạng cho build đó.
 - Sửa bảng `tiktok_*` sau khi đo: [quy trình thiết bị mới](../../../docs/agents/10-thiet-bi-moi.md). Selector không khớp mà chưa rõ do build hay do session/perception thì dùng `riviu-device-diagnostics` trước.
 
 ## 1. Luật cứng
@@ -43,7 +44,7 @@ Phần cột phải chỉ biết được bằng dump uiautomator trên máy th�
 
 ## 3. Quy tắc sản phẩm
 
-Riviu điều hướng TikTok như một người dùng: chạm qua từng màn hình. Kiến thức từ APK dùng để **nhận ra** màn hình và nút, không dùng để tìm deep-link, intent hay activity cho phép nhảy cóc qua màn hình.
+Mặc định Riviu điều hướng TikTok như một người dùng: chạm qua từng màn hình. Kiến thức từ APK dùng trước hết để **nhận ra** màn hình và nút. Deep link chỉ dùng ở chỗ có ích và đã được chủ dự án duyệt, ví dụ mở bài đích theo id thay cho Copy link (Copy link làm tăng bộ đếm share). Muốn thêm deep link, intent hay activity nhảy cóc qua cả một luồng màn hình thì hỏi trước; sau mỗi deep link phải kiểm activity và nội dung màn hình trước khi làm gì.
 
 ## 4. Các bước (chi tiết ở runbook)
 
