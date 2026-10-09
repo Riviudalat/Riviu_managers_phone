@@ -214,7 +214,11 @@ pub async fn inspect_rehearsal_account_with_baseline(
             return Err(PrepareFailure::new(PrepareBlocker::StaleDraft));
         }
     }
-    if tree.nodes.iter().any(|node| node.attribute("text").is_some_and(|text| matches!(text, "Posting" | "Uploading" | "Discard" | "Save draft"))) {
+    // 45.7.3 ends its progress text with dots ("Uploading your video...", "Posting..."),
+    // so the progress words match as prefixes; the draft buttons stay exact.
+    if tree.nodes.iter().any(|node| node.attribute("text").is_some_and(|text|
+        text.starts_with("Posting") || text.starts_with("Uploading")
+            || matches!(text, "Discard" | "Save draft"))) {
         return Err(PrepareFailure::new(PrepareBlocker::StaleDraft));
     }
     let bounded = NavigationReads {session, labels, epoch: &epoch, stop, deadline};

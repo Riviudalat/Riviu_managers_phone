@@ -1041,7 +1041,8 @@ mod tests {
         assert!(read(source.replace(":id/cqf", ":id/unrelated"))
             .unwrap()
             .is_none());
-        // The same id under another string is the direct-message Send, not this one.
+        // The same id under another string token is not this Send: on 45.7.3 `@2131823091`
+        // resolves to "Reply with a video".
         assert!(read(source.replace("@2131823090", "@2131823091")).is_err());
     }
 
