@@ -765,7 +765,7 @@ mod tests {
         }
     }
 
-    /// Riviu phone 31, fresh Global 45.7.3 install and login, 2026-10-09, plus the
+    /// Riviu phones 32/33, Global 45.7.3 reinstall and login, 2026-10-09, plus the
     /// emulator's notification prompt: one bounded negative action each, then the
     /// operator. Before this, the feed tab under them read as "on the feed".
     #[tokio::test]
@@ -773,7 +773,7 @@ mod tests {
         let global = "com.zhiliaoapp.musically";
         for (xml, foreground, tap) in [
             (FIRST_RUN_INTERESTS, global, Some((291.0, 2004.5))),
-            (FIRST_RUN_SECURITY, global, Some((1006.5, 1219.0))),
+            (FIRST_RUN_SECURITY, global, Some((1006.5, 1270.0))),
             (
                 FIRST_RUN_NOTIFICATION,
                 "com.google.android.permissioncontroller",

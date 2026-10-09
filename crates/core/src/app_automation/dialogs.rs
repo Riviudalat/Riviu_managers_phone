@@ -263,11 +263,11 @@ const BUTTON: &str = "android.widget.Button";
 /// The emulator's notification prompt is owned by this package; its ids keep the AOSP prefix.
 const NOTIFICATION_PROMPT_PACKAGE: &str = "com.google.android.permissioncontroller";
 
-/// First-run screens of Global 45.7.3. Riviu phone 31, fresh install and login,
-/// 2026-10-09 (Vietnamese UI): interests, swipe-up guide and security sheet. The guest
-/// consent dialog and notification prompt come from the emulator (English UI) in
-/// target/tiktok-45.7.3-research REPORT.md §7. The English strings are the 45.7.3
-/// string-table values for the same ids; see crates/core/fixtures/tiktok-first-run/.
+/// First-run screens of Global 45.7.3. Interests, swipe-up guide and security sheet are
+/// real English captures from Riviu phones 32/33 during reinstalls on 2026-10-09; phone 31
+/// gave the same screens in Vietnamese the same day. The guest consent dialog and
+/// notification prompt come from the emulator (English UI) in
+/// target/tiktok-45.7.3-research REPORT.md §7; see crates/core/fixtures/tiktok-first-run/.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum FirstRunScreen {
     Interests,
@@ -275,6 +275,8 @@ pub enum FirstRunScreen {
     SecurityCheck,
     NotificationPermission,
     TermsConsent,
+    /// TikTok wants a code sent to the account's email. Only the operator can read it.
+    EmailVerification,
 }
 
 /// The only action a recognised first-run screen permits. Never an affirmative.
@@ -295,7 +297,7 @@ impl FirstRunScreen {
             Self::SwipeUpGuide => 32,
             Self::SecurityCheck => 64,
             Self::NotificationPermission => 128,
-            Self::TermsConsent => 0,
+            Self::TermsConsent | Self::EmailVerification => 0,
         }
     }
 
@@ -307,6 +309,7 @@ impl FirstRunScreen {
             Self::SecurityCheck => "đóng bảng kiểm tra bảo mật nhanh (bấm Đóng, không bấm Tiếp tục); chờ đọc lại màn hình",
             Self::NotificationPermission => "từ chối quyền gửi thông báo của TikTok; chờ đọc lại màn hình",
             Self::TermsConsent => "TikTok đang hỏi đồng ý Điều khoản dịch vụ — Riviu không tự đồng ý; cần người vận hành tự xem và bấm trên máy",
+            Self::EmailVerification => EMAIL_CODE_SAYS,
         }
     }
 
@@ -317,7 +320,7 @@ impl FirstRunScreen {
             Self::SwipeUpGuide => "lớp hướng dẫn vuốt lên vẫn còn sau một lần vuốt — không vuốt lại, cần người vận hành kiểm tra",
             Self::SecurityCheck => "bảng kiểm tra bảo mật vẫn còn sau một lần bấm Đóng — không bấm Tiếp tục, cần người vận hành xử lý",
             Self::NotificationPermission => "hộp xin quyền thông báo vẫn còn sau một lần từ chối — không bấm lại, cần người vận hành kiểm tra",
-            Self::TermsConsent => Self::TermsConsent.says(),
+            Self::TermsConsent | Self::EmailVerification => self.says(),
         }
     }
 }
@@ -360,8 +363,10 @@ fn tappable(tree: &Tree, index: usize) -> Option<ElementBox> {
         .filter(|rect| rect.enabled && rect.clickable)
 }
 
-/// Phone 31: jg3/jfw head the picker inside tk8; cqt (Skip) and cnt (Next, whose
-/// count suffix is set from code) share the c8c bar. Skip selects no topic.
+/// The two interest pickers of an A/B test, both under tk8 with the same c8c bar: cqt
+/// (Skip) and cnt (Next, whose count suffix is set from code). Skip selects no topic.
+/// Variant A (Riviu phone 32, en): jg3 "Choose what you like" over jfw. Variant B (Riviu
+/// phone 33, en): jg3 "Choose your interests" over ubo, with krq tiles labelled by krz.
 fn interests_skip(tree: &Tree, package: &str) -> Option<ElementBox> {
     let root = measured_node(
         tree,
@@ -371,22 +376,43 @@ fn interests_skip(tree: &Tree, package: &str) -> Option<ElementBox> {
         Some("android.view.ViewGroup"),
         None,
     )?;
-    let title = measured_node(
-        tree,
-        package,
-        package,
-        "jg3",
-        Some(TEXT_VIEW),
-        Some("Choose what you like"),
-    )?;
-    let subtitle = measured_node(
-        tree,
-        package,
-        package,
-        "jfw",
-        Some(TEXT_VIEW),
-        Some("Your feed will be personalized based on what you like."),
-    )?;
+    // (title, subtitle id, subtitle, whether krq tiles carry the topics)
+    let variants = [
+        (
+            "Choose what you like",
+            "jfw",
+            "Your feed will be personalized based on what you like.",
+            false,
+        ),
+        (
+            "Choose your interests",
+            "ubo",
+            "Get better video recommendations",
+            true,
+        ),
+    ];
+    let (title, subtitle) =
+        variants
+            .into_iter()
+            .find_map(|(heading, subtitle_id, subtitle, tiles)| {
+                let title = measured_node(
+                    tree,
+                    package,
+                    package,
+                    "jg3",
+                    Some(TEXT_VIEW),
+                    Some(heading),
+                )?;
+                let subtitle = measured_node(
+                    tree,
+                    package,
+                    package,
+                    subtitle_id,
+                    Some(TEXT_VIEW),
+                    Some(subtitle),
+                )?;
+                (!tiles || interest_tile(tree, package, root)).then_some((title, subtitle))
+            })?;
     let bar = measured_node(
         tree,
         package,
@@ -406,6 +432,27 @@ fn interests_skip(tree: &Tree, package: &str) -> Option<ElementBox> {
             .all(|index| tree.nodes[index].parent == Some(bar)))
     .then(|| tappable(tree, skip))
     .flatten()
+}
+
+/// Variant B: a clickable krq ViewGroup tile whose krz TextView names a topic, in tk8.
+fn interest_tile(tree: &Tree, package: &str, root: usize) -> bool {
+    let tile_id = format!("{package}:id/krq");
+    let label_id = format!("{package}:id/krz");
+    tree.matching(package, ElementQuery::ResourceIdSuffix(&label_id))
+        .into_iter()
+        .any(|label| {
+            let node = &tree.nodes[label];
+            node.attr("resource-id") == label_id
+                && node.attr("class") == TEXT_VIEW
+                && !node.attr("text").is_empty()
+                && node.parent.is_some_and(|tile| {
+                    let tile_node = &tree.nodes[tile];
+                    tile_node.attr("resource-id") == tile_id
+                        && tile_node.attr("class") == "android.view.ViewGroup"
+                        && tile_node.rect().is_some_and(|r| r.clickable)
+                        && tree.inside(tile, root)
+                })
+        })
 }
 
 /// Phone 31: SwipeUpGuideStrengthenLayout (wmf > wmc) covers the feed page hpk and
@@ -448,9 +495,10 @@ fn swipe_up_guide(tree: &Tree, package: &str) -> Option<crate::SwipeGesture> {
     })
 }
 
-/// Phone 31, after login: bottom sheet fl4 with xw7/fkw and Continue nri; the header
-/// Close is the only Button described "Close" (vi capture: "Đóng"). The sheet copy is
-/// server text absent from the string table; it is the measured Trill 38.3.2/en sheet's.
+/// After login: bottom sheet fl4 with xw7/fkw and Continue nri; the header Close is the
+/// only Button described "Close", with no text and no id, under ovy (Riviu phone 33, en,
+/// 2026-10-09; phone 31's vi capture reads "Đóng"). The sheet copy is server text absent
+/// from the string table; the English strings are phone 33's.
 fn global_security_check(tree: &Tree, package: &str) -> Option<(usize, ElementBox)> {
     let sheet = measured_node(
         tree,
@@ -553,8 +601,37 @@ fn decline_notifications(tree: &Tree) -> Option<ElementBox> {
     .flatten()
 }
 
-/// Emulator, guest: Terms consent offers only an affirmative. Recognise it, never answer it.
+/// Terms consent offers only an affirmative. Recognise it, never answer it: the dialog
+/// (emulator guest session; Riviu phones 37/38/42 after login, 2026-10-09) or the welcome
+/// page shown before login.
 fn terms_consent(tree: &Tree, package: &str) -> bool {
+    terms_dialog(tree, package) || welcome_terms(tree, package)
+}
+
+/// Riviu phones, English UI, before login, 2026-10-09: read as text only, no XML capture.
+/// ele "Welcome to TikTok" and elc "Videos to make your day" over elg (terms text, set from
+/// code) and el8 "Agree and continue"; the 45.7.3 layout puts ele/elc under elf and
+/// elg/el8 under el_, all in tk8. Recognition only, so el8's class is not required.
+fn welcome_terms(tree: &Tree, package: &str) -> bool {
+    let node = |id: &str, text: Option<&str>| measured_node(tree, package, package, id, None, text);
+    let (Some(root), Some(heading), Some(tagline), Some(terms), Some(agree)) = (
+        node("tk8", None),
+        node("ele", Some("Welcome to TikTok")),
+        node("elc", Some("Videos to make your day")),
+        node("elg", None),
+        node("el8", Some("Agree and continue")),
+    ) else {
+        return false;
+    };
+    tree.nodes[terms].attr("text").contains("Terms of Service")
+        && tree.nodes[heading].parent == tree.nodes[tagline].parent
+        && tree.nodes[terms].parent == tree.nodes[agree].parent
+        && [heading, terms]
+            .into_iter()
+            .all(|index| tree.inside(index, root))
+}
+
+fn terms_dialog(tree: &Tree, package: &str) -> bool {
     let dialogs = tree.matching(
         package,
         ElementQuery::Description {
@@ -584,6 +661,60 @@ fn terms_consent(tree: &Tree, package: &str) -> bool {
         && notice.is_some_and(|index| tree.inside(index, *dialog))
         && matches!(agree.as_slice(), [index] if tree.inside(*index, *dialog)
             && tree.nodes[*index].attr("class") == BUTTON)
+}
+
+/// Operator line for TikTok's email verification pages, shared with the login stage.
+pub const EMAIL_CODE_SAYS: &str = "TikTok đòi xác minh danh tính bằng mã gửi qua email — Riviu dừng, không bấm gửi mã và không nhập mã; cần người vận hành lấy mã trong email và nhập trên máy";
+
+/// TikTok's email verification, a WebView page in the TikTok package. The method chooser
+/// (Riviu phones 40/42/45/49, en, 2026-10-09, XML): "Verify it’s really you" and its body over an
+/// "Email <masked address>" Button. The code page (phones 37/38/40, read as text only):
+/// "Verify identity", the "code sent to" line and the `code-input` field. The masked
+/// address is never compared. Recognition only: nothing here is ever tapped.
+pub fn email_verification(tree: &Tree, package: &str) -> bool {
+    let visible = |index: usize| {
+        let node = &tree.nodes[index];
+        node.visible(package) && tree.ancestors_visible(index) && node.rect().is_some()
+    };
+    let in_web_view = |index: usize| {
+        let mut current = tree.nodes[index].parent;
+        while let Some(at) = current {
+            if tree.nodes[at].attr("class") == "android.webkit.WebView" {
+                return true;
+            }
+            current = tree.nodes[at].parent;
+        }
+        false
+    };
+    let with_text = |text: &str| -> Vec<usize> {
+        (0..tree.nodes.len())
+            .filter(|index| visible(*index) && tree.nodes[*index].attr("text") == text)
+            .collect()
+    };
+    // TikTok's own wording, typos included.
+    let body = "Choose a method to verify your identify and make sure its really you logging in.";
+    let chooser = matches!(with_text("Verify it\u{2019}s really you").as_slice(), [heading]
+        if tree.nodes[*heading].attr("class") == TEXT_VIEW && in_web_view(*heading))
+        && matches!(with_text(body).as_slice(), [index] if in_web_view(*index))
+        && (0..tree.nodes.len()).any(|index| {
+            let node = &tree.nodes[index];
+            visible(index)
+                && node.attr("class") == BUTTON
+                && node.attr("text").starts_with("Email ")
+                && in_web_view(index)
+        });
+    let code_page = !with_text("Verify identity").is_empty()
+        && (0..tree.nodes.len()).any(|index| {
+            visible(index)
+                && tree.nodes[index]
+                    .attr("text")
+                    .starts_with("Verify your identity by entering the code sent to ")
+        })
+        && (0..tree.nodes.len()).any(|index| {
+            let id = tree.nodes[index].attr("resource-id");
+            visible(index) && (id == "code-input" || id.ends_with(":id/code-input"))
+        });
+    chooser || code_page
 }
 
 /// A modal above the picker or feed owns the screen; it is not this screen's to clear.
@@ -623,6 +754,9 @@ pub fn first_run_screen(
     }
     if terms_consent(tree, package) {
         found.push((FirstRunScreen::TermsConsent, FirstRunPlan::Operator));
+    }
+    if email_verification(tree, package) {
+        found.push((FirstRunScreen::EmailVerification, FirstRunPlan::Operator));
     }
     let [(screen, plan)] = <[_; 1]>::try_from(found).ok()?;
     if matches!(
@@ -1397,6 +1531,9 @@ mod tests {
         const GLOBAL: &str = "com.zhiliaoapp.musically";
         const EN_INTERESTS: &str =
             include_str!("../../fixtures/tiktok-first-run/musically-45.7.3-en/interests.fixture");
+        const EN_INTERESTS_B: &str = include_str!(
+            "../../fixtures/tiktok-first-run/musically-45.7.3-en/interests-variant-b.fixture"
+        );
         const EN_GUIDE: &str = include_str!(
             "../../fixtures/tiktok-first-run/musically-45.7.3-en/swipe-up-guide.fixture"
         );
@@ -1432,35 +1569,16 @@ mod tests {
         }
 
         #[test]
-        fn derived_english_fixtures_keep_the_real_capture_structure() {
-            for (en, vi) in [
-                (EN_INTERESTS, VI_INTERESTS),
-                (EN_GUIDE, VI_GUIDE),
-                (EN_SECURITY, VI_SECURITY),
-            ] {
-                let shape = |xml: &str| {
-                    tree(xml.into())
-                        .nodes
-                        .iter()
-                        .map(|n| {
-                            ["resource-id", "class", "bounds", "clickable", "enabled"]
-                                .map(|key| n.attr(key).to_owned())
-                        })
-                        .collect::<Vec<_>>()
-                };
-                assert_eq!(shape(en), shape(vi));
-            }
-        }
-
-        #[test]
         fn global_first_run_screens_permit_only_their_measured_negative_action() {
-            assert_eq!(
-                tap(EN_INTERESTS),
-                Some((FirstRunScreen::Interests, (53.0, 1936.0, 476.0, 137.0)))
-            );
+            for interests in [EN_INTERESTS, EN_INTERESTS_B] {
+                assert_eq!(
+                    tap(interests),
+                    Some((FirstRunScreen::Interests, (53.0, 1936.0, 476.0, 137.0)))
+                );
+            }
             assert_eq!(
                 tap(EN_SECURITY),
-                Some((FirstRunScreen::SecurityCheck, (954.0, 1161.0, 105.0, 116.0)))
+                Some((FirstRunScreen::SecurityCheck, (954.0, 1212.0, 105.0, 116.0)))
             );
             assert_eq!(
                 tap(EN_NOTIFICATION),
@@ -1493,6 +1611,8 @@ mod tests {
             for changed in [
                 EN_INTERESTS.replace("text=\"Skip\"", "text=\"Select all\""),
                 EN_INTERESTS.replace("Choose what you like", "Choose who to follow"),
+                EN_INTERESTS_B.replace("Get better video recommendations", "Follow these creators"),
+                EN_INTERESTS_B.replace("id/krq", "id/other_tile"),
                 EN_INTERESTS.replace("id/c8c", "id/other_bar"),
                 EN_INTERESTS.replace(
                     r#"enabled="true" focusable="true" focused="false" scrollable="false" long-clickable="false" password="false" selected="false" bounds="[53,1936][529,2073]""#,
@@ -1527,6 +1647,7 @@ mod tests {
                 let other = crate::tiktok_labels::controls_for(package, language, version).unwrap();
                 for xml in [
                     EN_INTERESTS,
+                    EN_INTERESTS_B,
                     EN_GUIDE,
                     EN_SECURITY,
                     EN_NOTIFICATION,
