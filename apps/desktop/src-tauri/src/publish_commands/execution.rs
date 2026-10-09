@@ -2205,10 +2205,16 @@ pub(super) async fn capture_confirmed_assignment_link(
             deadline_ms: None,
         });
         let package = control.resolve_tiktok_package(&assignment.udid).await?;
-        let language = session
-            .ui_language()
-            .await
-            .context("UI language unavailable")?;
+        // The expanded photo viewer renders too few labels for `observed_language`,
+        // so this read falls back to the system locale (`en-US`). The restart guards
+        // compare against the measured tuple `en`; a raw tag refused them on phones
+        // 39/46 (campaign 1c963ce0, 09/10/2026) and left a stale processing post.
+        let language = riviu_core::tiktok_labels::normalise_language(
+            &session
+                .ui_language()
+                .await
+                .context("UI language unavailable")?,
+        );
         let version = session
             .app_version(&package)
             .await
