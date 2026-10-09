@@ -20,6 +20,7 @@ Bảng dưới là bản đồ theo năng lực, không phải toàn bộ depend
 | Hành động trên điện thoại | `riviu-phone-automation` | Diagnostics khi thiếu bằng chứng/không chắc target | Exact device, controller, precondition → action → postcondition |
 | Macro/Flow, nhiều bước/máy, import GenFarmer | `riviu-interaction-flows` | Rust/TDD hoặc phone automation khi thực sự live | Draft/compile/save/run tách biệt, action catalog, deadline/cancel/evidence |
 | Có hình nhưng không điều khiển được, hierarchy/OCR sai | `riviu-device-diagnostics` | `systematic-debugging` | Xác định discovery/transport/session/perception/input/verifier; fixture hoặc live có phép |
+| TikTok bắt cập nhật build, selector/id/content-desc ngừng khớp sau bản mới, cần biết UI một build có gì | `riviu-tiktok-apk` | `riviu-device-diagnostics` khi chưa rõ lỗi do build hay do session/perception | Ứng viên id/chuỗi từ APK gốc (chỉ đọc), đo trên một máy thật rồi mới đổi bảng `tiktok_*` |
 | Source helper/agent Android/iOS | `senior-mobile-dev` | Rust/diagnostics nếu boundary liên quan | Lifecycle/permissions/signing, capability đúng nền tảng; iOS phải đọc WDA safety |
 | FastAPI/perception service Python | `fastapi` | TDD + debugging; không áp vào mọi script Python | API/types/timeouts, fixture OCR/vision, lint/pytest phù hợp |
 | Google Sheets/OAuth/Apps Script | `senior-system-design` cho contract | `identity-federation` cho assessment OAuth; `api-security` khi đánh giá API | Receipt/readback, permission, migration/reconciliation, secret redaction |
@@ -61,7 +62,7 @@ Skill chạy/build dự án → version/config/secret prerequisites → build/bu
 ## 3. Phần không áp mặc định
 
 - `go-rust-reverse` là phân tích binary Go/Rust, không phải viết Rust.
-- `apk-reverse`, `ida-reverse`, `mobile-reverse`, `protocol-reverse` chỉ dùng khi thật sự phân tích artifact/giao thức trong phạm vi cho phép. Sửa Android driver không tự là reverse.
+- `apk-reverse`, `ida-reverse`, `mobile-reverse`, `protocol-reverse` chỉ dùng khi thật sự phân tích artifact/giao thức trong phạm vi cho phép. Sửa Android driver không tự là reverse. APK TikTok đi qua `riviu-tiktok-apk` và `tools/tiktok-apk/` trước.
 - `supabase-postgres-best-practices`, Prisma, NestJS, Turborepo, Docker/K8s/cloud chỉ dùng nếu phần việc có công nghệ tương ứng; Riviu đang dùng SQLite không được tự đổi DB.
 - `payment-ledger` dành cho tiền/thanh toán, không mặc nhiên hợp effect ledger của task.
 - Brandkit/imagegen/Stitch cần brief và công cụ tương ứng; có file skill không có nghĩa có khả năng sinh ảnh/Stitch.

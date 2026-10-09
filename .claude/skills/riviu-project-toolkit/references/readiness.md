@@ -6,7 +6,7 @@ Repo chỉ mang theo các file được liệt kê trong [hướng dẫn thiết
 
 | Thành phần | Cách xác minh khi cần | Không được suy ra |
 |---|---|---|
-| Toolkit, ba skill phone, skill chạy app | Kiểm file trong `.claude/skills/` và danh sách skill phiên | Không chứng minh tool phụ hoặc runtime đã sẵn |
+| Toolkit, ba skill phone, `riviu-tiktok-apk`, skill chạy app | Kiểm file trong `.claude/skills/` và danh sách skill phiên | Không chứng minh tool phụ hoặc runtime đã sẵn |
 | Skill UI/Rust/debugging và skill host | Kiểm danh sách khả dụng, bản cài và nguồn; xem nhóm phụ thuộc trong hướng dẫn thiết lập | Không mặc định chúng đi kèm clone; thiếu thì dùng fallback tài liệu/test đúng phạm vi |
 | Codex MCP | Kiểm CLI, entry MCP và auth theo cách không in secret; chỉ handshake/review khi được phép và có ích | Có cấu hình không có nghĩa tool đã hiện hoặc đã có review mới |
 | Mobile MCP | Đối chiếu pin/launcher trong repo, chạy test/check/probe khi được phép | Tool list/Connected không chứng minh thao tác phone hoặc iOS |

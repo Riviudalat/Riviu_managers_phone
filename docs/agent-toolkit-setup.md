@@ -10,19 +10,20 @@ Bộ skill trong repository hướng dẫn chọn, dùng và kiểm chứng côn
 | [riviu-phone-automation](../.claude/skills/riviu-phone-automation/SKILL.md) | Quan sát và thao tác điện thoại qua controller/session/lease đúng phạm vi |
 | [riviu-interaction-flows](../.claude/skills/riviu-interaction-flows/SKILL.md) | Flow/Macro, import, điều kiện/chờ, nhiều máy, cancel/retry và bằng chứng |
 | [riviu-device-diagnostics](../.claude/skills/riviu-device-diagnostics/SKILL.md) | Chẩn đoán transport/session/perception/input/verifier, fixture/headless/live |
+| [riviu-tiktok-apk](../.claude/skills/riviu-tiktok-apk/SKILL.md) | Đọc APK TikTok gốc khi có build mới hoặc selector ngừng khớp; ứng viên id/chuỗi, đo máy thật trước khi đổi bảng |
 | [run-riviu-managers-phone](../.claude/skills/run-riviu-managers-phone/SKILL.md) | Skill có sẵn của dự án cho build/run/screenshot/kiểm desktop |
 | [Rule định tuyến](../.claude/rules/riviu-toolkit.md) | Nhắc chọn toolkit cho việc đáng kể, giữ quyền và đọc references theo nhu cầu |
 | [rust-best-practices](../.claude/skills/rust-best-practices/SKILL.md) | Bản prose chọn lọc/adapt Apollo: ownership, async, errors, tests; pin và license trong UPSTREAM.json/LICENSE |
 | [systematic-debugging](../.claude/skills/systematic-debugging/SKILL.md) | Bản prose chọn lọc/adapt Superpowers: reproduction, root cause và evidence; không kèm plugin/hooks/scripts |
 
-Đây là **file thật**, không phải symlink/junction tới home của người tạo. Bốn skill `riviu-*` là hướng dẫn tự soạn cho dự án, không phải sản phẩm chính thức của GenFarmer hoặc nhà cung cấp MCP. Bản chuẩn để sửa và review là `.claude/skills/` trong repo; bản runtime `.agents/` của một số host không phải nguồn chuẩn.
+Đây là **file thật**, không phải symlink/junction tới home của người tạo. Năm skill `riviu-*` là hướng dẫn tự soạn cho dự án, không phải sản phẩm chính thức của GenFarmer hoặc nhà cung cấp MCP. Bản chuẩn để sửa và review là `.claude/skills/` trong repo; bản runtime `.agents/` của một số host không phải nguồn chuẩn.
 
 Không đưa lên Git: `~/.claude.json`, settings cá nhân, `.installation.json`, token, `.env`, `node_modules`, DB vận hành hoặc raw screenshot/hierarchy có dữ liệu tài khoản. `.gitignore` chỉ cho theo dõi rule dự án được chỉ định, không mở toàn bộ `.claude/`.
 
 ## Mở trên máy mới
 
 1. Clone/mở **checkout hoặc worktree đang làm việc**. Đọc [AGENTS.md](../AGENTS.md) và [runbook agent](agents/agent-runbook.md).
-2. Với Claude Code, kiểm danh sách skill có `riviu-project-toolkit` và ba skill phone. Có thể gọi `/riviu-project-toolkit` kèm việc cần làm. Nếu client không hỗ trợ Skill, đọc trực tiếp điểm vào trong repo và references theo phạm vi; không tuyên bố đã gọi tool Skill.
+2. Với Claude Code, kiểm danh sách skill có `riviu-project-toolkit`, ba skill phone và `riviu-tiktok-apk`. Có thể gọi `/riviu-project-toolkit` kèm việc cần làm. Nếu client không hỗ trợ Skill, đọc trực tiếp điểm vào trong repo và references theo phạm vi; không tuyên bố đã gọi tool Skill.
 3. Chỉ thiết lập toolchain cần cho nhiệm vụ theo [developer guide](developer-guide.md). Đọc Markdown không cần cài Rust, adb, browser hay MCP.
 4. Kiểm dependency và quyền trước khi build/chạy. Test/mock/handshake không thay bằng chứng native, thiết bị thật hoặc bản cài.
 5. Nếu cần MCP, nối từng server theo phần bên dưới; đừng cài cả catalog hoặc chạy phone để kiểm tra skill vừa nhận diện.
