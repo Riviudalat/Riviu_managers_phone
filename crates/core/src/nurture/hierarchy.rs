@@ -202,8 +202,8 @@ const STUCK_SWIPE_LIMIT: u32 = 4;
 
 /// Unproven swipes before TikTok is restarted — **below** the give-up limit, deliberately.
 ///
-/// The feed loop runs exactly `num_videos` passes, so it makes at most that many swipe
-/// attempts: a session asked for two videos can never reach a counter of four. Measured
+/// The feed loop then ran exactly `num_videos` passes (now at most half as many again), so a
+/// session asked for two videos could never reach a counter of four. Measured
 /// 18/08/2026 on the fleet, where every stuck phone ended on `2/4` and the recovery
 /// behind that four could not have fired even if it had existed. Two is the smallest
 /// number that is still evidence rather than one disappointment.
@@ -660,46 +660,150 @@ async fn present(session: &dyn UiSession, labels: TikTokControls, control: TikTo
     matches!(locate(session, labels, control).await, Ok(Some(_)))
 }
 
+/// The card identity, never failing: a failed snapshot falls back to the per-control reads,
+/// which keep whatever they can still see, as this did before the snapshot existed. Read from
+/// the same source as [`read_fingerprint`], so a swipe is judged against a `before` and an
+/// `after` that were described the same way.
 async fn fingerprint(session: &dyn UiSession, labels: TikTokControls) -> PostFingerprint {
-    let read = |control| async move {
-        locate(session, labels, control)
-            .await
-            .ok()
-            .flatten()
-            .and_then(|element| element.description)
-    };
-    PostFingerprint {
-        author: read(TikTokControl::AuthorProfileLink).await,
-        comments: read(TikTokControl::Comments).await,
-        share: read(TikTokControl::Share).await,
-        sound: read(TikTokControl::SoundLink).await,
+    match read_fingerprint(session, labels).await {
+        Ok(card) => card,
+        Err(error) => {
+            tracing::debug!(%error, "nurture card snapshot unread; per-control fallback");
+            let read = |control| async move {
+                locate(session, labels, control)
+                    .await
+                    .ok()
+                    .flatten()
+                    .and_then(|element| element.description)
+            };
+            PostFingerprint {
+                author: read(TikTokControl::AuthorProfileLink).await,
+                comments: read(TikTokControl::Comments).await,
+                share: read(TikTokControl::Share).await,
+                sound: read(TikTokControl::SoundLink).await,
+            }
+        }
     }
 }
 
-/// A wait must retain a failed tree read rather than treating it as an empty rail.
+/// The card identity from **one** hierarchy snapshot. A wait must retain a failed read rather
+/// than treating it as an empty rail.
+///
+/// This used to be four sequential `locate`s, each its own `/element` round trip plus the
+/// rectangle and attribute reads, and a railless card added the navigation resolver's own
+/// snapshots on top. Box 31–50 acceptance run, 10/10/2026 (Galaxy S8+,
+/// `com.zhiliaoapp.musically` / en): single agent reads took up to 6 380 ms for `/element`
+/// and 5 468–10 690 ms for `/source`, so one fingerprint outlived the whole swipe window, no
+/// read completed, and 22 swipes were reported unproven. One snapshot is one round trip, and
+/// all four descriptions come from the same frame, so they cannot straddle two cards either.
+///
+/// A backend that refuses snapshots keeps the per-control reads.
 async fn read_fingerprint(
     session: &dyn UiSession,
     labels: TikTokControls,
 ) -> anyhow::Result<PostFingerprint> {
     let epoch = session.gui_session_epoch();
-    let read = |control| async move {
-        Ok::<_, anyhow::Error>(
-            locate(session, labels, control)
-                .await?
-                .and_then(|element| element.description),
-        )
-    };
-    let observed = PostFingerprint {
-        author: read(TikTokControl::AuthorProfileLink).await?,
-        comments: read(TikTokControl::Comments).await?,
-        share: read(TikTokControl::Share).await?,
-        sound: read(TikTokControl::SoundLink).await?,
+    let observed = match session.hierarchy_source_snapshot().await {
+        Ok(snapshot) => {
+            tree_fingerprint(&crate::ui_automation::tree::Tree::parse(snapshot)?, labels)
+        }
+        Err(error)
+            if error
+                .downcast_ref::<crate::driver::UnsupportedCapability>()
+                .is_some() =>
+        {
+            let read = |control| async move {
+                Ok::<_, anyhow::Error>(
+                    locate(session, labels, control)
+                        .await?
+                        .and_then(|element| element.description),
+                )
+            };
+            PostFingerprint {
+                author: read(TikTokControl::AuthorProfileLink).await?,
+                comments: read(TikTokControl::Comments).await?,
+                share: read(TikTokControl::Share).await?,
+                sound: read(TikTokControl::SoundLink).await?,
+            }
+        }
+        Err(error) => return Err(error),
     };
     anyhow::ensure!(
         session.gui_session_epoch() == epoch,
         "rail session changed during read"
     );
     Ok(observed)
+}
+
+/// How long a card read already running when its wait's deadline passes may still finish.
+///
+/// Cutting it at the deadline threw away the only evidence the wait had: on the box 31–50
+/// acceptance run of 10/10/2026 (Galaxy S8+), `/source` took 5 468–10 690 ms under load,
+/// longer than the whole swipe window, so a swipe that had advanced was reported unproven
+/// with no completed read, and the late-rail wait timed out 10 times out of 10. Sized just
+/// above that 10 690 ms maximum. No read *starts* after the deadline; a read still running
+/// at the end of this grace is cut as before, so the wait stays finite.
+const CARD_READ_GRACE: Duration = Duration::from_millis(11_000);
+
+/// What the card reads inside one bounded wait cost, for the unproven-swipe and late-rail
+/// lines, so the windows can be sized from measurement rather than guessed.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+struct CardReads {
+    completed: u32,
+    last: Option<Duration>,
+    /// A read still running when even [`CARD_READ_GRACE`] had run out.
+    cut_after: Option<Duration>,
+}
+
+impl CardReads {
+    fn says(&self) -> String {
+        let mut line = match self.last {
+            Some(last) => format!(
+                "đọc thẻ {} lần, lần cuối {} ms",
+                self.completed,
+                last.as_millis()
+            ),
+            None => "chưa đọc xong thẻ lần nào".to_string(),
+        };
+        if let Some(cut) = self.cut_after {
+            line.push_str(&format!(", một lần đọc bị cắt sau {} ms", cut.as_millis()));
+        }
+        line
+    }
+}
+
+/// One card read inside a wait. None starts at or after `deadline`; one already running then
+/// may finish within [`CARD_READ_GRACE`], and the caller judges what it read before the
+/// deadline ends the wait.
+async fn read_card_in_window(
+    session: &dyn UiSession,
+    labels: TikTokControls,
+    deadline: tokio::time::Instant,
+    stop: &AtomicBool,
+    reads: &mut CardReads,
+) -> anyhow::Result<ReadWaitResult<PostFingerprint>> {
+    if stop.load(Ordering::Relaxed) {
+        return Ok(ReadWaitResult::Cancelled);
+    }
+    if tokio::time::Instant::now() >= deadline {
+        return Ok(ReadWaitResult::DeadlineExceeded);
+    }
+    let started = tokio::time::Instant::now();
+    let result = read_before_deadline(
+        read_fingerprint(session, labels),
+        deadline + CARD_READ_GRACE,
+        stop,
+    )
+    .await?;
+    match &result {
+        ReadWaitResult::Ready(_) => {
+            reads.completed += 1;
+            reads.last = Some(started.elapsed());
+        }
+        ReadWaitResult::DeadlineExceeded => reads.cut_after = Some(started.elapsed()),
+        ReadWaitResult::Cancelled => {}
+    }
+    Ok(result)
 }
 
 /// The dwell is read at most this often. Each checkpoint takes one fresh snapshot that the
@@ -722,7 +826,7 @@ enum WatchEnd {
     Blocked(String),
 }
 
-/// Card identity from the checkpoint snapshot: the same four controls as [`fingerprint`].
+/// Card identity from one snapshot: the four controls [`read_fingerprint`] reads.
 fn tree_fingerprint(
     tree: &crate::ui_automation::tree::Tree,
     labels: TikTokControls,
@@ -1605,15 +1709,17 @@ impl<'a> HierarchyRun<'a> {
         seen
     }
 
-    /// Swipe to the next post and report whether the change was provable.
+    /// Swipe to the next post and report whether the change was provable, with what the
+    /// card reads that judged it cost.
     async fn swipe_next(
         &mut self,
         duration_ms: u64,
         before: &PostFingerprint,
         stop: &AtomicBool,
-    ) -> anyhow::Result<bool> {
+    ) -> anyhow::Result<(bool, CardReads)> {
+        let mut reads = CardReads::default();
         if stop.load(Ordering::Relaxed) {
-            return Ok(false);
+            return Ok((false, reads));
         }
         // A vertical flick through the middle of the screen, clear of the rail on
         // the right and of the system gesture strip at the very bottom.
@@ -1633,17 +1739,19 @@ impl<'a> HierarchyRun<'a> {
         let path = self.planner.plan_swipe(from, to, duration_ms);
         self.session.swipe_path(path).await?;
         // Keep the former settle + arrival budget, but an outgoing, non-empty rail
-        // is still a pending transition. Read until the card actually changes.
+        // is still a pending transition. Read until the card actually changes. A read still
+        // running at the deadline finishes and is judged (see [`CARD_READ_GRACE`]).
         let deadline = tokio::time::Instant::now() + SWIPE_SETTLE + RAIL_RETURN_WINDOW;
         loop {
-            match read_before_deadline(read_fingerprint(self.session, self.labels), deadline, stop)
-                .await?
+            match read_card_in_window(self.session, self.labels, deadline, stop, &mut reads).await?
             {
                 ReadWaitResult::Ready(after) if !after.is_empty() && after != *before => {
-                    return Ok(true);
+                    return Ok((true, reads));
                 }
                 ReadWaitResult::Ready(_) => {}
-                ReadWaitResult::Cancelled | ReadWaitResult::DeadlineExceeded => return Ok(false),
+                ReadWaitResult::Cancelled | ReadWaitResult::DeadlineExceeded => {
+                    return Ok((false, reads))
+                }
             }
             sleep_interruptible(
                 RAIL_RETURN_POLL
@@ -2067,10 +2175,9 @@ async fn await_first_rail(run: &HierarchyRun<'_>, stop: &AtomicBool) -> anyhow::
             );
             run.session.tap(element.centre()).await?;
         }
+        let mut reads = CardReads::default();
         loop {
-            match read_before_deadline(read_fingerprint(run.session, run.labels), deadline, stop)
-                .await?
-            {
+            match read_card_in_window(run.session, run.labels, deadline, stop, &mut reads).await? {
                 ReadWaitResult::Ready(card) if !card.is_empty() => return Ok(()),
                 ReadWaitResult::Ready(_) => {}
                 ReadWaitResult::Cancelled => anyhow::bail!("đã dừng khi chờ rail đầu tiên"),
@@ -2089,11 +2196,13 @@ async fn await_first_rail(run: &HierarchyRun<'_>, stop: &AtomicBool) -> anyhow::
 
 /// Wait for the rail of a card that came up railless right after an unproven swipe.
 ///
-/// Bounded by [`LATE_RAIL_WINDOW`] and the Stop flag. A read error stays an error, never an
-/// empty rail.
+/// Bounded by [`LATE_RAIL_WINDOW`] (plus one read in flight, [`CARD_READ_GRACE`]) and the
+/// Stop flag. A read error stays an error, never an empty rail. `reads` is filled either way,
+/// for the line the caller writes.
 async fn await_late_rail(
     run: &HierarchyRun<'_>,
     stop: &AtomicBool,
+    reads: &mut CardReads,
 ) -> anyhow::Result<ReadWaitResult<PostFingerprint>> {
     let deadline = tokio::time::Instant::now() + LATE_RAIL_WINDOW;
     loop {
@@ -2102,9 +2211,7 @@ async fn await_late_rail(
             stop,
         )
         .await;
-        match read_before_deadline(read_fingerprint(run.session, run.labels), deadline, stop)
-            .await?
-        {
+        match read_card_in_window(run.session, run.labels, deadline, stop, reads).await? {
             ReadWaitResult::Ready(card) if !card.is_empty() => {
                 return Ok(ReadWaitResult::Ready(card));
             }
@@ -2468,6 +2575,15 @@ pub(super) async fn run_feed(
     }
 
     let total_videos = video_target(&settings);
+    // **Count videos, not passes.** The loop used to run exactly `total_videos` passes, so
+    // every pass that counted nothing — an unproven swipe, a railless card swiped past, an
+    // off-feed walk back, a restart — lowered the result: on the box 31–50 acceptance run of
+    // 10/10/2026 one phone watched 15 cards and counted 12 videos. It now runs until the
+    // target is counted, inside a finite budget of half as many passes again. The target
+    // stays a cap, and the duration and night caps below still end the session first.
+    let pass_budget = total_videos.saturating_add(total_videos.div_ceil(2));
+    let videos_at_start = status.videos_done;
+    let mut passes = 0u32;
 
     let mut off_feed_streak = 0u32;
     let mut stuck_swipes = 0u32;
@@ -2495,7 +2611,21 @@ pub(super) async fn run_feed(
         status.phase = NurturePhase::Watching;
         report(status, status.last_message.clone());
     }
-    'feed: for _video in 0..total_videos {
+    'feed: loop {
+        if status.videos_done.saturating_sub(videos_at_start) >= total_videos {
+            break;
+        }
+        if passes >= pass_budget {
+            report(
+                status,
+                format!(
+                    "đã dùng hết {pass_budget} lượt cho {total_videos} video — dừng ở {}/{total_videos}",
+                    status.videos_done.saturating_sub(videos_at_start)
+                ),
+            );
+            break;
+        }
+        passes += 1;
         // Live tuning, once per post — same place, same function, same reason as the pixel
         // loop.
         let live_refresh =
@@ -2601,7 +2731,8 @@ pub(super) async fn run_feed(
                     status,
                     "vuốt trước chưa chứng minh được, thẻ hiện tại chưa có thanh hành động — chờ thanh hiện lại trước khi vuốt tiếp".into(),
                 );
-                match await_late_rail(&run, stop).await {
+                let mut reads = CardReads::default();
+                match await_late_rail(&run, stop, &mut reads).await {
                     Ok(ReadWaitResult::Ready(card)) => {
                         no_rail = false;
                         // Unproven is not advanced: the earlier swipe counts only now that a
@@ -2612,22 +2743,48 @@ pub(super) async fn run_feed(
                             status.videos_done += 1;
                             report(
                                 status,
-                                "thẻ mới đã hiện thanh hành động — lượt vuốt trước đã đổi thẻ"
-                                    .into(),
+                                format!(
+                                    "thẻ mới đã hiện thanh hành động — lượt vuốt trước đã đổi thẻ ({})",
+                                    reads.says()
+                                ),
                             );
                             if let Some(rest) = policy.rest_after_video() {
                                 report(status, format!("nghỉ tự nhiên {}s", rest.as_secs()));
                                 sleep_interruptible(rest, stop).await;
                             }
+                            // A cap, not a target: the card this proved is not watched past it.
+                            if status.videos_done.saturating_sub(videos_at_start) >= total_videos {
+                                break;
+                            }
+                        } else {
+                            report(
+                                status,
+                                format!(
+                                    "thanh hành động đã hiện nhưng vẫn là thẻ cũ — lượt vuốt trước không được tính ({})",
+                                    reads.says()
+                                ),
+                            );
                         }
                     }
                     Ok(ReadWaitResult::Cancelled) => {
                         outcome = Outcome::Stopped;
                         break;
                     }
-                    Ok(ReadWaitResult::DeadlineExceeded) => {}
+                    Ok(ReadWaitResult::DeadlineExceeded) => {
+                        report(
+                            status,
+                            format!(
+                                "chờ {}s mà thẻ vẫn chưa có thanh hành động ({})",
+                                LATE_RAIL_WINDOW.as_secs(),
+                                reads.says()
+                            ),
+                        );
+                    }
                     Err(error) => {
-                        report(status, format!("không đọc được thanh hành động: {error}"));
+                        report(
+                            status,
+                            format!("không đọc được thanh hành động: {error} ({})", reads.says()),
+                        );
                     }
                 }
                 if stop.load(Ordering::Relaxed) {
@@ -2648,11 +2805,11 @@ pub(super) async fn run_feed(
             status.swipe_attempts += 1;
             let before = fingerprint(run.session, run.labels).await;
             sleep_interruptible(Duration::from_millis(human.think_pause_ms()), stop).await;
-            let advanced = match run
+            let (advanced, _) = match run
                 .swipe_next(human.swipe_duration_ms(false), &before, stop)
                 .await
             {
-                Ok(advanced) => advanced,
+                Ok(judged) => judged,
                 Err(error) => {
                     report(status, format!("không đọc được kết quả vuốt: {error}"));
                     outcome = Outcome::Failed;
@@ -3133,7 +3290,7 @@ pub(super) async fn run_feed(
         // `pause_after_swipes` swipes. Never calling it left that setting **inert on Android** —
         // switched on in the UI, doing nothing on the twenty phones that actually run.
         sleep_interruptible(Duration::from_millis(human.think_pause_ms()), stop).await;
-        let advanced = match run
+        let (advanced, reads) = match run
             .swipe_next(
                 human.swipe_duration_ms(roll_bool(settings.frenzy_prob)),
                 &before,
@@ -3141,7 +3298,7 @@ pub(super) async fn run_feed(
             )
             .await
         {
-            Ok(advanced) => advanced,
+            Ok(judged) => judged,
             Err(error) => {
                 report(status, format!("không đọc được kết quả vuốt: {error}"));
                 outcome = Outcome::Failed;
@@ -3171,7 +3328,10 @@ pub(super) async fn run_feed(
             }
             report(
                 status,
-                format!("vuốt chưa chứng minh được đổi thẻ ({stuck_swipes}/{STUCK_SWIPE_LIMIT})"),
+                format!(
+                    "vuốt chưa chứng minh được đổi thẻ ({stuck_swipes}/{STUCK_SWIPE_LIMIT}; {})",
+                    reads.says()
+                ),
             );
             if stuck_swipes >= STUCK_RESTART_AFTER && !restarted && run.search_keyword.is_none() {
                 // **Restart TikTok once before believing the feed is over.**
@@ -4890,22 +5050,30 @@ mod tests {
             planner: TouchPointPlanner::new(screen),
             search_keyword: None,
         };
-        assert!(run
-            .swipe_next(
+        assert!(
+            run.swipe_next(
                 320,
                 &original_stuck_feed_fingerprint(),
                 &AtomicBool::new(false)
             )
             .await
-            .expect("readable incoming card"));
+            .expect("readable incoming card")
+            .0
+        );
         assert_eq!(phone.swipes.load(Ordering::Relaxed), 1);
     }
 
     #[tokio::test(start_paused = true)]
     async fn nurture_swipe_rejects_cancelled_late_and_failed_rail_reads() {
+        // The late read outlives even the grace one read in flight gets at the deadline
+        // ([`CARD_READ_GRACE`]); a read that finishes inside that grace is judged instead.
         for (delay, cancelled, failed) in [
             (Duration::from_millis(100), true, false),
-            (Duration::from_secs(5), false, false),
+            (
+                SWIPE_SETTLE + RAIL_RETURN_WINDOW + CARD_READ_GRACE + Duration::from_secs(1),
+                false,
+                false,
+            ),
             (Duration::ZERO, false, true),
         ] {
             let stop = std::sync::Arc::new(AtomicBool::new(false));
@@ -4934,9 +5102,9 @@ mod tests {
                     .to_string()
                     .contains("rail transport timeout"));
             } else {
-                assert!(!result.expect("unproved cancelled/expired swipe"));
+                assert!(!result.expect("unproved cancelled/expired swipe").0);
             }
-            assert!(started.elapsed() <= SWIPE_SETTLE + RAIL_RETURN_WINDOW);
+            assert!(started.elapsed() <= SWIPE_SETTLE + RAIL_RETURN_WINDOW + CARD_READ_GRACE);
             assert_eq!(phone.swipes.load(Ordering::Relaxed), 1);
         }
     }
