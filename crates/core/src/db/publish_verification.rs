@@ -739,8 +739,15 @@ impl Database {
             "status":evidence["verificationStatus"],"budget":evidence["verificationBudget"],
             "reviewBeforeStop":evidence["verificationReviewBeforeStop"],"resumedAt":now,
         });
-        evidence["verificationBudget"] =
-            new_verification_budget(candidate.effect_intent.as_deref());
+        let mut budget = new_verification_budget(candidate.effect_intent.as_deref());
+        // The proof frontier belongs to the exact intent, not to the budget: keep it so a
+        // stage-2 post still earns its restart after resume. Only the counters reset.
+        let prior = &evidence["verificationBudget"];
+        if prior["version"] == 1 && prior["intentSha256"] == budget["intentSha256"] {
+            budget["publicationStage"] =
+                serde_json::json!(prior["publicationStage"].as_u64().unwrap_or(0).min(2));
+        }
+        evidence["verificationBudget"] = budget;
         if let Some(object) = evidence.as_object_mut() {
             object.remove("verificationReviewBeforeStop");
         }
