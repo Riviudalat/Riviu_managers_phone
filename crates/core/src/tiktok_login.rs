@@ -23,6 +23,10 @@
 //! - **Failure screens (wrong password, too many attempts, code entry, missing account):**
 //!   string-table values only. Captcha is server-rendered and has no string; it is
 //!   recognised by a WebView or by its usual words and always stops.
+//! - **Email verification ("Verify it’s really you", then "Verify identity"):** WebView
+//!   pages read on Riviu phones 37/38/40/42/45/49 with an English UI (2026-10-09). They
+//!   are told from a captcha by [`dialogs::email_verification`] and always stop with
+//!   [`LoginStop::EmailCode`]; Riviu never asks for or types the code.
 //!
 //! The rules every path keeps:
 //!
@@ -84,6 +88,8 @@ pub enum LoginStop {
     WrongPassword,
     TooManyAttempts,
     Verification,
+    /// TikTok's email verification pages: a code from the account's mailbox.
+    EmailCode,
     Captcha,
     AccountMissing,
     /// A screen this module does not recognise.
@@ -95,7 +101,8 @@ impl LoginStop {
         match self {
             Self::WrongPassword => "wrongPassword",
             Self::TooManyAttempts => "tooManyAttempts",
-            Self::Verification => "verification",
+            // The same saved status: the desktop's "TikTok đòi mã xác minh" fits both.
+            Self::Verification | Self::EmailCode => "verification",
             Self::Captcha => "captcha",
             Self::AccountMissing => "accountMissing",
             Self::Unrecognized => "unrecognized",
@@ -107,6 +114,7 @@ impl LoginStop {
             Self::WrongPassword => "TikTok báo sai tài khoản hoặc mật khẩu. Riviu không thử lại; kiểm tra rồi lưu lại mật khẩu đúng.",
             Self::TooManyAttempts => "TikTok báo đăng nhập quá nhiều lần. Riviu dừng, không thử lại; chờ rồi đăng nhập tay.",
             Self::Verification => "TikTok đòi mã xác minh (OTP/2 bước). Riviu dừng; người vận hành nhập mã trên máy.",
+            Self::EmailCode => dialogs::EMAIL_CODE_SAYS,
             Self::Captcha => "TikTok hiện captcha. Riviu dừng, không giải; người vận hành tự xử lý trên máy.",
             Self::AccountMissing => "TikTok báo tài khoản không tồn tại. Riviu dừng; kiểm tra lại username đã lưu.",
             Self::Unrecognized => "Gặp màn hình đăng nhập chưa nhận diện được. Riviu dừng, không bấm gì thêm; cần người vận hành xem máy.",
@@ -415,12 +423,18 @@ pub fn password_step(tree: &Tree, package: &str) -> Option<PasswordStep> {
 /// Screens that end a login attempt. Strings from the 45.7.3 string table; captcha by
 /// shape. Scans every visible node, because these arrive as toasts, dialogs or pages.
 pub fn login_stop(tree: &Tree, package: &str) -> Option<LoginStop> {
+    // The email verification pages are WebViews too; only their measured text tells them
+    // from a captcha.
+    let email_code = dialogs::email_verification(tree, package);
     let mut found = None;
     for (index, node) in tree.nodes.iter().enumerate() {
         if node.visibility() == Some(false) || !tree.ancestors_visible(index) {
             continue;
         }
-        if node.attr("class") == "android.webkit.WebView" && node.attr("package") == package {
+        if node.attr("class") == "android.webkit.WebView"
+            && node.attr("package") == package
+            && !email_code
+        {
             return Some(LoginStop::Captcha);
         }
         for value in [node.attr("text"), node.attr("content-desc")] {
@@ -462,7 +476,22 @@ pub fn login_stop(tree: &Tree, package: &str) -> Option<LoginStop> {
             found = found.or(stop);
         }
     }
+    if email_code {
+        return Some(LoginStop::EmailCode);
+    }
     found
+}
+
+/// A TikTok WebView with nothing in it yet. Riviu phones 40/42/45/49 (en, 2026-10-09) read
+/// one between the password submit and "Verify it’s really you": too early to call it a
+/// captcha or a code page.
+fn blank_web_view(tree: &Tree, package: &str) -> bool {
+    tree.nodes.iter().enumerate().any(|(index, node)| {
+        node.attr("class") == "android.webkit.WebView"
+            && node.visible(package)
+            && tree.ancestors_visible(index)
+            && !tree.nodes.iter().any(|child| child.parent == Some(index))
+    })
 }
 
 /// The logged-in app after a submit: the Profile tab is on screen and no login screen is.
@@ -965,8 +994,11 @@ pub async fn log_in(
                 {
                     return Ok(LoginOutcome::LoggedIn);
                 }
-                if let Some(stop) = login_stop(&tree, package) {
-                    return Ok(LoginOutcome::Rejected(stop));
+                // A page still loading is read again; its content decides the stop.
+                if !blank_web_view(&tree, package) {
+                    if let Some(stop) = login_stop(&tree, package) {
+                        return Ok(LoginOutcome::Rejected(stop));
+                    }
                 }
             }
             Err(error) => last_error = Some(format!("{error:#}")),
