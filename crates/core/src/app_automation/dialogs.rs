@@ -173,7 +173,20 @@ pub fn decline_optional_location(tree: &Tree, labels: TikTokControls) -> Option<
 /// (acceptance-20261010 interaction-32-deeplink-feed.png). Screenshot only, no XML: the
 /// question, Deny and Allow are those of the measured Android 9 location dialog above, so the
 /// same OS ids, classes and container are required. Only Deny is ever pressed.
-fn decline_os_contacts(tree: &Tree, labels: TikTokControls) -> Option<ElementBox> {
+///
+/// Box 31-50, 2026-10-10: the question came back on every TikTok start. From the second
+/// request on, Android 9 adds AOSP PackageInstaller's "Don't ask again" checkbox
+/// (`grant_permissions.xml`, `do_not_ask_checkbox`, string `never_ask_again`) and disables
+/// Allow while it is ticked. Not yet in a measured dump, so the checkbox must be the one
+/// visible, enabled, clickable, checkable node of that id inside the container. Unticked,
+/// it is ticked first ([`OS_CONTACTS_DO_NOT_ASK_KIND`]); a fresh read must then show it
+/// ticked before Deny ([`OS_CONTACTS_KIND`]) denies for good. Without it, Deny alone.
+fn decline_os_contacts(tree: &Tree, labels: TikTokControls) -> Option<(u64, ElementBox)> {
+    os_contacts_answer(tree, labels).map(|(kind, button, _)| (kind, button))
+}
+
+/// [`decline_os_contacts`] plus whether its Deny is permanent ("Don't ask again" ticked).
+fn os_contacts_answer(tree: &Tree, labels: TikTokControls) -> Option<(u64, ElementBox, bool)> {
     if (
         labels.package(),
         labels.resource_version(),
@@ -215,19 +228,70 @@ fn decline_os_contacts(tree: &Tree, labels: TikTokControls) -> Option<ElementBox
         "Allow",
         "android.widget.Button",
     )?;
+    let do_not_ask = os_do_not_ask_checkbox(tree, container)?;
+    let ticked = matches!(do_not_ask, Some((_, true)));
     if ![prompt, deny, allow]
         .into_iter()
         .all(|index| tree.inside(index, container))
         || tree.nodes[deny].parent != tree.nodes[allow].parent
-        || !tree.nodes[allow]
-            .rect()
-            .is_some_and(|rect| rect.enabled && rect.clickable)
+        // Allow is disabled only while "Don't ask again" is ticked.
+        || (!ticked
+            && !tree.nodes[allow]
+                .rect()
+                .is_some_and(|rect| rect.enabled && rect.clickable))
     {
         return None;
+    }
+    if let Some((checkbox, false)) = do_not_ask {
+        return tree.nodes[checkbox]
+            .rect()
+            .map(|rect| (OS_CONTACTS_DO_NOT_ASK_KIND, rect, false));
     }
     tree.nodes[deny]
         .rect()
         .filter(|rect| rect.enabled && rect.clickable)
+        .map(|rect| (OS_CONTACTS_KIND, rect, ticked))
+}
+
+/// `Some(None)`: no "Don't ask again" on screen. `Some(Some((index, checked)))`: the one
+/// checkbox, proven inside `container` and tappable. `None`: a duplicate, foreign or
+/// unreadable checkbox, which authorizes nothing.
+fn os_do_not_ask_checkbox(tree: &Tree, container: usize) -> Option<Option<(usize, bool)>> {
+    let found: Vec<usize> = tree
+        .matching(
+            OS_PERMISSION_PACKAGE,
+            ElementQuery::ResourceIdSuffix(":id/do_not_ask_checkbox"),
+        )
+        .into_iter()
+        .filter(|index| tree.nodes[*index].visibility() != Some(false))
+        .collect();
+    let index = match found.as_slice() {
+        [] => return Some(None),
+        [index] => *index,
+        _ => return None,
+    };
+    let node = &tree.nodes[index];
+    let checked = match node.attr("checked") {
+        "true" => true,
+        "false" => false,
+        _ => return None,
+    };
+    (matches!(
+        node.attr("resource-id"),
+        "com.android.packageinstaller:id/do_not_ask_checkbox"
+            | "com.google.android.packageinstaller:id/do_not_ask_checkbox"
+    ) && matches!(
+        node.attr("text"),
+        "Don't ask again" | "Don\u{2019}t ask again"
+    ) && node.attr("class") == "android.widget.CheckBox"
+        && node.attr("checkable") == "true"
+        && node.visibility() == Some(true)
+        && tree.ancestors_visible(index)
+        && tree.inside(index, container)
+        && node
+            .rect()
+            .is_some_and(|rect| rect.enabled && rect.clickable))
+    .then_some(Some((index, checked)))
 }
 
 /// Android 9 runtime permission questions belong to this package; their ids keep the AOSP
@@ -355,8 +419,8 @@ pub enum FirstRunPlan {
 }
 
 impl FirstRunScreen {
-    /// One attempt per caller budget; bits 1..8 belong to [`optional_decline`] and bits
-    /// from 256 up to [`CATALOG`].
+    /// One attempt per caller budget; bits 1..8, 1 << 61 and 1 << 62 belong to
+    /// [`optional_decline`] and bits from 256 up to [`CATALOG`].
     fn budget_bit(self) -> u64 {
         match self {
             Self::Interests => 16,
@@ -1101,8 +1165,8 @@ fn catalog_popup(tree: &Tree, labels: TikTokControls) -> CatalogMatch {
 }
 
 const _: () = assert!(
-    CATALOG.len() <= 55,
-    "catalog bits must stay below UNKNOWN_BIT"
+    CATALOG.len() <= 53,
+    "catalog bits must stay below the OS contacts bits and UNKNOWN_BIT"
 );
 
 use crate::ui_automation::runtime::{read_before_deadline, ReadWaitResult};
@@ -1141,18 +1205,36 @@ pub enum PopupStep {
 }
 
 /// Negative actions shared across stages; provenance stays with each detector.
-pub fn optional_decline(tree: &Tree, labels: TikTokControls) -> Option<(u8, ElementBox)> {
+pub fn optional_decline(tree: &Tree, labels: TikTokControls) -> Option<(u64, ElementBox)> {
     decline_optional_location(tree, labels)
         .map(|button| (OS_LOCATION_KIND, button))
         .or_else(|| decline_contacts(tree, labels).map(|button| (2, button)))
         .or_else(|| decline_facebook_permission(tree, labels).map(|button| (4, button)))
         .or_else(|| decline_precise_location(tree, labels).map(|button| (8, button)))
-        .or_else(|| decline_os_contacts(tree, labels).map(|button| (OS_CONTACTS_KIND, button)))
+        .or_else(|| decline_os_contacts(tree, labels))
 }
 
-/// [`optional_decline`] kinds raised by the OS permission package rather than TikTok.
-const OS_LOCATION_KIND: u8 = 1;
-const OS_CONTACTS_KIND: u8 = 16;
+/// [`optional_decline`] kinds raised by the OS permission package rather than TikTok. The
+/// contacts kinds sit at the top of the budget, clear of the first-run bits (16..128) and
+/// of the catalog bits below them.
+const OS_LOCATION_KIND: u64 = 1;
+const OS_CONTACTS_KIND: u64 = 1 << 62;
+const OS_CONTACTS_DO_NOT_ASK_KIND: u64 = 1 << 61;
+
+/// Operator lines for the contacts question: (once sent, once spent).
+fn os_contacts_lines(kind: u64) -> Option<(&'static str, &'static str)> {
+    match kind {
+        OS_CONTACTS_DO_NOT_ASK_KIND => Some((
+            "tích \"Don't ask again\" trên hộp thoại hệ thống hỏi quyền danh bạ (không bấm Allow); chờ đọc lại màn hình rồi bấm Deny",
+            "hộp thoại hệ thống hỏi quyền danh bạ vẫn chưa nhận dấu tích \"Don't ask again\" — Riviu không bấm Allow; cần người vận hành kiểm tra trên máy",
+        )),
+        OS_CONTACTS_KIND => Some((
+            "từ chối quyền danh bạ trên hộp thoại hệ thống (Deny, không bấm Allow); chờ đọc lại màn hình",
+            "hộp thoại hệ thống hỏi quyền danh bạ vẫn còn sau khi đã bấm Deny — Riviu không bấm Allow; cần người vận hành kiểm tra trên máy",
+        )),
+        _ => None,
+    }
+}
 
 /// Screenshot-derived contract, NOT a measured XML/resource profile. A future
 /// observation must prove the full modal before this rule can authorize decline.
@@ -1335,7 +1417,7 @@ pub(crate) async fn step_before_deadline_with_tree(
     {
         return Ok(ReadWaitResult::Ready((PopupStep::Blocked, None)));
     }
-    let candidate = optional_decline(&tree, labels).map(|(kind, button)| (u64::from(kind), button));
+    let candidate = optional_decline(&tree, labels);
     let first_run = candidate
         .is_none()
         .then(|| first_run_screen(&tree, labels))
@@ -1351,7 +1433,10 @@ pub(crate) async fn step_before_deadline_with_tree(
         foreground == labels.package()
             || (foreground == OS_PERMISSION_PACKAGE
                 && candidate.as_ref().is_some_and(|(kind, _)| {
-                    *kind == u64::from(OS_LOCATION_KIND) || *kind == u64::from(OS_CONTACTS_KIND)
+                    matches!(
+                        *kind,
+                        OS_LOCATION_KIND | OS_CONTACTS_KIND | OS_CONTACTS_DO_NOT_ASK_KIND
+                    )
                 }))
             || (foreground == NOTIFICATION_PROMPT_PACKAGE
                 && matches!(first_run, Some((FirstRunScreen::NotificationPermission, _)))),
@@ -1364,7 +1449,7 @@ pub(crate) async fn step_before_deadline_with_tree(
     );
     // (bit, gesture, operator line once sent, operator line once spent)
     let (kind, gesture, lines) = match (candidate, first_run, catalog) {
-        (Some((kind, button)), _, _) => (kind, PopupGesture::Tap(button), None),
+        (Some((kind, button)), _, _) => (kind, PopupGesture::Tap(button), os_contacts_lines(kind)),
         (None, Some((screen, plan)), _) => {
             let gesture = match plan {
                 FirstRunPlan::Tap(button) => PopupGesture::Tap(button),
@@ -1472,6 +1557,19 @@ pub(crate) async fn step_before_deadline_with_tree(
     budget.spent |= kind;
     budget.last_action_generation = Some(tree.generation);
     budget.says = lines.map(|(sent, _)| sent);
+    if kind == OS_CONTACTS_KIND {
+        // The answer is recorded before it is sent: Deny with "Don't ask again" ticked is
+        // permanent; without the checkbox Android may ask again on the next start.
+        let permanent_deny =
+            os_contacts_answer(&tree, labels).is_some_and(|(_, _, permanent)| permanent);
+        tracing::info!(
+            popup = "os_contacts",
+            package = labels.package(),
+            permanentDeny = permanent_deny,
+            generation = tree.generation,
+            "bấm Deny trên hộp thoại hệ thống hỏi quyền danh bạ"
+        );
+    }
     match gesture {
         PopupGesture::Tap(button) => session.tap(button.centre()).await?,
         PopupGesture::Swipe(swipe) => session.swipe(swipe).await?,

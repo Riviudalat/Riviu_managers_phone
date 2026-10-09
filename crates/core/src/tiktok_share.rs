@@ -543,6 +543,9 @@ async fn observe_publish_account_inner(
     Ok(account)
 }
 
+/// Why account navigation stopped at the permission window when the popup step left no line.
+const PERMISSION_WINDOW_SAYS: &str = "hộp thoại quyền hệ thống vẫn che TikTok — Riviu không bấm Allow; cần người vận hành kiểm tra trên máy";
+
 /// Shared account navigation for manual account reads and publication preflight.
 /// A cold-start advertisement may hide Profile; use the same bounded navigation
 /// ladder instead of treating the first missing tab as an account failure.
@@ -561,6 +564,8 @@ pub async fn navigate_own_profile(
     let epoch = session.gui_session_epoch();
     let mut saw_tiktok = false;
     let mut reopened_from_launcher = false;
+    let mut permission_popups = crate::app_automation::dialogs::PopupBudget::default();
+    let popup_stop = std::sync::atomic::AtomicBool::new(false);
     let within_deadline = || tokio::time::Instant::now() < deadline
         && session.gui_scope().and_then(|scope| scope.deadline_ms)
             .is_none_or(|end| chrono::Utc::now().timestamp_millis() < end);
@@ -571,6 +576,52 @@ pub async fn navigate_own_profile(
                 .context("account navigation foreground read deadline exceeded")??
         } else { session.active_app_bundle().await? };
         anyhow::ensure!(session.gui_session_epoch() == epoch, "account navigation session changed");
+        if crate::tiktok_target::foreground_is_tiktok_or_permission_window(
+            session,
+            labels.package(),
+            &active,
+            deadline,
+        )
+        .await
+            == crate::tiktok_target::TikTokForeground::PermissionWindow
+        {
+            // Box 31-50, 10/10/2026: the measured contacts question over TikTok. The shared
+            // popup step may only tick "Don't ask again" and Deny, once each per budget; a
+            // spent, unknown or unproven window still fails below without a tap.
+            anyhow::ensure!(
+                within_deadline(),
+                "account navigation recovery deadline exceeded"
+            );
+            match crate::app_automation::dialogs::step_before_deadline(
+                session,
+                *labels,
+                &mut permission_popups,
+                deadline,
+                &popup_stop,
+                &popup_stop,
+            )
+            .await?
+            {
+                crate::ui_automation::runtime::ReadWaitResult::Ready(
+                    crate::app_automation::dialogs::PopupStep::Dismissed,
+                ) => {
+                    tracing::info!(
+                        package = labels.package(),
+                        says = permission_popups.says().unwrap_or_default(),
+                        "điều hướng tài khoản: đã trả lời hộp thoại quyền hệ thống đã đo; đọc lại foreground"
+                    );
+                    tokio::time::sleep(
+                        POLL.min(deadline.saturating_duration_since(tokio::time::Instant::now())),
+                    )
+                    .await;
+                    continue;
+                }
+                _ => anyhow::bail!(
+                    "account navigation left TikTok: {}",
+                    permission_popups.says().unwrap_or(PERMISSION_WINDOW_SAYS)
+                ),
+            }
+        }
         if active != labels.package() {
             // Measured machine 1: Samsung Home after the owned account-navigation began.
             // This is one navigation repair, never a reset or permission to replay an action.

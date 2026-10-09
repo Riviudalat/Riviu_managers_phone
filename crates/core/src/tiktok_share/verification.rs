@@ -876,9 +876,10 @@ impl Capture<'_> {
                 .map_err(|_| VerificationReason::ReadFailed)?,
         )
         .map_err(|_| VerificationReason::ReadFailed)?;
+        // The OS package is accepted only under a measured OS question the popup step in
+        // `profile` answers: Trill location, or Global contacts (box 31-50, 10/10/2026).
         if foreground != self.plan.labels.package()
-            && crate::app_automation::dialogs::decline_optional_location(&tree, self.plan.labels)
-                .is_none()
+            && crate::app_automation::dialogs::optional_decline(&tree, self.plan.labels).is_none()
         {
             return Err(VerificationReason::WrongApp);
         }

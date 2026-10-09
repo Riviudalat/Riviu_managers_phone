@@ -446,6 +446,7 @@ async fn open_detail_target(
     popups: &mut OpenPopups,
 ) -> anyhow::Result<TargetArrival> {
     let link = detail_link(&expected.content_id)?;
+    answer_permission_window(session, labels, target_package, popups, stop).await?;
     if !detail_baseline_clear(session, labels, target_package).await {
         ensure_not_cancelled(stop)?;
         session
@@ -454,6 +455,7 @@ async fn open_detail_target(
             .context("target_detail_open: app restart failed")?;
         tokio::time::sleep(DISPATCH_SETTLE).await;
         ensure_not_cancelled(stop)?;
+        answer_permission_window(session, labels, target_package, popups, stop).await?;
         anyhow::ensure!(
             detail_baseline_clear(session, labels, target_package).await,
             "target_detail_open: a post detail page was still open before the link; refusing to take it as the target"
@@ -563,6 +565,54 @@ async fn open_detail_target(
         }
         tokio::time::sleep(CARD_POLL.min(deadline.saturating_duration_since(Instant::now()))).await;
     }
+}
+
+/// Box 31-50, 10/10/2026: the contacts question came back on every TikTok start, so the
+/// baseline read below met `com.google.android.packageinstaller` and took it for a stacked
+/// detail page. While the foreground is the measured permission window over the target, the
+/// shared popup step answers it (tick "Don't ask again", then Deny; once each per budget);
+/// a spent or unknown window stops the open untouched. Any other foreground is left to the
+/// baseline check.
+async fn answer_permission_window(
+    session: &dyn UiSession,
+    labels: TikTokControls,
+    target_package: &str,
+    popups: &mut OpenPopups,
+    stop: &AtomicBool,
+) -> anyhow::Result<()> {
+    let deadline = Instant::now() + CARD_WINDOW;
+    // One read per answer the question allows (tick, Deny) and one to see it gone.
+    for _ in 0..3 {
+        ensure_not_cancelled(stop)?;
+        let Ok(active) = session.active_app_bundle().await else {
+            return Ok(());
+        };
+        if crate::tiktok_target::foreground_is_tiktok_or_permission_window(
+            session,
+            target_package,
+            &active,
+            deadline,
+        )
+        .await
+            != crate::tiktok_target::TikTokForeground::PermissionWindow
+        {
+            return Ok(());
+        }
+        match screen_popups(
+            session,
+            labels,
+            popups,
+            deadline,
+            stop,
+            "target_detail_open",
+        )
+        .await?
+        {
+            Screened::Dismissed => tokio::time::sleep(CARD_POLL).await,
+            Screened::Clear | Screened::Unscreened => return Ok(()),
+        }
+    }
+    Ok(())
 }
 
 /// True only when TikTok is foreground on a readable screen that is not a detail page.

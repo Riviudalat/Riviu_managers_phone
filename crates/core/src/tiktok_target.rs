@@ -56,6 +56,45 @@ pub fn runtime_permission_over_measured_tiktok(target: &str, focused: &str) -> b
         && activity.rsplit('.').next() == Some("GrantPermissionsActivity")
 }
 
+/// What a foreground read means for a loop bound to one TikTok build.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TikTokForeground {
+    /// The bound build itself.
+    TikTok,
+    /// The measured runtime permission question over the bound build. TikTok is still
+    /// there; the shared popup step owns the question and may only Deny it.
+    PermissionWindow,
+    /// Anything else, including a foreground that could not be named.
+    Other,
+}
+
+/// Classify `active` (an [`crate::UiSession::active_app_bundle`] read) against `target`.
+///
+/// Box 31-50, Global 45.7.3, 10/10/2026: the contacts question kept coming back over every
+/// TikTok start, and loops that compared the foreground package with the TikTok package
+/// bailed as "left TikTok" before any popup step could Deny it. Only the permission
+/// package named with `GrantPermissionsActivity` counts; an unreadable activity, a missed
+/// deadline or any other window stays [`TikTokForeground::Other`].
+pub async fn foreground_is_tiktok_or_permission_window(
+    session: &dyn crate::UiSession,
+    target: &str,
+    active: &str,
+    deadline: tokio::time::Instant,
+) -> TikTokForeground {
+    if active == target {
+        return TikTokForeground::TikTok;
+    }
+    if active != RUNTIME_PERMISSION_PACKAGE {
+        return TikTokForeground::Other;
+    }
+    match tokio::time::timeout_at(deadline, session.active_app_component()).await {
+        Ok(Ok(focused)) if runtime_permission_over_measured_tiktok(target, &focused) => {
+            TikTokForeground::PermissionWindow
+        }
+        _ => TikTokForeground::Other,
+    }
+}
+
 /// The measured packages as an operator-facing list, for refusal messages.
 pub fn measured_android_packages_list() -> String {
     let mut seen: Vec<&str> = Vec::new();

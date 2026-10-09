@@ -956,10 +956,13 @@ impl<'a> HierarchyRun<'a> {
         if !session.supports_element_bounds() {
             return Err(Unsupported::NoElementBounds);
         }
-        let package = session
+        let foreground = session
             .active_app_bundle()
             .await
             .unwrap_or_else(|_| settings.bundle_id.clone());
+        let package = tiktok_behind_permission_window(session, &settings.bundle_id, &foreground)
+            .await
+            .unwrap_or(foreground);
         let language = session.ui_language().await;
         // Read once per session, not per locate: `dumpsys package` measured 1–2 s on
         // this fleet. An unread version is not fatal — it leaves only the resource-id
@@ -1762,6 +1765,38 @@ async fn permission_over_tiktok(
         Ok(ReadWaitResult::Ready(focused))
             if crate::tiktok_target::runtime_permission_over_measured_tiktok(bundle_id, &focused)
     )
+}
+
+/// The TikTok build standing behind the measured runtime permission question, for the build
+/// check. Riviu #42, box 31-50, 10/10/2026: the contacts question was in front when the
+/// session opened, and the check read `com.google.android.packageinstaller 9-7028680` as
+/// the TikTok build. The build is the device's app selection when it is a measured TikTok,
+/// otherwise the one fleet build, and only when the focused window is
+/// `GrantPermissionsActivity` over it. Its installed version is read next, so a build that
+/// is not installed is still refused. Any other foreground answers `None`.
+async fn tiktok_behind_permission_window(
+    session: &dyn UiSession,
+    configured: &str,
+    foreground: &str,
+) -> Option<String> {
+    if foreground != crate::tiktok_target::RUNTIME_PERMISSION_PACKAGE {
+        return None;
+    }
+    let configured = configured.trim();
+    let target = if is_measured_tiktok(configured) {
+        configured
+    } else if let [build] = crate::tiktok_fleet_policy::TIKTOK_FLEET_BUILDS {
+        build.package
+    } else {
+        return None;
+    };
+    let deadline = tokio::time::Instant::now() + FOREGROUND_WINDOW;
+    (crate::tiktok_target::foreground_is_tiktok_or_permission_window(
+        session, target, foreground, deadline,
+    )
+    .await
+        == crate::tiktok_target::TikTokForeground::PermissionWindow)
+        .then(|| target.to_string())
 }
 
 /// What one attempt at a hierarchy-driven session came to.
