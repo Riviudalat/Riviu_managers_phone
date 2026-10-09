@@ -1145,19 +1145,23 @@ impl AndroidDriver {
 
     // Keep the original error for typed recovery decisions; publish only fixed vocabulary.
     fn record_helper_runtime_failure(&self, serial: &str, stage: &'static str, error: &anyhow::Error) {
-        let (category, reason) = if error.is::<crate::riviu_agent::HelperClipboardNotQualified>() {
-            ("clipboard_not_qualified", "Chưa xác minh được clipboard; giữ phiên hiện tại và kiểm tra chẩn đoán của máy.")
+        let device: String = serial.chars().take(128)
+            .filter(|c| c.is_ascii_alphanumeric() || matches!(c, '-' | '_' | '.' | ':')).collect();
+        // The shell-identity refusal is checked first: it also carries the recovery fence,
+        // and only its own category tells the operator what to change on the phone.
+        let (category, reason) = if let Some(refusal) = error.downcast_ref::<crate::riviu_agent::HelperShellIdentityRefused>() {
+            (refusal.category(), refusal.operator_message(&device))
+        } else if error.is::<crate::riviu_agent::HelperClipboardNotQualified>() {
+            ("clipboard_not_qualified", "Chưa xác minh được clipboard; giữ phiên hiện tại và kiểm tra chẩn đoán của máy.".to_owned())
         } else if error.is::<crate::riviu_agent::HelperRecoveryRequired>() {
-            ("recovery_required", "Cần đối soát phiên helper đang giữ; chưa nhận phiên thay thế.")
+            ("recovery_required", "Cần đối soát phiên helper đang giữ; chưa nhận phiên thay thế.".to_owned())
         } else {
-            ("unknown", "Kiểm tra chẩn đoán của đúng máy; nguyên nhân hiện chưa xác định.")
+            ("unknown", "Kiểm tra chẩn đoán của đúng máy; nguyên nhân hiện chưa xác định.".to_owned())
         };
         self.record_helper_runtime_result(serial, false);
         self.helper_setup_errors.lock().insert(serial.to_owned(), format!(
             "{HELPER_SETUP_FAILURE}; stage={stage}; category={category}; {reason}"));
-        let device: String = serial.chars().take(128)
-            .filter(|c| c.is_ascii_alphanumeric() || matches!(c, '-' | '_' | '.' | ':')).collect();
-        tracing::warn!(serial = %device, stage, category, reason, "helper runtime qualification failed; no action replay");
+        tracing::warn!(serial = %device, stage, category, reason = %reason, "helper runtime qualification failed; no action replay");
     }
 
     /// Release helper preparation for an admitted caller retaining the device lease.
@@ -3545,6 +3549,9 @@ mod tests {
             (anyhow::Error::new(crate::riviu_agent::HelperRecoveryRequired), "recovery_required"),
             (anyhow::Error::new(crate::riviu_agent::HelperClipboardNotQualified), "clipboard_not_qualified"),
             (anyhow!("fixture-secret-token owner clipboard credential envelope"), "unknown"),
+            // A root adbd also carries the retained-owner fence; its own category wins.
+            (anyhow::Error::new(crate::riviu_agent::HelperShellIdentityRefused::Root)
+                .context(crate::riviu_agent::HelperRecoveryRequired), "shell_root"),
         ] {
             let cause = cause.context("fixture-secret-token owner clipboard credential envelope");
             driver.record_helper_runtime_failure("fixture", "clipboard_qualification", &cause);
@@ -3552,6 +3559,7 @@ mod tests {
             let status = driver.cached_agent_status("fixture");
             let public = serde_json::to_string(&status).unwrap();
             assert!(public.contains(&format!("category={category}")));
+            assert_eq!(category == "shell_root", public.contains("`adb -s fixture unroot`"), "{public}");
             assert!(!public.contains("fixture-secret-token"));
             assert!(!public.contains("owner clipboard credential envelope"));
             assert_eq!(status.state, riviu_core::AgentState::RepairRequired);

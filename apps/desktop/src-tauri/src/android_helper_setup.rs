@@ -10,6 +10,7 @@ use std::sync::Arc;
 
 use riviu_android_driver::AndroidDriver;
 use riviu_android_driver::driver::{HelperRecoveryGeneration, HELPER_SETUP_FAILURE};
+use riviu_android_driver::riviu_agent::HelperShellIdentityRefused;
 use riviu_core::db::Database;
 use riviu_core::{
     DeviceControlError, DeviceControlPlane, DeviceInfo, DevicePlatform, DeviceStatus,
@@ -83,7 +84,7 @@ impl AndroidHelperSetup {
                                     Ok(_) => return Ok(()),
                                     Err(error) if error.is::<riviu_android_driver::riviu_agent::HelperRecoveryRequired>() => {}
                                     Err(error) => return Err(crate::command_error::CommandError::code(
-                                        "HelperAutomaticPreparationFailed", automatic_preparation_message(&error))),
+                                        "HelperAutomaticPreparationFailed", automatic_preparation_message(&serial, &error))),
                                 }
                                 }
                                 crate::agent_commands::automatic_helper_maintenance(
@@ -91,7 +92,7 @@ impl AndroidHelperSetup {
                                 android.prepare_helper_runtime(&serial).await
                                     .map(|_| ())
                                     .map_err(|error| crate::command_error::CommandError::code(
-                                        "HelperAutomaticPreparationFailed", automatic_preparation_message(&error)))
+                                        "HelperAutomaticPreparationFailed", automatic_preparation_message(&serial, &error)))
                             }.await;
                             match result {
                                 Ok(()) => {
@@ -127,12 +128,10 @@ impl AndroidHelperSetup {
     }
 }
 
-fn automatic_preparation_message(error: &anyhow::Error) -> String {
-    let message = error.to_string();
-    if message.starts_with("helper runtime requires shell UID2000; observed adbd UID ") {
-        message
-    } else {
-        "Chưa xác minh được Riviu Helper hoạt động; đã giữ bản ghi để xử lý tiếp.".into()
+fn automatic_preparation_message(serial: &str, error: &anyhow::Error) -> String {
+    match error.downcast_ref::<HelperShellIdentityRefused>() {
+        Some(refusal) => refusal.operator_message(serial),
+        None => "Chưa xác minh được Riviu Helper hoạt động; đã giữ bản ghi để xử lý tiếp.".into(),
     }
 }
 

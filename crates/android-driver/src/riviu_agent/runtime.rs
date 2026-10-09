@@ -32,6 +32,103 @@ impl std::fmt::Display for HelperRecoveryRequired {
     }
 }
 
+/// adbd's shell identity is not the one the helper runtime is bound to.
+///
+/// Owner records, IME journals and maintenance plans are only valid for shell UID 2000 on
+/// Android user 0, so this refuses before any claim, maintenance dispatch or action. A box
+/// that starts adbd as root (`adb root` at boot) lands here as `Root`; the fix is on the
+/// phone (`adb unroot`), never a root fallback. Where the caller already fenced a retained
+/// owner as recovery-required, the refusal keeps that fence as context.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum HelperShellIdentityRefused {
+    /// `id -u` answered 0.
+    Root,
+    /// `id -u` answered neither 0 nor 2000.
+    UnexpectedUid,
+    /// `am get-current-user` answered something other than 0.
+    AndroidUser,
+}
+
+impl HelperShellIdentityRefused {
+    const ALL: [Self; 3] = [Self::Root, Self::UnexpectedUid, Self::AndroidUser];
+
+    /// Stable token that opens this refusal's Display text. It never carries device output.
+    pub fn marker(self) -> &'static str {
+        match self {
+            Self::Root => "HelperShellRootRefused",
+            Self::UnexpectedUid => "HelperShellUidRefused",
+            Self::AndroidUser => "HelperAndroidUserRefused",
+        }
+    }
+
+    /// Fixed public category shared by the roster latch and the maintenance commands.
+    pub fn category(self) -> &'static str {
+        match self {
+            Self::Root => "shell_root",
+            Self::UnexpectedUid => "shell_uid",
+            Self::AndroidUser => "android_user",
+        }
+    }
+
+    /// Recognize a refusal inside a stringified error chain (the control-plane boundary
+    /// erases the anyhow type). Only this type writes the `<marker>:` token.
+    pub fn from_chain_text(text: &str) -> Option<Self> {
+        Self::ALL.into_iter().find(|refusal| text.contains(&format!("{}:", refusal.marker())))
+    }
+
+    /// Operator-facing Vietnamese instruction. The serial is reduced to ADB serial characters.
+    pub fn operator_message(self, serial: &str) -> String {
+        let serial: String = serial.chars().take(128)
+            .filter(|c| c.is_ascii_alphanumeric() || matches!(c, '-' | '_' | '.' | ':')).collect();
+        let serial = if serial.is_empty() { "<serial>".to_owned() } else { serial };
+        match self {
+            Self::Root => format!("adb shell đang chạy quyền root (uid 0) — helper từ chối root. Chạy `adb -s {serial} unroot` hoặc tắt adb root khi khởi động, rồi Khôi phục helper lại."),
+            Self::UnexpectedUid => format!("adb shell không chạy bằng uid 2000 (shell) — helper từ chối. Chạy `adb -s {serial} unroot` hoặc tắt rồi bật lại Gỡ lỗi USB, rồi Khôi phục helper lại."),
+            Self::AndroidUser => "Máy đang ở người dùng Android khác người dùng chính (user 0) — helper chỉ chạy cho người dùng chính. Chuyển về người dùng chính trên máy, rồi Khôi phục helper lại.".to_owned(),
+        }
+    }
+}
+
+impl std::fmt::Display for HelperShellIdentityRefused {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(match self {
+            Self::Root => "HelperShellRootRefused: adb shell runs as root (uid 0); helper requires shell uid 2000; no root fallback",
+            Self::UnexpectedUid => "HelperShellUidRefused: adb shell uid is not 2000; no fallback",
+            Self::AndroidUser => "HelperAndroidUserRefused: current Android user is not 0; no claim or action replay",
+        })
+    }
+}
+
+impl std::error::Error for HelperShellIdentityRefused {}
+
+/// Prove adbd runs as shell UID 2000 on Android user 0. Transport failures stay transport
+/// failures; only an answered mismatch becomes the typed refusal.
+async fn require_shell_identity(adb: &AdbProgram, serial: &str) -> anyhow::Result<()> {
+    match checked_shell(adb, serial, "id -u").await?.trim() {
+        "2000" => {}
+        "0" => return Err(anyhow!(HelperShellIdentityRefused::Root)),
+        _ => return Err(anyhow!(HelperShellIdentityRefused::UnexpectedUid)),
+    }
+    anyhow::ensure!(checked_shell(adb, serial, "am get-current-user").await?.trim() == "0",
+        HelperShellIdentityRefused::AndroidUser);
+    Ok(())
+}
+
+/// Keep a typed identity refusal visible beneath the recovery fence the caller already had.
+fn fence_identity_refusal(error: anyhow::Error) -> Result<anyhow::Error, anyhow::Error> {
+    if error.is::<HelperShellIdentityRefused>() {
+        if error.is::<HelperRecoveryRequired>() { Ok(error) } else { Ok(error.context(HelperRecoveryRequired)) }
+    } else {
+        Err(error)
+    }
+}
+
+/// Same proof, for callers whose mismatch already meant recovery-required.
+async fn require_shell_identity_for_recovery(adb: &AdbProgram, serial: &str) -> anyhow::Result<()> {
+    require_shell_identity(adb, serial).await
+        .map_err(|error| fence_identity_refusal(error).unwrap_or_else(|error| error))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -46,6 +143,71 @@ mod tests {
         ).await.expect_err("missing retained owner must not become success");
         std::fs::remove_dir_all(&root).unwrap();
         assert_eq!(error.to_string(), "HelperMaintenanceRetainedOwnerMissing");
+    }
+
+    /// Fixture adb that answers only the two identity probes; anything else exits 97.
+    fn identity_adb(root: &Path, uid: &str, user: &str) -> AdbProgram {
+        #[cfg(windows)]
+        let path = {
+            let path = root.join("identity-adb.cmd");
+            std::fs::write(&path, format!(concat!(
+                "@echo off\r\n",
+                "if \"%~4\"==\"id -u\" (\r\n  echo {uid}\r\n  exit /b 0\r\n)\r\n",
+                "if \"%~4\"==\"am get-current-user\" (\r\n  echo {user}\r\n  exit /b 0\r\n)\r\n",
+                "exit /b 97\r\n"), uid = uid, user = user)).unwrap();
+            path
+        };
+        #[cfg(not(windows))]
+        let path = {
+            use std::os::unix::fs::PermissionsExt;
+            let path = root.join("identity-adb");
+            std::fs::write(&path, format!(concat!(
+                "#!/bin/sh\n",
+                "case \"$4\" in\n",
+                "'id -u') echo {uid} ;;\n",
+                "'am get-current-user') echo {user} ;;\n",
+                "*) exit 97 ;;\n",
+                "esac\n"), uid = uid, user = user)).unwrap();
+            std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o700)).unwrap();
+            path
+        };
+        AdbProgram::at(path)
+    }
+
+    #[tokio::test]
+    async fn shell_identity_refusals_are_typed_and_keep_the_recovery_fence() {
+        let serial = "fixture-identity";
+        for (uid, user, expected) in [
+            ("0", "0", HelperShellIdentityRefused::Root),
+            ("1000", "0", HelperShellIdentityRefused::UnexpectedUid),
+            ("2000", "10", HelperShellIdentityRefused::AndroidUser),
+        ] {
+            let root = std::env::temp_dir().join(format!("helper-identity-{}", uuid::Uuid::new_v4()));
+            let state = state_path(&root, serial).unwrap();
+            std::fs::create_dir_all(&state).unwrap();
+            let adb = identity_adb(&root, uid, user);
+            // Fresh claim: refused before install or claim, not a retained-owner fence.
+            let apk = root.join("helper.apk");
+            std::fs::write(&apk, b"fixture-apk-not-for-device").unwrap();
+            let fresh = HelperClient::ensure_runtime(adb.clone(), serial, Some(&apk), Some(&root)).await
+                .err().expect("identity mismatch must refuse a fresh claim");
+            assert!(format!("{fresh:#}").contains(&format!("{}:", expected.marker())), "{uid}/{user}: {fresh:#}");
+            assert_eq!(fresh.downcast_ref::<HelperShellIdentityRefused>(), Some(&expected));
+            assert!(!fresh.is::<HelperRecoveryRequired>());
+            assert!(!state.join("runtime-owner.json").exists(), "no owner intent before identity proof");
+            // Retained owner: maintenance preparation names the identity and keeps the fence.
+            std::fs::write(state.join("runtime-owner.json"), serde_json::to_vec(&json!({
+                "serial":serial,"androidUser":0,"state":"claimPending","ownerId":"fixture_owner_0123456789",
+                "serviceInstance":"fixture_instance_012345","ownerGeneration":"fixture_generation_012345"})).unwrap()).unwrap();
+            let error = HelperClient::prepare_maintenance(&adb, serial, Some(&apk), Some(&root),
+                "fixture_maintenance_1234", json!({"operation":"fixture"})).await
+                .expect_err("identity mismatch must not become a maintenance plan");
+            let text = format!("{error:#}");
+            std::fs::remove_dir_all(&root).unwrap();
+            assert_eq!(HelperShellIdentityRefused::from_chain_text(&text), Some(expected), "{uid}/{user}: {text}");
+            assert!(error.is::<HelperRecoveryRequired>(), "retained owner stays fenced: {text}");
+        }
+        assert!(HelperShellIdentityRefused::Root.operator_message("R58M&x").contains("`adb -s R58Mx unroot`"));
     }
 
 
@@ -576,8 +738,7 @@ impl HelperClient {
         })?;
         let owner_id = record["ownerId"].as_str().context("old helper owner missing")?;
         owner_credential_name(serial, owner_id)?;
-        anyhow::ensure!(checked_shell(adb, serial, "id -u").await?.trim() == "2000"
-            && checked_shell(adb, serial, "am get-current-user").await?.trim() == "0", HelperRecoveryRequired);
+        require_shell_identity_for_recovery(adb, serial).await?;
         let (version, uid, installed_path) = inventory(adb, serial).await?;
         let bundled_hash = riviu_core::frame_sha256(&std::fs::read(apk.context("bundled helper missing")?)?);
         let installed_hash = checked_shell(adb, serial, &format!("sha256sum {}", crate::adb::quote_device_path(&installed_path))).await?
@@ -791,9 +952,7 @@ impl HelperClient {
                 && !state.join("maintenance-active.json").try_exists().context(HelperRecoveryRequired)?, HelperRecoveryRequired);
             let instance = metadata("serviceInstance")?;
             let generation = metadata("ownerGeneration")?;
-            anyhow::ensure!(checked_shell(&adb, serial, "id -u").await?.trim() == "2000"
-                && checked_shell(&adb, serial, "am get-current-user").await?.trim() == "0",
-                "helper cold readiness device user unproved");
+            require_shell_identity(&adb, serial).await?;
             let hash = riviu_core::frame_sha256(&std::fs::read(apk.context("bundled helper missing for cold readiness")?)?);
             let (version, uid, apk_path) = inventory(&adb, serial).await?;
             anyhow::ensure!(version >= MIN_VERSION && record["apkSha256"].as_str() == Some(hash.as_str())
@@ -826,8 +985,8 @@ impl HelperClient {
                 "helper owner record changed during cold readiness");
             Ok::<(), anyhow::Error>(())
         }.await;
-        result.map_err(|error| anyhow!(HelperRecoveryRequired)
-            .context(format!("helper cold readiness unproved; no claim ({error:#})")))
+        result.map_err(|error| fence_identity_refusal(error).unwrap_or_else(|error| anyhow!(HelperRecoveryRequired)
+            .context(format!("helper cold readiness unproved; no claim ({error:#})"))))
     }
 
     /// Called under the driver's inventory writer and the caller's control lease.
@@ -838,21 +997,22 @@ impl HelperClient {
         // Recovery precedes any installation, service restart or owner claim.
         if let Some(checkpoint) = pending_checkpoint(&state, serial).map_err(|_| anyhow!(HelperRecoveryRequired))? {
             Self::recover_runtime_checkpoint(adb.clone(), serial, &state, checkpoint).await.map_err(|error| {
-                anyhow!(HelperRecoveryRequired).context(format!("helper pending cleanup unresolved ({error:#})"))
+                fence_identity_refusal(error).unwrap_or_else(|error| anyhow!(HelperRecoveryRequired)
+                    .context(format!("helper pending cleanup unresolved ({error:#})")))
             })?;
         }
         // A prior failed claim/attach is never replaced by a new claim. Its credential
         // may have died with the host process; explicit owner reconciliation is required.
         if state.join("runtime-owner.json").try_exists().context(HelperRecoveryRequired)? {
             return Self::resume_runtime_owner(adb, serial, apk, &state).await.map_err(|error| {
-                anyhow!(HelperRecoveryRequired).context(format!("helper owner resume unresolved ({error:#})"))
+                fence_identity_refusal(error).unwrap_or_else(|error| anyhow!(HelperRecoveryRequired)
+                    .context(format!("helper owner resume unresolved ({error:#})")))
             });
         }
         let apk = apk.context("compatible bundled helper APK missing")?;
         let hash = riviu_core::frame_sha256(&std::fs::read(apk)?);
-        let shell_uid = checked_shell(&adb, serial, "id -u").await?;
-        anyhow::ensure!(shell_uid.trim() == "2000", "helper runtime requires shell UID2000; observed adbd UID {}; no root fallback", shell_uid.trim());
-        anyhow::ensure!(checked_shell(&adb, serial, "am get-current-user").await?.trim() == "0", "helper runtime requires checked Android user0");
+        // Refused before any install or claim: no owner journal exists yet.
+        require_shell_identity(&adb, serial).await?;
         let installed = package_installed(&adb, serial).await?;
         let old = if installed { Some(inventory(&adb, serial).await?) } else { None };
         let compatible = if let Some((version, _, path)) = &old { *version >= MIN_VERSION && matches_bundle(&adb, serial, path, &hash).await? } else { false };
@@ -971,7 +1131,7 @@ impl HelperClient {
     async fn resume_runtime_owner(adb: AdbProgram, serial: &str, apk: Option<&Path>, state: &Path) -> anyhow::Result<Self> {
         let record = owner_record(state, serial)?;
         let token = load_owner_credential(serial, &record).await?;
-        anyhow::ensure!(checked_shell(&adb, serial, "id -u").await?.trim() == "2000" && checked_shell(&adb, serial, "am get-current-user").await?.trim() == "0", HelperRecoveryRequired);
+        require_shell_identity_for_recovery(&adb, serial).await?;
         let hash = riviu_core::frame_sha256(&std::fs::read(apk.context("bundled helper unavailable for resume")?)?);
         let (version, uid, apk_path) = inventory(&adb, serial).await?;
         anyhow::ensure!(version >= MIN_VERSION && record["apkSha256"].as_str() == Some(hash.as_str()) && matches_bundle(&adb, serial, &apk_path, &hash).await?, HelperRecoveryRequired);
@@ -1040,8 +1200,7 @@ impl HelperClient {
 
     async fn recover_runtime_checkpoint(adb: AdbProgram, serial: &str, state: &Path, checkpoint: Value) -> anyhow::Result<()> {
         let _serial = ime_lock(serial).lock_owned().await;
-        anyhow::ensure!(checked_shell(&adb, serial, "id -u").await?.trim() == "2000", "pending cleanup shell identity changed");
-        anyhow::ensure!(checked_shell(&adb, serial, "am get-current-user").await?.trim() == "0", "pending cleanup Android user changed");
+        require_shell_identity(&adb, serial).await?;
         let (_, uid, apk_path) = inventory(&adb, serial).await?;
         let field = |name: &str| checkpoint[name].as_str().map(str::to_owned).context("pending cleanup owner metadata missing");
         let owner = CanaryOwner { owner_id: field("ownerId")?, instance: field("serviceInstance")?, generation: field("generation")?, nonce: uuid::Uuid::new_v4().simple().to_string(), socket: String::new(), uid, apk_path, report: state.into() };

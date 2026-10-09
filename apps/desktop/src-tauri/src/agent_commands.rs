@@ -11,6 +11,8 @@ use riviu_core::{
 use serde::{Deserialize, Serialize};
 use tauri::State;
 
+use riviu_android_driver::riviu_agent::HelperShellIdentityRefused;
+
 use crate::command_error::CommandError;
 use crate::state::AppState;
 
@@ -498,53 +500,89 @@ pub async fn agent_bulk_repair(
     Ok(bulk_repair_with_control(&state.control, udids).await)
 }
 
+fn helper_device_label(udid: &str) -> String {
+    udid.chars().take(128)
+        .filter(|c| c.is_ascii_alphanumeric() || matches!(c, '-' | '_' | '.' | ':')).collect()
+}
+
+/// The driver's recovery fence, recognized anywhere in a stringified chain: the control
+/// plane serializes `{error:#}`, so the fence often sits beneath a context prefix.
+fn is_helper_recovery_required(cause: &str) -> bool {
+    cause.contains(&riviu_android_driver::riviu_agent::HelperRecoveryRequired.to_string())
+}
+
 fn helper_maintenance_execution_error(udid: &str, error: &DeviceControlError) -> CommandError {
     // The control-plane boundary has already erased the anyhow type. Accept only
-    // complete existing driver literals, never substrings or arbitrary envelopes.
+    // complete existing driver literals or the driver's own typed markers.
     let cause = match error {
         DeviceControlError::Driver { operation: "executeHelperMaintenance", message, .. } => message.as_str(),
         _ => "",
     };
+    let device = helper_device_label(udid);
+    let refusal = HelperShellIdentityRefused::from_chain_text(cause);
+    let identity_reason = refusal.map(|refusal| refusal.operator_message(&device));
     let (stage, category, reason) = match cause {
         "helper maintenance binding changed; no replay or retirement"
         | "maintenance active plan changed; no replay or retirement" =>
             ("maintenance_binding", "binding_changed", "Thông tin thiết bị đã khác kế hoạch đang giữ; cần đối chiếu trước khi khôi phục."),
         "maintenance effect unresolved; process present; no replay" =>
             ("maintenance_reconciliation", "process_present", "Tiến trình helper vẫn còn; tiếp tục đối soát kế hoạch cũ, chưa gửi lệnh dừng lần nữa."),
-        "HelperRecoveryRequired" =>
+        _ if refusal.is_some() => (
+            "maintenance_execution",
+            refusal.map_or("unknown", HelperShellIdentityRefused::category),
+            identity_reason.as_deref().unwrap_or_default(),
+        ),
+        _ if is_helper_recovery_required(cause) =>
             ("maintenance_execution", "recovery_required", "Cần đối soát phiên helper đang giữ; chưa nhận phiên thay thế."),
         _ => ("maintenance_execution", "unknown", "Kiểm tra chẩn đoán của đúng máy; nguyên nhân hiện chưa xác định."),
     };
-    let device: String = udid.chars().take(128)
-        .filter(|c| c.is_ascii_alphanumeric() || matches!(c, '-' | '_' | '.' | ':')).collect();
     log::warn!("helper maintenance unproved; device={device}; stage={stage}; category={category}; {reason}; no action replay");
     CommandError::code("HelperMaintenanceExecutionUnproved", format!(
         "Khôi phục helper chưa được chứng minh; giữ bản ghi cũ để đối soát, không gửi lại thao tác; no action replay; stage={stage}; category={category}; {reason}"))
 }
 
+/// Public code and category for a refused maintenance preparation.
+///
+/// Only allowlisted complete driver messages and the driver's typed markers become
+/// public categories. Never serialize the raw chain: it may contain credentials or
+/// journal data. Preparation is observation-only, so every category is pre-effect.
 fn helper_maintenance_prepare_error(error: DeviceControlError) -> CommandError {
-    // Only allowlisted, complete driver messages become public categories.
-    // Never serialize the raw chain: it may contain credentials or journal data.
-    let cause = match &error {
-        DeviceControlError::Driver { operation: "prepareHelperMaintenance", message, .. } => message.as_str(),
-        _ => "",
+    let (udid, cause) = match &error {
+        DeviceControlError::Driver { operation: "prepareHelperMaintenance", udid, message } => (udid.as_str(), message.as_str()),
+        DeviceControlError::Driver { udid, .. } => (udid.as_str(), ""),
+        // Admission and lease errors already have their own public form.
+        _ => return CommandError::from(error),
     };
-    let (code, message) = match cause {
-        "live helper owner must settle normally" => ("HelperMaintenanceLiveOwner",
-            "Phiên helper hiện chưa được xác định là phiên lỗi cần khôi phục. Kiểm tra trạng thái điều khiển của đúng máy; không đặt lại phiên đang hoạt động."),
-        "helper inventory work still draining" | "helper clipboard work still draining" | "helper request still draining" => ("HelperMaintenanceDraining",
-            "Máy đang kết thúc thao tác helper. Chưa chuẩn bị khôi phục; đợi thao tác kết thúc rồi thử lại trên đúng máy."),
-        "helper clipboard/baseline cleanup unresolved" | "helper durable clipboard cleanup unresolved" => ("HelperMaintenanceCleanupPending",
-            "Phiên cũ còn thao tác clipboard chưa đối soát xong. Cần xử lý kết quả thao tác cũ trước khi khôi phục helper; chưa đặt lại phiên."),
-        "maintenance disabled in diagnostic mode" => ("HelperMaintenanceDisabled",
-            "Chế độ chẩn đoán không cho phép chuẩn bị khôi phục helper; chưa thực hiện khôi phục."),
-        "HelperMaintenanceRetainedOwnerMissing" => ("HelperMaintenanceRetainedOwnerMissing",
-            "Không có hồ sơ chủ phiên helper được giữ trên PC này; chưa đủ bằng chứng để chuẩn bị khôi phục. Kiểm tra đúng PC và dữ liệu phiên; không tự giành quyền hoặc đặt lại helper."),
-        "maintenance cannot guess or restore a lost boot IME" => ("HelperMaintenanceImeUnproved",
-            "Chưa chứng minh được bàn phím ban đầu để khôi phục helper. Giữ nguyên phiên và kiểm tra bằng chứng bàn phím; không tự đổi IME."),
-        _ => ("HelperMaintenancePrepareFailed",
-            "Không chuẩn bị được helper; chưa xác định nguyên nhân và chưa thực hiện khôi phục. Mở Chẩn đoán của đúng thiết bị; giữ nguyên dữ liệu phiên, không tự đặt lại helper."),
+    let device = helper_device_label(udid);
+    let (code, category, message): (&str, &str, String) = match cause {
+        "live helper owner must settle normally" => ("HelperMaintenanceLiveOwner", "live_owner",
+            "Phiên helper hiện chưa được xác định là phiên lỗi cần khôi phục. Kiểm tra trạng thái điều khiển của đúng máy; không đặt lại phiên đang hoạt động.".into()),
+        "helper inventory work still draining" | "helper clipboard work still draining" | "helper request still draining" => ("HelperMaintenanceDraining", "draining",
+            "Máy đang kết thúc thao tác helper. Chưa chuẩn bị khôi phục; đợi thao tác kết thúc rồi thử lại trên đúng máy.".into()),
+        "helper clipboard/baseline cleanup unresolved" | "helper durable clipboard cleanup unresolved" => ("HelperMaintenanceCleanupPending", "cleanup_pending",
+            "Phiên cũ còn thao tác clipboard chưa đối soát xong. Cần xử lý kết quả thao tác cũ trước khi khôi phục helper; chưa đặt lại phiên.".into()),
+        "maintenance disabled in diagnostic mode" => ("HelperMaintenanceDisabled", "disabled",
+            "Chế độ chẩn đoán không cho phép chuẩn bị khôi phục helper; chưa thực hiện khôi phục.".into()),
+        "HelperMaintenanceRetainedOwnerMissing" => ("HelperMaintenanceRetainedOwnerMissing", "retained_owner_missing",
+            "Không có hồ sơ chủ phiên helper được giữ trên PC này; chưa đủ bằng chứng để chuẩn bị khôi phục. Kiểm tra đúng PC và dữ liệu phiên; không tự giành quyền hoặc đặt lại helper.".into()),
+        "maintenance cannot guess or restore a lost boot IME" => ("HelperMaintenanceImeUnproved", "ime_unproved",
+            "Chưa chứng minh được bàn phím ban đầu để khôi phục helper. Giữ nguyên phiên và kiểm tra bằng chứng bàn phím; không tự đổi IME.".into()),
+        // Typed refusals are checked before the recovery fence they may also carry.
+        _ => match HelperShellIdentityRefused::from_chain_text(cause) {
+            Some(refusal) => (match refusal {
+                HelperShellIdentityRefused::Root => "HelperMaintenanceShellRoot",
+                HelperShellIdentityRefused::UnexpectedUid => "HelperMaintenanceShellUid",
+                HelperShellIdentityRefused::AndroidUser => "HelperMaintenanceAndroidUser",
+            }, refusal.category(), refusal.operator_message(&device)),
+            None if is_helper_recovery_required(cause) => ("HelperMaintenanceRecoveryRequired", "recovery_required",
+                "Hồ sơ helper trên PC này còn kế hoạch khôi phục dở hoặc không khớp đúng máy; chưa chuẩn bị kế hoạch mới. Mở Chẩn đoán của đúng thiết bị; giữ nguyên dữ liệu phiên, không tự đặt lại helper.".into()),
+            None if cause == "helper runtime inventory unavailable" || cause.starts_with("adb shell timed out after ") => ("HelperMaintenanceAdbUnavailable", "adb_unavailable",
+                "Không đọc được trạng thái máy qua ADB (lệnh lỗi hoặc quá thời gian); chưa thực hiện khôi phục. Kiểm tra cáp và kết nối ADB của đúng máy rồi thử lại.".into()),
+            None => ("HelperMaintenancePrepareFailed", "unknown",
+                "Không chuẩn bị được helper; chưa xác định nguyên nhân và chưa thực hiện khôi phục. Mở Chẩn đoán của đúng thiết bị; giữ nguyên dữ liệu phiên, không tự đặt lại helper.".into()),
+        },
     };
+    log::warn!("helper maintenance prepare refused; device={device}; stage=maintenance_prepare; category={category}; no action replay");
     CommandError::code(code, message)
 }
 
@@ -576,6 +614,32 @@ mod tests {
     }
 
     #[test]
+    fn helper_prepare_names_real_driver_chains_instead_of_unknown() {
+        use riviu_android_driver::riviu_agent::HelperRecoveryRequired;
+        // The control plane serializes the whole `{error:#}` chain, so the driver's
+        // typed fences arrive behind context prefixes, never as bare literals.
+        let fenced = |refusal| format!("{:#}", anyhow::Error::new(refusal).context(HelperRecoveryRequired));
+        for (cause, expected, hint) in [
+            (fenced(HelperShellIdentityRefused::Root), "HelperMaintenanceShellRoot", Some("`adb -s fixture-device unroot`")),
+            (format!("{}", HelperShellIdentityRefused::Root), "HelperMaintenanceShellRoot", Some("uid 0")),
+            (fenced(HelperShellIdentityRefused::UnexpectedUid), "HelperMaintenanceShellUid", Some("uid 2000")),
+            (fenced(HelperShellIdentityRefused::AndroidUser), "HelperMaintenanceAndroidUser", Some("người dùng chính")),
+            (HelperRecoveryRequired.to_string(), "HelperMaintenanceRecoveryRequired", None),
+            (format!("{:#}", anyhow::Error::new(HelperRecoveryRequired)
+                .context("fixture-secret-token raw journal context")), "HelperMaintenanceRecoveryRequired", None),
+            ("helper runtime inventory unavailable".into(), "HelperMaintenanceAdbUnavailable", None),
+        ] {
+            let error = helper_maintenance_prepare_error(DeviceControlError::Driver {
+                udid: "fixture-device".into(), operation: "prepareHelperMaintenance", message: cause.clone(),
+            });
+            assert_eq!(error.code, expected, "{cause}");
+            if let Some(hint) = hint { assert!(error.message.contains(hint), "{}", error.message); }
+            assert!(!error.message.contains("fixture-secret-token"));
+            assert!(!error.message.contains("HelperRecoveryRequired"));
+        }
+    }
+
+    #[test]
     fn helper_execute_only_reopens_proven_pre_dispatch_busy() {
         for (observation_only, operation, message, allowed) in [
             (false, "executeHelperMaintenance", "HelperMaintenanceBusyBeforeDispatch", true),
@@ -596,6 +660,10 @@ mod tests {
             ("maintenance effect unresolved; process present; no replay", "process_present", "maintenance_reconciliation"),
             ("fixture-secret-token owner clipboard credential envelope", "unknown", "maintenance_execution"),
             ("helper maintenance binding changed; no replay or retirement: fixture-secret-token", "unknown", "maintenance_execution"),
+            // The driver fence is the full Display text; the bare token never arrives.
+            ("HelperRecoveryRequired: prior owner cleanup unresolved; no claim or action replay", "recovery_required", "maintenance_execution"),
+            ("HelperRecoveryRequired: prior owner cleanup unresolved; no claim or action replay: HelperShellRootRefused: adb shell runs as root (uid 0); helper requires shell uid 2000; no root fallback",
+                "shell_root", "maintenance_execution"),
         ] {
             let error = DeviceControlError::Driver {
                 udid: "fixture-secret-owner".into(), operation: "executeHelperMaintenance", message: message.into(),

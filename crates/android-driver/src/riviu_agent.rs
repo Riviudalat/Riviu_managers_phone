@@ -29,7 +29,7 @@ use crate::adb::{self, AdbProgram};
 use crate::frames;
 
 mod runtime;
-pub use runtime::HelperRecoveryRequired;
+pub use runtime::{HelperRecoveryRequired, HelperShellIdentityRefused};
 pub(crate) use runtime::HelperMaintenanceBusyBeforeDispatch;
 
 /// Package installed on the phone.
