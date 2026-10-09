@@ -1709,6 +1709,19 @@ impl TikTokControls {
         }
     }
 
+    /// Every `content-desc` the top-left Back icon carries on this build, for checks that
+    /// scan the whole tree for a Back control.
+    ///
+    /// 45.7.3's `bix` reads the unresolved `@2131823215` ("Back" in `nxstring_default`,
+    /// versionCode 2024507030) on every capture we hold, never the text; the detail page's
+    /// `bj1` reads "Back" (set from code). Same static read as [`Self::description_anchor`].
+    pub fn back_descriptions(&self) -> &'static [&'static str] {
+        match (self.adaptive, self.package(), self.resource_version()) {
+            (false, "com.zhiliaoapp.musically", Some("45.7.3")) => &["Back", "@2131823215"],
+            _ => &["Back"],
+        }
+    }
+
     /// Whether a node's `content-desc` satisfies [`Self::description_anchor`].
     pub fn description_anchored(&self, control: TikTokControl, content_desc: &str) -> bool {
         self.description_anchor(control)

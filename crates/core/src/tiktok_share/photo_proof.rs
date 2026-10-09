@@ -415,16 +415,11 @@ pub(super) async fn capture_expanded_photo_link_counted(
         // Only inspect a measured post surface here. The public metadata below
         // still must match the complete submitted caption, account, ID and time.
         anyhow::ensure!(
-            !tree
-                .matching(
-                    package,
-                    ElementQuery::Description {
-                        value: "Back",
-                        exact: true
-                    }
-                )
-                .is_empty()
-                && labels
+            labels.back_descriptions().iter().any(|value| {
+                !tree
+                    .matching(package, ElementQuery::Description { value, exact: true })
+                    .is_empty()
+            }) && labels
                     .label(TikTokControl::Comments)
                     .is_some_and(|q| !tree.matching(package, q.to_query()).is_empty()),
             "not a measured post detail"

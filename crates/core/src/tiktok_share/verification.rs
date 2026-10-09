@@ -389,15 +389,11 @@ impl UnknownScreenShape {
             has_share_control: has(TikTokControl::Share),
             has_comments_control: has(TikTokControl::Comments),
             has_copy_control: tree.copy_control(package).is_ok_and(|row| row.is_some()),
-            has_back_control: !tree
-                .matching(
-                    package,
-                    ElementQuery::Description {
-                        value: "Back",
-                        exact: true,
-                    },
-                )
-                .is_empty(),
+            has_back_control: plan.labels.back_descriptions().iter().any(|value| {
+                !tree
+                    .matching(package, ElementQuery::Description { value, exact: true })
+                    .is_empty()
+            }),
         }
     }
 }
@@ -588,15 +584,11 @@ fn classify(tree: &Tree, plan: &PublishVerificationPlan) -> Screen {
         && !tree
             .matching(package, ElementQuery::ResourceIdSuffix(":id/desc"))
             .is_empty()
-        && !tree
-            .matching(
-                package,
-                ElementQuery::Description {
-                    value: "Back",
-                    exact: true,
-                },
-            )
-            .is_empty()
+        && plan.labels.back_descriptions().iter().any(|value| {
+            !tree
+                .matching(package, ElementQuery::Description { value, exact: true })
+                .is_empty()
+        })
     {
         return Screen::Post;
     }
