@@ -135,6 +135,11 @@ path = "src/bin/live_nurture_test.rs"
 required-features = ["diagnostics"]
 
 [[bin]]
+name = "source_probe"
+path = "src/bin/source_probe.rs"
+required-features = ["diagnostics"]
+
+[[bin]]
 name = "swipe_probe"
 path = "src/bin/swipe_probe.rs"
 required-features = ["diagnostics"]

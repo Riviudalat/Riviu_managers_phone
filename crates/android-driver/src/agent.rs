@@ -1371,6 +1371,45 @@ impl AgentClient {
             .unwrap_or_default()
             .to_string())
     }
+
+    /// This session's current server settings, for diagnostics that read one back.
+    ///
+    /// [`Self::send_once`], so describing a session never replaces it.
+    pub async fn settings(&self) -> anyhow::Result<Value> {
+        let value = self
+            .send_once(reqwest::Method::GET, "/appium/settings", None)
+            .await?;
+        Ok(value.get("value").cloned().unwrap_or(Value::Null))
+    }
+
+    /// Change settings on this session only, for diagnostics that try one and restore it.
+    ///
+    /// Production sets its settings once, in [`Self::prime_session`]. A replacement session
+    /// (`POST /session`) starts from the server defaults again, so a change made here does not
+    /// outlive the session it was made on.
+    pub async fn update_settings(&self, settings: Value) -> anyhow::Result<()> {
+        self.send_once(
+            reqwest::Method::POST,
+            "/appium/settings",
+            Some(json!({ "settings": settings })),
+        )
+        .await
+        .map(|_| ())
+    }
+
+    /// The server's `/status` body, which names its build. Reads no screen.
+    pub async fn server_status(&self) -> anyhow::Result<Value> {
+        let response = self
+            .http
+            .get(format!("{}/status", self.base))
+            .send()
+            .await
+            .context("đọc /status của agent Android")?;
+        response
+            .json()
+            .await
+            .context("đọc phản hồi /status của agent Android")
+    }
 }
 
 fn element_id(value: &Value) -> Option<String> {
