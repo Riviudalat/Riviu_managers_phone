@@ -1622,31 +1622,128 @@ pub fn parse_pidof(stdout: &str) -> Option<u64> {
     stdout.split_whitespace().next()?.parse().ok()
 }
 
-/// Parse the package name out of `dumpsys window windows | grep mCurrentFocus`.
+/// The read-only shell command whose `config:` line names the locale the system
+/// is running, which is what an app inflates its strings from.
+pub const ACTIVE_CONFIG_COMMAND: &str = "am get-config";
+
 /// The UI language the operator is actually looking at.
 ///
-/// **`persist.sys.locale`, never `ro.product.locale`.** Measured on the Redmi Note
-/// 12: `persist.sys.locale=vi-VN` while `ro.product.locale=en-GB`. The second is the
-/// factory default, so reading it says "English" about a phone whose TikTok labels
-/// are all Vietnamese — the same first-line trap as `wm size` and `mCurrentFocus`.
+/// Three sources, read in order of how directly they describe the screen:
+///
+/// 1. **The active configuration** (`am get-config`). This is what apps resolve
+///    their resources against, so when it names a locale it is the answer.
+/// 2. **`settings get system system_locales`**, first entry. Android 9 restores
+///    the user configuration from this setting at boot.
+/// 3. **`persist.sys.locale`**, never `ro.product.locale`. Measured on the Redmi
+///    Note 12: `persist.sys.locale=vi-VN` while `ro.product.locale=en-GB`, and
+///    the second is only the factory default.
+///
+/// **Riviu phone 31, 09/10/2026:** `persist.sys.locale=en-US`, `system_locales=vi-VN`,
+/// and a fresh TikTok 45.7.3 install rendered Vietnamese. Preferring the property
+/// read "English" about a Vietnamese screen and let the en-only effect gate pass.
+/// So when the configuration cannot be read and the two settings name different
+/// languages, the result is `None` (unknown): callers refuse effects on unknown
+/// rather than pick one.
 ///
 /// Returns the raw tag (`vi-VN`); reduce it with
 /// `riviu_core::tiktok_labels::normalise_language`.
-pub fn parse_locale(persist_locale: &str, system_locales: &str) -> Option<String> {
-    for candidate in [persist_locale, system_locales] {
-        // `settings get` prints `null` when unset, and that is a string, not None.
-        let value = candidate.trim();
-        if value.is_empty() || value.eq_ignore_ascii_case("null") {
-            continue;
-        }
-        // `system_locales` can be a comma-separated preference list; the first is
-        // the active one.
-        let first = value.split(',').next().unwrap_or(value).trim();
-        if !first.is_empty() {
-            return Some(first.to_string());
-        }
+pub fn parse_locale(
+    active_config: &str,
+    system_locales: &str,
+    persist_locale: &str,
+) -> Option<String> {
+    if let Some(active) = parse_config_locale(active_config) {
+        return Some(active);
     }
-    None
+    let setting = first_locale_entry(system_locales);
+    let property = first_locale_entry(persist_locale);
+    match (setting, property) {
+        (Some(setting), Some(property)) => {
+            (locale_language(&setting) == locale_language(&property)).then_some(setting)
+        }
+        (Some(only), None) | (None, Some(only)) => Some(only),
+        (None, None) => None,
+    }
+}
+
+/// The first entry of a locale value or preference list; `settings get` prints
+/// the word `null` when unset, and that is a string, not a locale.
+fn first_locale_entry(value: &str) -> Option<String> {
+    let value = value.trim();
+    if value.is_empty() || value.eq_ignore_ascii_case("null") {
+        return None;
+    }
+    let first = value.split(',').next().unwrap_or(value).trim();
+    locale_language(first).map(|_| first.to_string())
+}
+
+fn locale_language(tag: &str) -> Option<String> {
+    let language = tag.trim().split(['-', '_']).next()?.trim();
+    (!language.is_empty() && language.chars().all(|c| c.is_ascii_alphabetic()))
+        .then(|| language.to_ascii_lowercase())
+}
+
+/// The first locale of the `config:` line printed by `am get-config`.
+///
+/// AOSP prints `Configuration.resourceQualifierString`: `-`-joined qualifiers,
+/// optional `mccNNN`/`mncNN` first, then the locale list joined by `,` with each
+/// entry either `xx`/`xx-rYY` or the BCP-47 form `b+xx+Scrp+YY`, then `ldltr`
+/// and the rest. Anything that does not fit that shape is unread, never guessed:
+/// the caller then falls back to the settings.
+pub fn parse_config_locale(stdout: &str) -> Option<String> {
+    let line = stdout
+        .lines()
+        .find_map(|line| line.trim().strip_prefix("config:"))?
+        .trim();
+    let mut parts = line
+        .split('-')
+        .skip_while(|part| is_numeric_qualifier(part, "mcc") || is_numeric_qualifier(part, "mnc"));
+    let first = parts.next()?;
+    let (language_part, is_list) = match first.split_once(',') {
+        Some((head, _)) => (head, true),
+        None => (first, false),
+    };
+    if let Some(bcp47) = language_part.strip_prefix("b+") {
+        let mut subtags = bcp47.split('+');
+        let language = subtags.next()?;
+        if !is_language_subtag(language) {
+            return None;
+        }
+        return Some(
+            std::iter::once(language)
+                .chain(subtags.filter(|subtag| !subtag.is_empty()))
+                .collect::<Vec<_>>()
+                .join("-"),
+        );
+    }
+    if !is_language_subtag(language_part) {
+        return None;
+    }
+    // With one locale the region is the next `-` part; with a list the first
+    // entry ended at the comma, so whatever follows belongs to the next entry.
+    let region = if is_list {
+        None
+    } else {
+        parts.next().and_then(|part| {
+            let region = part.split(',').next().unwrap_or(part);
+            region
+                .strip_prefix('r')
+                .filter(|code| code.len() == 2 && code.chars().all(|c| c.is_ascii_uppercase()))
+        })
+    };
+    Some(match region {
+        Some(region) => format!("{language_part}-{region}"),
+        None => language_part.to_string(),
+    })
+}
+
+fn is_numeric_qualifier(part: &str, prefix: &str) -> bool {
+    part.strip_prefix(prefix)
+        .is_some_and(|digits| !digits.is_empty() && digits.chars().all(|c| c.is_ascii_digit()))
+}
+
+fn is_language_subtag(value: &str) -> bool {
+    (2..=3).contains(&value.len()) && value.chars().all(|c| c.is_ascii_lowercase())
 }
 
 /// Whether the display is composing, from `dumpsys power`.
@@ -3902,14 +3999,95 @@ drwxr-xr-x  32 root   root       788 2009-01-01 07:00 ..\n";
     fn ui_locale_comes_from_the_user_setting_not_the_factory_default() {
         // Verbatim from the Redmi Note 12: the two properties disagree, and only
         // the first describes what is on screen.
-        assert_eq!(parse_locale("vi-VN", "vi-VN").as_deref(), Some("vi-VN"));
+        assert_eq!(parse_locale("", "vi-VN", "vi-VN").as_deref(), Some("vi-VN"));
         // Falls back to the settings value when the property is unset.
-        assert_eq!(parse_locale("", "vi-VN").as_deref(), Some("vi-VN"));
+        assert_eq!(parse_locale("", "vi-VN", "").as_deref(), Some("vi-VN"));
         // `settings get` prints the word null when unset.
-        assert_eq!(parse_locale("null", "null"), None);
+        assert_eq!(parse_locale("", "null", "null"), None);
         // A preference list: the active locale is the first entry.
-        assert_eq!(parse_locale("", "vi-VN,en-GB").as_deref(), Some("vi-VN"));
-        assert_eq!(parse_locale("  ", "  "), None);
+        assert_eq!(
+            parse_locale("", "vi-VN,en-GB", "").as_deref(),
+            Some("vi-VN")
+        );
+        assert_eq!(parse_locale("  ", "  ", "  "), None);
+    }
+
+    /// Riviu phone 31, 09/10/2026: the property says English, the setting says
+    /// Vietnamese, and TikTok 45.7.3 rendered Vietnamese after a fresh install.
+    #[test]
+    fn a_property_that_disagrees_with_the_setting_is_not_the_ui_language() {
+        // Phone 31's exact values with no readable configuration: unknown, so the
+        // en-only effect gate refuses instead of trusting the property.
+        assert_eq!(parse_locale("", "vi-VN", "en-US"), None);
+        // An unreadable `am` answer is the same as no configuration.
+        assert_eq!(
+            parse_locale("Error: unknown command 'get-config'", "vi-VN", "en-US"),
+            None
+        );
+        // The active configuration settles the disagreement either way.
+        let vietnamese = "config: mcc452-mnc4-vi-rVN-ldltr-sw411dp-w411dp-h773dp-normal-long-notround-lowdr-nowidecg-port-notnight-420dpi-finger-keysexposed-nokeys-navhidden-nonav-v28\nabi: arm64-v8a,armeabi-v7a,armeabi\n";
+        assert_eq!(
+            parse_locale(vietnamese, "vi-VN", "en-US").as_deref(),
+            Some("vi-VN")
+        );
+        let english =
+            "config: en-rUS-ldltr-sw411dp-w411dp-h773dp-normal-long-port-notnight-420dpi-v28\r\n";
+        assert_eq!(
+            parse_locale(english, "vi-VN", "en-US").as_deref(),
+            Some("en-US")
+        );
+
+        // Other combinations read on this fleet agree on the language.
+        assert_eq!(
+            parse_locale("", "en-US,vi-VN,zh-CN", "en").as_deref(),
+            Some("en-US")
+        );
+        assert_eq!(parse_locale("", "null", "en").as_deref(), Some("en"));
+        assert_eq!(
+            parse_locale("", "en-US,km-KH", "en-US").as_deref(),
+            Some("en-US")
+        );
+        assert_eq!(parse_locale("", "null", "en-US").as_deref(), Some("en-US"));
+
+        // The effect gate sees what this parser returns: phone 31 stays refused
+        // whether its configuration reads Vietnamese or not at all.
+        for active in ["", vietnamese] {
+            let locale = parse_locale(active, "vi-VN", "en-US").unwrap_or_default();
+            assert!(riviu_core::tiktok_fleet_policy::require_fleet_build(
+                "com.zhiliaoapp.musically",
+                "45.7.3",
+                &locale
+            )
+            .is_err());
+        }
+    }
+
+    #[test]
+    fn the_active_configuration_names_its_first_locale() {
+        // One locale, no mcc/mnc.
+        assert_eq!(
+            parse_config_locale("config: en-ldltr-sw411dp-v28").as_deref(),
+            Some("en")
+        );
+        // A locale list: the first entry is the one in force.
+        assert_eq!(
+            parse_config_locale("config: mcc452-mnc2-vi-rVN,en-rUS-ldltr-v28").as_deref(),
+            Some("vi-VN")
+        );
+        assert_eq!(
+            parse_config_locale("config: en,vi-rVN-ldltr-v28").as_deref(),
+            Some("en")
+        );
+        // The BCP-47 spelling AOSP uses for scripts and three-letter languages.
+        assert_eq!(
+            parse_config_locale("config: b+sr+Latn+RS-ldltr-v28").as_deref(),
+            Some("sr-Latn-RS")
+        );
+        // No locale qualifier, or no config line at all, is unread.
+        assert_eq!(parse_config_locale("config: ldltr-sw411dp-v28"), None);
+        assert_eq!(parse_config_locale("config: mcc452-sw411dp-v28"), None);
+        assert_eq!(parse_config_locale("abi: arm64-v8a"), None);
+        assert_eq!(parse_config_locale(""), None);
     }
 
     #[test]

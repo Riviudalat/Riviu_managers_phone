@@ -374,6 +374,11 @@ impl AndroidUiSession {
     /// because label text is per-language: an English locator finds nothing on a
     /// Vietnamese UI (`riviu_core::tiktok_labels`).
     pub async fn ui_locale(&self) -> Option<String> {
+        let active = self
+            .adb
+            .shell(&self.serial, crate::adb::ACTIVE_CONFIG_COMMAND)
+            .await
+            .unwrap_or_default();
         let property = self
             .adb
             .shell(&self.serial, "getprop persist.sys.locale")
@@ -384,7 +389,7 @@ impl AndroidUiSession {
             .shell(&self.serial, "settings get system system_locales")
             .await
             .unwrap_or_default();
-        crate::adb::parse_locale(&property, &setting)
+        crate::adb::parse_locale(&active, &setting, &property)
     }
 
     /// The installed `versionName` of a package.

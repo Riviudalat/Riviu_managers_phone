@@ -114,7 +114,12 @@ Tương tác và Đăng bài. Readiness chỉ đọc khóa màn hình, transport
 Allowlist bản TikTok cho effect nằm ở `riviu_core::tiktok_fleet_policy`
 (`TIKTOK_FLEET_BUILDS`, mặc định đúng một bộ `com.zhiliaoapp.musically` / `45.7.3` /
 `en`). Package và `versionName` so khớp tuyệt đối; locale chỉ so phần ngôn ngữ trước
-`-`/`_`; phiên bản hoặc ngôn ngữ chưa đọc được bị từ chối. Mọi action trong
+`-`/`_`; phiên bản hoặc ngôn ngữ chưa đọc được bị từ chối. Locale Android
+(`adb::parse_locale`) lấy theo cấu hình đang chạy (`am get-config`), rồi mục đầu của
+`system_locales`, rồi `persist.sys.locale`. Khi không đọc được cấu hình mà hai giá trị
+sau khác ngôn ngữ thì locale coi như chưa đọc được: máy Riviu 31 báo
+`persist.sys.locale=en-US`, `system_locales=vi-VN` và TikTok 45.7.3 hiện tiếng Việt.
+Mọi action trong
 `action_capabilities` là effect, nên bản ngoài allowlist trả `buildNotAllowed` cho tất
 cả action và `require_actions` trả một thông báo duy nhất. Publish preflight thêm issue
 `build_not_allowed`, `publish_readiness` trả `buildNotAllowed`, và refusal trước

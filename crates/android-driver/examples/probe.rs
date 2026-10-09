@@ -190,7 +190,7 @@ async fn main() -> anyhow::Result<()> {
     // here, and both are printed: this is the measurement, not a lookup detail.
     println!("\n== label set for this build, UI language and app version ==");
     let locale = session.ui_locale().await;
-    println!("  ui locale   = {locale:?}   (persist.sys.locale, not ro.product.locale)");
+    println!("  ui locale   = {locale:?}   (active config, then system_locales, then persist.sys.locale)");
     let app_version = session
         .app_version_name(TIKTOK.as_str())
         .await

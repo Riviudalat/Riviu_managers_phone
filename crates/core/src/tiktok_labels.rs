@@ -615,7 +615,8 @@ impl LabelMatch {
 #[derive(Debug, Clone, Copy)]
 pub struct TikTokLabels {
     pub package: &'static str,
-    /// ISO 639-1 language of the *UI*, from `persist.sys.locale` — never from
+    /// ISO 639-1 language of the *UI*, from the active configuration (then
+    /// `system_locales`, then `persist.sys.locale`) — never from
     /// `ro.product.locale`, which is the factory default and read `en-GB` on a
     /// phone whose UI was Vietnamese.
     pub language: &'static str,

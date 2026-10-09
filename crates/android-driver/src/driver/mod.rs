@@ -1271,7 +1271,7 @@ impl AndroidDriver {
     ///
     /// Exactly the three keys `controls_for` is asked with, read the way the measuring
     /// sessions read them — package through the same resolver production uses, version
-    /// through `dumpsys` + the shared parser, locale from `persist.sys.locale`. No
+    /// through `dumpsys` + the shared parser, locale through [`adb::parse_locale`]. No
     /// session, no lease, no instrumentation: this exists for the diagnostics screen,
     /// which must be able to describe a phone it cannot drive.
     ///
@@ -1359,6 +1359,11 @@ impl AndroidDriver {
             .ok()
             .and_then(|out| riviu_core::tiktok_labels::parse_version_name(&out).map(str::to_string))
             .unwrap_or_default();
+        let active_config = self
+            .adb
+            .shell(serial, adb::ACTIVE_CONFIG_COMMAND)
+            .await
+            .unwrap_or_default();
         let locale_property = self
             .adb
             .shell(serial, "getprop persist.sys.locale")
@@ -1370,8 +1375,8 @@ impl AndroidDriver {
             .shell(serial, "settings get system system_locales")
             .await
             .unwrap_or_default();
-        let locale =
-            crate::adb::parse_locale(&locale_property, &locale_setting).unwrap_or_default();
+        let locale = adb::parse_locale(&active_config, &locale_setting, &locale_property)
+            .unwrap_or_default();
         Ok((package, version, locale))
     }
 
