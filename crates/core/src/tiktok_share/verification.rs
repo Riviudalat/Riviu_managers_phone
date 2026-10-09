@@ -1508,6 +1508,10 @@ impl Capture<'_> {
     }
 
     async fn capture(&mut self) -> Result<String, VerificationReason> {
+        // 45.7.3/en (box 31-50, 10/10): the open viewer can say "Post is being
+        // processed" while the Profile grid tile already carries the caption and
+        // time. Keep searching the grid; report Processing only if that fails too.
+        let mut processing = None;
         match self.visible_video().await {
             Ok(Some(link)) => return Ok(link),
             Ok(None)
@@ -1516,6 +1520,9 @@ impl Capture<'_> {
                 | VerificationReason::CaptionMismatch
                 | VerificationReason::SubmissionTooOld,
             ) => {}
+            Err(VerificationReason::Processing) => {
+                processing = Some(VerificationReason::Processing);
+            }
             Err(reason) => return Err(reason),
         }
         match super::photo_proof::capture_expanded_photo_link_counted(
@@ -1534,7 +1541,9 @@ impl Capture<'_> {
             }
             Err(error) => {
                 if let Some(reason) = self.matched_photo_failure(&error) {
-                    if !matches!(
+                    if reason == VerificationReason::Processing {
+                        processing = Some(reason);
+                    } else if !matches!(
                         reason,
                         VerificationReason::OtherPublication | VerificationReason::SubmissionTooOld
                     ) {
@@ -1567,7 +1576,7 @@ impl Capture<'_> {
                 }
             }
         }
-        let mut last_reason = VerificationReason::PostNotVisible;
+        let mut last_reason = processing.unwrap_or(VerificationReason::PostNotVisible);
         for page in 0..MAX_VIEWPORTS {
             self.diagnostic.viewports_visited = page + 1;
             let mut visited = HashSet::new();
@@ -1830,7 +1839,7 @@ impl Capture<'_> {
                     {
                         last_reason
                     } else if self.diagnostic.candidates_visited == 0 {
-                        VerificationReason::PostNotVisible
+                        processing.unwrap_or(VerificationReason::PostNotVisible)
                     } else if last_reason == VerificationReason::PostNotVisible {
                         VerificationReason::PaginationUnmeasured
                     } else {
