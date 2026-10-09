@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 
-import { describeError, controlFailure } from "./describeError";
+import { describeError, controlFailure, helperRecoveryMessage } from "./describeError";
 
 it("classifies ownership at one boundary without inferring an action from Script or a timeout", () => {
   expect(controlFailure({ code: "DeviceBusy", currentOwner: "script", message: "owned" })).toMatchObject({ owner: "script", canHandoff: true, summary: "Tác vụ tự động đang giữ máy" });
@@ -54,6 +54,33 @@ describe("describeError", () => {
     expect(message).toContain("Khôi phục helper");
     expect(message).toContain("phiên khác");
     expect(message).not.toMatch(/DeviceControlFailed|HelperRecoveryRequired|owner_conflict/);
+  });
+  it("offers helper recovery for the latched automatic-setup failure the roster publishes", () => {
+    // Exact text of `HELPER_SETUP_FAILURE` plus its categorized suffix (android-driver).
+    for (const latched of [
+      "Riviu Helper: runtime qualification failed; recovery required (no action replay)",
+      "Riviu Helper: runtime qualification failed; recovery required (no action replay); stage=runtime_acquisition; category=recovery_required; Cần đối soát phiên helper đang giữ; chưa nhận phiên thay thế.",
+    ]) {
+      expect(helperRecoveryMessage(latched)).toContain("Khôi phục helper");
+      expect(controlFailure(latched)).toMatchObject({ helper: true, summary: "Helper cần khôi phục" });
+    }
+  });
+  it("names a root adb shell with the exact unroot command, from the roster latch or the prepare command", () => {
+    const root = "adb shell đang chạy quyền root (uid 0) — helper từ chối root. Chạy `adb -s R58M12AB unroot` hoặc tắt adb root khi khởi động, rồi Khôi phục helper lại.";
+    const latched = `Riviu Helper: runtime qualification failed; recovery required (no action replay); stage=runtime_acquisition; category=shell_root; ${root}`;
+    expect(describeError(latched)).toBe(root);
+    expect(describeError({ code: "HelperMaintenanceShellRoot", message: root })).toBe(root);
+    expect(describeError(describeError(latched))).toBe(root);
+    expect(helperRecoveryMessage(latched)).toBe(root);
+    expect(describeError("HelperRecoveryRequired: prior owner cleanup unresolved; no claim or action replay: HelperShellRootRefused: adb shell runs as root (uid 0); helper requires shell uid 2000; no root fallback"))
+      .toContain("`adb -s <serial> unroot`");
+  });
+  it("keeps an unproved execution's own explanation even when it names a helper category", () => {
+    const message = describeError({
+      code: "HelperMaintenanceExecutionUnproved",
+      message: "Khôi phục helper chưa được chứng minh; giữ bản ghi cũ để đối soát, không gửi lại thao tác; no action replay; stage=maintenance_execution; category=recovery_required; Cần đối soát phiên helper đang giữ; chưa nhận phiên thay thế.",
+    });
+    expect(message).toContain("chưa được chứng minh");
   });
   it("does not promise publish reconnect for an offline preview", () => {
     const message = describeError({

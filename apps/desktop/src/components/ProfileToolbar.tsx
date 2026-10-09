@@ -212,7 +212,7 @@ export function ProfileToolbar({
           <button type="button" className="tb-btn" disabled={!canBatch || !onHelperMaintenance} onClick={async (event) => {
             event.currentTarget.closest("details")?.removeAttribute("open");
             try { await onHelperMaintenance?.(); } catch (error) { toastError("Khôi phục helper thất bại", error); }
-          }} title="Chuẩn bị và xác nhận khôi phục helper trên các máy Android đang kết nối trong phạm vi">
+          }} title={any ? "Chuẩn bị và xác nhận khôi phục helper trên các máy Android đã chọn" : "Chuẩn bị và xác nhận khôi phục helper trên các máy Android đang báo cần khôi phục helper"}>
             <Wrench size={16} aria-hidden="true" />Khôi phục helper
           </button>
           <button type="button" className="tb-btn" disabled={!canBatch || !onQuarantineMaintenance} onClick={async (event) => {

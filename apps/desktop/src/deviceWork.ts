@@ -77,6 +77,22 @@ export function deviceOperationalView(
   return { kind: "warning", label: "Cần xem", ownerLabel: null, tone: "warn" };
 }
 
+/**
+ * The toolbar's helper recovery without a selection: only connected Android phones whose
+ * cached control status or roster row reports a helper recovery need. Preparing every phone
+ * would only refuse healthy ones (live owner, no retained owner) and bury the real failures.
+ */
+export function helperRecoveryTargets(
+  devices: Pick<DeviceInfo, "udid" | "platform" | "status" | "lastError">[],
+  agentFor: (udid: string) => AgentStatus | undefined,
+): string[] {
+  return devices
+    .filter(device => device.platform === "android" && device.status !== "disconnected"
+      && (helperRecoveryMessage(agentFor(device.udid)?.message) !== null
+        || helperRecoveryMessage(device.lastError) !== null))
+    .map(device => device.udid);
+}
+
 function normalizeSearch(value: string): string {
   return value
     .normalize("NFD")

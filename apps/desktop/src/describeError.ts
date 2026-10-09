@@ -11,6 +11,32 @@ const GENERIC_CODES = new Set(["OperationFailed"]);
 
 const HELPER_RECOVERY_MESSAGE = "Helper còn giữ phiên cũ hoặc đang thuộc phiên khác; chưa thể xác minh điều khiển. Chọn Khôi phục helper trên đúng máy để xem và xác nhận kế hoạch. Không tự giành quyền hoặc gửi lại thao tác.";
 
+/** `HELPER_SETUP_FAILURE` in android-driver: the roster's latched automatic-setup failure. */
+const HELPER_SETUP_LATCH = "Riviu Helper: runtime qualification failed; recovery required";
+
+/**
+ * adbd shell-identity refusals, whichever boundary reports them: the driver's typed marker,
+ * the prepare command's code, the latched roster category, or the already-described text.
+ * The texts match `HelperShellIdentityRefused::operator_message` so describing twice is stable.
+ */
+const SHELL_IDENTITY_REFUSALS: { category: string; pattern: RegExp; message: (serial: string) => string }[] = [
+  {
+    category: "shell_root",
+    pattern: /HelperShellRootRefused:|^HelperMaintenanceShellRoot\b|^adb shell đang chạy quyền root \(uid 0\)/,
+    message: serial => `adb shell đang chạy quyền root (uid 0) — helper từ chối root. Chạy \`adb -s ${serial} unroot\` hoặc tắt adb root khi khởi động, rồi Khôi phục helper lại.`,
+  },
+  {
+    category: "shell_uid",
+    pattern: /HelperShellUidRefused:|^HelperMaintenanceShellUid\b|^adb shell không chạy bằng uid 2000/,
+    message: serial => `adb shell không chạy bằng uid 2000 (shell) — helper từ chối. Chạy \`adb -s ${serial} unroot\` hoặc tắt rồi bật lại Gỡ lỗi USB, rồi Khôi phục helper lại.`,
+  },
+  {
+    category: "android_user",
+    pattern: /HelperAndroidUserRefused:|^HelperMaintenanceAndroidUser\b|^Máy đang ở người dùng Android khác người dùng chính/,
+    message: () => "Máy đang ở người dùng Android khác người dùng chính (user 0) — helper chỉ chạy cho người dùng chính. Chuyển về người dùng chính trên máy, rồi Khôi phục helper lại.",
+  },
+];
+
 /** Recognize retained helper ownership at the shared IPC error boundary. */
 export function helperRecoveryMessage(cause: unknown): string | null {
   const message = typeof cause === "string" ? cause
@@ -18,7 +44,14 @@ export function helperRecoveryMessage(cause: unknown): string | null {
       : cause && typeof cause === "object"
         ? [Reflect.get(cause, "code"), Reflect.get(cause, "message")].filter(value => typeof value === "string").join(": ")
         : "";
+  // Categories are read only from the roster latch: an unproved execution names one too
+  // and keeps its own explanation.
+  const latched = message.includes(HELPER_SETUP_LATCH);
+  const category = latched ? /; category=([a-z_]+);/.exec(message)?.[1] : undefined;
+  const identity = SHELL_IDENTITY_REFUSALS.find(refusal => refusal.category === category || refusal.pattern.test(message));
+  if (identity) return identity.message(/`adb -s ([^`\s]+) unroot`/.exec(message)?.[1] ?? "<serial>");
   return /HelperRecoveryRequired|owner_conflict|helper_recovery_required/.test(message)
+    || latched
     || message === HELPER_RECOVERY_MESSAGE ? HELPER_RECOVERY_MESSAGE : null;
 }
 

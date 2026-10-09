@@ -84,6 +84,7 @@ import { resolveAutomationTarget } from "./automationTargets";
 import {
   deviceMatchesFleetFilter,
   deviceOperationalView,
+  helperRecoveryTargets,
 } from "./deviceWork";
 import type { DeviceOperationalFilter, DeviceWorkOwnerReadState } from "./deviceWork";
 import { forgetDepartedViews, useViewClient } from "./viewStore";
@@ -1059,7 +1060,16 @@ function App() {
                   }
                 }}
                 onStop={() => setSelected([])}
-                onHelperMaintenance={() => runHelperMaintenance(selected.length ? selected : devices.map(device => device.udid))}
+                onHelperMaintenance={async () => {
+                  if (selected.length) return runHelperMaintenance(selected);
+                  // No selection: only phones that report a helper recovery need.
+                  const blocked = helperRecoveryTargets(devices, cachedAgent);
+                  if (!blocked.length) {
+                    pushToast("info", "Không có máy cần khôi phục helper", "Không máy Android nào đang báo cần khôi phục helper. Chọn máy cụ thể nếu vẫn muốn kiểm tra phiên helper của máy đó.");
+                    return;
+                  }
+                  return runHelperMaintenance(blocked);
+                }}
                 onQuarantineMaintenance={async () => {
                   if (quarantineMaintenanceRunning.current) {
                     pushToast("warn", "Đang khôi phục phiên điều khiển", "Chờ lượt hiện tại kết thúc; không chạy lặp.");

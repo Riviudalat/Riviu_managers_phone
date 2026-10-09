@@ -4,6 +4,7 @@ import {
   deviceMatchesFleetFilter,
   deviceOperationalView,
   deviceWorkOwnerLabel,
+  helperRecoveryTargets,
 } from "./deviceWork";
 import type { AgentStatus, DeviceInfo, DeviceActivity } from "./types";
 
@@ -91,6 +92,46 @@ describe("device operational status", () => {
     expect(deviceOperationalView(readyDevice, null, "known", { ...agent, features: [] }).kind).toBe("connected");
     expect(deviceOperationalView(readyDevice, null, "known", { ...agent, sessionReady: false }).kind).toBe("connected");
     expect(deviceOperationalView({ ...readyDevice, platform: "ios" }, null).kind).toBe("ready");
+  });
+
+  it("offers helper recovery on the tile for the roster's latched setup failure", () => {
+    const latched: AgentStatus = {
+      udid: readyDevice.udid, state: "repairRequired", artifactId: "uiautomator", artifactVersion: "1",
+      bundleId: "io.appium.uiautomator2.server", protocolVersion: 1, features: [],
+      installedVersion: "1", installedBuild: null, authReady: false, mjpegReady: true, sessionReady: false,
+      message: "Riviu Helper: runtime qualification failed; recovery required (no action replay); stage=runtime_acquisition; category=recovery_required; Cần đối soát phiên helper đang giữ; chưa nhận phiên thay thế.",
+    };
+    expect(deviceOperationalView(readyDevice, null, "known", latched)).toMatchObject({
+      kind: "warning", label: "Cần khôi phục helper", helperRecovery: true,
+    });
+  });
+});
+
+describe("toolbar helper recovery scope", () => {
+  const status = (udid: string, message: string | null): AgentStatus => ({
+    udid, state: message ? "repairRequired" : "ready", artifactId: "uiautomator", artifactVersion: "1",
+    bundleId: "io.appium.uiautomator2.server", protocolVersion: 1, features: message ? [] : ["helperReady"],
+    installedVersion: "1", installedBuild: null, authReady: !message, mjpegReady: true, sessionReady: !message, message,
+  });
+  const latch = "Riviu Helper: runtime qualification failed; recovery required (no action replay)";
+
+  it("targets only connected Android phones that report a helper recovery need", () => {
+    const devices: DeviceInfo[] = [
+      { ...readyDevice, udid: "healthy" },
+      { ...readyDevice, udid: "latched", status: "error" },
+      { ...readyDevice, udid: "roster-only", status: "error", lastError: latch },
+      { ...readyDevice, udid: "offline", status: "disconnected" },
+      { ...readyDevice, udid: "iphone", platform: "ios" },
+      { ...readyDevice, udid: "other-failure", status: "error" },
+    ];
+    const agents = new Map([
+      ["healthy", status("healthy", null)],
+      ["latched", status("latched", `${latch}; stage=runtime_acquisition; category=shell_root; adb shell đang chạy quyền root (uid 0)`)],
+      ["offline", status("offline", latch)],
+      ["iphone", status("iphone", "HelperRecoveryRequired: owner_conflict")],
+      ["other-failure", status("other-failure", "the agent on other-failure did not answer /status within 10 seconds")],
+    ]);
+    expect(helperRecoveryTargets(devices, udid => agents.get(udid))).toEqual(["latched", "roster-only"]);
   });
 
   it.each([

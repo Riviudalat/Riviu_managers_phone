@@ -475,6 +475,36 @@ describe("device operational identity", () => {
     }
   });
 
+  it("scopes toolbar helper recovery without a selection to phones that report the need", async () => {
+    const api = await import("./api");
+    const healthy = { ...androidPhone, udid: "healthy-phone", name: "Máy khỏe" };
+    vi.mocked(api.listDevices).mockResolvedValue([androidPhone, healthy]);
+    vi.mocked(api.listDeviceWorkStates).mockResolvedValue([]);
+    const status = (udid: string, message: string | null) => ({
+      udid, state: message ? "repairRequired" as const : "ready" as const, artifactId: "uiautomator", artifactVersion: "1",
+      bundleId: "io.appium.uiautomator2.server", protocolVersion: 1, features: message ? [] : ["helperReady"], installedVersion: "1",
+      installedBuild: null, authReady: !message, mjpegReady: true, sessionReady: !message, message,
+    });
+    vi.mocked(api.agentListStatuses).mockResolvedValue([
+      status(androidPhone.udid, "Riviu Helper: runtime qualification failed; recovery required (no action replay); stage=runtime_acquisition; category=recovery_required; Cần đối soát phiên helper đang giữ; chưa nhận phiên thay thế."),
+      status(healthy.udid, null),
+    ]);
+    vi.mocked(api.agentHelperMaintenancePrepare).mockRejectedValue({ code: "HelperMaintenanceRecoveryRequired", message: "fixture refusal" });
+    try {
+      render(<App />);
+      const tile = (await screen.findAllByTestId("device-tile")).find(item => within(item).queryByText("Redmi"));
+      expect(await within(tile!).findByText("Cần khôi phục helper")).toBeVisible();
+      const maintenance = screen.getByText("Bảo trì", { selector: "summary" });
+      await userEvent.click(maintenance);
+      await userEvent.click(within(maintenance.closest("details")!).getByRole("button", { name: "Khôi phục helper" }));
+      await waitFor(() => expect(api.agentHelperMaintenancePrepare).toHaveBeenCalledExactlyOnceWith(androidPhone.udid));
+      expect(api.agentHelperMaintenancePending).not.toHaveBeenCalledWith(healthy.udid);
+    } finally {
+      vi.mocked(api.agentListStatuses).mockResolvedValue([]);
+      vi.mocked(api.agentHelperMaintenancePrepare).mockReset();
+    }
+  });
+
   it("refreshes current activity on the existing poll and clears it when the owner ends", async () => {
     const api = await import("./api");
     vi.mocked(api.listDevices).mockResolvedValue([androidPhone]);
