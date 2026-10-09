@@ -1484,6 +1484,36 @@ mod tests {
     }
 
     #[test]
+    fn global_in_app_precise_location_dialog_acts_only_on_not_now() {
+        let source = include_str!(
+            "../../fixtures/tiktok-publish/musically-45.7.3-en/real-20261009-precise-location-dialog.xml"
+        );
+        let labels =
+            crate::tiktok_labels::controls_for("com.zhiliaoapp.musically", "en", "45.7.3").unwrap();
+        assert!(optional_decline(&tree(source.into()), labels).is_none());
+        let CatalogMatch::Act { entry, button, .. } = catalog_popup(&tree(source.into()), labels)
+        else {
+            panic!("the real precise-location capture must act");
+        };
+        assert_eq!(entry.key, "precise_location_dialog");
+        assert_eq!(
+            (button.x, button.y, button.width, button.height),
+            (172.0, 1273.0, 367.0, 125.0)
+        );
+        for changed in [
+            source.replace("text=\"Not now\"", "text=\"Later\""),
+            source.replace("text=\"Allow\"", "text=\"OK\""),
+            source.replace("device's approximate location", "device's contacts"),
+            source.replace("id/zp_", "id/other"),
+        ] {
+            assert!(!matches!(
+                catalog_popup(&tree(changed), labels),
+                CatalogMatch::Act { .. }
+            ));
+        }
+    }
+
+    #[test]
     fn global_contact_settings_prompt_only_permits_the_negative_action() {
         let source =
             include_str!("../../fixtures/tiktok-publish/contacts-settings-global45.4.3.fixture");

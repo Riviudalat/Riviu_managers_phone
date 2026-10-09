@@ -37,6 +37,15 @@
         "original sound - fixture_creator by fixture_creator",
         "Fixture Place"
       ]
+    },
+    {
+      "file": "real-20261009-precise-location-dialog.xml",
+      "sha256": "3f4ba2dd504346fc5916b7136a10b91faa782e6b5843e689c36cef304484ab3b",
+      "source": "target/acceptance-20261010/evidence-for-workers/precise-location-31/hierarchy.xml",
+      "sourceSha256": "3f4ba2dd504346fc5916b7136a10b91faa782e6b5843e689c36cef304484ab3b",
+      "device": "Riviu #31, ce021712b32e6c950c, captured 2026-10-09T22:25:36+07:00 by the Riviu unknown-modal review capture (typed text masked)",
+      "screen": "in-app \"Turn on precise location\" Tux dialog (Not now / Allow) over the composer post screen",
+      "sanitized": []
     }
   ]
 }

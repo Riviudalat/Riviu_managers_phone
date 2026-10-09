@@ -69,6 +69,33 @@ pub(super) const CATALOG: &[CatalogPopup] = &[
         spent: "hộp thoại xin vị trí vẫn còn sau một lần bấm Cancel — không bấm lại, cần người vận hành kiểm tra",
         shadow: "[chạy bóng] nhận ra hộp thoại xin vị trí — khi được bật sẽ bấm Cancel; lần này Riviu không bấm, cần người vận hành",
     },
+    // Proven: crates/core/fixtures/tiktok-publish/musically-45.7.3-en/
+    // real-20261009-precise-location-dialog.xml, a real Global 45.7.3/en capture over the
+    // composer post screen (Riviu #31). Title zp_ and body zp9 sit in d93, the id-less
+    // Buttons in the x4 bar. Not now keeps the approximate location; Allow is never pressed.
+    // decline_precise_location in dialogs.rs owns the different OS-style "Don't allow" form.
+    CatalogPopup {
+        key: "precise_location_dialog",
+        mode: PopupMode::Act,
+        class: PopupClass::Dismissable,
+        container: DIALOG,
+        anchors: &[
+            id("d93"),
+            id("x4"),
+            part(Some("zp_"), Some(TEXT_VIEW), Some("Turn on precise location"), None),
+            part(
+                Some("zp9"),
+                Some(TEXT_VIEW),
+                Some("For more relevant content and ads, and location-based features, allow TikTok to use your device's precise location. Otherwise, TikTok will continue to use your device's approximate location."),
+                None,
+            ),
+            part(Some(""), Some(BUTTON), Some("Allow"), None),
+        ],
+        dismiss: Some(part(Some(""), Some(BUTTON), Some("Not now"), None)),
+        acted: "đóng hộp thoại \"Turn on precise location\" của TikTok (bấm Not now, giữ vị trí gần đúng, không bấm Allow); chờ đọc lại màn hình",
+        spent: "hộp thoại \"Turn on precise location\" vẫn còn sau một lần bấm Not now — không bấm lại, không bấm Allow; cần người vận hành kiểm tra",
+        shadow: "[chạy bóng] nhận ra hộp thoại \"Turn on precise location\" — khi được bật sẽ bấm Not now; lần này Riviu không bấm, cần người vận hành",
+    },
     // Proven: target/sound-picker-probe-20261009/raw/nav_exit.xml (real 45.7.3/en). Kept in
     // shadow: the composer walk-back owns this menu and taps its Discard row itself, so the
     // shared step must not turn it into a block. Discard acts at once, with no confirmation.
