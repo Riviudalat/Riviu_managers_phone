@@ -240,6 +240,10 @@ pub(crate) trait TargetDriver: Send + Sync {
     /// A short name for logs and refusal messages.
     fn kind(&self) -> &'static str;
 
+    /// The account this assignment proved on the phone. A driver that dismisses a popup
+    /// while opening the target reads it again before any public action.
+    fn bind_account(&self, _account: &str) {}
+
     /// Remove a composer left armed by a process that died before its effect gate.
     ///
     /// A successful cleanup returns to the feed. The campaign therefore calls this before

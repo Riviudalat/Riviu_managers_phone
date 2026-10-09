@@ -8,8 +8,10 @@ use super::{
     bare_author_label, confirm_target_from_share_link, read_author_label,
     read_target_identity_caption, TargetArrival, TargetCardContinuityLost, TargetLinkMismatch,
 };
+use crate::app_automation::dialogs::{step_before_deadline_with_tree, PopupBudget, PopupStep};
 use crate::driver::{ElementQuery, UiSession};
 use crate::tiktok_labels::{TikTokControl, TikTokControls};
+use crate::ui_automation::runtime::ReadWaitResult;
 use crate::ui_automation::tree::Tree;
 use crate::ResolvedTikTokTarget;
 
@@ -21,6 +23,8 @@ const CARD_WINDOW: Duration = Duration::from_secs(30);
 const CARD_POLL: Duration = Duration::from_millis(350);
 const DISPATCH_SETTLE: Duration = Duration::from_millis(900);
 const UNAVAILABLE_TEXT: &str = "This video is unavailable";
+const POPUP_BLOCKED_SAYS: &str =
+    "một lớp phủ chặn bài đích — Riviu không bấm gì; cần người vận hành kiểm tra";
 
 #[derive(Debug, thiserror::Error)]
 enum CardObservationError {
@@ -74,6 +78,21 @@ pub async fn open_exact_target_by_hierarchy(
     expected: &ResolvedTikTokTarget,
     stop: &AtomicBool,
 ) -> anyhow::Result<TargetArrival> {
+    open_target(session, labels, target_package, expected, stop, true)
+        .await
+        .map(|(arrival, _)| arrival)
+}
+
+/// [`open_exact_target_by_hierarchy`], also saying whether a popup was dismissed on the way.
+/// A dismissal voids every earlier proof on this phone: the caller renews its account proof
+/// and opens the target again before any public action.
+pub async fn open_exact_target_reporting_popups(
+    session: &dyn UiSession,
+    labels: TikTokControls,
+    target_package: &str,
+    expected: &ResolvedTikTokTarget,
+    stop: &AtomicBool,
+) -> anyhow::Result<(TargetArrival, bool)> {
     open_target(session, labels, target_package, expected, stop, true).await
 }
 
@@ -84,7 +103,7 @@ async fn open_target(
     expected: &ResolvedTikTokTarget,
     stop: &AtomicBool,
     inspect_current: bool,
-) -> anyhow::Result<TargetArrival> {
+) -> anyhow::Result<(TargetArrival, bool)> {
     ensure_not_cancelled(stop)?;
     anyhow::ensure!(
         labels.label(TikTokControl::Comments).is_some(),
@@ -103,7 +122,7 @@ async fn open_target(
         if let Ok(arrival) = confirm_target_from_share_link(session, labels, expected).await {
             ensure_not_cancelled(stop)?;
             ensure_foreground(session, target_package).await?;
-            return Ok(arrival);
+            return Ok((arrival, false));
         }
     }
 
@@ -117,8 +136,10 @@ async fn open_target(
     // both lack a changed author. The URL readback below is the only arrival authority.
     let mut deadline = Instant::now() + CARD_WINDOW;
     let mut redispatched = false;
-    let mut declined_contacts = false;
     let mut continuity_retry_used = false;
+    // One budget for this open: each measured popup gets at most one press here.
+    let mut popup = PopupBudget::default();
+    let mut dismissed = false;
     tokio::time::sleep(DISPATCH_SETTLE).await;
     loop {
         ensure_not_cancelled(stop)?;
@@ -126,20 +147,28 @@ async fn open_target(
         if matches!(observation, Err(CardObservationError::PostUnavailable)) {
             return Err(CardObservationError::PostUnavailable.into());
         }
-        if !declined_contacts
-            && matches!(observation, Err(CardObservationError::CommentsUnreadable))
+        if matches!(observation, Err(CardObservationError::CommentsUnreadable))
             && session.supports_accessibility_readback()
         {
-            let tree = crate::ui_automation::tree::Tree::parse(
-                session.hierarchy_source_snapshot().await?,
-            )?;
-            if let Some(button) = crate::app_automation::dialogs::decline_contacts(&tree, labels) {
-                ensure_not_cancelled(stop)?;
-                ensure_foreground(session, target_package).await?;
-                session.tap(button.centre()).await?;
-                declined_contacts = true;
-                tokio::time::sleep(CARD_POLL).await;
-                continue;
+            // The shared popup step replaces the single contacts decline: same measured
+            // detectors, one press per popup, and unknown modals stop here untouched.
+            match step_before_deadline_with_tree(session, labels, &mut popup, deadline, stop, stop)
+                .await?
+            {
+                ReadWaitResult::Ready((PopupStep::Dismissed, _)) => {
+                    dismissed = true;
+                    tokio::time::sleep(CARD_POLL).await;
+                    continue;
+                }
+                ReadWaitResult::Ready((PopupStep::Blocked, _)) => {
+                    anyhow::bail!(
+                        "target_exact_open: {}",
+                        popup.says().unwrap_or(POPUP_BLOCKED_SAYS)
+                    );
+                }
+                ReadWaitResult::Cancelled => anyhow::bail!("target_exact_open: cancelled"),
+                ReadWaitResult::Ready((PopupStep::Clear, _)) | ReadWaitResult::DeadlineExceeded => {
+                }
             }
         }
         // A cold Trill launch can consume the VIEW intent and remain on a LIVE
@@ -165,7 +194,7 @@ async fn open_target(
             ensure_not_cancelled(stop)?;
             ensure_foreground(session, target_package).await?;
             match proof {
-                Ok(arrival) => return Ok(arrival),
+                Ok(arrival) => return Ok((arrival, dismissed)),
                 Err(error)
                     if error.downcast_ref::<TargetLinkMismatch>().is_some()
                         && !redispatched
@@ -257,13 +286,16 @@ struct DetailCard {
 /// 3. "This video is unavailable", a feed card, another app or an unreadable card refuse
 ///    once the loading window ends. The link may be dispatched one more time when no detail
 ///    page has appeared; that is navigation, never a public action.
+///
+/// The shared popup step runs on every read. A dismissal voids what was read before it and
+/// is reported in the returned flag, so the caller can also renew its account proof.
 async fn open_detail_target(
     session: &dyn UiSession,
     labels: TikTokControls,
     target_package: &str,
     expected: &ResolvedTikTokTarget,
     stop: &AtomicBool,
-) -> anyhow::Result<TargetArrival> {
+) -> anyhow::Result<(TargetArrival, bool)> {
     let link = detail_link(&expected.content_id)?;
     if !detail_baseline_clear(session, labels, target_package).await {
         ensure_not_cancelled(stop)?;
@@ -286,12 +318,49 @@ async fn open_detail_target(
 
     let mut deadline = Instant::now() + CARD_WINDOW;
     let mut redispatched = false;
-    let mut declined_contacts = false;
     let mut previous: Option<(u64, DetailCard)> = None;
+    // One budget for this open: each measured popup gets at most one press here.
+    let mut popup = PopupBudget::default();
+    let mut dismissed = false;
     tokio::time::sleep(DISPATCH_SETTLE).await;
     loop {
         ensure_not_cancelled(stop)?;
-        match observe_detail_in_foreground(session, labels, target_package).await {
+        // The popup step reads the snapshot the card is then observed on, so a proof is
+        // only ever taken from a read that showed no popup.
+        let observation = if session.supports_accessibility_readback() {
+            match step_before_deadline_with_tree(session, labels, &mut popup, deadline, stop, stop)
+                .await
+            {
+                Ok(ReadWaitResult::Ready((PopupStep::Clear, Some(tree)))) => {
+                    match observe_detail(&tree, labels) {
+                        Ok(card) => Ok((tree.generation, card)),
+                        Err(error) => Err((error, Some(tree))),
+                    }
+                }
+                Ok(ReadWaitResult::Ready((PopupStep::Dismissed, _))) => {
+                    // Whatever was read before the popup went is no longer proof.
+                    previous = None;
+                    dismissed = true;
+                    tokio::time::sleep(CARD_POLL).await;
+                    continue;
+                }
+                Ok(ReadWaitResult::Ready((PopupStep::Blocked, _))) => {
+                    anyhow::bail!(
+                        "target_detail_open: {}",
+                        popup.says().unwrap_or(POPUP_BLOCKED_SAYS)
+                    );
+                }
+                Ok(ReadWaitResult::Cancelled) => {
+                    anyhow::bail!("target_exact_open: cancelled");
+                }
+                Ok(ReadWaitResult::Ready((PopupStep::Clear, None)))
+                | Ok(ReadWaitResult::DeadlineExceeded)
+                | Err(_) => Err((CardObservationError::HierarchyUnreadable, None)),
+            }
+        } else {
+            observe_detail_in_foreground(session, labels, target_package).await
+        };
+        match observation {
             Ok((generation, card)) => {
                 if previous
                     .as_ref()
@@ -299,27 +368,17 @@ async fn open_detail_target(
                 {
                     ensure_not_cancelled(stop)?;
                     ensure_foreground(session, target_package).await?;
-                    return Ok(TargetArrival::Identified {
-                        author_label: card.author,
-                    });
+                    return Ok((
+                        TargetArrival::Identified {
+                            author_label: card.author,
+                        },
+                        dismissed,
+                    ));
                 }
                 previous = Some((generation, card));
             }
             Err((CardObservationError::PostUnavailable, _)) => {
                 return Err(CardObservationError::PostUnavailable.into());
-            }
-            Err((CardObservationError::CommentsUnreadable, Some(tree))) if !declined_contacts => {
-                previous = None;
-                if let Some(button) =
-                    crate::app_automation::dialogs::decline_contacts(&tree, labels)
-                {
-                    ensure_not_cancelled(stop)?;
-                    ensure_foreground(session, target_package).await?;
-                    session.tap(button.centre()).await?;
-                    declined_contacts = true;
-                    tokio::time::sleep(CARD_POLL).await;
-                    continue;
-                }
             }
             Err((CardObservationError::NotDetailPage, _))
                 if !redispatched
@@ -479,7 +538,9 @@ pub async fn open_pinned_target_by_hierarchy(
     expected: &ResolvedTikTokTarget,
     stop: &AtomicBool,
 ) -> anyhow::Result<TargetArrival> {
-    open_target(session, labels, target_package, expected, stop, false).await
+    open_target(session, labels, target_package, expected, stop, false)
+        .await
+        .map(|(arrival, _)| arrival)
 }
 
 async fn live_feed_placeholder(session: &dyn UiSession, package: &str) -> bool {

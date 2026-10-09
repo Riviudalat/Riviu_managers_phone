@@ -2944,6 +2944,7 @@ async fn run_cohort(
                     let labels=crate::tiktok_labels::controls_for_runtime(&opened_package,&language,&version).context("Chưa nhận diện TikTok trên máy")?;
                     let account=crate::tiktok_share::observe_publish_account(session.as_ref(),&labels).await?;
                     anyhow::ensure!(account.eq_ignore_ascii_case(role.username.trim_start_matches('@')),"Tài khoản trên máy không khớp vai {}",role.role_id);
+                    driver.bind_account(&account);
                     interaction_mutation!(db, "observed_account", [prepared, account], |db| db.record_observed_interaction_account(&prepared.actor_udid,&account))?;
                 } else if request.actions.any() && session.supports_accessibility_readback() {
                     let language=session.ui_language().await.context("Chưa đọc được ngôn ngữ TikTok")?;
@@ -2954,6 +2955,7 @@ async fn run_cohort(
                         let expected=request.seeding.as_ref().and_then(|s|s.expected_accounts.get(&prepared.actor_udid)).cloned().unwrap_or(db.get_device_meta(&prepared.actor_udid)?.handle);
                         anyhow::ensure!(!expected.is_empty()&&account.eq_ignore_ascii_case(expected.trim().trim_start_matches('@')), "Tài khoản trên máy không khớp nick đã gán; chưa tương tác");
                     }
+                    driver.bind_account(&account);
                     interaction_mutation!(db, "observed_account", [prepared, account], |db| db.record_observed_interaction_account(&prepared.actor_udid,&account))?;
                 }
                 if actions.comment && request.mention_parent && prepared.parent_ordinal.is_some() {
@@ -3774,23 +3776,54 @@ pub(crate) async fn open_hierarchy_target_confirmed(
     target: &crate::ResolvedTikTokTarget,
     target_package: &str,
 ) -> anyhow::Result<TargetProof> {
+    open_hierarchy_target_renewing(session, labels, target, target_package, None).await
+}
+
+/// Opens of one target before a popup that keeps coming back goes to the operator.
+const POPUP_PROOF_ROUNDS: usize = 2;
+
+/// Open and prove the target. A popup dismissed on the way voids every proof taken before
+/// it, so the account (when the assignment proved one) is read again and the target opened
+/// again from that fresh state; only an open with no dismissal authorizes the action.
+async fn open_hierarchy_target_renewing(
+    session: &dyn crate::UiSession,
+    labels: crate::tiktok_labels::TikTokControls,
+    target: &crate::ResolvedTikTokTarget,
+    target_package: &str,
+    account: Option<&str>,
+) -> anyhow::Result<TargetProof> {
     let never = AtomicBool::new(false);
-    match crate::interaction_hierarchy::open_exact_target_by_hierarchy(
-        session,
-        labels,
-        target_package,
-        target,
-        &never,
-    )
-    .await?
-    {
-        crate::interaction_hierarchy::TargetArrival::Identified { .. } => {
-            Ok(TargetProof::Identified)
+    for _ in 0..POPUP_PROOF_ROUNDS {
+        let (arrival, dismissed) =
+            crate::interaction_hierarchy::open_exact_target_reporting_popups(
+                session,
+                labels,
+                target_package,
+                target,
+                &never,
+            )
+            .await?;
+        if !dismissed {
+            return match arrival {
+                crate::interaction_hierarchy::TargetArrival::Identified { .. } => {
+                    Ok(TargetProof::Identified)
+                }
+                crate::interaction_hierarchy::TargetArrival::Structural => {
+                    anyhow::bail!("target_link_proof: exact post identity not confirmed")
+                }
+            };
         }
-        crate::interaction_hierarchy::TargetArrival::Structural => {
-            anyhow::bail!("target_link_proof: exact post identity not confirmed")
+        if let Some(expected) = account {
+            let observed = crate::tiktok_share::observe_publish_account(session, &labels).await?;
+            anyhow::ensure!(
+                observed.eq_ignore_ascii_case(expected.trim().trim_start_matches('@')),
+                "Tài khoản trên máy không khớp nick đã gán sau khi đóng hộp thoại; chưa tương tác"
+            );
         }
     }
+    anyhow::bail!(
+        "target_link_proof: hộp thoại vẫn hiện lại sau {POPUP_PROOF_ROUNDS} lần mở bài — không tương tác; cần người vận hành kiểm tra"
+    )
 }
 
 async fn open_comment_for_ocr(
@@ -4053,6 +4086,8 @@ struct HierarchyTargetDriver<'a> {
     target_package: &'a str,
     labels: crate::tiktok_labels::TikTokControls,
     screen: (f64, f64),
+    /// The account this assignment proved on the phone, renewed after a popup dismissal.
+    account: std::sync::Mutex<Option<String>>,
 }
 
 impl HierarchyTargetDriver<'_> {
@@ -4209,7 +4244,26 @@ impl TargetDriver for HierarchyTargetDriver<'_> {
         // arrival check is safe, but the flag this campaign holds is permanently false
         // on purpose (see `execute_thread_campaign`), so passing it would only add a
         // parameter that never changes.
-        open_hierarchy_target_confirmed(session, self.labels, target, self.target_package).await
+        let account = self
+            .account
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .clone();
+        open_hierarchy_target_renewing(
+            session,
+            self.labels,
+            target,
+            self.target_package,
+            account.as_deref(),
+        )
+        .await
+    }
+
+    fn bind_account(&self, account: &str) {
+        *self
+            .account
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner()) = Some(account.to_owned());
     }
 
     async fn send_root(
@@ -4342,6 +4396,7 @@ async fn choose_target_driver<'a>(
         target_package,
         labels,
         screen,
+        account: std::sync::Mutex::new(None),
     }))
 }
 

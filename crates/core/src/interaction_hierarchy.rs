@@ -49,7 +49,10 @@ pub use draft_cleanup::DraftCleanup;
 mod exact_target;
 mod mention_token;
 pub(crate) mod replies;
-pub use exact_target::{open_exact_target_by_hierarchy, open_pinned_target_by_hierarchy};
+pub use exact_target::{
+    open_exact_target_by_hierarchy, open_exact_target_reporting_popups,
+    open_pinned_target_by_hierarchy,
+};
 
 /// Where to tap to reply to one specific comment, and whose comment it is.
 #[derive(Debug, Clone, PartialEq)]
