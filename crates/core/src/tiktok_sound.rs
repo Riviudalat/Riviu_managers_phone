@@ -66,6 +66,11 @@ tokio::task_local! { static SOUND_BUDGET: SoundBudget; }
 #[derive(Default)]
 struct SoundRouteEvidence {
     unreadable_roots: AtomicU32,
+    /// Unreadable roots since the last root that returned, across phases and the composer's
+    /// inline retries. A phase that starts again must not reset what the stage already saw.
+    consecutive_unreadable: AtomicU32,
+    /// The visual route already recorded that it skips the XML popup check.
+    popup_check_skipped: AtomicBool,
     selection: AtomicU8,
 }
 const ROUTE_XML: u8 = 1;
@@ -76,8 +81,62 @@ fn note_unreadable_root() {
         budget
             .route
             .unreadable_roots
-            .fetch_add(1, Ordering::Relaxed)
+            .fetch_add(1, Ordering::Relaxed);
+        budget
+            .route
+            .consecutive_unreadable
+            .fetch_add(1, Ordering::Relaxed);
     });
+}
+
+/// A sound read returned a root; the next unreadable one starts a new run.
+fn note_readable_root() {
+    let _ = SOUND_BUDGET.try_with(|budget| {
+        budget
+            .route
+            .consecutive_unreadable
+            .store(0, Ordering::Relaxed)
+    });
+}
+
+fn consecutive_unreadable_roots() -> u32 {
+    SOUND_BUDGET
+        .try_with(|budget| budget.route.consecutive_unreadable.load(Ordering::Relaxed))
+        .unwrap_or(0)
+}
+
+/// #47 (Global 45.7.3/en, 2026-10-09): after the opening phase handed off, each inline retry
+/// asked the same root twice more and the visual popup check asked it once per frame, ~10.5 s
+/// each, until the 180 s budget ran out. Once the stage met ROOT_UNREADABLE_CAP in a row, a
+/// phase with a measured visual route starts there. It never taps without a fresh frame.
+fn visual_handoff_due(session: &dyn UiSession, plan: SoundPickerPlan) -> bool {
+    consecutive_unreadable_roots() >= ROOT_UNREADABLE_CAP
+        && selection_recovery::measured(plan)
+        && session.gui_reasoner().is_some()
+}
+
+/// Recorded once per stage: the visual route reads frames without the XML popup check.
+fn note_popup_check_skipped(step: &str) {
+    let first = SOUND_BUDGET
+        .try_with(|budget| {
+            !budget
+                .route
+                .popup_check_skipped
+                .swap(true, Ordering::Relaxed)
+        })
+        .unwrap_or(false);
+    if first {
+        crate::publish_recovery::note_read(
+            "sound",
+            "rootUnreadable",
+            unreadable_roots(),
+            "visualHandoff",
+            Some(&format!(
+                "Không đọc được cây giao diện {} lần liên tiếp; bỏ kiểm tra hộp thoại bằng cây giao diện, chỉ bấm theo ảnh màn hình mới (bước: {step})",
+                consecutive_unreadable_roots()
+            )),
+        );
+    }
 }
 
 fn unreadable_roots() -> u32 {
@@ -408,9 +467,14 @@ async fn clear_sound_popup(
         .context("sound popup profile unavailable")?;
     let mut popup = popup.lock().await;
     loop {
-        match step_before_deadline(session, labels, &mut popup, deadline, &stopped, &stopped)
-            .await?
-        {
+        let step =
+            step_before_deadline(session, labels, &mut popup, deadline, &stopped, &stopped).await;
+        match &step {
+            Ok(ReadWaitResult::Ready(_)) => note_readable_root(),
+            Err(error) if unreadable_root(error) => note_unreadable_root(),
+            _ => {}
+        }
+        match step? {
             ReadWaitResult::Ready(PopupStep::Clear) => return Ok(()),
             ReadWaitResult::Ready(PopupStep::Dismissed) => {
                 tokio::time::sleep(POLL.min(deadline.saturating_duration_since(Instant::now())))
@@ -1036,7 +1100,11 @@ pub async fn resume_open_sounds_current(
     allow_recommended: bool,
 ) -> anyhow::Result<ObservedSoundPool> {
     let _pin = hold_sound_session(session);
-    if !allow_recommended || !selection_recovery::measured(plan) {
+    // After the hand-off the visual route below proves the sheet from fresh frames; asking the
+    // same unreadable root for popups first would only spend another ~10.5 s per retry.
+    if (!allow_recommended || !selection_recovery::measured(plan))
+        && !visual_handoff_due(session, plan)
+    {
         clear_sound_popup(session, phase_deadline(SOUND_WINDOW), Some(plan.package)).await?;
     }
     if selection_recovery::measured(plan) && session.gui_reasoner().is_some() {
@@ -1154,6 +1222,15 @@ async fn observe_measured_sound_pool(
             Ok(Some(pool)) => {
                 return checked_measured_sound_observation(session, plan, &epoch, Ok(pool)).await;
             }
+            // The current list is not observed here; direct XML would ask the same root twice.
+            Ok(None) if visual_handoff_due(session, plan) => {
+                let error = anyhow::Error::new(SoundRootUnreadable {
+                    reads: consecutive_unreadable_roots(),
+                });
+                diagnostics.emit("directXml", "skip", started, "rootUnreadable", Some(&error));
+                note_visual_handoff("mở bảng nhạc", &error);
+                true
+            }
             Ok(None) => false,
             Err(error) if error.is::<SoundRootUnreadable>() => {
                 diagnostics.emit(
@@ -1163,7 +1240,7 @@ async fn observe_measured_sound_pool(
                     "rootUnreadable",
                     Some(&error),
                 );
-                note_visual_handoff("đọc danh sách nhạc", &error);
+                note_visual_handoff("mở bảng nhạc, đọc danh sách nhạc", &error);
                 true
             }
             Err(error) => return Err(error),

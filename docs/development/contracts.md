@@ -216,6 +216,12 @@ phiên, không thấy tab bảng nhạc, có OCR chip đúng tên đã chốt m�
 chứng OCR này không cho phép Đăng: bước kiểm nhạc cuối trước Đăng vẫn đọc XML.
 Dòng tiến trình `ReadRecovery` ghi đường đã chọn (`selectionRoute`: `xml`/`visual`) và
 số lần không đọc được gốc; deadline chung ba phút không đổi.
+Đếm "liên tiếp" tính cho cả bước nhạc, không phải từng pha: lần thử lại tại chỗ sau
+lỗi tạm và pha mở bảng nhạc chạy lại không đặt lại số đếm, chỉ một lần đọc trả về gốc
+mới đặt lại. Khi đã đủ hai, pha mở/đọc danh sách vào thẳng đường ảnh, và ảnh bảng nhạc
+không còn hỏi XML kiểm tra hộp thoại trước mỗi khung hình: không nút hộp thoại nào được
+bấm khi thiếu XML, còn hộp thoại che bảng làm mất tab/hàng đã đo nên không có tap.
+`ReadRecovery` ghi `rootUnreadable`/`visualHandoff` cho cả pha mở bảng nhạc.
 Trên 45.7.3, APK khai báo lại các id `title` (408 layout), `tv_title` (303), `cover`
 (88), `desc` (75), `bix` (61), `esv`, `z3k`, `cqf`, `tv_top` và `gpr` ở nhiều màn khác,
 nên một lần khớp id duy nhất chưa đủ làm bằng chứng. Mỗi chỗ dùng phải có phạm vi:

@@ -62,6 +62,7 @@ async fn read_snapshot(
     }
     match observed {
         Ok(snapshot) => {
+            note_readable_root();
             if let Some(count) = unreadable {
                 *count = 0;
             }
@@ -409,7 +410,9 @@ async fn observe_current_recommended_inner(
     let mut previous: Option<(u64, ObservedSoundPool)> = None;
     let mut recoveries = 0;
     let mut covered_generation = None;
-    let mut unreadable = 0;
+    // The opening phase runs again on each inline retry; it continues the stage's run of
+    // unreadable roots instead of asking twice more (#47, 2026-10-09).
+    let mut unreadable = consecutive_unreadable_roots();
     loop {
         check_wait()?;
         anyhow::ensure!(session.gui_session_epoch() == epoch, "sound app/session replaced");
@@ -493,9 +496,18 @@ pub(super) async fn observe_direct(
         )
         .await
         {
-            Ok(Ok(source)) => source,
+            Ok(Ok(source)) => {
+                note_readable_root();
+                source
+            }
             Ok(Err(error)) if error.is::<SoundStopped>() => return Err(error),
-            _ => return Ok(None),
+            Ok(Err(error)) => {
+                if unreadable_root(&error) {
+                    note_unreadable_root();
+                }
+                return Ok(None);
+            }
+            Err(_) => return Ok(None),
         };
         check_wait()?;
         anyhow::ensure!(
@@ -731,7 +743,8 @@ async fn observe_inner(
         && selection_recovery::measured(plan)
         && plan.section_label == "Hot"
         && session.gui_reasoner().is_some();
-    let mut unreadable = 0;
+    // Continues the stage's run of unreadable roots, like the opening phase.
+    let mut unreadable = consecutive_unreadable_roots();
     loop {
         check_wait()?;
         if bound_trill {

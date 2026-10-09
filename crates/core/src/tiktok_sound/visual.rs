@@ -383,7 +383,21 @@ async fn capture_sheet(
     plan: SoundPickerPlan,
     generation: u64,
 ) -> anyhow::Result<(image::RgbImage, Vec<OcrLine>, Vec<OcrRect>, String)> {
-    clear_sound_popup(session, phase_deadline(SOUND_WINDOW), Some(plan.package)).await?;
+    // #47 (Global 45.7.3/en, 2026-10-09): after the hand-off this XML popup check waited
+    // ~10.5 s per frame for the same unreadable root, and its failure ended the visual route
+    // before any frame. Past the cap the frame alone decides: a covering popup hides the
+    // measured tabs and rows, so nothing is tapped; no popup control is pressed without XML.
+    if visual_handoff_due(session, plan) {
+        note_popup_check_skipped("ảnh bảng nhạc");
+    } else {
+        match clear_sound_popup(session, phase_deadline(SOUND_WINDOW), Some(plan.package)).await {
+            Ok(()) => {}
+            Err(error) if unreadable_root(&error) && visual_handoff_due(session, plan) => {
+                note_popup_check_skipped("ảnh bảng nhạc");
+            }
+            Err(error) => return Err(error),
+        }
+    }
     visual_diagnostic(|state| {
         state.generation = generation;
         state.request_id = None;

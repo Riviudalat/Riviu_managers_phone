@@ -258,7 +258,10 @@ async fn confirm_editor_observed(
             );
         }
         let source = match bounded(deadline, session.hierarchy_source_snapshot()).await {
-            Ok(source) => source,
+            Ok(source) => {
+                note_readable_root();
+                source
+            }
             Err(error) if transient_sound_read(&error) => {
                 if unreadable_root(&error) {
                     note_unreadable_root();
