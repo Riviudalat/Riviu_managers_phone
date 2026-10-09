@@ -2567,7 +2567,8 @@ export type PublishReadinessInfo =
   | { kind: "hierarchyReady" }
   | { kind: "hierarchyAdaptive" }
   | { kind: "hierarchyMissing"; labels: string[] }
-  | { kind: "hierarchyUnknownBuild"; version: string };
+  | { kind: "hierarchyUnknownBuild"; version: string }
+  | { kind: "buildNotAllowed"; message: string };
 
 export interface DevicePublishReadiness {
   udid: string;

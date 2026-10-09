@@ -68,6 +68,36 @@ async fn dispatch_recovery_missing_metadata_is_retryable_but_unsupported_locale_
     .await
     .expect_err("unsupported locale must still refuse");
     assert_eq!(describe(&unsupported).kind, FailureKind::Terminal);
+    // A phone that updated (or was never on the fleet build) is refused at session open,
+    // with the operator's instruction, before the composer is touched.
+    for (package, language, version) in [
+        (package, "en", "46.0.41"),
+        (package, "en", "46.4.3"),
+        (package, "en", "47.1.4"),
+        ("com.ss.android.ugc.trill", "en", "38.3.2"),
+        (package, "vi", "45.7.3"),
+    ] {
+        let refused = publish_runtime_labels(
+            &MetadataSession {
+                language: Some(language),
+                version: Some(version),
+            },
+            package,
+        )
+        .await
+        .expect_err("a build outside the fleet allowlist must refuse before Post");
+        let failure = describe(&refused);
+        assert_eq!(failure.code, "build_not_allowed");
+        assert_eq!(failure.kind, FailureKind::Terminal);
+        assert_eq!(
+            failure.message,
+            format!(
+                "TikTok trên máy đang là {package} {version} ({language}); đội máy chỉ chạy \
+                 TikTok Global 45.7.3 tiếng Anh. Chưa thực hiện thao tác nào. Hạ về 45.7.3 \
+                 trong Trung tâm ứng dụng rồi kiểm tra lại."
+            )
+        );
+    }
     let (language, version, _) = publish_runtime_labels(
         &MetadataSession {
             language: Some("en"),

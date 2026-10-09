@@ -272,4 +272,23 @@ fn post_inputs_passed_does_not_hide_link_or_pending_blockers() {
         checks.iter().find(|c| c.id == "account").unwrap().status,
         CheckStatus::Unknown
     );
+    assert_eq!(
+        checks.iter().find(|c| c.id == "build").unwrap().status,
+        CheckStatus::Pass
+    );
+    row.issues.push(crate::PublishExecutionIssue {
+        code: "build_not_allowed".into(),
+        assignment_id: None,
+        udid: Some("device".into()),
+        bundle_id: None,
+        message: "TikTok trên máy đang là com.zhiliaoapp.musically 46.0.41 (en-US)".into(),
+    });
+    let checks = super::checks::publish_checks(&row);
+    let build = checks.iter().find(|c| c.id == "build").unwrap();
+    assert_eq!(build.status, CheckStatus::Blocked);
+    assert!(build
+        .reason
+        .as_deref()
+        .unwrap_or_default()
+        .contains("46.0.41"));
 }

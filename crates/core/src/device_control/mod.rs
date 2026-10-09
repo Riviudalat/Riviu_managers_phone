@@ -2772,6 +2772,25 @@ mod tests {
             )));
         }
         assert!(control.current_work_owner("ready").is_none());
+        // A build outside the fleet allowlist is its own refusal, read without a session.
+        for udid in ["outdated", "trill"] {
+            let error = control
+                .preflight_tiktok_actions(udid, &["feed", "like"])
+                .await
+                .unwrap_err()
+                .to_string();
+            assert!(
+                error.starts_with(&format!("{udid}: TikTok trên máy đang là ")),
+                "{error}"
+            );
+            assert!(error.contains("Chưa thực hiện thao tác nào"), "{error}");
+            let report = control.tiktok_action_capabilities(udid).await;
+            assert!(report.actions.iter().all(|row| matches!(
+                row.state,
+                crate::ipc_contract::CapabilityEvidenceState::BuildNotAllowed
+            )));
+            assert!(control.current_work_owner(udid).is_none());
+        }
         // Background setup can overlap inventory/preflight. It must drain without
         // revocation, while genuine foreground owners still refuse immediately.
         for owner in [DeviceWorkOwner::IdleSweep, DeviceWorkOwner::Repair] {
@@ -2890,11 +2909,12 @@ mod tests {
         }
         async fn tiktok_build(&self, udid: &str) -> anyhow::Result<(String, String, String)> {
             anyhow::ensure!(udid != "missing-build", "fixture build unreadable");
-            Ok((
-                "com.ss.android.ugc.trill".into(),
-                "38.3.2".into(),
-                "en".into(),
-            ))
+            let (package, version) = match udid {
+                "bound" | "trill" => ("com.ss.android.ugc.trill", "38.3.2"),
+                "outdated" => ("com.zhiliaoapp.musically", "46.4.3"),
+                _ => ("com.zhiliaoapp.musically", "45.7.3"),
+            };
+            Ok((package.into(), version.into(), "en".into()))
         }
         async fn verify_automation_readiness(&self, udid: &str) -> anyhow::Result<()> {
             anyhow::ensure!(udid != "locked", "fixture screen locked");

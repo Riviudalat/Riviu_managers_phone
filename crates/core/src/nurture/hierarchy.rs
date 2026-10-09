@@ -763,6 +763,8 @@ pub(super) enum Unsupported {
     /// The backend cannot report element geometry (iOS).
     NoElementBounds,
     /// Geometry works, but nobody has measured labels for this build/language.
+    /// The build is outside the fleet allowlist (`crate::tiktok_fleet_policy`).
+    BuildNotAllowed(String),
     NoLabelSet {
         package: String,
         language: Option<String>,
@@ -776,6 +778,7 @@ impl Unsupported {
             Self::NoElementBounds => {
                 "máy này không đọc được vị trí phần tử — dùng đường nhận dạng ảnh".into()
             }
+            Self::BuildNotAllowed(refusal) => format!("failed — {refusal}"),
             Self::NoLabelSet { package, language } => format!(
                 "failed — chưa đo nhãn TikTok cho {package} + ngôn ngữ {}; \
                  đã đo: {}. Đo nhãn bằng `cargo run -p riviu-android-driver --example probe` \
@@ -816,6 +819,15 @@ impl<'a> HierarchyRun<'a> {
         // this fleet. An unread version is not fatal — it leaves only the resource-id
         // controls absent, so this loop can still like and read.
         let app_version = session.app_version(&package).await.unwrap_or_default();
+        // Admission checked the build at planning; TikTok can update itself before the
+        // session opens, so the session that is about to act asks again, before any tap.
+        if let Err(refusal) = crate::tiktok_fleet_policy::require_fleet_build(
+            &package,
+            &app_version,
+            language.as_deref().unwrap_or_default(),
+        ) {
+            return Err(Unsupported::BuildNotAllowed(refusal.to_string()));
+        }
         let labels = language
             .as_deref()
             .and_then(|language| {
@@ -3826,6 +3838,43 @@ mod tests {
         .message();
         assert!(message.contains("không đọc được"), "{message}");
         assert!(!message.contains("None"), "{message}");
+    }
+
+    #[tokio::test]
+    async fn the_session_rechecks_the_fleet_build_before_the_first_tap() {
+        use crate::tiktok_fleet_policy::fixtures::BuildSession;
+        let settings = NurtureSettings::default();
+        for (package, version, language) in [
+            ("com.zhiliaoapp.musically", "46.4.3", "en"),
+            ("com.ss.android.ugc.trill", "38.3.2", "en"),
+            ("com.zhiliaoapp.musically", "45.7.3", "vi"),
+        ] {
+            let session = BuildSession {
+                package,
+                language: Some(language),
+                version: Some(version),
+            };
+            match HierarchyRun::prepare(&session, (1080.0, 2220.0), &settings).await {
+                Err(refusal @ Unsupported::BuildNotAllowed(_)) => {
+                    let message = refusal.message();
+                    assert!(
+                        message.starts_with("failed — TikTok trên máy đang là"),
+                        "{message}"
+                    );
+                    assert!(message.contains(&format!("{package} {version} ({language})")));
+                }
+                Err(other) => panic!("{package} {version}: wrong refusal {other:?}"),
+                Ok(_) => panic!("{package} {version} {language}: build outside the fleet opened"),
+            }
+        }
+        let allowed = BuildSession {
+            package: "com.zhiliaoapp.musically",
+            language: Some("en"),
+            version: Some("45.7.3"),
+        };
+        assert!(HierarchyRun::prepare(&allowed, (1080.0, 2220.0), &settings)
+            .await
+            .is_ok());
     }
 
     #[test]

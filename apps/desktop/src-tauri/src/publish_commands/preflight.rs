@@ -921,8 +921,26 @@ fn evaluate_device_observation(
                 &error,
             ));
         }
-        match observed.tiktok_build {
-            Ok((package, version, locale)) => {
+        let observed_build = observed.tiktok_build.map(|(package, version, locale)| {
+            let refusal =
+                riviu_core::tiktok_fleet_policy::require_fleet_build(&package, &version, &locale)
+                    .err();
+            (package, version, locale, refusal)
+        });
+        match observed_build {
+            // Outside the fleet allowlist: one distinct issue, and none of the per-build
+            // composer/sound/link findings, which would point the operator at measuring a
+            // build the fleet must not run.
+            Ok((package, version, locale, Some(refusal))) => {
+                row_issues.push(preflight_issue(
+                    "build_not_allowed",
+                    udid,
+                    &bundle.id,
+                    &refusal.to_string(),
+                ));
+                (Some(package), Some(version), Some(locale), false, false)
+            }
+            Ok((package, version, locale, None)) => {
                 let capabilities = riviu_core::app_automation::action_capabilities(
                     udid, &package, &version, &locale, true,
                 );
@@ -1435,6 +1453,9 @@ pub(crate) enum PublishReadiness {
     HierarchyMissing(Vec<riviu_core::tiktok_labels::TikTokControl>),
     /// Driven by label, and its (package, language) pair has never been measured at all.
     HierarchyUnknownBuild(String),
+    /// The build is outside the fleet allowlist (`riviu_core::tiktok_fleet_policy`); the
+    /// operator-facing refusal is carried as-is.
+    BuildNotAllowed(String),
 }
 
 /// Refuse a campaign holding a device whose composer is not measured.
@@ -1450,8 +1471,12 @@ pub(super) fn refuse_devices_whose_composer_is_not_measured<'a>(
     reports: impl IntoIterator<Item = (&'a str, PublishReadiness)>,
 ) -> anyhow::Result<()> {
     let mut refusals = Vec::new();
+    let mut not_allowed = Vec::new();
     for (udid, readiness) in reports {
         match readiness {
+            PublishReadiness::BuildNotAllowed(refusal) => {
+                not_allowed.push(format!("{udid}: {refusal}"))
+            }
             PublishReadiness::PixelGrid
             | PublishReadiness::HierarchyReady
             | PublishReadiness::HierarchyAdaptive => {}
@@ -1469,6 +1494,14 @@ pub(super) fn refuse_devices_whose_composer_is_not_measured<'a>(
             }
         }
     }
+    // A build outside the fleet is not a measuring task, so it never gets the
+    // `composer_scout` advice below.
+    anyhow::ensure!(
+        not_allowed.is_empty(),
+        "không đăng được trên {} máy:\n  {}",
+        not_allowed.len(),
+        not_allowed.join("\n  ")
+    );
     anyhow::ensure!(
         refusals.is_empty(),
         "không đăng được trên {} máy, vì composer của bản build đó chưa đo:\n  {}\n\nĐo bằng \
@@ -1508,7 +1541,7 @@ pub(super) async fn readiness_of(control: &DeviceControlPlane, udid: &str) -> Pu
     // The reading is three adb round trips (package, dumpsys, getprop), which is why the
     // page asks per udid-set and offers a manual re-ask rather than polling.
     match control.tiktok_build(udid).await {
-        Ok((package, version, locale)) => readiness_of_build(&package, &locale, &version),
+        Ok((package, version, locale)) => fleet_readiness_of_build(&package, &locale, &version),
         Err(error) => PublishReadiness::HierarchyUnknownBuild(format!(
             "không đọc được bản TikTok trên máy này: {error}"
         )),
@@ -1534,8 +1567,26 @@ pub(super) fn video_plan_for_build(
     locale: &str,
     version: &str,
 ) -> anyhow::Result<riviu_core::tiktok_composer::VideoPickerPlan> {
+    video_plan_for_build_with_policy(
+        package,
+        locale,
+        version,
+        &riviu_core::tiktok_fleet_policy::TikTokFleetPolicy::FLEET,
+    )
+}
+
+/// [`video_plan_for_build`] against an explicit allowlist, for picker tests on builds the
+/// fleet no longer runs.
+pub(super) fn video_plan_for_build_with_policy(
+    package: &str,
+    locale: &str,
+    version: &str,
+    policy: &riviu_core::tiktok_fleet_policy::TikTokFleetPolicy,
+) -> anyhow::Result<riviu_core::tiktok_composer::VideoPickerPlan> {
     riviu_core::app_automation::require_actions(
-        &riviu_core::app_automation::action_capabilities("", package, version, locale, true),
+        &riviu_core::app_automation::action_capabilities_with_policy(
+            "", package, version, locale, true, policy,
+        ),
         &["video"],
     )?;
     riviu_core::tiktok_composer::VideoPickerPlan::resolve_runtime(package, locale, version)
@@ -1637,6 +1688,19 @@ pub(super) async fn refuse_devices_whose_sound_picker_is_not_measured(
     Ok(())
 }
 
+/// [`readiness_of_build`] behind the fleet allowlist: what a phone may publish, as opposed to
+/// what the catalogue knows about its build.
+pub(super) fn fleet_readiness_of_build(
+    package: &str,
+    locale: &str,
+    version: &str,
+) -> PublishReadiness {
+    match riviu_core::tiktok_fleet_policy::require_fleet_build(package, version, locale) {
+        Ok(()) => readiness_of_build(package, locale, version),
+        Err(refusal) => PublishReadiness::BuildNotAllowed(refusal.to_string()),
+    }
+}
+
 /// The readiness verdict for one measured build triple.
 ///
 /// Pure and named, because the decision was otherwise reachable only through three adb round
@@ -1645,6 +1709,8 @@ pub(super) async fn refuse_devices_whose_sound_picker_is_not_measured(
 /// visible: the catalogue is asked about **this** `(package, locale, version)`, so a phone
 /// whose TikTok updated lands on `HierarchyUnknownBuild` instead of keeping a green chip
 /// from some other version's complete set.
+///
+/// This is the catalogue's answer only; [`fleet_readiness_of_build`] is what a phone may do.
 pub(super) fn readiness_of_build(package: &str, locale: &str, version: &str) -> PublishReadiness {
     let Some(controls) = riviu_core::tiktok_labels::controls_for_runtime(package, locale, version)
     else {
@@ -1764,6 +1830,7 @@ pub enum PublishReadinessWire {
     HierarchyReady,
     HierarchyMissing { labels: Vec<String> },
     HierarchyUnknownBuild { version: String },
+    BuildNotAllowed { message: String },
 }
 
 impl From<PublishReadiness> for PublishReadinessWire {
@@ -1781,6 +1848,7 @@ impl From<PublishReadiness> for PublishReadinessWire {
             PublishReadiness::HierarchyUnknownBuild(version) => {
                 Self::HierarchyUnknownBuild { version }
             }
+            PublishReadiness::BuildNotAllowed(message) => Self::BuildNotAllowed { message },
         }
     }
 }

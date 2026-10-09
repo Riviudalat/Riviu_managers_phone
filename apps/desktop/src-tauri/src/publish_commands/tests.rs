@@ -90,6 +90,7 @@ use super::bundle_for_assignment;
 use super::bundle_media_shape_is_ready;
 use super::deliver_assignment_sheet_row;
 use super::evidence_with_post_url;
+use super::fleet_readiness_of_build;
 use super::fold_cleanup_into;
 use super::fresh_publish_preflight_issues;
 use super::mark_publish_sheet_sent_and_reconcile;
@@ -110,6 +111,7 @@ use super::settle_publish_sheet_delivery_and_announce;
 use super::state_for_outcome;
 use super::token_must_be_restated;
 use super::video_plan_for_build;
+use super::video_plan_for_build_with_policy;
 use super::LockScreening;
 use super::PostOutcome;
 use super::IOS_PIXEL_GRID_MAX_IMAGES;
@@ -1566,12 +1568,44 @@ fn video_snapshot_is_validated_and_picker_readiness_is_tuple_scoped() {
     video.caption_sha256 = super::frame_sha256(video.caption.as_bytes());
     assert!(bundle_media_shape_is_ready(&image, PublishRoute::Hierarchy));
     assert!(bundle_media_shape_is_ready(&video, PublishRoute::Hierarchy));
-    assert!(video_plan_for_build("com.ss.android.ugc.trill", "en", "38.3.2").is_ok());
+    // Picker coverage on builds the fleet no longer runs: allow them explicitly.
+    const MEASURED: &[riviu_core::tiktok_fleet_policy::FleetBuild] = &[
+        riviu_core::tiktok_fleet_policy::FleetBuild {
+            package: "com.ss.android.ugc.trill",
+            version: "38.3.2",
+            language: "en",
+            label: "Trill 38.3.2",
+        },
+        riviu_core::tiktok_fleet_policy::FleetBuild {
+            package: "com.zhiliaoapp.musically",
+            version: "46.2.2",
+            language: "en",
+            label: "Global 46.2.2",
+        },
+    ];
+    let measured = riviu_core::tiktok_fleet_policy::TikTokFleetPolicy::allowing(MEASURED);
+    assert!(video_plan_for_build_with_policy(
+        "com.ss.android.ugc.trill",
+        "en",
+        "38.3.2",
+        &measured
+    )
+    .is_ok());
+    assert!(video_plan_for_build_with_policy(
+        "com.zhiliaoapp.musically",
+        "en",
+        "46.2.2",
+        &measured
+    )
+    .unwrap()
+    .provenance()
+    .contains("runtime verification"));
+    // Production keeps the fleet allowlist in front of the same picker.
     assert!(
-        video_plan_for_build("com.zhiliaoapp.musically", "en", "46.2.2")
-            .unwrap()
-            .provenance()
-            .contains("runtime verification")
+        video_plan_for_build("com.ss.android.ugc.trill", "en", "38.3.2")
+            .unwrap_err()
+            .to_string()
+            .contains("Chưa thực hiện thao tác nào")
     );
 
     video.video = None;
@@ -2374,6 +2408,47 @@ fn a_phone_whose_build_is_unmeasured_is_refused_and_its_neighbours_are_not() {
     assert!(!message.contains("ce0617164585646f0d7e"), "{message}");
     // And it says how to close the gap, because the reader is the person who would.
     assert!(message.contains("composer_scout"), "{message}");
+}
+
+/// The fleet allowlist decides before the catalogue does: a build the catalogue can drive
+/// (Trill 38.3.2, Global 46.2.1) is still refused before transfer, with the downgrade
+/// instruction and without sending the operator off to measure it.
+#[test]
+fn a_build_outside_the_fleet_is_refused_before_transfer_without_measuring_advice() {
+    assert_eq!(
+        fleet_readiness_of_build("com.zhiliaoapp.musically", "en", "45.7.3"),
+        readiness_of_build("com.zhiliaoapp.musically", "en", "45.7.3")
+    );
+    let mut reports = Vec::new();
+    for (udid, package, locale, version) in [
+        ("global-46-0", "com.zhiliaoapp.musically", "en", "46.0.41"),
+        ("global-46-4", "com.zhiliaoapp.musically", "en", "46.4.3"),
+        ("global-46-2", "com.zhiliaoapp.musically", "en", "46.2.1"),
+        ("global-47", "com.zhiliaoapp.musically", "en", "47.1.4"),
+        ("trill", "com.ss.android.ugc.trill", "en", "38.3.2"),
+        ("global-vi", "com.zhiliaoapp.musically", "vi", "45.7.3"),
+    ] {
+        let readiness = fleet_readiness_of_build(package, locale, version);
+        assert!(
+            matches!(&readiness, PublishReadiness::BuildNotAllowed(message)
+                if message.contains(&format!("{package} {version} ({locale})"))),
+            "{udid}: {readiness:?}"
+        );
+        reports.push((udid, readiness));
+    }
+    let message = format!(
+        "{:#}",
+        refuse_devices_whose_composer_is_not_measured(reports).unwrap_err()
+    );
+    assert!(
+        message.contains("trill: TikTok trên máy đang là"),
+        "{message}"
+    );
+    assert!(
+        message.contains("Hạ về 45.7.3 trong Trung tâm ứng dụng"),
+        "{message}"
+    );
+    assert!(!message.contains("composer_scout"), "{message}");
 }
 
 /// A build missing labels is refused **by name**, so the measuring run knows what to get.

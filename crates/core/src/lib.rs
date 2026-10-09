@@ -56,6 +56,7 @@ pub mod tiktok_comment_delete;
 pub mod tiktok_comment_link;
 pub mod tiktok_composer;
 pub mod tiktok_drawer;
+pub mod tiktok_fleet_policy;
 pub mod tiktok_follow_cleanup;
 pub mod tiktok_follow_target;
 pub mod tiktok_friend_share;

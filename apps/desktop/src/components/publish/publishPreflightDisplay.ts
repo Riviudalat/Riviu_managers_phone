@@ -53,6 +53,11 @@ export function publishPreflightProblem(
         title: "Chưa xác minh được bài và lấy liên kết trên giao diện này",
         action: "Luồng soạn bài có thể đã đạt, nhưng bước đối chiếu bài đăng chưa sẵn sàng. Kiểm tra lại nhận diện và ngôn ngữ của máy; xem mã lỗi để gửi chẩn đoán.",
       };
+    case "build_not_allowed":
+      return {
+        title: "Bản TikTok trên máy không nằm trong danh sách đội máy",
+        action: issue.message,
+      };
     case "post_verification_pending":
       return {
         title: "Máy còn bài đang chờ xác minh",

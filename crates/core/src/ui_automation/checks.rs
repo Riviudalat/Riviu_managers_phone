@@ -21,6 +21,13 @@ pub fn publish_checks(row: &PublishPreflightAssignmentReport) -> Vec<AutomationC
         });
     }
     for (id, label, codes) in [
+        // `crate::tiktok_fleet_policy`: the build itself is refused, before any catalogue
+        // question about it.
+        (
+            "build",
+            "Bản TikTok của đội máy",
+            &["build_not_allowed"][..],
+        ),
         (
             "transport",
             "Kết nối điều khiển",

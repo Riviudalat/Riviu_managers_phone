@@ -60,6 +60,9 @@ pub enum CapabilityEvidenceState {
     RuntimeProofRequired,
     Unsupported,
     DeviceNotReady,
+    /// The phone's TikTok build is outside the fleet allowlist
+    /// (`crate::tiktok_fleet_policy`); effects are refused before any input.
+    BuildNotAllowed,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize, TS)]

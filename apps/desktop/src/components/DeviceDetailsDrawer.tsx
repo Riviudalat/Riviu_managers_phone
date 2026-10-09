@@ -2,7 +2,7 @@ import { X } from "lucide-react";
 import { useState } from "react";
 import { deviceActionCapabilities, deviceAppCandidates, deviceAppSelect } from "../api";
 import { describeError } from "../describeError";
-import type { DeviceActionCapabilities, DeviceAppChoices } from "../generated-ipc";
+import type { CapabilityEvidenceState, DeviceActionCapabilities, DeviceAppChoices } from "../generated-ipc";
 import { useModalFocus } from "./useModalFocus";
 import { StatusChip } from "./WorkspacePrimitives";
 
@@ -52,8 +52,13 @@ export function DeviceDetailsDrawer({
     } catch (error) { setAppError(describeError(error)); }
     finally { setSavingApp(false); }
   };
-  const stateLabels = { measured: "Đã đo", runtimeProofRequired: "Cần chứng minh trong phiên", unsupported: "Chưa hỗ trợ", deviceNotReady: "Máy chưa sẵn sàng" };
+  const stateLabels: Record<CapabilityEvidenceState, string> = { measured: "Đã đo", runtimeProofRequired: "Cần chứng minh trong phiên", unsupported: "Chưa hỗ trợ", deviceNotReady: "Máy chưa sẵn sàng", buildNotAllowed: "Bản TikTok không được phép" };
   const actionLabels: Record<string, string> = { feed: "Lướt feed", search: "Tìm kiếm", photo: "Đăng ảnh", video: "Đăng video", sound: "Chọn nhạc", like: "Thích", save: "Lưu", follow: "Theo dõi tài khoản đích", feedFollow: "Theo dõi trong Nuôi", mentionReply: "Trả lời và tag" };
+
+  // One build refusal covers every action; shown once instead of under each row.
+  const buildRefusal = capabilities?.udid === device.udid
+    ? capabilities.actions.find((action) => action.state === "buildNotAllowed")?.reason
+    : undefined;
 
   const ownerLabel = ownerReadFailed
     ? "Chưa đọc được"
@@ -124,8 +129,9 @@ export function DeviceDetailsDrawer({
           {capabilityError && <p role="alert">{capabilityError}</p>}
           {capabilities?.udid === device.udid && <>
             <p>{capabilities.package} · {capabilities.version} · {capabilities.locale}</p>
+            {buildRefusal && <p role="alert">{buildRefusal}</p>}
             <dl className="device-detail-list">{capabilities.actions.map(action => <div key={action.action}>
-              <dt>{actionLabels[action.action] ?? action.action}</dt><dd>{stateLabels[action.state]}<small style={{ display: "block" }}>{action.reason}</small></dd>
+              <dt>{actionLabels[action.action] ?? action.action}</dt><dd>{stateLabels[action.state]}{action.state !== "buildNotAllowed" && <small style={{ display: "block" }}>{action.reason}</small>}</dd>
             </div>)}</dl>
           </>}
         </section>

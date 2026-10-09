@@ -34,6 +34,18 @@ nhận diện được máy không chứng nhận mọi chức năng trên máy 
 | iOS | pymobiledevice3 + WDA/Riviu Agent, usbmux và MJPEG | Trust, signing/provisioning và transport theo iOS; Flow UI/qualification chưa parity Android |
 | Linux host | Không nằm trong ma trận bộ cài được hỗ trợ | Không suy hỗ trợ từ việc một crate có thể compile |
 
+**Bản TikTok của đội máy.** Theo quyết định của chủ sản phẩm (09/10/2026), mọi thao tác
+có tác động lên TikTok (Đăng bài, Thích, Bình luận, Theo dõi, Chia sẻ, Lưu, các bước
+Nuôi và dọn công khai Bỏ thích/Bỏ lưu) chỉ chạy trên **TikTok Global
+`com.zhiliaoapp.musically` 45.7.3, giao diện tiếng Anh**. Máy chạy bản khác, kể cả
+TikTok Trill (`com.ss.android.ugc.trill`), bản 46.x/47.x tự cập nhật hoặc 45.7.3 giao
+diện tiếng Việt, bị từ chối **trước mọi thao tác** với trạng thái **Bản TikTok không
+được phép** và hướng dẫn hạ về 45.7.3 trong Trung tâm ứng dụng. Riviu kiểm lúc lập kế
+hoạch và kiểm lại khi phiên thao tác mở, vì TikTok có thể tự cập nhật ở giữa. Việc chỉ
+đọc vẫn chạy trên mọi bản: xác minh liên kết của bài đã gửi, đọc tài khoản và chẩn
+đoán. Danh sách được phép là hằng số trong mã, không có công tắc trong Cài đặt; đổi
+bản của đội máy cần sửa mã và phát hành bản mới.
+
 Artifact iPhone và installer desktop là hai thứ khác nhau: profile ký iPhone có
 thể hết hạn/giới hạn UDID. Không đổi tên bundle, thay IPA hoặc reinstall để thử vận
 may. Đọc [WDA safety](docs/agents/02-wda-doc-truoc-khi-sua.md) trước mọi sửa đổi iOS.

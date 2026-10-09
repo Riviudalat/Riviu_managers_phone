@@ -4,6 +4,10 @@ pub mod tiktok_roles;
 
 /// Uses the same catalog and plans as production preflight. A catalog match is
 /// never a substitute for unique targets and postconditions in the live session.
+///
+/// Every action here is an effect, so a build outside the fleet allowlist
+/// ([`crate::tiktok_fleet_policy::TikTokFleetPolicy::FLEET`]) reports
+/// `BuildNotAllowed` for all of them, whatever the catalogue knows about it.
 pub fn action_capabilities(
     udid: &str,
     package: &str,
@@ -11,11 +15,35 @@ pub fn action_capabilities(
     locale: &str,
     ready: bool,
 ) -> crate::ipc_contract::DeviceActionCapabilities {
+    action_capabilities_with_policy(
+        udid,
+        package,
+        version,
+        locale,
+        ready,
+        &crate::tiktok_fleet_policy::TikTokFleetPolicy::FLEET,
+    )
+}
+
+/// [`action_capabilities`] against an explicit allowlist. Production passes the fleet
+/// policy; adapter tests on another measured build pass their own.
+pub fn action_capabilities_with_policy(
+    udid: &str,
+    package: &str,
+    version: &str,
+    locale: &str,
+    ready: bool,
+    policy: &crate::tiktok_fleet_policy::TikTokFleetPolicy,
+) -> crate::ipc_contract::DeviceActionCapabilities {
     use crate::ipc_contract::{
         ActionCapability, CapabilityEvidenceState as S, DeviceActionCapabilities,
     };
     use crate::tiktok_labels::controls_for_runtime;
     use crate::tiktok_labels::TikTokControl;
+    let build_refusal = policy
+        .check(package, version, locale)
+        .err()
+        .map(|refusal| refusal.to_string());
     let controls = controls_for_runtime(package, locale, version);
     let supported = controls.is_some();
     let labelled = |needed: &[TikTokControl]| {
@@ -98,6 +126,8 @@ pub fn action_capabilities(
                         S::DeviceNotReady,
                         "Thiết bị chưa sẵn sàng hoặc đang có owner",
                     )
+                } else if let Some(refusal) = &build_refusal {
+                    (S::BuildNotAllowed, refusal.as_str())
                 } else if !available {
                     (
                         S::Unsupported,
@@ -130,6 +160,19 @@ pub fn require_actions(
     requested: &[&str],
 ) -> anyhow::Result<()> {
     use crate::ipc_contract::CapabilityEvidenceState as S;
+    // One build refusal covers every requested action; repeating it per action would bury
+    // the instruction the operator needs under copies of itself.
+    if let Some(row) = requested.iter().find_map(|requested| {
+        report
+            .actions
+            .iter()
+            .find(|row| row.action == *requested && matches!(row.state, S::BuildNotAllowed))
+    }) {
+        if report.udid.is_empty() {
+            anyhow::bail!("{}", row.reason);
+        }
+        anyhow::bail!("{}: {}", report.udid, row.reason);
+    }
     let refusals = requested
         .iter()
         .filter_map(
@@ -209,16 +252,35 @@ mod capability_preflight_tests {
     }
     #[test]
     fn shared_action_preflight_refuses_unknown_action_locked_phone_and_unmeasured_follow() {
-        let report = action_capabilities("phone", "com.ss.android.ugc.trill", "38.3.2", "en", true);
+        use crate::tiktok_fleet_policy::{FleetBuild, TikTokFleetPolicy};
+        // Adapter coverage on builds the fleet no longer runs: allow them explicitly so the
+        // adapter answer, not the fleet allowlist, is what this test reads.
+        const MEASURED: &[FleetBuild] = &[
+            FleetBuild {
+                package: "com.ss.android.ugc.trill",
+                version: "38.3.2",
+                language: "en",
+                label: "Trill 38.3.2",
+            },
+            FleetBuild {
+                package: "com.zhiliaoapp.musically",
+                version: "45.7.4",
+                language: "en",
+                label: "Global 45.7.4",
+            },
+        ];
+        let policy = TikTokFleetPolicy::allowing(MEASURED);
+        let capabilities = |package, version, ready| {
+            action_capabilities_with_policy("phone", package, version, "en", ready, &policy)
+        };
+        let report = capabilities("com.ss.android.ugc.trill", "38.3.2", true);
         assert!(require_actions(&report, &["feed", "follow"]).is_ok());
         assert!(require_actions(&report, &["madeUp"]).is_err());
-        let locked =
-            action_capabilities("phone", "com.ss.android.ugc.trill", "38.3.2", "en", false);
+        let locked = capabilities("com.ss.android.ugc.trill", "38.3.2", false);
         assert!(require_actions(&locked, &["feed"]).is_err());
         let global = action_capabilities("phone", "com.zhiliaoapp.musically", "45.7.3", "en", true);
         assert!(require_actions(&global, &["follow"]).is_ok());
-        let unknown =
-            action_capabilities("phone", "com.zhiliaoapp.musically", "45.7.4", "en", true);
+        let unknown = capabilities("com.zhiliaoapp.musically", "45.7.4", true);
         assert!(require_actions(&unknown, &["follow"]).is_err());
         let settings = crate::NurtureSettings {
             like_enabled: false,
@@ -228,6 +290,46 @@ mod capability_preflight_tests {
             ..Default::default()
         };
         assert_eq!(nurture_actions(&settings), vec!["feed"]);
+    }
+
+    #[test]
+    fn every_effect_is_refused_on_a_build_outside_the_fleet_allowlist() {
+        use crate::ipc_contract::CapabilityEvidenceState as S;
+        let allowed =
+            action_capabilities("phone", "com.zhiliaoapp.musically", "45.7.3", "en", true);
+        assert!(allowed
+            .actions
+            .iter()
+            .all(|row| !matches!(row.state, S::BuildNotAllowed)));
+        assert!(require_actions(&allowed, &["feed", "like", "follow", "photo", "sound"]).is_ok());
+        for (package, version, locale) in [
+            ("com.zhiliaoapp.musically", "46.0.41", "en"),
+            ("com.zhiliaoapp.musically", "46.4.3", "en"),
+            ("com.zhiliaoapp.musically", "47.1.4", "en"),
+            ("com.ss.android.ugc.trill", "38.3.2", "en"),
+            ("com.zhiliaoapp.musically", "45.7.3", "vi"),
+        ] {
+            let report = action_capabilities("phone", package, version, locale, true);
+            assert!(
+                report
+                    .actions
+                    .iter()
+                    .all(|row| matches!(row.state, S::BuildNotAllowed)),
+                "{package} {version} {locale}: {:?}",
+                report.actions
+            );
+            let refusal = require_actions(&report, &["feed", "like", "photo", "sound"])
+                .unwrap_err()
+                .to_string();
+            assert_eq!(
+                refusal,
+                format!(
+                    "phone: TikTok trên máy đang là {package} {version} ({locale}); đội máy chỉ \
+                     chạy TikTok Global 45.7.3 tiếng Anh. Chưa thực hiện thao tác nào. Hạ về \
+                     45.7.3 trong Trung tâm ứng dụng rồi kiểm tra lại."
+                )
+            );
+        }
     }
 }
 use crate::ui_automation::{profile::CompatibilityPack, tree::Tree, AppContext};

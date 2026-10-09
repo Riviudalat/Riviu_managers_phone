@@ -111,6 +111,22 @@ Preflight Android dùng `DeviceControlPlane::tiktok_action_capabilities` và cat
 Tương tác và Đăng bài. Readiness chỉ đọc khóa màn hình, transport và owner, không
 đánh thức máy hoặc mở session. Mỗi action thiếu locator/tuple bị từ chối riêng;
 `runtimeProofRequired` cho phép vào bước chứng minh target, chưa cấp quyền tap.
+Allowlist bản TikTok cho effect nằm ở `riviu_core::tiktok_fleet_policy`
+(`TIKTOK_FLEET_BUILDS`, mặc định đúng một bộ `com.zhiliaoapp.musically` / `45.7.3` /
+`en`). Package và `versionName` so khớp tuyệt đối; locale chỉ so phần ngôn ngữ trước
+`-`/`_`; phiên bản hoặc ngôn ngữ chưa đọc được bị từ chối. Mọi action trong
+`action_capabilities` là effect, nên bản ngoài allowlist trả `buildNotAllowed` cho tất
+cả action và `require_actions` trả một thông báo duy nhất. Publish preflight thêm issue
+`build_not_allowed`, `publish_readiness` trả `buildNotAllowed`, và refusal trước
+transfer không kèm hướng dẫn đo composer. Khi phiên effect mở, cùng allowlist được kiểm
+lại trước tap đầu tiên: `run_cohort` của Tương tác (Android), `HierarchyRun::prepare`
+của Nuôi, `publish_runtime_labels` của Đăng bài (`build_not_allowed`, Terminal, chưa
+đăng gì) và `execute_ready` của dọn công khai. `controls_for_runtime` và đường adaptive
+giữ nguyên cho việc chỉ đọc: xác minh link bài đã gửi, đọc account, chẩn đoán và kiểm
+bình luận không hỏi allowlist. Test adapter trên bản khác truyền
+`TikTokFleetPolicy::allowing` qua `action_capabilities_with_policy`, không xoá coverage.
+Không có override trong Cài đặt; iPhone (đường pixel) không đọc được bản TikTok nên
+chưa đi qua allowlist này.
 Migration 47 lưu `device_app_bindings` theo `(udid, appKey)` với CAS. Resolver nằm
 trong `DeviceControlPlane`; Android luôn đọc lại danh sách package để chứng minh lựa
 chọn còn cài và có adapter. `tiktok_build` và resolve package dùng cùng binding. Máy

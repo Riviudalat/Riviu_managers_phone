@@ -3896,6 +3896,19 @@ async fn publish_runtime_labels(
             ),
         ).into());
     }
+    // The preflight digest bound the build at planning; an app that updated itself since is
+    // refused here, before the composer opens. Terminal: nothing was published, and only a
+    // downgrade on the phone can change the answer.
+    if let Err(refusal) =
+        riviu_core::tiktok_fleet_policy::require_fleet_build(package, &version, &language)
+    {
+        return Err(riviu_core::publish_recovery::RecoveryFailure::new(
+            "build_not_allowed",
+            riviu_core::publish_recovery::FailureKind::Terminal,
+            refusal.to_string(),
+        )
+        .into());
+    }
     let labels = riviu_core::tiktok_labels::controls_for_runtime(package, &language, &version)
         .ok_or_else(|| anyhow::anyhow!("chưa đo nhãn TikTok cho {package} / {language:?}"))?;
     Ok((language, version, labels))

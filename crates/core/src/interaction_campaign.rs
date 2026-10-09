@@ -2916,6 +2916,16 @@ async fn run_cohort(
                 // Chosen once per assignment, from the session in hand. A build with no
                 // measured labels refuses here — before the link is opened, so before
                 // anything at all has happened on the phone.
+                //
+                // Admission checked the fleet build at planning; TikTok can update itself
+                // in between, so the session that is about to act checks it again.
+                if session.supports_element_bounds() {
+                    crate::tiktok_fleet_policy::require_fleet_build_in_session(
+                        session.as_ref(),
+                        &opened_package,
+                    )
+                    .await?;
+                }
                 let driver = choose_target_driver(
                     &engine,
                     &prepared.actor_udid,
@@ -6065,6 +6075,30 @@ mod boundary_tests {
                 < tail.find("action_results.push(action)").unwrap(), "{action} evidence before advancing");
         }
 
+    }
+
+    /// Admission reads the build at planning; the session that acts must read it again
+    /// before it opens the target or touches any public control.
+    #[test]
+    fn the_runner_rechecks_the_fleet_build_when_the_effect_session_opens() {
+        let source = include_str!("interaction_campaign.rs");
+        let start = source
+            .find("async fn run_cohort(")
+            .expect("the runner still exists");
+        let rest = &source[start..];
+        let runner = &rest[..rest.find("\n#[cfg(test)]").unwrap_or(rest.len())];
+        let check = runner
+            .find("tiktok_fleet_policy::require_fleet_build_in_session(")
+            .expect("the effect session re-checks the fleet build");
+        for effect in [
+            "choose_target_driver(",
+            "execute_like_action(",
+            "send_root(",
+            "send_reply(",
+        ] {
+            let at = runner.find(effect).expect(effect);
+            assert!(check < at, "fleet build check must precede {effect}");
+        }
     }
 
     /// "Giữ bài" is the operator's promise that the phone stays on the post once its actions

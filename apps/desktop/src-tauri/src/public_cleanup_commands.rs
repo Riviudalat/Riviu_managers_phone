@@ -299,6 +299,12 @@ async fn execute_ready(
             .app_version(&target_package)
             .await
             .ok_or_else(|| anyhow::anyhow!("cleanup session did not report TikTok version"))?;
+        // Unlike/Unsave is a public effect: the fleet allowlist decides before the target opens.
+        riviu_core::tiktok_fleet_policy::require_fleet_build(
+            &target_package,
+            &app_version,
+            &language,
+        )?;
         let labels =
             riviu_core::tiktok_labels::controls_for(&target_package, &language, &app_version)
                 .ok_or_else(|| {
@@ -440,5 +446,30 @@ mod tests {
             );
         }
         assert!(!body[..refusal].contains("open_interaction_context"));
+    }
+
+    #[test]
+    fn the_cleanup_session_checks_the_fleet_build_before_opening_the_target() {
+        let source = include_str!("public_cleanup_commands.rs");
+        let body = source
+            .split("async fn execute_ready(")
+            .nth(1)
+            .expect("execute_ready body")
+            .split("#[tauri::command]")
+            .next()
+            .expect("execute_ready ends");
+        let check = body
+            .find("tiktok_fleet_policy::require_fleet_build(")
+            .expect("the cleanup session re-checks the fleet build");
+        for effect in [
+            "open_target_confirmed(",
+            "unlike_post_with_gate(",
+            "unsave_post_with_gate(",
+        ] {
+            assert!(
+                check < body.find(effect).expect(effect),
+                "{effect} before the build check"
+            );
+        }
     }
 }
