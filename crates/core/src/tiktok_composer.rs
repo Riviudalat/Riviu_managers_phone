@@ -3501,7 +3501,18 @@ impl<'a, P: TapPlanner> Composer<'a, P> {
                 && !tree.matching(self.plan.package, self.plan.album_menu).is_empty() {
                 return Ok(ReadWaitResult::Ready(Vec::new()));
             }
-            let indices = tree.matching(self.plan.package, query);
+            let mut indices = tree.matching(self.plan.package, query);
+            // 45.7.3 declares the album pill's `:id/tv_title` in 303 layouts, so the id
+            // names the pill only on the picker: the measured picker Next must be in the
+            // same tree. It is in every 45.7.3 picker read we hold (fixtures 06–09 and
+            // picker-11-*, Riviu #44 gallery dump 09/10/2026). The camera-cover check
+            // above stays unscoped on purpose: there a stray match only withholds a tap.
+            if query == self.plan.album_menu
+                && self.plan.popup_profile == ("en", Some("45.7.3"))
+                && tree.matching(self.plan.package, self.plan.picker_next).is_empty()
+            {
+                indices.clear();
+            }
             let mut rows = Vec::with_capacity(indices.len());
             for index in indices {
                 // A malformed match cannot be silently removed to prove uniqueness.
@@ -8553,6 +8564,39 @@ mod tests {
             assert!(session.taps.lock().is_empty());
         }
 
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn global_45_7_3_album_pill_needs_the_picker_next_in_the_same_tree() {
+        let labels =
+            crate::tiktok_labels::controls_for("com.zhiliaoapp.musically", "en", "45.7.3").unwrap();
+        let measured = ComposerPlan::resolve(&labels).unwrap();
+        // Real 45.7.3 picker: `tv_title` reads `Camera` [431,100][601,150], `wjp` Next.
+        let picker = include_str!("../fixtures/tiktok-publish/musically-45.7.3-en/06-camera.xml");
+        for (xml, expected) in [
+            (picker.to_owned(), true),
+            // The same `tv_title` without the picker around it is another layout's title.
+            (picker.replace(":id/wjp", ":id/unrelated"), false),
+        ] {
+            let session = FakeSession {
+                modal_readback: true,
+                foreground_override: Some("com.zhiliaoapp.musically".into()),
+                snapshot_overrides: Mutex::new([xml].into()),
+                ..Default::default()
+            };
+            let composer = Composer::new(&session, measured, |r: &ElementBox| r.centre());
+            let found = composer
+                .await_condition_until(
+                    Instant::now() + Duration::from_secs(1),
+                    measured.album_menu,
+                    &AtomicBool::new(false),
+                    |_| true,
+                )
+                .await
+                .unwrap();
+            assert_eq!(found.is_some(), expected);
+            assert!(session.taps.lock().is_empty());
+        }
     }
 
     // Actual native21 generation64, XML SHA256

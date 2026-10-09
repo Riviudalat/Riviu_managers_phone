@@ -203,6 +203,13 @@ hai quan sát mới rồi dùng snapshot XML chỉ khi Hot đã chọn và hàng
 Nhánh này chỉ chọn một lần, chờ hai ảnh mới có đúng tên nhạc chuyển hồng để
 xác nhận lựa chọn đã tải xong, rồi đóng bảng đã chứng minh bằng ảnh; hai XML mới
 trên editor phải khớp nguyên tên nhạc. Không khớp thì giữ lỗi trước Đăng.
+Trên 45.7.3, APK khai báo lại các id `title` (408 layout), `tv_title` (303), `cover`
+(88), `desc` (75), `bix` (61), `esv`, `z3k`, `cqf`, `tv_top` và `gpr` ở nhiều màn khác,
+nên một lần khớp id duy nhất chưa đủ làm bằng chứng. Mỗi chỗ dùng phải có phạm vi:
+`title`/`z3k` nằm trong hàng nhạc đã đo, pill album `tv_title` chỉ tính khi Next của
+picker cùng cây, `bix` trong rehearsal chỉ là Back của trang caption khi ô caption cùng
+cây, `esv` phải khớp nguyên văn câu hỏi, `tv_top` chỉ loại ô nằm trong ô `cover`, còn
+`cover`/`desc` trên đường xác minh vẫn phải qua bằng chứng tài khoản và link chuẩn.
 Tap từ ảnh dùng `tap_image` với đúng kích thước native, không thêm jitter.
 Nguồn ảnh minicap giữ kích thước native và giới hạn 2 FPS để giảm tải encode
 trên điện thoại; giới hạn này không thay chất lượng stream H.264 của ô thiết bị.

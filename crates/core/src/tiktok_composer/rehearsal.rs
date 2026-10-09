@@ -104,6 +104,27 @@ fn indices(tree: &Tree, labels: TikTokControls, query: ElementQuery<'_>) -> Vec<
         tree.matching(labels.package(), query)
     }
 }
+/// Whether `index` lies inside a node carrying the build's measured sound row id.
+/// Geometric, because the sanitized fixtures and some reads are flat lists.
+fn inside_sound_row(
+    tree: &Tree,
+    labels: TikTokControls,
+    row_id: Option<&str>,
+    index: usize,
+) -> bool {
+    let (Some(row_id), Some(inner)) = (row_id, tree.nodes[index].rect()) else {
+        return false;
+    };
+    indices(tree, labels, ElementQuery::ResourceIdSuffix(row_id))
+        .into_iter()
+        .filter_map(|row| tree.nodes[row].rect())
+        .any(|row| {
+            inner.x >= row.x
+                && inner.y >= row.y
+                && inner.x + inner.width <= row.x + row.width
+                && inner.y + inner.height <= row.y + row.height
+        })
+}
 fn unique(
     tree: &Tree,
     labels: TikTokControls,
@@ -534,6 +555,31 @@ impl<'a> PrepareSession<'a> {
             _ => &[],
         }
     }
+    /// The measured sound row of this build, the only scope in which `:id/title` names
+    /// a sound. Same exact-version keying as [`Self::sound_navigation_ids`].
+    fn sound_row_id(&self) -> Option<&'static str> {
+        match (self.labels.package(), self.labels.resource_version()) {
+            ("com.ss.android.ugc.trill", Some("38.3.2")) => Some(":id/ta8"),
+            ("com.zhiliaoapp.musically", Some("45.7.3")) => Some(":id/vertical_item_music_new_rl"),
+            _ => None,
+        }
+    }
+    /// Whether a node carrying one of the sound ids is that sound control here.
+    ///
+    /// TikTok 45.7.3 declares `:id/title` in 408 layouts (the feed's author name is one)
+    /// and `:id/bix` in 61. A unique match alone is therefore not the sound control:
+    /// `title` must sit inside a measured sound row, and `bix` (the caption page's Back)
+    /// must share the tree with the measured caption field.
+    fn sound_id_in_scope(&self, tree: &Tree, index: usize, id: &str) -> bool {
+        match id {
+            ":id/title" => inside_sound_row(tree, self.labels, self.sound_row_id(), index),
+            ":id/bix" => self
+                .plan
+                .publish
+                .is_some_and(|tail| !indices(tree, self.labels, tail.caption).is_empty()),
+            _ => true,
+        }
+    }
     async fn safe_point(&self, point: &crate::TapPoint) -> anyhow::Result<()> {
         self.check()?;
         anyhow::ensure!(
@@ -623,12 +669,15 @@ impl<'a> PrepareSession<'a> {
         }
         // Keep sound navigation exact-version keyed; never borrow resource IDs from
         // another package. These agree with the production measured SoundPickerPlan.
-        let sound_ids = self.sound_navigation_ids();
-        allowed_queries.extend(sound_ids.iter().map(|id| ElementQuery::ResourceIdSuffix(id)));
-        let measured_role = allowed_queries.into_iter().any(|query| {
-            let matches = indices(&tree, self.labels, query);
-            matches.as_slice() == [index]
+        let sound_role = self.sound_navigation_ids().iter().any(|id| {
+            indices(&tree, self.labels, ElementQuery::ResourceIdSuffix(id)).as_slice() == [index]
+                && self.sound_id_in_scope(&tree, index, id)
         });
+        let measured_role = sound_role
+            || allowed_queries.into_iter().any(|query| {
+                let matches = indices(&tree, self.labels, query);
+                matches.as_slice() == [index]
+            });
         let album_row = self.import_id.as_deref() == Some(node.attr("text"))
             && !indices(&tree, self.labels, self.plan.album_menu).is_empty();
         let ordinal = !indices(&tree, self.labels, self.plan.album_menu).is_empty()
@@ -765,12 +814,16 @@ impl UiSession for PrepareSession<'_> {
             self.plan.edit_step_marker,
             self.plan.publish.map(|p| p.caption),
             self.plan.discard,
-            Some(ElementQuery::ResourceIdSuffix(":id/title")),
             Some(ElementQuery::ResourceIdSuffix(":id/mjf")),
         ]
         .into_iter()
         .flatten()
-        .any(|query| !indices(&tree, self.labels, query).is_empty());
+        .any(|query| !indices(&tree, self.labels, query).is_empty())
+            // A sound title proves the sheet only inside a sound row: the feed's
+            // author name is a `:id/title` too.
+            || indices(&tree, self.labels, ElementQuery::ResourceIdSuffix(":id/title"))
+                .into_iter()
+                .any(|index| inside_sound_row(&tree, self.labels, self.sound_row_id(), index));
         anyhow::ensure!(owned, "no-public Back screen unproved");
         self.dispatch(self.session.back()).await
     }
@@ -1017,6 +1070,58 @@ mod tests {
         assert!(guard.safe_point(&crate::TapPoint { x: 973.0, y: 2029.5 }).await.is_err());
         guard.cleanup = true;
         assert!(guard.safe_point(&center).await.is_err());
+    }
+
+    /// 45.7.3 reuses `:id/title` (408 layouts) and `:id/bix` (61). On the real Home feed
+    /// the author name is a clickable `:id/title`, and the editor's own Back is a `bix`
+    /// whose tap opens Discard. Neither is the sound control the rehearsal allows.
+    #[tokio::test(start_paused = true)]
+    async fn generic_sound_ids_outside_their_screen_neither_authorize_a_tap_nor_back() {
+        struct Fixture {
+            xml: &'static str,
+            backs: AtomicUsize,
+        }
+        #[async_trait::async_trait]
+        impl UiSession for Fixture {
+            async fn tap(&self, _: crate::TapPoint) -> anyhow::Result<()> { panic!("point proof must not dispatch") }
+            async fn swipe(&self, _: crate::SwipeGesture) -> anyhow::Result<()> { panic!("no swipe") }
+            async fn type_text(&self, _: &str) -> anyhow::Result<()> { panic!("no type") }
+            async fn home(&self) -> anyhow::Result<()> { panic!("no Home") }
+            async fn back(&self) -> anyhow::Result<()> {
+                self.backs.fetch_add(1, Ordering::Relaxed);
+                Ok(())
+            }
+            async fn find_and_tap(&self, _: &str) -> anyhow::Result<()> { panic!("no find tap") }
+            async fn assert_visible(&self, _: &str) -> anyhow::Result<()> { Ok(()) }
+            fn stream_url(&self) -> Option<String> { None }
+            fn gui_session_epoch(&self) -> String { "fixture-epoch".into() }
+            async fn active_app_bundle(&self) -> anyhow::Result<String> { Ok("com.zhiliaoapp.musically".into()) }
+            async fn hierarchy_source_snapshot(&self) -> anyhow::Result<crate::HierarchySourceSnapshot> {
+                Ok(crate::HierarchySourceSnapshot { generation: 1, xml: self.xml.into() })
+            }
+        }
+        let global = crate::tiktok_labels::controls_for("com.zhiliaoapp.musically", "en", "45.7.3").unwrap();
+        let global_plan = ComposerPlan::resolve(&global).unwrap();
+        let stop = AtomicBool::new(false);
+        let deadline = Instant::now() + Duration::from_secs(10);
+        let session = |xml| Fixture { xml, backs: AtomicUsize::new(0) };
+
+        // Author button [32,1687][368,1745], the only `:id/title` on the card.
+        let feed = session(include_str!("../../fixtures/tiktok-publish/musically-45.7.3-en/real-20261009-home-feed.xml"));
+        let guard = PrepareSession::new(&feed, global, global_plan, "fixture-epoch", &stop, deadline, false);
+        assert!(guard.safe_point(&crate::TapPoint { x: 200.0, y: 1716.0 }).await.is_err());
+        assert!(guard.back().await.is_err());
+        assert_eq!(feed.backs.load(Ordering::Relaxed), 0);
+
+        // The editor's Back [32,95][137,200]: same id, no caption field beside it.
+        let editor = session(include_str!("../../fixtures/tiktok-publish/musically-45.7.3-en/real-20261009-editor.xml"));
+        let guard = PrepareSession::new(&editor, global, global_plan, "fixture-epoch", &stop, deadline, false);
+        assert!(guard.safe_point(&crate::TapPoint { x: 84.0, y: 147.0 }).await.is_err());
+
+        // The caption page's Back is the measured post-back control.
+        let caption = session(include_str!("../../fixtures/tiktok-publish/musically-45.7.3-en/18-typed.xml"));
+        let guard = PrepareSession::new(&caption, global, global_plan, "fixture-epoch", &stop, deadline, false);
+        guard.safe_point(&crate::TapPoint { x: 84.0, y: 147.0 }).await.unwrap();
     }
 
     #[tokio::test(start_paused = true)]
