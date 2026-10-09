@@ -560,6 +560,16 @@ impl UiSession for AndroidUiSession {
     fn pin_read_session(&self) -> riviu_core::driver::ReadSessionPin {
         riviu_core::driver::ReadSessionPin::holding(self.agent.pin_reads())
     }
+    async fn recycle_read_session(&self) -> anyhow::Result<()> {
+        // No gesture may straddle the replacement, and an unsettled one keeps its session.
+        let input = self.input_gate.lock().await;
+        anyhow::ensure!(!input.sealed, "session sealed for owner maintenance");
+        anyhow::ensure!(
+            !input.unknown,
+            "session gesture settlement unknown; session kept"
+        );
+        self.agent.recycle_for_owner().await
+    }
     fn gui_compatibility_pack(
         &self,
         package: &str,

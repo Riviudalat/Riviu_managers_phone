@@ -29,6 +29,16 @@ pub(crate) async fn with_binding<T>(work: impl std::future::Future<Output = T>) 
     }
 }
 
+/// The phase owner replaced its own session: forget the old epoch and every generation bound
+/// to it, so the next observation binds the new session from a fresh read.
+pub(crate) fn void_binding() {
+    let _ = PHASE_CURSOR.try_with(|shared| {
+        let mut cursor = shared.borrow_mut();
+        cursor.epoch = None;
+        cursor.previous = None;
+    });
+}
+
 pub(crate) fn check_session(session: &dyn UiSession) -> anyhow::Result<()> {
     PHASE_CURSOR
         .try_with(|shared| {

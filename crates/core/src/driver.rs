@@ -878,6 +878,14 @@ pub trait UiSession: Send + Sync {
     fn pin_read_session(&self) -> ReadSessionPin {
         ReadSessionPin::inert()
     }
+    /// Replace the read session once, on an epoch-bound owner's request, even while pinned.
+    ///
+    /// The owner calls this only at its own observation boundary, after it has dropped every
+    /// target it holds. The epoch changes, so nothing read before can reach a tap. Input never
+    /// replays through this path. Drivers whose reads never replace a session refuse it.
+    async fn recycle_read_session(&self) -> anyhow::Result<()> {
+        unsupported("recycle_read_session")
+    }
     fn gui_compatibility_pack(
         &self,
         _package: &str,

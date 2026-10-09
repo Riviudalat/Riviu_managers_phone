@@ -704,7 +704,9 @@ async fn observe_loop(
             let point = selection_recovery::prove_sheet(session, plan).await?;
             anyhow::ensure!(Instant::now() < deadline, "Hot navigation deadline expired");
             if navigation_attempts == 0 {
-                tap_native_image(session, point).await?;
+                let tapped = tap_native_image(session, point).await;
+                note_tab_tap();
+                tapped?;
             } else {
                 // Machine29, 2026-10-01: two acknowledged overlay taps left
                 // For You selected at the measured native Hot centre. After
@@ -727,6 +729,7 @@ async fn observe_loop(
                     state.emit("contactHotDispatch", None);
                 });
                 let result = session.tap(point).await;
+                note_tab_tap();
                 visual_diagnostic(|state| state.emit("contactHotAck", Some(result.is_ok())));
                 result?;
                 check_wait()?;

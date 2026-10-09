@@ -180,7 +180,9 @@ pub(super) async fn recover(
                     "Recent tab changed before navigation"
                 );
                 if !selected {
-                    sound_tap(session, target.centre()).await?;
+                    let tapped = sound_tap(session, target.centre()).await;
+                    note_tab_tap();
+                    tapped?;
                 }
                 break;
             }

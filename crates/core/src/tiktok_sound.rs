@@ -72,9 +72,176 @@ struct SoundRouteEvidence {
     /// The visual route already recorded that it skips the XML popup check.
     popup_check_skipped: AtomicBool,
     selection: AtomicU8,
+    /// A sheet tab tap was dispatched in this stage; see [`recycle_after_tab_switch`].
+    tab_tapped: AtomicBool,
+    /// `unreadable_roots` when the last tab tap was dispatched.
+    roots_at_tab_tap: AtomicU32,
+    /// Session replacements this stage asked for. Capped at one.
+    tab_recycles: AtomicU32,
+    /// Raised while a phase that can recycle and re-read the sheet is observing.
+    recycle_armed: AtomicBool,
+    /// The epoch this stage's own recycle produced, for owners that bound the old one.
+    recycled_epoch: parking_lot::Mutex<Option<String>>,
+    /// The last two-read late XML pool, its epoch and when it was proved.
+    late_xml: parking_lot::Mutex<Option<(String, Instant, ObservedSoundPool)>>,
 }
 const ROUTE_XML: u8 = 1;
 const ROUTE_VISUAL: u8 = 2;
+/// At most one session replacement per sound stage.
+const TAB_SWITCH_RECYCLE_CAP: u32 = 1;
+
+/// A sheet tab tap was dispatched. Recorded after the gesture, whatever it returned.
+fn note_tab_tap() {
+    let _ = SOUND_BUDGET.try_with(|budget| {
+        let roots = budget.route.unreadable_roots.load(Ordering::Relaxed);
+        budget
+            .route
+            .roots_at_tab_tap
+            .store(roots, Ordering::Relaxed);
+        budget.route.tab_tapped.store(true, Ordering::Relaxed);
+    });
+}
+
+/// Unreadable roots met since the last tab tap.
+fn unreadable_since_tab_tap() -> u32 {
+    SOUND_BUDGET
+        .try_with(|budget| {
+            budget
+                .route
+                .unreadable_roots
+                .load(Ordering::Relaxed)
+                .saturating_sub(budget.route.roots_at_tab_tap.load(Ordering::Relaxed))
+        })
+        .unwrap_or(0)
+}
+
+/// Phone 44 (Global 45.7.3/en, SM-G955F, 2026-10-10, `target/source-probe/44-*.jsonl`): after a
+/// tab switch inside the sheet, every `/source` on that UiAutomator2 session waited ~10.5 s for
+/// a root that never came, on Hot and For You alike, while a fresh session read the same sheet in
+/// ~2 s on either tab. So an unreadable root after a tab tap ends the phase at its observation
+/// boundary, once per stage, and only inside a phase that re-reads the sheet afterwards.
+fn tab_switch_recycle_due(plan: SoundPickerPlan) -> bool {
+    selection_recovery::measured(plan)
+        && SOUND_BUDGET
+            .try_with(|budget| {
+                budget.route.recycle_armed.load(Ordering::Relaxed)
+                    && budget.route.tab_tapped.load(Ordering::Relaxed)
+                    && budget.route.tab_recycles.load(Ordering::Relaxed) < TAB_SWITCH_RECYCLE_CAP
+            })
+            .unwrap_or(false)
+}
+
+/// Mark an unreadable root after a tab tap for the arming phase. Every other error is unchanged,
+/// and the original error stays in the chain for the existing classifiers.
+fn blind_after_tab_switch(plan: SoundPickerPlan, error: anyhow::Error) -> anyhow::Error {
+    if unreadable_root(&error) && tab_switch_recycle_due(plan) {
+        error.context(SoundTabSwitchBlind)
+    } else {
+        error
+    }
+}
+
+/// Lowers `recycle_armed` however the armed phase ends.
+struct RecycleArmed;
+impl RecycleArmed {
+    fn arm() -> Self {
+        let _ = SOUND_BUDGET
+            .try_with(|budget| budget.route.recycle_armed.store(true, Ordering::Relaxed));
+        Self
+    }
+}
+impl Drop for RecycleArmed {
+    fn drop(&mut self) {
+        let _ = SOUND_BUDGET
+            .try_with(|budget| budget.route.recycle_armed.store(false, Ordering::Relaxed));
+    }
+}
+
+fn tab_recycles() -> u32 {
+    SOUND_BUDGET
+        .try_with(|budget| budget.route.tab_recycles.load(Ordering::Relaxed))
+        .unwrap_or(0)
+}
+
+/// The epoch this stage's own recycle produced, if the session still carries it.
+pub(crate) fn recycled_epoch(session: &dyn UiSession) -> Option<String> {
+    let current = session.gui_session_epoch();
+    SOUND_BUDGET
+        .try_with(|budget| budget.route.recycled_epoch.lock().clone())
+        .ok()
+        .flatten()
+        .filter(|epoch| !epoch.is_empty() && *epoch == current)
+}
+
+/// Replace the blind session once, at the caller's observation boundary. The caller holds no
+/// target: every pool, tab and row bound to the old epoch is void, and the observation binding
+/// starts over. Nothing is tapped here. The caller re-reads the sheet on the new session.
+async fn recycle_after_tab_switch(
+    session: &dyn UiSession,
+    plan: SoundPickerPlan,
+    step: &str,
+) -> anyhow::Result<()> {
+    let claimed = SOUND_BUDGET
+        .try_with(|budget| {
+            budget
+                .route
+                .tab_recycles
+                .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |used| {
+                    (used < TAB_SWITCH_RECYCLE_CAP).then_some(used + 1)
+                })
+                .is_ok()
+        })
+        .unwrap_or(false);
+    anyhow::ensure!(claimed, "sound session recycle cap reached");
+    let roots = unreadable_roots();
+    let before = session.gui_session_epoch();
+    let recycled = async {
+        check_wait()?;
+        read_sound(session.recycle_read_session()).await?;
+        let after = session.gui_session_epoch();
+        anyhow::ensure!(
+            !after.is_empty() && after != before,
+            "sound session recycle kept the old epoch"
+        );
+        anyhow::ensure!(
+            read_sound(session.active_app_bundle()).await? == plan.package
+                && session.gui_session_epoch() == after,
+            "sound app/session changed during session recycle"
+        );
+        Ok(after)
+    }
+    .await;
+    // Whatever happened, nothing read before this point may reach a tap.
+    crate::tiktok_composer::observation::void_binding();
+    let _ = SOUND_BUDGET.try_with(|budget| {
+        *budget.route.late_xml.lock() = None;
+        budget
+            .route
+            .consecutive_unreadable
+            .store(0, Ordering::Relaxed);
+        if let Ok(after) = &recycled {
+            *budget.route.recycled_epoch.lock() = Some(after.clone());
+        }
+    });
+    tracing::warn!(serial=?session.gui_scope().map(|scope| scope.device_id),
+        previous=%before, current=%session.gui_session_epoch(), unreadableRoots=roots,
+        recycled=recycled.is_ok(), step, "sound session recycled after a tab switch");
+    crate::publish_recovery::note_read(
+        "sound",
+        "sessionRecycledAfterTabSwitch",
+        tab_recycles(),
+        if recycled.is_ok() { "recycled" } else { "failed" },
+        Some(&match &recycled {
+            Ok(_) => format!(
+                "Cây giao diện bảng nhạc không đọc được sau khi đổi tab; đã mở lại phiên đọc một lần và đọc lại bảng nhạc từ đầu (bước: {step}; số lần không đọc được: {roots})"
+            ),
+            Err(error) => format!(
+                "Không mở lại được phiên đọc sau khi đổi tab: {error:#} (bước: {step}; số lần không đọc được: {roots})"
+            ),
+        }),
+    );
+    recycled.map(|_| ())
+}
 
 fn note_unreadable_root() {
     let _ = SOUND_BUDGET.try_with(|budget| {
@@ -151,10 +318,11 @@ fn set_selection_route(route: u8) {
 
 /// Record which route chose the confirmed sound and how many unreadable roots the stage met.
 pub(crate) fn note_selection_route() {
-    let Ok((route, roots)) = SOUND_BUDGET.try_with(|budget| {
+    let Ok((route, roots, recycles)) = SOUND_BUDGET.try_with(|budget| {
         (
             budget.route.selection.load(Ordering::Relaxed),
             budget.route.unreadable_roots.load(Ordering::Relaxed),
+            budget.route.tab_recycles.load(Ordering::Relaxed),
         )
     }) else {
         return;
@@ -176,7 +344,7 @@ pub(crate) fn note_selection_route() {
         1,
         outcome,
         Some(&format!(
-            "{detail}; số lần không đọc được cây giao diện: {roots}"
+            "{detail}; số lần không đọc được cây giao diện: {roots}; số lần mở lại phiên đọc sau khi đổi tab (sessionRecycledAfterTabSwitch): {recycles}"
         )),
     );
 }
@@ -209,6 +377,12 @@ fn unreadable_root(error: &anyhow::Error) -> bool {
 pub(crate) struct SoundRootUnreadable {
     reads: u32,
 }
+
+/// A sheet read after a tab tap found no root, inside a phase armed to recycle the session once.
+/// Returned before any further tap; the arming phase handles it.
+#[derive(Debug, thiserror::Error)]
+#[error("Không đọc được cây giao diện bảng nhạc sau khi đổi tab; sẽ mở lại phiên đọc một lần, chưa bấm Đăng")]
+pub(crate) struct SoundTabSwitchBlind;
 
 /// The editor root stayed unreadable for a whole editor proof: no read returned a tree.
 /// Distinct from a read that showed another title, which is never handed to OCR.
@@ -510,7 +684,9 @@ async fn sound_tap_armed(
 /// attempt here: #22/#29/#30 on Global 45.7.3 (2026-10-08) each lost the attempt to one, while
 /// the replacement read the same unreadable root. So each public sound step holds its session,
 /// and an unreadable root stays an unknown read that the existing loops observe again within
-/// their unchanged deadlines. Nothing is rebound; no target outlives a session change.
+/// their unchanged deadlines. No target outlives a session change. The one exception is
+/// [`recycle_after_tab_switch`], which the stage asks for itself, once, at an observation
+/// boundary, and which re-reads the sheet from nothing on the new session.
 fn hold_sound_session(session: &dyn UiSession) -> crate::driver::ReadSessionPin {
     session.pin_read_session()
 }
@@ -1202,6 +1378,85 @@ async fn observe_measured_sound_pool(
     maximum: usize,
     allow_recommended: bool,
 ) -> anyhow::Result<ObservedSoundPool> {
+    let armed = RecycleArmed::arm();
+    let observed =
+        observe_measured_sound_pool_once(session, plan, maximum, allow_recommended).await;
+    drop(armed);
+    let blind = match observed {
+        Err(error) if error.is::<SoundTabSwitchBlind>() && !error.is::<SoundStopped>() => error,
+        observed => return observed,
+    };
+    // The blind phase returned before any further tap and holds no target.
+    if let Err(recycle) =
+        recycle_after_tab_switch(session, plan, "đọc bảng nhạc sau khi đổi tab").await
+    {
+        return Err(blind.context(format!("không mở lại được phiên đọc: {recycle:#}")));
+    }
+    observe_after_recycle(session, plan, maximum, allow_recommended).await
+}
+
+/// The sheet read again from nothing on the replacement session. The selected tab is proved
+/// from fresh reads, and Hot is tapped at most once, only when two fresh reads prove it is not
+/// selected. A blind root here is not recycled again: the error goes to the caller as today,
+/// whose next attempt starts on the existing visual route.
+async fn observe_after_recycle(
+    session: &dyn UiSession,
+    plan: SoundPickerPlan,
+    maximum: usize,
+    allow_recommended: bool,
+) -> anyhow::Result<ObservedSoundPool> {
+    let epoch = session.gui_session_epoch();
+    anyhow::ensure!(!epoch.is_empty(), "sound sheet session missing");
+    let pool = async {
+        // A policy that accepts the current list keeps it rather than switching tabs again.
+        if let Some(pool) =
+            observe_current_recommended_routed(session, plan, maximum, allow_recommended, true)
+                .await?
+        {
+            return Ok(pool);
+        }
+        snapshot::select_section_tab_xml_only(session, plan).await?;
+        snapshot::observe_xml_only(session, plan, maximum).await
+    }
+    .await;
+    crate::publish_recovery::note_read(
+        "sound",
+        "readAfterSessionRecycle",
+        tab_recycles(),
+        if pool.is_ok() { "ready" } else { "unavailable" },
+        Some(&match &pool {
+            Ok(pool) => format!(
+                "Phiên đọc mới đọc được bảng nhạc: {} nhạc, tab {}",
+                pool.candidates.len(),
+                pool.effective_plan(plan).section_label
+            ),
+            Err(error) => format!("Phiên đọc mới vẫn chưa đọc được bảng nhạc: {error:#}"),
+        }),
+    );
+    checked_measured_sound_observation(session, plan, &epoch, pool).await
+}
+
+/// Item 5 of the round-2 plan (#44/#47): the late XML route just proved this pool from two
+/// fresh reads. Within one POLL on the same epoch, the row tap reuses it instead of asking the
+/// root twice more (~21 s on those phones). Taken once; anything older is read again.
+fn take_fresh_late_xml(
+    session: &dyn UiSession,
+    pool: &ObservedSoundPool,
+) -> Option<ObservedSoundPool> {
+    let (epoch, proved, cached) = SOUND_BUDGET
+        .try_with(|budget| budget.route.late_xml.lock().take())
+        .ok()
+        .flatten()?;
+    (epoch == session.gui_session_epoch() && proved.elapsed() < POLL && cached == *pool)
+        .then_some(cached)
+}
+
+async fn observe_measured_sound_pool_once(
+    session: &dyn UiSession,
+    plan: SoundPickerPlan,
+    maximum: usize,
+    allow_recommended: bool,
+) -> anyhow::Result<ObservedSoundPool> {
     anyhow::ensure!(
         selection_recovery::measured(plan)
             && plan.package == "com.zhiliaoapp.musically"
@@ -1221,6 +1476,19 @@ async fn observe_measured_sound_pool(
         {
             Ok(Some(pool)) => {
                 return checked_measured_sound_observation(session, plan, &epoch, Ok(pool)).await;
+            }
+            // Roots that went blind after a tab tap, in a phase that could not recycle: this
+            // armed phase recycles before handing the attempt to OCR.
+            Ok(None)
+                if visual_handoff_due(session, plan)
+                    && tab_switch_recycle_due(plan)
+                    && unreadable_since_tab_tap() > 0 =>
+            {
+                let error = anyhow::Error::new(SoundRootUnreadable {
+                    reads: consecutive_unreadable_roots(),
+                });
+                diagnostics.emit("directXml", "skip", started, "tabSwitchBlind", Some(&error));
+                return Err(error.context(SoundTabSwitchBlind));
             }
             // The current list is not observed here; direct XML would ask the same root twice.
             Ok(None) if visual_handoff_due(session, plan) => {
@@ -1263,7 +1531,9 @@ async fn observe_measured_sound_pool(
             Ok(Some(pool)) => {
                 return checked_measured_sound_observation(session, plan, &epoch, Ok(pool)).await;
             }
-            Err(error) if error.is::<SoundStopped>() => return Err(error),
+            Err(error) if error.is::<SoundStopped>() || error.is::<SoundTabSwitchBlind>() => {
+                return Err(error)
+            }
             _ => checked_measured_sound_observation(session, plan, &epoch, Ok(())).await?,
         }
     }
@@ -1327,7 +1597,11 @@ async fn observe_measured_sound_pool(
             }
             Ok(pool) => pool,
         };
-        checked_measured_sound_observation(session, plan, &epoch, pool).await
+        let pool = checked_measured_sound_observation(session, plan, &epoch, pool).await?;
+        let _ = SOUND_BUDGET.try_with(|budget| {
+            *budget.route.late_xml.lock() = Some((epoch.clone(), Instant::now(), pool.clone()));
+        });
+        Ok(pool)
     }.await;
     diagnostics.emit("lateXml", "finish", started,
         if pool.is_ok() { "ready" } else { "error" }, pool.as_ref().err());
@@ -1737,7 +2011,21 @@ pub async fn choose_and_confirm_sound(
             .candidates
             .get(index)
             .context("sound selection index is outside the observed pool")?;
-        let fresh = match observe_sound_pool(session, plan, pool.maximum_visible).await {
+        let reused = take_fresh_late_xml(session, pool);
+        if reused.is_some() {
+            crate::publish_recovery::note_read(
+                "sound",
+                "lateXmlPoolReused",
+                1,
+                "reused",
+                Some("Dùng lại danh sách nhạc vừa đọc hai lần từ cây giao diện (cùng phiên, chưa quá một nhịp đọc); không đọc lại trước khi bấm chọn"),
+            );
+        }
+        let observed = match reused {
+            Some(fresh) => Ok(fresh),
+            None => observe_sound_pool(session, plan, pool.maximum_visible).await,
+        };
+        let fresh = match observed {
             Ok(fresh) => fresh,
             Err(error) if error.is::<SoundRootUnreadable>() => {
                 // No row was tapped in this call. The frozen XML identity moves to the

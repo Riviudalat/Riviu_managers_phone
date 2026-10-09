@@ -46,6 +46,13 @@ async fn read_snapshot(
         tokio::time::timeout_at(deadline, read_sound(session.hierarchy_source_snapshot()))
             .await
             .context("đọc bảng nhạc hết thời gian chờ 3 phút; chưa bấm Đăng")?;
+    let observed = match observed {
+        Err(error) if unreadable_root(&error) && tab_switch_recycle_due(plan) => {
+            note_unreadable_root();
+            return Err(error.context(SoundTabSwitchBlind));
+        }
+        observed => observed,
+    };
     if let Err(error) = &observed {
         if unreadable_root(error) {
             note_unreadable_root();
@@ -226,7 +233,9 @@ pub(super) async fn select_section_tab(
                     y = point.y,
                     "sound Hot navigation proved by two fresh OCR frames"
                 );
-                sound_tap(session, point).await?;
+                let tapped = sound_tap(session, point).await;
+                note_tab_tap();
+                tapped?;
                 observation = "Hot navigation dispatched; awaiting XML confirmation".into();
             }
             continue;
@@ -251,9 +260,9 @@ pub(super) async fn select_section_tab(
                         attempts,
                         "select sound section"
                     );
-                    sound_tap(session, tab.centre())
-                        .await
-                        .context("select measured sound section")?;
+                    let tapped = sound_tap(session, tab.centre()).await;
+                    note_tab_tap();
+                    tapped.context("select measured sound section")?;
                     retry_after = Instant::now() + Duration::from_secs(1);
                     previous = None;
                 } else {
@@ -504,6 +513,9 @@ pub(super) async fn observe_direct(
             Ok(Err(error)) => {
                 if unreadable_root(&error) {
                     note_unreadable_root();
+                    if tab_switch_recycle_due(plan) {
+                        return Err(error.context(SoundTabSwitchBlind));
+                    }
                 }
                 return Ok(None);
             }
@@ -575,7 +587,8 @@ pub(super) async fn select_section_tab_xml_only(
         let source =
             tokio::time::timeout_at(deadline, read_sound(session.hierarchy_source_snapshot()))
                 .await
-                .context("sound XML-only tab deadline")??;
+                .context("sound XML-only tab deadline")?
+                .map_err(|error| blind_after_tab_switch(plan, error))?;
         let tab = parse(&source.xml, plan).and_then(|nodes| {
             section_tab(&nodes, plan).map(|(rect, selected)| (rect.clone(), selected))
         });
@@ -591,7 +604,9 @@ pub(super) async fn select_section_tab_xml_only(
                                 && read_sound(session.active_app_bundle()).await? == plan.package,
                             "sound app/session changed before Hot tap"
                         );
-                        sound_tap(session, rect.centre()).await?;
+                        let dispatched = sound_tap(session, rect.centre()).await;
+                        note_tab_tap();
+                        dispatched?;
                         tapped = true;
                         previous = None;
                     }
@@ -632,7 +647,8 @@ pub(super) async fn observe_xml_only(
         let source =
             tokio::time::timeout_at(deadline, read_sound(session.hierarchy_source_snapshot()))
                 .await
-                .context("sound XML-only pool deadline")??;
+                .context("sound XML-only pool deadline")?
+                .map_err(|error| blind_after_tab_switch(plan, error))?;
         match pool(&source.xml, plan, maximum) {
             Ok(current) => {
                 if previous.as_ref().is_some_and(|(generation, before)| {

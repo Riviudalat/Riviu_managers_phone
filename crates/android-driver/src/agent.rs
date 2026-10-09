@@ -581,6 +581,15 @@ impl AgentClient {
         AgentReadPin(Arc::clone(&self.read_pins))
     }
 
+    /// The read-side replacement, asked for by the pinned owner itself at its own observation
+    /// boundary. The owner has dropped every target, and the new session identity voids
+    /// whatever it kept. No request is replayed here.
+    pub(crate) async fn recycle_for_owner(&self) -> anyhow::Result<()> {
+        tracing::warn!(serial = %self.serial, pins = self.read_pins.load(Ordering::SeqCst),
+            "replacing a pinned agent session at its owner's request");
+        self.recreate_session().await
+    }
+
     fn reads_pinned(&self) -> bool {
         self.read_pins.load(Ordering::SeqCst) > 0
     }

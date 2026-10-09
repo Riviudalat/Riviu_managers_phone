@@ -4274,9 +4274,10 @@ where
         let sound_deadline = crate::tiktok_sound::phase_deadline(Duration::from_secs(180));
         let sound_epoch = session.gui_session_epoch();
         let mut sound_trace = StageDiagnosticOperation::start("soundStage", &sound_epoch, Some(sound_deadline));
+        let mut stage_epoch = sound_epoch.clone();
         let chosen = crate::tiktok_sound::with_deadline_budget(stop, sound_deadline, async {
             let deadline = sound_deadline;
-            let epoch = session.gui_session_epoch();
+            let mut epoch = session.gui_session_epoch();
             let chosen = loop {
                 crate::tiktok_sound::check_wait()?;
                 let attempt = async {
@@ -4422,6 +4423,11 @@ where
                         {
                             break Err(error);
                         }
+                        // The sound stage's own one recycle after a tab switch already
+                        // re-read the sheet on the new session; bind that epoch.
+                        if let Some(recycled) = crate::tiktok_sound::recycled_epoch(session) {
+                            epoch = recycled;
+                        }
                         // A driver repair invalidates every pool/target and requires
                         // the dispatcher's account-bound restart, not an inline retry.
                         if session.gui_session_epoch() != epoch {
@@ -4448,6 +4454,9 @@ where
                     result => break result,
                 }
             };
+            if let Some(recycled) = crate::tiktok_sound::recycled_epoch(session) {
+                stage_epoch = recycled;
+            }
             if chosen.is_ok() {
                 crate::tiktok_sound::note_selection_route();
             }
@@ -4459,7 +4468,7 @@ where
         let chosen = chosen.map_err(|error| {
             if !stop.load(Ordering::Relaxed)
                 && Instant::now() >= sound_deadline
-                && session.gui_session_epoch() == sound_epoch
+                && session.gui_session_epoch() == stage_epoch
                 && !error.is::<crate::driver::SessionEpochChanged>()
                 && !crate::publish_recovery::requires_fresh_preparation(&error)
                 && crate::publish_recovery::describe(&error).kind
