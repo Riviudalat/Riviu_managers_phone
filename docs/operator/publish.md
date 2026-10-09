@@ -262,6 +262,10 @@ Tên nhạc bị rút gọn ở hàng đã chọn vẫn phải được xác nh�
 Trên Global 45.7.3 tiếng Anh, nếu bảng nhạc đã hiện mà OCR không đọc đủ tên hàng,
 app chỉ chuyển sang cây giao diện khi đã xác nhận đúng bảng, tab Hot và các hàng ổn
 định. Không chứng minh được thì báo lỗi trước Đăng; không tự chạm vào một hàng bất kỳ.
+Ngược lại, nếu hai lần liền không đọc được cây giao diện của bảng nhạc, app chuyển
+sang đọc ảnh màn hình thay vì chờ hết 3 phút. Chi tiết máy ghi "chuyển sang ảnh màn
+hình" và cuối bước ghi nhạc được chọn bằng cây giao diện hay bằng ảnh màn hình. Tên
+nhạc vẫn được đọc lại từ cây giao diện trước khi bấm Đăng.
 
 Lỗi tạm thời trước Đăng được **tự thử lại tối đa 3 lần ngoài lần chạy đầu**, chờ lần
 lượt 2, 5 và 10 giây. Chưa thấy nút mở soạn bài, màn camera, lối vào thư viện hoặc

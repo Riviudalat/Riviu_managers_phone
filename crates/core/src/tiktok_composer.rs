@@ -4277,7 +4277,7 @@ where
         let chosen = crate::tiktok_sound::with_deadline_budget(stop, sound_deadline, async {
             let deadline = sound_deadline;
             let epoch = session.gui_session_epoch();
-            loop {
+            let chosen = loop {
                 crate::tiktok_sound::check_wait()?;
                 let attempt = async {
                     if reopen_network_sheet {
@@ -4447,7 +4447,11 @@ where
                     }
                     result => break result,
                 }
+            };
+            if chosen.is_ok() {
+                crate::tiktok_sound::note_selection_route();
             }
+            chosen
         })
         .await;
         sound_trace.finish(if chosen.is_ok() { "confirmed" } else { "error" });

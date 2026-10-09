@@ -247,6 +247,7 @@ async fn confirm_editor_observed(
     let deadline =
         phase_deadline(Duration::from_secs(30)).min(Instant::now() + Duration::from_secs(30));
     let mut previous: Option<(String, u64, String)> = None;
+    let mut read_any = false;
     while Instant::now() < deadline {
         check_wait()?;
         let epoch = session.gui_session_epoch();
@@ -259,12 +260,16 @@ async fn confirm_editor_observed(
         let source = match bounded(deadline, session.hierarchy_source_snapshot()).await {
             Ok(source) => source,
             Err(error) if transient_sound_read(&error) => {
+                if unreadable_root(&error) {
+                    note_unreadable_root();
+                }
                 previous = None;
                 tokio::time::sleep(POLL).await;
                 continue;
             }
             Err(error) => return Err(error),
         };
+        read_any = true;
         check_wait()?;
         if epoch.is_empty() || session.gui_session_epoch() != epoch || source.generation == 0 {
             previous = None;
@@ -319,5 +324,156 @@ async fn confirm_editor_observed(
         }
         tokio::time::sleep(POLL).await;
     }
-    anyhow::bail!("selected sound was not confirmed on two fresh editor snapshots")
+    let unconfirmed =
+        anyhow::anyhow!("selected sound was not confirmed on two fresh editor snapshots");
+    Err(if read_any {
+        unconfirmed
+    } else {
+        unconfirmed.context(EditorRootUnreadable)
+    })
+}
+
+/// XML editor proof, or, only when no editor read returned a tree at all, two fresh frames
+/// whose chip OCR equals the frozen title. That stands in for the editor chip here only:
+/// the final sound reproof before Post still reads the chip from XML.
+pub(super) async fn confirm_editor_or_chip(
+    session: &dyn UiSession,
+    plan: SoundPickerPlan,
+    candidate: &SoundCandidate,
+) -> anyhow::Result<()> {
+    match confirm_editor(session, plan, &candidate.title).await {
+        Err(error) if error.is::<EditorRootUnreadable>() && session.gui_reasoner().is_some() => {
+            prove_editor_chip(session, plan, &candidate.title)
+                .await
+                .with_context(|| format!("{error:#}"))?;
+            crate::publish_recovery::note_read(
+                "sound",
+                "editorProof",
+                unreadable_roots(),
+                "ocrChip",
+                Some(&format!(
+                    "Màn chỉnh sửa không đọc được; ảnh màn hình cho thấy nhạc '{}' của '{}'. Tên nhạc vẫn được kiểm lại trước khi Đăng",
+                    candidate.title, candidate.artist
+                )),
+            );
+            Ok(())
+        }
+        result => result,
+    }
+}
+
+// Editor chip `tv_top_text` on Global 45.7.3/en at 1080x2220: [362,100][698,216] on Riviu #44
+// (SM-G955F ce031713d903001b01, real-20261009-editor.xml) and [398,100][662,216] on
+// ce031713b0c610ab0c (15-readback.xml). The title is centred in that band.
+const CHIP_LEFT: u32 = 100;
+const CHIP_RIGHT: u32 = 980;
+const CHIP_TOP: u32 = 90;
+const CHIP_BOTTOM: u32 = 230;
+// Sheet tabs read at y=1129 on hot-visual.png (same device class); prove_sheet scans 888..1443.
+const SHEET_TABS_TOP: u32 = 888;
+const OCR_BOTTOM: u32 = 1443;
+
+async fn prove_editor_chip(
+    session: &dyn UiSession,
+    plan: SoundPickerPlan,
+    expected: &str,
+) -> anyhow::Result<()> {
+    anyhow::ensure!(measured(plan), "sound editor chip OCR unmeasured");
+    let reasoner = session
+        .gui_reasoner()
+        .context("sound editor chip local OCR unavailable")?;
+    let window = Duration::from_secs(30);
+    let deadline = phase_deadline(window).min(Instant::now() + window);
+    let epoch = session.gui_session_epoch();
+    anyhow::ensure!(!epoch.is_empty(), "sound editor chip session missing");
+    let mut matched = 0;
+    let mut generation = 0;
+    while Instant::now() < deadline {
+        generation += 1;
+        check_wait()?;
+        anyhow::ensure!(
+            session.gui_session_epoch() == epoch
+                && read_sound(session.active_app_bundle()).await? == plan.package,
+            "sound editor chip app/session changed"
+        );
+        let png = bounded(deadline, session.screenshot_png()).await?;
+        anyhow::ensure!(
+            png.len() <= 8 * 1024 * 1024,
+            "sound editor chip frame too large"
+        );
+        let (width, height) = image::ImageReader::new(std::io::Cursor::new(&png))
+            .with_guessed_format()?
+            .into_dimensions()?;
+        anyhow::ensure!(
+            (width, height) == (1080, 2220),
+            "sound editor chip geometry unmeasured"
+        );
+        let remaining_ms = deadline
+            .saturating_duration_since(Instant::now())
+            .as_millis()
+            .min(15_000) as u64;
+        anyhow::ensure!(remaining_ms > 0, "sound editor chip observation expired");
+        let request = OcrRequest {
+            protocol_version: 1,
+            request_id: uuid::Uuid::new_v4().to_string(),
+            observation_id: uuid::Uuid::new_v4().to_string(),
+            session_epoch: epoch.clone(),
+            generation,
+            remaining_ms,
+            screenshot: OcrImage {
+                sha256: format!("{:x}", Sha256::digest(&png)),
+                bytes_base64: base64::engine::general_purpose::STANDARD.encode(png),
+                width,
+                height,
+            },
+            roi: Some(OcrRect {
+                x: 0,
+                y: 0,
+                width,
+                height: OCR_BOTTOM,
+            }),
+            languages: vec!["vi".into(), "en".into()],
+            min_confidence: 0.9,
+        };
+        let response = bounded(deadline, reasoner.ocr(request.clone())).await?;
+        response.validate_binding(&request)?;
+        // Any tab label in the sheet band means the picker may still cover the editor.
+        let sheet = response.lines.iter().any(|line| {
+            line.bounds.y >= SHEET_TABS_TOP
+                && ["Hot", "For You", "Favorites", "Recent"].contains(&line.text.trim())
+        });
+        let chip: Vec<_> = response
+            .lines
+            .iter()
+            .filter(|line| {
+                line.bounds.x >= CHIP_LEFT
+                    && line.bounds.x + line.bounds.width <= CHIP_RIGHT
+                    && line.bounds.y >= CHIP_TOP
+                    && line.bounds.y + line.bounds.height <= CHIP_BOTTOM
+            })
+            .collect();
+        let shown = !sheet
+            && matches!(chip.as_slice(), [line]
+                if line.confidence >= 0.9 && same_editor_sound_title(&line.text, expected));
+        check_wait()?;
+        anyhow::ensure!(
+            session.gui_session_epoch() == epoch,
+            "sound editor chip session changed"
+        );
+        matched = if shown { matched + 1 } else { 0 };
+        if matched == 2 {
+            anyhow::ensure!(
+                read_sound(session.active_app_bundle()).await? == plan.package
+                    && session.gui_session_epoch() == epoch,
+                "sound editor chip app/session changed"
+            );
+            check_wait()?;
+            return Ok(());
+        }
+        tokio::time::sleep(POLL).await;
+    }
+    Err(crate::publish_recovery::retryable_error(
+        "sound_editor_chip_unconfirmed",
+        "Ảnh màn hình chưa cho thấy đúng tên nhạc đã chọn trên màn chỉnh sửa; chưa bấm Đăng",
+    ))
 }

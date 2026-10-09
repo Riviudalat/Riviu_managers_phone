@@ -203,6 +203,19 @@ hai quan sát mới rồi dùng snapshot XML chỉ khi Hot đã chọn và hàng
 Nhánh này chỉ chọn một lần, chờ hai ảnh mới có đúng tên nhạc chuyển hồng để
 xác nhận lựa chọn đã tải xong, rồi đóng bảng đã chứng minh bằng ảnh; hai XML mới
 trên editor phải khớp nguyên tên nhạc. Không khớp thì giữ lỗi trước Đăng.
+Trên Global 45.7.3/en có OCR, hai lần liên tiếp `/source` không có gốc accessibility
+(`AccessibilityReadUnavailable` hoặc timeout gốc) trong cùng một pha đọc bảng nhạc
+thì pha đó dừng hỏi XML và chuyển sang đường ảnh đã đo, không tap. Ở pha đọc danh
+sách thì bỏ cả lượt XML trực tiếp; ở pha đọc lại trước khi chọn thì danh tính
+tên/nghệ sĩ đã chốt phải khớp đúng một hàng trong hai ảnh ổn định. Hàng đã hiện chọn
+không bao giờ bị bấm lại. Sau khi bấm hàng, cửa sổ đọc lại 8 giây hết mà chưa có lần
+đọc nào trả về được coi là gốc tạm không đọc được và đi nhánh editor/ảnh bảng như lỗi
+accessibility, không phải `sound_load_timeout`. Xác nhận sau chọn bằng ảnh dùng chip
+`tv_top_text` qua XML; chỉ khi không lần đọc editor nào trả cây thì hai ảnh mới cùng
+phiên, không thấy tab bảng nhạc, có OCR chip đúng tên đã chốt mới thay được. Bằng
+chứng OCR này không cho phép Đăng: bước kiểm nhạc cuối trước Đăng vẫn đọc XML.
+Dòng tiến trình `ReadRecovery` ghi đường đã chọn (`selectionRoute`: `xml`/`visual`) và
+số lần không đọc được gốc; deadline chung ba phút không đổi.
 Trên 45.7.3, APK khai báo lại các id `title` (408 layout), `tv_title` (303), `cover`
 (88), `desc` (75), `bix` (61), `esv`, `z3k`, `cqf`, `tv_top` và `gpr` ở nhiều màn khác,
 nên một lần khớp id duy nhất chưa đủ làm bằng chứng. Mỗi chỗ dùng phải có phạm vi:

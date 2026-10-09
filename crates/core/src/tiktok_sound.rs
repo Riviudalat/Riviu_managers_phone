@@ -9,7 +9,7 @@ use std::time::Duration;
 
 use anyhow::Context;
 use std::sync::{
-    atomic::{AtomicBool, Ordering},
+    atomic::{AtomicBool, AtomicU32, AtomicU8, Ordering},
     Arc,
 };
 use tokio::time::Instant;
@@ -47,14 +47,115 @@ mod visual;
 const READBACK_WINDOW: Duration = Duration::from_secs(8);
 const POLL: Duration = Duration::from_millis(250);
 const SOUND_WINDOW: Duration = Duration::from_secs(180);
+// #23/#28 (Global 45.7.3/en, 2026-10-08 20:34-20:50): every pinned /source on the sheet waited
+// ~10.5 s for a root that never came, twelve times in a row, until the phase deadline. Two in a
+// row (~21 s) is enough to stop asking that phase and let the measured visual route observe.
+const ROOT_UNREADABLE_CAP: u32 = 2;
 
 struct SoundBudget {
     deadline: Instant,
     stopped: Arc<AtomicBool>,
     popup: Arc<tokio::sync::Mutex<crate::app_automation::dialogs::PopupBudget>>,
     popup_package: Arc<tokio::sync::Mutex<Option<&'static str>>>,
+    route: Arc<SoundRouteEvidence>,
 }
 tokio::task_local! { static SOUND_BUDGET: SoundBudget; }
+
+/// What the sound stage observed about its own route. Timeline evidence only; it never
+/// authorizes a tap or Post.
+#[derive(Default)]
+struct SoundRouteEvidence {
+    unreadable_roots: AtomicU32,
+    selection: AtomicU8,
+}
+const ROUTE_XML: u8 = 1;
+const ROUTE_VISUAL: u8 = 2;
+
+fn note_unreadable_root() {
+    let _ = SOUND_BUDGET.try_with(|budget| {
+        budget
+            .route
+            .unreadable_roots
+            .fetch_add(1, Ordering::Relaxed)
+    });
+}
+
+fn unreadable_roots() -> u32 {
+    SOUND_BUDGET
+        .try_with(|budget| budget.route.unreadable_roots.load(Ordering::Relaxed))
+        .unwrap_or(0)
+}
+
+fn set_selection_route(route: u8) {
+    let _ = SOUND_BUDGET.try_with(|budget| budget.route.selection.store(route, Ordering::Relaxed));
+}
+
+/// Record which route chose the confirmed sound and how many unreadable roots the stage met.
+pub(crate) fn note_selection_route() {
+    let Ok((route, roots)) = SOUND_BUDGET.try_with(|budget| {
+        (
+            budget.route.selection.load(Ordering::Relaxed),
+            budget.route.unreadable_roots.load(Ordering::Relaxed),
+        )
+    }) else {
+        return;
+    };
+    let (outcome, detail) = match route {
+        ROUTE_XML => ("xml", "Đã chọn nhạc bằng cây giao diện"),
+        ROUTE_VISUAL => (
+            "visual",
+            "Đã chọn nhạc bằng ảnh màn hình (OCR); tên nhạc vẫn được kiểm lại trước khi Đăng",
+        ),
+        _ => (
+            "priorSelection",
+            "Nhạc đã có trên màn chỉnh sửa từ lượt trước; không rõ cách đã chọn",
+        ),
+    };
+    crate::publish_recovery::note_read(
+        "sound",
+        "selectionRoute",
+        1,
+        outcome,
+        Some(&format!(
+            "{detail}; số lần không đọc được cây giao diện: {roots}"
+        )),
+    );
+}
+
+fn note_visual_handoff(step: &str, error: &anyhow::Error) {
+    crate::publish_recovery::note_read(
+        "sound",
+        "rootUnreadable",
+        unreadable_roots(),
+        "visualHandoff",
+        Some(&format!("{error:#} (bước: {step})")),
+    );
+}
+
+/// A /source read waited for an accessibility root that never came. Unknown, never absent.
+fn unreadable_root(error: &anyhow::Error) -> bool {
+    error.is::<crate::driver::AccessibilityReadUnavailable>()
+        || error
+            .downcast_ref::<crate::driver::UiError>()
+            .is_some_and(|error| {
+                error.op == "hierarchySourceSnapshot"
+                    && matches!(error.kind, crate::driver::UiErrorKind::Timeout)
+            })
+}
+
+/// Consecutive sound-sheet reads found no accessibility root. Only a phase with a measured
+/// visual route to hand off to receives this, and it is returned before any tap.
+#[derive(Debug, thiserror::Error)]
+#[error("Không đọc được cây giao diện bảng nhạc {reads} lần liên tiếp; chuyển sang đọc ảnh màn hình, chưa bấm Đăng")]
+pub(crate) struct SoundRootUnreadable {
+    reads: u32,
+}
+
+/// The editor root stayed unreadable for a whole editor proof: no read returned a tree.
+/// Distinct from a read that showed another title, which is never handed to OCR.
+#[derive(Debug, thiserror::Error)]
+#[error("Không đọc được màn chỉnh sửa để xác nhận nhạc đã chọn; chưa bấm Đăng")]
+pub(crate) struct EditorRootUnreadable;
 
 #[derive(Debug, thiserror::Error)]
 #[error("Đã tạm dừng trong lúc chờ TikTok tải nhạc")]
@@ -124,6 +225,7 @@ pub(crate) async fn with_deadline_budget<T>(
         stopped: parent.stopped.clone(),
         popup: parent.popup.clone(),
         popup_package: parent.popup_package.clone(),
+        route: parent.route.clone(),
     }) {
         return SOUND_BUDGET
             .scope(budget, async {
@@ -138,6 +240,7 @@ pub(crate) async fn with_deadline_budget<T>(
         stopped: stopped.clone(),
         popup: Default::default(),
         popup_package: Default::default(),
+        route: Default::default(),
     };
     let task = SOUND_BUDGET.scope(
         budget,
@@ -172,12 +275,14 @@ pub(crate) async fn with_stage_budget<T>(
             stopped: parent.stopped.clone(),
             popup: parent.popup.clone(),
             popup_package: parent.popup_package.clone(),
+            route: parent.route.clone(),
         })
         .unwrap_or_else(|_| SoundBudget {
             deadline: stage_deadline,
             stopped: Arc::new(AtomicBool::new(false)),
             popup: Default::default(),
             popup_package: Default::default(),
+            route: Default::default(),
         });
     SOUND_BUDGET
         .scope(budget, async {
@@ -1041,25 +1146,49 @@ async fn observe_measured_sound_pool(
         scope: session.gui_scope(), epoch: epoch.clone(),
         deadline: SOUND_BUDGET.try_with(|budget| budget.deadline).ok(), events: 0,
     };
-    if let Some(pool) = observe_current_recommended(session, plan, maximum, allow_recommended).await? {
-        return checked_measured_sound_observation(session, plan, &epoch, Ok(pool)).await;
-    }
+    let started = Instant::now();
+    let root_unreadable =
+        match observe_current_recommended_routed(session, plan, maximum, allow_recommended, true)
+            .await
+        {
+            Ok(Some(pool)) => {
+                return checked_measured_sound_observation(session, plan, &epoch, Ok(pool)).await;
+            }
+            Ok(None) => false,
+            Err(error) if error.is::<SoundRootUnreadable>() => {
+                diagnostics.emit(
+                    "currentXml",
+                    "finish",
+                    started,
+                    "rootUnreadable",
+                    Some(&error),
+                );
+                note_visual_handoff("đọc danh sách nhạc", &error);
+                true
+            }
+            Err(error) => return Err(error),
+        };
     // The measured 45.7.3 sheet can expose a complete Hot hierarchy even
     // when local OCR is unavailable. Require two fresh, stable XML pools from
     // this same app/session before returning; an incomplete root falls back
     // to the existing visual route and never authorizes a row tap.
-    let started = Instant::now();
-    diagnostics.emit("directXml", "start", started, "pending", None);
-    let direct = snapshot::observe_direct(session, plan, maximum).await;
-    diagnostics.emit("directXml", "finish", started,
-        match &direct { Ok(Some(_)) => "ready", Ok(None) => "unavailable", Err(_) => "error" },
-        direct.as_ref().err());
-    match direct {
-        Ok(Some(pool)) => {
-            return checked_measured_sound_observation(session, plan, &epoch, Ok(pool)).await;
+    // After two unreadable roots in a row, a third wait here would only delay OCR.
+    if root_unreadable {
+        checked_measured_sound_observation(session, plan, &epoch, Ok(())).await?;
+    } else {
+        let started = Instant::now();
+        diagnostics.emit("directXml", "start", started, "pending", None);
+        let direct = snapshot::observe_direct(session, plan, maximum).await;
+        diagnostics.emit("directXml", "finish", started,
+            match &direct { Ok(Some(_)) => "ready", Ok(None) => "unavailable", Err(_) => "error" },
+            direct.as_ref().err());
+        match direct {
+            Ok(Some(pool)) => {
+                return checked_measured_sound_observation(session, plan, &epoch, Ok(pool)).await;
+            }
+            Err(error) if error.is::<SoundStopped>() => return Err(error),
+            _ => checked_measured_sound_observation(session, plan, &epoch, Ok(())).await?,
         }
-        Err(error) if error.is::<SoundStopped>() => return Err(error),
-        _ => checked_measured_sound_observation(session, plan, &epoch, Ok(())).await?,
     }
     let started = Instant::now();
     diagnostics.emit("visual", "start", started, "pending", None);
@@ -1102,17 +1231,25 @@ async fn observe_measured_sound_pool(
     let pool = async {
         let sheet = selection_recovery::prove_sheet(session, plan).await;
         checked_measured_sound_observation(session, plan, &epoch, sheet).await?;
-        let pool = tokio::time::timeout(
-            Duration::from_secs(45),
-            snapshot::observe(session, plan, maximum),
-        )
-        .await
-        .map_err(|_| {
+        let hierarchy_unavailable = || {
             crate::publish_recovery::retryable_error(
                 "sound_hierarchy_unavailable",
                 "TikTok chưa cung cấp hàng nhạc ổn định sau khi OCR không đọc được; chưa bấm Đăng",
             )
-        })?;
+        };
+        let pool = match tokio::time::timeout(
+            Duration::from_secs(45),
+            snapshot::observe(session, plan, maximum),
+        )
+        .await
+        {
+            Err(_) => return Err(hierarchy_unavailable()),
+            // OCR already had its turn; an unreadable root ends this route the same way.
+            Ok(Err(error)) if error.is::<SoundRootUnreadable>() => {
+                return Err(hierarchy_unavailable());
+            }
+            Ok(pool) => pool,
+        };
         checked_measured_sound_observation(session, plan, &epoch, pool).await
     }.await;
     diagnostics.emit("lateXml", "finish", started,
@@ -1126,6 +1263,17 @@ async fn observe_current_recommended(
     maximum: usize,
     allow_recommended: bool,
 ) -> anyhow::Result<Option<ObservedSoundPool>> {
+    observe_current_recommended_routed(session, plan, maximum, allow_recommended, false).await
+}
+
+/// `hand_off` is set only by a caller that continues on the measured visual route.
+async fn observe_current_recommended_routed(
+    session: &dyn UiSession,
+    plan: SoundPickerPlan,
+    maximum: usize,
+    allow_recommended: bool,
+    hand_off: bool,
+) -> anyhow::Result<Option<ObservedSoundPool>> {
     if !allow_recommended || !selection_recovery::measured(plan) {
         return Ok(None);
     }
@@ -1134,7 +1282,10 @@ async fn observe_current_recommended(
         canonical_section: "recommended",
         ..plan
     };
-    let Some(mut pool) = snapshot::observe_current_recommended_until_loaded(session, current, maximum).await? else {
+    let Some(mut pool) =
+        snapshot::observe_current_recommended_until_loaded(session, current, maximum, hand_off)
+            .await?
+    else {
         return Ok(None);
     };
     pool.effective_plan = Some(current);
@@ -1212,6 +1363,7 @@ pub async fn recover_sound_selection(
         };
     }
     if pool.visual {
+        set_selection_route(ROUTE_VISUAL);
         return visual::recover(session, plan, pool, index).await;
     }
     // The measured hierarchy path checks the current selected index before any tap.
@@ -1449,6 +1601,7 @@ pub(crate) async fn choose_provisional_sound(
     row_proved: &mut bool,
 ) -> anyhow::Result<String> {
     let _pin = hold_sound_session(session);
+    set_selection_route(ROUTE_VISUAL);
     visual::choose_provisional(
         session,
         pool.effective_plan(plan),
@@ -1499,13 +1652,26 @@ pub async fn choose_and_confirm_sound(
     let outcome = async {
         if pool.visual {
             phase = "visualRow";
+            set_selection_route(ROUTE_VISUAL);
             return visual::choose(session, plan, pool, index).await;
         }
+        set_selection_route(ROUTE_XML);
         let candidate = pool
             .candidates
             .get(index)
             .context("sound selection index is outside the observed pool")?;
-        let fresh = observe_sound_pool(session, plan, pool.maximum_visible).await?;
+        let fresh = match observe_sound_pool(session, plan, pool.maximum_visible).await {
+            Ok(fresh) => fresh,
+            Err(error) if error.is::<SoundRootUnreadable>() => {
+                // No row was tapped in this call. The frozen XML identity moves to the
+                // visual route, which taps only a row it sees unselected.
+                phase = "visualHandoff";
+                note_visual_handoff("trước khi bấm chọn nhạc", &error);
+                set_selection_route(ROUTE_VISUAL);
+                return visual::hand_off(session, plan, pool, index).await;
+            }
+            Err(error) => return Err(error),
+        };
         trace_row("preRow", Some(&fresh), None, Some(true), 0);
         let target = reproof_target(pool, &fresh, index)?;
         if fresh.selected_index != Some(index) {
@@ -1539,8 +1705,20 @@ pub async fn choose_and_confirm_sound(
                 let selected_pool = match observation {
                     Ok(pool) => pool,
                     Err(error)
-                        if transient_sound_read(&error) && selection_recovery::measured(plan) =>
+                        if (transient_sound_read(&error) || error.is::<SoundRootUnreadable>())
+                            && selection_recovery::measured(plan) =>
                     {
+                        if error.is::<SoundRootUnreadable>() {
+                            crate::publish_recovery::note_read(
+                                "sound",
+                                "postRowReadback",
+                                unreadable_roots(),
+                                "transientUnreadable",
+                                Some(&format!(
+                                    "Chưa đọc được bảng nhạc sau khi bấm chọn; kiểm tra bằng màn chỉnh sửa, không bấm chọn lại: {error:#}"
+                                )),
+                            );
+                        }
                         // Some measured builds close the inline sheet themselves after
                         // selection. An exact, stable editor chip proves completion;
                         // otherwise the still-open sheet must be proven before Back.
@@ -1632,7 +1810,7 @@ pub async fn choose_and_confirm_sound(
             session.back().await.context("close inline sound picker")?;
             if recovered {
                 phase = "editorReadback";
-                return selection_recovery::confirm_editor(session, plan, &candidate.title).await;
+                return selection_recovery::confirm_editor_or_chip(session, plan, candidate).await;
             }
         }
         phase = "editorReadback";
@@ -2094,6 +2272,7 @@ mod tests {
             stopped: Arc::new(AtomicBool::new(false)),
             popup: Default::default(),
             popup_package: Default::default(),
+            route: Default::default(),
         };
         let result = SOUND_BUDGET
             .scope(

@@ -139,6 +139,12 @@ impl PublishProgress {
                 let state = match outcome.as_str() {
                     "ready" => "đã nhận diện",
                     "stageExhausted" | "unavailable" => "chưa nhận diện được",
+                    "visualHandoff" => "không đọc được cây giao diện, chuyển sang ảnh màn hình",
+                    "transientUnreadable" => "chưa đọc được sau khi chọn, kiểm tra ở màn chỉnh sửa",
+                    "ocrChip" => "xác nhận tên nhạc bằng ảnh màn hình, sẽ kiểm lại trước khi Đăng",
+                    "xml" => "đã chọn bằng cây giao diện",
+                    "visual" => "đã chọn bằng ảnh màn hình",
+                    "priorSelection" => "nhạc đã có từ lượt trước",
                     _ => "đang kiểm tra lại",
                 };
                 format!("{step} · {state} · lượt {attempt}")

@@ -226,6 +226,13 @@ pub fn describe(error: &anyhow::Error) -> RecoveryFailure {
             format!("{error:#}"),
         );
     }
+    if error.is::<crate::tiktok_sound::SoundRootUnreadable>() {
+        return RecoveryFailure::new(
+            "sound_root_unreadable",
+            FailureKind::Retryable,
+            format!("{error:#}"),
+        );
+    }
     if error.is::<crate::tiktok_sound::SoundStopped>() {
         return RecoveryFailure::new(
             "sound_cancelled",

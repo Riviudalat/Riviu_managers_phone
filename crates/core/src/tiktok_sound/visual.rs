@@ -769,7 +769,55 @@ pub(super) async fn choose(
     index: usize,
 ) -> anyhow::Result<()> {
     select_row_and_close(session, plan, pool, index, &mut false).await?;
-    selection_recovery::confirm_editor(session, plan, &pool.candidates[index].title).await
+    let candidate = pool
+        .candidates
+        .get(index)
+        .context("visual sound index out of range")?;
+    selection_recovery::confirm_editor_or_chip(session, plan, candidate).await
+}
+
+/// The XML pool froze `frozen.candidates[index]`, then the sheet root stopped answering.
+/// Find that exact title/artist once among stable visual rows and select it there. A row
+/// already shown selected is never tapped again: a second tap deselects the sound.
+pub(super) async fn hand_off(
+    session: &dyn UiSession,
+    plan: SoundPickerPlan,
+    frozen: &ObservedSoundPool,
+    index: usize,
+) -> anyhow::Result<()> {
+    anyhow::ensure!(
+        selection_recovery::measured(plan) && plan.section_label == "Hot",
+        "visual sound hand-off tuple unmeasured"
+    );
+    let candidate = frozen
+        .candidates
+        .get(index)
+        .context("sound selection index is outside the observed pool")?;
+    let (_, _, tabs, _) = capture(session, plan, 1).await?;
+    if tabs.len() != 4 {
+        // No sheet in this frame, so nothing here may be selected. An earlier pick can
+        // only be proved on the editor; a sheet that is still open fails that proof.
+        return selection_recovery::confirm_editor_or_chip(session, plan, candidate).await;
+    }
+    let fresh = observe(session, plan, frozen.maximum_visible, false).await?;
+    let matches: Vec<_> = fresh
+        .candidates
+        .iter()
+        .enumerate()
+        .filter(|(_, row)| {
+            same_editor_sound_title(&row.title, &candidate.title)
+                && same_editor_sound_title(&row.artist, &candidate.artist)
+        })
+        .map(|(row, _)| row)
+        .collect();
+    let [visual_index] = matches.as_slice() else {
+        return Err(crate::publish_recovery::retryable_error(
+            "sound_visual_identity_unmatched",
+            "Ảnh màn hình không cho thấy đúng một bài nhạc trùng tên và nghệ sĩ đã chốt; chưa bấm chọn, chưa bấm Đăng",
+        ));
+    };
+    select_row_and_close(session, plan, &fresh, *visual_index, &mut false).await?;
+    selection_recovery::confirm_editor_or_chip(session, plan, candidate).await
 }
 
 pub(super) fn provisional_title_matches(observed: &str, expected: &str) -> bool {
@@ -902,14 +950,14 @@ pub(super) async fn recover(
         {
             anyhow::bail!("composer state lost; rebuild approved media before retry");
         }
-        return selection_recovery::confirm_editor(session, plan, &candidate.title).await;
+        return selection_recovery::confirm_editor_or_chip(session, plan, candidate).await;
     }
     if selected_row_ready(&image, &tabs, pool, index) {
         wait_selected_row(session, plan, pool, index).await?;
         selection_recovery::prove_sheet(session, plan).await?;
         check_wait()?;
         session.back().await?;
-        return selection_recovery::confirm_editor(session, plan, &candidate.title).await;
+        return selection_recovery::confirm_editor_or_chip(session, plan, candidate).await;
     }
     // choose reobserves two stable rows and either proves the same selected identity
     // or performs one selection from a fully unselected pool.

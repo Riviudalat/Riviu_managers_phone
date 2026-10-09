@@ -13,6 +13,9 @@ const SNAPSHOT_POOL_WINDOW: Duration = SOUND_WINDOW;
 /// A loading sheet may temporarily have no accessibility root. Keep observing
 /// within the existing phase/global deadline, clearing prior geometry each time.
 /// Only successful fresh snapshots can authorize a later navigation tap.
+/// `unreadable` counts consecutive unreadable roots for a phase that can hand off to the
+/// measured visual route; at ROOT_UNREADABLE_CAP it returns `SoundRootUnreadable` instead
+/// of asking the same root again.
 async fn read_snapshot(
     session: &dyn UiSession,
     plan: SoundPickerPlan,
@@ -20,6 +23,7 @@ async fn read_snapshot(
     recoveries: &mut u32,
     covered_generation: &mut Option<u64>,
     retry_transient: bool,
+    mut unreadable: Option<&mut u32>,
 ) -> anyhow::Result<Option<crate::HierarchySourceSnapshot>> {
     let labels = measured_popup_labels(plan);
     if labels.is_none() {
@@ -42,8 +46,25 @@ async fn read_snapshot(
         tokio::time::timeout_at(deadline, read_sound(session.hierarchy_source_snapshot()))
             .await
             .context("đọc bảng nhạc hết thời gian chờ 3 phút; chưa bấm Đăng")?;
+    if let Err(error) = &observed {
+        if unreadable_root(error) {
+            note_unreadable_root();
+            if let Some(count) = unreadable.as_deref_mut() {
+                *count += 1;
+                if retry_transient && *count >= ROOT_UNREADABLE_CAP {
+                    tracing::warn!(elapsed_ms = started.elapsed().as_millis() as u64,
+                        consecutive = *count, error = %error,
+                        "sound screen root unreadable; handing off to the measured visual route");
+                    return Err(SoundRootUnreadable { reads: *count }.into());
+                }
+            }
+        }
+    }
     match observed {
         Ok(snapshot) => {
+            if let Some(count) = unreadable {
+                *count = 0;
+            }
             check_wait()?;
             if let Some(package) = foreground.as_ref() {
                 anyhow::ensure!(session.gui_session_epoch() == epoch
@@ -164,14 +185,22 @@ pub(super) async fn select_section_tab(
     let mut covered_generation = None;
     let mut observation = "sound sheet not yet observed".to_string();
     loop {
-        let source = read_snapshot(session, plan, deadline, &mut recovery_used, &mut covered_generation, true)
-            .await
-            .with_context(|| {
-                format!(
-                    "{} sound section did not become selected after {attempts} tap(s): {observation}",
-                    plan.section_label
-                )
-            })?;
+        let source = read_snapshot(
+            session,
+            plan,
+            deadline,
+            &mut recovery_used,
+            &mut covered_generation,
+            true,
+            None,
+        )
+        .await
+        .with_context(|| {
+            format!(
+                "{} sound section did not become selected after {attempts} tap(s): {observation}",
+                plan.section_label
+            )
+        })?;
         let parsed = source
             .as_ref()
             .map(|source| parse(&source.xml, plan))
@@ -347,17 +376,25 @@ fn popup_covered(tree: &crate::ui_automation::tree::Tree, labels: crate::tiktok_
 
 /// Wait on the already-open measured Recommended sheet without navigation.
 /// Only an affirmative, uniquely selected other tab authorizes caller fallback.
+/// With `hand_off`, two unreadable roots in a row end the wait with `SoundRootUnreadable`.
 pub(super) async fn observe_current_recommended_until_loaded(
     session: &dyn UiSession,
     plan: SoundPickerPlan,
     maximum: usize,
+    hand_off: bool,
 ) -> anyhow::Result<Option<ObservedSoundPool>> {
     anyhow::ensure!(selection_recovery::measured(plan)
         && plan.section_label == "For You" && plan.canonical_section == "recommended",
         "sound current list tuple unmeasured");
     let deadline = phase_deadline(SOUND_WINDOW);
-    Box::pin(with_deadline_budget(&AtomicBool::new(false), deadline,
-        Box::pin(observe_current_recommended_inner(session, plan, maximum, deadline)))).await
+    Box::pin(with_deadline_budget(
+        &AtomicBool::new(false),
+        deadline,
+        Box::pin(observe_current_recommended_inner(
+            session, plan, maximum, deadline, hand_off,
+        )),
+    ))
+    .await
 }
 
 async fn observe_current_recommended_inner(
@@ -365,17 +402,27 @@ async fn observe_current_recommended_inner(
     plan: SoundPickerPlan,
     maximum: usize,
     deadline: Instant,
+    hand_off: bool,
 ) -> anyhow::Result<Option<ObservedSoundPool>> {
     let epoch = session.gui_session_epoch();
     anyhow::ensure!(!epoch.is_empty(), "sound snapshot session missing");
     let mut previous: Option<(u64, ObservedSoundPool)> = None;
     let mut recoveries = 0;
     let mut covered_generation = None;
+    let mut unreadable = 0;
     loop {
         check_wait()?;
         anyhow::ensure!(session.gui_session_epoch() == epoch, "sound app/session replaced");
-        let source = read_snapshot(session, plan, deadline, &mut recoveries,
-            &mut covered_generation, true).await?;
+        let source = read_snapshot(
+            session,
+            plan,
+            deadline,
+            &mut recoveries,
+            &mut covered_generation,
+            true,
+            hand_off.then_some(&mut unreadable),
+        )
+        .await?;
         anyhow::ensure!(session.gui_session_epoch() == epoch, "sound app/session replaced after snapshot");
         let observed = source.as_ref().filter(|source| source.generation > 0)
             .map(|source| -> anyhow::Result<Option<ObservedSoundPool>> {
@@ -608,13 +655,22 @@ pub(super) async fn observe_until(
     deadline: Instant,
 ) -> anyhow::Result<ObservedSoundPool> {
     let deadline = deadline.min(phase_deadline(SNAPSHOT_POOL_WINDOW));
-    Box::pin(with_deadline_budget(&AtomicBool::new(false), deadline,
-        Box::pin(observe_inner(session, plan, maximum, true, deadline)))).await
+    Box::pin(with_deadline_budget(
+        &AtomicBool::new(false),
+        deadline,
+        Box::pin(observe_inner(
+            session, plan, maximum, true, deadline, &mut 0,
+        )),
+    ))
+    .await
 }
 
 /// Once a sound has been tapped, propagate unreadable UI to the caller so it
 /// can prove the sheet visually and verify the editor instead of spending the
 /// entire remaining budget polling a broken root. Never repeat the selection.
+/// On the measured 45.7.3 sheet one root wait (~10.5 s) outlasts READBACK_WINDOW, so a
+/// window that expires before any read returned is an unreadable root, not a sound that
+/// failed to load: it is reported as `SoundRootUnreadable` for the caller's fallback.
 pub(super) async fn observe_after_selection(
     session: &dyn UiSession,
     plan: SoundPickerPlan,
@@ -622,8 +678,38 @@ pub(super) async fn observe_after_selection(
     deadline: Instant,
 ) -> anyhow::Result<ObservedSoundPool> {
     let deadline = deadline.min(phase_deadline(SNAPSHOT_POOL_WINDOW));
-    Box::pin(with_deadline_budget(&AtomicBool::new(false), deadline,
-        Box::pin(observe_inner(session, plan, maximum, false, deadline)))).await
+    let mut fresh_reads = 0;
+    let observed = Box::pin(with_deadline_budget(
+        &AtomicBool::new(false),
+        deadline,
+        Box::pin(observe_inner(
+            session,
+            plan,
+            maximum,
+            false,
+            deadline,
+            &mut fresh_reads,
+        )),
+    ))
+    .await;
+    match observed {
+        Err(error)
+            if fresh_reads == 0
+                && selection_recovery::measured(plan)
+                && !error.is::<SoundStopped>()
+                && !error.is::<crate::driver::SessionEpochChanged>()
+                && (Instant::now() >= deadline
+                    || matches!(
+                        crate::publish_recovery::describe(&error).code.as_str(),
+                        "sound_load_timeout" | "publish_observation_deadline"
+                    )) =>
+        {
+            note_unreadable_root();
+            tracing::warn!(error = %error, "post-row sound readback found no root before its window ended");
+            Err(error.context(SoundRootUnreadable { reads: 1 }))
+        }
+        observed => observed,
+    }
 }
 
 async fn observe_inner(
@@ -632,6 +718,7 @@ async fn observe_inner(
     maximum: usize,
     retry_unavailable: bool,
     deadline: Instant,
+    fresh_reads: &mut u32,
 ) -> anyhow::Result<ObservedSoundPool> {
     let epoch = session.gui_session_epoch();
     let bound_trill = plan.package == "com.ss.android.ugc.trill";
@@ -639,6 +726,12 @@ async fn observe_inner(
     let mut previous: Option<(u64, ObservedSoundPool)> = None;
     let mut recovery_used = 0;
     let mut covered_generation = None;
+    // Only a Hot pool has a visual twin to hand off to; other sections keep observing.
+    let hand_off = retry_unavailable
+        && selection_recovery::measured(plan)
+        && plan.section_label == "Hot"
+        && session.gui_reasoner().is_some();
+    let mut unreadable = 0;
     loop {
         check_wait()?;
         if bound_trill {
@@ -647,16 +740,29 @@ async fn observe_inner(
                 "sound snapshot app/session changed");
         }
         let source = if retry_unavailable || measured_popup_labels(plan).is_some() {
-            let Some(source) = read_snapshot(session, plan, deadline, &mut recovery_used,
-                &mut covered_generation, retry_unavailable).await?
+            let Some(source) = read_snapshot(
+                session,
+                plan,
+                deadline,
+                &mut recovery_used,
+                &mut covered_generation,
+                retry_unavailable,
+                hand_off.then_some(&mut unreadable),
+            )
+            .await?
             else {
                 previous = None;
+                // Without retry, only a read that returned (popup or stale generation) is None.
+                if !retry_unavailable {
+                    *fresh_reads += 1;
+                }
                 continue;
             };
             source
         } else {
             read_sound(session.hierarchy_source_snapshot()).await?
         };
+        *fresh_reads += 1;
         check_wait()?;
         if Instant::now() >= deadline { return Err(crate::publish_recovery::observation_deadline()); }
         if bound_trill {
