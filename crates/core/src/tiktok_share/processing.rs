@@ -70,23 +70,20 @@ pub(super) async fn frames_after_copy(
     frames
 }
 
+/// One rendered line that is exactly TikTok's "still processing" notice. Shared with the
+/// restart guards, which must refuse a screen that still shows it.
+pub fn is_processing_notice(text: &str) -> bool {
+    matches!(
+        text.trim().trim_end_matches('.').to_lowercase().as_str(),
+        "post is being processed" | "bài đăng đang được xử lý" | "bài viết đang được xử lý"
+    )
+}
+
 fn notice(response: &OcrResponse) -> Option<&str> {
     response
         .lines
         .iter()
-        .find(|line| {
-            line.confidence >= 0.9
-                && matches!(
-                    line.text
-                        .trim()
-                        .trim_end_matches('.')
-                        .to_lowercase()
-                        .as_str(),
-                    "post is being processed"
-                        | "bài đăng đang được xử lý"
-                        | "bài viết đang được xử lý"
-                )
-        })
+        .find(|line| line.confidence >= 0.9 && is_processing_notice(&line.text))
         .map(|line| line.text.as_str())
 }
 

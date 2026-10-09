@@ -58,7 +58,7 @@ use crate::tiktok_labels::{TikTokControl, TikTokControls};
 pub(crate) mod hierarchy;
 mod photo_proof;
 mod processing;
-pub use processing::ProcessingNotice;
+pub use processing::{is_processing_notice, ProcessingNotice};
 mod verification;
 pub use photo_proof::{capture_expanded_photo_link, capture_visible_video_link};
 pub use verification::{

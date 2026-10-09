@@ -431,18 +431,7 @@ fn warm_surface(
         ) {
             return None;
         }
-        let text = format!("{} {}", node.attr("text"), node.attr("content-desc")).to_lowercase();
-        if [
-            "uploading",
-            "processing",
-            "posting",
-            "đang tải",
-            "đang đăng",
-            "đang xử lý",
-        ]
-        .iter()
-        .any(|s| text.contains(s))
-        {
+        if shows_upload_in_progress(node) {
             return None;
         }
     }
@@ -580,6 +569,27 @@ fn global_expanded_photo_input(tree: &riviu_core::ui_automation::tree::Tree) -> 
         .then_some(input)
 }
 
+/// Text that means an earlier post may still be uploading or processing, so a restart must
+/// leave the app as it is. "Post is being processed" contains none of the progress words,
+/// so the exact notice that the Copy link reader matches is checked as well.
+fn shows_upload_in_progress(node: &riviu_core::ui_automation::tree::Node) -> bool {
+    let text = format!("{} {}", node.attr("text"), node.attr("content-desc")).to_lowercase();
+    [
+        "uploading",
+        "processing",
+        "being processed",
+        "posting",
+        "đang tải",
+        "đang đăng",
+        "đang xử lý",
+        "đang được xử lý",
+    ]
+    .iter()
+    .any(|token| text.contains(token))
+        || riviu_core::tiktok_share::is_processing_notice(node.attr("text"))
+        || riviu_core::tiktok_share::is_processing_notice(node.attr("content-desc"))
+}
+
 /// Global 45.7.3/en viewer and Home measured in saved phone captures on 29/09.
 /// Admission only: account, complete caption, submission time and canonical URL still
 /// belong to the existing verifier. No Global profile or overlay is admitted here.
@@ -614,10 +624,7 @@ fn global_warm_surface(tree: &riviu_core::ui_automation::tree::Tree) -> Option<&
         {
             return None;
         }
-        let text = format!("{} {}", node.attr("text"), node.attr("content-desc")).to_lowercase();
-        if ["uploading", "processing", "posting", "đang tải", "đang đăng", "đang xử lý"]
-            .iter().any(|token| text.contains(token))
-        {
+        if shows_upload_in_progress(node) {
             return None;
         }
     }
