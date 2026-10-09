@@ -369,6 +369,44 @@ fn profile_from_tree(tree: &Tree, labels: TikTokControls) -> Option<String> {
     }
 }
 
+/// How long the shared popup step may spend before the account read: two steps, each one
+/// hierarchy snapshot (5.3 s measured on the slowest box 31-50 phones) and two foreground reads.
+const ACCOUNT_POPUP_WINDOW: std::time::Duration = std::time::Duration::from_secs(15);
+
+/// Box 31-50, Global 45.7.3, 09/10/2026: a launch now counts with the measured runtime
+/// permission question over TikTok, so the account read is the first step to meet it. Run
+/// the shared popup step before any caller taps: it may only press a measured negative
+/// answer (Deny, Not now), never Allow. An unknown modal, a spent decline or a failed step
+/// leaves the screen as it was, and the account read below still refuses it. Answers
+/// whether a popup was dismissed, so the caller reads the foreground again.
+async fn clear_popups_before_account_read(session: &dyn UiSession, labels: TikTokControls) -> bool {
+    use crate::app_automation::dialogs::{step_before_deadline_with_tree, PopupBudget, PopupStep};
+    use crate::ui_automation::runtime::ReadWaitResult;
+    if !session.supports_accessibility_readback() {
+        return false;
+    }
+    let stop = std::sync::atomic::AtomicBool::new(false);
+    let deadline = tokio::time::Instant::now() + ACCOUNT_POPUP_WINDOW;
+    let mut budget = PopupBudget::default();
+    let mut dismissed = false;
+    for _ in 0..2 {
+        match step_before_deadline_with_tree(session, labels, &mut budget, deadline, &stop, &stop)
+            .await
+        {
+            Ok(ReadWaitResult::Ready((PopupStep::Dismissed, _))) => {
+                dismissed = true;
+                tracing::info!(
+                    package = labels.package(),
+                    says = budget.says().unwrap_or_default(),
+                    "đã đóng một hộp thoại đã đo trước khi đọc tài khoản"
+                );
+            }
+            _ => break,
+        }
+    }
+    dismissed
+}
+
 pub async fn observe_own_account(
     session: &dyn UiSession,
     labels: TikTokControls,
@@ -377,10 +415,18 @@ pub async fn observe_own_account(
         return Ok(None);
     }
     let epoch = session.gui_session_epoch();
-    let active = session
+    let mut active = session
         .active_app_bundle()
         .await
         .map_err(|e| AccountDiagnostic::read_failed(labels, &e).into_error())?;
+    if (active == labels.package() || active == crate::tiktok_target::RUNTIME_PERMISSION_PACKAGE)
+        && clear_popups_before_account_read(session, labels).await
+    {
+        active = session
+            .active_app_bundle()
+            .await
+            .map_err(|e| AccountDiagnostic::read_failed(labels, &e).into_error())?;
+    }
     if active != labels.package() {
         return Ok(None);
     }

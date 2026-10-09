@@ -1666,6 +1666,11 @@ pub(super) async fn ensure_tiktok_foreground(
     let deadline = tokio::time::Instant::now() + FOREGROUND_WINDOW;
     match read_before_deadline(session.active_app_bundle(), deadline, stop).await {
         Ok(ReadWaitResult::Ready(package)) if is_measured_tiktok(&package) => return Ok(false),
+        Ok(ReadWaitResult::Ready(package))
+            if permission_over_tiktok(session, bundle_id, &package, deadline, stop).await =>
+        {
+            return Ok(false)
+        }
         Ok(ReadWaitResult::Ready(_)) => {}
         Ok(ReadWaitResult::Cancelled) => anyhow::bail!("đã dừng trước khi mở TikTok"),
         Ok(ReadWaitResult::DeadlineExceeded) => {
@@ -1697,6 +1702,11 @@ pub(super) async fn ensure_tiktok_foreground(
     loop {
         match read_before_deadline(session.active_app_bundle(), deadline, stop).await? {
             ReadWaitResult::Ready(package) if is_measured_tiktok(&package) => return Ok(true),
+            ReadWaitResult::Ready(package)
+                if permission_over_tiktok(session, bundle_id, &package, deadline, stop).await =>
+            {
+                return Ok(true)
+            }
             ReadWaitResult::Ready(_) => {}
             ReadWaitResult::Cancelled => anyhow::bail!("đã dừng khi chờ TikTok foreground"),
             ReadWaitResult::DeadlineExceeded => break,
@@ -1716,6 +1726,27 @@ pub(super) async fn ensure_tiktok_foreground(
         "đã gọi mở {bundle_id} nhưng nó không lên foreground trong {}s. \
          Máy đang khoá màn hình thì đúng ra kết quả này — mở khoá rồi chạy lại",
         FOREGROUND_WINDOW.as_secs()
+    )
+}
+
+/// The measured runtime permission question over the configured TikTok counts as TikTok in
+/// front (see [`crate::tiktok_target::runtime_permission_over_measured_tiktok`]): the launch
+/// worked, and the shared popup step owns the question and may only Deny it. Any other
+/// foreign window, an unreadable activity or a backend that cannot name one still blocks.
+async fn permission_over_tiktok(
+    session: &dyn UiSession,
+    bundle_id: &str,
+    package: &str,
+    deadline: tokio::time::Instant,
+    stop: &AtomicBool,
+) -> bool {
+    if package != crate::tiktok_target::RUNTIME_PERMISSION_PACKAGE {
+        return false;
+    }
+    matches!(
+        read_before_deadline(session.active_app_component(), deadline, stop).await,
+        Ok(ReadWaitResult::Ready(focused))
+            if crate::tiktok_target::runtime_permission_over_measured_tiktok(bundle_id, &focused)
     )
 }
 

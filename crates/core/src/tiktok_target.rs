@@ -34,6 +34,28 @@ pub fn is_measured_android_tiktok(package: &str) -> bool {
     measured_android_packages().any(|candidate| candidate == package)
 }
 
+/// The package that owns the runtime permission question on the measured Android 9 phones.
+pub const RUNTIME_PERMISSION_PACKAGE: &str = "com.google.android.packageinstaller";
+
+/// Whether `focused` (`package/activity`, as `mCurrentFocus` names it) is Android's runtime
+/// permission question standing over a launch of the measured TikTok `target`.
+///
+/// Interaction acceptance on box 31-50, Global 45.7.3, 09/10/2026: ce0417141550322202 and
+/// ce051715e9f964e10d launched TikTok and then read
+/// `com.google.android.packageinstaller` for the whole eight-second confirmation, so the
+/// launch was refused as `activity launch ACK timed out` before any popup step could Deny.
+/// The launch had worked; the question lives in TikTok's own task. Only that exact package
+/// and `GrantPermissionsActivity` count; any other foreign window still blocks. This is
+/// launch evidence only — nothing here answers the question, and Allow is never pressed.
+pub fn runtime_permission_over_measured_tiktok(target: &str, focused: &str) -> bool {
+    let Some((package, activity)) = focused.trim().split_once('/') else {
+        return false;
+    };
+    is_measured_android_tiktok(target)
+        && package == RUNTIME_PERMISSION_PACKAGE
+        && activity.rsplit('.').next() == Some("GrantPermissionsActivity")
+}
+
 /// The measured packages as an operator-facing list, for refusal messages.
 pub fn measured_android_packages_list() -> String {
     let mut seen: Vec<&str> = Vec::new();

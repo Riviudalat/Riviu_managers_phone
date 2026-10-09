@@ -945,6 +945,11 @@ impl AdbProgram {
         read_foreground_package_with(|source| self.shell(serial, source)).await
     }
 
+    /// The same read, answering `package/activity` when the focused line names one.
+    pub async fn foreground_component(&self, serial: &str) -> anyhow::Result<String> {
+        read_foreground_component_with(|source| self.shell(serial, source)).await
+    }
+
     /// A launcher intent can resume another app's activity above this package.
     /// Samsung Android 9 / TikTok 46.2.42: SMS recipient picker remained in the
     /// TikTok task after sharing. Bring the existing launcher activity to the top by removing activities
@@ -995,7 +1000,7 @@ impl AdbProgram {
                     error,
                     Duration::from_secs(8),
                     |source_timeout| {
-                        read_foreground_package_with(move |source| async move {
+                        read_foreground_component_with(move |source| async move {
                             self.device(serial, &["shell", source], source_timeout)
                                 .await
                         })
@@ -1008,7 +1013,7 @@ impl AdbProgram {
         // cold-launch. Observe for a wall-clock window, leaving each ADB request
         // to its own deadline; never relaunch again or clear the process here.
         wait_for_foreground_with(package, Duration::from_secs(20), || {
-            self.foreground_package(serial)
+            self.foreground_component(serial)
         })
         .await
         .with_context(|| {
@@ -1041,7 +1046,16 @@ where
         let observed = read().await;
         observations += 1;
         let elapsed = started.elapsed();
-        if elapsed <= budget && observed.as_deref().is_ok_and(|value| value == package) {
+        // `read` answers a package or a `package/activity` component. The measured runtime
+        // permission question over TikTok is a completed launch, not a foreign app.
+        if elapsed <= budget
+            && observed.as_deref().is_ok_and(|value| {
+                value.split_once('/').map_or(value, |(owner, _)| owner) == package
+                    || riviu_core::tiktok_target::runtime_permission_over_measured_tiktok(
+                        package, value,
+                    )
+            })
+        {
             return Ok(());
         }
         last = match observed {
@@ -1121,7 +1135,24 @@ fn foreground_activity_command(package: &str, resolved: &str) -> anyhow::Result<
 /// `windows` works on the Android 9 fleet; `displays` works on Android 15.
 /// Plain `dumpsys window` is measured on both and therefore comes first. Keep
 /// deadlines on each ADB request; a missing form only advances to the next form.
-pub(crate) async fn read_foreground_package_with<F, Fut>(mut read: F) -> anyhow::Result<String>
+pub(crate) async fn read_foreground_package_with<F, Fut>(read: F) -> anyhow::Result<String>
+where
+    F: FnMut(&'static str) -> Fut,
+    Fut: std::future::Future<Output = anyhow::Result<String>>,
+{
+    read_foreground_with(read, false).await
+}
+
+/// [`read_foreground_package_with`], answering `package/activity` from the same focused line.
+pub(crate) async fn read_foreground_component_with<F, Fut>(read: F) -> anyhow::Result<String>
+where
+    F: FnMut(&'static str) -> Fut,
+    Fut: std::future::Future<Output = anyhow::Result<String>>,
+{
+    read_foreground_with(read, true).await
+}
+
+async fn read_foreground_with<F, Fut>(mut read: F, component: bool) -> anyhow::Result<String>
 where
     F: FnMut(&'static str) -> Fut,
     Fut: std::future::Future<Output = anyhow::Result<String>>,
@@ -1135,7 +1166,16 @@ where
     for source in SOURCES {
         match read(source).await {
             Ok(stdout) => match parse_foreground_window(&stdout) {
-                ForegroundWindow::App(package) => return Ok(package),
+                ForegroundWindow::App(package) => {
+                    return Ok(match focused_component(&stdout) {
+                        Some(focused)
+                            if component && focused.starts_with(&format!("{package}/")) =>
+                        {
+                            focused
+                        }
+                        _ => package,
+                    })
+                }
                 ForegroundWindow::System(window) => tried.push(format!(
                     "`{source}` reported the system window {window}, not an app — a lock \
                      screen does this, and so does any system dialog standing over the app"
@@ -2024,6 +2064,32 @@ pub fn parse_foreground_activity(stdout: &str) -> Option<String> {
 /// else simply behaves as before — the caller falls through to its own timeout.
 pub fn is_splash_activity(activity: &str) -> bool {
     activity.to_ascii_lowercase().contains("splash")
+}
+
+/// The `package/activity` that [`parse_foreground_window`] reports as [`ForegroundWindow::App`],
+/// read from the same line.
+fn focused_component(stdout: &str) -> Option<String> {
+    for line in stdout.lines().filter(|line| line.contains("mCurrentFocus")) {
+        let Some(after) = line.split_once("mCurrentFocus=") else {
+            continue;
+        };
+        let inside = after
+            .1
+            .trim()
+            .trim_start_matches("Window{")
+            .trim_end_matches('}');
+        let Some(what) = inside.split_whitespace().nth(2) else {
+            continue;
+        };
+        match what.split_once('/') {
+            Some((package, activity)) if !package.is_empty() => {
+                let activity = activity.trim_end_matches('}').trim();
+                return (!activity.is_empty()).then(|| format!("{package}/{activity}"));
+            }
+            _ => {}
+        }
+    }
+    None
 }
 
 pub fn parse_foreground_window(stdout: &str) -> ForegroundWindow {

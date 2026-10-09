@@ -860,9 +860,30 @@ fn select_foreground_tiktok_package(
             installed.join(", ")
         )
     };
-    let package = foreground.with_context(refusal)?;
-    anyhow::ensure!(installed.contains(&package), "{}", refusal());
-    Ok(package)
+    let focused = foreground.with_context(refusal)?;
+    let package = focused_owner(&focused);
+    if installed.iter().any(|candidate| candidate == package) {
+        return Ok(package.to_string());
+    }
+    // Phones 33/34 (Global + Trill), 09/10/2026: the measured permission question stood
+    // over the launch. With exactly one fleet build, that question belongs to the build
+    // effects may run on; any other window still leaves the tie unbroken.
+    if let [build] = riviu_core::tiktok_fleet_policy::TIKTOK_FLEET_BUILDS {
+        if installed.iter().any(|candidate| candidate == build.package)
+            && riviu_core::tiktok_target::runtime_permission_over_measured_tiktok(
+                build.package,
+                &focused,
+            )
+        {
+            return Ok(build.package.to_string());
+        }
+    }
+    anyhow::bail!("{}", refusal())
+}
+
+/// The package half of a `package/activity` foreground read.
+fn focused_owner(focused: &str) -> &str {
+    focused.split_once('/').map_or(focused, |(owner, _)| owner)
 }
 
 fn select_preferred_tiktok_package(
@@ -1425,7 +1446,7 @@ impl AndroidDriver {
             select_foreground_tiktok_package(
                 udid,
                 &installed,
-                self.adb.foreground_package(udid).await,
+                self.adb.foreground_component(udid).await,
             )?
         };
         self.tiktok_packages
@@ -2957,14 +2978,30 @@ impl DeviceDriver for AndroidDriver {
         // once, exactly like `backed_at` above.
         let mut keyguard_tried = false;
         loop {
-            let observed = match riviu_core::driver::UiSession::active_app_bundle(&session).await {
+            let observed = match riviu_core::driver::UiSession::active_app_component(&session).await
+            {
                 // The package is in front. Give the splash a bounded moment to get out of the
                 // way, then proceed either way — see `wait_out_splash`.
-                Ok(package) if package == bundle_id => {
+                Ok(focused) if focused_owner(&focused) == bundle_id => {
                     self.wait_out_splash(udid).await;
                     break;
                 }
-                Ok(package) => package,
+                // Box 31-50, Global 45.7.3, 09/10/2026: the measured runtime permission
+                // question over TikTok. Back cannot clear it, so hand the session to the
+                // shared popup step, which may only Deny a measured question.
+                Ok(focused)
+                    if riviu_core::tiktok_target::runtime_permission_over_measured_tiktok(
+                        &bundle_id, &focused,
+                    ) =>
+                {
+                    tracing::info!(
+                        udid,
+                        focused = %focused,
+                        "hộp thoại quyền hệ thống đã đo đang che TikTok; coi như đã mở app, bước popup chung chỉ được bấm Từ chối"
+                    );
+                    break;
+                }
+                Ok(focused) => focused_owner(&focused).to_string(),
                 // **Ask what the window *is*, rather than matching on the error text.**
                 //
                 // A system window has no `package/activity` pair, so a foreground read fails

@@ -1071,6 +1071,13 @@ pub trait UiSession: Send + Sync {
     async fn active_app_bundle(&self) -> anyhow::Result<String> {
         anyhow::bail!("active_app_bundle not supported")
     }
+    /// `package/activity` of the focused window, or just the package when no activity is
+    /// named. Only for recognising a measured system window over the target app (see
+    /// [`crate::tiktok_target::runtime_permission_over_measured_tiktok`]). Default:
+    /// unsupported, so such a window keeps blocking on backends that cannot name it.
+    async fn active_app_component(&self) -> anyhow::Result<String> {
+        unsupported("activeAppComponent")
+    }
     async fn open_url(&self, _url: &str) -> anyhow::Result<()> {
         unsupported("openUrl")
     }

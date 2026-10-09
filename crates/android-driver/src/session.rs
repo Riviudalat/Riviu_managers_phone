@@ -915,6 +915,9 @@ impl UiSession for AndroidUiSession {
     async fn active_app_bundle(&self) -> anyhow::Result<String> {
         self.adb.foreground_package(&self.serial).await
     }
+    async fn active_app_component(&self) -> anyhow::Result<String> {
+        self.adb.foreground_component(&self.serial).await
+    }
     /// Android has a first-class intent for this, so unlike the iOS side it
     /// needs no capability negotiation.
     async fn open_url(&self, url: &str) -> anyhow::Result<()> {
