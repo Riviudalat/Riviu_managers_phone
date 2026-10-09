@@ -684,7 +684,12 @@ mod tests {
                 let point = &points[0];
                 assert_eq!((point.x, point.y), (329.5, 1305.5));
             } else {
-                assert_eq!(result, LadderStep::Stuck);
+                // An unrecognised Dialog is left to the operator, untouched and without Back.
+                assert!(
+                    matches!(&result, LadderStep::NeedsOperator { says } if says.contains("cần người vận hành")),
+                    "{result:?}"
+                );
+                assert_eq!(phone.backs.load(Ordering::Relaxed), 0);
             }
         }
     }
@@ -694,18 +699,19 @@ mod tests {
     #[tokio::test]
     async fn optional_location_permission_declines_only_the_measured_tiktok_prompt() {
         let xml = include_str!("../fixtures/tiktok-publish/optional-location-trill-38.3.2-en.fixture");
-        for (xml, expected_taps) in [
-            (xml.to_owned(), 1),
-            (xml.replace("Allow TikTok", "Allow Instagram"), 0),
-            (xml.replace("this device's location", "photos, media and files on your device"), 0),
-            (xml.replace("access this device's location", "take pictures and record video"), 0),
-            (xml.replace("com.google.android.packageinstaller", "com.example.foreign"), 0),
-            (xml.replace("text=\"Deny\"", "text=\"Allow\""), 0),
-            (xml.replace("clickable=\"true\" enabled=\"true\"", "clickable=\"true\" enabled=\"false\""), 0),
-            (xml.replace("displayed=\"true\"", "displayed=\"false\""), 0),
-            (xml.replace("id/dialog_container", "id/other_container"), 0),
-            (xml.replace("text=\"Allow\"", "text=\"Other\""), 0),
-            (xml.replace("</hierarchy>", r#"<node package="com.google.android.packageinstaller" resource-id="com.android.packageinstaller:id/permission_deny_button" class="android.widget.Button" text="Deny" clickable="true" enabled="true" displayed="true" bounds="[1,1][2,2]"/></hierarchy>"#), 0),
+        // (xml, decline taps, the unanswered container still shows as a modal)
+        for (xml, expected_taps, modal) in [
+            (xml.to_owned(), 1, true),
+            (xml.replace("Allow TikTok", "Allow Instagram"), 0, true),
+            (xml.replace("this device's location", "photos, media and files on your device"), 0, true),
+            (xml.replace("access this device's location", "take pictures and record video"), 0, true),
+            (xml.replace("com.google.android.packageinstaller", "com.example.foreign"), 0, true),
+            (xml.replace("text=\"Deny\"", "text=\"Allow\""), 0, true),
+            (xml.replace("clickable=\"true\" enabled=\"true\"", "clickable=\"true\" enabled=\"false\""), 0, true),
+            (xml.replace("displayed=\"true\"", "displayed=\"false\""), 0, false),
+            (xml.replace("id/dialog_container", "id/other_container"), 0, false),
+            (xml.replace("text=\"Allow\"", "text=\"Other\""), 0, true),
+            (xml.replace("</hierarchy>", r#"<node package="com.google.android.packageinstaller" resource-id="com.android.packageinstaller:id/permission_deny_button" class="android.widget.Button" text="Deny" clickable="true" enabled="true" displayed="true" bounds="[1,1][2,2]"/></hierarchy>"#), 0, true),
         ] {
             // The modal can leave the underlying feed tab visible. It must win,
             // and an unchanged modal must never receive a second decline tap.
@@ -721,6 +727,12 @@ mod tests {
                 drop(points);
                 assert_eq!(step(&phone, measured(), &mut spend).await, LadderStep::Stuck);
                 assert_eq!(phone.taps(), 1, "unchanged modal must not be replayed");
+            } else if modal {
+                // An unrecognised modal is left to the operator, untouched and without Back.
+                assert!(
+                    matches!(&result, LadderStep::NeedsOperator { says } if says.contains("cần người vận hành")),
+                    "{result:?}"
+                );
             } else {
                 assert_eq!(result, LadderStep::Stuck);
             }

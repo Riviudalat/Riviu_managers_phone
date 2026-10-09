@@ -1,6 +1,9 @@
 //! Measured negative popup actions shared by caller-owned automation stages.
 use crate::{tiktok_labels::TikTokControls, ui_automation::tree::Tree, ElementBox, ElementQuery};
 
+mod catalog;
+use catalog::CATALOG;
+
 pub fn decline_contacts(tree: &Tree, labels: TikTokControls) -> Option<ElementBox> {
     let package = labels.package();
     if labels.language() != "en" {
@@ -284,8 +287,9 @@ pub enum FirstRunPlan {
 }
 
 impl FirstRunScreen {
-    /// One attempt per caller budget; bits 1..8 belong to [`optional_decline`].
-    fn budget_bit(self) -> u8 {
+    /// One attempt per caller budget; bits 1..8 belong to [`optional_decline`] and bits
+    /// from 256 up to [`CATALOG`].
+    fn budget_bit(self) -> u64 {
         match self {
             Self::Interests => 16,
             Self::SwipeUpGuide => 32,
@@ -631,6 +635,49 @@ pub fn first_run_screen(
     Some((screen, plan))
 }
 
+/// Global 45.7.3 login chooser, Compose: the heading TextView has no resource-id and each
+/// option is a clickable `android.view.View` whose child View carries the label as its
+/// content-desc. Emulator 05-login-method-chooser (en) and Riviu phone 31 s5 (vi), both
+/// under `tk8 > v6m`; target/apk-leverage-audit-20261009/login_notes.md.
+fn compose_login_chooser(tree: &Tree, labels: TikTokControls) -> bool {
+    if !first_run_profile(labels) {
+        return false;
+    }
+    let package = labels.package();
+    let Some(page) = measured_node(tree, package, package, "v6m", None, None) else {
+        return false;
+    };
+    let headings = tree.matching(
+        package,
+        ElementQuery::Text {
+            value: "Log in to TikTok",
+            exact: true,
+        },
+    );
+    let heading = matches!(headings.as_slice(), [index]
+        if tree.nodes[*index].attr("class") == TEXT_VIEW
+        && tree.nodes[*index].attr("resource-id").is_empty()
+        && tree.inside(*index, page));
+    heading
+        && tree.nodes.iter().enumerate().any(|(index, node)| {
+            node.visible(package)
+                && tree.ancestors_visible(index)
+                && node.attr("class") == "android.view.View"
+                && matches!(
+                    node.attr("content-desc"),
+                    "Use phone / email / username"
+                        | "Continue with Facebook"
+                        | "Continue with Google"
+                )
+                && tree.inside(index, page)
+                && node.parent.is_some_and(|option| {
+                    let option = &tree.nodes[option];
+                    option.attr("class") == "android.view.View"
+                        && option.rect().is_some_and(|r| r.enabled && r.clickable)
+                })
+        })
+}
+
 pub fn account_blocker(tree: &Tree, labels: TikTokControls) -> Option<AccountBlocker> {
     let package = labels.package();
     // Exact heading + separate login-method Button: a caption mentioning login
@@ -656,7 +703,7 @@ pub fn account_blocker(tree: &Tree, labels: TikTokControls) -> Option<AccountBlo
                 "Use phone / email / username" | "Continue with Facebook" | "Continue with Google"
             ) && node.rect().is_some_and(|r| r.enabled && r.clickable)
         });
-    if login_heading && login_method {
+    if (login_heading && login_method) || compose_login_chooser(tree, labels) {
         return Some(AccountBlocker::LoginRequired);
     }
     if security_sheet(tree, labels).is_some() {
@@ -686,6 +733,178 @@ pub fn account_blocker(tree: &Tree, labels: TikTokControls) -> Option<AccountBlo
         .then_some(AccountBlocker::UnrecognizedDialog)
 }
 
+const LOGIN_REQUIRED_SAYS: &str = "TikTok đang ở màn hình đăng nhập — Riviu không tự đăng nhập và không bấm Back; cần người vận hành đăng nhập lại trên máy";
+const SECURITY_PROMPT_SAYS: &str = "TikTok đang hỏi kiểm tra bảo mật — Riviu không bấm Tiếp tục và không bấm Back; cần người vận hành xử lý trên máy";
+const UNKNOWN_MODAL_SAYS: &str = "hộp thoại lạ đang che màn hình — Riviu không bấm gì, kể cả Back; cần người vận hành xem và đóng tay. Đã lưu XML (đã che chữ nhập) và ảnh màn hình vào thư mục artifacts/popups để rà soát";
+/// Review-capture bit for an unknown modal; catalog bits stay below it.
+const UNKNOWN_BIT: u64 = 1 << 63;
+
+/// Whether a catalog entry may press its control. The promotion switch of each entry.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PopupMode {
+    /// A real 45.7.3/en dump proved the whole popup: its one bounded action is allowed.
+    Act,
+    /// Known only from the APK: recognised, logged and captured, never pressed.
+    Shadow,
+}
+
+/// What the popup asks of the account.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PopupClass {
+    /// Not now, Later, Skip, Close, Got it on a pure tooltip, Don't allow on an optional
+    /// OS permission: one press commits nothing.
+    Dismissable,
+    /// Agree, allow, continue, buy, follow, sync contacts; terms, age, captcha/OTP,
+    /// verification, expired login; discarding user work or cancelling an upload.
+    Operator,
+}
+
+/// One node of a catalog entry. Every given field must match exactly; `id` is the short
+/// id under the TikTok package (`<package>:id/<id>`), a full id when it contains `:`
+/// (`android:id/button3`), and `Some("")` requires no id.
+#[derive(Debug, Clone, Copy)]
+struct PopupPart {
+    id: Option<&'static str>,
+    class: Option<&'static str>,
+    text: Option<&'static str>,
+    desc: Option<&'static str>,
+}
+
+/// One in-app popup of Global 45.7.3/en. The container, every anchor and the control must
+/// each be the only match in the snapshot, with the anchors and control inside the
+/// container. `docs`: target/popup-catalog-45.7.3/CATALOG.md, by `key`.
+#[derive(Debug, Clone, Copy)]
+pub struct CatalogPopup {
+    pub key: &'static str,
+    pub mode: PopupMode,
+    pub class: PopupClass,
+    container: PopupPart,
+    anchors: &'static [PopupPart],
+    /// The one non-committal control. `None` for [`PopupClass::Operator`].
+    dismiss: Option<PopupPart>,
+    /// Operator line once the dismissal was sent.
+    acted: &'static str,
+    /// Operator line when Riviu leaves it: Operator entries, or a dismissal already spent.
+    spent: &'static str,
+    /// Logged in shadow mode: what was recognised and what would be pressed.
+    shadow: &'static str,
+}
+
+enum CatalogMatch {
+    None,
+    Act {
+        bit: u64,
+        entry: &'static CatalogPopup,
+        button: ElementBox,
+    },
+    Operator {
+        entry: &'static CatalogPopup,
+    },
+    Shadow {
+        bit: u64,
+        entry: &'static CatalogPopup,
+    },
+    /// More than one entry that may act matched one snapshot.
+    Ambiguous,
+}
+
+fn part_matches(tree: &Tree, package: &str, part: PopupPart) -> Vec<usize> {
+    let id = part.id.map(|id| {
+        if id.is_empty() || id.contains(':') {
+            id.to_owned()
+        } else {
+            format!("{package}:id/{id}")
+        }
+    });
+    tree.nodes
+        .iter()
+        .enumerate()
+        .filter(|(index, node)| {
+            node.visible(package)
+                && tree.ancestors_visible(*index)
+                && node.rect().is_some()
+                && id
+                    .as_deref()
+                    .is_none_or(|id| node.attr("resource-id") == id)
+                && part.class.is_none_or(|class| node.attr("class") == class)
+                && part.text.is_none_or(|text| node.attr("text") == text)
+                && part
+                    .desc
+                    .is_none_or(|desc| node.attr("content-desc") == desc)
+        })
+        .map(|(index, _)| index)
+        .collect()
+}
+
+/// `Some(control)` when the entry's whole structure is present; the control is `None` for
+/// an Operator entry and `Some(None)` never authorizes a tap.
+fn catalog_entry(tree: &Tree, package: &str, entry: &CatalogPopup) -> Option<Option<ElementBox>> {
+    let [container] = part_matches(tree, package, entry.container)[..] else {
+        return None;
+    };
+    for anchor in entry.anchors {
+        let [index] = part_matches(tree, package, *anchor)[..] else {
+            return None;
+        };
+        if !tree.inside(index, container) {
+            return None;
+        }
+    }
+    let Some(dismiss) = entry.dismiss else {
+        return Some(None);
+    };
+    let [control] = part_matches(tree, package, dismiss)[..] else {
+        return None;
+    };
+    if !tree.inside(control, container) {
+        return None;
+    }
+    Some(tappable(tree, control))
+}
+
+fn catalog_popup(tree: &Tree, labels: TikTokControls) -> CatalogMatch {
+    if !first_run_profile(labels) {
+        return CatalogMatch::None;
+    }
+    let package = labels.package();
+    let mut acting = Vec::new();
+    let mut shadow = None;
+    for (index, entry) in CATALOG.iter().enumerate() {
+        let Some(control) = catalog_entry(tree, package, entry) else {
+            continue;
+        };
+        let bit = 1u64 << (8 + index);
+        match (entry.mode, entry.class, control) {
+            (PopupMode::Shadow, _, _) => {
+                if shadow.is_none() {
+                    shadow = Some(CatalogMatch::Shadow { bit, entry });
+                }
+            }
+            (PopupMode::Act, PopupClass::Operator, _) => {
+                acting.push(CatalogMatch::Operator { entry });
+            }
+            (PopupMode::Act, PopupClass::Dismissable, Some(button)) => {
+                acting.push(CatalogMatch::Act { bit, entry, button });
+            }
+            // The structure is there but its control is not enabled and clickable: the
+            // operator sees it rather than a guessed tap.
+            (PopupMode::Act, PopupClass::Dismissable, None) => {
+                acting.push(CatalogMatch::Operator { entry });
+            }
+        }
+    }
+    match acting.len() {
+        0 => shadow.unwrap_or(CatalogMatch::None),
+        1 => acting.pop().unwrap_or(CatalogMatch::Ambiguous),
+        _ => CatalogMatch::Ambiguous,
+    }
+}
+
+const _: () = assert!(
+    CATALOG.len() <= 55,
+    "catalog bits must stay below UNKNOWN_BIT"
+);
+
 use crate::ui_automation::runtime::{read_before_deadline, ReadWaitResult};
 use std::sync::atomic::{AtomicBool, Ordering};
 use tokio::time::Instant;
@@ -694,9 +913,11 @@ use tokio::time::Instant;
 #[derive(Debug, Clone, Default)]
 pub struct PopupBudget {
     epoch: Option<String>,
-    spent: u8,
+    spent: u64,
     last_action_generation: Option<u64>,
     says: Option<&'static str>,
+    /// Popup kinds already captured for review under this budget, by the same bits.
+    captured: u64,
 }
 
 impl PopupBudget {
@@ -909,11 +1130,16 @@ pub(crate) async fn step_before_deadline_with_tree(
     {
         return Ok(ReadWaitResult::Ready((PopupStep::Blocked, None)));
     }
-    let candidate = optional_decline(&tree, labels);
+    let candidate = optional_decline(&tree, labels).map(|(kind, button)| (u64::from(kind), button));
     let first_run = candidate
         .is_none()
         .then(|| first_run_screen(&tree, labels))
         .flatten();
+    let catalog = if candidate.is_none() && first_run.is_none() {
+        catalog_popup(&tree, labels)
+    } else {
+        CatalogMatch::None
+    };
     // The measured OS location and notification modals own foreground themselves. Every
     // other case requires the exact selected TikTok package, never a substring or recents.
     anyhow::ensure!(
@@ -929,9 +1155,10 @@ pub(crate) async fn step_before_deadline_with_tree(
         fresh_foreground == foreground,
         "popup foreground changed during observation"
     );
-    let (kind, gesture, screen) = match (candidate, first_run) {
-        (Some((kind, button)), _) => (kind, PopupGesture::Tap(button), None),
-        (None, Some((screen, plan))) => {
+    // (bit, gesture, operator line once sent, operator line once spent)
+    let (kind, gesture, lines) = match (candidate, first_run, catalog) {
+        (Some((kind, button)), _, _) => (kind, PopupGesture::Tap(button), None),
+        (None, Some((screen, plan)), _) => {
             let gesture = match plan {
                 FirstRunPlan::Tap(button) => PopupGesture::Tap(button),
                 FirstRunPlan::Swipe(swipe) => PopupGesture::Swipe(swipe),
@@ -940,25 +1167,85 @@ pub(crate) async fn step_before_deadline_with_tree(
                     return Ok(ReadWaitResult::Ready((PopupStep::Blocked, None)));
                 }
             };
-            (screen.budget_bit(), gesture, Some(screen))
+            (
+                screen.budget_bit(),
+                gesture,
+                Some((screen.says(), screen.operator_reason())),
+            )
         }
-        (None, None) => {
-            let blocked = modal_present(&tree)
-                || matches!(
-                    account_blocker(&tree, labels),
-                    Some(AccountBlocker::LoginRequired | AccountBlocker::SecurityPrompt)
-                );
-            return Ok(ReadWaitResult::Ready(if blocked {
-                (PopupStep::Blocked, None)
-            } else {
-                (PopupStep::Clear, Some(tree))
-            }));
+        (None, None, CatalogMatch::Act { bit, entry, button }) => (
+            bit,
+            PopupGesture::Tap(button),
+            Some((entry.acted, entry.spent)),
+        ),
+        (None, None, CatalogMatch::Operator { entry }) => {
+            budget.says = Some(entry.spent);
+            return Ok(ReadWaitResult::Ready((PopupStep::Blocked, None)));
+        }
+        (None, None, catalog) => {
+            // A shadow entry is only explained: what was recognised and what would be
+            // pressed once promoted. The screen keeps the verdict it had without it.
+            let shadow = match catalog {
+                CatalogMatch::Shadow { bit, entry } => {
+                    // Once per budget: a popup that stays up is one review item, not a log
+                    // line per poll.
+                    if budget.captured & bit == 0 {
+                        budget.captured |= bit;
+                        tracing::warn!(
+                            popup = entry.key,
+                            package = labels.package(),
+                            "{}",
+                            entry.shadow
+                        );
+                        super::popup_evidence::capture(
+                            session,
+                            &tree,
+                            labels,
+                            entry.key,
+                            entry.shadow,
+                            deadline,
+                            stop,
+                        )
+                        .await;
+                    }
+                    Some(entry)
+                }
+                _ => None,
+            };
+            let blocker = account_blocker(&tree, labels);
+            let says = match blocker {
+                Some(AccountBlocker::LoginRequired) => Some(LOGIN_REQUIRED_SAYS),
+                Some(AccountBlocker::SecurityPrompt) => Some(SECURITY_PROMPT_SAYS),
+                _ if modal_present(&tree) || matches!(catalog, CatalogMatch::Ambiguous) => {
+                    Some(shadow.map_or(UNKNOWN_MODAL_SAYS, |entry| entry.shadow))
+                }
+                _ => None,
+            };
+            let Some(says) = says else {
+                return Ok(ReadWaitResult::Ready((PopupStep::Clear, Some(tree))));
+            };
+            budget.says = Some(says);
+            if shadow.is_none() && says == UNKNOWN_MODAL_SAYS && budget.captured & UNKNOWN_BIT == 0
+            {
+                budget.captured |= UNKNOWN_BIT;
+                super::popup_evidence::capture(
+                    session,
+                    &tree,
+                    labels,
+                    "unknown-modal",
+                    UNKNOWN_MODAL_SAYS,
+                    deadline,
+                    stop,
+                )
+                .await;
+            }
+            return Ok(ReadWaitResult::Ready((PopupStep::Blocked, None)));
         }
     };
     if effect_stop.load(Ordering::Relaxed) || budget.spent & kind != 0 {
-        budget.says = screen
+        budget.says = lines
             .filter(|_| budget.spent & kind != 0)
-            .map(FirstRunScreen::operator_reason);
+            .map(|(_, spent)| spent);
         return Ok(ReadWaitResult::Ready((PopupStep::Blocked, None)));
     }
     let fresh_foreground = read!(session.active_app_bundle());
@@ -977,7 +1264,7 @@ pub(crate) async fn step_before_deadline_with_tree(
     }
     budget.spent |= kind;
     budget.last_action_generation = Some(tree.generation);
-    budget.says = screen.map(FirstRunScreen::says);
+    budget.says = lines.map(|(sent, _)| sent);
     match gesture {
         PopupGesture::Tap(button) => session.tap(button.centre()).await?,
         PopupGesture::Swipe(swipe) => session.swipe(swipe).await?,

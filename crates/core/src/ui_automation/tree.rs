@@ -193,4 +193,50 @@ impl Tree {
         }
         false
     }
+
+    /// The snapshot re-serialised for operator review. Password fields and editable text
+    /// lose their `text`: they can hold a typed credential, comment or caption draft.
+    pub(crate) fn redacted_xml(&self) -> String {
+        fn escape(value: &str) -> String {
+            value
+                .replace('&', "&amp;")
+                .replace('<', "&lt;")
+                .replace('>', "&gt;")
+                .replace('"', "&quot;")
+        }
+        let tag = |index: usize| {
+            if self.nodes[index].is_hierarchy_wrapper {
+                "hierarchy"
+            } else {
+                "node"
+            }
+        };
+        let mut out = String::from("<?xml version='1.0' encoding='UTF-8' standalone='yes' ?>\n");
+        let mut open: Vec<usize> = Vec::new();
+        for (index, node) in self.nodes.iter().enumerate() {
+            while let Some(top) = open.last().copied().filter(|top| node.parent != Some(*top)) {
+                open.pop();
+                out.push_str(&format!("</{}>", tag(top)));
+            }
+            let secret = node.attr("password") == "true" || node.attr("class").contains("EditText");
+            let mut keys: Vec<_> = node.attrs.keys().collect();
+            keys.sort();
+            out.push('<');
+            out.push_str(tag(index));
+            for key in keys {
+                let value = if secret && key == "text" {
+                    String::new()
+                } else {
+                    escape(node.attr(key))
+                };
+                out.push_str(&format!(" {}=\"{value}\"", escape(key)));
+            }
+            out.push('>');
+            open.push(index);
+        }
+        while let Some(index) = open.pop() {
+            out.push_str(&format!("</{}>", tag(index)));
+        }
+        out
+    }
 }

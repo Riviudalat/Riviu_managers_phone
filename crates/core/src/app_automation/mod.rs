@@ -1,5 +1,6 @@
 //! Application-specific interpretation. The UI runtime does not depend on these adapters.
 pub mod dialogs;
+pub mod popup_evidence;
 pub mod tiktok_roles;
 
 /// Uses the same catalog and plans as production preflight. A catalog match is

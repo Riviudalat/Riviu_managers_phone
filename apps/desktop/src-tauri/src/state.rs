@@ -987,6 +987,8 @@ impl AppState {
         std::fs::create_dir_all(&data)?;
         let artifacts_dir = data.join("artifacts");
         std::fs::create_dir_all(&artifacts_dir)?;
+        // Popups Riviu would not answer are saved here for the operator to review.
+        riviu_core::app_automation::popup_evidence::set_root(artifacts_dir.join("popups"));
 
         let (sidecar_root, sidecar_origin) = resolve_sidecar_root(resource_dir.as_deref())?;
         let credentials = CredentialStore::system()?;
