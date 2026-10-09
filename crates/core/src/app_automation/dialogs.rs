@@ -183,6 +183,9 @@ fn exact_node(tree: &Tree, package: &str, id: &str, text: &str) -> Option<usize>
 }
 
 fn security_sheet(tree: &Tree, labels: TikTokControls) -> Option<usize> {
+    if first_run_profile(labels) {
+        return global_security_check(tree, labels.package()).map(|(sheet, _)| sheet);
+    }
     if (
         labels.package(),
         labels.resource_version(),
@@ -251,6 +254,383 @@ pub fn security_reminder_close(tree: &Tree, labels: TikTokControls) -> Option<El
         .filter(|rect| rect.enabled && rect.clickable)
 }
 
+const GLOBAL: &str = "com.zhiliaoapp.musically";
+const TEXT_VIEW: &str = "android.widget.TextView";
+const BUTTON: &str = "android.widget.Button";
+/// The emulator's notification prompt is owned by this package; its ids keep the AOSP prefix.
+const NOTIFICATION_PROMPT_PACKAGE: &str = "com.google.android.permissioncontroller";
+
+/// First-run screens of Global 45.7.3. Riviu phone 31, fresh install and login,
+/// 2026-10-09 (Vietnamese UI): interests, swipe-up guide and security sheet. The guest
+/// consent dialog and notification prompt come from the emulator (English UI) in
+/// target/tiktok-45.7.3-research REPORT.md §7. The English strings are the 45.7.3
+/// string-table values for the same ids; see crates/core/fixtures/tiktok-first-run/.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum FirstRunScreen {
+    Interests,
+    SwipeUpGuide,
+    SecurityCheck,
+    NotificationPermission,
+    TermsConsent,
+}
+
+/// The only action a recognised first-run screen permits. Never an affirmative.
+#[derive(Debug, Clone)]
+pub enum FirstRunPlan {
+    Tap(ElementBox),
+    Swipe(crate::SwipeGesture),
+    /// Recognised, but only the operator may answer it.
+    Operator,
+}
+
+impl FirstRunScreen {
+    /// One attempt per caller budget; bits 1..8 belong to [`optional_decline`].
+    fn budget_bit(self) -> u8 {
+        match self {
+            Self::Interests => 16,
+            Self::SwipeUpGuide => 32,
+            Self::SecurityCheck => 64,
+            Self::NotificationPermission => 128,
+            Self::TermsConsent => 0,
+        }
+    }
+
+    /// The operator-facing line once the bounded action has been sent.
+    pub fn says(self) -> &'static str {
+        match self {
+            Self::Interests => "bỏ qua trang chọn chủ đề của TikTok (Skip, không chọn chủ đề nào); chờ đọc lại màn hình",
+            Self::SwipeUpGuide => "vuốt lên một lần để tắt lớp hướng dẫn \"Vuốt lên để xem thêm\"; chờ đọc lại màn hình",
+            Self::SecurityCheck => "đóng bảng kiểm tra bảo mật nhanh (bấm Đóng, không bấm Tiếp tục); chờ đọc lại màn hình",
+            Self::NotificationPermission => "từ chối quyền gửi thông báo của TikTok; chờ đọc lại màn hình",
+            Self::TermsConsent => "TikTok đang hỏi đồng ý Điều khoản dịch vụ — Riviu không tự đồng ý; cần người vận hành tự xem và bấm trên máy",
+        }
+    }
+
+    /// Why the screen is left to the operator: consent always, the rest once spent.
+    pub fn operator_reason(self) -> &'static str {
+        match self {
+            Self::Interests => "trang chọn chủ đề vẫn còn sau một lần bấm Skip — không bấm lại, cần người vận hành kiểm tra",
+            Self::SwipeUpGuide => "lớp hướng dẫn vuốt lên vẫn còn sau một lần vuốt — không vuốt lại, cần người vận hành kiểm tra",
+            Self::SecurityCheck => "bảng kiểm tra bảo mật vẫn còn sau một lần bấm Đóng — không bấm Tiếp tục, cần người vận hành xử lý",
+            Self::NotificationPermission => "hộp xin quyền thông báo vẫn còn sau một lần từ chối — không bấm lại, cần người vận hành kiểm tra",
+            Self::TermsConsent => Self::TermsConsent.says(),
+        }
+    }
+}
+
+fn first_run_profile(labels: TikTokControls) -> bool {
+    (
+        labels.package(),
+        labels.resource_version(),
+        labels.language(),
+    ) == (GLOBAL, Some("45.7.3"), "en")
+}
+
+/// The single node carrying exactly `package:id/<id>`, with the measured class and text.
+fn measured_node(
+    tree: &Tree,
+    package: &str,
+    id_package: &str,
+    id: &str,
+    class: Option<&str>,
+    text: Option<&str>,
+) -> Option<usize> {
+    let full = format!("{id_package}:id/{id}");
+    let found: Vec<_> = tree
+        .matching(package, ElementQuery::ResourceIdSuffix(&full))
+        .into_iter()
+        .filter(|index| tree.nodes[*index].attr("resource-id") == full)
+        .collect();
+    let [index] = found.as_slice() else {
+        return None;
+    };
+    let node = &tree.nodes[*index];
+    (class.is_none_or(|class| node.attr("class") == class)
+        && text.is_none_or(|text| node.attr("text") == text))
+    .then_some(*index)
+}
+
+fn tappable(tree: &Tree, index: usize) -> Option<ElementBox> {
+    tree.nodes[index]
+        .rect()
+        .filter(|rect| rect.enabled && rect.clickable)
+}
+
+/// Phone 31: jg3/jfw head the picker inside tk8; cqt (Skip) and cnt (Next, whose
+/// count suffix is set from code) share the c8c bar. Skip selects no topic.
+fn interests_skip(tree: &Tree, package: &str) -> Option<ElementBox> {
+    let root = measured_node(
+        tree,
+        package,
+        package,
+        "tk8",
+        Some("android.view.ViewGroup"),
+        None,
+    )?;
+    let title = measured_node(
+        tree,
+        package,
+        package,
+        "jg3",
+        Some(TEXT_VIEW),
+        Some("Choose what you like"),
+    )?;
+    let subtitle = measured_node(
+        tree,
+        package,
+        package,
+        "jfw",
+        Some(TEXT_VIEW),
+        Some("Your feed will be personalized based on what you like."),
+    )?;
+    let bar = measured_node(
+        tree,
+        package,
+        package,
+        "c8c",
+        Some("android.view.ViewGroup"),
+        None,
+    )?;
+    let skip = measured_node(tree, package, package, "cqt", Some(BUTTON), Some("Skip"))?;
+    let next = measured_node(tree, package, package, "cnt", Some(BUTTON), None)?;
+    (tree.nodes[title].parent == tree.nodes[subtitle].parent
+        && [title, bar]
+            .into_iter()
+            .all(|index| tree.inside(index, root))
+        && [skip, next]
+            .into_iter()
+            .all(|index| tree.nodes[index].parent == Some(bar)))
+    .then(|| tappable(tree, skip))
+    .flatten()
+}
+
+/// Phone 31: SwipeUpGuideStrengthenLayout (wmf > wmc) covers the feed page hpk and
+/// swallows taps until one vertical swipe. The swipe stays inside that page and uses the
+/// 0.72 -> 0.28 targets of the nurture feed swipe; hpk was [0,0][1080,2094] there.
+fn swipe_up_guide(tree: &Tree, package: &str) -> Option<crate::SwipeGesture> {
+    let guide = measured_node(
+        tree,
+        package,
+        package,
+        "tv_strengthen_swipe_up_guide",
+        Some(TEXT_VIEW),
+        Some("Swipe up for more"),
+    )?;
+    let overlay = measured_node(tree, package, package, "wmf", None, None)?;
+    let content = measured_node(tree, package, package, "wmc", None, None)?;
+    if tree.nodes[content].parent != Some(overlay) || !tree.inside(guide, content) {
+        return None;
+    }
+    let page_id = format!("{package}:id/hpk");
+    let mut page = tree.nodes[overlay].parent;
+    while let Some(index) = page {
+        if tree.nodes[index].attr("resource-id") == page_id {
+            break;
+        }
+        page = tree.nodes[index].parent;
+    }
+    let page = tree.nodes[page?].rect()?;
+    let x = page.x + page.width / 2.0;
+    Some(crate::SwipeGesture {
+        from: crate::TapPoint {
+            x,
+            y: page.y + page.height * 0.72,
+        },
+        to: crate::TapPoint {
+            x,
+            y: page.y + page.height * 0.28,
+        },
+        duration_ms: 300,
+    })
+}
+
+/// Phone 31, after login: bottom sheet fl4 with xw7/fkw and Continue nri; the header
+/// Close is the only Button described "Close" (vi capture: "Đóng"). The sheet copy is
+/// server text absent from the string table; it is the measured Trill 38.3.2/en sheet's.
+fn global_security_check(tree: &Tree, package: &str) -> Option<(usize, ElementBox)> {
+    let sheet = measured_node(
+        tree,
+        package,
+        package,
+        "fl4",
+        Some("android.widget.FrameLayout"),
+        None,
+    )?;
+    if tree.nodes[sheet].attr("content-desc") != "Bottom sheet" {
+        return None;
+    }
+    let parts = [
+        measured_node(tree, package, package, "xw7", Some(TEXT_VIEW), Some("Let's do a quick security checkup"))?,
+        measured_node(
+            tree,
+            package,
+            package,
+            "fkw",
+            Some(TEXT_VIEW),
+            Some("Complete a few personalized security tips to strengthen the safety of your account."),
+        )?,
+        measured_node(tree, package, package, "nri", Some(BUTTON), Some("Continue"))?,
+    ];
+    let header = measured_node(
+        tree,
+        package,
+        package,
+        "ovy",
+        Some("android.widget.LinearLayout"),
+        None,
+    )?;
+    let closes = tree.matching(
+        package,
+        ElementQuery::Description {
+            value: "Close",
+            exact: true,
+        },
+    );
+    let [close] = closes.as_slice() else {
+        return None;
+    };
+    let node = &tree.nodes[*close];
+    if !parts
+        .into_iter()
+        .chain([header])
+        .all(|index| tree.inside(index, sheet))
+        || node.parent != Some(header)
+        || node.attr("class") != BUTTON
+        || !node.attr("text").is_empty()
+        || !node.attr("resource-id").is_empty()
+    {
+        return None;
+    }
+    Some((sheet, tappable(tree, *close)?))
+}
+
+/// Emulator, Android 17: the OS notification prompt's negative button.
+fn decline_notifications(tree: &Tree) -> Option<ElementBox> {
+    let package = NOTIFICATION_PROMPT_PACKAGE;
+    let aosp = "com.android.permissioncontroller";
+    let dialog = measured_node(
+        tree,
+        package,
+        aosp,
+        "grant_dialog",
+        Some("android.widget.LinearLayout"),
+        None,
+    )?;
+    let prompt = measured_node(
+        tree,
+        package,
+        aosp,
+        "permission_message",
+        Some(TEXT_VIEW),
+        Some("Allow TikTok to send you notifications?"),
+    )?;
+    let allow = measured_node(
+        tree,
+        package,
+        aosp,
+        "permission_allow_button",
+        Some(BUTTON),
+        Some("Allow"),
+    )?;
+    let deny = measured_node(
+        tree,
+        package,
+        aosp,
+        "permission_deny_button",
+        Some(BUTTON),
+        Some("Don’t allow"),
+    )?;
+    ([prompt, allow, deny]
+        .into_iter()
+        .all(|index| tree.inside(index, dialog))
+        && tree.nodes[allow].parent == tree.nodes[deny].parent
+        && tappable(tree, allow).is_some())
+    .then(|| tappable(tree, deny))
+    .flatten()
+}
+
+/// Emulator, guest: Terms consent offers only an affirmative. Recognise it, never answer it.
+fn terms_consent(tree: &Tree, package: &str) -> bool {
+    let dialogs = tree.matching(
+        package,
+        ElementQuery::Description {
+            value: "Dialog",
+            exact: true,
+        },
+    );
+    let [dialog] = dialogs.as_slice() else {
+        return false;
+    };
+    let notice = measured_node(
+        tree,
+        package,
+        package,
+        "esv",
+        Some(TEXT_VIEW),
+        Some("By tapping “Agree and continue”, you agree to our Terms of Service and acknowledge that you have read our Privacy Policy to learn how we collect, use, and share your data."),
+    );
+    let agree = tree.matching(
+        package,
+        ElementQuery::Text {
+            value: "Agree and continue",
+            exact: true,
+        },
+    );
+    tree.nodes[*dialog].attr("resource-id") == format!("{package}:id/visual_area")
+        && notice.is_some_and(|index| tree.inside(index, *dialog))
+        && matches!(agree.as_slice(), [index] if tree.inside(*index, *dialog)
+            && tree.nodes[*index].attr("class") == BUTTON)
+}
+
+/// A modal above the picker or feed owns the screen; it is not this screen's to clear.
+fn foreign_modal(tree: &Tree, package: &str) -> bool {
+    ["Dialog", "Bottom sheet"].into_iter().any(|value| {
+        !tree
+            .matching(package, ElementQuery::Description { value, exact: true })
+            .is_empty()
+    })
+}
+
+/// Exactly one recognised first-run screen in this snapshot, or `None`. Unknown,
+/// ambiguous or unmeasured screens stay with the existing fail-closed handling.
+pub fn first_run_screen(
+    tree: &Tree,
+    labels: TikTokControls,
+) -> Option<(FirstRunScreen, FirstRunPlan)> {
+    if !first_run_profile(labels) {
+        return None;
+    }
+    let package = labels.package();
+    let mut found = Vec::new();
+    if let Some(skip) = interests_skip(tree, package) {
+        found.push((FirstRunScreen::Interests, FirstRunPlan::Tap(skip)));
+    }
+    if let Some(swipe) = swipe_up_guide(tree, package) {
+        found.push((FirstRunScreen::SwipeUpGuide, FirstRunPlan::Swipe(swipe)));
+    }
+    if let Some((_, close)) = global_security_check(tree, package) {
+        found.push((FirstRunScreen::SecurityCheck, FirstRunPlan::Tap(close)));
+    }
+    if let Some(deny) = decline_notifications(tree) {
+        found.push((
+            FirstRunScreen::NotificationPermission,
+            FirstRunPlan::Tap(deny),
+        ));
+    }
+    if terms_consent(tree, package) {
+        found.push((FirstRunScreen::TermsConsent, FirstRunPlan::Operator));
+    }
+    let [(screen, plan)] = <[_; 1]>::try_from(found).ok()?;
+    if matches!(
+        screen,
+        FirstRunScreen::Interests | FirstRunScreen::SwipeUpGuide
+    ) && foreign_modal(tree, package)
+    {
+        return None;
+    }
+    Some((screen, plan))
+}
+
 pub fn account_blocker(tree: &Tree, labels: TikTokControls) -> Option<AccountBlocker> {
     let package = labels.package();
     // Exact heading + separate login-method Button: a caption mentioning login
@@ -316,6 +696,20 @@ pub struct PopupBudget {
     epoch: Option<String>,
     spent: u8,
     last_action_generation: Option<u64>,
+    says: Option<&'static str>,
+}
+
+impl PopupBudget {
+    /// The operator line for the last step: the first-run action sent, or why a
+    /// recognised screen was left to the operator. `None` for unknown blockers.
+    pub fn says(&self) -> Option<&'static str> {
+        self.says
+    }
+}
+
+enum PopupGesture {
+    Tap(ElementBox),
+    Swipe(crate::SwipeGesture),
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -491,6 +885,7 @@ pub(crate) async fn step_before_deadline_with_tree(
     } else {
         budget.epoch = Some(epoch.clone());
     }
+    budget.says = None;
     macro_rules! read {
         ($future:expr) => {
             match read_before_deadline($future, deadline, stop).await? {
@@ -515,12 +910,18 @@ pub(crate) async fn step_before_deadline_with_tree(
         return Ok(ReadWaitResult::Ready((PopupStep::Blocked, None)));
     }
     let candidate = optional_decline(&tree, labels);
-    // The measured OS location modal owns foreground itself. Every other case
-    // requires the exact selected TikTok package, never a substring or recents.
+    let first_run = candidate
+        .is_none()
+        .then(|| first_run_screen(&tree, labels))
+        .flatten();
+    // The measured OS location and notification modals own foreground themselves. Every
+    // other case requires the exact selected TikTok package, never a substring or recents.
     anyhow::ensure!(
         foreground == labels.package()
             || (foreground == "com.google.android.packageinstaller"
-                && candidate.as_ref().is_some_and(|(kind, _)| *kind == 1)),
+                && candidate.as_ref().is_some_and(|(kind, _)| *kind == 1))
+            || (foreground == NOTIFICATION_PROMPT_PACKAGE
+                && matches!(first_run, Some((FirstRunScreen::NotificationPermission, _)))),
         "popup foreground does not match target package"
     );
     let fresh_foreground = read!(session.active_app_bundle());
@@ -528,19 +929,36 @@ pub(crate) async fn step_before_deadline_with_tree(
         fresh_foreground == foreground,
         "popup foreground changed during observation"
     );
-    let Some((kind, button)) = candidate else {
-        let blocked = modal_present(&tree)
-            || matches!(
-                account_blocker(&tree, labels),
-                Some(AccountBlocker::LoginRequired | AccountBlocker::SecurityPrompt)
-            );
-        return Ok(ReadWaitResult::Ready(if blocked {
-            (PopupStep::Blocked, None)
-        } else {
-            (PopupStep::Clear, Some(tree))
-        }));
+    let (kind, gesture, screen) = match (candidate, first_run) {
+        (Some((kind, button)), _) => (kind, PopupGesture::Tap(button), None),
+        (None, Some((screen, plan))) => {
+            let gesture = match plan {
+                FirstRunPlan::Tap(button) => PopupGesture::Tap(button),
+                FirstRunPlan::Swipe(swipe) => PopupGesture::Swipe(swipe),
+                FirstRunPlan::Operator => {
+                    budget.says = Some(screen.operator_reason());
+                    return Ok(ReadWaitResult::Ready((PopupStep::Blocked, None)));
+                }
+            };
+            (screen.budget_bit(), gesture, Some(screen))
+        }
+        (None, None) => {
+            let blocked = modal_present(&tree)
+                || matches!(
+                    account_blocker(&tree, labels),
+                    Some(AccountBlocker::LoginRequired | AccountBlocker::SecurityPrompt)
+                );
+            return Ok(ReadWaitResult::Ready(if blocked {
+                (PopupStep::Blocked, None)
+            } else {
+                (PopupStep::Clear, Some(tree))
+            }));
+        }
     };
     if effect_stop.load(Ordering::Relaxed) || budget.spent & kind != 0 {
+        budget.says = screen
+            .filter(|_| budget.spent & kind != 0)
+            .map(FirstRunScreen::operator_reason);
         return Ok(ReadWaitResult::Ready((PopupStep::Blocked, None)));
     }
     let fresh_foreground = read!(session.active_app_bundle());
@@ -559,7 +977,11 @@ pub(crate) async fn step_before_deadline_with_tree(
     }
     budget.spent |= kind;
     budget.last_action_generation = Some(tree.generation);
-    session.tap(button.centre()).await?;
+    budget.says = screen.map(FirstRunScreen::says);
+    match gesture {
+        PopupGesture::Tap(button) => session.tap(button.centre()).await?,
+        PopupGesture::Swipe(swipe) => session.swipe(swipe).await?,
+    }
     anyhow::ensure!(
         session.gui_session_epoch() == epoch,
         "popup session changed after decline"
@@ -680,6 +1102,152 @@ mod tests {
         ] {
             let other = crate::tiktok_labels::controls_for(package, language, version).unwrap();
             assert!(decline_contacts(&tree(FIXTURE.into()), other).is_none());
+        }
+    }
+
+    mod first_run {
+        use super::*;
+        const GLOBAL: &str = "com.zhiliaoapp.musically";
+        const EN_INTERESTS: &str =
+            include_str!("../../fixtures/tiktok-first-run/musically-45.7.3-en/interests.fixture");
+        const EN_GUIDE: &str = include_str!(
+            "../../fixtures/tiktok-first-run/musically-45.7.3-en/swipe-up-guide.fixture"
+        );
+        const EN_SECURITY: &str = include_str!(
+            "../../fixtures/tiktok-first-run/musically-45.7.3-en/security-check.fixture"
+        );
+        const EN_NOTIFICATION: &str = include_str!(
+            "../../fixtures/tiktok-first-run/musically-45.7.3-en/notification-permission.fixture"
+        );
+        const EN_CONSENT: &str = include_str!(
+            "../../fixtures/tiktok-first-run/musically-45.7.3-en/terms-consent.fixture"
+        );
+        const VI_INTERESTS: &str =
+            include_str!("../../fixtures/tiktok-first-run/musically-45.7.3-vi/interests.fixture");
+        const VI_GUIDE: &str = include_str!(
+            "../../fixtures/tiktok-first-run/musically-45.7.3-vi/swipe-up-guide.fixture"
+        );
+        const VI_SECURITY: &str = include_str!(
+            "../../fixtures/tiktok-first-run/musically-45.7.3-vi/security-check.fixture"
+        );
+
+        fn global() -> TikTokControls {
+            crate::tiktok_labels::controls_for(GLOBAL, "en", "45.7.3").unwrap()
+        }
+        fn screen(xml: &str) -> Option<(FirstRunScreen, FirstRunPlan)> {
+            first_run_screen(&tree(xml.into()), global())
+        }
+        fn tap(xml: &str) -> Option<(FirstRunScreen, (f64, f64, f64, f64))> {
+            match screen(xml)? {
+                (screen, FirstRunPlan::Tap(b)) => Some((screen, (b.x, b.y, b.width, b.height))),
+                _ => None,
+            }
+        }
+
+        #[test]
+        fn derived_english_fixtures_keep_the_real_capture_structure() {
+            for (en, vi) in [
+                (EN_INTERESTS, VI_INTERESTS),
+                (EN_GUIDE, VI_GUIDE),
+                (EN_SECURITY, VI_SECURITY),
+            ] {
+                let shape = |xml: &str| {
+                    tree(xml.into())
+                        .nodes
+                        .iter()
+                        .map(|n| {
+                            ["resource-id", "class", "bounds", "clickable", "enabled"]
+                                .map(|key| n.attr(key).to_owned())
+                        })
+                        .collect::<Vec<_>>()
+                };
+                assert_eq!(shape(en), shape(vi));
+            }
+        }
+
+        #[test]
+        fn global_first_run_screens_permit_only_their_measured_negative_action() {
+            assert_eq!(
+                tap(EN_INTERESTS),
+                Some((FirstRunScreen::Interests, (53.0, 1936.0, 476.0, 137.0)))
+            );
+            assert_eq!(
+                tap(EN_SECURITY),
+                Some((FirstRunScreen::SecurityCheck, (954.0, 1161.0, 105.0, 116.0)))
+            );
+            assert_eq!(
+                tap(EN_NOTIFICATION),
+                Some((
+                    FirstRunScreen::NotificationPermission,
+                    (133.0, 1421.0, 814.0, 126.0)
+                ))
+            );
+            let Some((FirstRunScreen::SwipeUpGuide, FirstRunPlan::Swipe(swipe))) = screen(EN_GUIDE)
+            else {
+                panic!("swipe-up guide must plan exactly one swipe");
+            };
+            assert_eq!(
+                (swipe.from.x, swipe.from.y, swipe.to.x, swipe.to.y),
+                (540.0, 2094.0 * 0.72, 540.0, 2094.0 * 0.28)
+            );
+            assert!(matches!(
+                screen(EN_CONSENT),
+                Some((FirstRunScreen::TermsConsent, FirstRunPlan::Operator))
+            ));
+            let sheet = tree(EN_SECURITY.into());
+            assert_eq!(
+                account_blocker(&sheet, global()),
+                Some(AccountBlocker::SecurityPrompt)
+            );
+
+            let duplicate = |xml: &str, node: &str| {
+                xml.replacen("</hierarchy>", &format!("{node}</hierarchy>"), 1)
+            };
+            for changed in [
+                EN_INTERESTS.replace("text=\"Skip\"", "text=\"Select all\""),
+                EN_INTERESTS.replace("Choose what you like", "Choose who to follow"),
+                EN_INTERESTS.replace("id/c8c", "id/other_bar"),
+                EN_INTERESTS.replace(
+                    r#"enabled="true" focusable="true" focused="false" scrollable="false" long-clickable="false" password="false" selected="false" bounds="[53,1936][529,2073]""#,
+                    r#"enabled="false" focusable="true" focused="false" scrollable="false" long-clickable="false" password="false" selected="false" bounds="[53,1936][529,2073]""#,
+                ),
+                duplicate(EN_INTERESTS, r#"<node package="com.zhiliaoapp.musically" resource-id="com.zhiliaoapp.musically:id/cqt" class="android.widget.Button" text="Skip" clickable="true" enabled="true" bounds="[1,1][2,2]"/>"#),
+                duplicate(EN_INTERESTS, r#"<node package="com.zhiliaoapp.musically" content-desc="Dialog" bounds="[100,100][900,900]"/>"#),
+                EN_GUIDE.replace("Swipe up for more", "Tap to continue"),
+                EN_GUIDE.replace("id/wmc", "id/other"),
+                EN_GUIDE.replace("id/hpk", "id/other_page"),
+                duplicate(EN_GUIDE, r#"<node package="com.zhiliaoapp.musically" resource-id="com.zhiliaoapp.musically:id/tv_strengthen_swipe_up_guide" class="android.widget.TextView" text="Swipe up for more" bounds="[1,1][2,2]"/>"#),
+                EN_SECURITY.replace("content-desc=\"Close\"", "content-desc=\"Back\""),
+                EN_SECURITY.replace("quick security checkup", "quick password reset"),
+                EN_SECURITY.replace("text=\"Continue\"", "text=\"Verify\""),
+                duplicate(EN_SECURITY, r#"<node package="com.zhiliaoapp.musically" class="android.widget.Button" content-desc="Close" clickable="true" enabled="true" bounds="[1,1][2,2]"/>"#),
+                EN_NOTIFICATION.replace("send you notifications", "access your location"),
+                EN_NOTIFICATION.replace("text=\"Don’t allow\"", "text=\"Allow\""),
+                EN_NOTIFICATION.replace("com.google.android.permissioncontroller", "com.example.foreign"),
+                EN_CONSENT.replace("Terms of Service", "Community Guidelines"),
+                // The real Vietnamese captures never match the English profile.
+                VI_INTERESTS.into(),
+                VI_GUIDE.into(),
+                VI_SECURITY.into(),
+            ] {
+                assert!(screen(&changed).is_none());
+            }
+            for (package, language, version) in [
+                (GLOBAL, "en", "46.2.1"),
+                (GLOBAL, "en", "45.4.3"),
+                ("com.ss.android.ugc.trill", "en", "38.3.2"),
+            ] {
+                let other = crate::tiktok_labels::controls_for(package, language, version).unwrap();
+                for xml in [
+                    EN_INTERESTS,
+                    EN_GUIDE,
+                    EN_SECURITY,
+                    EN_NOTIFICATION,
+                    EN_CONSENT,
+                ] {
+                    assert!(first_run_screen(&tree(xml.into()), other).is_none());
+                }
+            }
         }
     }
 }

@@ -216,7 +216,8 @@ impl LadderSpend {
 pub enum LadderStep {
     /// The feed tab is on screen. Nothing to do, and nothing was touched.
     OnFeed,
-    /// A rung fired and its tap was accepted.
+    /// A rung fired and its tap was accepted. `DialogDismiss` also covers the popup
+    /// step's bounded first-run action, which may be one swipe; `says` names it.
     Tapped {
         control: TikTokControl,
         says: &'static str,
@@ -231,6 +232,10 @@ pub enum LadderStep {
     PressedBack { spent: u32, limit: u32 },
     /// Nothing matched and Back is either not allowed yet or used up. The caller waits.
     Stuck,
+    /// A recognised screen only the operator may answer, such as Terms consent, or a
+    /// first-run screen still present after its one bounded action. Nothing was touched
+    /// and Back is not pressed.
+    NeedsOperator { says: &'static str },
 }
 
 impl LadderStep {
@@ -246,6 +251,7 @@ impl LadderStep {
                 "màn hình bị chặn và không có nút nào đọc được — bấm Back ({spent}/{limit})"
             )),
             Self::Stuck => None,
+            Self::NeedsOperator { says } => Some((*says).to_string()),
         }
     }
 
@@ -355,11 +361,17 @@ async fn step_inner(
             ReadWaitResult::Ready(crate::app_automation::dialogs::PopupStep::Dismissed) => {
                 return Ok(ReadWaitResult::Ready(LadderStep::Tapped {
                     control: TikTokControl::DialogDismiss,
-                    says: "từ chối hộp thoại tùy chọn đã đo; chờ đọc lại màn hình",
+                    says: spend
+                        .popup
+                        .says()
+                        .unwrap_or("từ chối hộp thoại tùy chọn đã đo; chờ đọc lại màn hình"),
                 }))
             }
             ReadWaitResult::Ready(crate::app_automation::dialogs::PopupStep::Blocked) => {
-                return Ok(ReadWaitResult::Ready(LadderStep::Stuck))
+                return Ok(ReadWaitResult::Ready(match spend.popup.says() {
+                    Some(says) => LadderStep::NeedsOperator { says },
+                    None => LadderStep::Stuck,
+                }))
             }
             ReadWaitResult::Cancelled => return Ok(ReadWaitResult::Cancelled),
             ReadWaitResult::DeadlineExceeded => return Ok(ReadWaitResult::DeadlineExceeded),
@@ -503,6 +515,12 @@ mod tests {
         refuse_taps: bool,
         xml: Option<String>,
         read_fails: bool,
+        /// Foreground package; the SEA build when unset.
+        foreground: Option<&'static str>,
+        swiped: Mutex<Vec<SwipeGesture>>,
+        /// Each snapshot read is a newer generation, as on a live screen.
+        fresh_reads: bool,
+        reads: std::sync::atomic::AtomicU64,
     }
 
     impl FakePhone {
@@ -528,7 +546,7 @@ mod tests {
     #[async_trait::async_trait]
     impl UiSession for FakePhone {
         async fn active_app_bundle(&self) -> anyhow::Result<String> {
-            Ok("com.ss.android.ugc.trill".into())
+            Ok(self.foreground.unwrap_or("com.ss.android.ugc.trill").into())
         }
         fn supports_accessibility_readback(&self) -> bool {
             self.xml.is_some()
@@ -537,8 +555,9 @@ mod tests {
         async fn hierarchy_source_snapshot(
             &self,
         ) -> anyhow::Result<crate::HierarchySourceSnapshot> {
+            let read = self.reads.fetch_add(1, Ordering::Relaxed) + 1;
             Ok(crate::HierarchySourceSnapshot {
-                generation: 1,
+                generation: if self.fresh_reads { read } else { 1 },
                 xml: self
                     .xml
                     .clone()
@@ -554,7 +573,8 @@ mod tests {
             Ok(())
         }
 
-        async fn swipe(&self, _gesture: SwipeGesture) -> anyhow::Result<()> {
+        async fn swipe(&self, gesture: SwipeGesture) -> anyhow::Result<()> {
+            self.swiped.lock().expect("swipes").push(gesture);
             Ok(())
         }
 
@@ -705,6 +725,104 @@ mod tests {
                 assert_eq!(result, LadderStep::Stuck);
             }
         }
+    }
+
+    const FIRST_RUN_INTERESTS: &str =
+        include_str!("../fixtures/tiktok-first-run/musically-45.7.3-en/interests.fixture");
+    const FIRST_RUN_GUIDE: &str =
+        include_str!("../fixtures/tiktok-first-run/musically-45.7.3-en/swipe-up-guide.fixture");
+    const FIRST_RUN_SECURITY: &str =
+        include_str!("../fixtures/tiktok-first-run/musically-45.7.3-en/security-check.fixture");
+    const FIRST_RUN_NOTIFICATION: &str = include_str!(
+        "../fixtures/tiktok-first-run/musically-45.7.3-en/notification-permission.fixture"
+    );
+    const FIRST_RUN_CONSENT: &str =
+        include_str!("../fixtures/tiktok-first-run/musically-45.7.3-en/terms-consent.fixture");
+
+    fn global_45_7_3() -> TikTokControls {
+        controls_for("com.zhiliaoapp.musically", "en", "45.7.3").expect("measured set")
+    }
+
+    fn first_run_phone(xml: &str, foreground: &'static str) -> FakePhone {
+        // The feed tab stays readable under each screen, so the first-run step must win.
+        FakePhone {
+            xml: Some(xml.to_owned()),
+            foreground: Some(foreground),
+            fresh_reads: true,
+            ..FakePhone::showing_desc(&["For You"])
+        }
+    }
+
+    /// Riviu phone 31, fresh Global 45.7.3 install and login, 2026-10-09, plus the
+    /// emulator's notification prompt: one bounded negative action each, then the
+    /// operator. Before this, the feed tab under them read as "on the feed".
+    #[tokio::test]
+    async fn global_first_run_screens_get_one_bounded_action_before_the_feed() {
+        let global = "com.zhiliaoapp.musically";
+        for (xml, foreground, tap) in [
+            (FIRST_RUN_INTERESTS, global, Some((291.0, 2004.5))),
+            (FIRST_RUN_SECURITY, global, Some((1006.5, 1219.0))),
+            (
+                FIRST_RUN_NOTIFICATION,
+                "com.google.android.permissioncontroller",
+                Some((540.0, 1484.0)),
+            ),
+            (FIRST_RUN_GUIDE, global, None),
+        ] {
+            let phone = first_run_phone(xml, foreground);
+            let mut spend = LadderSpend::new(1);
+            spend.allow_back = true;
+            let first = step(&phone, global_45_7_3(), &mut spend).await;
+            assert!(
+                matches!(
+                    first,
+                    LadderStep::Tapped {
+                        control: TikTokControl::DialogDismiss,
+                        ..
+                    }
+                ),
+                "{first:?}"
+            );
+            match tap {
+                Some(point) => {
+                    let taps = phone.tapped.lock().expect("taps");
+                    assert_eq!(taps.iter().map(|p| (p.x, p.y)).collect::<Vec<_>>(), [point]);
+                    assert!(phone.swiped.lock().expect("swipes").is_empty());
+                }
+                None => {
+                    assert_eq!(phone.taps(), 0);
+                    let swipes = phone.swiped.lock().expect("swipes");
+                    let [swipe] = swipes.as_slice() else {
+                        panic!("exactly one swipe: {swipes:?}");
+                    };
+                    assert!(swipe.from.y > swipe.to.y && swipe.from.x == swipe.to.x);
+                }
+            }
+            // Still there on a fresher read: no second action, no Back, and a reason.
+            let second = step(&phone, global_45_7_3(), &mut spend).await;
+            assert!(!second.acted(), "{second:?}");
+            assert!(second
+                .says()
+                .is_some_and(|says| says.contains("cần người vận hành")));
+            assert_eq!(phone.taps() + phone.swiped.lock().expect("swipes").len(), 1);
+            assert_eq!(phone.backs.load(Ordering::Relaxed), 0);
+        }
+    }
+
+    /// Emulator, guest session: Terms consent offers only "Agree and continue".
+    #[tokio::test]
+    async fn terms_consent_is_reported_to_the_operator_and_never_answered() {
+        let phone = first_run_phone(FIRST_RUN_CONSENT, "com.zhiliaoapp.musically");
+        let mut spend = LadderSpend::new(1);
+        spend.allow_back = true;
+        let result = step(&phone, global_45_7_3(), &mut spend).await;
+        assert!(!result.acted(), "{result:?}");
+        assert!(result
+            .says()
+            .is_some_and(|says| says.contains("Điều khoản dịch vụ")));
+        assert_eq!(phone.taps(), 0);
+        assert!(phone.swiped.lock().expect("swipes").is_empty());
+        assert_eq!(phone.backs.load(Ordering::Relaxed), 0);
     }
 
     #[tokio::test]

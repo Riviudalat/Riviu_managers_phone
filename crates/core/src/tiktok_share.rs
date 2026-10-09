@@ -646,6 +646,7 @@ pub async fn navigate_own_profile(
                 step,
                 crate::feed_ladder::LadderStep::Stuck
                     | crate::feed_ladder::LadderStep::TapFailed { .. }
+                    | crate::feed_ladder::LadderStep::NeedsOperator { .. }
             ),
             "profile navigation unavailable"
         );
