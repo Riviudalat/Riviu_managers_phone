@@ -688,6 +688,138 @@ async fn read_fingerprint(
     Ok(observed)
 }
 
+/// The dwell is read at most this often. Each checkpoint takes one fresh snapshot that the
+/// popup step and the card identity both use; the last stretch before the deadline is
+/// slept, never read again to "catch up".
+const WATCH_CHECKPOINT: Duration = Duration::from_secs(5);
+
+/// How one watched card ended.
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum WatchEnd {
+    /// The whole dwell elapsed and every checkpoint read the same card, or none was due.
+    Watched,
+    Stopped,
+    /// A checkpoint read another card than the first checkpoint: the watched card is gone.
+    CardChanged,
+    /// A popup was dismissed and no clean read came after it; nothing proves which card is
+    /// now on screen.
+    Unproven,
+    /// A popup only the operator may answer.
+    Blocked(String),
+}
+
+/// Card identity from the checkpoint snapshot: the same four controls as [`fingerprint`].
+fn tree_fingerprint(
+    tree: &crate::ui_automation::tree::Tree,
+    labels: TikTokControls,
+) -> PostFingerprint {
+    let package = labels.package();
+    let read = |control| {
+        let query = labels.label(control)?.to_query();
+        let nodes = if let ElementQuery::Semantic(role) = query {
+            crate::app_automation::tiktok_roles::indices(tree, package, role)
+        } else {
+            tree.matching(package, query)
+        };
+        let [index] = nodes.as_slice() else {
+            return None;
+        };
+        let node = &tree.nodes[*index];
+        [node.attr("content-desc"), node.attr("text")]
+            .into_iter()
+            .find(|value| !value.is_empty())
+            .map(str::to_owned)
+    };
+    PostFingerprint {
+        author: read(TikTokControl::AuthorProfileLink),
+        comments: read(TikTokControl::Comments),
+        share: read(TikTokControl::Share),
+        sound: read(TikTokControl::SoundLink),
+    }
+}
+
+/// Watch the card for `dwell`, interruptible by Stop, with a popup/identity checkpoint every
+/// [`WATCH_CHECKPOINT`]. One popup budget serves the whole card. Every read is bounded by the
+/// watch deadline, so the dwell never grows; a failed read is not evidence and the watch goes
+/// on until the next checkpoint.
+async fn watch_card(
+    session: &dyn UiSession,
+    labels: TikTokControls,
+    dwell: Duration,
+    stop: &AtomicBool,
+    status: &mut NurtureSessionStatus,
+    report: &(dyn Fn(&mut NurtureSessionStatus, String) + Send + Sync),
+) -> WatchEnd {
+    use crate::app_automation::dialogs::{step_before_deadline_with_tree, PopupBudget, PopupStep};
+    let deadline = tokio::time::Instant::now() + dwell;
+    let mut popup = PopupBudget::default();
+    let mut card: Option<PostFingerprint> = None;
+    let mut unproven = false;
+    loop {
+        let left = deadline.saturating_duration_since(tokio::time::Instant::now());
+        if left.is_zero() {
+            break;
+        }
+        sleep_interruptible(left.min(WATCH_CHECKPOINT), stop).await;
+        if stop.load(Ordering::Relaxed) {
+            return WatchEnd::Stopped;
+        }
+        if tokio::time::Instant::now() >= deadline || !session.supports_accessibility_readback() {
+            continue;
+        }
+        let step =
+            step_before_deadline_with_tree(session, labels, &mut popup, deadline, stop, stop).await;
+        match step {
+            Ok(ReadWaitResult::Ready((PopupStep::Clear, Some(tree)))) => {
+                unproven = false;
+                let seen = tree_fingerprint(&tree, labels);
+                match &card {
+                    Some(first)
+                        if !first.is_empty()
+                            && !seen.is_empty()
+                            && !first.same_card_for_duplicate_guard(&seen) =>
+                    {
+                        return WatchEnd::CardChanged;
+                    }
+                    Some(_) => {}
+                    None => card = Some(seen),
+                }
+            }
+            Ok(ReadWaitResult::Ready((PopupStep::Clear, None))) => {}
+            Ok(ReadWaitResult::Ready((PopupStep::Dismissed, _))) => {
+                // The card under the popup is re-grounded by the next clean read.
+                card = None;
+                unproven = true;
+                report(
+                    status,
+                    popup
+                        .says()
+                        .unwrap_or("đóng một hộp thoại tùy chọn đã đo; chờ đọc lại màn hình")
+                        .to_string(),
+                );
+            }
+            Ok(ReadWaitResult::Ready((PopupStep::Blocked, _))) => {
+                return WatchEnd::Blocked(
+                    popup
+                        .says()
+                        .unwrap_or("màn hình đang bị một lớp phủ chặn — Riviu không bấm gì; cần người vận hành kiểm tra")
+                        .to_string(),
+                );
+            }
+            Ok(ReadWaitResult::Cancelled) => return WatchEnd::Stopped,
+            Ok(ReadWaitResult::DeadlineExceeded) => break,
+            Err(error) => {
+                tracing::debug!(%error, "nurture watch checkpoint unread; keeps watching");
+            }
+        }
+    }
+    if unproven {
+        WatchEnd::Unproven
+    } else {
+        WatchEnd::Watched
+    }
+}
+
 struct HierarchyNurtureSaveAdapter<'a> {
     session: &'a dyn UiSession,
     labels: TikTokControls,
@@ -2381,10 +2513,42 @@ pub(super) async fn run_feed(
 
         let watch = human.watch_seconds(settings.watch_min, settings.watch_max) * mood.watch_mult();
         report(status, format!("xem {watch:.1}s ({})", mood.label()));
-        sleep_interruptible(Duration::from_secs_f64(watch.max(0.5)), stop).await;
-        if stop.load(Ordering::Relaxed) {
+        let watched = watch_card(
+            run.session,
+            run.labels,
+            Duration::from_secs_f64(watch.max(0.5)),
+            stop,
+            status,
+            report,
+        )
+        .await;
+        if stop.load(Ordering::Relaxed) || watched == WatchEnd::Stopped {
             outcome = Outcome::Stopped;
             break;
+        }
+        match watched {
+            WatchEnd::Watched | WatchEnd::Stopped => {}
+            WatchEnd::CardChanged => {
+                report(
+                    status,
+                    "thẻ đã đổi trong lúc xem — không tương tác với thẻ chưa xem, xem lại từ đầu"
+                        .into(),
+                );
+                continue;
+            }
+            WatchEnd::Unproven => {
+                report(
+                    status,
+                    "vừa đóng hộp thoại và chưa đọc lại được thẻ — không tương tác, xem lại từ đầu"
+                        .into(),
+                );
+                continue;
+            }
+            WatchEnd::Blocked(says) => {
+                report(status, says);
+                outcome = Outcome::Partial;
+                break;
+            }
         }
 
         let before = fingerprint(run.session, run.labels).await;
