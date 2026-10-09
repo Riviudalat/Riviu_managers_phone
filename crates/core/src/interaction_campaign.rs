@@ -2034,7 +2034,10 @@ async fn execute_like_action(
         armed,
         ActionSettlement {
             state,
-            evidence: serde_json::json!({"verdict":verdict,"arrival":proof.as_str()}),
+            evidence: with_target_route(
+                serde_json::json!({"verdict":verdict,"arrival":proof.as_str()}),
+                proof,
+            ),
             error,
         },
     )
@@ -2304,7 +2307,10 @@ async fn execute_follow_action(
         armed,
         ActionSettlement {
             state,
-            evidence: serde_json::json!({"verdict":verdict,"author":target.author,"arrival":"identified"}),
+            evidence: with_target_route(
+                serde_json::json!({"verdict":verdict,"author":target.author,"arrival":"identified"}),
+                proof.as_ref().map_or(TargetProof::Structural, |proof| *proof),
+            ),
             error,
         },
     ).await
@@ -2315,11 +2321,14 @@ fn save_action_evidence(
     proof: TargetProof,
     effect_boundary_crossed: bool,
 ) -> serde_json::Value {
-    serde_json::json!({
-        "verdict": verdict,
-        "arrival": proof.as_str(),
-        "effectBoundaryCrossed": effect_boundary_crossed,
-    })
+    with_target_route(
+        serde_json::json!({
+            "verdict": verdict,
+            "arrival": proof.as_str(),
+            "effectBoundaryCrossed": effect_boundary_crossed,
+        }),
+        proof,
+    )
 }
 
 /// Run one cohort's share of a campaign: its links, its phones, its own identity map.
@@ -3311,13 +3320,13 @@ async fn run_cohort(
                             comment_armed,
                             ActionSettlement {
                                 state,
-                                evidence: serde_json::json!({
+                                evidence: with_target_route(serde_json::json!({
                                     "phase": if comment_crossed { "afterSendBoundary" } else if effect_intent { "typedCleanupUnverified" } else { "beforeSendBoundary" },
                                     "arrival": proof.as_str(),
                                     "publicSendBoundaryCrossed": comment_crossed,
                                     "publicEffectMayHaveGoneOut": failure.effect_may_have_gone_out(),
                                     "draftCleanupPending": matches!(failure, SendFailure::DraftCleanupPending { .. }),
-                                }),
+                                }), proof),
                                 error: Some(detail),
                             },
                         ).await?;
@@ -3332,17 +3341,17 @@ async fn run_cohort(
                     comment_armed,
                     ActionSettlement {
                         state: if session.supports_accessibility_readback() {crate::InteractionActionState::Uncertain} else {crate::InteractionActionState::Confirmed},
-                        evidence: serde_json::json!({
+                        evidence: with_target_route(serde_json::json!({
                             "verdict":"sent",
                             "arrival": proof.as_str(),
                             "postedIdentity": sent.identity,
-                        }),
+                        }), proof),
                         error: None,
                     },
                 ).await?;
                 action_results.push(comment_result);
                 if let Some(parent) = parent_identity.as_ref() {
-                    Ok::<Option<serde_json::Value>, anyhow::Error>(Some(serde_json::json!({
+                    Ok::<Option<serde_json::Value>, anyhow::Error>(Some(with_target_route(serde_json::json!({
                         "commentVerificationPending":session.supports_accessibility_readback(),
                         "send": sent.evidence,
                         "parent": parent,
@@ -3364,9 +3373,9 @@ async fn run_cohort(
                         // Recorded so the operator can tell it from a normal reply — the one
                         // outcome the comment's own text and the thread view cannot show.
                         "parentWasFolded": sent.parent_was_folded,
-                    })))
+                    }), proof)))
                 } else {
-                    Ok::<Option<serde_json::Value>, anyhow::Error>(Some(serde_json::json!({
+                    Ok::<Option<serde_json::Value>, anyhow::Error>(Some(with_target_route(serde_json::json!({
                         "commentVerificationPending":session.supports_accessibility_readback(),
                         "send": sent.evidence,
                         "postedIdentity": sent.identity,
@@ -3379,7 +3388,7 @@ async fn run_cohort(
                         // reply — filed beside the like note because both are outcomes the
                         // comment's own text cannot show.
                         "mention": sent.mention_note,
-                    })))
+                    }), proof)))
                 }
             }
             .await;
@@ -3631,9 +3640,9 @@ const OPEN_TARGET_HANDLE_GRACE: Duration = Duration::from_secs(4);
 /// How far the open could be proved.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum TargetProof {
-    /// The author handle from the link was read back off the screen. This is
-    /// the only level that identifies *which* post is open.
-    Identified,
+    /// The post was identified, by the route given. This is the only level that
+    /// identifies *which* post is open.
+    Identified(crate::interaction_hierarchy::TargetRoute),
     /// TikTok came forward, the screen changed, and it settled on a post — but
     /// the handle could not be read, so the post is unidentified.
     ///
@@ -3650,14 +3659,27 @@ impl TargetProof {
     /// that does not say which of those it achieved cannot be audited afterwards.
     pub(crate) fn as_str(self) -> &'static str {
         match self {
-            Self::Identified => "identified",
+            Self::Identified(_) => "identified",
             Self::Structural => "structural",
         }
     }
 }
 
+/// Add which route proved the target to an action's evidence. A Copy link proof is marked
+/// `copyLinkCountsAsShare`, as the publish verifier marks its own copies: TikTok very likely
+/// counts it as a public share of the post.
+fn with_target_route(mut evidence: serde_json::Value, proof: TargetProof) -> serde_json::Value {
+    if let (TargetProof::Identified(route), Some(fields)) = (proof, evidence.as_object_mut()) {
+        fields.insert("targetRoute".into(), route.as_str().into());
+        if route.copy_link_counts_as_share() {
+            fields.insert("copyLinkCountsAsShare".into(), true.into());
+        }
+    }
+    evidence
+}
+
 fn target_proof_authorizes_public_effect(proof: TargetProof) -> bool {
-    matches!(proof, TargetProof::Identified)
+    matches!(proof, TargetProof::Identified(_))
 }
 
 pub async fn open_target_confirmed(
@@ -3736,7 +3758,9 @@ pub async fn open_target_confirmed(
                     if observations.iter().any(|observation| {
                         crate::normalize_locator_text(&observation.text).contains(&needle)
                     }) {
-                        return Ok(TargetProof::Identified);
+                        return Ok(TargetProof::Identified(
+                            crate::interaction_hierarchy::TargetRoute::ScreenHandle,
+                        ));
                     }
                 }
                 // Not a reason to fail the open — it is how a build with no OCR
@@ -3794,19 +3818,18 @@ async fn open_hierarchy_target_renewing(
 ) -> anyhow::Result<TargetProof> {
     let never = AtomicBool::new(false);
     for _ in 0..POPUP_PROOF_ROUNDS {
-        let (arrival, dismissed) =
-            crate::interaction_hierarchy::open_exact_target_reporting_popups(
-                session,
-                labels,
-                target_package,
-                target,
-                &never,
-            )
-            .await?;
-        if !dismissed {
-            return match arrival {
+        let opening = crate::interaction_hierarchy::open_exact_target_reporting_popups(
+            session,
+            labels,
+            target_package,
+            target,
+            &never,
+        )
+        .await?;
+        if !opening.popup_dismissed {
+            return match opening.arrival {
                 crate::interaction_hierarchy::TargetArrival::Identified { .. } => {
-                    Ok(TargetProof::Identified)
+                    Ok(TargetProof::Identified(opening.route))
                 }
                 crate::interaction_hierarchy::TargetArrival::Structural => {
                     anyhow::bail!("target_link_proof: exact post identity not confirmed")
@@ -5917,7 +5940,7 @@ mod boundary_tests {
     #[test]
     fn an_unidentified_card_never_authorizes_like_save_or_comment_effects() {
         assert!(super::target_proof_authorizes_public_effect(
-            super::TargetProof::Identified
+            super::TargetProof::Identified(crate::interaction_hierarchy::TargetRoute::DetailLink)
         ));
         assert!(!super::target_proof_authorizes_public_effect(
             super::TargetProof::Structural
@@ -5956,7 +5979,7 @@ mod boundary_tests {
     fn save_action_evidence_uses_the_public_camel_case_verdict() {
         let evidence = super::save_action_evidence(
             crate::SaveVerdict::AlreadySaved,
-            super::TargetProof::Identified,
+            super::TargetProof::Identified(crate::interaction_hierarchy::TargetRoute::DetailLink),
             false,
         );
 

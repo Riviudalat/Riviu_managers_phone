@@ -322,7 +322,7 @@ async fn execute_ready(
                     &target_package,
                 )
                 .await?,
-                TargetProof::Identified
+                TargetProof::Identified(_)
             ),
             "canonical target author was not identified"
         );

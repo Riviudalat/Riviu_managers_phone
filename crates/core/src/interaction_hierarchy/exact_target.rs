@@ -7,6 +7,7 @@ use tokio::time::Instant;
 use super::{
     bare_author_label, confirm_target_from_share_link, read_author_label,
     read_target_identity_caption, TargetArrival, TargetCardContinuityLost, TargetLinkMismatch,
+    TargetOpening, TargetRoute,
 };
 use crate::app_automation::dialogs::{step_before_deadline_with_tree, PopupBudget, PopupStep};
 use crate::driver::{ElementQuery, UiSession};
@@ -46,6 +47,15 @@ enum CardObservationError {
     NotDetailPage,
 }
 
+/// The detail route ran out of budget without two matching reads of a detail page: the
+/// link landed elsewhere (a feed-style viewer on some accounts), or the page never held still.
+#[derive(Debug, thiserror::Error)]
+#[error("target_detail_open: post {content_id} not proven on a detail page within {} seconds; last check: {last_check}", CARD_WINDOW.as_secs())]
+struct DetailPageNotProven {
+    content_id: String,
+    last_check: String,
+}
+
 // Measured on TikTok Global 45.7.3/en, SM-G955F ce0417143cef30280d (Riviu #46),
 // 09/10/2026 (apply-apk-20261009/share-deeplink-probe, B3b/B3e):
 // `snssdk1233://aweme/detail/<id>` opens DetailActivity on exactly that post. The
@@ -62,15 +72,19 @@ const MAX_CONTENT_ID_DIGITS: usize = 32;
 /// control.
 ///
 /// On the measured detail route (Global 45.7.3/en) the post is opened by its id from the
-/// campaign link, and the opened detail page is the proof: **the share sheet is never
+/// campaign link, and the opened detail page is the proof: **the share sheet is not
 /// opened**. TikTok very likely counts `Copy link` as a public share (probe 09/10/2026: the
 /// share counter went 0 -> 1 about a minute after one copy), so routine interaction must not
 /// copy a link it already has. See [`open_detail_target`].
 ///
+/// Some accounts get the post in a feed-style viewer instead of a detail page (Riviu #32/#34,
+/// 09/10/2026). A feed card can change under us, so the id alone never proves it there: when
+/// the detail route proves no detail page within its budget, the open falls back **once** to
+/// the legacy proof below, and the returned [`TargetRoute`] says that a copy was made.
+///
 /// Other builds keep the legacy proof: the current post's own copied URL, or the pinned URL
-/// opened once and then copied. Effects are refused on those builds by the fleet allowlist,
-/// so only read paths (comment verification, inspection) can reach it. Author and caption
-/// are continuity evidence there, never authority for a particular post.
+/// opened once and then copied. Author and caption are continuity evidence there, never
+/// authority for a particular post.
 pub async fn open_exact_target_by_hierarchy(
     session: &dyn UiSession,
     labels: TikTokControls,
@@ -80,19 +94,19 @@ pub async fn open_exact_target_by_hierarchy(
 ) -> anyhow::Result<TargetArrival> {
     open_target(session, labels, target_package, expected, stop, true)
         .await
-        .map(|(arrival, _)| arrival)
+        .map(|opening| opening.arrival)
 }
 
-/// [`open_exact_target_by_hierarchy`], also saying whether a popup was dismissed on the way.
-/// A dismissal voids every earlier proof on this phone: the caller renews its account proof
-/// and opens the target again before any public action.
+/// [`open_exact_target_by_hierarchy`], also saying which route proved the post and whether a
+/// popup was dismissed on the way. A dismissal voids every earlier proof on this phone: the
+/// caller renews its account proof and opens the target again before any public action.
 pub async fn open_exact_target_reporting_popups(
     session: &dyn UiSession,
     labels: TikTokControls,
     target_package: &str,
     expected: &ResolvedTikTokTarget,
     stop: &AtomicBool,
-) -> anyhow::Result<(TargetArrival, bool)> {
+) -> anyhow::Result<TargetOpening> {
     open_target(session, labels, target_package, expected, stop, true).await
 }
 
@@ -103,17 +117,157 @@ async fn open_target(
     expected: &ResolvedTikTokTarget,
     stop: &AtomicBool,
     inspect_current: bool,
-) -> anyhow::Result<(TargetArrival, bool)> {
+) -> anyhow::Result<TargetOpening> {
     ensure_not_cancelled(stop)?;
     anyhow::ensure!(
         labels.label(TikTokControl::Comments).is_some(),
         "target_exact_open: comments control unmeasured"
     );
-    if detail_route_measured(labels, target_package) {
-        return open_detail_target(session, labels, target_package, expected, stop).await;
+    // One budget for the whole open, whichever route meets the popup: each measured popup
+    // gets at most one press here.
+    let mut popups = OpenPopups::default();
+    if !detail_route_measured(labels, target_package) {
+        let arrival = open_by_copied_link(
+            session,
+            labels,
+            target_package,
+            expected,
+            stop,
+            inspect_current,
+            &mut popups,
+        )
+        .await?;
+        return Ok(popups.opening(arrival, TargetRoute::CopiedLink));
     }
+    let not_proven = match open_detail_target(
+        session,
+        labels,
+        target_package,
+        expected,
+        stop,
+        &mut popups,
+    )
+    .await
+    {
+        Ok(arrival) => return Ok(popups.opening(arrival, TargetRoute::DetailLink)),
+        Err(error) => match error.downcast::<DetailPageNotProven>() {
+            Ok(not_proven) => not_proven,
+            Err(error) => return Err(error),
+        },
+    };
+    // Only a detail route that ran out of budget falls back. Unavailable posts, popups left
+    // to the operator, cancellation and dispatch failures already said no.
+    tracing::warn!(
+        content_id = %expected.content_id,
+        "Không mở được trang chi tiết của bài đích ({not_proven}); thử một lần bằng Sao chép liên kết — TikTok có thể tính đây là một lượt chia sẻ"
+    );
+    ensure_not_cancelled(stop)?;
+    let arrival = open_by_copied_link(
+        session,
+        labels,
+        target_package,
+        expected,
+        stop,
+        inspect_current,
+        &mut popups,
+    )
+    .await
+    .map_err(|error| {
+        error.context(format!(
+            "target_copy_link_fallback: the copied-link proof also failed after {not_proven}"
+        ))
+    })?;
+    Ok(popups.opening(arrival, TargetRoute::CopiedLink))
+}
 
+/// The popup state shared by every read of one open.
+#[derive(Default)]
+struct OpenPopups {
+    budget: PopupBudget,
+    dismissed: bool,
+}
+
+impl OpenPopups {
+    fn opening(&self, arrival: TargetArrival, route: TargetRoute) -> TargetOpening {
+        TargetOpening {
+            arrival,
+            route,
+            popup_dismissed: self.dismissed,
+        }
+    }
+}
+
+/// What the shared popup step said before a read.
+enum Screened {
+    /// No popup: the read that follows may be taken as proof.
+    Clear,
+    /// A popup was dismissed. Whatever was read before it is no longer proof.
+    Dismissed,
+    /// The screen could not be read or screened yet. Nothing on it may be taken as proof.
+    Unscreened,
+}
+
+/// Run the shared popup step before a read: measured OS and in-app popups get their one
+/// negative press, and an unknown modal or a spent popup stops the open untouched.
+async fn screen_popups(
+    session: &dyn UiSession,
+    labels: TikTokControls,
+    popups: &mut OpenPopups,
+    deadline: Instant,
+    stop: &AtomicBool,
+    stage: &str,
+) -> anyhow::Result<Screened> {
+    if !session.supports_accessibility_readback() {
+        return Ok(Screened::Clear);
+    }
+    match step_before_deadline_with_tree(session, labels, &mut popups.budget, deadline, stop, stop)
+        .await
+    {
+        Ok(ReadWaitResult::Ready((PopupStep::Clear, Some(_)))) => Ok(Screened::Clear),
+        Ok(ReadWaitResult::Ready((PopupStep::Dismissed, _))) => {
+            popups.dismissed = true;
+            Ok(Screened::Dismissed)
+        }
+        Ok(ReadWaitResult::Ready((PopupStep::Blocked, _))) => {
+            anyhow::bail!(
+                "{stage}: {}",
+                popups.budget.says().unwrap_or(POPUP_BLOCKED_SAYS)
+            )
+        }
+        Ok(ReadWaitResult::Cancelled) => anyhow::bail!("target_exact_open: cancelled"),
+        // A cold start can leave the launcher in front, and a read can fail: neither is a
+        // popup, and neither may be taken as proof.
+        Ok(ReadWaitResult::Ready((PopupStep::Clear, None)))
+        | Ok(ReadWaitResult::DeadlineExceeded)
+        | Err(_) => Ok(Screened::Unscreened),
+    }
+}
+
+/// The legacy proof: the current post's own copied URL, or the pinned URL opened once and
+/// then copied. The shared popup step runs before every read, so a proof is only ever taken
+/// from a screen that showed no popup.
+async fn open_by_copied_link(
+    session: &dyn UiSession,
+    labels: TikTokControls,
+    target_package: &str,
+    expected: &ResolvedTikTokTarget,
+    stop: &AtomicBool,
+    inspect_current: bool,
+    popups: &mut OpenPopups,
+) -> anyhow::Result<TargetArrival> {
     if inspect_current
+        && matches!(
+            screen_popups(
+                session,
+                labels,
+                popups,
+                Instant::now() + CARD_WINDOW,
+                stop,
+                "target_exact_open",
+            )
+            .await?,
+            Screened::Clear
+        )
         && readable_card_in_foreground(session, labels, target_package, false)
             .await
             .is_ok()
@@ -122,7 +276,7 @@ async fn open_target(
         if let Ok(arrival) = confirm_target_from_share_link(session, labels, expected).await {
             ensure_not_cancelled(stop)?;
             ensure_foreground(session, target_package).await?;
-            return Ok((arrival, false));
+            return Ok(arrival);
         }
     }
 
@@ -137,39 +291,31 @@ async fn open_target(
     let mut deadline = Instant::now() + CARD_WINDOW;
     let mut redispatched = false;
     let mut continuity_retry_used = false;
-    // One budget for this open: each measured popup gets at most one press here.
-    let mut popup = PopupBudget::default();
-    let mut dismissed = false;
     tokio::time::sleep(DISPATCH_SETTLE).await;
     loop {
         ensure_not_cancelled(stop)?;
-        let observation = readable_card_in_foreground(session, labels, target_package, true).await;
-        if matches!(observation, Err(CardObservationError::PostUnavailable)) {
-            return Err(CardObservationError::PostUnavailable.into());
-        }
-        if matches!(observation, Err(CardObservationError::CommentsUnreadable))
-            && session.supports_accessibility_readback()
-        {
-            // The shared popup step replaces the single contacts decline: same measured
-            // detectors, one press per popup, and unknown modals stop here untouched.
-            match step_before_deadline_with_tree(session, labels, &mut popup, deadline, stop, stop)
+        let observation =
+            match screen_popups(session, labels, popups, deadline, stop, "target_exact_open")
                 .await?
             {
-                ReadWaitResult::Ready((PopupStep::Dismissed, _)) => {
-                    dismissed = true;
+                Screened::Dismissed => {
                     tokio::time::sleep(CARD_POLL).await;
                     continue;
                 }
-                ReadWaitResult::Ready((PopupStep::Blocked, _)) => {
-                    anyhow::bail!(
-                        "target_exact_open: {}",
-                        popup.says().unwrap_or(POPUP_BLOCKED_SAYS)
-                    );
+                Screened::Clear => {
+                    readable_card_in_foreground(session, labels, target_package, true).await
                 }
-                ReadWaitResult::Cancelled => anyhow::bail!("target_exact_open: cancelled"),
-                ReadWaitResult::Ready((PopupStep::Clear, _)) | ReadWaitResult::DeadlineExceeded => {
+                // Read for the diagnosis and the unavailable notice only; a card seen
+                // without a popup screen is never proof.
+                Screened::Unscreened => {
+                    match readable_card_in_foreground(session, labels, target_package, true).await {
+                        Ok(()) => Err(CardObservationError::HierarchyUnreadable),
+                        Err(error) => Err(error),
+                    }
                 }
-            }
+            };
+        if matches!(observation, Err(CardObservationError::PostUnavailable)) {
+            return Err(CardObservationError::PostUnavailable.into());
         }
         // A cold Trill launch can consume the VIEW intent and remain on a LIVE
         // feed tile. Reopen the SAME pinned link once only after that observable
@@ -194,7 +340,7 @@ async fn open_target(
             ensure_not_cancelled(stop)?;
             ensure_foreground(session, target_package).await?;
             match proof {
-                Ok(arrival) => return Ok((arrival, dismissed)),
+                Ok(arrival) => return Ok(arrival),
                 Err(error)
                     if error.downcast_ref::<TargetLinkMismatch>().is_some()
                         && !redispatched
@@ -288,14 +434,17 @@ struct DetailCard {
 ///    page has appeared; that is navigation, never a public action.
 ///
 /// The shared popup step runs on every read. A dismissal voids what was read before it and
-/// is reported in the returned flag, so the caller can also renew its account proof.
+/// is recorded in `popups`, so the caller can also renew its account proof. Running out of
+/// budget without a proven detail page is [`DetailPageNotProven`], the one failure the
+/// caller may answer with the copied-link proof.
 async fn open_detail_target(
     session: &dyn UiSession,
     labels: TikTokControls,
     target_package: &str,
     expected: &ResolvedTikTokTarget,
     stop: &AtomicBool,
-) -> anyhow::Result<(TargetArrival, bool)> {
+    popups: &mut OpenPopups,
+) -> anyhow::Result<TargetArrival> {
     let link = detail_link(&expected.content_id)?;
     if !detail_baseline_clear(session, labels, target_package).await {
         ensure_not_cancelled(stop)?;
@@ -319,17 +468,21 @@ async fn open_detail_target(
     let mut deadline = Instant::now() + CARD_WINDOW;
     let mut redispatched = false;
     let mut previous: Option<(u64, DetailCard)> = None;
-    // One budget for this open: each measured popup gets at most one press here.
-    let mut popup = PopupBudget::default();
-    let mut dismissed = false;
     tokio::time::sleep(DISPATCH_SETTLE).await;
     loop {
         ensure_not_cancelled(stop)?;
         // The popup step reads the snapshot the card is then observed on, so a proof is
         // only ever taken from a read that showed no popup.
         let observation = if session.supports_accessibility_readback() {
-            match step_before_deadline_with_tree(session, labels, &mut popup, deadline, stop, stop)
-                .await
+            match step_before_deadline_with_tree(
+                session,
+                labels,
+                &mut popups.budget,
+                deadline,
+                stop,
+                stop,
+            )
+            .await
             {
                 Ok(ReadWaitResult::Ready((PopupStep::Clear, Some(tree)))) => {
                     match observe_detail(&tree, labels) {
@@ -340,14 +493,14 @@ async fn open_detail_target(
                 Ok(ReadWaitResult::Ready((PopupStep::Dismissed, _))) => {
                     // Whatever was read before the popup went is no longer proof.
                     previous = None;
-                    dismissed = true;
+                    popups.dismissed = true;
                     tokio::time::sleep(CARD_POLL).await;
                     continue;
                 }
                 Ok(ReadWaitResult::Ready((PopupStep::Blocked, _))) => {
                     anyhow::bail!(
                         "target_detail_open: {}",
-                        popup.says().unwrap_or(POPUP_BLOCKED_SAYS)
+                        popups.budget.says().unwrap_or(POPUP_BLOCKED_SAYS)
                     );
                 }
                 Ok(ReadWaitResult::Cancelled) => {
@@ -368,12 +521,9 @@ async fn open_detail_target(
                 {
                     ensure_not_cancelled(stop)?;
                     ensure_foreground(session, target_package).await?;
-                    return Ok((
-                        TargetArrival::Identified {
-                            author_label: card.author,
-                        },
-                        dismissed,
-                    ));
+                    return Ok(TargetArrival::Identified {
+                        author_label: card.author,
+                    });
                 }
                 previous = Some((generation, card));
             }
@@ -405,11 +555,11 @@ async fn open_detail_target(
                     Ok(_) => "detail page did not hold still across two reads".to_string(),
                     Err((error, _)) => error.to_string(),
                 };
-            anyhow::bail!(
-                "target_detail_open: post {} not proven on a detail page within {} seconds; last check: {last_check}",
-                expected.content_id,
-                CARD_WINDOW.as_secs()
-            );
+            return Err(DetailPageNotProven {
+                content_id: expected.content_id.clone(),
+                last_check,
+            }
+            .into());
         }
         tokio::time::sleep(CARD_POLL.min(deadline.saturating_duration_since(Instant::now()))).await;
     }
@@ -540,7 +690,7 @@ pub async fn open_pinned_target_by_hierarchy(
 ) -> anyhow::Result<TargetArrival> {
     open_target(session, labels, target_package, expected, stop, false)
         .await
-        .map(|(arrival, _)| arrival)
+        .map(|opening| opening.arrival)
 }
 
 async fn live_feed_placeholder(session: &dyn UiSession, package: &str) -> bool {
@@ -940,7 +1090,7 @@ mod tests {
         .unwrap();
         assert!(matches!(
             proof,
-            crate::interaction_campaign::TargetProof::Identified
+            crate::interaction_campaign::TargetProof::Identified(_)
         ));
         assert_eq!(
             *session.opens.lock(),
@@ -1479,7 +1629,10 @@ mod detail_route_tests {
         }
 
         async fn set_clipboard(&self, _: &str, _: &[u8]) -> anyhow::Result<()> {
-            panic!("a known link never touches the clipboard")
+            // Only the copied-link fallback gets here. This phone has no share sheet, so
+            // the fallback must refuse before any tap.
+            self.events.lock().push("clipboard".into());
+            anyhow::bail!("fixture: no share sheet")
         }
 
         async fn get_clipboard(&self, _: usize) -> anyhow::Result<(String, Vec<u8>)> {
@@ -1564,7 +1717,7 @@ mod detail_route_tests {
         .unwrap();
         assert!(matches!(
             proof,
-            crate::interaction_campaign::TargetProof::Identified
+            crate::interaction_campaign::TargetProof::Identified(_)
         ));
         assert_eq!(phone.opens(), vec![DETAIL_LINK.to_string()]);
         assert_eq!(phone.restarts.load(Ordering::Relaxed), 0);
@@ -1622,16 +1775,22 @@ mod detail_route_tests {
     #[tokio::test(start_paused = true)]
     async fn a_link_that_lands_on_the_feed_is_not_proof_of_the_post() {
         // The https form lands on For You (probe B2g) and a swallowed link leaves the feed
-        // up. Either way the card on screen is not authorized by the id.
+        // up. Either way the card on screen is not authorized by the id: only the copied-link
+        // fallback, once, may prove it, and here it cannot copy.
         let phone = DetailPhone::new(Screen::Feed, Screen::Feed);
         let error = exact(&phone).await.unwrap_err();
         assert!(
-            error.to_string().contains("detail page not shown"),
+            error.to_string().contains("detail page not shown")
+                && error.to_string().contains("target_copy_link_fallback"),
             "{error:#}"
         );
         assert_eq!(
             phone.opens(),
-            vec![DETAIL_LINK.to_string(), DETAIL_LINK.to_string()]
+            vec![
+                DETAIL_LINK.to_string(),
+                DETAIL_LINK.to_string(),
+                TARGET_URL.to_string()
+            ]
         );
     }
 
@@ -1643,7 +1802,10 @@ mod detail_route_tests {
             error.to_string().contains("did not hold still"),
             "{error:#}"
         );
-        assert_eq!(phone.opens(), vec![DETAIL_LINK.to_string()]);
+        assert_eq!(
+            phone.opens(),
+            vec![DETAIL_LINK.to_string(), TARGET_URL.to_string()]
+        );
 
         let phone = DetailPhone::new(Screen::Feed, Screen::Unavailable);
         let error = exact(&phone).await.unwrap_err();

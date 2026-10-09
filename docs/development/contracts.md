@@ -422,7 +422,18 @@ trang chi tiết thì từ chối mà không gửi link. Sau khi gửi, hai snap
 tăng dần phải cùng là trang chi tiết (`bj1` Back, không có tab Home, có Comments)
 với cùng tác giả và đúng một caption. Feed, ứng dụng khác, "This video is
 unavailable" hoặc thẻ đổi giữa hai lần đọc đều từ chối trước thao tác công khai.
-Chỉ gửi lại cùng link một lần khi chưa thấy trang chi tiết. Các bản khác chỉ còn
+Chỉ gửi lại cùng link một lần khi chưa thấy trang chi tiết. Trên một số tài khoản
+(máy #32/#34, 09/10/2026) link này mở bài trong trình xem kiểu feed (có tab Home,
+thanh Not interested/Interested) chứ không phải trang chi tiết. ID một mình không
+chứng minh thẻ feed, vì thẻ có thể đổi. Khi hết ngân sách mà chưa chứng minh được
+trang chi tiết, và chỉ trong trường hợp đó, resolver chuyển **một lần** sang proof
+bằng link sao chép bên dưới cho bài đó. Bài không còn, popup giao người vận hành,
+lệnh hủy hoặc lỗi gửi link vẫn dừng ngay. Evidence của Like, Lưu, Follow và bình
+luận ghi `targetRoute` (`detailLink`, `copiedLink` hoặc `screenHandle` ở đường ảnh);
+`copiedLink` kèm `copyLinkCountsAsShare: true`. Bước popup chung chạy trước mọi lần
+đọc trên cả hai nhánh, kể cả lần mở lại trước mỗi thao tác. Hộp hệ thống Android 9
+"Allow TikTok to access your contacts?" chỉ được bấm **Deny**, không bao giờ Allow.
+Các bản khác chỉ còn
 đường đọc, vì thao tác công khai đã bị danh sách bản được phép chặn, và giữ proof
 bằng link sao chép: trong cửa sổ 30 giây, chỉ mở lại cùng link một lần nếu đọc được
 Home/Profile và thẻ LIVE sau ít nhất 10 giây mà chưa có nút bình luận. Không mở

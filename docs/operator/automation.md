@@ -112,6 +112,14 @@ trước tương tác khi màn mở ra không phải trang chi tiết, bài khô
 giả/nội dung đổi giữa hai lần đọc. Kết quả Like/Send đã gửi không được tự lặp lại
 khi chưa rõ kết quả.
 
+Một số tài khoản mở link đó trong trình xem kiểu feed thay vì trang chi tiết. Khi đó
+Riviu thử **một lần** cách cũ: Chia sẻ → Sao chép liên kết rồi so link với bài đích.
+Cách này có thể được TikTok tính là một lượt chia sẻ; evidence của thao tác ghi
+`targetRoute: copiedLink` và `copyLinkCountsAsShare: true`. Nếu Android hỏi quyền
+truy cập danh bạ, Riviu chỉ bấm **Deny**. Riviu chưa nhận diện riêng màn "Find
+contacts" của TikTok: nếu nó còn sau Deny, bài chỉ được chứng minh khi vẫn đọc được
+đúng bài; nếu không, Riviu dừng trước tương tác và cần người vận hành đóng tay.
+
 Riviu tự lấy và lưu ID bình luận sau khi xác minh trên TikTok Android `45.7.3/en`.
 Khi có ID đã lưu, lượt reply mở và đối chiếu lại ID của câu đang hiển thị; người dùng
 không cần lấy ID thủ công. Nếu không lấy được ID trong thời hạn, Riviu giữ cách tìm

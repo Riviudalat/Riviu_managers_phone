@@ -168,6 +168,72 @@ pub fn decline_optional_location(tree: &Tree, labels: TikTokControls) -> Option<
     tree.nodes[deny].rect().filter(|rect| rect.enabled && rect.clickable)
 }
 
+/// Riviu #32 and #34 (SM-G955F, Android 9), Global 45.7.3/en, 2026-10-09: the OS contacts
+/// question raised over TikTok's "Find contacts" banner while a target post opened
+/// (acceptance-20261010 interaction-32-deeplink-feed.png). Screenshot only, no XML: the
+/// question, Deny and Allow are those of the measured Android 9 location dialog above, so the
+/// same OS ids, classes and container are required. Only Deny is ever pressed.
+fn decline_os_contacts(tree: &Tree, labels: TikTokControls) -> Option<ElementBox> {
+    if (
+        labels.package(),
+        labels.resource_version(),
+        labels.language(),
+    ) != ("com.zhiliaoapp.musically", Some("45.7.3"), "en")
+    {
+        return None;
+    }
+    let package = OS_PERMISSION_PACKAGE;
+    let exact = |id: &str, text: &str, class: &str| {
+        let matches = tree.matching(package, ElementQuery::ResourceIdSuffix(id));
+        let [index] = matches.as_slice() else {
+            return None;
+        };
+        let node = &tree.nodes[*index];
+        (node.attr("resource-id") == id
+            && node.attr("text") == text
+            && node.attr("class") == class
+            && node.visibility() == Some(true))
+        .then_some(*index)
+    };
+    let container = exact(
+        "com.android.packageinstaller:id/dialog_container",
+        "",
+        "android.widget.LinearLayout",
+    )?;
+    let prompt = exact(
+        "com.android.packageinstaller:id/permission_message",
+        "Allow TikTok to access your contacts?",
+        "android.widget.TextView",
+    )?;
+    let deny = exact(
+        "com.android.packageinstaller:id/permission_deny_button",
+        "Deny",
+        "android.widget.Button",
+    )?;
+    let allow = exact(
+        "com.android.packageinstaller:id/permission_allow_button",
+        "Allow",
+        "android.widget.Button",
+    )?;
+    if ![prompt, deny, allow]
+        .into_iter()
+        .all(|index| tree.inside(index, container))
+        || tree.nodes[deny].parent != tree.nodes[allow].parent
+        || !tree.nodes[allow]
+            .rect()
+            .is_some_and(|rect| rect.enabled && rect.clickable)
+    {
+        return None;
+    }
+    tree.nodes[deny]
+        .rect()
+        .filter(|rect| rect.enabled && rect.clickable)
+}
+
+/// Android 9 runtime permission questions belong to this package; their ids keep the AOSP
+/// `com.android.packageinstaller` prefix.
+const OS_PERMISSION_PACKAGE: &str = "com.google.android.packageinstaller";
+
 /// Positive blockers shared by pre-Post account proof and post-link verification.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum AccountBlocker {
@@ -1077,11 +1143,16 @@ pub enum PopupStep {
 /// Negative actions shared across stages; provenance stays with each detector.
 pub fn optional_decline(tree: &Tree, labels: TikTokControls) -> Option<(u8, ElementBox)> {
     decline_optional_location(tree, labels)
-        .map(|button| (1, button))
+        .map(|button| (OS_LOCATION_KIND, button))
         .or_else(|| decline_contacts(tree, labels).map(|button| (2, button)))
         .or_else(|| decline_facebook_permission(tree, labels).map(|button| (4, button)))
         .or_else(|| decline_precise_location(tree, labels).map(|button| (8, button)))
+        .or_else(|| decline_os_contacts(tree, labels).map(|button| (OS_CONTACTS_KIND, button)))
 }
+
+/// [`optional_decline`] kinds raised by the OS permission package rather than TikTok.
+const OS_LOCATION_KIND: u8 = 1;
+const OS_CONTACTS_KIND: u8 = 16;
 
 /// Screenshot-derived contract, NOT a measured XML/resource profile. A future
 /// observation must prove the full modal before this rule can authorize decline.
@@ -1278,8 +1349,10 @@ pub(crate) async fn step_before_deadline_with_tree(
     // other case requires the exact selected TikTok package, never a substring or recents.
     anyhow::ensure!(
         foreground == labels.package()
-            || (foreground == "com.google.android.packageinstaller"
-                && candidate.as_ref().is_some_and(|(kind, _)| *kind == 1))
+            || (foreground == OS_PERMISSION_PACKAGE
+                && candidate.as_ref().is_some_and(|(kind, _)| {
+                    *kind == u64::from(OS_LOCATION_KIND) || *kind == u64::from(OS_CONTACTS_KIND)
+                }))
             || (foreground == NOTIFICATION_PROMPT_PACKAGE
                 && matches!(first_run, Some((FirstRunScreen::NotificationPermission, _)))),
         "popup foreground does not match target package"

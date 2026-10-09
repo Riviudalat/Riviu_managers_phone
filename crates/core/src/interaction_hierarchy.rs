@@ -324,6 +324,45 @@ pub enum TargetArrival {
     Structural,
 }
 
+/// Which proof identified the target post. Stored in the action evidence, because the
+/// Copy link route leaves a public trace that the detail route does not.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TargetRoute {
+    /// `snssdk1233://aweme/detail/<id>` opened a detail page that this dispatch created. The
+    /// share sheet was never opened.
+    DetailLink,
+    /// The post's own URL, copied from its share sheet. TikTok very likely counts that copy
+    /// as a public share.
+    CopiedLink,
+    /// The pixel path read the author handle off the screen.
+    ScreenHandle,
+}
+
+impl TargetRoute {
+    /// The word that goes into the evidence row.
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::DetailLink => "detailLink",
+            Self::CopiedLink => "copiedLink",
+            Self::ScreenHandle => "screenHandle",
+        }
+    }
+
+    /// Whether the proof used the share sheet's Copy link, which counts as a share.
+    pub fn copy_link_counts_as_share(self) -> bool {
+        matches!(self, Self::CopiedLink)
+    }
+}
+
+/// One open of the target: the arrival, the route that proved it, and whether a popup was
+/// dismissed on the way (which voids every earlier proof on the phone).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TargetOpening {
+    pub arrival: TargetArrival,
+    pub route: TargetRoute,
+    pub popup_dismissed: bool,
+}
+
 #[derive(Debug, thiserror::Error)]
 #[error("target_link_proof: copied link belongs to a different post; expected={expected_url}; observed={observed_url}")]
 struct TargetLinkMismatch {

@@ -149,6 +149,7 @@ hướng dẫn cho người vận hành ở [Thiết bị](../../operator/device
 | Hướng dẫn vuốt | `tv_strengthen_swipe_up_guide` "Swipe up for more" trên trang `hpk` | Vuốt lên một lần; lớp này không có nút | Máy (vi); fixture en có feed thật |
 | Kiểm tra bảo mật | Sheet `fl4` desc "Bottom sheet", `xw7`/`fkw` (chữ từ server) | Button không id, desc **Close**, trong `ovy`. Không bao giờ bấm `nri` Continue | Máy (vi); chữ tiếng Anh mượn từ Trill |
 | Xin quyền thông báo | Hộp hệ thống `permission_allow_button`/`permission_deny_button` | **Don’t allow** | EMU (en) |
+| Xin quyền danh bạ (Android 9) | Hộp hệ thống `com.google.android.packageinstaller`, `permission_message` "Allow TikTok to access your contacts?", cùng id/class với hộp vị trí đã đo | **Deny**. Banner "Find contacts" của TikTok (chuỗi 0x7f116f22) hiện phía trên; nếu còn sau Deny thì giao người vận hành | Ảnh màn hình #32/#34 (en), chưa có XML |
 | Điều khoản dịch vụ | `visual_area` desc "Dialog", `esv` | Không bấm; chuyển cho người vận hành | EMU (en) |
 
 Hộp thoại chuẩn có cấu trúc `visual_area` → `y5e`/`xwe` → `d93` > `tx3` > `esv`, cùng thanh
@@ -189,7 +190,7 @@ qua UI như người dùng. Deep link chỉ được dùng ở chỗ có ích v�
 
 | Đường vào | Kết quả |
 |---|---|
-| `snssdk1233://aweme/detail/<id>` | Mở DetailActivity đúng bài |
+| `snssdk1233://aweme/detail/<id>` | Máy #46: mở DetailActivity đúng bài. Máy #32/#34 (tài khoản fleet, 2026-10-09): mở bài trong trình xem kiểu feed (tab Home, thanh Not interested/Interested), không có `bj1` |
 | `snssdk1233://music/detail/<id>` | Mở MusicDetailActivity ngay lần đầu |
 | `snssdk1233://user/profile/<uid>` | Mở hồ sơ (TikTokHostActivity) |
 | `snssdk1233://setting` | Mở "Settings and privacy" |
@@ -203,8 +204,14 @@ qua UI như người dùng. Deep link chỉ được dùng ở chỗ có ích v�
 Hệ quả cho code:
 
 - **Copy link làm tăng bộ đếm share.** Bộ đếm của bài đọc 0 ngay sau Copy link và 1 share
-  khoảng một phút sau. Ngay bên trái Copy link là **Repost**. Không bao giờ lấy link qua
-  share sheet trong production; lấy id từ Sheet hoặc dữ liệu web.
+  khoảng một phút sau. Ngay bên trái Copy link là **Repost**. Mở bài đích theo id; share
+  sheet chỉ là đường dự phòng một lần khi trang chi tiết không được chứng minh, và
+  evidence ghi `copyLinkCountsAsShare`.
+- **Biến thể trình xem feed chưa giải thích được.** Bảng router của APK
+  (`SmartRouter$$Mapping`) ánh xạ `//aweme/detail` và `//aweme/detaillist` thẳng tới
+  `DetailActivity`; research không tìm thấy cờ thí nghiệm hay interceptor nào chuyển route
+  này sang feed. Giả thuyết còn mở: cấu hình phía server theo tài khoản. Không coi thẻ feed
+  là proof chỉ vì id.
 - Sau mỗi deep link phải kiểm activity đích và nội dung màn hình trước khi làm gì, vì route
   sai không báo lỗi. Dùng deadline hữu hạn và không dùng `-W`.
 - **Message** trên share sheet và **Send to friends**/**Save draft** trong menu Discard là
