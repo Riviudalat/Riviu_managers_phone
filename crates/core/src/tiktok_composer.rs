@@ -2734,6 +2734,7 @@ impl<'a, P: TapPlanner> Composer<'a, P> {
         // single transient agent failure on the first poll turned a live post into
         // `PostNotConfirmed`, permanently unclaimable, twenty seconds early.
         let back_on_the_feed = self.await_feed(POST_CONFIRM_WINDOW, stop).await;
+        self.record_post_outcome_notice().await;
         Ok(if back_on_the_feed {
             self.emit_progress(PublishProgress::PostSubmitted);
             ComposerVerdict::Submitted
@@ -3335,6 +3336,51 @@ impl<'a, P: TapPlanner> Composer<'a, P> {
             }
             tokio::time::sleep(POLL.min(deadline.saturating_duration_since(Instant::now()))).await;
         }
+    }
+
+    /// Record TikTok's own post-outcome text as evidence after the Post wait ends.
+    ///
+    /// Evidence only: the verdict stays what [`Self::await_feed`] decided, nothing is retried,
+    /// and a missing or unreadable notice means unknown, never "not posted". One read, never
+    /// cancelled, so no request overlaps it; the server bounds it (~10.5 s root wait at worst).
+    async fn record_post_outcome_notice(&self) {
+        let package = self.plan.package;
+        // Measured on Android builds only; other platforms record nothing rather than guess.
+        if !observation::android(package) || !self.session.supports_accessibility_readback() {
+            return;
+        }
+        let tree = match self.session.hierarchy_source_snapshot().await {
+            Ok(snapshot) => crate::ui_automation::tree::Tree::parse(snapshot),
+            Err(error) => Err(error),
+        };
+        let tree = match tree {
+            Ok(tree) => tree,
+            Err(error) => {
+                crate::publish_recovery::note_read(
+                    "postOutcome",
+                    "tiktokNotice",
+                    1,
+                    "readUnavailable",
+                    Some(&format!("{error:#}")),
+                );
+                return;
+            }
+        };
+        let observed = tree.nodes.iter().enumerate().find_map(|(index, node)| {
+            let visible = node.visibility() != Some(false) && tree.ancestors_visible(index);
+            let owned =
+                node.attr("package") == package || node.attr("class") == "android.widget.Toast";
+            if !visible || !owned {
+                return None;
+            }
+            [node.attr("text"), node.attr("content-desc")]
+                .into_iter()
+                .find_map(|text| post_outcome_notice(text).map(|kind| (kind, text.trim())))
+        });
+        let (outcome, text) =
+            observed.map_or(("noneObserved", None), |(kind, text)| (kind, Some(text)));
+        tracing::info!(package, outcome, notice = ?text, "TikTok post outcome notice after Post");
+        crate::publish_recovery::note_read("postOutcome", "tiktokNotice", 1, outcome, text);
     }
 
     /// One latest XML per device and refusal branch, captured before leave()
@@ -4963,6 +5009,36 @@ fn caption_is_empty_after_editor(
             || (node.attr("showing-hint") == "true"
                 && !node.attr("hint").is_empty()
                 && node.attr("text") == node.attr("hint")))
+}
+
+/// TikTok's post-outcome notices on Global 45.7.3, English base and vi-VN strings
+/// (`0x7f116043`, `0x7f1146f2`, `0x7f111020`, `0x7f118567`, `0x7f117a35`, `0x7f115e61`-`64`,
+/// `0x7f11475d`, `0x7f111027`, `0x7f11734c`). Matched from the start of the line, so a caption
+/// that merely mentions the words is not read as a notice. Evidence only, never a verdict.
+fn post_outcome_notice(text: &str) -> Option<&'static str> {
+    let line = text.trim().replace('\u{2019}', "'").to_lowercase();
+    let starts = |prefixes: &[&str]| prefixes.iter().any(|prefix| line.starts_with(prefix));
+    if starts(&[
+        "draft saved. you've been posting too frequently",
+        "đã lưu bản nháp. bạn đã đăng bài quá thường xuyên",
+    ]) {
+        Some("rateLimitedDraftSaved")
+    } else if starts(&[
+        "couldn't post. draft saved",
+        "không thể đăng. đã lưu bản nháp",
+    ]) {
+        Some("couldNotPostDraftSaved")
+    } else if starts(&["couldn't post comment", "không thể đăng bình luận"]) {
+        None
+    } else if starts(&["couldn't post", "không thể đăng"]) {
+        Some("couldNotPost")
+    } else if starts(&["video posted", "đã đăng video", "video đã được đăng"]) {
+        Some("videoPosted")
+    } else if crate::tiktok_share::is_processing_notice(&line) {
+        Some("processing")
+    } else {
+        None
+    }
 }
 
 #[cfg(test)]
