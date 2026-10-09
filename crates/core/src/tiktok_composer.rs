@@ -3502,6 +3502,14 @@ impl<'a, P: TapPlanner> Composer<'a, P> {
                 return Ok(ReadWaitResult::Ready(Vec::new()));
             }
             let mut indices = tree.matching(self.plan.package, query);
+            if query == self.plan.shutter {
+                indices.retain(|index| {
+                    labels.description_anchored(
+                        TikTokControl::ComposerShutter,
+                        tree.nodes[*index].attr("content-desc"),
+                    )
+                });
+            }
             // 45.7.3 declares the album pill's `:id/tv_title` in 303 layouts, so the id
             // names the pill only on the picker: the measured picker Next must be in the
             // same tree. It is in every 45.7.3 picker read we hold (fixtures 06–09 and
@@ -3509,7 +3517,9 @@ impl<'a, P: TapPlanner> Composer<'a, P> {
             // above stays unscoped on purpose: there a stray match only withholds a tap.
             if query == self.plan.album_menu
                 && self.plan.popup_profile == ("en", Some("45.7.3"))
-                && tree.matching(self.plan.package, self.plan.picker_next).is_empty()
+                && tree
+                    .matching(self.plan.package, self.plan.picker_next)
+                    .is_empty()
             {
                 indices.clear();
             }
@@ -8595,6 +8605,37 @@ mod tests {
                 .await
                 .unwrap();
             assert_eq!(found.is_some(), expected);
+            assert!(session.taps.lock().is_empty());
+        }
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn global_45_7_3_shutter_needs_the_measured_record_video_desc() {
+        let labels =
+            crate::tiktok_labels::controls_for("com.zhiliaoapp.musically", "en", "45.7.3").unwrap();
+        let measured = ComposerPlan::resolve(&labels).unwrap();
+        // Real 45.7.3 camera: `sn3` [395,1591][684,1880], desc `@2131823130`.
+        let camera = include_str!("../fixtures/tiktok-publish/musically-45.7.3-en/03-composer.xml");
+        for (xml, expected) in [
+            (camera.to_owned(), true),
+            (camera.replace("@2131823130", "@2131823131"), false),
+        ] {
+            let session = FakeSession {
+                modal_readback: true,
+                foreground_override: Some("com.zhiliaoapp.musically".into()),
+                snapshot_overrides: Mutex::new([xml].into()),
+                ..Default::default()
+            };
+            let composer = Composer::new(&session, measured, |r: &ElementBox| r.centre());
+            let found = composer
+                .await_navigation_target(
+                    Instant::now() + Duration::from_secs(1),
+                    measured.shutter,
+                    &AtomicBool::new(false),
+                    None,
+                )
+                .await;
+            assert_eq!(found.is_ok_and(|target| target.is_some()), expected);
             assert!(session.taps.lock().is_empty());
         }
     }

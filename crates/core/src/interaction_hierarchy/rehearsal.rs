@@ -486,6 +486,7 @@ fn composer_state(
         || send_node.visibility() != Some(true)
         || !tree.ancestors_visible(*send_index)
         || send_node.attr("clickable") != "true"
+        || !labels.description_anchored(TikTokControl::CommentSend, send_node.attr("content-desc"))
     {
         return Err(PrepareFailure::new(PrepareBlocker::ComposerUnproved));
     }

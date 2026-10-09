@@ -210,6 +210,14 @@ nên một lần khớp id duy nhất chưa đủ làm bằng chứng. Mỗi ch�
 picker cùng cây, `bix` trong rehearsal chỉ là Back của trang caption khi ô caption cùng
 cây, `esv` phải khớp nguyên văn câu hỏi, `tv_top` chỉ loại ô nằm trong ô `cover`, còn
 `cover`/`desc` trên đường xác minh vẫn phải qua bằng chứng tài khoản và link chuẩn.
+Bản 45.7.3 còn có neo `content-desc` riêng của bản build (chuỗi chưa resolve
+`@<id chuỗi>`, giống nhau mọi ngôn ngữ, đổi số mỗi bản build; đọc tĩnh APK 09/10/2026):
+`cqf` Gửi bình luận `@2131823090`, `sn3` nút quay `@2131823130`, `bix` Back
+`@2131823215`. Nơi đọc control từ cây thì desc phải khớp cùng id (`cqf` cũng là nút Gửi
+trong tin nhắn). Trên bảng nhạc 45.7.3, mỗi hàng nằm trong một khung bấm được `opr`;
+`nms` chỉ hiện ở hàng đang phát nên đánh dấu hàng vừa chọn. Bảng có thể mở ở For You
+nên vẫn phải bấm tab Hot. Bấm lại hàng đang phát sẽ bỏ chọn nhạc, nên không bao giờ
+dùng thao tác đó để tạm dừng.
 Tap từ ảnh dùng `tap_image` với đúng kích thước native, không thêm jitter.
 Nguồn ảnh minicap giữ kích thước native và giới hạn 2 FPS để giảm tải encode
 trên điện thoại; giới hạn này không thay chất lượng stream H.264 của ô thiết bị.

@@ -119,6 +119,7 @@ fn parse(xml: &str, plan: SoundPickerPlan) -> anyhow::Result<Vec<Node>> {
         .contains(&id)
             && !plan.selected_marker_ids().contains(&id)
             && plan.choose_id != Some(id)
+            && plan.row_container_id != Some(id)
         {
             continue;
         }
@@ -271,9 +272,23 @@ fn pool(xml: &str, plan: SoundPickerPlan, maximum: usize) -> anyhow::Result<Obse
     let viewport = exactly_one(find(layout.viewport_id), "sound list viewport")?;
     let titles = find(plan.title_id);
     let artists = find(plan.artist_id);
+    // 45.7.3 Hot rows sit in a clickable `opr` each (Riviu #44, 09/10/2026). When the
+    // read holds such containers, a row outside exactly one of them is not a row we
+    // can tap as itself. A read without any (For You, older captures) keeps the
+    // viewport and text proof below.
+    let containers = plan.row_container_id.map(find).unwrap_or_default();
     let mut rows = Vec::new();
     for row in find(plan.row_id) {
         anyhow::ensure!(contains(&viewport, &row), "sound row outside list viewport");
+        anyhow::ensure!(
+            containers.is_empty()
+                || containers
+                    .iter()
+                    .filter(|container| container.clickable && contains(container, &row))
+                    .count()
+                    == 1,
+            "sound row outside its clickable container"
+        );
         let row_titles = inside(&row, &titles);
         let row_artists = inside(&row, &artists);
         if row.y + row.height == viewport.y + viewport.height
@@ -1609,6 +1624,20 @@ mod tests {
         assert_eq!(titles, ["Paper Moon Static", "Thank You Baby", "nothing"]);
         // `nms` marks the row whose preview is playing, which is the tapped row.
         assert_eq!(observed.selected_index, Some(0));
+        // Each Hot row sits in one clickable `opr`; a row that has lost its container
+        // in a read that has the others is not tapped as itself.
+        let first_container = picker
+            .find(":id/opr")
+            .expect("real picker holds the opr containers");
+        let orphaned = format!(
+            "{}:id/unrelated{}",
+            &picker[..first_container],
+            &picker[first_container + ":id/opr".len()..]
+        );
+        assert!(pool(&orphaned, plan, 5)
+            .unwrap_err()
+            .to_string()
+            .contains("outside its clickable container"));
 
         // The editor names the applied sound in `tv_top_text` and has no sound rows.
         assert!(pool(editor, plan, 5).is_err());

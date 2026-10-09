@@ -369,6 +369,12 @@ pub struct SoundPickerPlan {
     layout: SoundPickerLayout,
     selection: SoundSelectionMode,
     post_back_id: Option<&'static str>,
+    /// The unresolved `content-desc` the post-back control carries on this exact build.
+    /// Checked wherever that control is read from a tree; see the 45.7.3 entry.
+    post_back_description: Option<&'static str>,
+    /// The clickable container wrapping each row, when measured. A row read next to
+    /// such containers must sit inside exactly one clickable container.
+    row_container_id: Option<&'static str>,
     provenance: &'static str,
 }
 
@@ -419,6 +425,8 @@ const MEASURED_SOUND_PICKERS: &[MeasuredSoundPicker] = &[
             }),
             selection: SoundSelectionMode::Inline { marker_ids: &[":id/nd_"] },
             post_back_id: Some(":id/bgy"),
+            post_back_description: None,
+            row_container_id: None,
             provenance: "SM-G955F ce04171435f104080c, Android 9/en, 08/09/2026 code2024504030; isolated album, ordinal 1/2, Hot, selected sound, caption roundtrip, Send empty/typed/cleared",
         },
     },
@@ -437,6 +445,8 @@ const MEASURED_SOUND_PICKERS: &[MeasuredSoundPicker] = &[
             }),
             selection: SoundSelectionMode::Inline { marker_ids: &[":id/ntf"] },
             post_back_id: Some(":id/bn7"),
+            post_back_description: None,
+            row_container_id: None,
             provenance: "SM-G955F ce051715e15b2c2e02, Android 9/en, 08/09/2026 code2024601030; isolated album, ordinal 1/2, Hot, selected sound, caption roundtrip, Send empty/typed/cleared",
         },
     },
@@ -455,10 +465,24 @@ const MEASURED_SOUND_PICKERS: &[MeasuredSoundPicker] = &[
             }),
             selection: SoundSelectionMode::Inline { marker_ids: &[":id/o2k"] },
             post_back_id: Some(":id/bor"),
+            post_back_description: None,
+            row_container_id: None,
             provenance: "SM-G955F ce031713aadf361905, Android 9/en, 08/09/2026 code2024604030; isolated album, ordinal 1/2, Hot, selected sound, caption roundtrip, Send empty/typed/cleared",
         },
     },
 
+    // 45.7.3/en, re-read on Riviu #44 (SM-G955F ce031713d903001b01) 09/10/2026 with
+    // `uiautomator dump`; fixtures `real-20261009-*`:
+    // - The sheet can open on For You, not Hot, so the `wrv` Hot tap stays required.
+    // - Each row `vertical_item_music_new_rl` sits in the clickable container `opr`.
+    // - `nms` is a Lottie shown only on the row whose preview is playing, so it marks
+    //   the tapped row. Tapping that row again stops the preview AND deselects the
+    //   sound (the editor chip shows no sound); there is no Pause control on this
+    //   build, so a second tap is never a pause.
+    // - `bix` (the caption page's Back) is declared in 61 layouts; its content-desc is
+    //   the unresolved string reference `@2131823215` ("Back" in the APK's NxString
+    //   table). The editor's own Back has the same id and desc, so the caption page
+    //   itself stays the proof.
     MeasuredSoundPicker {
         version: "45.7.3",
         language: "en",
@@ -480,6 +504,8 @@ const MEASURED_SOUND_PICKERS: &[MeasuredSoundPicker] = &[
             }),
             selection: SoundSelectionMode::Inline { marker_ids: &[":id/nms"] },
             post_back_id: Some(":id/bix"),
+            post_back_description: Some("@2131823215"),
+            row_container_id: Some(":id/opr"),
             provenance: "musically/en/45.7.3 code2024507030, measured 2026-09-08 on ce031713b0c610ab0c; three-photo selection, Hot, selected row/editor/caption return",
         },
     },
@@ -506,6 +532,8 @@ const MEASURED_SOUND_PICKERS: &[MeasuredSoundPicker] = &[
                 marker_ids: &[":id/dfu", ":id/jk1"],
             },
             post_back_id: Some(":id/aun"),
+            post_back_description: None,
+            row_container_id: None,
             provenance: "trill/en/38.3.2, measured 2026-09-04 on 9889db374744474635",
         },
     },
@@ -532,6 +560,8 @@ const MEASURED_SOUND_PICKERS: &[MeasuredSoundPicker] = &[
             }),
             selection: SoundSelectionMode::Inline { marker_ids: &[":id/nx3"] },
             post_back_id: Some(":id/bot"),
+            post_back_description: None,
+            row_container_id: None,
             provenance: "musically/en/46.2.1, remeasured 08-09-2026 on ce04171411ae6a1504; Hot inline marker, Back, editor title and caption roundtrip; AGENTS.md ?9.189",
         },
     },
@@ -558,6 +588,8 @@ const MEASURED_SOUND_PICKERS: &[MeasuredSoundPicker] = &[
                 marker_ids: &[":id/nve"],
             },
             post_back_id: Some(":id/bot"),
+            post_back_description: None,
+            row_container_id: None,
             provenance: "musically/en/46.2.42, measured 2026-09-04 on ce0517155ab38c390d",
         },
     },
@@ -583,6 +615,8 @@ const MEASURED_SOUND_PICKERS: &[MeasuredSoundPicker] = &[
             }),
             selection: SoundSelectionMode::Inline { marker_ids: &[":id/nrm"] },
             post_back_id: Some(":id/bmy"),
+            post_back_description: None,
+            row_container_id: None,
             provenance: "musically/en/46.0.41 code2024600410, measured 2026-09-08 on ce011711c354be2005; selected row/editor/caption return verified before Post",
         },
     },
@@ -607,6 +641,9 @@ impl SoundPickerPlan {
     }
     pub(crate) fn post_back_query(self) -> Option<ElementQuery<'static>> {
         self.post_back_id.map(ElementQuery::ResourceIdSuffix)
+    }
+    pub(crate) fn post_back_description(self) -> Option<&'static str> {
+        self.post_back_description
     }
 
     fn snapshot_layout(self) -> Option<SoundSnapshotLayout> {

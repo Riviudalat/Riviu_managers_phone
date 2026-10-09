@@ -1684,6 +1684,37 @@ impl TikTokControls {
         self.resources.and_then(|set| set.pinned_badge)
     }
 
+    /// The `content-desc` a measured resource id carries on this exact build, checked on
+    /// top of the id wherever the node is read from a tree.
+    ///
+    /// TikTok 45.7.3 moves its strings out of `resources.arsc` into NxString tables, so
+    /// these descs read as unresolved references `@<string id>`: the same in every UI
+    /// language and renumbered on every build. Static read of the 45.7.3 APK
+    /// (versionCode 2024507030, `nxstring_default`), 09/10/2026: `@2131823090` is
+    /// "Post comment" and `@2131823130` is "Record video". The same descs are on every
+    /// 45.7.3 capture we hold (fixtures 28–30 and 03–09). The id alone is not enough for
+    /// Send: `cqf` is also the direct-message "Send".
+    pub fn description_anchor(&self, control: TikTokControl) -> Option<&'static str> {
+        if self.adaptive {
+            return None;
+        }
+        match (self.package(), self.resource_version(), control) {
+            ("com.zhiliaoapp.musically", Some("45.7.3"), TikTokControl::CommentSend) => {
+                Some("@2131823090")
+            }
+            ("com.zhiliaoapp.musically", Some("45.7.3"), TikTokControl::ComposerShutter) => {
+                Some("@2131823130")
+            }
+            _ => None,
+        }
+    }
+
+    /// Whether a node's `content-desc` satisfies [`Self::description_anchor`].
+    pub fn description_anchored(&self, control: TikTokControl, content_desc: &str) -> bool {
+        self.description_anchor(control)
+            .is_none_or(|anchor| content_desc == anchor)
+    }
+
     /// The Drafts label inside a profile cover, measured separately from real post tiles.
     /// Global 46.2.1/en, 09/09/2026 phone17: zq_ reads "Drafts: 1" at
     /// [16,929][342,971] inside cover [0,913][358,1390]. See the retained

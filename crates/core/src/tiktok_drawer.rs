@@ -256,15 +256,25 @@ impl<'a, P: TapPlanner> CommentDrawer<'a, P> {
     }
 
     async fn locate_send(&self, query: ElementQuery<'_>) -> anyhow::Result<Option<ElementBox>> {
+        let anchor = self.labels.description_anchor(TikTokControl::CommentSend);
         if !self.session.supports_accessibility_readback() {
-            return self.session.locate(query).await;
+            // `locate` reads `content-desc`, so the measured anchor applies here too.
+            let send = self.session.locate(query).await?;
+            anyhow::ensure!(
+                anchor.is_none()
+                    || send
+                        .as_ref()
+                        .is_none_or(|send| send.description.as_deref() == anchor),
+                "Send control description mismatch"
+            );
+            return Ok(send);
         }
         anyhow::ensure!(
             self.session.active_app_bundle().await? == self.labels.package(),
             "Send foreground changed"
         );
         let snapshot = self.session.hierarchy_source_snapshot().await?;
-        snapshot_send_control(snapshot, self.labels.package(), query)
+        snapshot_send_control(snapshot, self.labels.package(), query, anchor)
     }
 
     async fn tap_inside(&mut self, element: &ElementBox) -> anyhow::Result<()> {
@@ -401,8 +411,12 @@ impl<'a, P: TapPlanner> CommentDrawer<'a, P> {
                         "Comment drawer foreground changed"
                     );
                     let snapshot = self.session.hierarchy_source_snapshot().await?;
-                    let send =
-                        snapshot_send_control(snapshot.clone(), self.labels.package(), send_query)?;
+                    let send = snapshot_send_control(
+                        snapshot.clone(),
+                        self.labels.package(),
+                        send_query,
+                        self.labels.description_anchor(TikTokControl::CommentSend),
+                    )?;
                     if send.is_none_or(|button| button.enabled) {
                         return Ok(None);
                     }
@@ -567,7 +581,14 @@ impl<'a, P: TapPlanner> CommentDrawer<'a, P> {
         if self.session.active_app_bundle().await? != self.labels.package() {
             return Err(FocusedDraftFailure::BindingChanged.into());
         }
-        snapshot_focused_composer(self.session.hierarchy_source_snapshot().await?, self.labels.package(), query, expected_hint, waiting_for_focus)
+        snapshot_focused_composer(
+            self.session.hierarchy_source_snapshot().await?,
+            self.labels.package(),
+            query,
+            self.labels.description_anchor(TikTokControl::CommentSend),
+            expected_hint,
+            waiting_for_focus,
+        )
     }
 
     /// Re-prove the same focused field in a newer snapshot, without re-tapping stale geometry.
@@ -811,11 +832,12 @@ fn snapshot_focused_composer(
     snapshot: crate::HierarchySourceSnapshot,
     package: &str,
     query: ElementQuery<'_>,
+    send_anchor: Option<&str>,
     expected_hint: Option<&str>,
     waiting_for_focus: bool,
 ) -> anyhow::Result<Option<FocusedComposer>> {
     let generation = snapshot.generation;
-    let send = snapshot_send_control(snapshot.clone(), package, query)
+    let send = snapshot_send_control(snapshot.clone(), package, query, send_anchor)
         .map_err(|_| FocusedDraftFailure::ReadUnproved)?;
     let tree = crate::ui_automation::tree::Tree::parse(snapshot)
         .map_err(|_| FocusedDraftFailure::ReadUnproved)?;
@@ -870,6 +892,7 @@ fn snapshot_send_control(
     snapshot: crate::HierarchySourceSnapshot,
     package: &str,
     query: ElementQuery<'_>,
+    description_anchor: Option<&str>,
 ) -> anyhow::Result<Option<ElementBox>> {
     let tree = crate::ui_automation::tree::Tree::parse(snapshot)?;
     let matches = if let ElementQuery::Semantic(role) = query {
@@ -882,6 +905,11 @@ fn snapshot_send_control(
         return Ok(None);
     };
     let node = &tree.nodes[*index];
+    // 45.7.3 reuses the Send id in direct messages; the build's desc tells them apart.
+    anyhow::ensure!(
+        description_anchor.is_none_or(|anchor| node.attr("content-desc") == anchor),
+        "Send control description mismatch"
+    );
     anyhow::ensure!(
         matches!(node.attr("enabled"), "true" | "false"),
         "Send enabled state missing"
@@ -985,12 +1013,17 @@ mod tests {
     fn observed_global_send_state_is_atomic_and_missing_or_duplicate_nodes_refuse() {
         const PKG: &str = "com.zhiliaoapp.musically";
         let source = include_str!("../fixtures/tiktok-comment/global45.7.3-empty-send.fixture");
-        let query = ElementQuery::ResourceIdSuffix(":id/cqf");
+        let labels = crate::tiktok_labels::controls_for(PKG, "en", "45.7.3").unwrap();
+        let query = labels.label(TikTokControl::CommentSend).unwrap().to_query();
+        assert_eq!(query, ElementQuery::ResourceIdSuffix(":id/cqf"));
+        let anchor = labels.description_anchor(TikTokControl::CommentSend);
+        assert_eq!(anchor, Some("@2131823090"));
         let read = |xml: String| {
             snapshot_send_control(
                 crate::HierarchySourceSnapshot { generation: 1, xml },
                 PKG,
                 query,
+                anchor,
             )
         };
         let button = read(source.into()).unwrap().unwrap();
@@ -1008,6 +1041,8 @@ mod tests {
         assert!(read(source.replace(":id/cqf", ":id/unrelated"))
             .unwrap()
             .is_none());
+        // The same id under another string is the direct-message Send, not this one.
+        assert!(read(source.replace("@2131823090", "@2131823091")).is_err());
     }
 
     use crate::tiktok_labels::controls_for;

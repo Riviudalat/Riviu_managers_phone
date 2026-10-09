@@ -573,10 +573,18 @@ impl<'a> PrepareSession<'a> {
     fn sound_id_in_scope(&self, tree: &Tree, index: usize, id: &str) -> bool {
         match id {
             ":id/title" => inside_sound_row(tree, self.labels, self.sound_row_id(), index),
-            ":id/bix" => self
-                .plan
-                .publish
-                .is_some_and(|tail| !indices(tree, self.labels, tail.caption).is_empty()),
+            ":id/bix" => {
+                self.plan
+                    .publish
+                    .is_some_and(|tail| !indices(tree, self.labels, tail.caption).is_empty())
+                    && crate::tiktok_sound::SoundPickerPlan::resolve(
+                        self.labels.package(),
+                        self.labels.language(),
+                        self.labels.resource_version().unwrap_or_default(),
+                    )
+                    .and_then(|plan| plan.post_back_description())
+                    .is_none_or(|anchor| tree.nodes[index].attr("content-desc") == anchor)
+            }
             _ => true,
         }
     }
@@ -1122,6 +1130,12 @@ mod tests {
         let caption = session(include_str!("../../fixtures/tiktok-publish/musically-45.7.3-en/18-typed.xml"));
         let guard = PrepareSession::new(&caption, global, global_plan, "fixture-epoch", &stop, deadline, false);
         guard.safe_point(&crate::TapPoint { x: 84.0, y: 147.0 }).await.unwrap();
+        // ...only while it carries this build's `@2131823215` desc.
+        let renamed = include_str!("../../fixtures/tiktok-publish/musically-45.7.3-en/18-typed.xml")
+            .replace("@2131823215", "@2131823216");
+        let renamed = session(Box::leak(renamed.into_boxed_str()));
+        let guard = PrepareSession::new(&renamed, global, global_plan, "fixture-epoch", &stop, deadline, false);
+        assert!(guard.safe_point(&crate::TapPoint { x: 84.0, y: 147.0 }).await.is_err());
     }
 
     #[tokio::test(start_paused = true)]
