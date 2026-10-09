@@ -53,8 +53,15 @@ pub const DRAWER_WINDOW: Duration = Duration::from_millis(6_000);
 /// How long the Send button may take to arm after the text is set.
 pub const ARM_WINDOW: Duration = Duration::from_millis(3_000);
 /// How long to wait for Send to disarm, which is what proves the comment left.
-pub const SEND_WINDOW: Duration = Duration::from_millis(5_000);
+///
+/// One blind snapshot plus a poll. Box 31-50, Global 45.7.3, 10/10/2026: `/source` took
+/// 5.0-5.3 s on exactly the phones whose comments settled as uncertain, against a former
+/// 5 s window, so the only read after the tap lost the race it should have won.
+pub const SEND_WINDOW: Duration = SEND_BLIND_QUERY_COST.saturating_add(DRAWER_POLL);
 pub const DRAWER_POLL: Duration = Duration::from_millis(350);
+/// The Android agent's own root-node deadline (`AgentClient::BLIND_QUERY_COST` in
+/// riviu-android-driver, measured 10 116 and 10 132 ms): the longest one snapshot can take.
+const SEND_BLIND_QUERY_COST: Duration = Duration::from_secs(11);
 
 /// What a comment attempt actually achieved, named for the step that failed.
 ///
@@ -681,8 +688,16 @@ impl<'a, P: TapPlanner> CommentDrawer<'a, P> {
         };
         let deadline = Instant::now() + SEND_WINDOW;
         let epoch = self.session.gui_session_epoch();
+        // The first snapshot after the tap is the likeliest proof, so it completes on the
+        // driver's own request deadline instead of being dropped at ours. Later reads stay
+        // inside the window. Either way the outcome is only read; Send is never tapped again.
+        let mut first = Some(self.locate_send(query).await?);
         loop {
-            match read_before_deadline(self.locate_send(query), deadline, stop).await? {
+            let read = match first.take() {
+                Some(observed) => ReadWaitResult::Ready(observed),
+                None => read_before_deadline(self.locate_send(query), deadline, stop).await?,
+            };
+            match read {
                 ReadWaitResult::Ready(observed) => {
                     anyhow::ensure!(
                         self.session.gui_session_epoch() == epoch,
@@ -1488,7 +1503,8 @@ mod tests {
             .tap_send_and_confirm_disarm(&element(true), &AtomicBool::new(false))
             .await
             .unwrap());
-        assert!(started.elapsed() <= SEND_WINDOW);
+        // The first snapshot completes; nothing is read after the window.
+        assert!(started.elapsed() <= SEND_WINDOW + Duration::from_secs(1));
         assert_eq!(session.taps.lock().len(), 1);
         assert_eq!(session.reads.load(Ordering::Relaxed), 1);
 
