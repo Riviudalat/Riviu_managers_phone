@@ -230,12 +230,65 @@ fn new_verification_budget(intent: Option<&str>) -> serde_json::Value {
     })
 }
 
+const OWN_VIEWER_STAGES: [&str; 5] = [
+    "postProof",
+    "copy",
+    "videoPublicProof",
+    "expandedPhotoPublicProof",
+    "restoreProfile",
+];
+
+/// Two observations are not operator-facing no-progress: a pass that proved the target
+/// but ran out of time ruling out a second match, and a pass that met only the post
+/// viewer its own previous pass left open after running out of time. At most every
+/// other observation is exempt, so the no-progress limit still ends the loop.
+fn exempt_from_no_progress(
+    evidence: &serde_json::Value,
+    reason_code: &str,
+    diagnostic: Option<&serde_json::Value>,
+) -> bool {
+    if evidence["verificationBudget"]["lastObservationExempt"] == true {
+        return false;
+    }
+    if reason_code == "ambiguityScanIncomplete" {
+        return true;
+    }
+    let previous = &evidence["verificationDiagnostic"];
+    let Some(current) = diagnostic else {
+        return false;
+    };
+    let shape = &current["unknownScreenShape"];
+    let viewer = matches!(
+        current["screenState"].as_str(),
+        Some("Post" | "Share" | "Comments")
+    ) || (shape["hasBackControl"] == true
+        && shape["hasShareControl"] == true
+        && shape["hasCommentsControl"] == true
+        && shape["hasProfileTab"] == false
+        && shape["hasFeedTab"] == false
+        && shape["hasPostTile"] == false);
+    matches!(
+        reason_code,
+        "profileUnavailable" | "navigationBudgetExhausted"
+    ) && current["stage"] == "profile"
+        && current["candidatesVisited"].as_u64() == Some(0)
+        && viewer
+        && matches!(
+            previous["reasonCode"].as_str(),
+            Some("searchBudgetExhausted" | "ambiguityScanIncomplete")
+        )
+        && previous["stage"]
+            .as_str()
+            .is_some_and(|stage| OWN_VIEWER_STAGES.contains(&stage))
+}
+
 /// Only first-time target-caption/time proof advances this finite frontier. Rejected
 /// captions, changing timestamps, snapshot generations and Copy counts are not progress.
 fn advance_verification_budget(
     evidence: &serde_json::Value,
     intent: Option<&str>,
     diagnostic: Option<&serde_json::Value>,
+    exempt: bool,
 ) -> serde_json::Value {
     use sha2::Digest;
     let initial = new_verification_budget(intent);
@@ -257,14 +310,19 @@ fn advance_verification_budget(
         _ => 0,
     };
     let stage = previous_stage.max(observed_stage);
+    let prior_no_progress = prior["noProgressObservations"].as_u64().unwrap_or(0);
     let no_progress = if stage > previous_stage {
         0
+    } else if exempt {
+        prior_no_progress
     } else {
-        prior["noProgressObservations"]
-            .as_u64()
-            .unwrap_or(0)
-            .saturating_add(1)
+        prior_no_progress.saturating_add(1)
     };
+    // The proven candidate is a lead for the next pass, never a verified link.
+    let proven_candidate_url = proof
+        .and_then(|proof| proof["provenCandidateUrl"].as_str())
+        .map(serde_json::Value::from)
+        .unwrap_or_else(|| prior["provenCandidateUrl"].clone());
     // The fingerprint describes the durable proof frontier, not the latest screen.
     let frontier =
         serde_json::json!({"intentSha256":initial["intentSha256"],"publicationStage":stage});
@@ -272,14 +330,19 @@ fn advance_verification_budget(
         "{:x}",
         sha2::Sha256::digest(frontier.to_string().as_bytes())
     );
-    serde_json::json!({
+    let mut budget = serde_json::json!({
         "version":1,"intentSha256":initial["intentSha256"],"publicationStage":stage,
         "fingerprint":fingerprint,"noProgressObservations":no_progress,
         "observations":prior["observations"].as_u64().unwrap_or(0).saturating_add(1),
         "metadataObservations":prior["metadataObservations"].as_u64().unwrap_or(0),
         "metadataLimit":METADATA_RETRY_LIMIT,
         "limit":VERIFICATION_NO_PROGRESS_LIMIT,
-    })
+        "lastObservationExempt":exempt && stage == previous_stage,
+    });
+    if !proven_candidate_url.is_null() {
+        budget["provenCandidateUrl"] = proven_candidate_url;
+    }
+    budget
 }
 
 /// Destructive verifier restart authority only. An earlier observation of this exact
@@ -746,6 +809,9 @@ impl Database {
         if prior["version"] == 1 && prior["intentSha256"] == budget["intentSha256"] {
             budget["publicationStage"] =
                 serde_json::json!(prior["publicationStage"].as_u64().unwrap_or(0).min(2));
+            if prior["provenCandidateUrl"].is_string() {
+                budget["provenCandidateUrl"] = prior["provenCandidateUrl"].clone();
+            }
         }
         evidence["verificationBudget"] = budget;
         if let Some(object) = evidence.as_object_mut() {
@@ -1589,6 +1655,8 @@ impl Database {
             evidence["priorEvidenceJson"] = serde_json::to_value(&prior)?;
         }
         let metadata_observation = retained_metadata_observation(&transaction,candidate,diagnostic)?;
+        // Judged against the previous pass's diagnostic, before this one replaces it.
+        let exempt = exempt_from_no_progress(&evidence, reason_code, diagnostic);
         if let Some(diagnostic) = diagnostic {
             let previous = evidence.get("verificationDiagnostic").and_then(|d|d.get("pendingMetadataCandidate"))
                 .or_else(|| evidence.get("post").and_then(|p|p.get("verificationDiagnostic")).and_then(|d|d.get("pendingMetadataCandidate"))).cloned();
@@ -1625,7 +1693,7 @@ impl Database {
             budget["observations"] = serde_json::json!(budget["observations"].as_u64().unwrap_or(0).saturating_add(1));
             budget
         } else {
-            advance_verification_budget(&evidence, intent.as_deref(), diagnostic)
+            advance_verification_budget(&evidence, intent.as_deref(), diagnostic, exempt)
         };
         let metadata_exhausted = budget["metadataObservations"].as_u64().unwrap_or(0) >= METADATA_RETRY_LIMIT;
         let budget_exhausted = metadata_exhausted || budget["noProgressObservations"].as_u64().unwrap_or(0)

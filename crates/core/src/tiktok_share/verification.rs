@@ -10,6 +10,14 @@ use tokio::time::Instant;
 const CONTRACT_VERSION: u32 = 1;
 const RECOVERY_WINDOW: Duration = Duration::from_secs(60);
 const CAPTURE_WINDOW: Duration = Duration::from_secs(180);
+/// Extra time, once one tile is proven, to finish ruling out a second match in that
+/// viewport. Global 45.7.3/en, phones 39 ce11171beb405c2701 and 46 ce0417143cef30280d,
+/// 10/10/2026: one tile cost 4-26 s, with one 74 s outlier under adb-slot contention;
+/// 46 needed 154 s for nine tiles, and 39 ran past 180 s on its sixth.
+const AMBIGUITY_SCAN_EXTENSION: Duration = Duration::from_secs(120);
+/// Bound on leaving the viewer a pass opened itself after its search window ran out.
+const LEAVE_VIEWER_WINDOW: Duration = Duration::from_secs(20);
+const MAX_LEAVE_VIEWER_BACKS: u32 = 2;
 const MAX_RECOVERY_ACTIONS: u32 = 5;
 const MAX_CANDIDATES: u32 = 12;
 const MAX_GLOBAL_45_7_3_TAPS: u32 = 24;
@@ -182,6 +190,7 @@ pub enum VerificationReason {
     RedirectFailed,
     MultipleMatchingPosts,
     OtherPublication,
+    AmbiguityScanIncomplete,
 }
 
 impl VerificationReason {
@@ -228,6 +237,7 @@ impl VerificationReason {
             Self::RedirectFailed => "redirectFailed",
             Self::MultipleMatchingPosts => "multipleMatchingPosts",
             Self::OtherPublication => "otherPublication",
+            Self::AmbiguityScanIncomplete => "ambiguityScanIncomplete",
         }
     }
 
@@ -274,6 +284,7 @@ impl VerificationReason {
             Self::ClipboardNotPostLink => "Clipboard đã đổi nhưng nội dung không phải liên kết bài TikTok hợp lệ.",
             Self::RedirectFailed => "Đã sao chép liên kết nhưng chưa chuẩn hóa được đường dẫn đến bài TikTok.",
             Self::MultipleMatchingPosts => "Có nhiều bài cùng khớp caption và thời gian trong lưới hồ sơ; chưa chọn liên kết để tránh gán nhầm lượt đăng.",
+            Self::AmbiguityScanIncomplete => "Đã thấy một bài khớp caption và thời gian nhưng hết thời gian rà các bài còn lại để loại trừ bài trùng; chưa xác minh liên kết, tự kiểm tra lại sau 5 phút, không đăng lại.",
         }
     }
 }
@@ -284,6 +295,10 @@ impl VerificationReason {
 pub struct VerificationPublicationEvidence {
     pub caption_matched: bool,
     pub submission_time_matched: bool,
+    /// First candidate this pass proved, kept as a lead for the next pass. It is never a
+    /// verified link: only a completed ambiguity scan of its viewport selects one.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub proven_candidate_url: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -684,26 +699,74 @@ fn classify(tree: &Tree, plan: &PublishVerificationPlan) -> Screen {
     Screen::Unknown
 }
 
-/// Navigation-only recovery for the measured caption-hidden Trill detail.
+/// Navigation-only recovery for the measured caption-hidden post viewers.
 /// Copy and publication proof still require their unchanged independent checks.
-fn hidden_post_restore_surface(tree: &Tree, plan: &PublishVerificationPlan) -> Option<[ElementBox; 4]> {
+fn hidden_post_restore_surface(
+    tree: &Tree,
+    plan: &PublishVerificationPlan,
+) -> Option<Vec<ElementBox>> {
     let package = plan.labels.package();
-    if package != "com.ss.android.ugc.trill"
-        || plan.labels.resource_version() != Some("38.3.2")
-        || plan.labels.language() != "en"
-        || classify(tree, plan) != Screen::Unknown
+    let tuple = (
+        package,
+        plan.labels.resource_version(),
+        plan.labels.language(),
+    );
+    if !matches!(
+        tuple,
+        ("com.ss.android.ugc.trill", Some("38.3.2"), "en")
+            | ("com.zhiliaoapp.musically", Some("45.7.3"), "en")
+    ) || classify(tree, plan) != Screen::Unknown
     {
         return None;
     }
     let shape = UnknownScreenShape::from_tree(tree, plan);
-    if shape.foreign_visible_nodes != 0
-        || shape.has_profile_tab || shape.has_feed_tab || shape.has_post_tile
-        || shape.has_post_caption || shape.has_copy_control
-        || tree.nodes.iter().enumerate().any(|(index, node)| {
-            node.visible(package) && tree.ancestors_visible(index)
+    let editing = |focused_only: bool| {
+        tree.nodes.iter().enumerate().any(|(index, node)| {
+            node.visible(package)
+                && tree.ancestors_visible(index)
                 && node.attr("class") == "android.widget.EditText"
+                && (!focused_only || node.attr("focused") == "true")
         })
+    };
+    if shape.foreign_visible_nodes != 0
+        || shape.has_profile_tab
+        || shape.has_feed_tab
+        || shape.has_post_tile
+        || shape.has_post_caption
+        || shape.has_copy_control
     {
+        return None;
+    }
+    if package == "com.zhiliaoapp.musically" {
+        // Global 45.7.3/en, phone 39 ce11171beb405c2701, 10/10/2026 19:17Z: the
+        // own-post viewer the previous pass left open read Back, Comments and Share,
+        // no tab, tile, :id/desc caption, copy row or foreign node, and stayed Unknown.
+        // Its "Add comment..." field is allowed only while it is not being typed into.
+        if editing(true) {
+            return None;
+        }
+        let actionable = |query| {
+            tree.matching(package, query)
+                .into_iter()
+                .filter(|index| tree.ancestors_visible(*index))
+                .find_map(|index| {
+                    tree.nodes[index]
+                        .rect()
+                        .filter(|rect| rect.enabled && rect.clickable)
+                })
+        };
+        let back = plan
+            .labels
+            .back_descriptions()
+            .iter()
+            .find_map(|value| actionable(ElementQuery::Description { value, exact: true }))?;
+        return Some(vec![
+            back,
+            actionable(plan.labels.label(TikTokControl::Comments)?.to_query())?,
+            actionable(plan.labels.label(TikTokControl::Share)?.to_query())?,
+        ]);
+    }
+    if editing(false) {
         return None;
     }
     // 06/10/2026 machine2-post-observe: exact measured native control tuple.
@@ -716,7 +779,7 @@ fn hidden_post_restore_surface(tree: &Tree, plan: &PublishVerificationPlan) -> O
         }
         node.rect().filter(|rect| rect.enabled && rect.clickable)
     };
-    Some([
+    Some(vec![
         actionable(ElementQuery::Description { value: "Back", exact: true }, ":id/aur", "android.widget.ImageView")?,
         actionable(plan.labels.label(TikTokControl::Comments)?.to_query(), ":id/cqn", "android.widget.Button")?,
         actionable(plan.labels.label(TikTokControl::Share)?.to_query(), ":id/drt", "android.widget.Button")?,
@@ -794,6 +857,19 @@ impl Capture<'_> {
                 .and_then(|id| chrono::DateTime::from_timestamp((id >> 32) as i64, 0))
                 .map(|at| at.to_rfc3339());
         }
+        // Every proof reaching here matched the full caption, the account and a post
+        // allocated after this submission, including the public video/photo proofs that
+        // never pass `post_proof`. Record that as the restart frontier (stage 2) and keep
+        // the first URL as a lead; neither selects a link.
+        let evidence = self
+            .diagnostic
+            .publication_evidence
+            .get_or_insert_with(Default::default);
+        evidence.caption_matched = true;
+        evidence.submission_time_matched = true;
+        evidence
+            .proven_candidate_url
+            .get_or_insert_with(|| proof.0.clone());
         remember_candidate(candidate, proof)
     }
 
@@ -852,8 +928,76 @@ impl Capture<'_> {
             _ => VerificationReason::ShareUnavailable,
         })
     }
+    fn proven(&self) -> bool {
+        self.diagnostic
+            .publication_evidence
+            .as_ref()
+            .is_some_and(|evidence| evidence.proven_candidate_url.is_some())
+    }
+    /// The search window, extended once a tile is proven so the ambiguity scan of
+    /// its viewport can finish. Both bounds are finite.
+    fn window(&self) -> Duration {
+        if self.proven() {
+            CAPTURE_WINDOW + AMBIGUITY_SCAN_EXTENSION
+        } else {
+            CAPTURE_WINDOW
+        }
+    }
     fn expired(&self) -> bool {
-        self.started.elapsed() >= CAPTURE_WINDOW
+        self.started.elapsed() >= self.window()
+    }
+
+    /// The pass ran out of time on a viewer it opened itself. Leave it with at most
+    /// two Backs (Share sheet, then viewer), each from a freshly read post, share or
+    /// comments surface, so the next pass starts from the profile. Never a tap; any
+    /// other screen, a stale read or the deadline stops it.
+    async fn leave_own_viewer(&mut self) {
+        let deadline = Instant::now() + LEAVE_VIEWER_WINDOW;
+        for _ in 0..MAX_LEAVE_VIEWER_BACKS {
+            if !self.viewer_proved_before(deadline).await || self.session.back().await.is_err() {
+                return;
+            }
+            self.diagnostic.navigation_actions += 1;
+            tokio::time::sleep(POLL).await;
+        }
+    }
+
+    /// A fresh read past the search window, used only to authorize one Back.
+    async fn fresh_tree_before(&mut self, deadline: Instant) -> Option<Tree> {
+        if Instant::now() >= deadline
+            || self.session.active_app_bundle().await.ok().as_deref()
+                != Some(self.plan.labels.package())
+        {
+            return None;
+        }
+        let tree = Tree::parse(self.session.hierarchy_source_snapshot().await.ok()?).ok()?;
+        if Instant::now() >= deadline || tree.generation <= self.diagnostic.snapshot_generation {
+            return None;
+        }
+        self.diagnostic.snapshot_generation = tree.generation;
+        Some(tree)
+    }
+
+    async fn viewer_proved_before(&mut self, deadline: Instant) -> bool {
+        let Some(tree) = self.fresh_tree_before(deadline).await else {
+            return false;
+        };
+        if matches!(
+            classify(&tree, self.plan),
+            Screen::Post | Screen::Share | Screen::Comments
+        ) {
+            return true;
+        }
+        // The unlabelled viewer surface needs the same two-read proof as `profile`.
+        let Some(surface) = hidden_post_restore_surface(&tree, self.plan) else {
+            return false;
+        };
+        let epoch = self.session.gui_session_epoch();
+        let Some(fresh) = self.fresh_tree_before(deadline).await else {
+            return false;
+        };
+        self.session.gui_session_epoch() == epoch
+            && hidden_post_restore_surface(&fresh, self.plan).as_ref() == Some(&surface)
     }
     async fn read(&mut self) -> Result<Tree, VerificationReason> {
         if self.expired() {
@@ -941,7 +1085,7 @@ impl Capture<'_> {
                     self.session,
                     self.plan.labels,
                     &mut popup,
-                    (start + RECOVERY_WINDOW).min(self.started + CAPTURE_WINDOW),
+                    (start + RECOVERY_WINDOW).min(self.started + self.window()),
                     &popup_stop,
                     &popup_stop,
                 )
@@ -964,7 +1108,9 @@ impl Capture<'_> {
                 }
             }
             let mut screen = classify(&tree, self.plan);
-            if restoring && screen == Screen::Unknown {
+            // Also on the first profile read: a pass that ran out of time can leave its
+            // own viewer open, and the next pass must be able to Back out of it.
+            if screen == Screen::Unknown {
                 if let Some(surface) = hidden_post_restore_surface(&tree, self.plan) {
                     let epoch = self.session.gui_session_epoch();
                     let fresh = self.read().await?;
@@ -1291,7 +1437,7 @@ impl Capture<'_> {
                     )
                     .ok_or(VerificationReason::SubmissionTimeAmbiguous)?;
                     if start.elapsed() + delay >= Duration::from_secs(65)
-                        || self.started.elapsed() + delay >= CAPTURE_WINDOW
+                        || self.started.elapsed() + delay >= self.window()
                     {
                         return Err(VerificationReason::SubmissionTimeAmbiguous);
                     }
@@ -1930,6 +2076,23 @@ pub async fn capture_submission_link_excluding(
     } else {
         capture.capture().await
     };
+    // A proven tile whose viewport could not be fully ruled out stays unverified (the
+    // ambiguity guard holds), but it is not an empty search.
+    let result = match result {
+        Err(VerificationReason::SearchBudgetExhausted) if capture.proven() => {
+            Err(VerificationReason::AmbiguityScanIncomplete)
+        }
+        result => result,
+    };
+    if matches!(
+        result,
+        Err(VerificationReason::SearchBudgetExhausted | VerificationReason::AmbiguityScanIncomplete)
+    ) && matches!(
+        capture.diagnostic.stage,
+        "postProof" | "copy" | "videoPublicProof" | "expandedPhotoPublicProof" | "restoreProfile"
+    ) {
+        capture.leave_own_viewer().await;
+    }
     let outcome = match result {
         Ok(link) => {
             capture.diagnostic.reason_code = VerificationReason::Verified;
@@ -1968,6 +2131,7 @@ pub async fn capture_submission_link_excluding(
                 }
                 VerificationReason::PostNotVisible
                 | VerificationReason::SearchBudgetExhausted
+                | VerificationReason::AmbiguityScanIncomplete
                 | VerificationReason::PaginationUnmeasured => OwnPostLink::CaptionNotFound,
                 VerificationReason::DraftsObserved => OwnPostLink::DraftsPresent(1),
                 _ => OwnPostLink::SubmissionUnverified,
