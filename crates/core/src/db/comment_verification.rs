@@ -7,18 +7,37 @@ use crate::comment_verification::{
 #[path = "comment_verification_tests.rs"]
 mod tests;
 
+/// A pending row whose window closed with no live observer. Without a worker (manual
+/// acceptance) nothing flips it, so the read model must not keep calling it "checking".
+const EXPIRED_UNOBSERVED: &str = "expired_unobserved: hết hạn, chưa quan sát";
+/// Rows an explicit readback may reopen: reviewed, or pending past the window with no
+/// live lease. The caller binds the current time as `?3`.
+const REOPENABLE: &str = "(owner IS NULL OR lease_until_ms<=?3) AND (state='needsReview' OR (state='pending' AND deadline_ms<=?3))";
+
 fn view(row: &rusqlite::Row<'_>) -> rusqlite::Result<CommentVerification> {
     let state: String = row.get(0)?;
+    let attempts: u32 = row.get(1)?;
+    let reason: Option<String> = row.get(4)?;
+    let expired: bool = row.get(6)?;
+    let (state, reason) = match state.as_str() {
+        "verified" => (VerificationState::Verified, reason),
+        "pending" if expired => (
+            VerificationState::NeedsReview,
+            if attempts == 0 {
+                Some(EXPIRED_UNOBSERVED.into())
+            } else {
+                reason.or_else(|| Some("verification_budget_exhausted".into()))
+            },
+        ),
+        "pending" => (VerificationState::Pending, reason),
+        _ => (VerificationState::NeedsReview, reason),
+    };
     Ok(CommentVerification {
-        state: match state.as_str() {
-            "verified" => VerificationState::Verified,
-            "pending" => VerificationState::Pending,
-            _ => VerificationState::NeedsReview,
-        },
-        attempts: row.get(1)?,
+        state,
+        attempts,
         next_check_at_ms: row.get(2)?,
         deadline_ms: row.get(3)?,
-        reason: row.get(4)?,
+        reason,
         evidence: row.get(5)?,
     })
 }
@@ -117,7 +136,10 @@ impl Database {
         &self,
         assignment: &str,
     ) -> anyhow::Result<Option<CommentVerification>> {
-        Ok(self.conn()?.query_row("SELECT state,attempts,next_at_ms,deadline_ms,reason,evidence_json FROM interaction_comment_verification WHERE assignment_id=?1 AND sent_at_ms IS NOT NULL",[assignment],view).optional()?)
+        let now = Utc::now().timestamp_millis();
+        Ok(self.conn()?.query_row("SELECT state,attempts,next_at_ms,deadline_ms,reason,evidence_json,
+            state='pending' AND deadline_ms<=?2 AND (owner IS NULL OR lease_until_ms<=?2)
+            FROM interaction_comment_verification WHERE assignment_id=?1 AND sent_at_ms IS NOT NULL",params![assignment,now],view).optional()?)
     }
     pub fn comment_verification_pending(&self, assignment: &str) -> anyhow::Result<bool> {
         Ok(self
@@ -372,12 +394,12 @@ impl Database {
         // readback may fill only that missing field; the worker still verifies
         // the visible comment author's actual profile before settlement.
         if !account.trim().is_empty() {
-            tx.execute("UPDATE interaction_comment_verification SET context_json=json_set(context_json,'$.account',?2) WHERE assignment_id=?1 AND owner IS NULL AND state='needsReview' AND COALESCE(json_extract(context_json,'$.account'),'')=''",params![assignment,account])?;
+            tx.execute(&format!("UPDATE interaction_comment_verification SET context_json=json_set(context_json,'$.account',?2) WHERE assignment_id=?1 AND {REOPENABLE} AND COALESCE(json_extract(context_json,'$.account'),'')=''"),params![assignment,account,now])?;
         }
         if let Some(root) = root {
-            tx.execute("UPDATE interaction_comment_verification SET context_json=json_set(context_json,'$.root',json(?2)) WHERE assignment_id=?1 AND owner IS NULL AND state='needsReview' AND json_extract(context_json,'$.root') IS NULL",params![assignment,serde_json::to_string(&root)?])?;
+            tx.execute(&format!("UPDATE interaction_comment_verification SET context_json=json_set(context_json,'$.root',json(?2)) WHERE assignment_id=?1 AND {REOPENABLE} AND json_extract(context_json,'$.root') IS NULL"),params![assignment,serde_json::to_string(&root)?,now])?;
         }
-        tx.execute("UPDATE interaction_comment_verification SET state='pending',attempts=0,sent_at_ms=?2,next_at_ms=?2,deadline_ms=?2+120000,reason=NULL,revision=revision+1 WHERE assignment_id=?1 AND owner IS NULL AND state='needsReview'",params![assignment,now])?;
+        tx.execute(&format!("UPDATE interaction_comment_verification SET state='pending',attempts=0,sent_at_ms=?2,next_at_ms=?2,deadline_ms=?2+120000,reason=NULL,owner=NULL,lease_until_ms=NULL,revision=revision+1 WHERE assignment_id=?1 AND {REOPENABLE}"),params![assignment,now,now])?;
         tx.execute("UPDATE interaction_assignments SET state='uncertain',revision=revision+1 WHERE id=?1 AND state='succeeded'",[assignment])?;
         tx.execute("UPDATE tiktok_action_runs SET state='uncertain',revision=revision+1 WHERE assignment_id=?1 AND action_kind='comment' AND state='confirmed'",[assignment])?;
         tx.execute("UPDATE interaction_campaigns SET state='partial',revision=revision+1 WHERE id=?1 AND state='succeeded'",[campaign])?;

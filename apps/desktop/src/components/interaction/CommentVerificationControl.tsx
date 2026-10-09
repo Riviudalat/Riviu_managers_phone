@@ -11,7 +11,7 @@ export function CommentVerificationControl({campaignId,assignmentId,value,disabl
   return <div className="interaction-readback" aria-label="Xác minh bình luận">
     <small role="status">{label}{value.state==="pending"?` · lần ${value.attempts}/3`:""}</small>
     {value.nextCheckAtMs&&value.state==="pending"?<small>Kiểm tra tiếp lúc {new Date(value.nextCheckAtMs).toLocaleTimeString("vi-VN")}</small>:null}
-    {value.reason&&value.state==="needsReview"?<small>{value.reason.startsWith("legacy_missing_evidence")?"Lịch sử thiếu bằng chứng đọc lại.":value.reason.includes("account")||value.reason.includes("author")?"Chưa đối chiếu được tài khoản của người đăng.":value.reason.includes("parent")?"Chưa thấy đúng nhánh bình luận cha.":value.reason.includes("not_visible")?"Chưa tìm thấy bình luận trong danh sách đã đọc.":"Chưa đủ bằng chứng sau các lần kiểm tra. Bạn có thể yêu cầu đọc lại."}</small>:null}
+    {value.reason&&value.state==="needsReview"?<small>{value.reason.startsWith("legacy_missing_evidence")?"Lịch sử thiếu bằng chứng đọc lại.":value.reason.startsWith("expired_unobserved")?"Hết hạn, chưa quan sát. Bạn có thể yêu cầu đọc lại.":value.reason.includes("account")||value.reason.includes("author")?"Chưa đối chiếu được tài khoản của người đăng.":value.reason.includes("parent")?"Chưa thấy đúng nhánh bình luận cha.":value.reason.includes("not_visible")?"Chưa tìm thấy bình luận trong danh sách đã đọc.":"Chưa đủ bằng chứng sau các lần kiểm tra. Bạn có thể yêu cầu đọc lại."}</small>:null}
     {value.state==="needsReview"?<button type="button" className="btn btn-sm" disabled={disabled||busy} onClick={()=>void check()}>{busy?"Đang yêu cầu…":"Đọc lại bình luận"}</button>:null}
     {error?<small role="alert">{error}</small>:null}
   </div>;

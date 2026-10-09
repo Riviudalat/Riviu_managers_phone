@@ -237,7 +237,7 @@ pub async fn interaction_readback(
 
 /// What one phone read off a post, and what that means for the numbers asked for.
 #[tauri::command]
-pub fn interaction_verify_comment(
+pub async fn interaction_verify_comment(
     state: State<'_, AppState>,
     campaign_id: String,
     assignment_id: String,
@@ -256,7 +256,8 @@ pub fn interaction_verify_comment(
     if !state.control.reports_element_bounds(&row.actor_udid) {
         return Err(interaction_error("Đọc lại bình luận cần máy Android"));
     }
-    let result = state
+    let device_id = row.actor_udid.clone();
+    let mut result = state
         .db
         .request_comment_verification(&campaign_id, &assignment_id)
         .map_err(interaction_error)?;
@@ -264,6 +265,28 @@ pub fn interaction_verify_comment(
         campaign_id,
         revision: revision(),
     });
+    // Manual acceptance freezes the background worker, so the operator's request runs the
+    // read-only observation for this one assignment here. Nothing else is observed.
+    if state.comment_verifications.is_none()
+        && state.dev_acceptance.automatic_device_workers_frozen()
+        && result.state == riviu_core::comment_verification::VerificationState::Pending
+    {
+        riviu_core::comment_verification::worker::verify_assignment(
+            state.db.clone(),
+            state.control.clone(),
+            state.events.clone(),
+            state.artifacts_dir.clone(),
+            &assignment_id,
+            &device_id,
+        )
+        .await
+        .map_err(interaction_error)?;
+        result = state
+            .db
+            .comment_verification(&assignment_id)
+            .map_err(interaction_error)?
+            .ok_or_else(|| interaction_error("Thiếu trạng thái đọc lại bình luận"))?;
+    }
     Ok(result)
 }
 

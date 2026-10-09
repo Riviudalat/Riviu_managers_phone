@@ -90,6 +90,54 @@ impl VerificationWorker {
     }
 }
 
+/// Operator-started readback of one assignment when no background worker runs (manual
+/// acceptance). It follows the worker's schedule, claim, lease and CAS settlement inside
+/// the same 120 s window and at most three attempts. It only reads; it never sends.
+pub async fn verify_assignment(
+    db: Arc<Database>,
+    control: Arc<DeviceControlPlane>,
+    events: EventBus,
+    artifacts: PathBuf,
+    assignment_id: &str,
+    device_id: &str,
+) -> anyhow::Result<()> {
+    let stop = Arc::new(AtomicBool::new(false));
+    for _ in 0..3 {
+        let Some(view) = db.comment_verification(assignment_id)? else {
+            break;
+        };
+        let (Some(next), Some(deadline)) = (view.next_check_at_ms, view.deadline_ms) else {
+            break;
+        };
+        if view.state != VerificationState::Pending || next >= deadline {
+            break;
+        }
+        let wait = next - chrono::Utc::now().timestamp_millis();
+        if wait > 0 {
+            tokio::time::sleep(Duration::from_millis(wait as u64)).await;
+        }
+        anyhow::ensure!(
+            control.current_work_owner(device_id).is_none(),
+            "Máy đang bận việc khác; chưa đọc lại bình luận"
+        );
+        let Some(job) =
+            db.claim_comment_verification(assignment_id, chrono::Utc::now().timestamp_millis())?
+        else {
+            break;
+        };
+        run_job(
+            db.clone(),
+            control.clone(),
+            events.clone(),
+            artifacts.clone(),
+            job,
+            stop.clone(),
+        )
+        .await;
+    }
+    Ok(())
+}
+
 async fn observe(
     control: &DeviceControlPlane,
     job: &VerificationJob,
