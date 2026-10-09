@@ -225,6 +225,20 @@ const SWIPE_SETTLE: Duration = Duration::from_millis(700);
 const RAIL_RETURN_WINDOW: Duration = Duration::from_millis(2_600);
 const RAIL_RETURN_POLL: Duration = Duration::from_millis(300);
 
+/// How long a railless card that directly follows an unproven swipe gets to draw its rail
+/// before it is swiped past.
+///
+/// Observed 09/10/2026 on box 31–50 (`ce0317139ca344520c`, `ce071827715f321b05`,
+/// `ce011711c354be2005`, `ce031713b064841e0c` and `ce0417141d4decde0c`; Galaxy S8+,
+/// `com.zhiliaoapp.musically` / en): fourteen times a swipe stayed unproven through
+/// [`SWIPE_SETTLE`] + [`RAIL_RETURN_WINDOW`], and the next pass, about 2.2 s later, found
+/// the feed tab but no rail. It swiped that card away unwatched, the swipe after it was
+/// proven, and one card cost two passes. Five of six phones spent all 15 swipes and ended on
+/// 8–11 videos. The logs only show the rail still missing at least 5.5 s after the swipe.
+/// The 6 s bound is the round-2 fix plan's figure, not a measured return time. A card that
+/// has still not drawn by then is swiped past as before.
+const LATE_RAIL_WINDOW: Duration = Duration::from_millis(6_000);
+
 /// Read `(current, total)` out of a photo post's page counter.
 ///
 /// The counter is **three adjacent nodes** — `"1"`, `" / "`, `"5"` — not one string, which
@@ -2038,6 +2052,35 @@ async fn await_first_rail(run: &HierarchyRun<'_>, stop: &AtomicBool) -> anyhow::
     Ok(())
 }
 
+/// Wait for the rail of a card that came up railless right after an unproven swipe.
+///
+/// Bounded by [`LATE_RAIL_WINDOW`] and the Stop flag. A read error stays an error, never an
+/// empty rail.
+async fn await_late_rail(
+    run: &HierarchyRun<'_>,
+    stop: &AtomicBool,
+) -> anyhow::Result<ReadWaitResult<PostFingerprint>> {
+    let deadline = tokio::time::Instant::now() + LATE_RAIL_WINDOW;
+    loop {
+        sleep_interruptible(
+            RAIL_RETURN_POLL.min(deadline.saturating_duration_since(tokio::time::Instant::now())),
+            stop,
+        )
+        .await;
+        match read_before_deadline(read_fingerprint(run.session, run.labels), deadline, stop)
+            .await?
+        {
+            ReadWaitResult::Ready(card) if !card.is_empty() => {
+                return Ok(ReadWaitResult::Ready(card));
+            }
+            ReadWaitResult::Ready(_) => {}
+            ended @ (ReadWaitResult::Cancelled | ReadWaitResult::DeadlineExceeded) => {
+                return Ok(ended);
+            }
+        }
+    }
+}
+
 /// Wait for the feed to be on screen. `false` means it never was.
 ///
 /// Cheap in the ordinary case — TikTok already on the feed answers on the first query and
@@ -2401,6 +2444,10 @@ pub(super) async fn run_feed(
     // whose card fingerprint matches this one spends no interaction; it only tries to leave.
     // Cleared the moment a swipe is proven to have changed the card.
     let mut last_acted_fingerprint: Option<PostFingerprint> = None;
+    // The railed card the previous pass swiped away from without proof. Only the very next
+    // pass may use it: it waits for a railless card's rail instead of spending the pass on
+    // swiping it past, and counts the earlier swipe only when the rail returns on another card.
+    let mut unproven_swipe_from: Option<PostFingerprint> = None;
     let mut outcome = Outcome::Done;
     // Latched so an operator who switches comments on mid-run is told once why nothing
     // happens, instead of watching a switch that reports nothing at all.
@@ -2456,6 +2503,7 @@ pub(super) async fn run_feed(
             break;
         }
         policy.begin_post();
+        let left_unproven = unproven_swipe_from.take();
 
         let (mood, mood_changed) = moods.next();
         if mood_changed {
@@ -2507,7 +2555,52 @@ pub(super) async fn run_feed(
         // label — no LIVE post has come past to read it off — so absence of the
         // comment control is what identifies these cards there.
         let live_label = present(run.session, run.labels, TikTokControl::LiveRoom).await;
-        let no_rail = !present(run.session, run.labels, TikTokControl::Comments).await;
+        let mut no_rail = !present(run.session, run.labels, TikTokControl::Comments).await;
+        // **Right after an unproven swipe, a railless card is usually the incoming one still
+        // drawing.** The feed tab is on screen, so the tree is not empty; only the rail is
+        // missing. Swiping it past charged a second attempt for one card and left it unwatched
+        // (see [`LATE_RAIL_WINDOW`]). Wait for its rail first, within that finite window.
+        if no_rail && !live_label {
+            if let Some(left) = left_unproven.as_ref() {
+                report(
+                    status,
+                    "vuốt trước chưa chứng minh được, thẻ hiện tại chưa có thanh hành động — chờ thanh hiện lại trước khi vuốt tiếp".into(),
+                );
+                match await_late_rail(&run, stop).await {
+                    Ok(ReadWaitResult::Ready(card)) => {
+                        no_rail = false;
+                        // Unproven is not advanced: the earlier swipe counts only now that a
+                        // railed card reads differently from the one it left, by the full
+                        // fingerprint and by the stable author/sound identity.
+                        if card != *left && !left.same_card_for_duplicate_guard(&card) {
+                            stuck_swipes = 0;
+                            status.videos_done += 1;
+                            report(
+                                status,
+                                "thẻ mới đã hiện thanh hành động — lượt vuốt trước đã đổi thẻ"
+                                    .into(),
+                            );
+                            if let Some(rest) = policy.rest_after_video() {
+                                report(status, format!("nghỉ tự nhiên {}s", rest.as_secs()));
+                                sleep_interruptible(rest, stop).await;
+                            }
+                        }
+                    }
+                    Ok(ReadWaitResult::Cancelled) => {
+                        outcome = Outcome::Stopped;
+                        break;
+                    }
+                    Ok(ReadWaitResult::DeadlineExceeded) => {}
+                    Err(error) => {
+                        report(status, format!("không đọc được thanh hành động: {error}"));
+                    }
+                }
+                if stop.load(Ordering::Relaxed) {
+                    outcome = Outcome::Stopped;
+                    break;
+                }
+            }
+        }
         if live_label || no_rail {
             report(
                 status,
@@ -3038,6 +3131,9 @@ pub(super) async fn run_feed(
             }
         } else {
             stuck_swipes += 1;
+            if !before.is_empty() {
+                unproven_swipe_from = Some(before.clone());
+            }
             report(
                 status,
                 format!("vuốt chưa chứng minh được đổi thẻ ({stuck_swipes}/{STUCK_SWIPE_LIMIT})"),
@@ -3058,6 +3154,8 @@ pub(super) async fn run_feed(
                 // that is still stuck afterwards is telling us something a second restart
                 // will not change.
                 restarted = true;
+                // The card after a restart is no evidence about the swipe that preceded it.
+                unproven_swipe_from = None;
                 report(status, "feed không đổi thẻ — khởi động lại TikTok".into());
                 let _ = run.session.restart_app(bundle_id).await;
                 if await_feed(&run, stop, status, report).await {
