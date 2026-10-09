@@ -40,19 +40,35 @@ describe("agentStatusView", () => {
 });
 
 describe("summarizeBulkRepair", () => {
-  it("counts ready and error devices without UDIDs in the toast heading", () => {
-    const statuses = [
-      status("ready"),
-      status("ready"),
-      status("error", "stream unavailable"),
-    ];
+  const outcome = (status: AgentStatus, agentRepaired: boolean, helperRecoveryRequired = false) =>
+    ({ status, agentRepaired, helperRecoveryRequired });
 
-    const summary = summarizeBulkRepair(statuses);
+  it("counts repaired and failed devices without UDIDs in the toast heading", () => {
+    const summary = summarizeBulkRepair([
+      outcome(status("ready"), true),
+      outcome(status("ready"), true),
+      outcome(status("error", "stream unavailable"), false),
+    ]);
 
-    expect(summary.readyCount).toBe(2);
-    expect(summary.errorCount).toBe(1);
+    expect(summary.repairedCount).toBe(2);
+    expect(summary.failedCount).toBe(1);
+    expect(summary.helperPendingCount).toBe(0);
     expect(summary.attentionCount).toBe(1);
+    expect(summary.heading).toBe("Sửa agent: 2 máy đã sửa, 1 máy lỗi");
     expect(summary.heading).not.toContain("fixture-ready");
     expect(summary.heading).not.toContain("fixture-error");
+  });
+
+  it("reports a repaired agent separately from a helper that still needs recovery", () => {
+    // The latched helper failure overrides the cached status; the repair still succeeded.
+    const latched = status("repairRequired", "Riviu Helper: runtime qualification failed; recovery required (no action replay)");
+    const summary = summarizeBulkRepair([outcome(latched, true, true)]);
+
+    expect(summary.repairedCount).toBe(1);
+    expect(summary.failedCount).toBe(0);
+    expect(summary.helperPendingCount).toBe(1);
+    expect(summary.attentionCount).toBe(1);
+    expect(summary.heading).toBe("Sửa agent: 1 máy đã sửa, 0 máy lỗi");
+    expect(summary.message).toContain("Khôi phục helper");
   });
 });

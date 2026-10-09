@@ -1,4 +1,4 @@
-import type { AgentState, AgentStatus } from "./types";
+import type { AgentRepairOutcome, AgentState, AgentStatus } from "./types";
 
 type StatusTone = "ok" | "warn" | "danger" | "info";
 
@@ -10,8 +10,9 @@ export interface AgentStatusView {
 }
 
 export interface BulkRepairSummary {
-  readyCount: number;
-  errorCount: number;
+  repairedCount: number;
+  failedCount: number;
+  helperPendingCount: number;
   attentionCount: number;
   heading: string;
   message: string;
@@ -45,15 +46,23 @@ export function agentStatusView(status: AgentStatus): AgentStatusView {
   };
 }
 
-export function summarizeBulkRepair(statuses: AgentStatus[]): BulkRepairSummary {
-  const readyCount = statuses.filter((status) => status.state === "ready").length;
-  const errorCount = statuses.filter((status) => status.state === "error").length;
-  const attentionCount = statuses.length - readyCount;
+/**
+ * "Sửa agent" repairs the control agent only. A helper latched as failed overrides the
+ * cached status, so the outcome's own flags, not the status state, say whether it worked.
+ */
+export function summarizeBulkRepair(outcomes: AgentRepairOutcome[]): BulkRepairSummary {
+  const repairedCount = outcomes.filter((outcome) => outcome.agentRepaired).length;
+  const failedCount = outcomes.length - repairedCount;
+  const helperPendingCount = outcomes.filter((outcome) => outcome.agentRepaired && outcome.helperRecoveryRequired).length;
+  const helper = helperPendingCount > 0
+    ? ` ${helperPendingCount} máy đã sửa agent nhưng helper vẫn cần Khôi phục helper; Sửa agent không khôi phục helper.`
+    : "";
   return {
-    readyCount,
-    errorCount,
-    attentionCount,
-    heading: `Agent: ${readyCount} sẵn sàng, ${attentionCount} cần xử lý`,
-    message: `${readyCount} máy sẵn sàng; ${attentionCount} máy cần xử lý.`,
+    repairedCount,
+    failedCount,
+    helperPendingCount,
+    attentionCount: failedCount + helperPendingCount,
+    heading: `Sửa agent: ${repairedCount} máy đã sửa, ${failedCount} máy lỗi`,
+    message: `${repairedCount} máy đã sửa agent; ${failedCount} máy sửa lỗi.${helper}`,
   };
 }

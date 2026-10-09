@@ -1180,7 +1180,7 @@ function App() {
                         .filter((device) => device.status !== "disconnected")
                         .map((device) => device.udid);
                   if (!targets.length) {
-                    pushToast("warn", "Chưa có thiết bị", "Cắm iPhone qua USB rồi bấm Làm mới.");
+                    pushToast("warn", "Chưa có thiết bị", "Cắm điện thoại Android hoặc iPhone qua USB rồi bấm Làm mới.");
                     return;
                   }
                   const scope = selected.length ? "đã chọn" : "đang kết nối";
@@ -1193,15 +1193,18 @@ function App() {
                   try {
                     const repaired = await agentBulkRepair(targets);
                     // The command owns this repair outcome; cached readiness can predate
-                    // a failed repair and must never replace its per-device error.
+                    // a failed repair and must never replace its per-device error. A helper
+                    // latched as failed is a separate layer this repair does not touch.
                     const summary = summarizeBulkRepair(repaired);
-                    const failures = repaired
-                      .filter((status) => status.state !== "ready")
-                      .map((status) => `${automationDeviceLabels.get(status.udid) ?? status.udid}: ${describeError(status.message || "Chưa xác nhận sửa thành công.")}`);
+                    const label = (udid: string) => automationDeviceLabels.get(udid) ?? udid;
+                    const details = repaired.flatMap(({ status, agentRepaired, helperRecoveryRequired }) =>
+                      !agentRepaired ? [`${label(status.udid)}: ${describeError(status.message || "Chưa xác nhận sửa thành công.")}`]
+                        : helperRecoveryRequired ? [`${label(status.udid)}: đã sửa agent; helper vẫn cần Khôi phục helper.`]
+                          : []);
                     pushToast(
                       summary.attentionCount > 0 ? "warn" : "ok",
                       summary.heading,
-                      [summary.message, ...failures].join(" "),
+                      [summary.message, ...details].join(" "),
                     );
                     await reload();
                   } catch (error) {

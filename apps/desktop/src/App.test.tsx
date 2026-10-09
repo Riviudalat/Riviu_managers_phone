@@ -394,17 +394,17 @@ describe("device operational identity", () => {
     vi.mocked(api.listDeviceMetas).mockResolvedValue([{ udid: androidPhone.udid, number: 8, alias: "Máy từ xa", notes: "", tags: [] }]);
     vi.mocked(api.listDeviceWorkStates).mockResolvedValue([]);
     vi.mocked(api.agentListStatuses).mockResolvedValue([ready]);
-    vi.mocked(api.agentBulkRepair).mockResolvedValue([{ ...ready, state: "error", message: "DeviceControlFailed: lỗi sửa fixture" }]);
+    vi.mocked(api.agentBulkRepair).mockResolvedValue([{ status: { ...ready, state: "error", message: "DeviceControlFailed: lỗi sửa fixture" }, agentRepaired: false, helperRecoveryRequired: false }]);
     try {
       render(<App />);
       await screen.findByText("Máy từ xa");
       await userEvent.click(screen.getByText("Bảo trì", { selector: "summary" }));
       await userEvent.click(screen.getByRole("button", { name: "Sửa Riviu Agent" }));
       await clickConfirmation("Sửa agent");
-      expect(await screen.findByText("Agent: 0 sẵn sàng, 1 cần xử lý")).toBeVisible();
+      expect(await screen.findByText("Sửa agent: 0 máy đã sửa, 1 máy lỗi")).toBeVisible();
       const activity = await openActivityDetails();
       expect(within(activity).getByText(/Máy 8.*Máy từ xa.*Chưa điều khiển được thiết bị: lỗi sửa fixture/)).toBeVisible();
-      expect(screen.queryByText("Agent: 1 sẵn sàng, 0 cần xử lý")).toBeNull();
+      expect(screen.queryByText("Sửa agent: 1 máy đã sửa, 0 máy lỗi")).toBeNull();
       expect(api.agentBulkRepair).toHaveBeenCalledExactlyOnceWith([androidPhone.udid]);
       expect(api.agentHelperMaintenancePrepare).not.toHaveBeenCalled();
       expect(api.agentHelperMaintenanceExecute).not.toHaveBeenCalled();

@@ -268,6 +268,15 @@ export interface AgentStatus {
   message: string | null;
 }
 
+/** One device's "Sửa agent" result (`AgentRepairOutcome` in agent_commands.rs). */
+export interface AgentRepairOutcome {
+  status: AgentStatus;
+  /** The install-only agent repair itself was proved on this attempt. */
+  agentRepaired: boolean;
+  /** The Android helper is still latched as failed; only "Khôi phục helper" addresses it. */
+  helperRecoveryRequired: boolean;
+}
+
 export interface AgentRuntimeView {
   settings: AgentSettings;
   tokenConfigured: boolean;

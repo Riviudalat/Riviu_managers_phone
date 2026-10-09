@@ -44,6 +44,7 @@ import type {
   AnalyticsSummary,
   OperationDeviceLog,
   AppEvent,
+  AgentRepairOutcome,
   AgentRuntimeView,
   AgentSettings,
   AgentStatus,
@@ -769,7 +770,7 @@ export async function agentRepair(udid: string) {
 }
 
 export async function agentBulkRepair(udids: string[]) {
-  return invoke<AgentStatus[]>("agent_bulk_repair", { udids });
+  return invoke<AgentRepairOutcome[]>("agent_bulk_repair", { udids });
 }
 
 export interface HelperMaintenancePlan {

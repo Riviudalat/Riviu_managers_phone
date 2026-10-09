@@ -369,26 +369,56 @@ async fn repair_with_driver(driver: &dyn DeviceDriver, udid: &str) -> anyhow::Re
 async fn bulk_repair_with_driver(
     driver: &dyn DeviceDriver,
     udids: Vec<String>,
-) -> Vec<AgentStatus> {
-    let mut statuses = Vec::with_capacity(udids.len());
+) -> Vec<AgentRepairOutcome> {
+    let mut outcomes = Vec::with_capacity(udids.len());
     for udid in udids {
-        let status = match repair_with_driver(driver, &udid).await {
-            Ok(status) => status,
-            Err(_) => {
-                let mut status = driver.cached_agent_status(&udid);
-                status.state = riviu_core::AgentState::Error;
-                status.auth_ready = false;
-                status.mjpeg_ready = false;
-                status.session_ready = false;
-                status
-                    .message
-                    .get_or_insert_with(|| "Agent repair failed".to_string());
-                status
-            }
-        };
-        statuses.push(status);
+        let result = repair_with_driver(driver, &udid).await.map_err(|error| error.to_string());
+        outcomes.push(repair_outcome(result, || driver.cached_agent_status(&udid)));
     }
-    statuses
+    outcomes
+}
+
+/// One device's "Sửa agent" result.
+///
+/// The install-only repair (UiAutomator2 on Android, Riviu Agent on iOS) and the Android
+/// helper are separate layers. A latched helper failure overrides the cached status, so the
+/// status alone made every Android repair read as failed even when the agent was repaired.
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AgentRepairOutcome {
+    pub status: AgentStatus,
+    /// The install-only repair itself was proved on this attempt.
+    pub agent_repaired: bool,
+    /// The helper is still latched as failed; only "Khôi phục helper" addresses that.
+    pub helper_recovery_required: bool,
+}
+
+fn helper_setup_latched(status: &AgentStatus) -> bool {
+    status.message.as_deref()
+        .is_some_and(|message| message.starts_with(riviu_android_driver::driver::HELPER_SETUP_FAILURE))
+}
+
+fn repair_outcome(
+    result: Result<AgentStatus, String>,
+    cached: impl FnOnce() -> AgentStatus,
+) -> AgentRepairOutcome {
+    match result {
+        Ok(status) => AgentRepairOutcome {
+            helper_recovery_required: helper_setup_latched(&status),
+            agent_repaired: true,
+            status,
+        },
+        Err(message) => {
+            let mut status = cached();
+            let helper_recovery_required = helper_setup_latched(&status);
+            status.state = riviu_core::AgentState::Error;
+            status.auth_ready = false;
+            status.mjpeg_ready = false;
+            status.session_ready = false;
+            status.message = Some(message);
+            AgentRepairOutcome { status, agent_repaired: false, helper_recovery_required }
+        }
+    }
 }
 
 async fn preflight_with_control(
@@ -415,24 +445,13 @@ async fn repair_with_control(
 async fn bulk_repair_with_control(
     control: &DeviceControlPlane,
     udids: Vec<String>,
-) -> Vec<AgentStatus> {
-    let mut statuses = Vec::with_capacity(udids.len());
+) -> Vec<AgentRepairOutcome> {
+    let mut outcomes = Vec::with_capacity(udids.len());
     for udid in udids {
-        let status = match repair_with_control(control, &udid).await {
-            Ok(status) => status,
-            Err(error) => {
-                let mut status = control.cached_agent_status(&udid);
-                status.state = riviu_core::AgentState::Error;
-                status.auth_ready = false;
-                status.mjpeg_ready = false;
-                status.session_ready = false;
-                status.message = Some(error.to_string());
-                status
-            }
-        };
-        statuses.push(status);
+        let result = repair_with_control(control, &udid).await.map_err(|error| error.to_string());
+        outcomes.push(repair_outcome(result, || control.cached_agent_status(&udid)));
     }
-    statuses
+    outcomes
 }
 
 #[tauri::command]
@@ -495,7 +514,7 @@ pub async fn agent_repair(
 pub async fn agent_bulk_repair(
     state: State<'_, AppState>,
     udids: Vec<String>,
-) -> Result<Vec<AgentStatus>, CommandError> {
+) -> Result<Vec<AgentRepairOutcome>, CommandError> {
     let _admission = state.ensure_accepting_work()?;
     Ok(bulk_repair_with_control(&state.control, udids).await)
 }
@@ -846,9 +865,33 @@ mod tests {
 
         assert_eq!(driver.agent_repair_calls(), 0);
         assert_eq!(statuses.len(), 3);
-        assert_eq!(statuses[0].state, AgentState::Ready);
-        assert_eq!(statuses[1].state, AgentState::Error);
-        assert_eq!(statuses[2].state, AgentState::Ready);
-        assert_eq!(statuses[1].udid, "MOCK-IPHONE-02");
+        assert_eq!(statuses[0].status.state, AgentState::Ready);
+        assert_eq!(statuses[1].status.state, AgentState::Error);
+        assert_eq!(statuses[2].status.state, AgentState::Ready);
+        assert_eq!(statuses[1].status.udid, "MOCK-IPHONE-02");
+        assert_eq!(statuses.iter().map(|outcome| outcome.agent_repaired).collect::<Vec<_>>(), [true, false, true]);
+        assert!(statuses.iter().all(|outcome| !outcome.helper_recovery_required));
+    }
+
+    #[test]
+    fn bulk_repair_reports_agent_repair_separately_from_a_latched_helper() {
+        let latched = format!("{}; stage=runtime_acquisition; category=recovery_required; fixture",
+            riviu_android_driver::driver::HELPER_SETUP_FAILURE);
+        let mut cached = AgentStatus::unknown("fixture-android");
+        cached.state = AgentState::RepairRequired;
+        cached.message = Some(latched.clone());
+        // UiAutomator2 repaired, helper still latched: not a repair failure.
+        let repaired = repair_outcome(Ok(cached.clone()), || panic!("success keeps its status"));
+        assert!(repaired.agent_repaired && repaired.helper_recovery_required);
+        assert_eq!(repaired.status.message.as_deref(), Some(latched.as_str()));
+        // A failed repair reports its own error and still names the helper latch.
+        let failed = repair_outcome(Err("fixture repair error".into()), || cached.clone());
+        assert!(!failed.agent_repaired && failed.helper_recovery_required);
+        assert_eq!(failed.status.state, AgentState::Error);
+        assert_eq!(failed.status.message.as_deref(), Some("fixture repair error"));
+        let json = serde_json::to_value(&repaired).unwrap();
+        assert_eq!(json["agentRepaired"], true);
+        assert_eq!(json["helperRecoveryRequired"], true);
+        assert_eq!(json["status"]["udid"], "fixture-android");
     }
 }
