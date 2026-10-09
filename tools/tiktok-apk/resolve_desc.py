@@ -26,7 +26,9 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 import nxstring  # noqa: E402
 
 TOKEN = re.compile(r"^@(\d{9,10})$")
-NODE = re.compile(r"<node\b([^>]*)>")
+# Any start tag: plain dumps use <node>, the class-name form (UiAutomator2 page source)
+# names each element after its class, e.g. <android.widget.ImageView ...>.
+NODE = re.compile(r"<(?![?!/])[\w.$-]+([^>]*)>")
 ATTR = re.compile(r'([\w-]+)="([^"]*)"')
 SCAN_SUFFIXES = (".xml", ".fixture", ".txt")
 
@@ -39,7 +41,7 @@ def parse_token(token: str) -> int:
 
 
 def scan_text(text: str, source: str, found: dict[int, set[str]]) -> None:
-    """Collect tokens from text/content-desc attributes of uiautomator nodes."""
+    """Collect tokens from text/content-desc attributes of uiautomator elements in either tag form."""
     for node in NODE.finditer(text):
         attrs = dict(ATTR.findall(node.group(1)))
         resource_id = attrs.get("resource-id", "").split(":id/")[-1] or "-"
