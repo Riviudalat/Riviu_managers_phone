@@ -237,6 +237,9 @@ pub struct AndroidUiSession {
     helper: Option<HelperClient>,
     /// Monotonic ordering for successful full-tree reads made by this session.
     hierarchy_generation: AtomicU64,
+    /// The driver's instrumentation restart, for [`UiSession::recycle_read_session`]. Missing
+    /// means this session cannot recycle and refuses.
+    instrumentation: Option<crate::driver::InstrumentationRuntime>,
 }
 
 impl AndroidUiSession {
@@ -255,7 +258,16 @@ impl AndroidUiSession {
             screen: ScreenCache::seeded(screen),
             helper: None,
             hierarchy_generation: AtomicU64::new(0),
+            instrumentation: None,
         }
+    }
+
+    pub(crate) fn with_instrumentation(
+        mut self,
+        instrumentation: crate::driver::InstrumentationRuntime,
+    ) -> Self {
+        self.instrumentation = Some(instrumentation);
+        self
     }
 
     /// Share the driver's per-serial cache instead of this session's private one, so an
@@ -560,6 +572,11 @@ impl UiSession for AndroidUiSession {
     fn pin_read_session(&self) -> riviu_core::driver::ReadSessionPin {
         riviu_core::driver::ReadSessionPin::holding(self.agent.pin_reads())
     }
+    fn can_recycle_read_session(&self) -> bool {
+        self.instrumentation
+            .as_ref()
+            .is_some_and(|instrumentation| instrumentation.can_restart())
+    }
     async fn recycle_read_session(&self) -> anyhow::Result<()> {
         // No gesture may straddle the replacement, and an unsettled one keeps its session.
         let input = self.input_gate.lock().await;
@@ -568,7 +585,14 @@ impl UiSession for AndroidUiSession {
             !input.unknown,
             "session gesture settlement unknown; session kept"
         );
-        self.agent.recycle_for_owner().await
+        // A new POST /session on a blind server stays blind (phone 44, 2026-10-10), so the
+        // recycle restarts the instrumentation and moves this session onto the fresh one.
+        let instrumentation = self.instrumentation.as_ref().ok_or_else(|| {
+            anyhow!("phiên này không khởi động lại được UiAutomator; giữ phiên cũ")
+        })?;
+        instrumentation
+            .restart_for_read_owner(&self.serial, &self.agent)
+            .await
     }
     fn gui_compatibility_pack(
         &self,

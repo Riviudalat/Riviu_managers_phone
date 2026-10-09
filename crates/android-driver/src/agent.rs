@@ -581,13 +581,31 @@ impl AgentClient {
         AgentReadPin(Arc::clone(&self.read_pins))
     }
 
-    /// The read-side replacement, asked for by the pinned owner itself at its own observation
-    /// boundary. The owner has dropped every target, and the new session identity voids
-    /// whatever it kept. No request is replayed here.
-    pub(crate) async fn recycle_for_owner(&self) -> anyhow::Result<()> {
+    pub(crate) fn base(&self) -> &str {
+        &self.base
+    }
+
+    /// Move this client, and every clone of it, onto `fresh`'s session after the pinned owner's
+    /// instrumentation restart. The owner has dropped every target, and the new session
+    /// identity voids whatever it kept. No request is replayed here.
+    pub(crate) fn adopt_session(&self, fresh: &AgentClient) -> anyhow::Result<()> {
+        anyhow::ensure!(
+            fresh.base == self.base,
+            "phiên UiAutomator mới của máy {} ở cổng khác; giữ phiên cũ",
+            self.serial
+        );
+        let identity = fresh.session_identity();
+        let mut current = self.session_id.lock();
+        anyhow::ensure!(
+            *current != identity,
+            "UiAutomator trên máy {} trả lại đúng phiên cũ sau khi khởi động lại",
+            self.serial
+        );
         tracing::warn!(serial = %self.serial, pins = self.read_pins.load(Ordering::SeqCst),
-            "replacing a pinned agent session at its owner's request");
-        self.recreate_session().await
+            previous = %current, fresh = %identity,
+            "a pinned agent session moved to the restarted instrumentation at its owner's request");
+        *current = identity;
+        Ok(())
     }
 
     fn reads_pinned(&self) -> bool {

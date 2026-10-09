@@ -418,41 +418,6 @@ impl AndroidDriver {
         active
     }
 
-    async fn active_foreign_instrumentations(&self, serial: &str) -> Vec<String> {
-        let Ok(dump) = self.adb.shell(serial, "dumpsys activity").await else {
-            return Vec::new();
-        };
-        Self::active_instrumentations(&dump, &[AGENT_PACKAGE, AGENT_TEST_PACKAGE])
-    }
-
-    async fn refuse_active_foreign_instrumentation(&self, serial: &str) -> anyhow::Result<()> {
-        let active = self.active_foreign_instrumentations(serial).await;
-        anyhow::ensure!(
-            active.is_empty(),
-            "máy {serial} đang chạy UiAutomator của công cụ khác: {}. Riviu không khởi động hoặc \
-             restart agent để tránh tranh UiAutomation; hãy dừng công cụ kia rồi thử lại",
-            active.join(", ")
-        );
-        Ok(())
-    }
-
-    /// Report observed live runners. Installed packages do not prove an owner.
-    /// A failed ActivityManager read leaves the cause unknown.
-    async fn foreign_instrumentation_note(&self, serial: &str) -> String {
-        let Ok(dump) = self.adb.shell(serial, "dumpsys activity").await else {
-            return " Chưa đọc được chủ instrumentation; chưa xác định nguyên nhân.".into();
-        };
-        let foreign = Self::active_instrumentations(&dump, &[AGENT_PACKAGE, AGENT_TEST_PACKAGE]);
-        if foreign.is_empty() {
-            return " Không thấy instrumentation khác đang hoạt động; cây UI của app có thể chưa phản hồi.".into();
-        }
-        format!(
-            " ActivityManager ghi nhận instrumentation khác đang hoạt động: {}. Hãy dừng phiên \
-             điều khiển đó trước khi thử lại.",
-            foreign.join(", ")
-        )
-    }
-
     /// The instrumentation component this driver starts to bring the agent up.
     pub(super) fn agent_runner() -> String {
         format!("{AGENT_TEST_PACKAGE}/{AGENT_RUNNER}")
@@ -608,6 +573,7 @@ impl AndroidDriver {
             // `new` still takes a tuple so the public constructor is unchanged; the shared
             // handle replaces the private cache it seeds.
             AndroidUiSession::new(agent, self.adb.clone(), udid.to_string(), (0.0, 0.0))
+                .with_instrumentation(self.instrumentation_runtime())
                 .with_screen_cache(screen)
                 .with_helper(helper)
                 .with_gui_reasoner(self.gui_reasoner.lock().clone())
@@ -712,6 +678,7 @@ impl AndroidDriver {
         self.verify_adb_transport(serial).await?;
         self.forward(serial).await?;
         let base = self.agent_base(serial);
+        let runtime = self.instrumentation_runtime();
 
         // Reuse the session we already have. Opening a second one costs the whole
         // fleet: see the note on `Self::agents`.
@@ -737,9 +704,9 @@ impl AndroidDriver {
                     let found = self.adb.shell(serial, &format!("pm path {package}")).await?;
                     anyhow::ensure!(found.lines().any(|line|line.trim().starts_with("package:")), "diagnostic runner APK absent; no install");
                 }
-                return self.instrument_and_wait(serial, &base).await;
+                return runtime.instrument_and_wait(serial, &base).await;
             }
-            let agent = self.open_and_cache_agent(serial, &base).await?;
+            let agent = runtime.open_and_cache_agent(serial, &base).await?;
             anyhow::ensure!(agent.is_alive().await, "Diagnostic refuses a blind UiAutomator session; no restart");
             return Ok(agent);
         }
@@ -772,7 +739,7 @@ impl AndroidDriver {
             // A server that answers `/status` and will not give a session is wedged whatever
             // the message says, so the failure is not inspected: it is treated exactly like a
             // blind session.
-            let opened = self.open_and_cache_agent(serial, &base).await;
+            let opened = runtime.open_and_cache_agent(serial, &base).await;
             match opened {
                 Ok(agent) if agent.is_alive().await => return Ok(agent),
                 Ok(agent) => {
@@ -793,7 +760,7 @@ impl AndroidDriver {
             // window races the same holder for another twenty seconds of the operator's
             // time. Failing here is not giving up — it is the difference between one clear
             // message and a minute of silence.
-            if let Some(since) = self.since_instrumentation_restart(serial) {
+            if let Some(since) = runtime.since_instrumentation_restart(serial) {
                 if since < INSTRUMENTATION_RESTART_COOLDOWN {
                     let quiet_for = INSTRUMENTATION_RESTART_COOLDOWN - since;
                     // Said out loud, not just returned. The error reaches whoever made this
@@ -805,7 +772,7 @@ impl AndroidDriver {
                         quiet_for_s = quiet_for.as_secs(),
                         "refusing to restart the instrumentation again inside its cooldown"
                     );
-                    let note = self.foreign_instrumentation_note(serial).await;
+                    let note = runtime.foreign_instrumentation_note(serial).await;
                     anyhow::bail!(
                         "the agent on {serial} is listening but cannot read the accessibility \
                          tree, and its instrumentation was already restarted {:.0}s ago \
@@ -815,17 +782,19 @@ impl AndroidDriver {
                     );
                 }
             }
-            self.refuse_active_foreign_instrumentation(serial).await?;
-            let note = self.foreign_instrumentation_note(serial).await;
+            runtime
+                .refuse_active_foreign_instrumentation(serial)
+                .await?;
+            let note = runtime.foreign_instrumentation_note(serial).await;
             tracing::warn!(
                 serial,
                 "the agent answers /status but cannot read the accessibility tree — \
                  restarting the instrumentation.{note}"
             );
-            self.note_instrumentation_restart(serial);
+            runtime.note_instrumentation_restart(serial);
             let started = std::time::Instant::now();
-            self.restart_instrumentation(serial).await?;
-            let recovered = self.instrument_and_wait(serial, &base).await;
+            runtime.restart_instrumentation(serial).await?;
+            let recovered = runtime.instrument_and_wait(serial, &base).await;
             // Logged either way, because the cost of this path is the whole reason it now
             // has a cooldown and nobody should have to induce the fault to find it again.
             tracing::info!(
@@ -851,8 +820,168 @@ impl AndroidDriver {
             self.install_agent_apks(serial).await?;
         }
 
-        self.instrument_and_wait(serial, &base).await
+        runtime.instrument_and_wait(serial, &base).await
     }
+    /// Push and install both halves of the uiautomator2 instrumentation.
+    ///
+    /// Until 16/08/2026 this was a message telling the operator to install two APKs the
+    /// app did not ship. Measured on a freshly plugged 20-device Galaxy S8 box: video
+    /// worked on 20/20 because `scrcpy-server` is bundled and pushed, and control worked
+    /// on **0/20** because nothing pushed these. Telling someone to install a file that is
+    /// not in the box is not an error message, it is a missing feature.
+    ///
+    /// `-r -g -t`: reinstall over a stale copy, grant the runtime permissions the server
+    /// needs without a dialog, and allow a test-only APK -- the `androidTest` half is
+    /// built with `android:testOnly`, which `pm install` refuses by default.
+    async fn install_agent_apks(&self, serial: &str) -> anyhow::Result<()> {
+        let Some((server, test)) = self.agent_apks.as_ref() else {
+            return Err(anyhow!(
+                "the agent is not installed on {serial} and this build has no agent APK \
+                 to install. Set RIVIU_AGENT_SERVER_APK and RIVIU_AGENT_TEST_APK, or use \
+                 an installer that bundles them"
+            ));
+        };
+        // Server first: the test APK declares an instrumentation targeting the server's
+        // package, and installing it against a missing target fails on some builds.
+        for (apk, package) in [(server, AGENT_PACKAGE), (test, AGENT_TEST_PACKAGE)] {
+            let path = apk.to_string_lossy().to_string();
+            tracing::info!(serial, package, apk = %path, "installing the uiautomator2 agent");
+            self.adb
+                .run(
+                    &["-s", serial, "install", "-r", "-g", "-t", &path],
+                    INSTALL_TIMEOUT,
+                )
+                .await
+                .with_context(|| format!("install {package} on {serial} from {path}"))?;
+        }
+        // Prove it rather than trust the exit code: `pm install` has been observed to
+        // report success for a package that is not then listed.
+        let installed = self
+            .adb
+            .shell(serial, &format!("pm list packages {AGENT_PACKAGE}"))
+            .await
+            .unwrap_or_default();
+        anyhow::ensure!(
+            installed.contains(AGENT_PACKAGE),
+            "installed the agent on {serial} but `pm list packages` still does not show              {AGENT_PACKAGE}"
+        );
+        Ok(())
+    }
+    /// This driver's instrumentation recovery, shared with the sessions it opens.
+    pub(super) fn instrumentation_runtime(&self) -> InstrumentationRuntime {
+        InstrumentationRuntime {
+            adb: self.adb.clone(),
+            automatic_setup_allowed: self.automatic_setup_allowed,
+            agents: Arc::clone(&self.agents),
+            instrumentation_children: Arc::clone(&self.instrumentation_children),
+            instrumentation_restarts: Arc::clone(&self.instrumentation_restarts),
+        }
+    }
+}
+
+/// The driver's own instrumentation start/restart path, with its adb queue hold, its owned
+/// runner children, its session cache and its cooldown. Every field is shared with the driver,
+/// so a session that holds a clone restarts exactly as [`AndroidDriver::ensure_agent`] does and
+/// counts against the same cooldown.
+#[derive(Clone)]
+pub(crate) struct InstrumentationRuntime {
+    adb: AdbProgram,
+    automatic_setup_allowed: bool,
+    agents: Arc<Mutex<HashMap<String, AgentClient>>>,
+    instrumentation_children: Arc<InstrumentationChildren>,
+    instrumentation_restarts: Arc<Mutex<HashMap<String, std::time::Instant>>>,
+}
+
+impl InstrumentationRuntime {
+    /// Diagnostic scopes never restart the runner, so their sessions cannot recycle.
+    pub(crate) fn can_restart(&self) -> bool {
+        self.automatic_setup_allowed
+    }
+
+    /// Phone 44 (SM-G955F, Global 45.7.3/en, 2026-10-10, `target/source-probe/44-*.jsonl`):
+    /// once the sound sheet went blind, a new POST /session on the same server stayed blind.
+    /// Only force-stopping both halves and instrumenting afresh read the sheet again (5/5 at
+    /// ~1.9 s, Hot and For You). So the pinned owner's one recycle restarts the runner here and
+    /// moves `agent`, and every clone of it, onto the fresh server's session. The caller holds
+    /// the session's input gate; nothing is replayed.
+    pub(crate) async fn restart_for_read_owner(
+        &self,
+        serial: &str,
+        agent: &AgentClient,
+    ) -> anyhow::Result<()> {
+        anyhow::ensure!(
+            self.automatic_setup_allowed,
+            "phiên chẩn đoán không khởi động lại UiAutomator trên máy {serial}"
+        );
+        if let Some(since) = self.since_instrumentation_restart(serial) {
+            anyhow::ensure!(
+                since >= INSTRUMENTATION_RESTART_COOLDOWN,
+                "UiAutomator trên máy {serial} vừa được khởi động lại {:.0} giây trước; chưa khởi \
+                 động lại lần nữa trong {:.0} giây",
+                since.as_secs_f64(),
+                (INSTRUMENTATION_RESTART_COOLDOWN - since).as_secs_f64()
+            );
+        }
+        self.refuse_active_foreign_instrumentation(serial).await?;
+        let base = agent.base().to_string();
+        // Nothing may reuse the blind session while the runner restarts.
+        self.agents.lock().remove(serial);
+        tracing::warn!(
+            serial,
+            "restarting the instrumentation for a pinned read owner"
+        );
+        self.note_instrumentation_restart(serial);
+        let started = std::time::Instant::now();
+        self.restart_instrumentation(serial).await?;
+        let fresh = self.instrument_and_wait(serial, &base).await;
+        tracing::info!(
+            serial,
+            ms = started.elapsed().as_millis() as u64,
+            ok = fresh.is_ok(),
+            "instrumentation restart for a pinned read owner finished"
+        );
+        agent.adopt_session(&fresh?)?;
+        // The cache keeps the owner's client, so later sessions share its identity and pins.
+        self.agents.lock().insert(serial.to_string(), agent.clone());
+        Ok(())
+    }
+
+    async fn active_foreign_instrumentations(&self, serial: &str) -> Vec<String> {
+        let Ok(dump) = self.adb.shell(serial, "dumpsys activity").await else {
+            return Vec::new();
+        };
+        AndroidDriver::active_instrumentations(&dump, &[AGENT_PACKAGE, AGENT_TEST_PACKAGE])
+    }
+
+    async fn refuse_active_foreign_instrumentation(&self, serial: &str) -> anyhow::Result<()> {
+        let active = self.active_foreign_instrumentations(serial).await;
+        anyhow::ensure!(
+            active.is_empty(),
+            "máy {serial} đang chạy UiAutomator của công cụ khác: {}. Riviu không khởi động hoặc \
+             restart agent để tránh tranh UiAutomation; hãy dừng công cụ kia rồi thử lại",
+            active.join(", ")
+        );
+        Ok(())
+    }
+
+    /// Report observed live runners. Installed packages do not prove an owner.
+    /// A failed ActivityManager read leaves the cause unknown.
+    async fn foreign_instrumentation_note(&self, serial: &str) -> String {
+        let Ok(dump) = self.adb.shell(serial, "dumpsys activity").await else {
+            return " Chưa đọc được chủ instrumentation; chưa xác định nguyên nhân.".into();
+        };
+        let foreign =
+            AndroidDriver::active_instrumentations(&dump, &[AGENT_PACKAGE, AGENT_TEST_PACKAGE]);
+        if foreign.is_empty() {
+            return " Không thấy instrumentation khác đang hoạt động; cây UI của app có thể chưa phản hồi.".into();
+        }
+        format!(
+            " ActivityManager ghi nhận instrumentation khác đang hoạt động: {}. Hãy dừng phiên \
+             điều khiển đó trước khi thử lại.",
+            foreign.join(", ")
+        )
+    }
+
     /// How long since this device's instrumentation was last restarted for blindness.
     fn since_instrumentation_restart(&self, serial: &str) -> Option<Duration> {
         self.instrumentation_restarts
@@ -870,7 +999,10 @@ impl AndroidDriver {
         self.refuse_active_foreign_instrumentation(serial).await?;
         if !self.automatic_setup_allowed {
             let activity = self.adb.shell(serial, "dumpsys activity").await?;
-            anyhow::ensure!(Self::active_instrumentations(&activity, &[]).is_empty(), "diagnostic runner occupied immediately before startup; no restart");
+            anyhow::ensure!(
+                AndroidDriver::active_instrumentations(&activity, &[]).is_empty(),
+                "diagnostic runner occupied immediately before startup; no restart"
+            );
         }
         // **Hold this phone's adb queue for the whole startup.** The child outlives the call
         // so it must not hold a global slot, but while `am instrument -w` is taking
@@ -941,57 +1073,6 @@ impl AndroidDriver {
             AGENT_READY_WAIT.as_secs_f64()
         ))
     }
-    /// Stop the running instrumentation so the next start is a clean one.
-    ///
-    /// Force-stopping both halves is what actually recovered the phone by hand on
-    /// 12/08/2026 — `open_session` then re-instrumented and answered in 4040 ms. The
-    /// server holds `UiAutomation` for its lifetime, so nothing short of ending the
-    /// process gets it back.
-    /// Push and install both halves of the uiautomator2 instrumentation.
-    ///
-    /// Until 16/08/2026 this was a message telling the operator to install two APKs the
-    /// app did not ship. Measured on a freshly plugged 20-device Galaxy S8 box: video
-    /// worked on 20/20 because `scrcpy-server` is bundled and pushed, and control worked
-    /// on **0/20** because nothing pushed these. Telling someone to install a file that is
-    /// not in the box is not an error message, it is a missing feature.
-    ///
-    /// `-r -g -t`: reinstall over a stale copy, grant the runtime permissions the server
-    /// needs without a dialog, and allow a test-only APK -- the `androidTest` half is
-    /// built with `android:testOnly`, which `pm install` refuses by default.
-    async fn install_agent_apks(&self, serial: &str) -> anyhow::Result<()> {
-        let Some((server, test)) = self.agent_apks.as_ref() else {
-            return Err(anyhow!(
-                "the agent is not installed on {serial} and this build has no agent APK \
-                 to install. Set RIVIU_AGENT_SERVER_APK and RIVIU_AGENT_TEST_APK, or use \
-                 an installer that bundles them"
-            ));
-        };
-        // Server first: the test APK declares an instrumentation targeting the server's
-        // package, and installing it against a missing target fails on some builds.
-        for (apk, package) in [(server, AGENT_PACKAGE), (test, AGENT_TEST_PACKAGE)] {
-            let path = apk.to_string_lossy().to_string();
-            tracing::info!(serial, package, apk = %path, "installing the uiautomator2 agent");
-            self.adb
-                .run(
-                    &["-s", serial, "install", "-r", "-g", "-t", &path],
-                    INSTALL_TIMEOUT,
-                )
-                .await
-                .with_context(|| format!("install {package} on {serial} from {path}"))?;
-        }
-        // Prove it rather than trust the exit code: `pm install` has been observed to
-        // report success for a package that is not then listed.
-        let installed = self
-            .adb
-            .shell(serial, &format!("pm list packages {AGENT_PACKAGE}"))
-            .await
-            .unwrap_or_default();
-        anyhow::ensure!(
-            installed.contains(AGENT_PACKAGE),
-            "installed the agent on {serial} but `pm list packages` still does not show              {AGENT_PACKAGE}"
-        );
-        Ok(())
-    }
     pub(super) async fn stop_instrumentation(&self, serial: &str) -> anyhow::Result<()> {
         for package in [AGENT_PACKAGE, AGENT_TEST_PACKAGE] {
             if let Err(error) = self
@@ -1005,6 +1086,12 @@ impl AndroidDriver {
         Ok(())
     }
 
+    /// Stop the running instrumentation so the next start is a clean one.
+    ///
+    /// Force-stopping both halves is what actually recovered the phone by hand on
+    /// 12/08/2026 — `open_session` then re-instrumented and answered in 4040 ms. The
+    /// server holds `UiAutomation` for its lifetime, so nothing short of ending the
+    /// process gets it back.
     async fn restart_instrumentation(&self, serial: &str) -> anyhow::Result<()> {
         self.stop_instrumentation(serial).await?;
         // The port stays bound for a moment after the process goes.

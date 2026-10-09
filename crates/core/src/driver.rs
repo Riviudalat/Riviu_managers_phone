@@ -886,6 +886,11 @@ pub trait UiSession: Send + Sync {
     async fn recycle_read_session(&self) -> anyhow::Result<()> {
         unsupported("recycle_read_session")
     }
+    /// Whether [`Self::recycle_read_session`] can be asked at all. An owner that cannot recycle
+    /// keeps its existing route instead of ending a phase to ask.
+    fn can_recycle_read_session(&self) -> bool {
+        false
+    }
     fn gui_compatibility_pack(
         &self,
         _package: &str,

@@ -512,8 +512,9 @@ pub(super) async fn observe_direct(
             Ok(Err(error)) if error.is::<SoundStopped>() => return Err(error),
             Ok(Err(error)) => {
                 if unreadable_root(&error) {
+                    let recycle = tab_switch_recycle_due(plan);
                     note_unreadable_root();
-                    if tab_switch_recycle_due(plan) {
+                    if recycle {
                         return Err(error.context(SoundTabSwitchBlind));
                     }
                 }

@@ -975,10 +975,12 @@ pub struct AndroidDriver {
     /// root-`AccessibilityNodeInfo` timeout — 10 000+ ms and then `absent`, which
     /// reads exactly like a wrong locator. Force-stopping the instrumentation
     /// restored 118–425 ms immediately. See [`AgentClient::close`].
-    agents: Mutex<HashMap<String, AgentClient>>,
+    ///
+    /// Shared with each session's [`InstrumentationRuntime`], like the two fields below.
+    agents: Arc<Mutex<HashMap<String, AgentClient>>>,
     /// Exact host children for our long-running `adb shell am instrument -w` calls.
     /// Drained through `DeviceDriver::shutdown_owned_processes`; never kill adb by name.
-    instrumentation_children: agent::InstrumentationChildren,
+    instrumentation_children: Arc<agent::InstrumentationChildren>,
     /// serial -> when this device's instrumentation was last restarted for blindness.
     ///
     /// The restart itself is already bounded *within* one call: it happens once, and a
@@ -996,7 +998,7 @@ pub struct AndroidDriver {
     /// This is the "windowed cooldown on recovery actions" half of docs/re/genfarmer
     /// §12.6 — the half Riviu had for view producers (`VIEW_RESTART_BACKOFF`) and nowhere
     /// else.
-    instrumentation_restarts: Mutex<HashMap<String, std::time::Instant>>,
+    instrumentation_restarts: Arc<Mutex<HashMap<String, std::time::Instant>>>,
     /// serial -> the resolved TikTok package, memoised.
     ///
     /// `pm list packages` is a 1–2 s adb round trip per candidate and this sits on the
@@ -1059,6 +1061,7 @@ pub struct AndroidDriver {
 }
 
 mod agent;
+pub(crate) use agent::InstrumentationRuntime;
 mod device_ops;
 mod helper_setup;
 mod stream;
@@ -1554,9 +1557,9 @@ impl AndroidDriver {
             }),
             starting: Mutex::new(HashSet::new()),
             interaction: riviu_core::InteractionLifecycleRegistry::default(),
-            agents: Mutex::new(HashMap::new()),
-            instrumentation_children: agent::InstrumentationChildren::default(),
-            instrumentation_restarts: Mutex::new(HashMap::new()),
+            agents: Arc::new(Mutex::new(HashMap::new())),
+            instrumentation_children: Arc::new(agent::InstrumentationChildren::default()),
+            instrumentation_restarts: Arc::new(Mutex::new(HashMap::new())),
             tiktok_packages: Mutex::new(HashMap::new()),
             screens: Mutex::new(HashMap::new()),
             ports: Mutex::new(HashMap::new()),
@@ -1848,7 +1851,11 @@ impl DeviceDriver for AndroidDriver {
         };
         owned_serials.extend(instrumented.iter().cloned());
         for serial in &owned_serials {
-            if let Err(error) = self.stop_instrumentation(serial).await {
+            if let Err(error) = self
+                .instrumentation_runtime()
+                .stop_instrumentation(serial)
+                .await
+            {
                 failures.push(format!("stop UIAutomator on {serial}: {error}"));
             }
             for package in [AGENT_PACKAGE, AGENT_TEST_PACKAGE] {

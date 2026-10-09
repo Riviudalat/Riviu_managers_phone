@@ -4423,7 +4423,7 @@ where
                         {
                             break Err(error);
                         }
-                        // The sound stage's own one recycle after a tab switch already
+                        // The sound stage's own one instrumentation-restart recycle already
                         // re-read the sheet on the new session; bind that epoch.
                         if let Some(recycled) = crate::tiktok_sound::recycled_epoch(session) {
                             epoch = recycled;

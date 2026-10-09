@@ -115,23 +115,27 @@ fn unreadable_since_tab_tap() -> u32 {
         .unwrap_or(0)
 }
 
-/// Phone 44 (Global 45.7.3/en, SM-G955F, 2026-10-10, `target/source-probe/44-*.jsonl`): after a
-/// tab switch inside the sheet, every `/source` on that UiAutomator2 session waited ~10.5 s for
-/// a root that never came, on Hot and For You alike, while a fresh session read the same sheet in
-/// ~2 s on either tab. So an unreadable root after a tab tap ends the phase at its observation
-/// boundary, once per stage, and only inside a phase that re-reads the sheet afterwards.
+/// Phone 44 (Global 45.7.3/en, SM-G955F, 2026-10-10, `target/source-probe/44-*.jsonl`): once the
+/// sheet went blind, every `/source` on that UiAutomator2 server waited ~10.5 s for a root that
+/// never came, on Hot and For You alike, and a new POST /session on the same server stayed blind.
+/// A restarted instrumentation read the same sheet 5/5 at ~1.9 s on either tab. The 2026-10-09
+/// controller log shows 44's first currentXml read blind before any Hot tap, so opening the sheet
+/// can cause it too. So an unreadable root after a tab tap, or the stage's first unreadable root
+/// with no tab tap, ends the phase at its observation boundary, once per stage, and only inside a
+/// phase that re-reads the sheet. Ask before noting the read that found it.
 fn tab_switch_recycle_due(plan: SoundPickerPlan) -> bool {
     selection_recovery::measured(plan)
         && SOUND_BUDGET
             .try_with(|budget| {
                 budget.route.recycle_armed.load(Ordering::Relaxed)
-                    && budget.route.tab_tapped.load(Ordering::Relaxed)
+                    && (budget.route.tab_tapped.load(Ordering::Relaxed)
+                        || budget.route.unreadable_roots.load(Ordering::Relaxed) == 0)
                     && budget.route.tab_recycles.load(Ordering::Relaxed) < TAB_SWITCH_RECYCLE_CAP
             })
             .unwrap_or(false)
 }
 
-/// Mark an unreadable root after a tab tap for the arming phase. Every other error is unchanged,
+/// Mark an unreadable sheet root for the arming phase. Every other error is unchanged,
 /// and the original error stays in the chain for the existing classifiers.
 fn blind_after_tab_switch(plan: SoundPickerPlan, error: anyhow::Error) -> anyhow::Error {
     if unreadable_root(&error) && tab_switch_recycle_due(plan) {
@@ -141,12 +145,14 @@ fn blind_after_tab_switch(plan: SoundPickerPlan, error: anyhow::Error) -> anyhow
     }
 }
 
-/// Lowers `recycle_armed` however the armed phase ends.
+/// Lowers `recycle_armed` however the armed phase ends. A session that cannot recycle is never
+/// armed, so its phases keep their existing route.
 struct RecycleArmed;
 impl RecycleArmed {
-    fn arm() -> Self {
+    fn arm(session: &dyn UiSession) -> Self {
+        let armed = session.can_recycle_read_session();
         let _ = SOUND_BUDGET
-            .try_with(|budget| budget.route.recycle_armed.store(true, Ordering::Relaxed));
+            .try_with(|budget| budget.route.recycle_armed.store(armed, Ordering::Relaxed));
         Self
     }
 }
@@ -215,17 +221,18 @@ async fn recycle_after_tab_switch(
     crate::tiktok_composer::observation::void_binding();
     let _ = SOUND_BUDGET.try_with(|budget| {
         *budget.route.late_xml.lock() = None;
-        budget
-            .route
-            .consecutive_unreadable
-            .store(0, Ordering::Relaxed);
+        // A failed recycle keeps the unreadable run, so the existing route hands off as before.
         if let Ok(after) = &recycled {
+            budget
+                .route
+                .consecutive_unreadable
+                .store(0, Ordering::Relaxed);
             *budget.route.recycled_epoch.lock() = Some(after.clone());
         }
     });
     tracing::warn!(serial=?session.gui_scope().map(|scope| scope.device_id),
         previous=%before, current=%session.gui_session_epoch(), unreadableRoots=roots,
-        recycled=recycled.is_ok(), step, "sound session recycled after a tab switch");
+        recycled=recycled.is_ok(), step, "sound session recycled by an instrumentation restart");
     crate::publish_recovery::note_read(
         "sound",
         "sessionRecycledAfterTabSwitch",
@@ -233,10 +240,10 @@ async fn recycle_after_tab_switch(
         if recycled.is_ok() { "recycled" } else { "failed" },
         Some(&match &recycled {
             Ok(_) => format!(
-                "Cây giao diện bảng nhạc không đọc được sau khi đổi tab; đã mở lại phiên đọc một lần và đọc lại bảng nhạc từ đầu (bước: {step}; số lần không đọc được: {roots})"
+                "Cây giao diện bảng nhạc không đọc được; đã khởi động lại UiAutomator một lần và đọc lại bảng nhạc từ đầu (bước: {step}; số lần không đọc được: {roots})"
             ),
             Err(error) => format!(
-                "Không mở lại được phiên đọc sau khi đổi tab: {error:#} (bước: {step}; số lần không đọc được: {roots})"
+                "Không khởi động lại được UiAutomator để đọc bảng nhạc: {error:#} (bước: {step}; số lần không đọc được: {roots})"
             ),
         }),
     );
@@ -344,7 +351,7 @@ pub(crate) fn note_selection_route() {
         1,
         outcome,
         Some(&format!(
-            "{detail}; số lần không đọc được cây giao diện: {roots}; số lần mở lại phiên đọc sau khi đổi tab (sessionRecycledAfterTabSwitch): {recycles}"
+            "{detail}; số lần không đọc được cây giao diện: {roots}; số lần khởi động lại UiAutomator khi bảng nhạc không đọc được (sessionRecycledAfterTabSwitch): {recycles}"
         )),
     );
 }
@@ -378,10 +385,10 @@ pub(crate) struct SoundRootUnreadable {
     reads: u32,
 }
 
-/// A sheet read after a tab tap found no root, inside a phase armed to recycle the session once.
+/// A sheet read found no root, inside a phase armed to recycle the session once.
 /// Returned before any further tap; the arming phase handles it.
 #[derive(Debug, thiserror::Error)]
-#[error("Không đọc được cây giao diện bảng nhạc sau khi đổi tab; sẽ mở lại phiên đọc một lần, chưa bấm Đăng")]
+#[error("Không đọc được cây giao diện bảng nhạc; sẽ khởi động lại UiAutomator một lần rồi đọc lại, chưa bấm Đăng")]
 pub(crate) struct SoundTabSwitchBlind;
 
 /// The editor root stayed unreadable for a whole editor proof: no read returned a tree.
@@ -1378,7 +1385,7 @@ async fn observe_measured_sound_pool(
     maximum: usize,
     allow_recommended: bool,
 ) -> anyhow::Result<ObservedSoundPool> {
-    let armed = RecycleArmed::arm();
+    let armed = RecycleArmed::arm(session);
     let observed =
         observe_measured_sound_pool_once(session, plan, maximum, allow_recommended).await;
     drop(armed);
@@ -1387,12 +1394,21 @@ async fn observe_measured_sound_pool(
         observed => return observed,
     };
     // The blind phase returned before any further tap and holds no target.
-    if let Err(recycle) =
-        recycle_after_tab_switch(session, plan, "đọc bảng nhạc sau khi đổi tab").await
-    {
-        return Err(blind.context(format!("không mở lại được phiên đọc: {recycle:#}")));
+    match recycle_after_tab_switch(session, plan, "đọc bảng nhạc").await {
+        Ok(()) => observe_after_recycle(session, plan, maximum, allow_recommended).await,
+        Err(recycle) if recycle.is::<SoundStopped>() => Err(recycle),
+        // A refused or failed restart ends this attempt as an unreadable root, before any tap.
+        // The cap is spent and the run of unreadable roots kept, so the next attempt starts on
+        // the existing route and hands off to the visual route as before.
+        Err(recycle) => {
+            tracing::warn!(blind = %format!("{blind:#}"), recycle = %format!("{recycle:#}"),
+                "sound session recycle unavailable; attempt ends before any tap");
+            Err(anyhow::Error::new(SoundRootUnreadable {
+                reads: consecutive_unreadable_roots(),
+            })
+            .context(format!("không khởi động lại được UiAutomator: {recycle:#}")))
+        }
     }
-    observe_after_recycle(session, plan, maximum, allow_recommended).await
 }
 
 /// The sheet read again from nothing on the replacement session. The selected tab is proved
