@@ -1584,6 +1584,61 @@ mod tests {
         assert!(pool(hot, observed_460_plan(), 5).is_err());
     }
 
+    /// Real `uiautomator dump` reads from Riviu #44 (SM-G955F, 45.7.3/en), 09/10/2026;
+    /// see `real-20261009-provenance.json`. The sheet is its own window, so the picker
+    /// dump holds only the sheet, and the playing row carries the `nms` animation.
+    #[test]
+    fn real_45_7_3_dumps_bind_the_playing_row_the_editor_title_and_ignore_the_feed() {
+        let plan = SoundPickerPlan::resolve(PACKAGE, "en", "45.7.3").unwrap();
+        let picker = include_str!(
+            "../../fixtures/tiktok-publish/musically-45.7.3-en/real-20261009-picker-hot-playing.xml"
+        );
+        let editor = include_str!(
+            "../../fixtures/tiktok-publish/musically-45.7.3-en/real-20261009-editor.xml"
+        );
+        let feed = include_str!(
+            "../../fixtures/tiktok-publish/musically-45.7.3-en/real-20261009-home-feed.xml"
+        );
+
+        let observed = pool(picker, plan, 5).unwrap();
+        let titles: Vec<_> = observed
+            .candidates
+            .iter()
+            .map(|row| row.title.as_str())
+            .collect();
+        assert_eq!(titles, ["Paper Moon Static", "Thank You Baby", "nothing"]);
+        // `nms` marks the row whose preview is playing, which is the tapped row.
+        assert_eq!(observed.selected_index, Some(0));
+
+        // The editor names the applied sound in `tv_top_text` and has no sound rows.
+        assert!(pool(editor, plan, 5).is_err());
+        let nodes = parse(
+            editor,
+            SoundPickerPlan {
+                title_id: plan.current_title_id,
+                ..plan
+            },
+        )
+        .unwrap();
+        let current: Vec<_> = nodes
+            .iter()
+            .filter(|node| node.id == plan.current_title_id)
+            .collect();
+        assert_eq!(current.len(), 1);
+        assert_eq!(
+            current[0].rect.description.as_deref(),
+            Some("Upside Down - Original CHIC Mix")
+        );
+
+        // The feed reuses `:id/title` for the author button. Without the measured tab
+        // and viewport it is not a sound row, so no pool and no selection come of it.
+        assert!(parse(feed, plan)
+            .unwrap()
+            .iter()
+            .any(|node| node.id == ":id/title"));
+        assert!(pool(feed, plan, 5).is_err());
+    }
+
     #[test]
     fn measured_global_460_hot_pool_excludes_the_visibly_clipped_bottom_artist() {
         let plan = observed_460_plan();

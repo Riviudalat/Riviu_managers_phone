@@ -1,0 +1,42 @@
+{
+  "package": "com.zhiliaoapp.musically",
+  "version": "45.7.3",
+  "versionCode": "2024507030",
+  "locale": "en",
+  "device": "Riviu #44, SM-G955F ce031713d903001b01, Android 9, override 1080x2220",
+  "capturedOn": "2026-10-09",
+  "tool": "adb shell uiautomator dump (no Riviu controller, helper or Appium running)",
+  "publicPost": false,
+  "effects": "none; the draft was discarded",
+  "files": [
+    {
+      "file": "real-20261009-picker-hot-playing.xml",
+      "sha256": "41d5ec69a39ae6c6975c10444e3feb8a6159da74384767b400d7b5de9bf73426",
+      "source": "target/sound-picker-probe-20261009/raw/E1_last_dump.xml",
+      "sourceSha256": "41d5ec69a39ae6c6975c10444e3feb8a6159da74384767b400d7b5de9bf73426",
+      "screen": "sound sheet on Hot, row 1 previewing (nms present); E1 condition",
+      "sanitized": []
+    },
+    {
+      "file": "real-20261009-editor.xml",
+      "sha256": "035e24fe8caf8b843a14b7a9905d4fe4d69bfe49d618af3b53dea0def2d2c67f",
+      "source": "target/sound-picker-probe-20261009/raw/nav_editor.xml",
+      "sourceSha256": "035e24fe8caf8b843a14b7a9905d4fe4d69bfe49d618af3b53dea0def2d2c67f",
+      "screen": "photo editor with the auto-applied sound in tv_top_text and the editor Back bix",
+      "sanitized": []
+    },
+    {
+      "file": "real-20261009-home-feed.xml",
+      "sha256": "3fa08a9bcdc776993769e2eec63ca1055b22d879e7044d4b220ccc1b3e2f9fa0",
+      "source": "target/sound-picker-probe-20261009/raw/nav_home.xml",
+      "sourceSha256": "5745b7ad008b0d862938b7dcc44c21f2708975c3e7a3c1becb8188dd36fc37b3",
+      "screen": "Home feed card: author in :id/title, caption in :id/desc",
+      "sanitized": [
+        "Fixture Author",
+        "Fixture caption for a feed card #fixture…more",
+        "original sound - fixture_creator by fixture_creator",
+        "Fixture Place"
+      ]
+    }
+  ]
+}
