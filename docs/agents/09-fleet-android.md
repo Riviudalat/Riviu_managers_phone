@@ -21,5 +21,19 @@ sở hữu inventory/hash; không nhân bản danh sách pin.
 - Các engine đi qua control plane. IdleSweep thấp ưu tiên, không tranh foreground.
   Không dùng direct probe khi desktop giữ cùng USB.
 
+### Sức khỏe máy trước code
+
+Khi chỉ một máy có root không đọc được hoặc tap bị nuốt, so máy đó với một máy cùng
+đời trước khi sửa code: `top -b -n 1` và `/proc/meminfo` (swap). Choreographer
+"Skipped NN frames" trong logcat là dấu hiệu cùng loại.
+
+- Số đo: máy 44 (`ce031713d903001b01`, SM-G955F, 10/10/2026) có root bảng nhạc không
+  đọc được và tap chỉ hiện sau ≥110 s. surfaceflinger ~92% CPU trong khi máy cùng đời
+  ~3%, swap dùng 1,1 GB, Choreographer báo bỏ khung. `adb reboot` hết lỗi.
+- Chỉ reboot khi máy đó không còn Post/Send nào ở trạng thái chưa rõ.
+- Sau reboot: kiểm lại auto-rotate (đã bật lại sau reboot) và khóa màn hình, rồi chạy
+  "Khôi phục helper" (pending → prepare → execute). Bỏ bước này thì job kế tiếp lỗi
+  `media_transfer_failed` / `recovery_required`.
+
 [Snapshot đo Android](../archive/technical-snapshots-2026-10-01/09-fleet-android.md)
 không là danh sách thiếu chức năng hiện tại hoặc chứng nhận mọi ROM/build.

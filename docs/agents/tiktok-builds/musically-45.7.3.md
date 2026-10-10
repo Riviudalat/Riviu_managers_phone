@@ -65,13 +65,17 @@ Bản APKPure trùng từng byte với `base.apk` kéo từ máy #44. Kiểm l�
    tìm bằng `dex_lookup.py const`, rồi `dex_lookup.py classdef`.
 6. **Thẻ quảng cáo trên feed có hai bề mặt** (`crates/core/src/nurture/ad_card.rs`; nguồn:
    `aapt2-resources.txt`, `layout_index.jsonl`, bảng chuỗi `default`, và
-   `commercialize/feed/CommerceVideoDelegateKt` đã decompile; **chưa có dump thật nào trên
-   máy**, chỉ có ảnh chụp `acceptance-20261010/evidence-h/b064-norail.png` của máy
+   `commercialize/feed/CommerceVideoDelegateKt` đã decompile; thẻ kết thúc mới chỉ thấy trên
+   ảnh chụp `acceptance-20261010/evidence-h/b064-norail.png` của máy
    `ce031713b064841e0c`, 10/10/2026):
    - Lúc đang phát: thẻ có thanh hành động như thường, thêm khung nút quảng cáo
      `ad_feed_card_container_v2` (con của `y8z` trong layout `b7l`/`d07`, `visibility=gone`
      khi không phải quảng cáo) và nhãn "Sponsored" từ server dưới tên tác giả. Nuôi chỉ xem,
      không tim/lưu/bình luận/follow.
+   - **Máy** (`ce0417141d4decde0c`, en, 10/10/2026): thẻ quảng cáo có thể không có
+     `ad_feed_card_container` lẫn "Sponsored". Dấu hiệu đã đo là nhãn dưới caption
+     `:id/hnj` (`Button`, text đúng "Ad", trong `lzt`), kèm desc nhạc
+     "Sound: Promoted Music…". Desc nhạc chỉ là bằng chứng phụ, không tự đánh dấu thẻ.
    - Thẻ kết thúc: khi video quảng cáo hết, delegate bơm lớp Lynx qua `view_stub_ad_mask`
      (con của `a4v`, gốc thẻ) và đặt cả `widget_container` thành INVISIBLE, nên thanh hành
      động, caption và tác giả **biến khỏi cây** trong khi tab For You và thanh Home vẫn còn.
@@ -87,6 +91,15 @@ Bản APKPure trùng từng byte với `base.apk` kéo từ máy #44. Kiểm l�
      CTA; chỉ vuốt thẳng, và bấm Close đúng một lần mỗi thẻ khi vuốt chưa rời được. Id
      `feed_ad_lynx_mask_container_spark` và `tv_sponsored` (chỉ trong mask splash `aax`) chưa
      thấy trên dump nào, nên chưa dùng.
+7. **Toast yêu thích "Saved · Manage" nằm trong PopupWindow riêng.**
+   - **APK**: lớp `X.0vrI`, tag `add_to_favorites_bottomwindow`, layout `em`; rộng hết màn,
+     cách đáy pager khoảng 72dp, tự đóng sau 3 s. Snapshot chỉ đọc một cửa sổ không thấy nó.
+   - **Máy** (`ce0417141d4decde0c`, SM-G955N, Android 9, 10/10/2026): DOWN của cú vuốt rơi
+     lên toast, chạm làm toast đóng, InputDispatcher hủy cử chỉ ("touched window was
+     removed") và UiAutomator2 trả `invalid element state` / "Unable to perform W3C
+     actions". Riviu gọi đó là `GestureCancelled`
+     ([`driver.rs`](../../../crates/core/src/driver.rs)): không chứng minh cử chỉ đã hay
+     chưa tác động, nên điều hướng đọc lại màn hình còn tap effect giữ trạng thái chưa rõ.
 
 ## 3. Bảng id Riviu dùng cho 45.7.3
 
@@ -180,6 +193,11 @@ Hộp thoại chuẩn có cấu trúc `visual_area` → `y5e`/`xwe` → `d93` > 
 nút `x4` mà các nút trong đó không có id. Không bao giờ bấm Agree, Allow, Continue, Buy,
 Follow hay Sync contacts.
 
+Hộp "Link email" (tiêu đề `xwe`; APK: `X.0Nct`, `global_email_auth_dialog`) có thể hiện
+đè For You bất cứ lúc nào, không chỉ sau cài mới (máy `ce071827715f321b05`, en). Thao tác
+duy nhất là **Not now**; OK liên kết các địa chỉ email của máy vào tài khoản. Code:
+[`dialogs/catalog.rs`](../../../crates/core/src/app_automation/dialogs/catalog.rs).
+
 ## 5. Sound picker
 
 Đo trên máy #44, giao diện en, ngày 2026-10-09:
@@ -196,6 +214,13 @@ Follow hay Sync contacts.
   đó có trong bảng nhưng không hiện ra.
 - **Picker có thể mở ở tab For You chứ không phải Hot**, nên Riviu vẫn phải chạm `wrv`
   "Hot".
+- **Tab Hot có thể có hàng chip vùng** "United States / Vietnam / Global" phía trên danh
+  sách, đẩy hàng đầu từ y≈1370 xuống y≈1686 trên khung 1080×2220 (máy 44
+  `ce031713d903001b01`, 10/10/2026). Không giả định vị trí hàng cố định.
+- **Hàng đã chọn có khung đỏ 4 px quanh thumbnail** (x 110..234; ảnh chưa chọn chỉ
+  ~115..230). Đây là bằng chứng ảnh của hàng đã chọn, kể cả khi OCR không đọc được tiêu
+  đề đỏ. Hằng số đo nằm ở
+  [`tiktok_sound/visual.rs`](../../../crates/core/src/tiktok_sound/visual.rs).
 - Một lượt `uiautomator dump` mới đọc được picker trong khoảng 2,6 s ở 28/28 lần, dù preview
   đang phát hay đã dừng, và dù animation scale là 1 hay 0. Main thread vẫn phản hồi (khoảng
   0,2 s). Như vậy lỗi treo khoảng 10,5 s nằm ở đường đọc của session UiAutomator2 sống lâu,

@@ -105,6 +105,9 @@ phạm vi mạng nếu cần, không ghi “an toàn” chỉ vì chưa chạy a
 | Device canary | Đúng thiết bị/action/tuple được phép | Toàn fleet/phiên bản khác |
 | Installer | Đúng artifact/runtime và clean-host behavior đã đo | Mọi phone hay tài khoản Google |
 
+Khi một lượt chạy trên máy dừng hoặc kẹt, chụp màn hình và hierarchy **trước** khi phiên
+đóng app. Ảnh chụp sau đó không còn nguyên nhân (popup, bảng, overlay đã biến mất).
+
 Regression quan trọng cần baseline→modified→rollback trên bản sao. Compile failure
 không chứng minh assertion bắt được lỗi. Test zero cases không được ghi PASS feature.
 Không chạy cùng cache Cargo song song giữa các worktree; xem `scripts/dev_compile_cache.ps1`.

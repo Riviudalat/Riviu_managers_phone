@@ -5,6 +5,12 @@
   chỉ `sleep`. Đừng tạo lại kiểu đó.
 - **Không tap mù.** Detector không chắc thì không tap. Toạ độ ở nửa dưới màn hình
   đặc biệt nguy hiểm (thanh nav, nút Home).
+- **ACK không phải hiệu ứng, kể cả với tap.** Trên máy chậm, tap contact có thể bị bỏ
+  qua hoặc chỉ hiện sau 9–13 s (tab Hot, #47) hay ≥110 s (#44, máy quá tải, xem
+  [fleet](09-fleet-android.md#sức-khỏe-máy-trước-code)). Chứng minh hiệu ứng trên khung
+  hình mới. Chỉ tap lại sau cửa sổ settle đã đo và khi khung mới chứng minh dương tính
+  rằng tap đầu chưa ăn. Không bao giờ tap lại một toggle (hàng nhạc) trên khung chưa
+  chứng minh. Hằng số đo nằm ở `crates/core/src/tiktok_sound/visual.rs`.
 - **Mọi hằng số hình học phải kèm số đo thật** trong comment, ghi rõ đo trên máy nào.
 - **Ngân sách recovery phải hữu hạn** và phải log rõ đang tiêu cái gì.
 - Log hướng tới người vận hành, tiếng Việt, nói đúng chuyện đang xảy ra.
