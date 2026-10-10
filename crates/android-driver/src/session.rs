@@ -240,6 +240,9 @@ pub struct AndroidUiSession {
     /// The driver's instrumentation restart, for [`UiSession::recycle_read_session`]. Missing
     /// means this session cannot recycle and refuses.
     instrumentation: Option<crate::driver::InstrumentationRuntime>,
+    /// While `Some(package)`, the agent session has `enableMultiWindows: true` and every full
+    /// tree read keeps only that package's windows. See [`UiSession::enable_multi_window_read`].
+    multi_window: parking_lot::Mutex<Option<String>>,
 }
 
 impl AndroidUiSession {
@@ -259,7 +262,41 @@ impl AndroidUiSession {
             helper: None,
             hierarchy_generation: AtomicU64::new(0),
             instrumentation: None,
+            multi_window: parking_lot::Mutex::new(None),
         }
+    }
+
+    /// Seal the agent and drop it from the driver's cache; a session without the driver's
+    /// runtime can only seal.
+    fn quarantine(&self, reason: String) {
+        match self.instrumentation.as_ref() {
+            Some(instrumentation) => instrumentation.quarantine(&self.serial, &self.agent, reason),
+            None => self.agent.seal(reason),
+        }
+    }
+
+    /// Set `enableMultiWindows` on the agent session and prove it by reading the settings back.
+    async fn set_multi_windows(&self, enabled: bool) -> anyhow::Result<()> {
+        self.agent
+            .update_settings(serde_json::json!({ "enableMultiWindows": enabled }))
+            .await
+            .with_context(|| {
+                format!("đặt enableMultiWindows={enabled} trên máy {}", self.serial)
+            })?;
+        let settings = self
+            .agent
+            .settings()
+            .await
+            .with_context(|| format!("đọc lại cài đặt UiAutomator trên máy {}", self.serial))?;
+        let observed = settings
+            .get("enableMultiWindows")
+            .and_then(serde_json::Value::as_bool);
+        anyhow::ensure!(
+            observed == Some(enabled),
+            "UiAutomator trên máy {} đọc lại enableMultiWindows={observed:?}, cần {enabled}",
+            self.serial
+        );
+        Ok(())
     }
 
     pub(crate) fn with_instrumentation(
@@ -592,7 +629,65 @@ impl UiSession for AndroidUiSession {
         })?;
         instrumentation
             .restart_for_read_owner(&self.serial, &self.agent)
-            .await
+            .await?;
+        // The fresh session starts from the server defaults, so no window filter applies.
+        *self.multi_window.lock() = None;
+        Ok(())
+    }
+    fn can_read_multi_window(&self) -> bool {
+        !self.agent.is_sealed()
+    }
+    async fn enable_multi_window_read(&self, package: &str) -> anyhow::Result<()> {
+        anyhow::ensure!(!package.is_empty(), "multi-window read needs a package");
+        // No gesture may straddle the switch; the gate is the same one gestures hold.
+        let input = self.input_gate.lock().await;
+        anyhow::ensure!(!input.sealed, "session sealed for owner maintenance");
+        if self.multi_window.lock().as_deref() == Some(package) {
+            return Ok(());
+        }
+        let started = std::time::Instant::now();
+        match self.set_multi_windows(true).await {
+            Ok(()) => {
+                *self.multi_window.lock() = Some(package.to_string());
+                tracing::info!(serial = %self.serial, package,
+                    ms = started.elapsed().as_millis() as u64,
+                    "agent session reads through every window (enableMultiWindows: true)");
+                Ok(())
+            }
+            Err(error) => {
+                // The switch is unproven either way; put the session back or take it out.
+                if let Err(restore) = self.set_multi_windows(false).await {
+                    self.quarantine(format!(
+                        "không bật được enableMultiWindows ({error:#}) và không tắt lại được ({restore:#})"
+                    ));
+                }
+                Err(error)
+            }
+        }
+    }
+    async fn restore_single_window_read(&self) -> anyhow::Result<bool> {
+        if self.multi_window.lock().is_none() {
+            return Ok(false);
+        }
+        let input = self.input_gate.lock().await;
+        let started = std::time::Instant::now();
+        let restored = self.set_multi_windows(false).await;
+        // Whatever the server said, this session never filters windows again.
+        *self.multi_window.lock() = None;
+        match restored {
+            Ok(()) => {
+                tracing::info!(serial = %self.serial, sealed = input.sealed,
+                    ms = started.elapsed().as_millis() as u64,
+                    "agent session back to active-window reads (enableMultiWindows: false)");
+                Ok(true)
+            }
+            Err(error) => {
+                self.quarantine(format!(
+                    "không tắt lại được enableMultiWindows sau bước nhạc: {error:#}"
+                ));
+                Err(error)
+            }
+        }
     }
     fn gui_compatibility_pack(
         &self,
@@ -1283,6 +1378,31 @@ impl UiSession for AndroidUiSession {
         let started = std::time::Instant::now();
         let result = async {
             let xml = self.agent.source().await?;
+            // Under `enableMultiWindows` the server dumps one root per window; only the
+            // owner's package was measured, so the other windows are cut before any parse.
+            let multi_window = self.multi_window.lock().clone();
+            let xml = match multi_window {
+                None => xml,
+                Some(package) => {
+                    let selection =
+                        riviu_core::ui_automation::tree::keep_package_windows(&xml, &package)?;
+                    tracing::info!(serial = %self.serial, package = %package,
+                        windows = ?selection.windows, kept = selection.kept,
+                        ms = started.elapsed().as_millis() as u64,
+                        "hierarchy read through every window");
+                    if selection.kept == 0 {
+                        // Unknown, never absent: the app's window had no root to give.
+                        return Err(riviu_core::driver::AccessibilityReadUnavailable {
+                            message: format!(
+                                "đọc qua mọi cửa sổ không có cửa sổ nào của {package}; các cửa sổ: {:?}",
+                                selection.windows
+                            ),
+                        }
+                        .into());
+                    }
+                    selection.xml
+                }
+            };
             let generation = self
                 .hierarchy_generation
                 .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |current| {

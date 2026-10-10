@@ -704,7 +704,9 @@ impl AndroidDriver {
                     let found = self.adb.shell(serial, &format!("pm path {package}")).await?;
                     anyhow::ensure!(found.lines().any(|line|line.trim().starts_with("package:")), "diagnostic runner APK absent; no install");
                 }
-                return runtime.instrument_and_wait(serial, &base).await;
+                return runtime
+                    .instrument_and_wait(serial, &base, Readiness::Screen)
+                    .await;
             }
             let agent = runtime.open_and_cache_agent(serial, &base).await?;
             anyhow::ensure!(agent.is_alive().await, "Diagnostic refuses a blind UiAutomator session; no restart");
@@ -794,7 +796,9 @@ impl AndroidDriver {
             runtime.note_instrumentation_restart(serial);
             let started = std::time::Instant::now();
             runtime.restart_instrumentation(serial).await?;
-            let recovered = runtime.instrument_and_wait(serial, &base).await;
+            let recovered = runtime
+                .instrument_and_wait(serial, &base, Readiness::Screen)
+                .await;
             // Logged either way, because the cost of this path is the whole reason it now
             // has a cooldown and nobody should have to induce the fault to find it again.
             tracing::info!(
@@ -820,7 +824,9 @@ impl AndroidDriver {
             self.install_agent_apks(serial).await?;
         }
 
-        runtime.instrument_and_wait(serial, &base).await
+        runtime
+            .instrument_and_wait(serial, &base, Readiness::Screen)
+            .await
     }
     /// Push and install both halves of the uiautomator2 instrumentation.
     ///
@@ -892,6 +898,17 @@ pub(crate) struct InstrumentationRuntime {
     instrumentation_restarts: Arc<Mutex<HashMap<String, std::time::Instant>>>,
 }
 
+/// What proves a freshly started runner ready in [`InstrumentationRuntime::instrument_and_wait`].
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum Readiness {
+    /// `/status`, a session, and one element query that walks the active window's tree.
+    Screen,
+    /// `/status` and a session that opened and primed. For a read owner that reads the
+    /// screen itself next: on a sheet whose active-window root never comes, the element
+    /// query marks a healthy fresh server dead after ~10 s (phone 47, 2026-10-09 21:36:48).
+    Session,
+}
+
 impl InstrumentationRuntime {
     /// Diagnostic scopes never restart the runner, so their sessions cannot recycle.
     pub(crate) fn can_restart(&self) -> bool {
@@ -932,18 +949,50 @@ impl InstrumentationRuntime {
         );
         self.note_instrumentation_restart(serial);
         let started = std::time::Instant::now();
-        self.restart_instrumentation(serial).await?;
-        let fresh = self.instrument_and_wait(serial, &base).await;
+        // From the force-stop on, the owner's session points at a server that is gone. The
+        // owner reads the sheet itself right after this, so a fresh session is readiness
+        // enough here: the `/element` probe waits on the very active-window root that made
+        // the owner restart, and on this sheet it called a healthy server dead (phone 47,
+        // 2026-10-09 21:36:48, 10 130 ms, `ok=false`).
+        let fresh = async {
+            self.restart_instrumentation(serial).await?;
+            let fresh = self
+                .instrument_and_wait(serial, &base, Readiness::Session)
+                .await?;
+            agent.adopt_session(&fresh)?;
+            Ok::<(), anyhow::Error>(())
+        }
+        .await;
         tracing::info!(
             serial,
             ms = started.elapsed().as_millis() as u64,
             ok = fresh.is_ok(),
             "instrumentation restart for a pinned read owner finished"
         );
-        agent.adopt_session(&fresh?)?;
+        if let Err(error) = fresh {
+            // The old server was stopped and nothing replaced it for this owner: seal the
+            // session so every later request refuses at once instead of polling the dead port.
+            agent.seal(format!(
+                "UiAutomator trên máy {serial} đã dừng để khởi động lại nhưng phiên mới chưa lên: {error:#}"
+            ));
+            return Err(error);
+        }
         // The cache keeps the owner's client, so later sessions share its identity and pins.
         self.agents.lock().insert(serial.to_string(), agent.clone());
         Ok(())
+    }
+
+    /// Take `agent` out of service: seal it and drop it from the cache, so the next caller
+    /// opens a fresh session instead of inheriting a session whose settings are unproven.
+    pub(crate) fn quarantine(&self, serial: &str, agent: &AgentClient, reason: String) {
+        agent.seal(reason);
+        let mut agents = self.agents.lock();
+        if agents
+            .get(serial)
+            .is_some_and(|cached| cached.session_identity() == agent.session_identity())
+        {
+            agents.remove(serial);
+        }
     }
 
     async fn active_foreign_instrumentations(&self, serial: &str) -> Vec<String> {
@@ -995,7 +1044,23 @@ impl InstrumentationRuntime {
             .insert(serial.to_string(), std::time::Instant::now());
     }
     /// Start the runner and wait for a session that can actually read the screen.
-    async fn instrument_and_wait(&self, serial: &str, base: &str) -> anyhow::Result<AgentClient> {
+    async fn instrument_and_wait(
+        &self,
+        serial: &str,
+        base: &str,
+        readiness: Readiness,
+    ) -> anyhow::Result<AgentClient> {
+        // `Readiness::Session` trusts a session that opened and primed; the caller's own read
+        // is its proof. `Readiness::Screen` asks the one element query `is_alive` documents.
+        let proven = |agent: &AgentClient| {
+            let agent = agent.clone();
+            async move {
+                match readiness {
+                    Readiness::Screen => agent.is_alive().await,
+                    Readiness::Session => true,
+                }
+            }
+        };
         self.refuse_active_foreign_instrumentation(serial).await?;
         if !self.automatic_setup_allowed {
             let activity = self.adb.shell(serial, "dumpsys activity").await?;
@@ -1024,7 +1089,7 @@ impl InstrumentationRuntime {
                 return Ok(agent);
             }
             if let Ok(agent) = self.open_and_cache_agent(serial, base).await {
-                if agent.is_alive().await {
+                if proven(&agent).await {
                     return Ok(agent);
                 }
                 anyhow::ensure!(self.automatic_setup_allowed, "diagnostic runner became blind; no DELETE/restart");
@@ -1052,7 +1117,7 @@ impl InstrumentationRuntime {
             }
             if AgentClient::is_ready(base).await {
                 let agent = self.open_and_cache_agent(serial, base).await?;
-                if agent.is_alive().await {
+                if proven(&agent).await {
                     self.instrumentation_children.retain(serial, child).await;
                     return Ok(agent);
                 }

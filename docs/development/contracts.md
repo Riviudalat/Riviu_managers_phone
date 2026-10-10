@@ -222,6 +222,26 @@ mới đặt lại. Khi đã đủ hai, pha mở/đọc danh sách vào thẳng 
 không còn hỏi XML kiểm tra hộp thoại trước mỗi khung hình: không nút hộp thoại nào được
 bấm khi thiếu XML, còn hộp thoại che bảng làm mất tab/hàng đã đo nên không có tap.
 `ReadRecovery` ghi `rootUnreadable`/`visualHandoff` cho cả pha mở bảng nhạc.
+Khi gốc bảng nhạc không đọc được ngay trong pha có thể thay phiên (#44/#47, 2026-10-09:
+gốc cửa sổ đang hoạt động vẫn null kể cả trên server UiAutomator2 mới), Android thử đọc
+qua mọi cửa sổ trước: bật `enableMultiWindows: true` trên đúng phiên đó qua
+`/appium/settings`, đọc lại cài đặt để chứng minh, rồi đọc lại `/source`; cây trả về có
+một gốc cho mỗi cửa sổ nên chỉ giữ các cửa sổ của gói TikTok đã chọn (bỏ system UI, bàn
+phím), không có cửa sổ nào của gói đó thì coi là chưa đọc được, không phải vắng. Các bộ
+phân loại bảng nhạc chạy y nguyên trên cây đã lọc; epoch không đổi và mọi guard epoch,
+foreground, generation mới trước tap giữ nguyên. Tối đa một lần chuyển mỗi bước nhạc;
+`ReadRecovery` ghi `multiWindowRead` (`ready`/`unreadable`/`failed`/`unsupported`) kèm
+thời gian bật và đọc lại, `selectionRoute` ghi `multiWindowRead: true/false`. Cuối bước
+nhạc, trên mọi đường thoát, đặt lại `enableMultiWindows: false` và đọc lại xác nhận
+(`multiWindowRestore`); không khôi phục được thì phiên bị niêm phong (`SessionSealed`),
+không dùng cho màn chỉnh sửa hay Đăng, lượt thử mới mở phiên khác. Chỉ khi đọc qua mọi
+cửa sổ cũng không có cây mới khởi động lại instrumentation một lần như trước; sau khi đã
+dừng server cũ mà phiên mới không lên thì phiên cũ cũng bị niêm phong, mọi yêu cầu sau đó
+bị từ chối ngay trước khi ra mạng và vòng dọn composer (Back + đọc) dừng ở lỗi đầu tiên
+thay vì gõ vào server đã chết. Sau khi khởi động lại cho chủ đọc, bằng chứng sẵn sàng là
+`/status` cộng phiên mở và prime được, không phải `/element` (lệnh đó chờ chính gốc cửa
+sổ đang hoạt động vừa làm chủ đọc phải khởi động lại); chính lần đọc bảng nhạc kế tiếp
+của chủ đọc mới là bằng chứng đọc được.
 Trên 45.7.3, APK khai báo lại các id `title` (408 layout), `tv_title` (303), `cover`
 (88), `desc` (75), `bix` (61), `esv`, `z3k`, `cqf`, `tv_top` và `gpr` ở nhiều màn khác,
 nên một lần khớp id duy nhất chưa đủ làm bằng chứng. Mỗi chỗ dùng phải có phạm vi:

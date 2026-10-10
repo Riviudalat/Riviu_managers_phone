@@ -378,6 +378,9 @@ pub struct AgentClient {
     /// replacement through any clone changes the epoch every pinned owner is bound to.
     read_pins: Arc<AtomicUsize>,
     observation_mode: AndroidObservationMode,
+    /// Why this client, and every clone of it, refuses every request before the network.
+    /// Set once by [`Self::seal`]; never cleared. See `riviu_core::driver::SessionSealed`.
+    sealed: Arc<Mutex<Option<String>>>,
 }
 
 /// One pinned read owner; see [`AgentClient::pin_reads`].
@@ -450,6 +453,7 @@ impl AgentClient {
             session_id: Arc::new(Mutex::new(session_id)),
             read_pins: Arc::default(),
             observation_mode,
+            sealed: Arc::default(),
         };
         client.prime_session().await?;
         tracing::info!(serial = %client.serial, mode = ?client.observation_mode,
@@ -581,6 +585,39 @@ impl AgentClient {
         AgentReadPin(Arc::clone(&self.read_pins))
     }
 
+    /// Close this client, and every clone of it, for good: from now on every request fails
+    /// with `SessionSealed` before any network I/O. The first reason wins.
+    ///
+    /// Phone 47, 2026-10-09 21:36:48: the owner's instrumentation restart force-stopped the
+    /// server and the replacement failed its readiness probe, yet the owner's client kept the
+    /// old session id. The composer's cleanup then sent 28 requests to the dead port in 20 s,
+    /// each failing in 3–7 ms, with nothing to say "stop asking".
+    pub(crate) fn seal(&self, reason: String) {
+        let mut sealed = self.sealed.lock();
+        if sealed.is_none() {
+            tracing::warn!(serial = %self.serial, session = %self.session_id.lock(), %reason,
+                "sealed an agent session; every later request refuses before the network");
+            *sealed = Some(reason);
+        }
+    }
+
+    pub(crate) fn is_sealed(&self) -> bool {
+        self.sealed.lock().is_some()
+    }
+
+    fn refuse_if_sealed(&self, route: &str) -> anyhow::Result<()> {
+        if let Some(reason) = self.sealed.lock().as_deref() {
+            return Err(riviu_core::driver::SessionSealed {
+                message: format!(
+                    "phiên UiAutomator trên máy {} đã đóng, không gửi {route}: {reason}",
+                    self.serial
+                ),
+            }
+            .into());
+        }
+        Ok(())
+    }
+
     pub(crate) fn base(&self) -> &str {
         &self.base
     }
@@ -704,6 +741,7 @@ impl AgentClient {
         body: Option<Value>,
         deadline: std::time::Instant,
     ) -> anyhow::Result<Value> {
+        self.refuse_if_sealed(suffix)?;
         let remaining = deadline.saturating_duration_since(std::time::Instant::now());
         anyhow::ensure!(!remaining.is_zero(), "observation_deadline_exceeded");
         let mut request = self
@@ -871,6 +909,7 @@ impl AgentClient {
         body: Option<Value>,
         request_timeout: Option<Duration>,
     ) -> anyhow::Result<Value> {
+        self.refuse_if_sealed(suffix)?;
         let url = self.url(suffix);
         let mut request = self.http.request(method.clone(), &url);
         if let Some(request_timeout) = request_timeout {
@@ -1512,6 +1551,7 @@ mod tests {
                 base, serial: "bulk-fixture".into(), session_id: identity.clone(),
                 read_pins: Arc::default(),
                 observation_mode: AndroidObservationMode::Legacy,
+            sealed: Arc::default(),
             };
             let session = crate::session::AndroidUiSession::new(
                 client, crate::adb::AdbProgram::at("no-adb-bulk-fixture".into()),
@@ -1598,6 +1638,7 @@ mod tests {
             session_id: Arc::new(Mutex::new("fixed".into())),
             read_pins: Arc::default(),
             observation_mode: AndroidObservationMode::Legacy,
+            sealed: Arc::default(),
         };
         let (id, rect) = client
             .find_with_rect(&Locator::Description("Create".into()))
@@ -1671,6 +1712,7 @@ mod tests {
             session_id: Arc::new(Mutex::new("fixed".into())),
             read_pins: Arc::default(),
             observation_mode: AndroidObservationMode::Legacy,
+            sealed: Arc::default(),
         };
         let result = client.find_with_rect(&Locator::Text("Next".into())).await;
         server.abort();
@@ -1808,6 +1850,7 @@ mod tests {
             session_id: Arc::new(Mutex::new("fixture".into())),
             read_pins: Arc::default(),
             observation_mode: AndroidObservationMode::Legacy,
+            sealed: Arc::default(),
         };
         (client, routes, server)
     }
@@ -1997,6 +2040,7 @@ mod tests {
             session_id: Arc::new(Mutex::new("old".into())),
             read_pins: Arc::default(),
             observation_mode: AndroidObservationMode::Legacy,
+            sealed: Arc::default(),
         };
         (client, routes, server)
     }
@@ -2134,6 +2178,7 @@ mod tests {
             session_id: Arc::new(Mutex::new("old".into())),
             read_pins: Arc::default(),
             observation_mode: AndroidObservationMode::Legacy,
+            sealed: Arc::default(),
         };
         (client, routes, server)
     }
@@ -2282,6 +2327,7 @@ mod tests {
             session_id: Arc::new(Mutex::new("fixture-session".to_owned())),
             read_pins: Arc::default(),
             observation_mode: AndroidObservationMode::Legacy,
+            sealed: Arc::default(),
         };
 
         let error = client

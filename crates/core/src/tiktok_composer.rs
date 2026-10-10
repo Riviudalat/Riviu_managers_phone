@@ -3255,6 +3255,10 @@ impl<'a, P: TapPlanner> Composer<'a, P> {
             match opener {
                 Ok(ReadWaitResult::Ready(Some(_))) => return true,
                 Ok(ReadWaitResult::Cancelled | ReadWaitResult::DeadlineExceeded) => return false,
+                // Phone 47, 2026-10-09 21:37:07–10: a failed instrumentation restart left this
+                // loop 28 requests against a dead server. A sealed session answers nothing
+                // again, so the phone's state is unknown and the walk ends at once.
+                Err(error) if crate::driver::session_sealed(&error) => return false,
                 Ok(ReadWaitResult::Ready(None)) | Err(_) => {}
             }
             // Only this measured Discard row can replace one cleanup Back.
@@ -3280,6 +3284,7 @@ impl<'a, P: TapPlanner> Composer<'a, P> {
                     Ok(ReadWaitResult::Cancelled | ReadWaitResult::DeadlineExceeded) => {
                         return false
                     }
+                    Err(error) if crate::driver::session_sealed(&error) => return false,
                     Ok(ReadWaitResult::Ready(None)) | Err(_) => {}
                 }
             }
@@ -3287,7 +3292,11 @@ impl<'a, P: TapPlanner> Composer<'a, P> {
                 return false;
             }
             // Once Back is dispatched it drains; Stop only prevents later gestures.
-            let _ = self.session.back().await;
+            if let Err(error) = self.session.back().await {
+                if crate::driver::session_sealed(&error) {
+                    return false;
+                }
+            }
             sleep(
                 POLL.min(deadline.saturating_duration_since(Instant::now())),
                 stop,
@@ -4463,6 +4472,13 @@ where
             chosen
         })
         .await;
+        // Every exit of the sound stage returns the session to active-window reads. A restore
+        // that cannot be proven has quarantined the session, so a confirmed sound still ends
+        // here rather than reaching the editor or Post on it.
+        let chosen = match crate::tiktok_sound::end_multi_window_read(session).await {
+            Ok(()) => chosen,
+            Err(restore) => chosen.and_then(|_| Err(restore)),
+        };
         sound_trace.finish(if chosen.is_ok() { "confirmed" } else { "error" });
         drop(sound_trace);
         let chosen = chosen.map_err(|error| {

@@ -14,6 +14,24 @@ pub struct AccessibilityReadUnavailable {
     pub message: String,
 }
 
+/// The driver closed this UI session for good and nothing may be sent through it again.
+///
+/// Raised before any network I/O. Two causes today, both Android: the instrumentation was
+/// stopped for a read owner's restart and the replacement never came up (phone 47,
+/// 2026-10-09 21:36:48, after which 28 requests went to the dead server in 20 s), or a
+/// session setting could not be proven restored after the sound sheet was read through every
+/// window. A loop that tolerates read errors must stop at this one instead of polling.
+#[derive(Debug, Error)]
+#[error("{message}")]
+pub struct SessionSealed {
+    pub message: String,
+}
+
+/// Whether `error` says the session is sealed, at any depth of its chain.
+pub fn session_sealed(error: &anyhow::Error) -> bool {
+    error.is::<SessionSealed>()
+}
+
 /// Keeps a UI session's identity while an epoch-bound owner reads.
 ///
 /// While any pin is alive, the driver must not replace its session to finish a read: a tree it
@@ -301,6 +319,10 @@ pub enum ReadFailureKind {
 pub fn classify_read_failure(error: &anyhow::Error) -> ReadFailureKind {
     if error.downcast_ref::<UnsupportedCapability>().is_some() {
         return ReadFailureKind::Unsupported;
+    }
+    // A sealed session answers nothing ever again; observing once more is polling a corpse.
+    if session_sealed(error) {
+        return ReadFailureKind::Permanent;
     }
     if error
         .downcast_ref::<AccessibilityReadUnavailable>()
@@ -890,6 +912,23 @@ pub trait UiSession: Send + Sync {
     /// keeps its existing route instead of ending a phase to ask.
     fn can_recycle_read_session(&self) -> bool {
         false
+    }
+    /// Whether [`Self::enable_multi_window_read`] can be asked at all.
+    fn can_read_multi_window(&self) -> bool {
+        false
+    }
+    /// Read full trees from every window the phone shows instead of waiting on the active
+    /// window's root, keeping only `package`'s windows (Android: UiAutomator2
+    /// `enableMultiWindows`, applied on this same session and read back). The session identity
+    /// and epoch stay as they are. The owner restores it with
+    /// [`Self::restore_single_window_read`] when its phase ends, on every exit path.
+    async fn enable_multi_window_read(&self, _package: &str) -> anyhow::Result<()> {
+        unsupported("multiWindowRead")
+    }
+    /// Return to active-window reads. `Ok(false)` means nothing was switched. A restore that
+    /// cannot be proven seals the session: it must not be reused for the editor or Post.
+    async fn restore_single_window_read(&self) -> anyhow::Result<bool> {
+        Ok(false)
     }
     fn gui_compatibility_pack(
         &self,

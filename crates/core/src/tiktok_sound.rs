@@ -84,11 +84,17 @@ struct SoundRouteEvidence {
     recycled_epoch: parking_lot::Mutex<Option<String>>,
     /// The last two-read late XML pool, its epoch and when it was proved.
     late_xml: parking_lot::Mutex<Option<(String, Instant, ObservedSoundPool)>>,
+    /// Switches of the read session to every-window trees this stage asked for. Capped at one.
+    multi_window_switches: AtomicU32,
+    /// The sheet was read through every window at least once in this stage.
+    multi_window_read: AtomicBool,
 }
 const ROUTE_XML: u8 = 1;
 const ROUTE_VISUAL: u8 = 2;
 /// At most one session replacement per sound stage.
 const TAB_SWITCH_RECYCLE_CAP: u32 = 1;
+/// At most one switch to every-window reads per sound stage.
+const MULTI_WINDOW_SWITCH_CAP: u32 = 1;
 
 /// A sheet tab tap was dispatched. Recorded after the gesture, whatever it returned.
 fn note_tab_tap() {
@@ -325,11 +331,12 @@ fn set_selection_route(route: u8) {
 
 /// Record which route chose the confirmed sound and how many unreadable roots the stage met.
 pub(crate) fn note_selection_route() {
-    let Ok((route, roots, recycles)) = SOUND_BUDGET.try_with(|budget| {
+    let Ok((route, roots, recycles, multi_window)) = SOUND_BUDGET.try_with(|budget| {
         (
             budget.route.selection.load(Ordering::Relaxed),
             budget.route.unreadable_roots.load(Ordering::Relaxed),
             budget.route.tab_recycles.load(Ordering::Relaxed),
+            budget.route.multi_window_read.load(Ordering::Relaxed),
         )
     }) else {
         return;
@@ -351,7 +358,7 @@ pub(crate) fn note_selection_route() {
         1,
         outcome,
         Some(&format!(
-            "{detail}; số lần không đọc được cây giao diện: {roots}; số lần khởi động lại UiAutomator khi bảng nhạc không đọc được (sessionRecycledAfterTabSwitch): {recycles}"
+            "{detail}; số lần không đọc được cây giao diện: {roots}; đọc bảng nhạc qua mọi cửa sổ (multiWindowRead): {multi_window}; số lần khởi động lại UiAutomator khi bảng nhạc không đọc được (sessionRecycledAfterTabSwitch): {recycles}"
         )),
     );
 }
@@ -388,7 +395,7 @@ pub(crate) struct SoundRootUnreadable {
 /// A sheet read found no root, inside a phase armed to recycle the session once.
 /// Returned before any further tap; the arming phase handles it.
 #[derive(Debug, thiserror::Error)]
-#[error("Không đọc được cây giao diện bảng nhạc; sẽ khởi động lại UiAutomator một lần rồi đọc lại, chưa bấm Đăng")]
+#[error("Không đọc được cây giao diện bảng nhạc; sẽ đọc qua mọi cửa sổ một lần, nếu vẫn không được thì khởi động lại UiAutomator một lần rồi đọc lại, chưa bấm Đăng")]
 pub(crate) struct SoundTabSwitchBlind;
 
 /// The editor root stayed unreadable for a whole editor proof: no read returned a tree.
@@ -1393,9 +1400,26 @@ async fn observe_measured_sound_pool(
         Err(error) if error.is::<SoundTabSwitchBlind>() && !error.is::<SoundStopped>() => error,
         observed => return observed,
     };
-    // The blind phase returned before any further tap and holds no target.
+    // The blind phase returned before any further tap and holds no target. Phones 44/47
+    // (Global 45.7.3/en, 2026-10-09 21:36): the active-window root stayed null on a fresh
+    // server too, so a tree built from every window is asked first, on this same session.
+    // The instrumentation restart stays the fallback for a sheet that is blind that way too.
+    if let Some(observed) =
+        reread_through_every_window(session, plan, maximum, allow_recommended).await
+    {
+        return observed;
+    }
     match recycle_after_tab_switch(session, plan, "đọc bảng nhạc").await {
-        Ok(()) => observe_after_recycle(session, plan, maximum, allow_recommended).await,
+        Ok(()) => {
+            observe_after_switch(
+                session,
+                plan,
+                maximum,
+                allow_recommended,
+                "readAfterSessionRecycle",
+            )
+            .await
+        }
         Err(recycle) if recycle.is::<SoundStopped>() => Err(recycle),
         // A refused or failed restart ends this attempt as an unreadable root, before any tap.
         // The cap is spent and the run of unreadable roots kept, so the next attempt starts on
@@ -1411,15 +1435,174 @@ async fn observe_measured_sound_pool(
     }
 }
 
-/// The sheet read again from nothing on the replacement session. The selected tab is proved
-/// from fresh reads, and Hot is tapped at most once, only when two fresh reads prove it is not
-/// selected. A blind root here is not recycled again: the error goes to the caller as today,
-/// whose next attempt starts on the existing visual route.
-async fn observe_after_recycle(
+/// Switch this session's tree reads to every window once per stage, then read the sheet again
+/// on the same session and epoch. `None` means the switch is unsupported, spent, refused or
+/// the every-window tree was blind as well; the caller falls back to the restart. `Some` is
+/// the sheet read on the every-window tree, or an error that is not about readability.
+async fn reread_through_every_window(
     session: &dyn UiSession,
     plan: SoundPickerPlan,
     maximum: usize,
     allow_recommended: bool,
+) -> Option<anyhow::Result<ObservedSoundPool>> {
+    let step = "đọc bảng nhạc";
+    let note = |outcome: &str, detail: String| {
+        crate::publish_recovery::note_read(
+            "sound",
+            "multiWindowRead",
+            multi_window_switches(),
+            outcome,
+            Some(&format!(
+                "{detail} (bước: {step}; số lần không đọc được: {})",
+                unreadable_roots()
+            )),
+        );
+    };
+    if !session.can_read_multi_window() {
+        note("unsupported", "Phiên này không đọc được cây giao diện qua mọi cửa sổ; chuyển sang khởi động lại UiAutomator".into());
+        return None;
+    }
+    let claimed = SOUND_BUDGET
+        .try_with(|budget| {
+            budget
+                .route
+                .multi_window_switches
+                .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |used| {
+                    (used < MULTI_WINDOW_SWITCH_CAP).then_some(used + 1)
+                })
+                .is_ok()
+        })
+        .unwrap_or(false);
+    if !claimed {
+        note(
+            "capReached",
+            "Đã dùng hết lượt đọc qua mọi cửa sổ của bước nhạc này".into(),
+        );
+        return None;
+    }
+    if let Err(stopped) = check_wait() {
+        return Some(Err(stopped));
+    }
+    let roots = unreadable_roots();
+    let epoch = session.gui_session_epoch();
+    let switch_started = Instant::now();
+    let switched = read_sound(session.enable_multi_window_read(plan.package)).await;
+    let switch_ms = switch_started.elapsed().as_millis() as u64;
+    if let Err(error) = switched {
+        if error.is::<SoundStopped>() {
+            return Some(Err(error));
+        }
+        tracing::warn!(serial=?session.gui_scope().map(|scope| scope.device_id), session=%epoch,
+            switchMs=switch_ms, unreadableRoots=roots, error=%format!("{error:#}"),
+            "sound sheet every-window read unavailable; falling back to the instrumentation restart");
+        note("failed", format!(
+            "Không bật được chế độ đọc qua mọi cửa sổ (enableMultiWindows) sau {switch_ms} ms: {error:#}; chuyển sang khởi động lại UiAutomator"
+        ));
+        return None;
+    }
+    let _ = SOUND_BUDGET.try_with(|budget| {
+        budget
+            .route
+            .multi_window_read
+            .store(true, Ordering::Relaxed)
+    });
+    // The epoch is unchanged: nothing read before was ever a target, and the guards that bind
+    // a tap to a fresh generation, this epoch and the foreground app run unchanged below.
+    let read_started = Instant::now();
+    let observed =
+        observe_after_switch(session, plan, maximum, allow_recommended, "multiWindowRead").await;
+    let read_ms = read_started.elapsed().as_millis() as u64;
+    match observed {
+        Ok(pool) => {
+            tracing::info!(serial=?session.gui_scope().map(|scope| scope.device_id), session=%epoch,
+                multiWindowRead=true, switchMs=switch_ms, readMs=read_ms, unreadableRoots=roots,
+                candidates=pool.candidates.len(), "sound sheet read through every window");
+            note("ready", format!(
+                "multiWindowRead: true; bật chế độ đọc qua mọi cửa sổ mất {switch_ms} ms, đọc lại bảng nhạc mất {read_ms} ms: {} nhạc, tab {}",
+                pool.candidates.len(),
+                pool.effective_plan(plan).section_label
+            ));
+            Some(Ok(pool))
+        }
+        Err(error) if error.is::<SoundStopped>() => Some(Err(error)),
+        Err(error) if error.is::<SoundRootUnreadable>() || unreadable_root(&error) => {
+            tracing::warn!(serial=?session.gui_scope().map(|scope| scope.device_id), session=%epoch,
+                multiWindowRead=true, switchMs=switch_ms, readMs=read_ms, unreadableRoots=unreadable_roots(),
+                error=%format!("{error:#}"),
+                "sound sheet blind through every window too; falling back to the instrumentation restart");
+            note("unreadable", format!(
+                "multiWindowRead: true; bật chế độ đọc qua mọi cửa sổ mất {switch_ms} ms, đọc lại {read_ms} ms vẫn không có cây giao diện của TikTok: {error:#}; chuyển sang khởi động lại UiAutomator"
+            ));
+            None
+        }
+        Err(error) => {
+            note("error", format!(
+                "multiWindowRead: true; bật chế độ đọc qua mọi cửa sổ mất {switch_ms} ms, đọc lại {read_ms} ms rồi lỗi: {error:#}"
+            ));
+            Some(Err(error))
+        }
+    }
+}
+
+fn multi_window_switches() -> u32 {
+    SOUND_BUDGET
+        .try_with(|budget| budget.route.multi_window_switches.load(Ordering::Relaxed))
+        .unwrap_or(0)
+}
+
+/// Return the session to active-window reads when the sound stage ends, whatever the stage
+/// returned. Idempotent: a session that never switched answers `false` and nothing is noted.
+/// A restore that cannot be proven has sealed the session in the driver; the error returned
+/// here must end the attempt before the editor or Post is read on that session.
+pub(crate) async fn end_multi_window_read(session: &dyn UiSession) -> anyhow::Result<()> {
+    let started = Instant::now();
+    let restored = session.restore_single_window_read().await;
+    let ms = started.elapsed().as_millis() as u64;
+    match restored {
+        Ok(false) => Ok(()),
+        Ok(true) => {
+            tracing::info!(serial=?session.gui_scope().map(|scope| scope.device_id),
+                session=%session.gui_session_epoch(), restoreMs=ms,
+                "sound stage restored active-window reads");
+            crate::publish_recovery::note_read(
+                "sound",
+                "multiWindowRestore",
+                1,
+                "restored",
+                Some(&format!("Đã tắt chế độ đọc qua mọi cửa sổ (enableMultiWindows: false) sau {ms} ms và đọc lại xác nhận")),
+            );
+            Ok(())
+        }
+        Err(error) => {
+            tracing::warn!(serial=?session.gui_scope().map(|scope| scope.device_id),
+                session=%session.gui_session_epoch(), restoreMs=ms, error=%format!("{error:#}"),
+                "sound stage could not restore active-window reads; the session is quarantined");
+            crate::publish_recovery::note_read(
+                "sound",
+                "multiWindowRestore",
+                1,
+                "failed",
+                Some(&format!("Không tắt được chế độ đọc qua mọi cửa sổ sau {ms} ms; phiên bị cách ly, không dùng cho màn chỉnh sửa hay Đăng: {error:#}")),
+            );
+            Err(error.context(crate::publish_recovery::RecoveryFailure::new(
+                "sound_multi_window_restore_failed",
+                crate::publish_recovery::FailureKind::Retryable,
+                "Không khôi phục được chế độ đọc một cửa sổ của UiAutomator sau khi chọn nhạc; phiên bị cách ly, chưa bấm Đăng. Lượt thử mới sẽ mở phiên khác.",
+            )))
+        }
+    }
+}
+
+/// The sheet read again from nothing after the read session was switched or replaced. The
+/// selected tab is proved from fresh reads, and Hot is tapped at most once, only when two
+/// fresh reads prove it is not selected. A blind root here is not recycled again: the error
+/// goes to the caller, whose next attempt starts on the existing visual route.
+async fn observe_after_switch(
+    session: &dyn UiSession,
+    plan: SoundPickerPlan,
+    maximum: usize,
+    allow_recommended: bool,
+    strategy: &'static str,
 ) -> anyhow::Result<ObservedSoundPool> {
     let epoch = session.gui_session_epoch();
     anyhow::ensure!(!epoch.is_empty(), "sound sheet session missing");
@@ -1435,20 +1618,23 @@ async fn observe_after_recycle(
         snapshot::observe_xml_only(session, plan, maximum).await
     }
     .await;
-    crate::publish_recovery::note_read(
-        "sound",
-        "readAfterSessionRecycle",
-        tab_recycles(),
-        if pool.is_ok() { "ready" } else { "unavailable" },
-        Some(&match &pool {
-            Ok(pool) => format!(
-                "Phiên đọc mới đọc được bảng nhạc: {} nhạc, tab {}",
-                pool.candidates.len(),
-                pool.effective_plan(plan).section_label
-            ),
-            Err(error) => format!("Phiên đọc mới vẫn chưa đọc được bảng nhạc: {error:#}"),
-        }),
-    );
+    // The every-window read writes its own note with the timings.
+    if strategy == "readAfterSessionRecycle" {
+        crate::publish_recovery::note_read(
+            "sound",
+            strategy,
+            tab_recycles(),
+            if pool.is_ok() { "ready" } else { "unavailable" },
+            Some(&match &pool {
+                Ok(pool) => format!(
+                    "Phiên đọc mới đọc được bảng nhạc: {} nhạc, tab {}",
+                    pool.candidates.len(),
+                    pool.effective_plan(plan).section_label
+                ),
+                Err(error) => format!("Phiên đọc mới vẫn chưa đọc được bảng nhạc: {error:#}"),
+            }),
+        );
+    }
     checked_measured_sound_observation(session, plan, &epoch, pool).await
 }
 
