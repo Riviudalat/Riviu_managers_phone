@@ -32,6 +32,10 @@ snapshot, log nghiệm thu, file phụ tái tạo được và cache compiler.
 
 ## Nghiệm thu Publish và bàn giao
 
+Vòng chung cho mọi nghiệm thu máy thật (preflight, một controller, bằng chứng trước,
+khôi phục, ghi kết quả) nằm ở skill
+[riviu-device-acceptance](../../.claude/skills/riviu-device-acceptance/SKILL.md).
+
 ### Đầu vào, ownership và candidate
 
 Ghi receipt ngoài docs: media root tuyệt đối đã kiểm tồn tại/quyền đọc, manifest,
