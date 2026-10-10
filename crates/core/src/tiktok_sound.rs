@@ -88,6 +88,9 @@ struct SoundRouteEvidence {
     multi_window_switches: AtomicU32,
     /// The sheet was read through every window at least once in this stage.
     multi_window_read: AtomicBool,
+    /// A read-only `/source` on the sheet spent a request deadline this stage; see
+    /// [`source_request_timed_out`]. The next unreadable root hands off without a second one.
+    source_timed_out: AtomicBool,
 }
 const ROUTE_XML: u8 = 1;
 const ROUTE_VISUAL: u8 = 2;
@@ -269,6 +272,39 @@ fn note_unreadable_root() {
     });
 }
 
+/// Count an unreadable read, and remember a `/source` that spent the driver's request
+/// deadline. The flag outlives a later readable root: the stage never spends a second one.
+fn note_unreadable_read(error: &anyhow::Error) {
+    if source_request_timed_out(error) {
+        note_source_deadline();
+    } else {
+        note_unreadable_root();
+    }
+}
+
+/// A read-only `/source` abandoned at a deadline, by the driver or by this stage. The server
+/// is still waiting on the same root, and the next read queues behind it.
+fn note_source_deadline() {
+    note_unreadable_root();
+    let _ = SOUND_BUDGET
+        .try_with(|budget| budget.route.source_timed_out.store(true, Ordering::Relaxed));
+}
+
+fn source_timed_out() -> bool {
+    SOUND_BUDGET
+        .try_with(|budget| budget.route.source_timed_out.load(Ordering::Relaxed))
+        .unwrap_or(false)
+}
+
+/// Enough unreadable roots in a row for a measured visual route to take over: ROOT_UNREADABLE_CAP
+/// of them, or one once a `/source` deadline was spent. Phone 44 (box3150g, 2026-10-10 01:01): a
+/// 30 s `agent_request_timeout` on the sheet was not counted, and the XML route then spent four
+/// ~35 s pre-row attempts on the same blind root until the stage budget ran out. A second 30 s
+/// read never buys a tree the first one did not, so one is the most this stage spends on them.
+fn blind_handoff_reached(consecutive: u32) -> bool {
+    consecutive >= ROOT_UNREADABLE_CAP || (consecutive >= 1 && source_timed_out())
+}
+
 /// A sound read returned a root; the next unreadable one starts a new run.
 fn note_readable_root() {
     let _ = SOUND_BUDGET.try_with(|budget| {
@@ -290,7 +326,7 @@ fn consecutive_unreadable_roots() -> u32 {
 /// each, until the 180 s budget ran out. Once the stage met ROOT_UNREADABLE_CAP in a row, a
 /// phase with a measured visual route starts there. It never taps without a fresh frame.
 fn visual_handoff_due(session: &dyn UiSession, plan: SoundPickerPlan) -> bool {
-    consecutive_unreadable_roots() >= ROOT_UNREADABLE_CAP
+    blind_handoff_reached(consecutive_unreadable_roots())
         && selection_recovery::measured(plan)
         && session.gui_reasoner().is_some()
 }
@@ -382,6 +418,25 @@ fn unreadable_root(error: &anyhow::Error) -> bool {
                 error.op == "hierarchySourceSnapshot"
                     && matches!(error.kind, crate::driver::UiErrorKind::Timeout)
             })
+        || source_request_timed_out(error)
+}
+
+/// A read-only `GET /source` that reached the Android driver's request deadline. Phone 44
+/// (box3150g, 2026-10-10 01:01:39): `agent_request_timeout ... GET /source ... elapsed_ms=30000`
+/// on the sound sheet is the same blindness as the ~10.5 s root error, but the driver reports
+/// it as a transport timeout, so the stage kept the XML route and never handed off. Only the
+/// hierarchy route matches; no effectful request is classified here and nothing is replayed.
+fn source_request_timed_out(error: &anyhow::Error) -> bool {
+    error.chain().any(|source| {
+        source
+            .downcast_ref::<reqwest::Error>()
+            .is_some_and(|transport| {
+                transport.is_timeout()
+                    && transport
+                        .url()
+                        .is_some_and(|url| url.path().ends_with("/source"))
+            })
+    })
 }
 
 /// Consecutive sound-sheet reads found no accessibility root. Only a phase with a measured
@@ -659,7 +714,7 @@ async fn clear_sound_popup(
             step_before_deadline(session, labels, &mut popup, deadline, &stopped, &stopped).await;
         match &step {
             Ok(ReadWaitResult::Ready(_)) => note_readable_root(),
-            Err(error) if unreadable_root(error) => note_unreadable_root(),
+            Err(error) if unreadable_root(error) => note_unreadable_read(error),
             _ => {}
         }
         match step? {
@@ -1974,6 +2029,16 @@ pub async fn recover_sound_selection(
         set_selection_route(ROUTE_VISUAL);
         return visual::recover(session, plan, pool, index).await;
     }
+    // A stage past its blind-root cap asks the editor and the sheet for no further XML: the
+    // frozen identity goes to the visual route, which never taps a row shown selected.
+    if visual_handoff_due(session, plan) {
+        let blind = anyhow::Error::new(SoundRootUnreadable {
+            reads: consecutive_unreadable_roots(),
+        });
+        note_visual_handoff("chọn lại nhạc sau khi đọc lỗi", &blind);
+        set_selection_route(ROUTE_VISUAL);
+        return hand_off_frozen_pool(session, plan, pool, index).await;
+    }
     // The measured hierarchy path checks the current selected index before any tap.
     if confirm_sound(session, plan, &pool.candidates[index].title)
         .await
@@ -1982,6 +2047,29 @@ pub async fn recover_sound_selection(
         return Ok(());
     }
     choose_and_confirm_sound(session, plan, pool, index).await
+}
+
+/// The XML pool is frozen and the sheet root stopped answering before the row tap. Hot has
+/// the measured visual twin (`visual::hand_off`). Any other tab has none: OCR rows are proved
+/// under the Hot underline only, so the attempt ends before any tap and the bound choice waits
+/// for a fresh attempt, exactly like a choice that left the pool.
+async fn hand_off_frozen_pool(
+    session: &dyn UiSession,
+    plan: SoundPickerPlan,
+    pool: &ObservedSoundPool,
+    index: usize,
+) -> anyhow::Result<()> {
+    if plan.section_label == "Hot" {
+        return visual::hand_off(session, plan, pool, index).await;
+    }
+    Err(crate::publish_recovery::retryable_error(
+        "sound_any_choice_requires_fresh_attempt",
+        format!(
+            "Không đọc được cây giao diện bảng nhạc trước khi bấm chọn ({} lần liên tiếp); tab {} chưa đo đường đọc ảnh màn hình nên không chuyển sang OCR được; cần lượt thử mới, chưa bấm Đăng",
+            consecutive_unreadable_roots(),
+            plan.section_label
+        ),
+    ))
 }
 
 fn unique_sound_entry(
@@ -2268,6 +2356,18 @@ pub async fn choose_and_confirm_sound(
             .candidates
             .get(index)
             .context("sound selection index is outside the observed pool")?;
+        if visual_handoff_due(session, plan) {
+            // The stage already met its blind-root cap. Asking the same root for popups and
+            // rows again (~10.5 s each, 30 s on a request deadline) would only spend the
+            // budget: the frozen identity is handed off before any read.
+            phase = "visualHandoff";
+            let blind = anyhow::Error::new(SoundRootUnreadable {
+                reads: consecutive_unreadable_roots(),
+            });
+            note_visual_handoff("trước khi bấm chọn nhạc", &blind);
+            set_selection_route(ROUTE_VISUAL);
+            return hand_off_frozen_pool(session, plan, pool, index).await;
+        }
         let reused = take_fresh_late_xml(session, pool);
         if reused.is_some() {
             crate::publish_recovery::note_read(
@@ -2284,13 +2384,17 @@ pub async fn choose_and_confirm_sound(
         };
         let fresh = match observed {
             Ok(fresh) => fresh,
-            Err(error) if error.is::<SoundRootUnreadable>() => {
+            Err(error)
+                if error.is::<SoundRootUnreadable>()
+                    || (unreadable_root(&error) && visual_handoff_due(session, plan)) =>
+            {
                 // No row was tapped in this call. The frozen XML identity moves to the
-                // visual route, which taps only a row it sees unselected.
+                // visual route, which taps only a row it sees unselected. A popup read that
+                // met the cap on this same root is not asked again either.
                 phase = "visualHandoff";
                 note_visual_handoff("trước khi bấm chọn nhạc", &error);
                 set_selection_route(ROUTE_VISUAL);
-                return visual::hand_off(session, plan, pool, index).await;
+                return hand_off_frozen_pool(session, plan, pool, index).await;
             }
             Err(error) => return Err(error),
         };

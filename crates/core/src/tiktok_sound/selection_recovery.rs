@@ -264,7 +264,7 @@ async fn confirm_editor_observed(
             }
             Err(error) if transient_sound_read(&error) => {
                 if unreadable_root(&error) {
-                    note_unreadable_root();
+                    note_unreadable_read(&error);
                 }
                 previous = None;
                 tokio::time::sleep(POLL).await;

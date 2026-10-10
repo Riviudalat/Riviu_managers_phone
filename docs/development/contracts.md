@@ -222,6 +222,17 @@ mới đặt lại. Khi đã đủ hai, pha mở/đọc danh sách vào thẳng 
 không còn hỏi XML kiểm tra hộp thoại trước mỗi khung hình: không nút hộp thoại nào được
 bấm khi thiếu XML, còn hộp thoại che bảng làm mất tab/hàng đã đo nên không có tap.
 `ReadRecovery` ghi `rootUnreadable`/`visualHandoff` cho cả pha mở bảng nhạc.
+Một `GET /source` chỉ đọc chạm hạn yêu cầu của driver (30 giây, `agent_request_timeout`;
+#44, box3150g 2026-10-10 01:01) trên bảng nhạc cũng là một gốc không đọc được như lỗi gốc
+~10,5 giây, không phải lỗi tạm để đọc thêm: pha có thể thay phiên đi đường đọc qua mọi cửa
+sổ rồi đường ảnh y như gốc null. Sau một lần chạm hạn như vậy (kể cả `/source` bị bỏ ở hạn
+12 giây của chính bước nhạc), gốc không đọc được kế tiếp đã đủ để chuyển sang đường ảnh, nên
+mỗi bước nhạc tốn tối đa một lần đọc 30 giây; chỉ `/source` chỉ đọc được phân loại như vậy,
+không yêu cầu gây hiệu ứng nào bị gửi lại. Trước khi bấm hàng, bước nhạc đã đủ số gốc không
+đọc được thì không hỏi thêm XML nào (không kiểm hộp thoại, không đọc lại danh sách, lần thử
+lại tại chỗ không đọc lại editor): pool Hot giao danh tính đã chốt cho đường ảnh; tab khác
+(For You) chưa đo đường ảnh nên lượt thử kết thúc trước mọi tap với
+`sound_any_choice_requires_fresh_attempt`.
 Khi gốc bảng nhạc không đọc được ngay trong pha có thể thay phiên (#44/#47, 2026-10-09:
 gốc cửa sổ đang hoạt động vẫn null kể cả trên server UiAutomator2 mới), Android thử đọc
 qua mọi cửa sổ trước: bật `enableMultiWindows: true` trên đúng phiên đó qua

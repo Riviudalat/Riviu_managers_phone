@@ -14,8 +14,10 @@ const SNAPSHOT_POOL_WINDOW: Duration = SOUND_WINDOW;
 /// within the existing phase/global deadline, clearing prior geometry each time.
 /// Only successful fresh snapshots can authorize a later navigation tap.
 /// `unreadable` counts consecutive unreadable roots for a phase that can hand off to the
-/// measured visual route; at ROOT_UNREADABLE_CAP it returns `SoundRootUnreadable` instead
-/// of asking the same root again.
+/// measured visual route; at ROOT_UNREADABLE_CAP (or one root after a `/source` deadline) it
+/// returns `SoundRootUnreadable` instead of asking the same root again. A measured session with
+/// a reasoner stops there on any tab: the caller ends before a tap rather than polling the
+/// blind root for the rest of the window.
 async fn read_snapshot(
     session: &dyn UiSession,
     plan: SoundPickerPlan,
@@ -48,22 +50,28 @@ async fn read_snapshot(
             .context("đọc bảng nhạc hết thời gian chờ 3 phút; chưa bấm Đăng")?;
     let observed = match observed {
         Err(error) if unreadable_root(&error) && tab_switch_recycle_due(plan) => {
-            note_unreadable_root();
+            note_unreadable_read(&error);
             return Err(error.context(SoundTabSwitchBlind));
         }
         observed => observed,
     };
     if let Err(error) = &observed {
         if unreadable_root(error) {
-            note_unreadable_root();
-            if let Some(count) = unreadable.as_deref_mut() {
-                *count += 1;
-                if retry_transient && *count >= ROOT_UNREADABLE_CAP {
-                    tracing::warn!(elapsed_ms = started.elapsed().as_millis() as u64,
-                        consecutive = *count, error = %error,
-                        "sound screen root unreadable; handing off to the measured visual route");
-                    return Err(SoundRootUnreadable { reads: *count }.into());
+            note_unreadable_read(error);
+            let consecutive = match unreadable.as_deref_mut() {
+                Some(count) => {
+                    *count += 1;
+                    *count
                 }
+                None => consecutive_unreadable_roots(),
+            };
+            let hands_off = unreadable.is_some()
+                || (selection_recovery::measured(plan) && session.gui_reasoner().is_some());
+            if retry_transient && hands_off && blind_handoff_reached(consecutive) {
+                tracing::warn!(elapsed_ms = started.elapsed().as_millis() as u64,
+                    consecutive, sourceTimedOut = source_timed_out(), error = %error,
+                    "sound screen root unreadable; handing off to the measured visual route");
+                return Err(SoundRootUnreadable { reads: consecutive }.into());
             }
         }
     }
@@ -513,14 +521,18 @@ pub(super) async fn observe_direct(
             Ok(Err(error)) => {
                 if unreadable_root(&error) {
                     let recycle = tab_switch_recycle_due(plan);
-                    note_unreadable_root();
+                    note_unreadable_read(&error);
                     if recycle {
                         return Err(error.context(SoundTabSwitchBlind));
                     }
                 }
                 return Ok(None);
             }
-            Err(_) => return Ok(None),
+            Err(_elapsed) => {
+                // A read-only `/source` abandoned at this deadline is a blind root as well.
+                note_source_deadline();
+                return Ok(None);
+            }
         };
         check_wait()?;
         anyhow::ensure!(
@@ -755,7 +767,8 @@ async fn observe_inner(
     let mut previous: Option<(u64, ObservedSoundPool)> = None;
     let mut recovery_used = 0;
     let mut covered_generation = None;
-    // Only a Hot pool has a visual twin to hand off to; other sections keep observing.
+    // Only a Hot pool has a visual twin to hand off to. Another measured section ends at the
+    // same cap inside `read_snapshot` and the caller closes the attempt before any tap.
     let hand_off = retry_unavailable
         && selection_recovery::measured(plan)
         && plan.section_label == "Hot"
