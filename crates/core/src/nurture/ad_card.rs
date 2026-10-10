@@ -154,7 +154,7 @@ pub(super) fn sponsored_card(tree: &Tree, labels: TikTokControls) -> Option<Spon
     };
     Some(SponsoredCard {
         evidence,
-        touch_owners: touch_owners(tree),
+        touch_owners: touch_owners(tree, ad_label_measured),
     })
 }
 
@@ -163,7 +163,13 @@ pub(super) fn sponsored_card(tree: &Tree, labels: TikTokControls) -> Option<Spon
 /// Clickable containers that span much of the card (the card root, the long-press layer,
 /// the whole interact column `kqi`, 993 px of 2220 on the 10/10/2026 dump) are left out: they
 /// are under every point and their drag goes to the feed pager like any card's.
-fn touch_owners(tree: &Tree) -> Vec<ElementBox> {
+///
+/// On the measured build a sponsored **photo** post also carries the photo page-indicator band
+/// ([`super::hierarchy::PHOTO_INDICATOR_ID`]), which swallows a drag that starts on it.
+/// `ce071827715f321b05` (Galaxy S8+, 45.7.3), 10/10/2026 16:05:22: the ad flick started at
+/// y=1367 inside the band [1236,1416] of a jewellery photo ad, stayed unproven twice and cost a
+/// TikTok restart (evidence `popups/20261010/230523.328-nurture-unproven-swipe-…`).
+fn touch_owners(tree: &Tree, measured_build: bool) -> Vec<ElementBox> {
     let extent = visible_nodes(tree)
         .map(|(_, rect)| rect.y + rect.height)
         .fold(0.0_f64, f64::max);
@@ -172,6 +178,7 @@ fn touch_owners(tree: &Tree) -> Vec<ElementBox> {
             let node = &tree.nodes[*index];
             let id = node.attr("resource-id");
             node.attr("content-desc") == "click_container"
+                || (measured_build && id.ends_with(super::hierarchy::PHOTO_INDICATOR_ID))
                 || id.ends_with(":id/ad_feed_card_container_v2")
                 || id.ends_with(":id/ad_feed_card_container")
                 || (rect.clickable && rect.enabled && rect.height < extent * 0.25)

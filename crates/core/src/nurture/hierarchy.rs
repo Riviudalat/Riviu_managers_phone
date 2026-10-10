@@ -833,7 +833,7 @@ const CARD_READ_GRACE: Duration = Duration::from_millis(11_000);
 /// the same start left every video. The band reports `clickable=false` and the tree does
 /// not say what it does with a drag; it is avoided, not interpreted. The id is an obfuscated
 /// name, so it is bound to [`PHOTO_INDICATOR_BUILD`] the way [`super::ad_card`] binds its own.
-const PHOTO_INDICATOR_ID: &str = ":id/q9t";
+pub(super) const PHOTO_INDICATOR_ID: &str = ":id/q9t";
 const PHOTO_INDICATOR_BUILD: &str = "45.7.3";
 const PHOTO_INDICATOR_PACKAGE: &str = "com.zhiliaoapp.musically";
 
