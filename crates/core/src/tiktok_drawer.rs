@@ -52,11 +52,17 @@ pub const EDIT_TEXT: &str = "android.widget.EditText";
 pub const DRAWER_WINDOW: Duration = Duration::from_millis(6_000);
 /// How long the Send button may take to arm after the text is set.
 pub const ARM_WINDOW: Duration = Duration::from_millis(3_000);
-/// How long to wait for Send to disarm, which is what proves the comment left.
+/// How long after the Send tap a confirmation read may still **start**. A read that has
+/// started finishes on the driver's own request deadline, so the worst case is this window
+/// plus one blind query.
 ///
 /// One blind snapshot plus a poll. Box 31-50, Global 45.7.3, 10/10/2026: `/source` took
 /// 5.0-5.3 s on exactly the phones whose comments settled as uncertain, against a former
-/// 5 s window, so the only read after the tap lost the race it should have won.
+/// 5 s window, so the only read after the tap lost the race it should have won. Same box,
+/// retry of 21:33Z: with the window at 11 s the first snapshot (requested about a second
+/// after the tap) still showed the composer before TikTok's round trip, and the second read
+/// (5.4-13.7 s on `/source`) was dropped at the window, so 13 of 13 sends settled uncertain
+/// while the readback found every comment on the post.
 pub const SEND_WINDOW: Duration = SEND_BLIND_QUERY_COST.saturating_add(DRAWER_POLL);
 pub const DRAWER_POLL: Duration = Duration::from_millis(350);
 /// The Android agent's own root-node deadline (`AgentClient::BLIND_QUERY_COST` in
@@ -197,6 +203,11 @@ pub struct CommentDrawer<'a, P: TapPlanner> {
     plan_tap: P,
     typing_attempted: bool,
     focused_binding: Option<FocusBinding>,
+    /// The text this drawer typed, for the post-tap list proof.
+    typed_text: Option<String>,
+    /// Visible comment bodies that already rendered that text before it was typed, from
+    /// the composer snapshot taken right before typing. `None` on the legacy locate path.
+    bodies_before_send: Option<usize>,
 }
 
 struct FocusedComposer {
@@ -204,6 +215,31 @@ struct FocusedComposer {
     text: String,
     hint: bool,
     send: ElementBox,
+    /// How many visible comment bodies already carried the text about to be typed, read
+    /// from the same snapshot. `None` when no text was given.
+    bodies: Option<usize>,
+}
+
+/// What one post-tap snapshot says about the Send, the composer and the comment list.
+struct SendEvidence {
+    /// The Send control, or `None` when the snapshot has no such node.
+    send: Option<ElementBox>,
+    /// Every visible comment field shows an empty draft: the typed text left the composer.
+    composer_cleared: bool,
+    /// Visible comment bodies rendering the typed text.
+    bodies: usize,
+}
+
+/// Visible comment bodies rendering `text`: the same matcher the comment readback uses.
+fn comment_bodies_with_text(
+    tree: &crate::ui_automation::tree::Tree,
+    package: &str,
+    text: &str,
+) -> usize {
+    crate::comment_verification::search::comment_bodies(tree, package, text)
+        .into_iter()
+        .filter(|index| tree.nodes[*index].attr("class") != EDIT_TEXT)
+        .count()
 }
 
 struct FocusBinding {
@@ -250,6 +286,8 @@ impl<'a, P: TapPlanner> CommentDrawer<'a, P> {
             plan_tap,
             typing_attempted: false,
             focused_binding: None,
+            typed_text: None,
+            bodies_before_send: None,
         }
     }
 
@@ -526,6 +564,8 @@ impl<'a, P: TapPlanner> CommentDrawer<'a, P> {
         }
         anyhow::ensure!(!stop.load(Ordering::Relaxed), "Comment stopped before typing");
         self.typing_attempted = true;
+        self.typed_text = Some(text.to_owned());
+        self.bodies_before_send = None;
         self.session.type_text(text).await?;
         Ok(TypedInto::Typed)
     }
@@ -563,7 +603,7 @@ impl<'a, P: TapPlanner> CommentDrawer<'a, P> {
         let deadline = Instant::now() + DRAWER_WINDOW;
         let mut retried = false;
         loop {
-            let result = read_before_deadline(self.read_focused_composer(query, expected_hint, true), deadline, stop).await;
+            let result = read_before_deadline(self.read_focused_composer(query, expected_hint, true, None), deadline, stop).await;
             if self.session.gui_session_epoch() != epoch || scope_identity(self.session) != scope {
                 return Err(FocusedDraftFailure::BindingChanged.into());
             }
@@ -584,7 +624,13 @@ impl<'a, P: TapPlanner> CommentDrawer<'a, P> {
         }
     }
 
-    async fn read_focused_composer(&self, query: ElementQuery<'_>, expected_hint: Option<&str>, waiting_for_focus: bool) -> anyhow::Result<Option<FocusedComposer>> {
+    async fn read_focused_composer(
+        &self,
+        query: ElementQuery<'_>,
+        expected_hint: Option<&str>,
+        waiting_for_focus: bool,
+        body_text: Option<&str>,
+    ) -> anyhow::Result<Option<FocusedComposer>> {
         if self.session.active_app_bundle().await? != self.labels.package() {
             return Err(FocusedDraftFailure::BindingChanged.into());
         }
@@ -595,7 +641,50 @@ impl<'a, P: TapPlanner> CommentDrawer<'a, P> {
             self.labels.description_anchor(TikTokControl::CommentSend),
             expected_hint,
             waiting_for_focus,
+            body_text,
         )
+    }
+
+    /// One post-tap read: the Send control, the composer state and the comment list, all
+    /// from a single snapshot on the accessibility path. The legacy path keeps its single
+    /// `locate` and reports nothing about the list.
+    async fn send_evidence(&self, query: ElementQuery<'_>) -> anyhow::Result<SendEvidence> {
+        if !self.session.supports_accessibility_readback() {
+            return Ok(SendEvidence {
+                send: self.locate_send(query).await?,
+                composer_cleared: false,
+                bodies: 0,
+            });
+        }
+        anyhow::ensure!(
+            self.session.active_app_bundle().await? == self.labels.package(),
+            "Send foreground changed"
+        );
+        let snapshot = self.session.hierarchy_source_snapshot().await?;
+        let package = self.labels.package();
+        let anchor = self.labels.description_anchor(TikTokControl::CommentSend);
+        let send = snapshot_send_control(snapshot.clone(), package, query, anchor)?;
+        let tree = crate::ui_automation::tree::Tree::parse(snapshot)?;
+        let fields = tree.matching(package, ElementQuery::ClassName(EDIT_TEXT));
+        let composer_cleared = !fields.is_empty()
+            && fields.iter().all(|index| {
+                let node = &tree.nodes[*index];
+                empty_draft(
+                    node.attr("text"),
+                    node.attr("showing-hint") == "true",
+                    false,
+                    None,
+                )
+            });
+        let bodies = self
+            .typed_text
+            .as_deref()
+            .map_or(0, |text| comment_bodies_with_text(&tree, package, text));
+        Ok(SendEvidence {
+            send,
+            composer_cleared,
+            bodies,
+        })
     }
 
     /// Re-prove the same focused field in a newer snapshot, without re-tapping stale geometry.
@@ -609,10 +698,15 @@ impl<'a, P: TapPlanner> CommentDrawer<'a, P> {
         let Some(query) = self.send_query() else {
             return Ok(TypedInto::NoSendControl);
         };
+        self.bodies_before_send = None;
         let button = if let Some(baseline) = binding.composer.as_ref() {
             let observed = match read_before_deadline(
-                self.read_focused_composer(query, expected_hint, false), Instant::now() + DRAWER_WINDOW, stop,
-            ).await? {
+                self.read_focused_composer(query, expected_hint, false, Some(text)),
+                Instant::now() + DRAWER_WINDOW,
+                stop,
+            )
+            .await?
+            {
                 ReadWaitResult::Ready(value) => value,
                 ReadWaitResult::Cancelled | ReadWaitResult::DeadlineExceeded => None,
             };
@@ -626,6 +720,9 @@ impl<'a, P: TapPlanner> CommentDrawer<'a, P> {
             {
                 return Err(FocusedDraftFailure::DraftChanged.into());
             }
+            // The list as it was before this text existed in the composer: a body with the
+            // same text that appears after Send is new, whatever else is on the post.
+            self.bodies_before_send = observed.bodies;
             observed.send
         } else {
             let Some(button) = self.await_element(DRAWER_WINDOW, query, stop).await? else {
@@ -642,6 +739,7 @@ impl<'a, P: TapPlanner> CommentDrawer<'a, P> {
             "Comment stopped before typing"
         );
         self.typing_attempted = true; // A failed ACK does not prove that text did not land.
+        self.typed_text = Some(text.to_owned());
         self.session.type_text(text).await?;
         Ok(TypedInto::Typed)
     }
@@ -669,11 +767,20 @@ impl<'a, P: TapPlanner> CommentDrawer<'a, P> {
             .await
     }
 
-    /// Tap Send and report whether the disarm was observed.
+    /// Tap Send and report whether the comment was seen to leave.
     ///
-    /// The disarm is the proof: the button goes back to not-armed once the comment
-    /// leaves. The button vanishing counts too — a drawer that closed is the same
-    /// evidence.
+    /// The disarm is one proof: the button goes back to not-armed once the comment leaves.
+    /// On the legacy path the button vanishing counts too — a drawer that closed is the
+    /// same evidence. On the accessibility path a missing Send proves nothing by itself:
+    /// Box 31-50, Global 45.7.3, 10/10/2026 (`c3d4f0aa`, screenshot 21:38Z) measured that a
+    /// real send collapses the composer to the bottom bar, where the Send node is absent,
+    /// while the new row sits at the top of the list "1s ago". So the same snapshot also
+    /// proves the send when every comment field shows an empty draft **and** one more body
+    /// renders the typed text than before it was typed.
+    ///
+    /// Reads may start until [`SEND_WINDOW`] and each finishes on the driver's own deadline;
+    /// the outcome is only read, and Send is never tapped again. Each read is logged, so a
+    /// send that stays uncertain says what the screen showed.
     pub async fn tap_send_and_confirm_disarm(
         &mut self,
         send: &ElementBox,
@@ -688,28 +795,46 @@ impl<'a, P: TapPlanner> CommentDrawer<'a, P> {
         };
         let deadline = Instant::now() + SEND_WINDOW;
         let epoch = self.session.gui_session_epoch();
-        // The first snapshot after the tap is the likeliest proof, so it completes on the
-        // driver's own request deadline instead of being dropped at ours. Later reads stay
-        // inside the window. Either way the outcome is only read; Send is never tapped again.
-        let mut first = Some(self.locate_send(query).await?);
+        let started = Instant::now();
+        let mut reads: u32 = 0;
         loop {
-            let read = match first.take() {
-                Some(observed) => ReadWaitResult::Ready(observed),
-                None => read_before_deadline(self.locate_send(query), deadline, stop).await?,
-            };
-            match read {
-                ReadWaitResult::Ready(observed) => {
-                    anyhow::ensure!(
-                        self.session.gui_session_epoch() == epoch,
-                        "Send session changed"
-                    );
-                    if observed.as_ref().is_some_and(|element| !element.enabled)
-                        || (observed.is_none() && !self.session.supports_element_bounds())
-                    {
-                        return Ok(true);
-                    }
-                }
-                ReadWaitResult::Cancelled | ReadWaitResult::DeadlineExceeded => return Ok(false),
+            // The first snapshot after the tap always completes; a later read starts only
+            // inside the window, and is never dropped once started.
+            if reads > 0 && (stop.load(Ordering::Relaxed) || Instant::now() >= deadline) {
+                tracing::info!(
+                    reads,
+                    elapsed_ms = started.elapsed().as_millis() as u64,
+                    "sau khi bấm Gửi: hết cửa sổ xác nhận mà chưa thấy bằng chứng gửi; giữ trạng thái mơ hồ, không bấm lại"
+                );
+                return Ok(false);
+            }
+            let evidence = self.send_evidence(query).await?;
+            reads += 1;
+            anyhow::ensure!(
+                self.session.gui_session_epoch() == epoch,
+                "Send session changed"
+            );
+            let disarmed = evidence
+                .send
+                .as_ref()
+                .is_some_and(|element| !element.enabled);
+            let vanished_legacy =
+                evidence.send.is_none() && !self.session.supports_element_bounds();
+            let new_row = self
+                .bodies_before_send
+                .is_some_and(|before| evidence.bodies > before);
+            let posted_row = evidence.composer_cleared && new_row;
+            tracing::info!(
+                read = reads,
+                elapsed_ms = started.elapsed().as_millis() as u64,
+                send = evidence.send.as_ref().map_or("vắng", |element| if element.enabled { "sáng" } else { "tắt" }),
+                composer_cleared = evidence.composer_cleared,
+                rows_with_text = evidence.bodies,
+                rows_before = ?self.bodies_before_send,
+                "sau khi bấm Gửi: đọc màn hình"
+            );
+            if disarmed || vanished_legacy || posted_row {
+                return Ok(true);
             }
             sleep(
                 DRAWER_POLL.min(deadline.saturating_duration_since(Instant::now())),
@@ -850,12 +975,14 @@ fn snapshot_focused_composer(
     send_anchor: Option<&str>,
     expected_hint: Option<&str>,
     waiting_for_focus: bool,
+    body_text: Option<&str>,
 ) -> anyhow::Result<Option<FocusedComposer>> {
     let generation = snapshot.generation;
     let send = snapshot_send_control(snapshot.clone(), package, query, send_anchor)
         .map_err(|_| FocusedDraftFailure::ReadUnproved)?;
     let tree = crate::ui_automation::tree::Tree::parse(snapshot)
         .map_err(|_| FocusedDraftFailure::ReadUnproved)?;
+    let bodies = body_text.map(|text| comment_bodies_with_text(&tree, package, text));
     let fields = tree.matching(package, ElementQuery::ClassName(EDIT_TEXT));
     if !fields.iter().all(|index| matches!(tree.nodes[*index].attr("focused"), "true" | "false")) {
         return Err(FocusedDraftFailure::ReadUnproved.into());
@@ -898,7 +1025,13 @@ fn snapshot_focused_composer(
         }
         return Ok(None);
     }
-    Ok(Some(FocusedComposer { generation, text, hint, send }))
+    Ok(Some(FocusedComposer {
+        generation,
+        text,
+        hint,
+        send,
+        bodies,
+    }))
 }
 
 /// Keep identity, geometry and the arm/disarm bit from one fresh source. Android
