@@ -52,9 +52,8 @@ fn atomic_record(path: &std::path::Path, record: &impl Serialize) -> anyhow::Res
     use std::io::Write;
     file.write_all(&serde_json::to_vec_pretty(record)?)?;
     file.sync_all()?;
-    std::fs::rename(&temp, path).or_else(|error| {
+    std::fs::rename(&temp, path).inspect_err(|_| {
         temp.exists().then(|| std::fs::remove_file(&temp));
-        Err(error)
     })?;
     Ok(())
 }

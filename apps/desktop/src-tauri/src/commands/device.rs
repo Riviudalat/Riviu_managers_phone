@@ -218,7 +218,7 @@ pub async fn install_ipa_to_group(
                 .control
                 .try_acquire_exclusive(&udid, DeviceWorkOwner::Repair)
                 .await?;
-            state.control.install_app(&context, &ipa).await
+            state.control.install_app(&context, ipa).await
         }
         .await;
         match outcome {

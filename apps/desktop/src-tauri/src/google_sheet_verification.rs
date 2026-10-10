@@ -69,8 +69,8 @@ pub(super) async fn verify(db: &Database, url: &str) -> anyhow::Result<GoogleShe
         check.reporting_ready && check.writer_schema_version == Some(2) && ready_read;
     let epoch = check.reporting_epoch.clone();
     let mut result = if let Some(connection) = bound {
-        checked_bound_result(check, connection).map_err(|error| {
-            writer_check::invalidate(); error
+        checked_bound_result(check, connection).inspect_err(|_| {
+            writer_check::invalidate();
         })?
     } else {
         checked_result(check, "")?

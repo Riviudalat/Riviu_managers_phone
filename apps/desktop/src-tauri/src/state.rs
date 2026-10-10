@@ -833,7 +833,7 @@ impl AppState {
         let artifacts_dir = data.join("artifacts");
         std::fs::create_dir(&artifacts_dir)?;
         // Direct mock construction does not consult token env, manifests, sidecars or USB.
-        let (control, streams, android) = if scope.is_some() {
+        let (control, streams, android) = if let Some(diagnostic) = scope.as_ref() {
             let root = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../../sidecars");
             let tools = crate::android_tools::AndroidTools::load_from(&root, SidecarOrigin::RepoCheckout);
             let config = riviu_android_driver::AndroidDriverConfig {
@@ -841,7 +841,7 @@ impl AppState {
                 bundled_minicap_apk: tools.minicap_apk,
                 bundled_scrcpy_server: tools.scrcpy_server,
                 automatic_setup_allowed: false,
-                diagnostic_runner_devices: scope.as_ref().expect("diagnostic scope").devices.iter().filter(|d|d.allow_installed_runner).map(|d|d.udid.clone()).collect(),
+                diagnostic_runner_devices: diagnostic.devices.iter().filter(|d|d.allow_installed_runner).map(|d|d.udid.clone()).collect(),
                 ..Default::default()
             };
             let driver = riviu_android_driver::detect_driver(&config).await.map_err(anyhow::Error::msg)?;
