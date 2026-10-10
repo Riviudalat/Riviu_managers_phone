@@ -48,7 +48,7 @@ for (const width of [1440, 820]) {
     await expect(page.getByText("Đang chờ xác minh bài đăng", { exact: true })).toHaveCount(0);
     await page.getByRole("button",{name:/^Hoàn tất/}).click();
     await expect(page.getByRole("button",{name:"Kiểm tra liên kết",exact:true})).toHaveCount(0);
-    await page.getByRole("button",{name:/^Cần xử lý/}).click();
+    await page.locator(".publish-page").getByRole("button",{name:/^Cần xử lý/}).click();
     await expect(page.getByRole("button",{name:"Kiểm tra liên kết",exact:true})).toBeVisible();
     const accessibility = await new AxeBuilder({page}).include(".publish-page").analyze();
     expect(accessibility.violations).toEqual([]);

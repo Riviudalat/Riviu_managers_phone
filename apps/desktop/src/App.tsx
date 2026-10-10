@@ -49,6 +49,7 @@ import { DeviceTile } from "./components/DeviceTile";
 import { FilterToolbar, type ViewMode } from "./components/FilterToolbar";
 import { DeviceListTable } from "./components/DeviceListTable";
 import { deviceEvidence } from "./deviceEvidence";
+import { FleetCounters } from "./components/FleetCounters";
 import { DeviceContextMenu } from "./components/DeviceContextMenu";
 import { DeviceFilesPopup } from "./components/DeviceFilesPopup";
 import type { DeviceMenuNode } from "./deviceMenu";
@@ -88,6 +89,7 @@ import { PageHeader, StatusChip } from "./components/WorkspacePrimitives";
 import { resolveAutomationTarget } from "./automationTargets";
 import {
   deviceMatchesFleetFilter,
+  fleetCounts,
   deviceOperationalView,
   helperRecoveryTargets,
 } from "./deviceWork";
@@ -548,11 +550,13 @@ function App() {
           deviceStatusFilter,
           deviceWorkOwnerReadState,
           cachedAgent(device.udid),
+          cachedLoad(device.udid),
         ),
       ),
     [
       connectionFilter,
       cachedAgent,
+      cachedLoad,
       deviceSearch,
       deviceStatusFilter,
       deviceWorkOwnerReadState,
@@ -878,6 +882,11 @@ function App() {
     return count;
   }, [devices, currentDeviceWorkOwner, deviceWorkOwnerReadState, cachedAgent, cachedLoad]);
 
+  const counts = useMemo(
+    () => fleetCounts(devices, fleetSettled, currentDeviceWorkOwner, deviceWorkOwnerReadState, cachedAgent, cachedLoad),
+    [devices, fleetSettled, currentDeviceWorkOwner, deviceWorkOwnerReadState, cachedAgent, cachedLoad],
+  );
+
   const runningJobs = useMemo(
     () => jobs.filter((j) => j.status === "running" || j.status === "queued").length,
     [jobs],
@@ -992,6 +1001,14 @@ function App() {
           meta={
             <>
               <span className="fleet-status-label">Toàn hệ thống</span>
+              <FleetCounters
+                counts={counts}
+                filter={deviceStatusFilter}
+                onFilter={(next) => {
+                  setDeviceStatusFilter(next);
+                  if (page !== "control") void requestPage("control", true);
+                }}
+              />
               {syncStatusLabel && <StatusChip>{syncStatusLabel}</StatusChip>}
               {readyCount !== null && readyCount > 0 && (
                 <StatusChip tone="success">{readyCount} sẵn sàng</StatusChip>
@@ -1317,6 +1334,7 @@ function App() {
                     }
                   >
                     <option value="all">Mọi trạng thái</option>
+                    <option value="idle">Rảnh</option>
                     <option value="ready">Sẵn sàng</option>
                     <option value="connected">Đã kết nối</option>
                     <option value="busy">Bận</option>

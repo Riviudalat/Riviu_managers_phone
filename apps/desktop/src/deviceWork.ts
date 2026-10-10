@@ -2,7 +2,8 @@ import type { AgentStatus, DeviceInfo, DeviceLoadState, DeviceWorkOwner, DeviceA
 import { describeError, helperRecoveryMessage } from "./describeError";
 
 export type DeviceOperationalStatus = "ready" | "connected" | "busy" | "warning" | "offline";
-export type DeviceOperationalFilter = DeviceOperationalStatus | "all";
+/** `idle` ("Rảnh") is `ready` or `connected`: nothing holds the phone and nothing needs the operator. */
+export type DeviceOperationalFilter = DeviceOperationalStatus | "all" | "idle";
 export type DeviceWorkOwnerReadState = "known" | "loading" | "error";
 
 export interface DeviceOperationalView {
@@ -119,10 +120,60 @@ export function deviceMatchesFleetFilter(
   status: DeviceOperationalFilter,
   ownerReadState: DeviceWorkOwnerReadState = "known",
   agent?: AgentStatus,
+  load?: DeviceLoadState,
 ): boolean {
-  const operational = deviceOperationalView(device, currentOwner, ownerReadState, agent);
-  if (status !== "all" && operational.kind !== status) return false;
+  const operational = deviceOperationalView(device, currentOwner, ownerReadState, agent, null, load);
+  if (!operationalMatchesFilter(operational.kind, status)) return false;
   const needle = normalizeSearch(query);
   if (!needle) return true;
   return normalizeSearch(`Máy ${machineNumber} ${machineNumber} ${displayName}`).includes(needle);
+}
+
+export function operationalMatchesFilter(kind: DeviceOperationalStatus, filter: DeviceOperationalFilter): boolean {
+  if (filter === "all") return true;
+  if (filter === "idle") return kind === "ready" || kind === "connected";
+  return kind === filter;
+}
+
+/** Header fleet counters. `null` is unknown ("Chưa rõ"), never 0. */
+export interface FleetCounts {
+  idle: number | null;
+  busy: number | null;
+  attention: number | null;
+  offline: number | null;
+}
+
+/**
+ * Counts with the tile's own predicate, so a counter and the wall filter it sets always agree.
+ * Unknown follows the header's "Sẵn sàng" rule: owners unread make busy/idle/attention unknown,
+ * and a connected idle Android phone without cached helper proof could be idle or need attention.
+ */
+export function fleetCounts(
+  devices: Pick<DeviceInfo, "udid" | "platform" | "status" | "wdaReady">[],
+  settled: boolean,
+  ownerFor: (udid: string) => DeviceWorkOwner | null,
+  ownerReadState: DeviceWorkOwnerReadState,
+  agentFor: (udid: string) => AgentStatus | undefined,
+  loadFor: (udid: string) => DeviceLoadState | undefined,
+): FleetCounts {
+  if (!settled) return { idle: null, busy: null, attention: null, offline: null };
+  const counts = { idle: 0, busy: 0, attention: 0, offline: 0 };
+  const ownersKnown = ownerReadState === "known";
+  let idleKnown = ownersKnown;
+  for (const device of devices) {
+    const owner = ownerFor(device.udid);
+    const agent = agentFor(device.udid);
+    if (device.platform === "android" && device.status !== "disconnected" && device.status !== "busy" && !owner && !agent) idleKnown = false;
+    const kind = deviceOperationalView(device, owner, ownerReadState, agent, null, loadFor(device.udid)).kind;
+    if (kind === "offline") counts.offline += 1;
+    else if (kind === "busy") counts.busy += 1;
+    else if (kind === "warning") counts.attention += 1;
+    else counts.idle += 1;
+  }
+  return {
+    idle: idleKnown ? counts.idle : null,
+    busy: ownersKnown ? counts.busy : null,
+    attention: idleKnown ? counts.attention : null,
+    offline: counts.offline,
+  };
 }

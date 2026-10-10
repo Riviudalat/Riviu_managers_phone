@@ -158,7 +158,16 @@ Không dùng "sẵn sàng" cho tập rộng hơn `kind === "ready"`. Thẻ chọ
 nên roster `ready` hiện là **Đã chuẩn bị**, còn `connected` là **Chưa chuẩn bị**. Số **Sẵn sàng**
 ở header và sidebar đếm đúng điều kiện của thẻ máy. Khi chưa đọc được chủ sở hữu tác vụ hoặc
 bằng chứng helper Android (bộ nhớ đệm này chỉ được đọc trong Control Center), số đó hiện
-**Chưa rõ**, không hiện 0. Mở và đóng **Chọn thiết bị**
+**Chưa rõ**, không hiện 0.
+
+Header luôn có bốn **bộ đếm fleet**: **Rảnh** (`kind` là `ready` hoặc `connected`), **Đang chạy**
+(`busy`), **Cần xử lý** (`warning`, gồm cả máy quá tải theo sức khỏe máy) và **Mất kết nối**
+(`offline`). Số 0 vẫn hiện; số chưa biết hiện **Chưa rõ** theo đúng quy tắc của số Sẵn sàng (Mất kết
+nối chỉ chưa rõ trước khi danh sách máy tải xong). Rảnh không có nghĩa là Sẵn sàng. Bấm một bộ đếm
+đặt đúng state lọc của select **Trạng thái thiết bị** trên lưới (select có thêm mục **Rảnh**), bấm lại
+thì bỏ lọc; từ trang khác thì chuyển về Control Center. Bộ đếm và bộ lọc dùng chung một state và
+cùng điều kiện của thẻ máy, không có bản sao thứ hai. Từ 981 đến 1279 px, bộ đếm thu nhỏ và nhãn **Toàn hệ thống**
+chỉ còn cho trình đọc màn hình để header giữ một hàng; dưới 980 px trạng thái xuống hàng riêng như trước. Mở và đóng **Chọn thiết bị**
 mà không sửa thì giữ nguyên phạm vi Toàn bộ, Nhóm hoặc Máy cụ thể. Phạm vi chỉ thành Máy
 cụ thể khi người vận hành sửa trong drawer. Phạm vi rỗng không bao giờ thành Toàn bộ;
 nút chạy hiện lý do bị khóa.
