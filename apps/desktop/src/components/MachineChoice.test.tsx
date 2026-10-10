@@ -8,7 +8,7 @@ describe("machine selection status", () => {
   it("shows readiness as visible text while preserving the checkbox name", () => {
     const change = vi.fn();
     render(<MachineChoice number={4} name="Pixel" status="ready" checked={false} label="Chọn Máy 4" onChange={change} />);
-    expect(screen.getByText("Sẵn sàng")).toBeVisible();
+    expect(screen.getByText("Đã chuẩn bị")).toBeVisible();
     fireEvent.click(screen.getByRole("checkbox", { name: "Chọn Máy 4" }));
     expect(change).toHaveBeenCalledWith(true);
   });

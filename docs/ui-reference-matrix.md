@@ -99,6 +99,23 @@ bộ lọc. Refresh lỗi giữ dữ liệu cũ khi còn hợp lệ; response c�
 - Desktop/laptop và viewport hẹp giữ nút chạy, filter, status đọc được; overflow thuộc bảng/canvas phù hợp.
 - Kiểm tra contrast, focus-visible, keyboard/dialog, tooltip gần mép, reload và chuyển trang khi chạy/bản nháp.
 
+## Thuật ngữ trạng thái máy và phạm vi
+
+Bốn trạng thái khác nhau; nhãn và số đếm đứng cạnh nhãn phải dùng cùng một điều kiện.
+
+| Từ trên UI | Nghĩa | Điều kiện |
+|---|---|---|
+| **Đã kết nối** | Máy có trong danh sách và trả lời, nhưng chưa chứng minh điều khiển được | `deviceOperationalView(...).kind === "connected"` |
+| **Bận** (hoặc nhãn hoạt động như "Đang nuôi TikTok") | Một tác vụ đang giữ máy | `kind === "busy"`: có chủ sở hữu hiện tại hoặc roster `busy` |
+| **Chọn được** (Nuôi, Tương tác) / **có thể gán** (Đăng bài) | Máy được phép đưa vào phạm vi, danh sách máy thực hiện hoặc phân công. Máy bận vẫn chọn được, vì tác vụ cũ dừng khi lượt mới bắt đầu. Đây không phải lời khẳng định đã sẵn sàng. | roster `ready`, `busy` hoặc `connected`; lịch Đăng bài còn đòi roster `ready` và không vướng bài đang chờ |
+| **Sẵn sàng** | Đã chứng minh điều khiển được: Android có helper, phiên và xác thực sẵn sàng; iOS ở trạng thái `ready` hoặc WDA sẵn sàng | chỉ `deviceOperationalView(...).kind === "ready"` |
+
+Không dùng "sẵn sàng" cho tập rộng hơn `kind === "ready"`. Thẻ chọn máy chỉ có trạng thái roster,
+nên roster `ready` hiện là **Đã chuẩn bị**, còn `connected` là **Chưa chuẩn bị**. Mở và đóng **Chọn thiết bị**
+mà không sửa thì giữ nguyên phạm vi Toàn bộ, Nhóm hoặc Máy cụ thể. Phạm vi chỉ thành Máy
+cụ thể khi người vận hành sửa trong drawer. Phạm vi rỗng không bao giờ thành Toàn bộ;
+nút chạy hiện lý do bị khóa.
+
 Test entrypoints: `apps/desktop/e2e/pages.spec.ts`, `typography.spec.ts`,
 `flow-workspace.spec.ts`, unit của workspace và token tests. Snapshot mock chỉ xác nhận
 layout/interaction fixture; smoke Tauri xác nhận renderer/backend thật ở phạm vi đã chạy.

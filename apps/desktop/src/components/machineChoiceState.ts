@@ -1,5 +1,6 @@
 const statusLabels: Record<string, string> = {
-  ready: "Sẵn sàng",
+  // Roster `ready` alone is not proved control; "Sẵn sàng" belongs to deviceOperationalView.
+  ready: "Đã chuẩn bị",
   busy: "Đang bận",
   disconnected: "Mất kết nối",
   pairing: "Đang ghép nối",
@@ -9,5 +10,5 @@ const statusLabels: Record<string, string> = {
 };
 
 export function machineStatusLabel(status: string) {
-  return statusLabels[status] ?? "Chưa sẵn sàng";
+  return statusLabels[status] ?? "Chưa rõ trạng thái";
 }
