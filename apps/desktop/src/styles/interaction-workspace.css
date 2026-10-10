@@ -18,6 +18,8 @@
 .interaction-wizard .iw-scope-names { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: var(--text-3); font-size: var(--text-xs); }
 .interaction-wizard .iw-scope-bar > button { flex: none; margin-left: auto; }
 .interaction-wizard .iw-scope-bar .machine-select-count { white-space: nowrap; font-size: var(--text-xs); }
+.interaction-wizard .iw-scope-count { white-space: nowrap; color: var(--text-2); font-size: var(--text-xs); font-variant-numeric: tabular-nums; }
+.interaction-wizard .iw-scope-bar > .iw-actor-label { padding-left: 10px; border-left: 1px solid var(--line); }
 .interaction-wizard .iw-steps { display: flex; flex: none; gap: 16px; margin: 0; border-bottom: 1px solid var(--line); }
 .interaction-wizard .iw-steps button { display: flex; align-items: center; gap: 8px; padding: 8px 2px; min-width: 0; min-height: 40px; border: 0; border-bottom: 2px solid transparent; border-radius: 0; background: transparent; color: var(--text-2); text-align: left; }
 .interaction-wizard .iw-steps button[aria-selected="true"] { border-bottom-color: var(--primary); color: var(--primary); font-weight: 600; }
@@ -159,6 +161,7 @@
   .interaction-wizard .iw-step-content > .iw-panel { overflow: visible; }
   .interaction-wizard .iw-step-content > .iw-context { display: flex; }
   .interaction-wizard .iw-scope-names { display: none; }
+  .interaction-wizard .iw-scope-bar { flex-wrap: wrap; row-gap: 6px; }
   .interaction-wizard .iw-step-content .iw-table-scroll { flex: auto; min-height: 140px; max-height: 320px; }
   .interaction-wizard .iw-draft-summary { grid-template-columns: repeat(2, minmax(0, 1fr)); }
   .interaction-wizard .conversation-editor > .iw-fields { grid-template-columns: minmax(0, 1fr); }

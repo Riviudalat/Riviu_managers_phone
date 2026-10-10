@@ -35,6 +35,8 @@ export function InteractionWorkspaceSetup({ setup: p, profiles, scopeControl, ef
   const [pickerOpen, setPickerOpen] = useState(false);
   const openAccount = (udid: string | null) => { setAccount(udid); if (udid) setPickerOpen(true); };
   const { draft, patch } = p;
+  // Scope bounds who may act; actors are who will. Mention tags can add actors inside the scope.
+  const scopeCount = p.pixelActors.length + p.hierarchyActors.length;
   const targets = p.lines.flatMap((line) => line.target ? [line.target] : []);
   const actionOrder = [...ACTIONS.filter(([key]) => draft.actions[key]).map(([, label]) => label), ...(draft.actions.share ? ["Share"] : [])].join(" → ");
   const linkIssues = p.issues.filter((issue) => issue.field === "links");
@@ -52,9 +54,11 @@ export function InteractionWorkspaceSetup({ setup: p, profiles, scopeControl, ef
   return <div className="interaction-wizard">
     {profiles && <details className="iw-profile-tools"><summary>Hồ sơ & cài đặt</summary>{profiles}</details>}
     <div className="iw-scope-bar" role="group" aria-label="Phạm vi Tương tác">
-      <strong>Máy thực hiện</strong>
+      <strong>Phạm vi máy</strong>
       {scopeControl}
-      <span className="machine-select-count" role="status">Đã chọn {effectiveActors.length}</span>
+      <span className="iw-scope-count">{scopeCount} máy trong phạm vi</span>
+      <strong className="iw-actor-label">Máy thực hiện</strong>
+      <span className="machine-select-count" role="status">{effectiveActors.length} máy{p.mentionActorCount > 0 ? ` · ${p.mentionActorCount} từ tag` : ""}</span>
       <span className="iw-scope-names">{effectiveActors.map(udid => `${p.deviceNumber.get(udid) ?? "?"} · ${p.deviceLabel.get(udid) ?? "Máy chưa đặt tên"}`).join(", ") || "Chưa có máy được chọn"}</span>
       <button type="button" className="ghost" disabled={busy} aria-haspopup="dialog" aria-expanded={pickerOpen} onClick={() => setPickerOpen(true)}>Chọn máy</button>
     </div>
@@ -93,7 +97,7 @@ export function InteractionWorkspaceSetup({ setup: p, profiles, scopeControl, ef
         </section>
         <aside className="iw-panel iw-context" aria-label="Đầu vào và kết quả" tabIndex={0}>
           <h3>Lượt tương tác</h3>
-          <div className="iw-input-summary"><strong>{targets.length}</strong><span>bài hợp lệ</span><strong>{effectiveActors.length}</strong><span>máy đã chọn</span></div>
+          <div className="iw-input-summary"><strong>{targets.length}</strong><span>bài hợp lệ</span><strong>{effectiveActors.length}</strong><span>máy thực hiện</span></div>
           <ol>{[
             ["Bài viết cụ thể", "Hệ thống mở đúng link trên từng máy."],
             ["Hành động bạn chọn", "Tim, Lưu, Bình luận có thể bật riêng."],
@@ -203,7 +207,7 @@ function WorkspaceActors({ setup: p, effectiveActors, account, setAccount }: { s
   // Selectable means connected (busy included), not proved ready; readiness is checked at start.
   const selectable = choices.filter((device) => device.status === "ready" || device.status === "busy" || device.status === "connected");
   return <section className="iw-panel iw-machines" tabIndex={0} aria-label="Máy thực hiện">
-    <div className="iw-heading"><div><span className="automation-section-kicker">Phạm vi</span><h2>Máy thực hiện</h2></div><span className="machine-select-count" role="status">Đã chọn {effectiveActors.length}</span></div>
+    <div className="iw-heading"><div><span className="automation-section-kicker">Trong {p.pixelActors.length + p.hierarchyActors.length} máy của phạm vi</span><h2>Máy thực hiện</h2></div><span className="machine-select-count" role="status">{effectiveActors.length} máy thực hiện</span></div>
     <label className="iw-search"><Search size={16} aria-hidden="true" /><input type="search" aria-label="Tìm máy Tương tác" placeholder="Tìm số máy hoặc tên" value={query} onChange={(event) => setQuery(event.target.value)} /></label>
     <div className="iw-picker-tools"><button type="button" className="ghost" title="Chọn mọi máy đang kết nối, kể cả máy đang bận; tác vụ cũ được dừng và sẵn sàng được kiểm tra khi bắt đầu lượt mới" disabled={!selectable.length} onClick={() => replaceActors(selectable)}>Chọn tất cả máy chọn được</button><button type="button" className="ghost" disabled={!p.draft.actors.length} onClick={() => replaceActors([])}>Bỏ chọn</button><small>{selectable.length} chọn được · {choices.length} tổng</small></div>
     {thread && groups.length > 0 && <label className="iw-field"><span>Lấy từ nhóm</span><select value="" onChange={(event) => { const group = groups.find((entry) => entry.id === event.target.value); if (group) replaceActors(choices.filter((device) => group.udids.includes(device.udid))); }}><option value="">Chọn nhóm…</option>{groups.map((group) => <option key={group.id} value={group.id}>{group.name} ({group.udids.length})</option>)}</select></label>}

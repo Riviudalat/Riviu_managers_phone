@@ -25,6 +25,7 @@ test("nurture compact scope and machine picker preserve drafts at three viewport
   await expect(workspace.getByRole("tablist", { name: "Chế độ Nuôi TikTok" }).getByRole("tab")).toHaveText(["Thiết lập", "Hẹn giờ", "Theo dõi"]);
   const scope = workspace.getByRole("combobox", { name: "Phạm vi thiết bị", exact: true });
   await expect(scope).toHaveCount(1);
+  await expect(workspace.getByRole("button", { name: "Chọn thiết bị" })).toHaveCount(0);
   await expect(scope.locator("option:checked")).toHaveText("38 máy đã chọn");
   const total = workspace.getByRole("spinbutton", { name: "Tổng số video muốn lướt", exact: true });
   await expect(total).toBeVisible();
@@ -101,7 +102,7 @@ test("nurture compact scope and machine picker preserve drafts at three viewport
   await picker.getByRole("searchbox", { name: "Tìm máy Nuôi TikTok" }).fill("");
   await expect(machines.getByRole("checkbox", { checked: true })).toHaveCount(37);
   await picker.getByRole("button", { name: "Xong", exact: true }).click();
-  await expect(workspace.locator(".nurture-scope-bar .nurture-count")).toHaveText("Đã chọn 37");
+  await expect(workspace.locator(".nurture-scope-bar .nurture-count")).toHaveText("37 máy trong phạm vi");
   await expect(scope).toHaveValue("explicit");
   await expect(scope.locator("option:checked")).toHaveText("37 máy đã chọn");
   const calls = await mockCommandCalls(page);

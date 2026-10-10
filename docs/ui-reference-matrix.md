@@ -127,6 +127,18 @@ mà không sửa thì giữ nguyên phạm vi Toàn bộ, Nhóm hoặc Máy cụ
 cụ thể khi người vận hành sửa trong drawer. Phạm vi rỗng không bao giờ thành Toàn bộ;
 nút chạy hiện lý do bị khóa.
 
+Phạm vi, máy thực hiện và phân công là ba số khác nhau, mỗi số có nhãn riêng:
+
+| Khái niệm | Nghĩa | Nhãn trên UI |
+|---|---|---|
+| **Phạm vi máy** | Toàn bộ, Nhóm hoặc Máy cụ thể; giới hạn máy nào được dùng | "N máy trong phạm vi" (Nuôi, Tương tác), "N trong phạm vi" (Đăng bài) |
+| **Máy thực hiện** | Máy sẽ chạy lượt Tương tác: máy chọn trong phạm vi cộng máy được thêm bởi tag tài khoản | "N máy · K từ tag", "N máy thực hiện" |
+| **Phân công** | Đăng bài ghép từng bài với một máy có thể gán; **Chọn nhanh** và **Hoàn tác** nằm trong nhóm "Phân công", không đổi phạm vi | "N/M bài đã gán" |
+
+Nuôi chỉ có một trình sửa phạm vi: select **Phạm vi thiết bị** chọn kiểu, drawer **Chọn máy**
+sửa danh sách; Nuôi không có drawer **Chọn thiết bị** thứ hai. Tương tác và Đăng bài giữ
+**Chọn thiết bị** cho phạm vi, còn **Chọn máy** của Tương tác sửa máy thực hiện và tài khoản.
+
 Test entrypoints: `apps/desktop/e2e/pages.spec.ts`, `typography.spec.ts`,
 `flow-workspace.spec.ts`, unit của workspace và token tests. Snapshot mock chỉ xác nhận
 layout/interaction fixture; smoke Tauri xác nhận renderer/backend thật ở phạm vi đã chạy.

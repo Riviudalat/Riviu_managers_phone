@@ -10,7 +10,8 @@ vi.mock("../pages/PublishPage", () => ({ PublishPage: ({ scopeControl }: { scope
 afterEach(cleanup);
 const devices = [{ udid: "a", name: "Phone A", status: "ready", platform: "android" }, { udid: "b", name: "Phone B", status: "ready", platform: "android" }] as DeviceInfo[];
 
-it.each(["nurture", "interaction", "publish"] as const)("%s opens the full roster from an empty explicit scope", kind => {
+// Nuôi edits scope only in its own "Chọn máy" drawer (NurturePopup.test covers the same path there).
+it.each(["interaction", "publish"] as const)("%s opens the full roster from an empty explicit scope", kind => {
   function Harness() {
     const [target, setTarget] = useState<TargetRef>({ type: "explicit", udids: [] });
     return <AutomationWorkspace kind={kind} devices={devices} groups={[]} selected={[]} targetRef={target}

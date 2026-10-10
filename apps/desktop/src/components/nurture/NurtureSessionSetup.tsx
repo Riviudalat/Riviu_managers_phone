@@ -69,16 +69,17 @@ export function NurtureMachinePicker({ devices, metas, targets, onTargetRefChang
   const names = ordered.filter(({ device }) => selected.has(device.udid)).map(({ number, name }) => `${machineNumberLabel(number)} · ${name}`).join(", ");
   return <>
     <div className="nurture-scope-bar" role="group" aria-label="Phạm vi Nuôi TikTok">
-      <strong>Máy thực hiện</strong>
+      <strong>Phạm vi máy</strong>
       {scopeControl}
-      <span className="nurture-count" role="status">Đã chọn {targets.length}</span>
-      <span className="nurture-scope-names" title={names}>{names || "Chưa có máy được chọn"}</span>
+      <span className="nurture-count" role="status">{targets.length} máy trong phạm vi</span>
+      <span className="nurture-scope-names" title={names}>{names || "Phạm vi chưa có máy"}</span>
       <button type="button" className="ghost" aria-expanded={open} aria-haspopup="dialog" onClick={() => setOpen(true)}>Chọn máy</button>
     </div>
     <DetailDrawer open={open} title="Chọn máy Nuôi TikTok" onClose={() => setOpen(false)}
-      footer={<><span>{targets.length} máy được chọn</span><button type="button" className="primary" onClick={() => setOpen(false)}>Xong</button></>}>
+      footer={<><span>{targets.length} máy trong phạm vi</span><button type="button" className="primary" onClick={() => setOpen(false)}>Xong</button></>}>
     <section className="nurture-machines-card" aria-label="Máy thực hiện">
-    <header className="nurture-card-heading"><h2>Máy thực hiện</h2><span className="nurture-count" role="status">Đã chọn {targets.length}</span></header>
+    <header className="nurture-card-heading"><h2>Máy thực hiện</h2><span className="nurture-count" role="status">{targets.length} máy trong phạm vi</span></header>
+    <p className="nurture-setup-note">Mở và đóng không đổi phạm vi. Sửa danh sách ở đây chuyển phạm vi Toàn bộ hoặc Nhóm thành Máy cụ thể.</p>
     <label className="nurture-machine-search"><Search size={16} aria-hidden="true" /><input type="search" aria-label="Tìm máy Nuôi TikTok" placeholder="Tìm số máy hoặc tên" value={query} onChange={(event) => setQuery(event.target.value)} /></label>
     <div className="nurture-machine-tools">
       <button type="button" className="ghost" title="Chọn mọi máy đang kết nối, kể cả máy đang bận và máy ngoài kết quả tìm kiếm; sẵn sàng được kiểm tra khi bắt đầu" disabled={!onTargetRefChange || !available.length} onClick={() => setTargets(available.map(({device}) => device.udid))}>Chọn tất cả máy chọn được</button>

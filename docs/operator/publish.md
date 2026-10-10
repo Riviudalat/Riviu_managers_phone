@@ -139,8 +139,9 @@ danh sách bài–máy chỉ ghi **Chờ kết quả**, chưa coi máy là đạ
 Lượt cũ chưa có đích đã chốt giữ nguyên lịch sử để kiểm tra, không tự gửi sang
 kết nối mới.
 
-Khung **Máy thực hiện** có nút **Chọn nhanh**: lấy bài trong nguồn (tối đa 100) và
-mọi máy sẵn sàng trong phạm vi; mỗi máy một bài. Khi đã chọn phạm vi máy, khung
+Khung **Máy thực hiện** có nhóm **Phân công** với **Chọn nhanh** và **Hoàn tác**.
+Chọn nhanh là phân công bài, không đổi phạm vi máy: lấy bài trong nguồn (tối đa 100) và
+mọi máy có thể gán trong phạm vi; mỗi máy một bài. Khi đã chọn phạm vi máy, khung
 mặc định chỉ hiện máy trong phạm vi và máy đã ghép cần sửa; mở **Bộ lọc thiết bị →
 Hiện máy ngoài phạm vi** để xem toàn dàn. Cặp đã ghép hợp lệ được giữ. Nếu đợt
 trước chỉ gán một phần mà sau đó thêm máy sẵn sàng, bấm lại sẽ lấp tiếp máy trống bằng

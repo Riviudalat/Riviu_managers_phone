@@ -11,8 +11,10 @@ còn hồ sơ nhiều vòng vẫn hiển thị tổng đã nhân để dễ ki�
 Trang chỉ có một ô nhập tổng video; phần Hành vi giữ các tùy chỉnh nhịp xem, không
 hiển thị lại giới hạn/vòng hay các tỷ lệ tương tác đã có ở thiết lập phiên.
 
-Thanh **Máy thực hiện** ở đầu Thiết lập giữ **Phạm vi thiết bị**, số máy đã chọn
-và nút **Chọn máy**. Nút này mở bảng chọn hai cột có tìm kiếm và cuộn riêng;
+Thanh **Phạm vi máy** ở đầu Thiết lập giữ **Phạm vi thiết bị** (Toàn bộ, Nhóm hoặc
+từng máy), số máy trong phạm vi và nút **Chọn máy**, nơi duy nhất sửa danh sách máy
+của Nuôi. Nút này mở bảng chọn hai cột có tìm kiếm và cuộn riêng; mở rồi đóng không đổi
+phạm vi, còn sửa danh sách chuyển phạm vi Toàn bộ hoặc Nhóm thành từng máy;
 **Xong** hoặc Escape đóng bảng nhưng giữ lựa chọn. **Chọn tất cả đang kết nối** gồm
 cả máy ngoài kết quả tìm kiếm; **Bỏ chọn** xóa lựa chọn. Có thể chọn máy đang bận
 hoặc chưa chuẩn bị; khi bắt đầu, app dừng tác vụ cũ liên quan, chờ nhả máy rồi kiểm tra
