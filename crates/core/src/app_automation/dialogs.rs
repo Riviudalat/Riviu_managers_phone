@@ -314,6 +314,26 @@ const OS_PERMISSION_TRANSITION_WINDOW: std::time::Duration = std::time::Duration
 /// fade is shorter than this, so the second read already sees the settled screen.
 const OS_PERMISSION_TRANSITION_POLL: std::time::Duration = std::time::Duration::from_millis(450);
 
+/// Foregrounds re-read as a transition when their tree names no measured question: the
+/// Android 9 permission package and the permission controller that replaces it on newer
+/// Android (and its AOSP name). Box 31-50 round 6, 10/10/2026 08:51:11-13, nurture on
+/// ce0317139ca344520c (SM-G955F, Android 9, Global 45.7.3/en): two seconds after Deny with
+/// "Don't ask again" ticked, the popup step failed on a foreground that was neither TikTok
+/// nor the permission package it re-reads; which one was not logged. A closing permission
+/// dialog, or a second one animating in, is a transition; only a measured question is
+/// ever tapped, and Allow never is.
+const OS_PERMISSION_TRANSITION_PACKAGES: [&str; 4] = [
+    OS_PERMISSION_PACKAGE,
+    "com.android.packageinstaller",
+    NOTIFICATION_PROMPT_PACKAGE,
+    "com.android.permissioncontroller",
+];
+
+/// Samsung One UI home screen on the Galaxy S8+ fleet (SM-G955F, Android 9); see also
+/// `tiktok_share.rs`. A popup step that finds it in front after a dismissal fails with its
+/// own operator line: TikTok went to the background, and the popup step never relaunches.
+const LAUNCHER_PACKAGES: [&str; 1] = ["com.sec.android.app.launcher"];
+
 /// Whether `candidate` is one of the measured OS permission questions, the only trees that
 /// may own a `com.google.android.packageinstaller` foreground.
 fn os_permission_candidate(candidate: Option<&(u64, ElementBox)>) -> bool {
@@ -1454,8 +1474,10 @@ pub(crate) async fn step_before_deadline_with_tree(
             return Ok(ReadWaitResult::Ready((PopupStep::Blocked, None)));
         }
         let candidate = optional_decline(&tree, labels);
-        let settled = foreground != OS_PERMISSION_PACKAGE
+        let settled = !OS_PERMISSION_TRANSITION_PACKAGES.contains(&foreground.as_str())
             || os_permission_candidate(candidate.as_ref())
+            || (foreground == NOTIFICATION_PROMPT_PACKAGE
+                && decline_notifications(&tree).is_some())
             || Instant::now() >= transition_until;
         if settled {
             if transition_reads > 0 {
@@ -1499,13 +1521,28 @@ pub(crate) async fn step_before_deadline_with_tree(
     };
     // The measured OS location and notification modals own foreground themselves. Every
     // other case requires the exact selected TikTok package, never a substring or recents.
-    anyhow::ensure!(
-        foreground == labels.package()
-            || (foreground == OS_PERMISSION_PACKAGE && os_permission_candidate(candidate.as_ref()))
-            || (foreground == NOTIFICATION_PROMPT_PACKAGE
-                && matches!(first_run, Some((FirstRunScreen::NotificationPermission, _)))),
-        "popup foreground does not match target package"
-    );
+    // The error names the observed package only, never screen text.
+    if !(foreground == labels.package()
+        || (foreground == OS_PERMISSION_PACKAGE && os_permission_candidate(candidate.as_ref()))
+        || (foreground == NOTIFICATION_PROMPT_PACKAGE
+            && matches!(first_run, Some((FirstRunScreen::NotificationPermission, _)))))
+    {
+        if LAUNCHER_PACKAGES.contains(&foreground.as_str()) {
+            anyhow::bail!(
+                "TikTok đã về nền, màn hình chính ({foreground}) đang ở foreground — bước popup không tự mở lại app; cần chạy lại phiên hoặc người vận hành kiểm tra máy"
+            );
+        }
+        if OS_PERMISSION_TRANSITION_PACKAGES.contains(&foreground.as_str()) {
+            anyhow::bail!(
+                "hộp thoại quyền hệ thống ({foreground}) vẫn ở foreground sau khi đọc lại tối đa {}s mà không nhận ra câu hỏi đã đo — Riviu không bấm gì, kể cả Allow; cần người vận hành kiểm tra máy",
+                OS_PERMISSION_TRANSITION_WINDOW.as_secs()
+            );
+        }
+        anyhow::bail!(
+            "popup foreground does not match target package: ứng dụng {foreground} đang ở foreground, không phải {} — bước popup không bấm gì",
+            labels.package()
+        );
+    }
     let fresh_foreground = read!(session.active_app_bundle());
     anyhow::ensure!(
         fresh_foreground == foreground,

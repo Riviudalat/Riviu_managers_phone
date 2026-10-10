@@ -96,6 +96,31 @@ pub(super) const CATALOG: &[CatalogPopup] = &[
         spent: "hộp thoại \"Turn on precise location\" vẫn còn sau một lần bấm Not now — không bấm lại, không bấm Allow; cần người vận hành kiểm tra",
         shadow: "[chạy bóng] nhận ra hộp thoại \"Turn on precise location\" — khi được bật sẽ bấm Not now; lần này Riviu không bấm, cần người vận hành",
     },
+    // Proven: a real Global 45.7.3/en capture over the For You feed (box 31-50 round 6,
+    // ce071827715f321b05, 10/10/2026 15:50:57, artifacts/popups/20261010/
+    // 155057.999-unknown-modal-ce071827715f321b05). Title xwe and body esv (in tx3) sit in
+    // d93, the id-less Buttons in the x4 bar. APK: X.0Nct ("global_email_auth_dialog")
+    // builds it; its button result (AwS122S1100000_9.invoke$17) maps Not now to the same
+    // decline as an outside dismissal, while OK links the device's email addresses, so OK
+    // is never pressed. The body is matched by id only: it carries a newline before
+    // "Learn more", a link out of TikTok.
+    CatalogPopup {
+        key: "link_email_dialog",
+        mode: PopupMode::Act,
+        class: PopupClass::Dismissable,
+        container: DIALOG,
+        anchors: &[
+            id("d93"),
+            id("x4"),
+            part(Some("xwe"), Some(TEXT_VIEW), Some("Link email"), None),
+            part(Some("esv"), Some(TEXT_VIEW), None, None),
+            part(Some(""), Some(BUTTON), Some("OK"), None),
+        ],
+        dismiss: Some(part(Some(""), Some(BUTTON), Some("Not now"), None)),
+        acted: "đóng hộp thoại \"Link email\" của TikTok (bấm Not now, không liên kết email, không bấm OK); chờ đọc lại màn hình",
+        spent: "hộp thoại \"Link email\" vẫn còn sau một lần bấm Not now — không bấm lại, không bấm OK; cần người vận hành kiểm tra",
+        shadow: "[chạy bóng] nhận ra hộp thoại \"Link email\" — khi được bật sẽ bấm Not now; lần này Riviu không bấm, cần người vận hành",
+    },
     // Proven: target/sound-picker-probe-20261009/raw/nav_exit.xml (real 45.7.3/en). Kept in
     // shadow: the composer walk-back owns this menu and taps its Discard row itself, so the
     // shared step must not turn it into a block. Discard acts at once, with no confirmation.

@@ -2669,6 +2669,14 @@ async fn back_to_feed(
         return false;
     }
     let deadline = tokio::time::Instant::now() + BACK_RETURN_WINDOW;
+    // The feed Back returns to can come up under a TikTok dialog: box 31-50 round 6,
+    // 10/10/2026 08:50:53-57, ce071827715f321b05 (Global 45.7.3/en), where "Link email"
+    // opened over For You right after Back from the author's profile and the snapshot held
+    // only the dialog's window. Each poll therefore asks the shared popup step first, as
+    // the ladder does, so a catalogued dialog is answered here instead of being read as
+    // "no feed tab". A blocking or unreadable screen ends the wait; [`await_feed`] owns it.
+    let screened = run.search_keyword.is_none() && run.session.supports_accessibility_readback();
+    let mut popup = crate::app_automation::dialogs::PopupBudget::default();
     loop {
         sleep_interruptible(
             BACK_RETURN_POLL.min(deadline.saturating_duration_since(tokio::time::Instant::now())),
@@ -2678,7 +2686,45 @@ async fn back_to_feed(
         if stop.load(Ordering::Relaxed) {
             return false;
         }
-        if run.on_feed().await {
+        let on_feed = if screened {
+            use crate::app_automation::dialogs::{step_before_deadline_with_tree, PopupStep};
+            match step_before_deadline_with_tree(
+                run.session,
+                run.labels,
+                &mut popup,
+                deadline,
+                stop,
+                stop,
+            )
+            .await
+            {
+                Ok(ReadWaitResult::Ready((PopupStep::Clear, Some(tree)))) => {
+                    classify_tree(&tree, run.labels) == FeedScreen::Feed
+                }
+                Ok(ReadWaitResult::Ready((PopupStep::Clear, None))) => run.on_feed().await,
+                Ok(ReadWaitResult::Ready((PopupStep::Dismissed, _))) => {
+                    report(
+                        status,
+                        popup
+                            .says()
+                            .unwrap_or("đóng một hộp thoại tùy chọn đã đo; chờ đọc lại màn hình")
+                            .to_string(),
+                    );
+                    false
+                }
+                // No operator line: the read predates the dismissal just sent (or a spent
+                // decline); the next poll reads again within the same window.
+                Ok(ReadWaitResult::Ready((PopupStep::Blocked, _))) if popup.says().is_none() => {
+                    false
+                }
+                Ok(ReadWaitResult::Ready((PopupStep::Blocked, _))) | Err(_) => return false,
+                Ok(ReadWaitResult::Cancelled) => return false,
+                Ok(ReadWaitResult::DeadlineExceeded) => false,
+            }
+        } else {
+            run.on_feed().await
+        };
+        if on_feed {
             report(status, "feed đã lên sau Back".into());
             return true;
         }
