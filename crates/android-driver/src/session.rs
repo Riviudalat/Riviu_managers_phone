@@ -380,7 +380,15 @@ impl AndroidUiSession {
             state.unknown = true;
         }
         let result = work.await;
-        if result.is_ok() {
+        // A cancelled gesture is a complete UiAutomator2 answer: InputDispatcher already
+        // cancelled the touch, so nothing is left in flight. ce0417141d4decde0c (SM-G955N,
+        // Global 45.7.3), 10/10/2026: kept unknown, it would refuse the owned cleanup at
+        // session end and every later read-session recycle.
+        let settled = match &result {
+            Ok(_) => true,
+            Err(error) => error.is::<riviu_core::driver::GestureCancelled>(),
+        };
+        if settled {
             if let Some(state) = input.as_mut() {
                 state.unknown = previous_unknown;
             }
