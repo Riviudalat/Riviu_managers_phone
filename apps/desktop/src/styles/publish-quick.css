@@ -268,5 +268,5 @@
 @media (max-width:1000px) {
   .publish-quick .pq-footer>.pq-check { flex-direction:column-reverse; align-items:flex-end; gap:2px; max-width:55%; }
   .pq-check-reason { max-width:100%; text-align:right; }
-  .pq-footer .pq-check-reason small { -webkit-line-clamp:1; }
+  .pq-footer .pq-check-reason small { display:block; min-width:0; white-space:nowrap; text-overflow:ellipsis; }
 }
