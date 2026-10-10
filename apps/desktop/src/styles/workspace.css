@@ -92,10 +92,69 @@
 
 .workspace-command-actions {
   display: flex;
-  flex: 0 0 auto;
+  flex: 0 1 auto;
+  min-width: 0;
   align-items: center;
+  justify-content: flex-end;
   gap: var(--space-2);
   flex-wrap: wrap;
+}
+
+.workspace-command-blocker {
+  display: flex;
+  flex-basis: 100%;
+  justify-content: flex-end;
+  min-width: 0;
+}
+
+/* Inline "why is this off" next to a disabled primary. Not a banner: it belongs to the CTA. */
+.blocked-reason {
+  min-width: 0;
+  color: var(--warn-strong);
+  font-size: var(--text-sm);
+  line-height: var(--leading-normal);
+}
+
+.blocked-reason ul {
+  display: grid;
+  gap: 2px;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.blocked-reason li {
+  display: flex;
+  align-items: center;
+  gap: var(--space-1);
+  min-width: 0;
+}
+
+.blocked-reason li > svg {
+  flex: none;
+}
+
+.blocked-reason li > span {
+  min-width: 0;
+  overflow-wrap: anywhere;
+}
+
+.blocked-reason-fix {
+  flex: none;
+  min-height: 0;
+  padding: 0 var(--space-1);
+  border: 0;
+  background: transparent;
+  color: var(--primary-deep);
+  font-size: inherit;
+  font-weight: var(--weight-semibold);
+  text-decoration: underline;
+  text-underline-offset: 2px;
+}
+
+.blocked-reason-fix:hover:not(:disabled) {
+  background: transparent;
+  color: var(--primary-deep);
 }
 
 .page-header-drag {

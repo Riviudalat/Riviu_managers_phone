@@ -171,7 +171,7 @@ export function DeviceFunctionList({
         role={inFlyout ? "menuitem" : undefined}
         className={`${node.danger ? "danger" : ""}${node.disabled ? " is-disabled" : ""}`}
         disabled={node.disabled}
-        title={node.pathLabel ?? node.label}
+        title={node.disabled && node.disabledReason ? `${node.pathLabel ?? node.label} — ${node.disabledReason}` : node.pathLabel ?? node.label}
         onClick={() => runLeaf(node)}
       >
         {Icon && <Icon size={16} />}

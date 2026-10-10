@@ -71,6 +71,7 @@ import { useDeviceWindows } from "./components/useDeviceWindows";
 import { IconPhone, IconRefresh } from "./components/Icons";
 import { Search } from "lucide-react";
 import { Banner, EmptyState, LoadingState } from "./components/States";
+import { SystemNotices } from "./components/SystemNotices";
 import { AutomationWorkspace } from "./components/AutomationWorkspace";
 import { isDeviceAutomation } from "./features/devices/deviceAutomation";
 import { JobsPanel } from "./components/JobsPanel";
@@ -1146,6 +1147,7 @@ function App() {
           ref={contentRef}
           className={`content content-${page} ${page === "scripts" ? "content-flow" : ""}`}
         >
+          <SystemNotices>
           {draftStorageError && <Banner tone="error">{draftStorageError}</Banner>}
           {numberAllocationError && <Banner tone="warn" action={
             <button type="button" disabled={retryingNumbers} onClick={() => void retryDeviceNumbers()}>
@@ -1202,6 +1204,7 @@ function App() {
               Nguyên nhân: {androidToolProblems.join("; ")}
             </Banner>
           )}
+          </SystemNotices>
 
           {page === "control" && (
             <section className={`device-browser${displayPinned ? "" : " rail-unpinned"}`} aria-label="Danh sách và màn hình thiết bị">

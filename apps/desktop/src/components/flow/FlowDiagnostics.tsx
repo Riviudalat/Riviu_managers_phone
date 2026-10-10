@@ -12,7 +12,7 @@ export function FlowDiagnostics({
   onSelectNode?: (nodeId: string) => void;
 }) {
   return (
-    <section className="flow-diagnostics" aria-label="Chẩn đoán Flow">
+    <section className="flow-diagnostics" aria-label="Chẩn đoán Flow" tabIndex={-1}>
       <header>
         <strong>Chẩn đoán</strong>
         <span>{issues.length}</span>

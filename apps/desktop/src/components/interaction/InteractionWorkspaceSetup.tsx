@@ -1,10 +1,11 @@
-import { useEffect, useState, type ComponentProps, type ReactNode } from "react";
+import { useEffect, useId, useRef, useState, type ComponentProps, type ReactNode } from "react";
 import { Bookmark, Check, Heart, Link2, MessageCircle, Search, Users } from "lucide-react";
 import { listGroups } from "../../api";
 import { effectiveMessageCount, manualCommentsOf, wholeNumber, type ThreadKind } from "../../interactionPlan";
 import { linkErrorVi } from "../../interactionErrors";
 import type { DeviceGroup, DeviceInfo } from "../../types";
-import { CommandBar, DetailDrawer, StatusChip } from "../WorkspacePrimitives";
+import { BlockedReason, CommandBar, DetailDrawer, StatusChip } from "../WorkspacePrimitives";
+import { blockerDescribedBy, focusBlockingField, type Blocker } from "../blockers";
 import { MachineChoice } from "../MachineChoice";
 import { Banner } from "../States";
 import { AccountReadControl } from "./AccountReadControl";
@@ -50,8 +51,40 @@ export function InteractionWorkspaceSetup({ setup: p, profiles, scopeControl, ef
     if (busy) return;
     setStep(next);
   };
+  const rootRef = useRef<HTMLDivElement>(null);
+  const blockerId = useId();
+  const [repair, setRepair] = useState<string | null>(null);
+  useEffect(() => {
+    if (!repair) return;
+    if (!focusBlockingField(rootRef.current, `[data-iw-field="${repair}"]`)) {
+      focusBlockingField(rootRef.current, `#iw-tab-${step}`);
+    }
+    setRepair(null);
+  }, [repair, step]);
+  // Where each DraftIssue field is edited: the link box on step 1, the actor drawer, or step 2.
+  const fixFor = (field: string): Pick<Blocker, "fixLabel" | "onFix"> => {
+    if (field === "links") return { fixLabel: "Sửa link", onFix: () => { changeStep(1); setRepair("links"); } };
+    if (field === "actors") return { fixLabel: "Sửa máy thực hiện", onFix: () => setPickerOpen(true) };
+    if (field === "manual" || field === "messageCount" || field === "maxWords") return { fixLabel: "Sửa", onFix: () => {
+      if ((field === "messageCount" || field === "maxWords") && !p.advancedOpen) p.setAdvancedOpen(true);
+      changeStep(2); setRepair(field);
+    } };
+    return {};
+  };
+  const runBlockers: Blocker[] = busy ? [] : step === 1 || !p.issues.length
+    ? linksReady ? [] : [{
+      message: p.linkBusy ? "Đang kiểm tra link…"
+        : p.linkError ? "Kiểm tra link chưa xong; xem lỗi phía trên."
+          : !draft.rawLinks.trim() ? "Dán ít nhất một link TikTok."
+            : p.lines.some((line) => !line.target) ? `${p.lines.filter((line) => !line.target).length} dòng link chưa hợp lệ.`
+              : linkIssues[0]?.message ?? "Chưa có bài hợp lệ.",
+      ...(p.linkBusy ? {} : fixFor("links")),
+    }]
+    : [];
+  // Steps 2–3 list their issues right above the footer already; the CTA points at that list.
+  const issuesId = `${blockerId}-issues`;
 
-  return <div className="interaction-wizard">
+  return <div className="interaction-wizard" ref={rootRef}>
     {profiles && <details className="iw-profile-tools"><summary>Hồ sơ & cài đặt</summary>{profiles}</details>}
     <div className="iw-scope-bar" role="group" aria-label="Phạm vi Tương tác">
       <strong>Phạm vi máy</strong>
@@ -78,7 +111,7 @@ export function InteractionWorkspaceSetup({ setup: p, profiles, scopeControl, ef
         <section className="iw-panel iw-links" aria-label="Bài viết cần tương tác">
           <div className="iw-heading"><div><h3>Bài viết cần tương tác</h3><p className="iw-help">Dán các bài cần chạy, rồi chọn hành động và máy.</p></div><Link2 size={19} aria-hidden="true"/></div>
           <label className="iw-field"><span>Link TikTok — mỗi dòng một link</span>
-            <textarea value={draft.rawLinks} onChange={(event) => patch("rawLinks", event.target.value)} placeholder="Dán link TikTok, mỗi dòng một bài" rows={4} />
+            <textarea data-iw-field="links" value={draft.rawLinks} onChange={(event) => patch("rawLinks", event.target.value)} placeholder="Dán link TikTok, mỗi dòng một bài" rows={4} />
           </label>
           <div className="iw-link-tools"><span>Hỗ trợ link video và bài ảnh.</span><div>
             {p.lines.some((line) => line.error === "unresolvedShortLink") && <button type="button" className="ghost" disabled={p.linkBusy} onClick={p.onResolveShortLinks}>Gỡ link rút gọn</button>}
@@ -126,7 +159,7 @@ export function InteractionWorkspaceSetup({ setup: p, profiles, scopeControl, ef
               <label className="iw-field"><span>Nội dung bình luận</span><select value={draft.textSource} onChange={(event) => patch("textSource", event.target.value as "ai" | "manual" | "script")}><option value="ai">AI viết theo bài</option><option value="manual">Nội dung tự nhập</option><option value="script">Hội thoại theo kịch bản</option></select></label>
             </div>
             {draft.textSource === "script" ? <ConversationEditor draft={draft} onChange={value=>patch("conversationJson",value)} onRawChange={value=>patch("conversationRawJson",value)} targets={targets} devices={p.devices.filter(device=>effectiveActors.includes(device.udid))} handles={p.savedHandles ?? {}} deviceNumber={p.deviceNumber} deviceLabel={p.deviceLabel} onAssignAccount={openAccount}/> : draft.textSource === "ai" ? <label className="iw-field"><span>Hướng dẫn giọng điệu cho AI</span><textarea rows={3} value={draft.instruction} onChange={(event) => patch("instruction", event.target.value)} /></label>
-              : <label className="iw-field"><span>Danh sách bình luận — mỗi dòng một câu</span><textarea rows={4} value={draft.manualText} onChange={(event) => patch("manualText", event.target.value)} /><small>{manualCommentsOf(draft).length} câu · {draft.threadKind === "chain" ? `cần ít nhất ${messages}` : `quay vòng cho ${messages} lượt`}</small></label>}
+              : <label className="iw-field"><span>Danh sách bình luận — mỗi dòng một câu</span><textarea data-iw-field="manual" rows={4} value={draft.manualText} onChange={(event) => patch("manualText", event.target.value)} /><small>{manualCommentsOf(draft).length} câu · {draft.threadKind === "chain" ? `cần ít nhất ${messages}` : `quay vòng cho ${messages} lượt`}</small></label>}
             <p className="iw-help">{draft.textSource === "script" ? "Các vai giữ đúng máy; mỗi link có hội thoại riêng và được thực hiện xen kẽ." : draft.threadKind === "standalone" ? "Mỗi máy tự mở bài và gửi bình luận riêng." : "Cần ít nhất 2 máy cùng loại. Một máy gửi gốc trước khi các máy còn lại trả lời."} {draft.textSource === "ai" && "AI chỉ gửi khi đọc đủ nội dung bài."}</p>
             </>}
             <label className="iw-checkbox"><input type="checkbox" checked={draft.likeParent} onChange={(event) => patch("likeParent", event.target.checked)} />Tim bình luận của máy trước</label>
@@ -139,8 +172,8 @@ export function InteractionWorkspaceSetup({ setup: p, profiles, scopeControl, ef
             {draft.textSource !== "script" && <button type="button" className="ghost iw-advanced-button" aria-expanded={p.advancedOpen} onClick={() => p.setAdvancedOpen(!p.advancedOpen)}>{p.advancedOpen ? "Ẩn tuỳ chỉnh nâng cao" : "Tuỳ chỉnh nâng cao"}</button>}
             {p.advancedOpen && draft.textSource !== "script" && <div className="iw-advanced">
               <div className="iw-fields">
-                {!draft.seeding && <label className="iw-field"><span>Số bình luận mỗi link</span><input type="number" min={draft.threadKind === "standalone" ? 1 : 2} max={64} placeholder={`${messages} · tự động`} value={draft.messageCount ?? ""} onChange={(event) => patch("messageCount", event.target.value === "" ? null : wholeNumber(event.target.value))} /></label>}
-                <label className="iw-field"><span>Số từ tối đa mỗi câu</span><input type="number" min={4} max={20} value={draft.maxWords} onChange={(event) => patch("maxWords", wholeNumber(event.target.value))} /></label>
+                {!draft.seeding && <label className="iw-field"><span>Số bình luận mỗi link</span><input data-iw-field="messageCount" type="number" min={draft.threadKind === "standalone" ? 1 : 2} max={64} placeholder={`${messages} · tự động`} value={draft.messageCount ?? ""} onChange={(event) => patch("messageCount", event.target.value === "" ? null : wholeNumber(event.target.value))} /></label>}
+                <label className="iw-field"><span>Số từ tối đa mỗi câu</span><input data-iw-field="maxWords" type="number" min={4} max={20} value={draft.maxWords} onChange={(event) => patch("maxWords", wholeNumber(event.target.value))} /></label>
                 <label className="iw-field"><span>Giữ bài (giây)</span><input type="number" min={0} max={60} placeholder="0 · rời ngay" value={draft.postDwellSeconds ?? ""} onChange={(event) => patch("postDwellSeconds", event.target.value === "" ? null : wholeNumber(event.target.value))} /></label>
               </div>
               <p className="iw-help">{!draft.seeding && "Để trống số bình luận để tự lấy bằng số máy đã chọn. "}Giữ bài là số giây máy ở lại bài sau khi làm xong, tối đa 60.</p>
@@ -177,14 +210,15 @@ export function InteractionWorkspaceSetup({ setup: p, profiles, scopeControl, ef
       </section>
     </div>
     {p.runError && <Banner tone="error">{p.runError}</Banner>}
-    {step > 1 && stepIssues.length > 0 && <div className="iw-issues" role="status"><ul>{stepIssues.map((issue) => <li key={`${issue.field}:${issue.message}`}>{issue.message}{issue.fix && <button type="button" className="ghost" onClick={() => patch("messageCount", issue.fix!.messageCount)}>{issue.fix.label}</button>}{issue.technicalDetail && <details><summary>Chi tiết</summary><code>{issue.technicalDetail}</code></details>}</li>)}</ul></div>}
+    {step > 1 && stepIssues.length > 0 && <div className="iw-issues" id={issuesId} role="status"><ul>{stepIssues.map((issue) => { const repairLink = fixFor(issue.field); return <li key={`${issue.field}:${issue.message}`}>{issue.message}{issue.fix ? <button type="button" className="ghost" onClick={() => patch("messageCount", issue.fix!.messageCount)}>{issue.fix.label}</button> : repairLink.onFix && <button type="button" className="blocked-reason-fix" onClick={repairLink.onFix}>{repairLink.fixLabel}</button>}{issue.technicalDetail && <details><summary>Chi tiết</summary><code>{issue.technicalDetail}</code></details>}</li>; })}</ul></div>}
     <footer className="iw-footer"><CommandBar
       title={`${targets.length} bài · ${effectiveActors.length} máy`}
       detail={step === 1 ? "Bước tiếp theo: chọn hành động và máy." : step === 2 ? actionOrder : "Kết quả được ghi riêng cho từng máy."}
       tone={stepIssues.length ? "warning" : "neutral"}
+      blocker={runBlockers.length ? <BlockedReason id={blockerId} blockers={runBlockers} /> : undefined}
       actions={<>
         {step > 1 && <button type="button" className="ghost" disabled={busy} onClick={() => setStep(step - 1)}>Quay lại</button>}
-        <button type="button" className="primary" disabled={busy || (step === 1 ? !linksReady : !ready)} onClick={() => step === 3 ? onRun() : setStep(step + 1)}>{busy ? "Đang bắt đầu…" : step === 1 ? "Chọn hành động & máy →" : step === 2 ? "Kiểm tra lượt chạy →" : "Bắt đầu tương tác"}</button>
+        <button type="button" className="primary" disabled={busy || (step === 1 ? !linksReady : !ready)} aria-describedby={step > 1 && stepIssues.length ? issuesId : blockerDescribedBy(blockerId, runBlockers)} onClick={() => step === 3 ? onRun() : setStep(step + 1)}>{busy ? "Đang bắt đầu…" : step === 1 ? "Chọn hành động & máy →" : step === 2 ? "Kiểm tra lượt chạy →" : "Bắt đầu tương tác"}</button>
       </>} />
     </footer>
   </div>;

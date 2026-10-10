@@ -14,7 +14,8 @@ import {
   Undo2,
   Upload,
 } from "lucide-react";
-import { useState, type PropsWithChildren } from "react";
+import { useId, useRef, useState, type PropsWithChildren } from "react";
+import { focusBlockingField } from "../blockers";
 import { useModalFocus } from "../useModalFocus";
 import type {
   ActionDefinition,
@@ -109,15 +110,34 @@ export function FlowToolbar(props: FlowToolbarProps) {
     props.currentFlowId !== null &&
     !props.validationPending &&
     !props.savePending;
+  const toolbarRef = useRef<HTMLElement>(null);
+  const runBlockerId = useId();
+  // Why Run is off, beside Run. Saving is the button right next to it; issues link to Chẩn đoán.
+  const runBlocker: { message: string; showIssues?: boolean } | null = canRun || props.savePending ? null
+    : props.validationPending ? { message: "Đang kiểm tra Flow…" }
+      : props.issues.length > 0 ? { message: `Còn ${props.issues.length} lỗi cần sửa`, showIssues: true }
+        : props.compiled === null ? { message: "Flow chưa hợp lệ" }
+          : props.currentFlowId === null ? { message: "Lưu Flow trước khi chạy" }
+            : props.dirty ? { message: "Lưu bản trước khi chạy" } : null;
+  const showIssues = () => {
+    const workspace = toolbarRef.current?.closest(".flow-workspace");
+    if (!focusBlockingField(workspace, ".flow-diagnostics li button:not(:disabled)")) {
+      focusBlockingField(workspace, ".flow-diagnostics");
+    }
+  };
 
   return (
-    <header className="flow-toolbar" data-testid="flow-toolbar">
+    <header ref={toolbarRef} className="flow-toolbar" data-testid="flow-toolbar">
       <div className="flow-toolbar-group flow-toolbar-primary" role="group" aria-label="Chọn và chỉnh Flow">
         <IconCommand label="Bật/tắt bảng hành động" onClick={props.onTogglePalette}>
           <PanelLeft size={16} />
         </IconCommand>
         <select
           aria-label="Flow"
+          title={(() => {
+            const flow = props.flows.find((entry) => entry.id === props.currentFlowId);
+            return flow ? `${flow.name} / bản ${flow.latestRevision}` : "Chọn Flow";
+          })()}
           value={props.currentFlowId ?? ""}
           onChange={(event) => props.onSelectFlow(event.target.value)}
         >
@@ -192,6 +212,14 @@ export function FlowToolbar(props: FlowToolbarProps) {
         </IconCommand>
       </div>
       <div className="flow-toolbar-group flow-toolbar-actions" role="group" aria-label="Chạy và bố cục Flow">
+        {runBlocker && (
+          <span className="flow-run-blocker" role="status">
+            <span id={runBlockerId} title={runBlocker.message}>{runBlocker.message}</span>
+            {runBlocker.showIssues && (
+              <button type="button" className="blocked-reason-fix" onClick={showIssues}>Xem lỗi</button>
+            )}
+          </span>
+        )}
         <button type="button" className="ghost" aria-label="Lưu bản" disabled={!canSave} onClick={props.onSave}>
           <Save size={16} aria-hidden="true" />{props.savePending ? "Đang lưu…" : "Lưu bản"}
         </button>
@@ -202,6 +230,7 @@ export function FlowToolbar(props: FlowToolbarProps) {
           type="button"
           className="flow-run-command"
           disabled={!canRun}
+          aria-describedby={runBlocker ? runBlockerId : undefined}
           title={props.dirty ? "Lưu bản trước khi chạy Flow" : props.validationPending ? "Đang kiểm tra Flow" : "Chạy phiên bản đã lưu"}
           onClick={props.onRun}
         >

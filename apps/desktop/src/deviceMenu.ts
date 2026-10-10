@@ -34,6 +34,8 @@ export interface DeviceMenuNode {
   /** Not offered on iOS. Gated by `gateDeviceMenu`, never by the renderer. */
   androidOnly?: boolean;
   disabled?: boolean;
+  /** Why the row is disabled; the renderer shows it as the row's tooltip. */
+  disabledReason?: string;
   /** A non-empty list makes this row a submenu, and `run` is then ignored. */
   children?: DeviceMenuNode[];
   /**

@@ -267,6 +267,8 @@ export function GoogleSheetConnection({ onReadyChange }: Props) {
       : result?.message || (savedBinding && !isSheetVerificationInvalidated() ? "Đã liên kết Google Sheet. Lượt đăng dùng kết quả kiểm quyền ghi còn hạn của đúng kết nối."
         : status && !status.configured ? "Bản app chưa có cấu hình Google. Mở Thiết lập Google để bổ sung."
         : status?.connected ? "Chưa xác minh kết nối bảng." : "Chưa đăng nhập Google."));
+  // Also the tooltip: the compact Sheet row cuts this line with an ellipsis.
+  const resultText = `${status?.email ? `${status.email} · ` : ""}${message}${result?.verifiedAt && !autoChecking && action === null ? ` · Xác minh lúc ${new Date(result.verifiedAt).toLocaleTimeString("vi-VN")}` : ""}`;
   return <div className="publish-sheet-connection google-sheet-connection" data-google-sheet-focus tabIndex={-1}>
     <label htmlFor="publish-sheet-link">Link Google Sheet</label>
     <div className="google-sheet-compact-controls">
@@ -276,7 +278,7 @@ export function GoogleSheetConnection({ onReadyChange }: Props) {
       <button type="button" disabled={!canCancel && action !== null} title={status?.email || "Đăng nhập Google"} onClick={() => void (canCancel ? cancel() : login())}>{canCancel ? "Hủy đăng nhập" : "Đăng nhập Google"}</button>
       <button type="button" disabled={action !== null || !url.trim()} onClick={() => void check()}>{(action === "check" || action === "picking") && <LoaderCircle className="publish-check-spinner" size={14} aria-hidden="true" />}Kiểm tra kết nối</button>
     </div>
-    <p tabIndex={0} role={error ? "alert" : "status"} className={`publish-sheet-result ${verified ? "is-verified" : savedBinding && result === null && !isSheetVerificationInvalidated() ? "is-linked" : "needs-attention"}`}>{status?.email ? `${status.email} · ` : ""}{message}{result?.verifiedAt && !autoChecking && action === null ? ` · Xác minh lúc ${new Date(result.verifiedAt).toLocaleTimeString("vi-VN")}` : ""}</p>
+    <p tabIndex={0} role={error ? "alert" : "status"} className={`publish-sheet-result ${verified ? "is-verified" : savedBinding && result === null && !isSheetVerificationInvalidated() ? "is-linked" : "needs-attention"}`} title={resultText}>{resultText}</p>
     {status && !status.configured && <GoogleAppSetup key={status.clientId} clientId={status.clientId}
       busy={action !== null || status.phase !== "idle"} open={setupOpen} onOpenChange={setSetupOpen} onSave={configure} />}
   </div>;

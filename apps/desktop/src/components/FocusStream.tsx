@@ -222,6 +222,9 @@ export function FocusStream({
     controlState.ready.length === targets.length &&
     failureCount === 0;
   const keyDisabled = busy || actionPending || pointerBusy || !sessionReady;
+  // Shown on the greyed rows, so a disabled key says why instead of looking broken.
+  const busyReason = "Đang chạy một thao tác khác trên máy này";
+  const keyDisabledReason = !sessionReady ? "Chưa điều khiển được máy — bấm Thử lại điều khiển" : busyReason;
   const phoneKeyboard = usePhoneKeyboard({
     udid: device.udid, generation: viewSize?.generation,
     enabled: active && !closing && sessionReady && hasView,
@@ -680,7 +683,7 @@ export function FocusStream({
       label: "Tăng âm lượng",
       Icon: Volume2,
       androidOnly: true,
-      disabled: keyDisabled,
+      disabled: keyDisabled, disabledReason: keyDisabledReason,
       run: () => void pressKey("volumeUp"),
     },
     {
@@ -688,7 +691,7 @@ export function FocusStream({
       label: "Giảm âm lượng",
       Icon: Volume1,
       androidOnly: true,
-      disabled: keyDisabled,
+      disabled: keyDisabled, disabledReason: keyDisabledReason,
       run: () => void pressKey("volumeDown"),
     },
     {
@@ -699,7 +702,7 @@ export function FocusStream({
       label: "Làm mới hình",
       Icon: ScanLine,
       androidOnly: true,
-      disabled: busy,
+      disabled: busy, disabledReason: busyReason,
       run: () => {
         void viewRequestKeyframe(device.udid)
           .then((asked) =>
@@ -714,7 +717,7 @@ export function FocusStream({
       id: "screenshot",
       label: "Chụp màn hình",
       Icon: Image,
-      disabled: busy,
+      disabled: busy, disabledReason: busyReason,
       run: () => void capture(),
     },
     {
@@ -722,11 +725,11 @@ export function FocusStream({
       label: "Nút nguồn",
       Icon: Power,
       androidOnly: true,
-      disabled: keyDisabled,
+      disabled: keyDisabled, disabledReason: keyDisabledReason,
       run: () => void pressKey("power"),
     },
     ...(!isIos ? [{ id: "rotation-lock", label: "Khóa xoay dọc", Icon: Smartphone,
-      disabled: keyDisabled, run: () => void runBusy(async () => {
+      disabled: keyDisabled, disabledReason: keyDisabledReason, run: () => void runBusy(async () => {
         try { const value = await setScreenRotation(device.udid, 0); setRotationMessage(value === 0 ? "Đã khóa hướng dọc." : "Thiết bị chưa xác nhận hướng dọc."); }
         catch (error) { setRotationMessage(describeError(error)); }
       }) }] : []),
@@ -735,7 +738,7 @@ export function FocusStream({
       label: "Cài APK",
       Icon: PackagePlus,
       androidOnly: true,
-      disabled: busy,
+      disabled: busy, disabledReason: busyReason,
       run: () => {
         void (async () => {
           const path = await pickFile({
@@ -759,7 +762,7 @@ export function FocusStream({
       label: "PC → Điện thoại",
       Icon: ImageUp,
       androidOnly: true,
-      disabled: busy,
+      disabled: busy, disabledReason: busyReason,
       run: () => { void (async () => {
         const paths = await pickFiles({ title: "Chọn tệp từ PC đưa vào điện thoại" });
         if (paths.length && fileTarget.current === device.udid) setShowFiles({ mode: "upload", paths });
@@ -771,7 +774,7 @@ export function FocusStream({
       label: "Điện thoại → PC",
       Icon: FolderDown,
       androidOnly: true,
-      disabled: busy,
+      disabled: busy, disabledReason: busyReason,
       run: () => setShowFiles({ mode: "download", paths: [] }),
     },
     {
@@ -795,7 +798,7 @@ export function FocusStream({
       label: showPhrases ? "Ẩn câu nhanh" : "Câu nhanh",
       Icon: TextCursorInput,
       androidOnly: true,
-      disabled: busy,
+      disabled: busy, disabledReason: busyReason,
       run: () => setShowPhrases((open) => !open),
     },
     {
@@ -803,7 +806,7 @@ export function FocusStream({
       label: showKeyboards ? "Ẩn bàn phím" : "Đổi bàn phím",
       Icon: Keyboard,
       androidOnly: true,
-      disabled: busy,
+      disabled: busy, disabledReason: busyReason,
       run: () => {
         setShowKeyboards((open) => {
           const next = !open;
@@ -817,7 +820,7 @@ export function FocusStream({
       label: "Thông báo",
       Icon: Bell,
       androidOnly: true,
-      disabled: keyDisabled,
+      disabled: keyDisabled, disabledReason: keyDisabledReason,
       run: () => void pressKey("notification"),
     },
     {

@@ -77,6 +77,18 @@ mã lượt chạy và mã thiết bị nằm trong **Chi tiết**. Mục không
 Lời toast theo nguyên tắc ACK chưa phải bằng chứng: "Đã gửi lệnh…", không "Thành công" cho
 tác động chưa được xác minh.
 
+**Lý do bị khóa nằm cạnh nút.** Nút chính bị tắt luôn có lý do ngay bên cạnh (`BlockedReason`,
+`aria-describedby` trỏ vào lý do) và nút sửa đưa focus tới đúng trường: Nuôi (phạm vi, thiết lập),
+Tương tác (link, Chọn máy, trường bước 2), Đăng bài (thư mục, Chọn nhanh, máy nhận, caption),
+Flow (Lưu bản, Xem lỗi), Điều phối (tên, thêm bước), Công cụ nhóm (văn bản, regex, tệp). Lý do
+quy trình không gom vào banner và không ẩn. Dòng chức năng bị tắt trong cửa sổ điện thoại nêu lý
+do ở tooltip. **Thông báo hệ thống** cấp app (backend, số máy, nhánh iOS/Android, bộ công cụ) gộp
+thành một dải: thông báo trùng chữ hiện một lần kèm (×N), thông báo nặng nhất hiện đủ cùng hành
+động, phần còn lại sau nút "+N thông báo hệ thống". **Tràn:** tab Công cụ nhóm xuống hàng, không
+cuộn ngang ẩn; toolbar Flow tách hai hàng từ 1400 px trở xuống; tên trong tiêu đề cửa sổ điện thoại,
+chọn Flow và "Gán:" của Đăng bài cắt chữ nhưng có tooltip. Mọi lệnh của các vùng này vẫn bấm được
+ở 1366×768 và 820×560.
+
 ## Nguồn và cách áp dụng
 
 | Nguồn | Mẫu tham khảo | Áp dụng trong Riviu | Không sao chép |

@@ -1,10 +1,12 @@
-import { useMemo, useState } from "react";
+import { useId, useMemo, useState } from "react";
 import type { DeviceInfo } from "../../types";
 import { distributeFiles } from "../../api";
 import { pickFiles } from "../../pickFile";
 import { assign, leftover } from "../../textDistribution";
 import { groupInputOutcome } from "../../groupInput";
 import { pushToast, toastError } from "../../toastStore";
+import { BlockedReason } from "../WorkspacePrimitives";
+import { blockerDescribedBy, focusBlockingField, type Blocker } from "../blockers";
 
 export function FileDistributionTool({
   devices,
@@ -29,6 +31,11 @@ export function FileDistributionTool({
     return d?.name || d?.model || udid.slice(-6);
   };
   const baseName = (p: string): string => p.split(/[/\\]/).pop() || p;
+  const blockerId = useId();
+  const blockers: Blocker[] = [
+    ...(!targets.length ? [{ message: "Chưa có máy nhận trong phạm vi." }] : []),
+    ...(!paths.length ? [{ message: "Chọn tệp để gửi.", fixLabel: "Thêm tệp", onFix: () => focusBlockingField(document, "#gt-file-pick") }] : []),
+  ];
 
   const pick = async () => {
     const picked = await pickFiles({
@@ -67,7 +74,7 @@ export function FileDistributionTool({
         máy. Chọn nhiều tệp một lần; tệp thứ i vào máy thứ i.
       </p>
       <div className="nurture-float-actions">
-        <button type="button" className="ghost" onClick={() => void pick()}>
+        <button id="gt-file-pick" type="button" className="ghost" onClick={() => void pick()}>
           Chọn tệp…
         </button>
       </div>
@@ -89,10 +96,11 @@ export function FileDistributionTool({
         </div>
       )}
       <div className="nurture-float-actions" style={{ marginTop: "0.7rem" }}>
-        <button type="button" className="primary" disabled={busy || !pairs.length} onClick={() => void send()}>
+        <button type="button" className="primary" disabled={busy || !pairs.length} aria-describedby={blockerDescribedBy(blockerId, blockers)} onClick={() => void send()}>
           {busy ? "Đang gửi…" : `Gửi tới ${pairs.length} máy`}
         </button>
       </div>
+      <BlockedReason id={blockerId} blockers={blockers} />
     </>
   );
 }

@@ -92,6 +92,23 @@
   color: var(--text-inverse);
 }
 
+.flow-run-blocker {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--space-1);
+  min-width: 0;
+  max-width: 220px;
+  color: var(--warn-strong);
+  font-size: var(--text-sm);
+}
+
+.flow-run-blocker > span {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
 .flow-toolbar-separator {
   width: 1px;
   height: 22px;
@@ -826,7 +843,9 @@
   white-space: normal;
 }
 
-@media (max-width: 1280px) {
+/* Two rows from 1400 px down: one row does not fit a 1366 px window with the sidebar open,
+   and the toolbar's overflow scroll hid the inspector toggle (mock browser, 1366×768). */
+@media (max-width: 1400px) {
   .flow-toolbar {
     display: grid;
     grid-template-columns: minmax(0, 1fr) auto;

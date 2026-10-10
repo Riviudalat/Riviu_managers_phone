@@ -4,8 +4,9 @@ import {
   type KeyboardEvent,
   type ReactNode,
 } from "react";
-import { Check, X } from "lucide-react";
+import { AlertTriangle, Check, X } from "lucide-react";
 import { useModalFocus } from "./useModalFocus";
+import type { Blocker } from "./blockers";
 
 export type StatusTone = "neutral" | "info" | "success" | "warning" | "error";
 
@@ -14,11 +15,14 @@ export function CommandBar({
   detail,
   tone = "neutral",
   actions,
+  blocker,
 }: {
   title: ReactNode;
   detail?: ReactNode;
   tone?: StatusTone;
   actions: ReactNode;
+  /** Why the primary action is off, rendered under the actions it blocks. */
+  blocker?: ReactNode;
 }) {
   return (
     <div className={`workspace-command-bar is-${tone}`}>
@@ -26,7 +30,36 @@ export function CommandBar({
         <strong>{title}</strong>
         {detail && <span>{detail}</span>}
       </div>
-      <div className="workspace-command-actions">{actions}</div>
+      <div className="workspace-command-actions">
+        {actions}
+        {blocker && <div className="workspace-command-blocker">{blocker}</div>}
+      </div>
+    </div>
+  );
+}
+
+/**
+ * Workflow blockers sit next to the CTA they block and are never folded away: a disabled
+ * primary that does not say why reads as broken, and a reason parked in a banner at the top
+ * of the page is out of sight when the operator reaches the button.
+ */
+export function BlockedReason({ id, blockers }: { id: string; blockers: readonly Blocker[] }) {
+  if (!blockers.length) return null;
+  return (
+    <div className="blocked-reason" role="status">
+      <ul aria-label="Lý do chưa thể chạy">
+        {blockers.map((blocker, index) => (
+          <li key={index}>
+            <AlertTriangle size={14} aria-hidden="true" />
+            <span id={`${id}-${index}`}>{blocker.message}</span>
+            {blocker.onFix && (
+              <button type="button" className="blocked-reason-fix" onClick={blocker.onFix}>
+                {blocker.fixLabel ?? "Sửa"}
+              </button>
+            )}
+          </li>
+        ))}
+      </ul>
     </div>
   );
 }

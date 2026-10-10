@@ -1,10 +1,12 @@
-import { useMemo, useState } from "react";
+import { useId, useMemo, useState } from "react";
 import type { DeviceInfo } from "../../types";
 import { distributeText } from "../../api";
 import { assign, leftover, splitText, type SplitMode } from "../../textDistribution";
 import { groupInputOutcome } from "../../groupInput";
 import { pushToast, toastError } from "../../toastStore";
 import { describeError } from "../../describeError";
+import { BlockedReason } from "../WorkspacePrimitives";
+import { blockerDescribedBy, focusBlockingField, type Blocker } from "../blockers";
 
 export function TextDistributionTool({
   devices,
@@ -37,6 +39,13 @@ export function TextDistributionTool({
 
   const pairs = useMemo(() => assign(items, targets), [items, targets]);
   const spare = useMemo(() => leftover(items, targets), [items, targets]);
+
+  const blockerId = useId();
+  const blockers: Blocker[] = [
+    ...(!targets.length ? [{ message: "Chưa có máy nhận trong phạm vi." }] : []),
+    ...(error ? [{ message: "Mẫu regex chưa hợp lệ.", fixLabel: "Sửa mẫu", onFix: () => focusBlockingField(document, "#gt-pattern") }]
+      : !items.length ? [{ message: "Nhập văn bản để chia cho các máy.", fixLabel: "Nhập văn bản", onFix: () => focusBlockingField(document, "#gt-text") }] : []),
+  ];
 
   const nameFor = (udid: string): string => {
     const d = devices.find((x) => x.udid === udid);
@@ -97,7 +106,7 @@ export function TextDistributionTool({
         {modeKind === "regex" && (
           <label>
             Mẫu regex
-            <input type="text" value={pattern} onChange={(e) => setPattern(e.target.value)} />
+            <input id="gt-pattern" type="text" value={pattern} onChange={(e) => setPattern(e.target.value)} />
           </label>
         )}
       </div>
@@ -124,11 +133,13 @@ export function TextDistributionTool({
           type="button"
           className="primary"
           disabled={busy || !pairs.length || Boolean(error)}
+          aria-describedby={blockerDescribedBy(blockerId, blockers)}
           onClick={() => void send()}
         >
           {busy ? "Đang gửi…" : `Gửi tới ${pairs.length} máy`}
         </button>
       </div>
+      <BlockedReason id={blockerId} blockers={blockers} />
     </>
   );
 }

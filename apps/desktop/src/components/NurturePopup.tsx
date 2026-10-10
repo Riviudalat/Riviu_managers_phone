@@ -43,7 +43,8 @@ import { AutomationTabs } from "./AutomationTabs";
 import "../styles/nurture-workspace.css";
 import { IconClose, IconHeart, IconRefresh } from "./Icons";
 import { LoadingState, StatusNotice } from "./States";
-import { CommandBar, StatusChip } from "./WorkspacePrimitives";
+import { BlockedReason, CommandBar, StatusChip } from "./WorkspacePrimitives";
+import { blockerDescribedBy, focusBlockingField, type Blocker } from "./blockers";
 import type {
   DeviceInfo,
   DeviceMeta,
@@ -341,6 +342,8 @@ export function NurturePopup({
   const issueId = useId();
   const workspaceRef = useRef<HTMLDivElement>(null);
   const [focusInvalid, setFocusInvalid] = useState(false);
+  const [focusScope, setFocusScope] = useState(false);
+  const blockerId = useId();
   const settingsIssue = useMemo(() => {
     const issue = settings ? validateNurtureSettings(settings) : null;
     return surface === "page" && (issue?.field === "numVideos" || issue?.field === "numRounds")
@@ -398,6 +401,34 @@ export function NurturePopup({
     }
     setFocusInvalid(false);
   }, [focusInvalid, settingsIssue, pageSurface]);
+  useEffect(() => {
+    if (!focusScope) return;
+    focusBlockingField(workspaceRef.current, 'select[aria-label="Phạm vi thiết bị"]');
+    setFocusScope(false);
+  }, [focusScope]);
+  const repairSettings = () => {
+    if (!settingsIssue) return;
+    if (pageSurface) {
+      setPageMode(settingsIssue.field === "scheduleEveryMinutes" ? "schedule" : "setup");
+      setTab(["numVideos","numRounds","scheduleDurationMinutes","searchKeyword"].includes(settingsIssue.field) ? "session" : settingsIssue.tab);
+    } else {
+      setTab(settingsIssue.tab);
+    }
+    setFocusInvalid(true);
+  };
+  // The reasons that wait for the operator, each with the way to the field that clears it.
+  const startBlockers: Blocker[] = !settings ? [] : [
+    ...(!targets.length ? [{
+      message: "Chưa có máy trong phạm vi.",
+      ...(pageSurface && scopeControl ? { fixLabel: "Chọn phạm vi", onFix: () => { setPageMode("setup"); setFocusScope(true); } } : {}),
+    }] : []),
+    ...(settingsIssue ? [{ message: <span id={issueId}>{settingsIssue.message}</span>, fixLabel: "Sửa thiết lập", onFix: repairSettings }] : []),
+  ];
+  const startBlocker = startBlockers.length ? <BlockedReason id={blockerId} blockers={startBlockers} /> : null;
+  const scheduleBlockers: Blocker[] = !settings ? [] : [
+    ...(settingsIssue ? [{ message: "Sửa thiết lập đang lỗi trước khi áp dụng hẹn giờ." }] : []),
+    ...(settings.scheduleEnabled && !targets.length ? [{ message: "Lịch tự chạy cần ít nhất một máy trong phạm vi." }] : []),
+  ];
   const profileConfig = useMemo(
     () =>
       settings ? nurtureProfileConfig(settings, settings.scheduleDurationMinutes) : null,
@@ -861,7 +892,7 @@ export function NurturePopup({
 
   const actionControls = (
     <div className="nurture-float-actions">
-      <button type="button" className="primary" disabled={busy || !targets.length || !settings || Boolean(settingsIssue)} onClick={start}>
+      <button type="button" className="primary" disabled={busy || !targets.length || !settings || Boolean(settingsIssue)} aria-describedby={blockerDescribedBy(blockerId, startBlockers)} onClick={start}>
         {pageSurface ? "Kiểm tra & bắt đầu" : "Bắt đầu"}
       </button>
       <button type="button" className="danger" disabled={busy || !stopTargets.length} onClick={stop}>
@@ -936,6 +967,7 @@ export function NurturePopup({
           ) : (
             <>
               {!pageSurface && actionControls}
+              {!pageSurface && startBlocker}
 
               {pageSurface && (
                 <AutomationTabs id="nurture-page" label="Chế độ Nuôi TikTok" value={pageMode} onChange={activatePageMode} />
@@ -947,6 +979,7 @@ export function NurturePopup({
                   detail={pageMode === "monitor" ? "Theo dõi tiến độ hoặc dừng các máy trong phiên hiện tại." : anyRunning ? "Phiên đang chạy; có thể dừng hoặc lưu thay đổi." : "Kiểm tra thiết lập rồi bắt đầu phiên Nuôi TikTok."}
                   tone={targets.length && !settingsIssue ? "success" : "warning"}
                   actions={actionControls}
+                  blocker={startBlocker}
                 />
               )}
 
@@ -957,23 +990,6 @@ export function NurturePopup({
                     <p>Không bắt đầu: {startReport.requested.filter((udid) => !startReport.started.includes(udid)).map((udid) => deviceLabel(devices, metas, udid)).join("; ")}.</p>
                     <p>Các máy này không thuộc phiên và không được tự tắt TikTok. Xem nhật ký khởi chạy để biết lý do.</p>
                   </>}
-                </StatusNotice>
-              )}
-
-              {pageSurface && settingsIssue && (
-                <StatusNotice
-                  tone="warning"
-                  action={(
-                    <button type="button" className="ghost" onClick={() => {
-                      setPageMode(settingsIssue.field === "scheduleEveryMinutes" ? "schedule" : "setup");
-                      setTab(pageSurface && ["numVideos","numRounds","scheduleDurationMinutes","searchKeyword"].includes(settingsIssue.field) ? "session" : settingsIssue.tab);
-                      setFocusInvalid(true);
-                    }}>
-                      Sửa thiết lập
-                    </button>
-                  )}
-                >
-                  <span id={issueId}>{settingsIssue.message}</span>
                 </StatusNotice>
               )}
 
@@ -1015,7 +1031,9 @@ export function NurturePopup({
                     try { if (await save(undefined, true)) setMsg(settings.scheduleEnabled ? "Đã áp dụng hẹn giờ cho các máy đã chọn." : "Đã tắt lịch tự chạy."); }
                     catch (error) { setMsg(describeError(error)); }
                     finally { setBusy(false); }
-                  }}>Áp dụng hẹn giờ</button><span>Lịch dùng các máy đã chọn ở Thiết lập. Giữ Riviu và máy tính đang mở.</span></div>
+                  }} aria-describedby={scheduleBlockers.length ? `${blockerId}-schedule-0` : undefined}>Áp dụng hẹn giờ</button><span>Lịch dùng các máy đã chọn ở Thiết lập. Giữ Riviu và máy tính đang mở.</span>
+                    {/* The fix links live in the footer right under this panel; one set is enough. */}
+                    <BlockedReason id={`${blockerId}-schedule`} blockers={scheduleBlockers.slice(0, 1)} /></div>
                   {targetRef && profileConfig && <AutomationSettingsSchedule kind="nurture" target={targetRef} config={profileConfig} disabled={Boolean(settingsIssue) || !targets.length} />}
                 </div>
               </div>}
@@ -1024,7 +1042,8 @@ export function NurturePopup({
                     <CommandBar title={`${targets.length} máy được chọn`}
                       detail={`Tối đa ${settings.scheduleDurationMinutes} phút hoặc ${settings.numVideos * settings.numRounds} bài / máy`}
                       tone={!targets.length || settingsIssue ? "warning" : "neutral"}
-                      actions={actionControls} />
+                      actions={actionControls}
+                      blocker={startBlocker} />
                   </footer>
               )}
 
@@ -1260,7 +1279,8 @@ export function NurturePopup({
                   </div>
                 )}
               </div>
-               {msg && <p className="nurture-float-err">{msg}</p>}
+               {/* A refused save reports the same issue the blocker under Bắt đầu already shows. */}
+               {msg && msg !== settingsIssue?.message && <p className="nurture-float-err">{msg}</p>}
                {conflictingSettings && <button type="button" onClick={() => {
                  if (!settings || !baseline) return;
                  const local = (nurtureProfileConfig(settings) as { settings: Record<string, unknown> }).settings;

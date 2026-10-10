@@ -686,7 +686,9 @@
 .group-tools-scope > div { display: flex; flex-direction: column; gap: var(--space-1); }
 .group-tools-scope strong { font-size: var(--text-md); }
 .group-tools-scope span { color: var(--text-3); font-size: var(--text-sm); }
-.group-tools .workspace-tabs { padding: var(--space-2) var(--space-4); }
+/* Wrap rather than scroll: the tools never fit one row in this dialog, and a clipped
+   strip with no scrollbar hid "Root / Máy mới" and "Ngoại vi" at every window size. */
+.group-tools .workspace-tabs { flex-wrap: wrap; overflow-x: visible; padding: var(--space-2) var(--space-4); }
 .group-tools .workspace-tabs button { flex-shrink: 0; }
 .group-tools-panel { padding: var(--space-5); }
 .group-tools-intro { margin-bottom: var(--space-4); }

@@ -15,6 +15,7 @@ import "../../styles/publish-quick.css";
 import { allocateQuickPosts } from "./publishQuickAllocation";
 import { publishSelectionStatus } from "./publishSelectionStatus";
 import { deviceGuardBlock, deviceGuardPending } from "./publishDeviceGuardState";
+import { focusBlockingField } from "../blockers";
 import type { PublishDeviceGuards } from "../../types";
 
 type QuickProps = PublishWizardProps & {
@@ -203,6 +204,15 @@ export function PublishQuickSetup(p: QuickProps) {
   };
   const selectedBlockedDevice = selected.map(bundle => p.assignments[bundle.id]).find(udid => !!udid && !!deviceGuardBlock(p.deviceGuards, udid));
   const selectedPending = selectedBlockedDevice ? deviceGuardPending(p.deviceGuards?.[selectedBlockedDevice]) : undefined;
+  const checkReasonText = selectedBlockedDevice ? `${label(selectedBlockedDevice)}: ${checkReason}` : checkReason;
+  // The field that clears the footer's reason; transient states (scan, preflight, busy) have none.
+  const blockedBundle = selected.find(bundle => selection.reason.startsWith(`${bundle.name}:`));
+  const checkFix = locked || !selection.reason ? null
+    : !bundles.length ? { label: "Nhập thư mục", selector: "#publish-source-folder" }
+      : !selected.length ? { label: "Ghép bài", selector: ".pq-quick-button" }
+        : blockedBundle && selection.reason.endsWith("nội dung chữ đang trống.")
+          ? { label: "Sửa nội dung", selector: `[aria-label="${CSS.escape(`Sửa caption · ${blockedBundle.name}`)}"]` }
+          : blockedBundle ? { label: "Chọn máy nhận", selector: `select[aria-label="${CSS.escape(`Máy nhận bài ${blockedBundle.name}`)}"]` } : null;
   const filteredDevices = devices.filter(d => (!p.scopeControl || showOutOfScope || p.eligible.includes(d.udid) || assignedByDevice.has(d.udid))
     && `${label(d.udid)} ${p.metas.get(d.udid)?.handle ?? ""}`.toLocaleLowerCase().includes(deviceQuery.toLocaleLowerCase())
     && (!onlyFree || (canReceive(p, d.udid) && !assignedByDevice.has(d.udid))));
@@ -255,7 +265,7 @@ export function PublishQuickSetup(p: QuickProps) {
           })}{!selected.length && <div className="pq-list-empty"><strong>Chưa chọn bài nào</strong><p>Tick bài bên trái hoặc dùng Chọn nhanh để ghép với máy có thể gán.</p></div>}</div>
         </section>
         <section className="pq-devices pq-panel" aria-label="Máy thực hiện">
-          <header className="pq-devices-header"><div><h2>Thiết bị{p.scopeControl && <small className="pq-scope-count">{p.eligible.length} trong phạm vi</small>}</h2><div className={`pq-active-post${active && !activeVisible ? " is-hidden" : ""}`} role="status">{active && !activeVisible ? <><span>Bài đang gán bị lọc ẩn.</span><button type="button" className="ghost" onClick={() => { revealAfterCommit.current = active.id; setQuery(""); }}>Hiện bài</button></> : <span title={active?.name}>Gán: <strong>{active?.name ?? "Chưa chọn bài"}</strong>{active && !p.selectedIds.includes(active.id) ? " · Tick bài trước" : ""}</span>}</div></div>{p.scopeControl ?? <span>{ready.length} có thể gán</span>}</header>
+          <header className="pq-devices-header"><div><h2>Thiết bị{p.scopeControl && <small className="pq-scope-count">{p.eligible.length} trong phạm vi</small>}</h2><div className={`pq-active-post${active && !activeVisible ? " is-hidden" : ""}`} role="status">{active && !activeVisible ? <><span>Bài đang gán bị lọc ẩn.</span><button type="button" className="ghost" onClick={() => { revealAfterCommit.current = active.id; setQuery(""); }}>Hiện bài</button></> : <span title={`Gán: ${active?.name ?? "Chưa chọn bài"}${active && !p.selectedIds.includes(active.id) ? " · Tick bài trước" : ""}`}>Gán: <strong>{active?.name ?? "Chưa chọn bài"}</strong>{active && !p.selectedIds.includes(active.id) ? " · Tick bài trước" : ""}</span>}</div></div>{p.scopeControl ?? <span>{ready.length} có thể gán</span>}</header>
           <div className="pq-panel-tools pq-device-tools">
             <div className="pq-quick-actions" role="group" aria-label="Phân công bài cho máy"><span className="pq-quick-label" aria-hidden="true"><span className="pq-quick-label-full">Phân công</span><span className="pq-quick-label-short">Gán</span></span><button type="button" className="pq-quick-button" title="Ghép bài đã tick với máy có thể gán trong phạm vi, mỗi máy một bài. Không đổi phạm vi máy." disabled={locked || confirming || !bundles.length} onClick={autoAssign}><Zap size={15} aria-hidden="true"/>Chọn nhanh</button><button type="button" aria-label="Hoàn tác gán nhanh" disabled={locked || confirming || !undo || undo.source !== p.sourceRoot || undo.after !== mappingKey} onClick={undoAssignment}><Undo2 size={15} aria-hidden="true"/>Hoàn tác</button></div>
             <div className="pq-device-searchbar"><label className="pq-search"><Search size={15}/><input aria-label="Tìm số máy" value={deviceQuery} onChange={e => setDeviceQuery(e.target.value)} placeholder="Tìm máy / tài khoản"/></label>
@@ -290,7 +300,8 @@ export function PublishQuickSetup(p: QuickProps) {
         </section>
       </div>
     </div>
-    <footer className="pq-footer"><div><strong>{selected.length} bài đã chọn</strong><span>{mapped}/{selected.length} bài có máy · mỗi máy một bài</span><span className="pq-run-options">Sheet bật · Dọn bản chuyển bật</span>{notice && <details className="pq-assignment-notice"><summary title={notice}><span role="status">{notice}</span></summary><p>{notice}</p></details>}{checkReason && <small id="publish-check-reason" role="status">{selectedBlockedDevice ? `${label(selectedBlockedDevice)}: ${checkReason}` : checkReason}</small>}{selectedPending && p.onPendingPublication && <button type="button" className="pq-pending-action" disabled={locked} onClick={() => { if (!locked) p.onPendingPublication?.(selectedPending.campaignId); }}>Xem bài đang chờ</button>}</div><button type="button" className="primary" aria-describedby={checkReason ? "publish-check-reason" : undefined} disabled={locked || !complete} onClick={() => { if (!locked && complete) { setDialog("check"); void p.onPreflight(); } }}>{p.preflightLoading ? "Đang kiểm tra…" : "Kiểm tra & đăng"}<ArrowRight size={16}/></button></footer>
+    <footer className="pq-footer"><div><strong>{selected.length} bài đã chọn</strong><span>{mapped}/{selected.length} bài có máy · mỗi máy một bài</span><span className="pq-run-options">Sheet bật · Dọn bản chuyển bật</span>{notice && <details className="pq-assignment-notice"><summary title={notice}><span role="status">{notice}</span></summary><p>{notice}</p></details>}{selectedPending && p.onPendingPublication && <button type="button" className="pq-pending-action" disabled={locked} onClick={() => { if (!locked) p.onPendingPublication?.(selectedPending.campaignId); }}>Xem bài đang chờ</button>}</div>
+      <div className="pq-check">{checkReason && <p className="pq-check-reason" role="status"><small id="publish-check-reason" title={checkReasonText}>{checkReasonText}</small>{checkFix && <button type="button" className="blocked-reason-fix" onClick={() => focusBlockingField(rootRef.current, checkFix.selector)}>{checkFix.label}</button>}</p>}<button type="button" className="primary" aria-describedby={checkReason ? "publish-check-reason" : undefined} disabled={locked || !complete} onClick={() => { if (!locked && complete) { setDialog("check"); void p.onPreflight(); } }}>{p.preflightLoading ? "Đang kiểm tra…" : "Kiểm tra & đăng"}<ArrowRight size={16}/></button></div></footer>
     {captionContext && captionBundle && <PublishDialog title={`Ảnh & caption · ${captionBundle.name}`} wide returnFocus={captionReturnTarget} fallbackFocus={() => linksRef.current} onClose={() => setCaptionContext(null)} actions={<button type="button" onClick={() => setCaptionContext(null)}>Đóng · giữ bản nháp</button>}>
       <div className="pq-caption-editor"><div className="pq-caption-media"><div className="pq-large-preview"><PublishMedia bundle={captionBundle} index={Math.min(photo, Math.max(0, captionBundle.images.length - 1))} expanded/></div>
         {captionBundle.mediaKind === "image" && captionBundle.images.length > 0 && <div className="pq-photo-nav"><button type="button" aria-label="Ảnh trước" disabled={photo === 0} onClick={() => setPhoto(n => n - 1)}><ArrowLeft size={16}/></button><span>{Math.min(photo + 1, captionBundle.images.length)} / {captionBundle.images.length}</span><button type="button" aria-label="Ảnh tiếp" disabled={photo + 1 >= captionBundle.images.length} onClick={() => setPhoto(n => n + 1)}><ArrowRight size={16}/></button></div>}

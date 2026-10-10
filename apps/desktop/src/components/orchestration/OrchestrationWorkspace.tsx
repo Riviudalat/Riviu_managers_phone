@@ -3,6 +3,7 @@ import { AUTOMATION_APP_MIME } from "./automationDrag";
 import {
   useCallback,
   useEffect,
+  useId,
   useMemo,
   useRef,
   useState,
@@ -56,6 +57,8 @@ import type {
   TargetRef,
 } from "../../types";
 import { EmptyState, LoadingState, StatusNotice } from "../States";
+import { BlockedReason } from "../WorkspacePrimitives";
+import { blockerDescribedBy, focusBlockingField, type Blocker } from "../blockers";
 
 type Props = {
   onDirtyChange: (dirty: boolean) => void;
@@ -594,6 +597,17 @@ export function OrchestrationWorkspace({
     );
   }) ?? false;
   const canSave = Boolean(document?.name.trim()) && campaignCount > 0 && routesComplete && !busy;
+  const blockerId = useId();
+  // What waits for the operator before Lưu bản; Chạy also needs a clean saved revision.
+  const saveBlockers: Blocker[] = !document ? [] : [
+    ...(!document.name.trim() ? [{ message: "Đặt tên điều phối.", fixLabel: "Nhập tên", onFix: () => focusBlockingField(globalThis.document, 'input[aria-label="Tên điều phối"]') }] : []),
+    ...(campaignCount === 0 ? [{ message: "Thêm ít nhất một bước Nuôi, Tương tác hoặc Đăng bài.", fixLabel: "Thêm bước", onFix: () => focusBlockingField(globalThis.document, ".orchestration-add button") }] : []),
+    ...(campaignCount > 0 && !routesComplete ? [{ message: "Nối đủ các nhánh kết quả của mọi bước trước khi lưu." }] : []),
+  ];
+  const runBlockers: Blocker[] = !document || busy ? [] : savedRevision === null || dirty
+    ? [{ message: savedRevision === null ? "Lưu bản đầu tiên trước khi chạy." : "Lưu thay đổi trước khi chạy." }]
+    : [];
+  const blockers = [...saveBlockers, ...runBlockers];
   const profilesByKind = useMemo(
     () => ({
       nurture: profiles.filter((profile) => profile.kind === "nurture"),
@@ -757,13 +771,20 @@ export function OrchestrationWorkspace({
               <button
                 type="button"
                 disabled={savedRevision === null || dirty || busy}
+                aria-describedby={blockerDescribedBy(`${blockerId}-run`, runBlockers)}
                 onClick={() => void startRun()}
               >
                 <Play size={16} /> Chạy điều phối
               </button>
-              <button type="button" className="primary" disabled={!canSave} onClick={() => void save()}>
+              <button type="button" className="primary" disabled={!canSave} aria-describedby={blockerDescribedBy(blockerId, saveBlockers)} onClick={() => void save()}>
                 <Save size={16} /> Lưu bản
               </button>
+              {blockers.length > 0 && (
+                <div className="orchestration-toolbar-blocker">
+                  <BlockedReason id={blockerId} blockers={saveBlockers} />
+                  <BlockedReason id={`${blockerId}-run`} blockers={runBlockers} />
+                </div>
+              )}
             </header>
 
             {error && <StatusNotice tone="error">{error}</StatusNotice>}

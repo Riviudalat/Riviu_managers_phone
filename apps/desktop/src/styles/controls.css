@@ -117,6 +117,25 @@ button:disabled {
 .banner-action {
   flex-shrink: 0;
 }
+/* Several system notices fold into one strip: the most severe stays, the rest sit behind a count. */
+.system-notices,
+.system-notices-rest {
+  display: grid;
+  gap: var(--space-2);
+  min-width: 0;
+}
+.system-notices-rest[hidden] {
+  display: none;
+}
+.system-notices .banner-action {
+  display: flex;
+  flex-wrap: wrap;
+  justify-content: flex-end;
+  gap: var(--space-2);
+}
+.system-notices-toggle {
+  white-space: nowrap;
+}
 .banner-info {
   border-color: var(--primary-ring);
   background: var(--primary-50);

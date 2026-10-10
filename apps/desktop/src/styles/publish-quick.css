@@ -257,3 +257,16 @@
 @media (prefers-reduced-motion:reduce) {
   .pq-posts>article,.pq-link,.pq-device-row>.machine-choice { transition:none; }
 }
+/* The reason sits beside the CTA it blocks, not at the far end of the footer. Two lines at
+   most (one under 1000 px, under the button), so the footer never grows into the roster;
+   the full sentence is the tooltip and the CTA's accessible description. */
+.publish-quick .pq-footer>.pq-check { display:flex; flex:0 1 auto; align-items:center; justify-content:flex-end; min-width:0; max-width:62%; gap:10px; }
+.pq-check-reason { display:flex; align-items:center; gap:4px; min-width:0; margin:0; color:var(--warn-strong); }
+.pq-footer .pq-check-reason small { display:-webkit-box; -webkit-box-orient:vertical; -webkit-line-clamp:2; max-height:none; overflow:hidden; color:inherit; }
+.pq-check-reason .blocked-reason-fix { white-space:nowrap; }
+.pq-check>.primary { min-height:36px; flex:none; white-space:nowrap; }
+@media (max-width:1000px) {
+  .publish-quick .pq-footer>.pq-check { flex-direction:column-reverse; align-items:flex-end; gap:2px; max-width:55%; }
+  .pq-check-reason { max-width:100%; text-align:right; }
+  .pq-footer .pq-check-reason small { -webkit-line-clamp:1; }
+}
