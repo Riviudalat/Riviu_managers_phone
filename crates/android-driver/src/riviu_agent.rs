@@ -511,7 +511,7 @@ impl HelperClient {
                     .and_then(|s| s.parse::<u32>().ok())
             })
             .context("helper package UID unreadable")?;
-        anyhow::ensure!(uid >= 10000 && uid < 100000, "helper package UID invalid");
+        anyhow::ensure!((10000..100000).contains(&uid), "helper package UID invalid");
         let run_as_uid = adb
             .shell_output(
                 serial,

@@ -129,147 +129,6 @@ async fn require_shell_identity_for_recovery(adb: &AdbProgram, serial: &str) -> 
         .map_err(|error| fence_identity_refusal(error).unwrap_or_else(|error| error))
 }
 
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[tokio::test]
-    async fn maintenance_missing_retained_owner_is_explicit_and_remains_failed() {
-        let root = std::env::temp_dir().join(format!("helper-maintenance-missing-{}", uuid::Uuid::new_v4()));
-        std::fs::create_dir(&root).unwrap();
-        let error = HelperClient::prepare_maintenance(
-            &AdbProgram::at(root.join("never-run-adb")), "fixture", None, Some(&root),
-            "fixture_maintenance_1234", json!({"operation":"fixture"}),
-        ).await.expect_err("missing retained owner must not become success");
-        std::fs::remove_dir_all(&root).unwrap();
-        assert_eq!(error.to_string(), "HelperMaintenanceRetainedOwnerMissing");
-    }
-
-    /// Fixture adb that answers only the two identity probes; anything else exits 97.
-    fn identity_adb(root: &Path, uid: &str, user: &str) -> AdbProgram {
-        #[cfg(windows)]
-        let path = {
-            let path = root.join("identity-adb.cmd");
-            std::fs::write(&path, format!(concat!(
-                "@echo off\r\n",
-                "if \"%~4\"==\"id -u\" (\r\n  echo {uid}\r\n  exit /b 0\r\n)\r\n",
-                "if \"%~4\"==\"am get-current-user\" (\r\n  echo {user}\r\n  exit /b 0\r\n)\r\n",
-                "exit /b 97\r\n"), uid = uid, user = user)).unwrap();
-            path
-        };
-        #[cfg(not(windows))]
-        let path = {
-            use std::os::unix::fs::PermissionsExt;
-            let path = root.join("identity-adb");
-            std::fs::write(&path, format!(concat!(
-                "#!/bin/sh\n",
-                "case \"$4\" in\n",
-                "'id -u') echo {uid} ;;\n",
-                "'am get-current-user') echo {user} ;;\n",
-                "*) exit 97 ;;\n",
-                "esac\n"), uid = uid, user = user)).unwrap();
-            std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o700)).unwrap();
-            path
-        };
-        AdbProgram::at(path)
-    }
-
-    #[tokio::test]
-    async fn shell_identity_refusals_are_typed_and_keep_the_recovery_fence() {
-        let serial = "fixture-identity";
-        for (uid, user, expected) in [
-            ("0", "0", HelperShellIdentityRefused::Root),
-            ("1000", "0", HelperShellIdentityRefused::UnexpectedUid),
-            ("2000", "10", HelperShellIdentityRefused::AndroidUser),
-        ] {
-            let root = std::env::temp_dir().join(format!("helper-identity-{}", uuid::Uuid::new_v4()));
-            let state = state_path(&root, serial).unwrap();
-            std::fs::create_dir_all(&state).unwrap();
-            let adb = identity_adb(&root, uid, user);
-            // Fresh claim: refused before install or claim, not a retained-owner fence.
-            let apk = root.join("helper.apk");
-            std::fs::write(&apk, b"fixture-apk-not-for-device").unwrap();
-            let fresh = HelperClient::ensure_runtime(adb.clone(), serial, Some(&apk), Some(&root)).await
-                .err().expect("identity mismatch must refuse a fresh claim");
-            assert!(format!("{fresh:#}").contains(&format!("{}:", expected.marker())), "{uid}/{user}: {fresh:#}");
-            assert_eq!(fresh.downcast_ref::<HelperShellIdentityRefused>(), Some(&expected));
-            assert!(!fresh.is::<HelperRecoveryRequired>());
-            assert!(!state.join("runtime-owner.json").exists(), "no owner intent before identity proof");
-            // Retained owner: maintenance preparation names the identity and keeps the fence.
-            std::fs::write(state.join("runtime-owner.json"), serde_json::to_vec(&json!({
-                "serial":serial,"androidUser":0,"state":"claimPending","ownerId":"fixture_owner_0123456789",
-                "serviceInstance":"fixture_instance_012345","ownerGeneration":"fixture_generation_012345"})).unwrap()).unwrap();
-            let error = HelperClient::prepare_maintenance(&adb, serial, Some(&apk), Some(&root),
-                "fixture_maintenance_1234", json!({"operation":"fixture"})).await
-                .expect_err("identity mismatch must not become a maintenance plan");
-            let text = format!("{error:#}");
-            std::fs::remove_dir_all(&root).unwrap();
-            assert_eq!(HelperShellIdentityRefused::from_chain_text(&text), Some(expected), "{uid}/{user}: {text}");
-            assert!(error.is::<HelperRecoveryRequired>(), "retained owner stays fenced: {text}");
-        }
-        assert!(HelperShellIdentityRefused::Root.operator_message("R58M&x").contains("`adb -s R58Mx unroot`"));
-    }
-
-
-    #[tokio::test]
-    async fn cold_retained_release_blocks_optional_helper_fallback() {
-        let root = std::env::temp_dir().join(format!("helper-release-admission-{}", uuid::Uuid::new_v4()));
-        let serial = "fixture-release-admission";
-        let state = state_path(&root, serial).unwrap();
-        std::fs::create_dir_all(&state).unwrap();
-        let owner_id = "fixture_owner_0123456789";
-        let record = json!({"serial":serial,"androidUser":0,"ownerId":owner_id,
-            "state":"claimPending","serviceInstance":"fixture_instance_012345",
-            "ownerGeneration":"fixture_generation_012345"});
-        let owner_bytes = serde_json::to_vec(&record).unwrap();
-        let owner_path = state.join("runtime-owner.json");
-        std::fs::write(&owner_path, &owner_bytes).unwrap();
-        let release_path = state.join(format!("release-{owner_id}.json"));
-        let mut failures = Vec::new();
-        for (name, release_state, stale_owner) in [
-            ("pending release", "releasePending", false),
-            ("stale exact-owner receipt", "released", true),
-        ] {
-            let mut receipt = json!({"serial":serial,"androidUser":0,"ownerId":owner_id,
-                "state":release_state,"ownerRecord":record,
-                "serviceInstance":"fixture_instance_012345",
-                "ownerGeneration":"fixture_generation_012345","nonce":"fixture_nonce_012345"});
-            if stale_owner {
-                receipt["ownerRecord"]["ownerGeneration"] = json!("replaced_generation_012345");
-            }
-            let release_bytes = serde_json::to_vec(&receipt).unwrap();
-            std::fs::write(&release_path, &release_bytes).unwrap();
-            // Missing APK and unusable ADB cannot convert a retained lifecycle into
-            // optional helper absence or dispatch a new claim/release.
-            let error = HelperClient::ensure_runtime(
-                AdbProgram::at(root.join("never-run-adb")), serial, None, Some(&root),
-            ).await.err().expect("retained release must reject runtime admission");
-            assert_eq!(std::fs::read(&owner_path).unwrap(), owner_bytes);
-            assert_eq!(std::fs::read(&release_path).unwrap(), release_bytes);
-            if !error.is::<HelperRecoveryRequired>() {
-                failures.push(format!("{name}: {error:#}"));
-            }
-        }
-        std::fs::remove_dir_all(&root).unwrap();
-        assert!(failures.is_empty(), "open_session must fence retained lifecycle errors: {failures:?}");
-    }
-    #[test]
-    fn pending_cleanup_admission_rejects_foreign_and_oversized_records() {
-        let root = std::env::temp_dir().join(format!("helper-admission-{}", uuid::Uuid::new_v4()));
-        std::fs::create_dir(&root).unwrap();
-        assert!(pending_checkpoint(&root, "fixture").unwrap().is_none());
-        let path = root.join("ime-checkpoint.json");
-        std::fs::write(&path, serde_json::to_vec(&json!({"serial":"foreign","androidUser":0,"pending":{}})).unwrap()).unwrap();
-        assert!(pending_checkpoint(&root, "fixture").is_err());
-        std::fs::write(&path, vec![b' '; CHECKPOINT_LIMIT as usize + 1]).unwrap();
-        assert!(pending_checkpoint(&root, "fixture").is_err());
-        std::fs::write(&path, serde_json::to_vec(&json!({"serial":"fixture","androidUser":0,"pending":{"phase":"switching"}})).unwrap()).unwrap();
-        assert!(pending_checkpoint(&root, "fixture").unwrap().is_some());
-        assert!(state_path(Path::new("relative"), "fixture").is_err());
-        assert!(state_path(&root, "../../serial").unwrap().starts_with(&root));
-        std::fs::remove_dir_all(root).unwrap();
-    }
-}
 impl std::error::Error for HelperRecoveryRequired {}
 
 fn state_path(root: &Path, serial: &str) -> anyhow::Result<PathBuf> {
@@ -772,6 +631,8 @@ impl HelperClient {
         Self::execute_maintenance_with_cache(adb, serial, apk, root, plan, operator_authorized, observation_only, None).await
     }
 
+    // The arguments are execute_maintenance's exact plan tuple plus the cached guard; a bag struct would touch every maintenance caller.
+    #[allow(clippy::too_many_arguments)]
     pub(crate) async fn execute_maintenance_with_cache(adb: &AdbProgram, serial: &str, apk: Option<&Path>, root: Option<&Path>, plan: Value, operator_authorized: bool, observation_only: bool, cached: Option<&CachedMaintenanceGuard>) -> anyhow::Result<Value> {
         anyhow::ensure!(operator_authorized, "operator authorization required for helper supersession");
         let state = state_path(root.context("helper state directory missing")?, serial)?;
@@ -1242,5 +1103,147 @@ impl HelperClient {
         result?;
         cleanup?;
         finish_release(serial, &owner).await
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn maintenance_missing_retained_owner_is_explicit_and_remains_failed() {
+        let root = std::env::temp_dir().join(format!("helper-maintenance-missing-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir(&root).unwrap();
+        let error = HelperClient::prepare_maintenance(
+            &AdbProgram::at(root.join("never-run-adb")), "fixture", None, Some(&root),
+            "fixture_maintenance_1234", json!({"operation":"fixture"}),
+        ).await.expect_err("missing retained owner must not become success");
+        std::fs::remove_dir_all(&root).unwrap();
+        assert_eq!(error.to_string(), "HelperMaintenanceRetainedOwnerMissing");
+    }
+
+    /// Fixture adb that answers only the two identity probes; anything else exits 97.
+    fn identity_adb(root: &Path, uid: &str, user: &str) -> AdbProgram {
+        #[cfg(windows)]
+        let path = {
+            let path = root.join("identity-adb.cmd");
+            std::fs::write(&path, format!(concat!(
+                "@echo off\r\n",
+                "if \"%~4\"==\"id -u\" (\r\n  echo {uid}\r\n  exit /b 0\r\n)\r\n",
+                "if \"%~4\"==\"am get-current-user\" (\r\n  echo {user}\r\n  exit /b 0\r\n)\r\n",
+                "exit /b 97\r\n"), uid = uid, user = user)).unwrap();
+            path
+        };
+        #[cfg(not(windows))]
+        let path = {
+            use std::os::unix::fs::PermissionsExt;
+            let path = root.join("identity-adb");
+            std::fs::write(&path, format!(concat!(
+                "#!/bin/sh\n",
+                "case \"$4\" in\n",
+                "'id -u') echo {uid} ;;\n",
+                "'am get-current-user') echo {user} ;;\n",
+                "*) exit 97 ;;\n",
+                "esac\n"), uid = uid, user = user)).unwrap();
+            std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o700)).unwrap();
+            path
+        };
+        AdbProgram::at(path)
+    }
+
+    #[tokio::test]
+    async fn shell_identity_refusals_are_typed_and_keep_the_recovery_fence() {
+        let serial = "fixture-identity";
+        for (uid, user, expected) in [
+            ("0", "0", HelperShellIdentityRefused::Root),
+            ("1000", "0", HelperShellIdentityRefused::UnexpectedUid),
+            ("2000", "10", HelperShellIdentityRefused::AndroidUser),
+        ] {
+            let root = std::env::temp_dir().join(format!("helper-identity-{}", uuid::Uuid::new_v4()));
+            let state = state_path(&root, serial).unwrap();
+            std::fs::create_dir_all(&state).unwrap();
+            let adb = identity_adb(&root, uid, user);
+            // Fresh claim: refused before install or claim, not a retained-owner fence.
+            let apk = root.join("helper.apk");
+            std::fs::write(&apk, b"fixture-apk-not-for-device").unwrap();
+            let fresh = HelperClient::ensure_runtime(adb.clone(), serial, Some(&apk), Some(&root)).await
+                .err().expect("identity mismatch must refuse a fresh claim");
+            assert!(format!("{fresh:#}").contains(&format!("{}:", expected.marker())), "{uid}/{user}: {fresh:#}");
+            assert_eq!(fresh.downcast_ref::<HelperShellIdentityRefused>(), Some(&expected));
+            assert!(!fresh.is::<HelperRecoveryRequired>());
+            assert!(!state.join("runtime-owner.json").exists(), "no owner intent before identity proof");
+            // Retained owner: maintenance preparation names the identity and keeps the fence.
+            std::fs::write(state.join("runtime-owner.json"), serde_json::to_vec(&json!({
+                "serial":serial,"androidUser":0,"state":"claimPending","ownerId":"fixture_owner_0123456789",
+                "serviceInstance":"fixture_instance_012345","ownerGeneration":"fixture_generation_012345"})).unwrap()).unwrap();
+            let error = HelperClient::prepare_maintenance(&adb, serial, Some(&apk), Some(&root),
+                "fixture_maintenance_1234", json!({"operation":"fixture"})).await
+                .expect_err("identity mismatch must not become a maintenance plan");
+            let text = format!("{error:#}");
+            std::fs::remove_dir_all(&root).unwrap();
+            assert_eq!(HelperShellIdentityRefused::from_chain_text(&text), Some(expected), "{uid}/{user}: {text}");
+            assert!(error.is::<HelperRecoveryRequired>(), "retained owner stays fenced: {text}");
+        }
+        assert!(HelperShellIdentityRefused::Root.operator_message("R58M&x").contains("`adb -s R58Mx unroot`"));
+    }
+
+
+    #[tokio::test]
+    async fn cold_retained_release_blocks_optional_helper_fallback() {
+        let root = std::env::temp_dir().join(format!("helper-release-admission-{}", uuid::Uuid::new_v4()));
+        let serial = "fixture-release-admission";
+        let state = state_path(&root, serial).unwrap();
+        std::fs::create_dir_all(&state).unwrap();
+        let owner_id = "fixture_owner_0123456789";
+        let record = json!({"serial":serial,"androidUser":0,"ownerId":owner_id,
+            "state":"claimPending","serviceInstance":"fixture_instance_012345",
+            "ownerGeneration":"fixture_generation_012345"});
+        let owner_bytes = serde_json::to_vec(&record).unwrap();
+        let owner_path = state.join("runtime-owner.json");
+        std::fs::write(&owner_path, &owner_bytes).unwrap();
+        let release_path = state.join(format!("release-{owner_id}.json"));
+        let mut failures = Vec::new();
+        for (name, release_state, stale_owner) in [
+            ("pending release", "releasePending", false),
+            ("stale exact-owner receipt", "released", true),
+        ] {
+            let mut receipt = json!({"serial":serial,"androidUser":0,"ownerId":owner_id,
+                "state":release_state,"ownerRecord":record,
+                "serviceInstance":"fixture_instance_012345",
+                "ownerGeneration":"fixture_generation_012345","nonce":"fixture_nonce_012345"});
+            if stale_owner {
+                receipt["ownerRecord"]["ownerGeneration"] = json!("replaced_generation_012345");
+            }
+            let release_bytes = serde_json::to_vec(&receipt).unwrap();
+            std::fs::write(&release_path, &release_bytes).unwrap();
+            // Missing APK and unusable ADB cannot convert a retained lifecycle into
+            // optional helper absence or dispatch a new claim/release.
+            let error = HelperClient::ensure_runtime(
+                AdbProgram::at(root.join("never-run-adb")), serial, None, Some(&root),
+            ).await.err().expect("retained release must reject runtime admission");
+            assert_eq!(std::fs::read(&owner_path).unwrap(), owner_bytes);
+            assert_eq!(std::fs::read(&release_path).unwrap(), release_bytes);
+            if !error.is::<HelperRecoveryRequired>() {
+                failures.push(format!("{name}: {error:#}"));
+            }
+        }
+        std::fs::remove_dir_all(&root).unwrap();
+        assert!(failures.is_empty(), "open_session must fence retained lifecycle errors: {failures:?}");
+    }
+    #[test]
+    fn pending_cleanup_admission_rejects_foreign_and_oversized_records() {
+        let root = std::env::temp_dir().join(format!("helper-admission-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir(&root).unwrap();
+        assert!(pending_checkpoint(&root, "fixture").unwrap().is_none());
+        let path = root.join("ime-checkpoint.json");
+        std::fs::write(&path, serde_json::to_vec(&json!({"serial":"foreign","androidUser":0,"pending":{}})).unwrap()).unwrap();
+        assert!(pending_checkpoint(&root, "fixture").is_err());
+        std::fs::write(&path, vec![b' '; CHECKPOINT_LIMIT as usize + 1]).unwrap();
+        assert!(pending_checkpoint(&root, "fixture").is_err());
+        std::fs::write(&path, serde_json::to_vec(&json!({"serial":"fixture","androidUser":0,"pending":{"phase":"switching"}})).unwrap()).unwrap();
+        assert!(pending_checkpoint(&root, "fixture").unwrap().is_some());
+        assert!(state_path(Path::new("relative"), "fixture").is_err());
+        assert!(state_path(&root, "../../serial").unwrap().starts_with(&root));
+        std::fs::remove_dir_all(root).unwrap();
     }
 }
