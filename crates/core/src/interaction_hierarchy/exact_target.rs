@@ -21,6 +21,14 @@ use crate::ResolvedTikTokTarget;
 // On the measured detail route the post id in the dispatched link authorizes the
 // post; elsewhere only a copied canonical URL does.
 const CARD_WINDOW: Duration = Duration::from_secs(30);
+/// Completed card observations the copied-link proof must have made before its window may
+/// close. Box 31-50, SM-G955F, Global 45.7.3, retry of 21:33Z on 10/10/2026
+/// (ce0417141550322202, rows 06ad0d38 and d9c66d7d): `/source` took 5.4-13.7 s and
+/// `/element` 6.1 s, so one popup screen plus one card read filled most of the window and
+/// the proof closed after one or two reads with "Comments: measured control missing or
+/// unreadable". Every read is still bounded by the driver's own request deadline, so the
+/// worst case is three reads, not an open wait.
+const MIN_CARD_OBSERVATIONS: u32 = 3;
 const CARD_POLL: Duration = Duration::from_millis(350);
 const DISPATCH_SETTLE: Duration = Duration::from_millis(900);
 const UNAVAILABLE_TEXT: &str = "This video is unavailable";
@@ -291,6 +299,7 @@ async fn open_by_copied_link(
     let mut deadline = Instant::now() + CARD_WINDOW;
     let mut redispatched = false;
     let mut continuity_retry_used = false;
+    let mut observations: u32 = 0;
     tokio::time::sleep(DISPATCH_SETTLE).await;
     loop {
         ensure_not_cancelled(stop)?;
@@ -314,6 +323,7 @@ async fn open_by_copied_link(
                     }
                 }
             };
+        observations += 1;
         if matches!(observation, Err(CardObservationError::PostUnavailable)) {
             return Err(CardObservationError::PostUnavailable.into());
         }
@@ -381,13 +391,13 @@ async fn open_by_copied_link(
                 }
             }
         }
-        if Instant::now() >= deadline {
+        if Instant::now() >= deadline && observations >= MIN_CARD_OBSERVATIONS {
             let last_check = observation
                 .err()
                 .map(|error| error.to_string())
                 .unwrap_or_else(|| "copied URL did not identify the target".into());
             anyhow::bail!(
-                "target_exact_open: no readable post in the target app within {} seconds; last check: {last_check}", CARD_WINDOW.as_secs()
+                "target_exact_open: no readable post in the target app within {} seconds ({observations} reads); last check: {last_check}", CARD_WINDOW.as_secs()
             );
         }
         tokio::time::sleep(CARD_POLL.min(deadline.saturating_duration_since(Instant::now()))).await;
