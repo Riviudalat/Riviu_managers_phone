@@ -289,6 +289,19 @@ const CAROUSEL_FRAME_BUDGET: Duration = Duration::from_secs(4);
 /// not understand, and the honest answer is to say so rather than swipe it blind.
 const NO_RAIL_STREAK_LIMIT: u32 = 3;
 
+/// How many consecutive railless passes the loop may spend **on a proven feed** before it
+/// stops.
+///
+/// Box 31–50 acceptance round 5, 10/10/2026 (`ce031713b064841e0c`, Galaxy S8+,
+/// `com.zhiliaoapp.musically` / en, 01:16:29–01:16:55): [`NO_RAIL_STREAK_LIMIT`] fired on a
+/// card whose rail was hidden by an ad end-card while the For You tab and the Home tab were
+/// on screen the whole time — the feed *was* proven, the message said it was not, and the
+/// phone stopped at 5/15. A railless card on a proven feed is an ad end-card or a LIVE card:
+/// it is left by swiping, and by one Close on the end-card. Twice the other limit, because
+/// the swipe and the Close each get a pass; a feed that is still on a railless card after
+/// this many is reported rather than swiped blind.
+const NO_RAIL_ON_FEED_LIMIT: u32 = 6;
+
 /// How long the feed tab gets to come back after the one Back this loop presses itself.
 ///
 /// Back out of the author's profile is a single activity pop. The ladder in
@@ -684,8 +697,31 @@ async fn present(session: &dyn UiSession, labels: TikTokControls, control: TikTo
 /// the same source as [`read_fingerprint`], so a swipe is judged against a `before` and an
 /// `after` that were described the same way.
 async fn fingerprint(session: &dyn UiSession, labels: TikTokControls) -> PostFingerprint {
-    match read_fingerprint(session, labels).await {
-        Ok(card) => card,
+    fingerprint_and_surface(session, labels).await.0
+}
+
+/// What one card read says about the card besides its identity.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum CardSurface {
+    /// A snapshot was read and carried no sponsored marker.
+    Ordinary,
+    /// A snapshot was read and carried one; see [`super::ad_card::sponsored_card`].
+    Sponsored(&'static str),
+    /// The backend has no snapshots, so the markers can never be looked for there. The
+    /// per-control path reads four rail labels and nothing else; it keeps its old behaviour.
+    Unsupported,
+    /// A snapshot was asked for and the read failed. Unknown, not ordinary.
+    Unread,
+}
+
+/// [`fingerprint`] plus, from the **same** snapshot, whether the card is a sponsored one.
+/// No second read: the sponsored markers are on the tree the identity was just read from.
+async fn fingerprint_and_surface(
+    session: &dyn UiSession,
+    labels: TikTokControls,
+) -> (PostFingerprint, CardSurface) {
+    match read_card(session, labels).await {
+        Ok(read) => read,
         Err(error) => {
             tracing::debug!(%error, "nurture card snapshot unread; per-control fallback");
             let read = |control| async move {
@@ -695,12 +731,15 @@ async fn fingerprint(session: &dyn UiSession, labels: TikTokControls) -> PostFin
                     .flatten()
                     .and_then(|element| element.description)
             };
-            PostFingerprint {
-                author: read(TikTokControl::AuthorProfileLink).await,
-                comments: read(TikTokControl::Comments).await,
-                share: read(TikTokControl::Share).await,
-                sound: read(TikTokControl::SoundLink).await,
-            }
+            (
+                PostFingerprint {
+                    author: read(TikTokControl::AuthorProfileLink).await,
+                    comments: read(TikTokControl::Comments).await,
+                    share: read(TikTokControl::Share).await,
+                    sound: read(TikTokControl::SoundLink).await,
+                },
+                CardSurface::Unread,
+            )
         }
     }
 }
@@ -721,10 +760,23 @@ async fn read_fingerprint(
     session: &dyn UiSession,
     labels: TikTokControls,
 ) -> anyhow::Result<PostFingerprint> {
+    Ok(read_card(session, labels).await?.0)
+}
+
+/// [`read_fingerprint`] with the card's surface from the same snapshot.
+async fn read_card(
+    session: &dyn UiSession,
+    labels: TikTokControls,
+) -> anyhow::Result<(PostFingerprint, CardSurface)> {
     let epoch = session.gui_session_epoch();
     let observed = match session.hierarchy_source_snapshot().await {
         Ok(snapshot) => {
-            tree_fingerprint(&crate::ui_automation::tree::Tree::parse(snapshot)?, labels)
+            let tree = crate::ui_automation::tree::Tree::parse(snapshot)?;
+            (
+                tree_fingerprint(&tree, labels),
+                super::ad_card::sponsored_card(&tree, labels)
+                    .map_or(CardSurface::Ordinary, CardSurface::Sponsored),
+            )
         }
         Err(error)
             if error
@@ -738,12 +790,15 @@ async fn read_fingerprint(
                         .and_then(|element| element.description),
                 )
             };
-            PostFingerprint {
-                author: read(TikTokControl::AuthorProfileLink).await?,
-                comments: read(TikTokControl::Comments).await?,
-                share: read(TikTokControl::Share).await?,
-                sound: read(TikTokControl::SoundLink).await?,
-            }
+            (
+                PostFingerprint {
+                    author: read(TikTokControl::AuthorProfileLink).await?,
+                    comments: read(TikTokControl::Comments).await?,
+                    share: read(TikTokControl::Share).await?,
+                    sound: read(TikTokControl::SoundLink).await?,
+                },
+                CardSurface::Unsupported,
+            )
         }
         Err(error) => return Err(error),
     };
@@ -1801,24 +1856,29 @@ impl<'a> HierarchyRun<'a> {
     /// Swipe to the next post and report whether the change was provable, with what the
     /// card reads that judged it cost.
     ///
-    /// `leaving_photo` is set when the card being left was just paged sideways. A photo
-    /// card's own image pager watches the horizontal axis, and the bow `plan_swipe` puts on
-    /// a vertical gesture is horizontal — into exactly that axis — so a bowed, decelerating
-    /// vertical swipe can be claimed by the image pager as a short sideways drag, which it
-    /// ignores (a drag turns nothing, see [`Self::swipe_slide`]) and the feed never sees.
+    /// `straight_flick` is set when the card being left handles the gesture itself: a photo
+    /// card that was just paged sideways, or an ad end-card. A photo card's own image pager
+    /// watches the horizontal axis, and the bow `plan_swipe` puts on a vertical gesture is
+    /// horizontal — into exactly that axis — so a bowed, decelerating vertical swipe can be
+    /// claimed by the image pager as a short sideways drag, which it ignores (a drag turns
+    /// nothing, see [`Self::swipe_slide`]) and the feed never sees. The ad end-card is a Lynx
+    /// mask over the card that consumes the touch and forwards only what its own swipe-up
+    /// recogniser accepts, as `action_ad_swipe_up_video`, to the feed pager
+    /// (`CommerceVideoDelegateKt` in the 45.7.3 APK); see [`super::ad_card`].
     /// Box 31–50 rounds 3–4 (09–10/10/2026): the vertical swipe straight after a paged
     /// carousel was unproven on `ce031713aadf361905` at 00:10:39 and 00:11:13 and on
     /// `ce0317139ca344520c` at 21:38:54, and proven on `ce031713b064841e0c` at 00:09:11
     /// and `ce0317139ca344520c` at 21:35:43 — the odds of a gesture whose bow direction is
-    /// drawn per swipe. Leaving a photo card therefore uses the flick: jittered ends and
+    /// drawn per swipe. Leaving such a card therefore uses the flick: jittered ends and
     /// varied legs, no bow and no pause, which is the gesture the pager measured as acting
     /// 19 of 19 times, here sent up the feed axis instead of across it. **Not yet proved on
-    /// a phone** as of this change; the live check is the vertical swipe after a carousel.
+    /// a phone** as of this change; the live check is the vertical swipe after a carousel
+    /// and the swipe off an ad end-card.
     async fn swipe_next(
         &mut self,
         duration_ms: u64,
         before: &PostFingerprint,
-        leaving_photo: bool,
+        straight_flick: bool,
         stop: &AtomicBool,
     ) -> anyhow::Result<(bool, CardReads)> {
         let mut reads = CardReads::default();
@@ -1840,7 +1900,7 @@ impl<'a> HierarchyRun<'a> {
             x: self.screen.0 * 0.5,
             y: self.screen.1 * 0.28,
         };
-        let path = if leaving_photo {
+        let path = if straight_flick {
             self.planner.plan_flick(from, to, duration_ms)
         } else {
             self.planner.plan_swipe(from, to, duration_ms)
@@ -2311,6 +2371,28 @@ async fn await_first_rail(run: &HierarchyRun<'_>, stop: &AtomicBool) -> anyhow::
     Ok(())
 }
 
+/// Leave a railless card: one vertical swipe with the two `HumanBehavior` pauses every feed
+/// swipe takes, judged by [`HierarchyRun::swipe_next`] against `before`. The caller decides
+/// what an unproven departure costs and whether the card counts as a video.
+async fn leave_railless_card(
+    run: &mut HierarchyRun<'_>,
+    human: &mut HumanBehavior,
+    before: &PostFingerprint,
+    straight_flick: bool,
+    stop: &AtomicBool,
+    status: &mut NurtureSessionStatus,
+) -> anyhow::Result<(bool, CardReads)> {
+    status.swipe_attempts += 1;
+    sleep_interruptible(Duration::from_millis(human.think_pause_ms()), stop).await;
+    let judged = run
+        .swipe_next(human.swipe_duration_ms(false), before, straight_flick, stop)
+        .await?;
+    if !stop.load(Ordering::Relaxed) {
+        sleep_interruptible(Duration::from_millis(human.after_swipe_pause_ms()), stop).await;
+    }
+    Ok(judged)
+}
+
 /// Wait for the rail of a card that came up railless right after an unproven swipe.
 ///
 /// Bounded by [`LATE_RAIL_WINDOW`] (plus one read in flight, [`CARD_READ_GRACE`]) and the
@@ -2450,7 +2532,14 @@ enum FeedScreen {
 /// The shapes, in the order they are asked, each measured on the Global build:
 ///
 /// * the feed tab (`For You` / `Đề xuất`, the catalogued [`TikTokControl::FeedTab`]);
-/// * the bottom bar's Home tab ([`TikTokControl::HomeTab`]);
+/// * the bottom bar's Home tab ([`TikTokControl::HomeTab`]) — **selected**, it proves the
+///   feed as well, because the Home tab is only selected while the feed pager is in front
+///   (`selected="true"` on `…:id/nr_` in
+///   `fixtures/tiktok-publish/musically-45.7.3-en/real-20261009-home-feed.xml`, read off
+///   a real phone). Neither proof needs the action rail: an ad end-card hides the whole
+///   interact area and leaves both tabs on screen (box 31–50 round 5, 10/10/2026,
+///   `ce031713b064841e0c`, `evidence-h/b064-norail.png`). An unselected Home tab is some
+///   other bottom tab;
 /// * the author's profile page — `Followers`, `Following` and `Likes` as visible text, the
 ///   header the 45.7.3/en fixtures `tiktok-follow/global-profile-{before,after}.fixture`
 ///   carry, or the Vietnamese pair `comment_verification::search` reads on a profile;
@@ -2461,39 +2550,55 @@ enum FeedScreen {
 ///
 /// A backend without snapshots answers only the first question, through `on_feed`.
 async fn classify_screen(run: &HierarchyRun<'_>) -> FeedScreen {
-    let labels = run.labels;
-    let package = labels.package();
-    let tree = match run.session.hierarchy_source_snapshot().await {
+    match screen_tree(run).await {
+        Some(tree) => classify_tree(&tree, run.labels),
+        None if run.on_feed().await => FeedScreen::Feed,
+        None => FeedScreen::Unknown,
+    }
+}
+
+/// One parsed snapshot, or `None` when the backend has none or it did not parse. The callers
+/// fall back to the feed-tab query, which is all a snapshot-less backend can answer.
+async fn screen_tree(run: &HierarchyRun<'_>) -> Option<crate::ui_automation::tree::Tree> {
+    match run.session.hierarchy_source_snapshot().await {
         Ok(snapshot) => match crate::ui_automation::tree::Tree::parse(snapshot) {
-            Ok(tree) => tree,
+            Ok(tree) => Some(tree),
             Err(error) => {
                 tracing::debug!(%error, "nurture screen snapshot unparsed");
-                return FeedScreen::Unknown;
+                None
             }
         },
-        Err(_) => {
-            return if run.on_feed().await {
-                FeedScreen::Feed
-            } else {
-                FeedScreen::Unknown
-            };
-        }
-    };
-    let has = |control: TikTokControl| {
+        Err(_) => None,
+    }
+}
+
+/// [`classify_screen`] on a tree already in hand.
+fn classify_tree(tree: &crate::ui_automation::tree::Tree, labels: TikTokControls) -> FeedScreen {
+    let package = labels.package();
+    let found = |control: TikTokControl| -> Vec<usize> {
         labels
             .label(control)
-            .is_some_and(|label| match label.to_query() {
+            .map(|label| match label.to_query() {
                 ElementQuery::Semantic(role) => {
-                    !crate::app_automation::tiktok_roles::indices(&tree, package, role).is_empty()
+                    crate::app_automation::tiktok_roles::indices(tree, package, role)
                 }
-                query => !tree.matching(package, query).is_empty(),
+                query => tree.matching(package, query),
             })
+            .unwrap_or_default()
     };
-    if has(TikTokControl::FeedTab) {
+    if !found(TikTokControl::FeedTab).is_empty() {
         return FeedScreen::Feed;
     }
-    if has(TikTokControl::HomeTab) {
-        return FeedScreen::OtherTab;
+    let home = found(TikTokControl::HomeTab);
+    if !home.is_empty() {
+        return if home
+            .iter()
+            .any(|index| tree.nodes[*index].attr("selected") == "true")
+        {
+            FeedScreen::Feed
+        } else {
+            FeedScreen::OtherTab
+        };
     }
     let visible = |attribute: &str, value: &str| {
         tree.nodes.iter().enumerate().any(|(index, node)| {
@@ -2510,7 +2615,7 @@ async fn classify_screen(run: &HierarchyRun<'_>) -> FeedScreen {
         return FeedScreen::NonFeed("trang hồ sơ tác giả");
     }
     if labels.resource_version().is_some_and(|version| {
-        crate::tiktok_share::photo_proof::expanded_photo_surface(&tree, package, version)
+        crate::tiktok_share::photo_proof::expanded_photo_surface(tree, package, version)
     }) {
         return FeedScreen::NonFeed("trình xem ảnh phóng to");
     }
@@ -2901,8 +3006,14 @@ pub(super) async fn run_feed(
     // pass may use it: it waits for a railless card's rail instead of spending the pass on
     // swiping it past, and counts the earlier swipe only when the rail returns on another card.
     let mut unproven_swipe_from: Option<PostFingerprint> = None;
-    // Consecutive passes that found no action rail. See [`NO_RAIL_STREAK_LIMIT`].
+    // Consecutive passes that found no action rail. See [`NO_RAIL_STREAK_LIMIT`] and
+    // [`NO_RAIL_ON_FEED_LIMIT`].
     let mut no_rail_streak = 0u32;
+    // Whether the one Close this loop may press on an ad end-card has been pressed during
+    // the current railless streak. One per card: the streak ends with the next railed card.
+    let mut ad_close_pressed = false;
+    // Sponsored cards passed without an interaction, for the operator lines.
+    let mut ads_skipped = 0u32;
     // The last card whose images were paged sideways. A swallowed vertical swipe leaves it
     // on screen, and paging it again starts blind from its last image — the feed hides the
     // counter until a turn — so the first turn is the one that leaves the post for the
@@ -3109,51 +3220,245 @@ pub(super) async fn run_feed(
         }
         if live_label || no_rail {
             no_rail_streak += 1;
-            // **A railless card must not consume the whole pass budget.** From the second
-            // railless pass in a row the screen is classified; a proved non-feed screen gets
-            // one Back and the feed is re-proved by a railed card. At
-            // [`NO_RAIL_STREAK_LIMIT`] with still no rail the session stops and says why,
-            // instead of the twenty blind swipes of round 4 (see the constant).
-            if no_rail_streak >= 2 {
-                if let FeedScreen::NonFeed(why) = classify_screen(&run).await {
-                    report(
-                        status,
-                        format!("{no_rail_streak} thẻ liên tiếp không có thanh hành động — màn hình là {why}"),
-                    );
-                    if back_to_feed(&run, stop, status, report, why).await {
-                        let mut reads = CardReads::default();
-                        match await_late_rail(&run, stop, &mut reads).await {
-                            Ok(ReadWaitResult::Ready(_)) => {
-                                report(
-                                    status,
-                                    format!(
-                                        "thẻ có thanh hành động đã hiện lại sau Back ({})",
-                                        reads.says()
-                                    ),
-                                );
-                                no_rail_streak = 0;
-                                continue;
-                            }
-                            Ok(ReadWaitResult::Cancelled) => {
-                                outcome = Outcome::Stopped;
-                                break;
-                            }
-                            Ok(ReadWaitResult::DeadlineExceeded) => {}
-                            Err(error) => {
-                                report(
-                                    status,
-                                    format!("không đọc được thanh hành động sau Back: {error}"),
-                                );
+            // **A railless card must not consume the whole pass budget, and a proven feed must
+            // not stop the session.** The screen is read once per railless pass (a measured
+            // LIVE label is its own answer and skips the read):
+            //
+            // * a proved non-feed screen gets one Back from the second railless pass, and the
+            //   feed is re-proved by a railed card;
+            // * a proven feed — the For You tab or a selected Home tab, never the rail — with
+            //   an ad end-card over the card is left by one straight flick, then by one Close
+            //   and another flick; nothing on it is ever tapped but Close ([`super::ad_card`]);
+            // * a proven feed with any other railless card (LIVE, still drawing) is swiped on,
+            //   straight from the second pass, up to [`NO_RAIL_ON_FEED_LIMIT`];
+            // * a screen that is none of those reaches [`NO_RAIL_STREAK_LIMIT`] and stops, as
+            //   round 4 taught (see the constant). Round 5 (`ce031713b064841e0c`,
+            //   01:16:37–01:16:55, 10/10/2026) then stopped there *on* the feed: the tabs were
+            //   on screen on every pass — `on_feed` at the top of the pass had said so — and
+            //   the old line claimed the feed was unproven because the rail was.
+            let mut feed_proven = live_label;
+            let mut end_card: Option<super::ad_card::AdEndCard> = None;
+            // The card as the same snapshot read it: what the swipe below is judged against,
+            // without a second read.
+            let mut railless_card: Option<PostFingerprint> = None;
+            if !live_label {
+                match screen_tree(&run).await {
+                    Some(tree) => match classify_tree(&tree, run.labels) {
+                        FeedScreen::Feed => {
+                            feed_proven = true;
+                            end_card = super::ad_card::end_card(&tree, run.labels, run.screen);
+                            railless_card = Some(tree_fingerprint(&tree, run.labels));
+                        }
+                        FeedScreen::NonFeed(why) if no_rail_streak >= 2 => {
+                            report(
+                                status,
+                                format!("{no_rail_streak} thẻ liên tiếp không có thanh hành động — màn hình là {why}"),
+                            );
+                            if back_to_feed(&run, stop, status, report, why).await {
+                                let mut reads = CardReads::default();
+                                match await_late_rail(&run, stop, &mut reads).await {
+                                    Ok(ReadWaitResult::Ready(_)) => {
+                                        report(
+                                            status,
+                                            format!(
+                                                "thẻ có thanh hành động đã hiện lại sau Back ({})",
+                                                reads.says()
+                                            ),
+                                        );
+                                        no_rail_streak = 0;
+                                        ad_close_pressed = false;
+                                        continue;
+                                    }
+                                    Ok(ReadWaitResult::Cancelled) => {
+                                        outcome = Outcome::Stopped;
+                                        break;
+                                    }
+                                    Ok(ReadWaitResult::DeadlineExceeded) => {}
+                                    Err(error) => {
+                                        report(
+                                            status,
+                                            format!(
+                                                "không đọc được thanh hành động sau Back: {error}"
+                                            ),
+                                        );
+                                    }
+                                }
                             }
                         }
-                    }
+                        FeedScreen::NonFeed(_) | FeedScreen::OtherTab | FeedScreen::Unknown => {}
+                    },
+                    // No snapshot to read: the feed-tab query is the only proof left, and it is
+                    // the one the top of this pass already passed.
+                    None => feed_proven = run.on_feed().await,
                 }
                 if stop.load(Ordering::Relaxed) {
                     outcome = Outcome::Stopped;
                     break;
                 }
             }
-            if no_rail_streak >= NO_RAIL_STREAK_LIMIT {
+            if feed_proven && no_rail_streak >= NO_RAIL_ON_FEED_LIMIT {
+                report(
+                    status,
+                    format!(
+                        "{no_rail_streak} thẻ liên tiếp không có thanh hành động dù feed đã chứng minh (tab For You / Home){} — \
+                         thẻ không đổi sau nhiều lượt vuốt; dừng thay vì vuốt hết lượt, cần kiểm tra tay",
+                        if end_card.is_some() {
+                            ", vẫn là thẻ kết thúc quảng cáo"
+                        } else {
+                            ""
+                        }
+                    ),
+                );
+                outcome = Outcome::Partial;
+                break;
+            }
+            if let Some(ad) = end_card {
+                ads_skipped += 1;
+                report(
+                    status,
+                    format!(
+                        "quảng cáo — bỏ qua: thẻ kết thúc quảng cáo (nút «{}»), không tương tác, \
+                         không bấm nút quảng cáo; vuốt thẳng qua (đã bỏ qua {ads_skipped} quảng cáo)",
+                        ad.cta
+                    ),
+                );
+                // The rail is hidden under the mask, so `before` is empty and the swipe is
+                // proven by the rail of whatever arrives. A skipped card, never a watched
+                // video: `videos_done` does not move in this branch.
+                let before = railless_card.take().unwrap_or_default();
+                let (advanced, reads) =
+                    match leave_railless_card(&mut run, &mut human, &before, true, stop, status)
+                        .await
+                    {
+                        Ok(judged) => judged,
+                        Err(error) => {
+                            report(status, format!("không đọc được kết quả vuốt: {error}"));
+                            outcome = Outcome::Failed;
+                            break;
+                        }
+                    };
+                if stop.load(Ordering::Relaxed) {
+                    outcome = Outcome::Stopped;
+                    break;
+                }
+                if advanced {
+                    report(status, format!("đã rời thẻ quảng cáo ({})", reads.says()));
+                    no_rail_streak = 0;
+                    ad_close_pressed = false;
+                    continue;
+                }
+                if ad_close_pressed {
+                    report(
+                        status,
+                        format!(
+                            "vuốt chưa chứng minh được rời quảng cáo ({}); Close đã dùng cho thẻ này — lượt sau vuốt tiếp",
+                            reads.says()
+                        ),
+                    );
+                    continue;
+                }
+                // One Close per card, and only on an end-card that is still there after the
+                // swipe, read again: a stale match never authorises a tap. Close is the mask's
+                // own `action_ad_hide_lynx_mask`: it hides the overlay and shows the card's rail
+                // again, nothing else — and that rail belongs to the ad, so what follows is the
+                // flick, never an interaction.
+                let still_up = match screen_tree(&run).await {
+                    Some(tree) => super::ad_card::end_card(&tree, run.labels, run.screen),
+                    None => None,
+                };
+                match still_up {
+                    Some(super::ad_card::AdEndCard {
+                        close: Some(close), ..
+                    }) => {
+                        ad_close_pressed = true;
+                        report(
+                            status,
+                            format!(
+                                "vuốt chưa rời được quảng cáo ({}) — bấm Close một lần (chỉ đóng lớp phủ \
+                                 quảng cáo, không mở trang quảng cáo) rồi vuốt tiếp",
+                                reads.says()
+                            ),
+                        );
+                        if let Err(error) = run.session.tap(close.centre()).await {
+                            report(status, format!("bấm Close không được: {error}"));
+                            continue;
+                        }
+                        let mut reads = CardReads::default();
+                        match await_late_rail(&run, stop, &mut reads).await {
+                            Ok(ReadWaitResult::Ready(card)) => {
+                                report(
+                                    status,
+                                    format!(
+                                        "thanh hành động hiện lại trên thẻ quảng cáo sau Close ({}) — không tương tác, vuốt tiếp",
+                                        reads.says()
+                                    ),
+                                );
+                                match leave_railless_card(
+                                    &mut run, &mut human, &card, true, stop, status,
+                                )
+                                .await
+                                {
+                                    Ok((true, reads)) => {
+                                        report(
+                                            status,
+                                            format!("đã rời thẻ quảng cáo sau Close ({})", reads.says()),
+                                        );
+                                        no_rail_streak = 0;
+                                        ad_close_pressed = false;
+                                    }
+                                    Ok((false, reads)) => report(
+                                        status,
+                                        format!(
+                                            "vuốt sau Close chưa chứng minh được đổi thẻ ({}) — lượt sau vuốt tiếp",
+                                            reads.says()
+                                        ),
+                                    ),
+                                    Err(error) => {
+                                        report(status, format!("không đọc được kết quả vuốt: {error}"));
+                                        outcome = Outcome::Failed;
+                                        break;
+                                    }
+                                }
+                            }
+                            Ok(ReadWaitResult::Cancelled) => {
+                                outcome = Outcome::Stopped;
+                                break;
+                            }
+                            Ok(ReadWaitResult::DeadlineExceeded) => report(
+                                status,
+                                format!(
+                                    "sau Close vẫn chưa thấy thanh hành động ({}) — lượt sau vuốt tiếp",
+                                    reads.says()
+                                ),
+                            ),
+                            Err(error) => report(
+                                status,
+                                format!("không đọc được thanh hành động sau Close: {error}"),
+                            ),
+                        }
+                    }
+                    Some(_) => report(
+                        status,
+                        format!(
+                            "vuốt chưa rời được quảng cáo ({}); thấy nút Close nhưng cây không nhận nó là nút bấm được — không bấm, lượt sau vuốt tiếp",
+                            reads.says()
+                        ),
+                    ),
+                    None => report(
+                        status,
+                        format!(
+                            "vuốt chưa chứng minh được đổi thẻ ({}) và không còn đọc thấy thẻ kết thúc quảng cáo — đọc lại ở lượt sau",
+                            reads.says()
+                        ),
+                    ),
+                }
+                if stop.load(Ordering::Relaxed) {
+                    outcome = Outcome::Stopped;
+                    break;
+                }
+                continue;
+            }
+            if !feed_proven && no_rail_streak >= NO_RAIL_STREAK_LIMIT {
                 report(
                     status,
                     format!(
@@ -3164,20 +3469,34 @@ pub(super) async fn run_feed(
                 outcome = Outcome::Partial;
                 break;
             }
+            // From the second railless pass on a proven feed the bowed swipe has failed once
+            // on this card; the straight flick is the gesture the overlays accept.
+            let straight_flick = feed_proven && no_rail_streak >= 2;
             report(
                 status,
                 if live_label {
                     "thẻ LIVE — chỉ vuốt qua, không tương tác".into()
+                } else if straight_flick {
+                    format!(
+                        "{no_rail_streak} thẻ liên tiếp không có thanh hành động nhưng feed đã chứng minh (tab For You / Home) — không dừng, vuốt thẳng tiếp"
+                    )
                 } else {
                     "thẻ không có thanh hành động (LIVE / đang chuyển) — chỉ vuốt tiếp".to_string()
                 },
             );
-            status.swipe_attempts += 1;
-            let before = fingerprint(run.session, run.labels).await;
-            sleep_interruptible(Duration::from_millis(human.think_pause_ms()), stop).await;
-            let (advanced, _) = match run
-                .swipe_next(human.swipe_duration_ms(false), &before, false, stop)
-                .await
+            let before = match railless_card.take() {
+                Some(card) => card,
+                None => fingerprint(run.session, run.labels).await,
+            };
+            let (advanced, _) = match leave_railless_card(
+                &mut run,
+                &mut human,
+                &before,
+                straight_flick,
+                stop,
+                status,
+            )
+            .await
             {
                 Ok(judged) => judged,
                 Err(error) => {
@@ -3193,10 +3512,10 @@ pub(super) async fn run_feed(
             if advanced {
                 status.videos_done += 1;
             }
-            sleep_interruptible(Duration::from_millis(human.after_swipe_pause_ms()), stop).await;
             continue;
         }
         no_rail_streak = 0;
+        ad_close_pressed = false;
 
         let watch = human.watch_seconds(settings.watch_min, settings.watch_max) * mood.watch_mult();
         report(status, format!("xem {watch:.1}s ({})", mood.label()));
@@ -3238,7 +3557,7 @@ pub(super) async fn run_feed(
             }
         }
 
-        let before = fingerprint(run.session, run.labels).await;
+        let (before, surface) = fingerprint_and_surface(run.session, run.labels).await;
         // **A swipe proven one pass late, by a railed card.** The late-rail wait above counts
         // the previous swipe only when the next card arrived *without* a rail. When it
         // arrived with one, the swipe that produced it was dropped unjudged: the card the
@@ -3295,10 +3614,40 @@ pub(super) async fn run_feed(
         // post-action fingerprint can be remembered before the swipe.
         let mut acted_this_pass = false;
 
-        let plan = if still_on_acted_card {
-            crate::human_behavior::FeedActionPlan::default()
-        } else {
-            roll_nurture_actions(&settings, mood)
+        // **Never interact with a sponsored card.** No like, save, comment or follow, and the
+        // CTA is never a target of anything here. Read from the same snapshot as `before`
+        // ([`CardSurface`]): the CTA strip `ad_feed_card_container_v2` or the `Sponsored` label
+        // (see [`super::ad_card::sponsored_card`]). A snapshot that failed to read is unknown,
+        // not ordinary, so that pass watches and leaves; a backend without snapshots cannot
+        // tell and keeps its rolls, which is what it did before.
+        let plan = match surface {
+            CardSurface::Sponsored(evidence) => {
+                ads_skipped += 1;
+                report(
+                    status,
+                    format!(
+                        "quảng cáo ({evidence}) — chỉ xem, không tim/lưu/bình luận/follow, không bấm nút \
+                         quảng cáo (đã bỏ qua {ads_skipped} quảng cáo)"
+                    ),
+                );
+                crate::human_behavior::FeedActionPlan::default()
+            }
+            CardSurface::Unread if !still_on_acted_card => {
+                report(
+                    status,
+                    "không đọc được cây màn hình để loại quảng cáo — không tương tác với thẻ này"
+                        .into(),
+                );
+                crate::human_behavior::FeedActionPlan::default()
+            }
+            CardSurface::Ordinary | CardSurface::Unsupported | CardSurface::Unread
+                if still_on_acted_card =>
+            {
+                crate::human_behavior::FeedActionPlan::default()
+            }
+            CardSurface::Ordinary | CardSurface::Unsupported | CardSurface::Unread => {
+                roll_nurture_actions(&settings, mood)
+            }
         };
         for selected in
             crate::human_behavior::ordered_feed_actions(&plan, &settings.workflow_action_order)

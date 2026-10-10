@@ -27,6 +27,7 @@ use std::time::{Duration, Instant};
 use parking_lot::Mutex;
 use sha2::{Digest, Sha256};
 mod actions;
+mod ad_card;
 mod hierarchy;
 mod live;
 mod recovery;

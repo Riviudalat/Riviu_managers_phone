@@ -63,6 +63,30 @@ Bản APKPure trùng từng byte với `base.apk` kéo từ máy #44. Kiểm l�
    Điều này đã đo trên máy (vi) và EMU (en).
 5. **jadx chạy toàn bộ APK lặng lẽ bỏ sót class.** Chỉ decompile dex chứa hằng số cần tìm:
    tìm bằng `dex_lookup.py const`, rồi `dex_lookup.py classdef`.
+6. **Thẻ quảng cáo trên feed có hai bề mặt** (`crates/core/src/nurture/ad_card.rs`; nguồn:
+   `aapt2-resources.txt`, `layout_index.jsonl`, bảng chuỗi `default`, và
+   `commercialize/feed/CommerceVideoDelegateKt` đã decompile; **chưa có dump thật nào trên
+   máy**, chỉ có ảnh chụp `acceptance-20261010/evidence-h/b064-norail.png` của máy
+   `ce031713b064841e0c`, 10/10/2026):
+   - Lúc đang phát: thẻ có thanh hành động như thường, thêm khung nút quảng cáo
+     `ad_feed_card_container_v2` (con của `y8z` trong layout `b7l`/`d07`, `visibility=gone`
+     khi không phải quảng cáo) và nhãn "Sponsored" từ server dưới tên tác giả. Nuôi chỉ xem,
+     không tim/lưu/bình luận/follow.
+   - Thẻ kết thúc: khi video quảng cáo hết, delegate bơm lớp Lynx qua `view_stub_ad_mask`
+     (con của `a4v`, gốc thẻ) và đặt cả `widget_container` thành INVISIBLE, nên thanh hành
+     động, caption và tác giả **biến khỏi cây** trong khi tab For You và thanh Home vẫn còn.
+     Lớp này vẽ logo nhà quảng cáo, một nút CTA và nút Close. Chuỗi CTA trong bảng `default`:
+     "Book now" (`0x7f11114c`, nút trên ảnh chụp), "Shop now", "Learn more", "Download",
+     "Install now", "Sign up", "Order now", "Apply now", "Contact us", "Play now", "Play game",
+     "Get quote", "Get offer", "Watch now", "View now", "View profile", "Visit website",
+     "Send message", "Interested", "Open now", "Get showtimes"; bảng `vi` (574 mục) không có
+     bản dịch, nên bộ nhận chỉ bật ở `en`. Close gửi `action_ad_hide_lynx_mask`: delegate chỉ
+     ẩn lớp phủ và đặt lại `widget_container` VISIBLE, không mở trang nào; vuốt lên trên lớp
+     phủ là sự kiện `action_ad_swipe_up_video` do chính lớp Lynx nhận rồi gọi
+     `VerticalViewPager` sang thẻ kế, nên pager không nhận cử chỉ thô. Nuôi không bao giờ bấm
+     CTA; chỉ vuốt thẳng, và bấm Close đúng một lần mỗi thẻ khi vuốt chưa rời được. Id
+     `feed_ad_lynx_mask_container_spark` và `tv_sponsored` (chỉ trong mask splash `aax`) chưa
+     thấy trên dump nào, nên chưa dùng.
 
 ## 3. Bảng id Riviu dùng cho 45.7.3
 
