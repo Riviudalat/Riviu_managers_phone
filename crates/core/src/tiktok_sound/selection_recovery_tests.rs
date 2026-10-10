@@ -203,6 +203,10 @@ impl UiSession for Session {
         }
         .into())
     }
+    // The fixture serves 1080x2220 frames; the contact tap proves the screen is the same size.
+    async fn window_size(&self) -> anyhow::Result<(f64, f64)> {
+        Ok((1080.0, 2220.0))
+    }
     async fn screenshot_png(&self) -> anyhow::Result<Vec<u8>> {
         self.frames.fetch_add(1, Ordering::Relaxed);
         if self.screenshot_unavailable {

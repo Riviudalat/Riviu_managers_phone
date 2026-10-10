@@ -234,8 +234,20 @@ foreground, generation mới trước tap giữ nguyên. Tối đa một lần c
 thời gian bật và đọc lại, `selectionRoute` ghi `multiWindowRead: true/false`. Cuối bước
 nhạc, trên mọi đường thoát, đặt lại `enableMultiWindows: false` và đọc lại xác nhận
 (`multiWindowRestore`); không khôi phục được thì phiên bị niêm phong (`SessionSealed`),
-không dùng cho màn chỉnh sửa hay Đăng, lượt thử mới mở phiên khác. Chỉ khi đọc qua mọi
-cửa sổ cũng không có cây mới khởi động lại instrumentation một lần như trước; sau khi đã
+không dùng cho màn chỉnh sửa hay Đăng, lượt thử mới mở phiên khác. Khi đọc qua mọi cửa
+sổ cũng không có cây và đã đủ hai gốc không đọc được liên tiếp trên phiên có OCR đo sẵn
+(#47, box3150e 2026-10-10: server khởi động lại lên `ok=true` nhưng vẫn mù y như cũ), pha
+đọc chuyển thẳng sang đường ảnh, không khởi động lại và không hỏi thêm `/source` nào
+(`ReadRecovery` ghi `rootUnreadable`/`visualHandoff` ở bước đọc qua mọi cửa sổ); chỉ phiên
+không có đường ảnh mới khởi động lại instrumentation một lần như trước. Trên đường ảnh,
+mọi tap vào bảng (tab Hot, hàng nhạc) là tap contact 45–130 ms tại điểm OCR trên khung
+1080×2220, sau khi chứng minh màn hình cùng kích thước, cùng phiên và cùng app ngay trước
+cử chỉ (machine29 và #47: tap native 16 ms được ACK nhưng không đổi tab, không chọn hàng);
+tab Hot tối đa hai lần và chỉ khi hai ảnh mới chưa đổi, hàng nhạc đúng một lần, rồi chờ hai
+ảnh mới có hàng chuyển hồng. OCR không bao giờ là bằng chứng chọn: `editorProof` ghi `xml`
+khi hai snapshot XML mới của màn chỉnh sửa cùng tên nhạc, và chỉ bằng chứng đó mới xác
+nhận lựa chọn (`visualSelection` ghi thời gian bấm hàng/đóng bảng và xác nhận editor);
+màn chỉnh sửa không xác nhận thì lượt thử kết thúc trước Đăng. Sau khi đã
 dừng server cũ mà phiên mới không lên thì phiên cũ cũng bị niêm phong, mọi yêu cầu sau đó
 bị từ chối ngay trước khi ra mạng và vòng dọn composer (Back + đọc) dừng ở lỗi đầu tiên
 thay vì gõ vào server đã chết. Sau khi khởi động lại cho chủ đọc, bằng chứng sẵn sàng là

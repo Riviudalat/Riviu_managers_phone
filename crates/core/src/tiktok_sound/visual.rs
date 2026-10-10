@@ -96,6 +96,62 @@ async fn tap_native_image_armed(
     check_wait()
 }
 
+/// Which sheet control a contact tap is for; only the log and the ReadRecovery note differ.
+#[derive(Clone, Copy)]
+enum SheetContact {
+    Hot,
+    Row(usize),
+}
+
+/// The human contact tap (45-130 ms, the same gesture the XML route sends through
+/// `sound_tap`) at a point measured on a fresh 1080x2220 frame. Machine29 (2026-10-01) and #47
+/// (Global 45.7.3/en, 2026-10-10 00:11:01, box3150e): acknowledged 16 ms native taps on the
+/// OCR-located Hot centre left For You selected, and #47's native row tap never turned its row
+/// red in the 60 s that followed; the contact tap at the same centre did switch the tab. The
+/// frame is 1080x2220 by construction, so the point reaches the same control only when the
+/// screen proves the same size, on the same session and app, right before the gesture.
+async fn tap_contact_image(
+    session: &dyn UiSession,
+    plan: SoundPickerPlan,
+    epoch: &str,
+    point: crate::TapPoint,
+    contact: SheetContact,
+) -> anyhow::Result<()> {
+    check_wait()?;
+    let screen = read_sound(session.window_size()).await?;
+    anyhow::ensure!(
+        screen == (1080.0, 2220.0),
+        "visual sound contact coordinates unmeasured"
+    );
+    let package = read_sound(session.active_app_bundle()).await?;
+    anyhow::ensure!(
+        session.gui_session_epoch() == epoch && package == plan.package,
+        "visual sound app/session changed before the contact tap"
+    );
+    check_wait()?;
+    let serial = session.gui_scope().map(|scope| scope.device_id);
+    let (dispatch, ack, index) = match contact {
+        SheetContact::Hot => ("contactHotDispatch", "contactHotAck", None),
+        SheetContact::Row(index) => ("contactRowDispatch", "contactRowAck", Some(index)),
+    };
+    visual_diagnostic(|state| {
+        if matches!(contact, SheetContact::Hot) {
+            state.navigation_attempts += 1;
+        }
+        state.emit(dispatch, None);
+    });
+    // The row tap runs outside the observation's diagnostic scope; #47's row step logged
+    // nothing for 60 s. This event is the dispatch evidence either way.
+    tracing::info!(serial=?serial, session=%epoch, phase=dispatch, rowIndex=?index,
+        x=point.x, y=point.y, "visual sound contact tap");
+    let result = session.tap(point).await;
+    visual_diagnostic(|state| state.emit(ack, Some(result.is_ok())));
+    tracing::info!(serial=?serial, session=%epoch, phase=ack, rowIndex=?index,
+        acknowledged=result.is_ok(), "visual sound contact tap");
+    result?;
+    check_wait()
+}
+
 fn loading_chip(img: &image::RgbImage) -> bool {
     if img.dimensions() != (1080, 2220) {
         return false;
@@ -694,6 +750,9 @@ async fn observe_loop(
         // A navigation ACK is not arrival: machine25 stayed on For You after
         // its first Hot tap. One retry requires two fresh unchanged tab reads;
         // never retry after Hot has appeared or enlarge the shared deadline.
+        // Both attempts are contact taps at the OCR-located Hot centre: the 16 ms
+        // native tap was acknowledged and did nothing on machine29 and #47
+        // (see `tap_contact_image`); the retry still needs fresh Hot proof.
         if navigate
             && !saw_hot.load(Ordering::Relaxed)
             && !hot_selected(&img, &tabs)
@@ -703,45 +762,19 @@ async fn observe_loop(
             visual_diagnostic(|state| state.emit("navigationProofStart", None));
             let point = selection_recovery::prove_sheet(session, plan).await?;
             anyhow::ensure!(Instant::now() < deadline, "Hot navigation deadline expired");
-            if navigation_attempts == 0 {
-                let tapped = tap_native_image(session, point).await;
-                note_tab_tap();
-                tapped?;
-            } else {
-                // Machine29, 2026-10-01: two acknowledged overlay taps left
-                // For You selected at the measured native Hot centre. After
-                // fresh unchanged unselected proof, use the ordinary contact
-                // route once; its distinct input strategy still needs Hot proof.
-                let screen = read_sound(session.window_size()).await?;
-                anyhow::ensure!(
-                    screen == (1080.0, 2220.0),
-                    "Hot recovery native coordinates unmeasured"
-                );
-                let package = read_sound(session.active_app_bundle()).await?;
-                anyhow::ensure!(
-                    session.gui_session_epoch() == epoch && package == plan.package,
-                    "Hot recovery app/session changed"
-                );
-                check_wait()?;
-                anyhow::ensure!(Instant::now() < deadline, "Hot recovery deadline expired");
-                visual_diagnostic(|state| {
-                    state.navigation_attempts += 1;
-                    state.emit("contactHotDispatch", None);
-                });
-                let result = session.tap(point).await;
-                note_tab_tap();
-                visual_diagnostic(|state| state.emit("contactHotAck", Some(result.is_ok())));
-                result?;
-                check_wait()?;
-                crate::publish_recovery::note_read(
-                    "sound",
-                    "nativeHotNavigation",
-                    2,
-                    "awaitingProof",
-                    None,
-                );
-            }
+            let tapped = tap_contact_image(session, plan, &epoch, point, SheetContact::Hot).await;
+            note_tab_tap();
+            tapped?;
             navigation_attempts += 1;
+            crate::publish_recovery::note_read(
+                "sound",
+                "visualHotNavigation",
+                navigation_attempts,
+                "awaitingProof",
+                Some(&format!(
+                    "Đã bấm tab Hot theo vị trí OCR (lần {navigation_attempts}, cách bấm contact); chờ ảnh mới chứng minh Hot đã chọn, chưa chọn nhạc"
+                )),
+            );
             unselected_tabs = None;
             prior = None;
             continue;
@@ -785,12 +818,27 @@ pub(super) async fn choose(
     pool: &ObservedSoundPool,
     index: usize,
 ) -> anyhow::Result<()> {
+    let row_started = Instant::now();
     select_row_and_close(session, plan, pool, index, &mut false).await?;
+    let row_ms = row_started.elapsed().as_millis() as u64;
     let candidate = pool
         .candidates
         .get(index)
         .context("visual sound index out of range")?;
-    selection_recovery::confirm_editor_or_chip(session, plan, candidate).await
+    let editor_started = Instant::now();
+    selection_recovery::confirm_editor_or_chip(session, plan, candidate).await?;
+    let editor_ms = editor_started.elapsed().as_millis() as u64;
+    crate::publish_recovery::note_read(
+        "sound",
+        "visualSelection",
+        1,
+        "confirmed",
+        Some(&format!(
+            "selectionRoute: visual; bấm một hàng theo OCR, chờ hàng chuyển hồng và đóng bảng mất {row_ms} ms; xác nhận tên nhạc trên màn chỉnh sửa mất {editor_ms} ms (số lần không đọc được cây giao diện: {})",
+            unreadable_roots()
+        )),
+    );
+    Ok(())
 }
 
 /// The XML pool froze `frozen.candidates[index]`, then the sheet root stopped answering.
@@ -918,7 +966,12 @@ async fn select_row_and_close(
         index < pool.candidates.len(),
         "visual sound index out of range"
     );
+    let epoch = session.gui_session_epoch();
     let fresh = observe(session, plan, pool.maximum_visible, false).await?;
+    anyhow::ensure!(
+        session.gui_session_epoch() == epoch,
+        "visual sound session changed before the row tap"
+    );
     if let Some(selected) = fresh.selected_index {
         if selected != index {
             anyhow::ensure!(
@@ -929,13 +982,27 @@ async fn select_row_and_close(
             // A preselection already present in the original stable pool is
             // TikTok's initial choice. The durable target may replace it once.
             let target = reproof_target(pool, &fresh, index)?;
-            tap_native_image(session, target.centre()).await?;
+            tap_contact_image(
+                session,
+                plan,
+                &epoch,
+                target.centre(),
+                SheetContact::Row(index),
+            )
+            .await?;
         } else {
             reproof_target(pool, &fresh, index)?;
         }
     } else {
         let target = reproof_target(pool, &fresh, index)?;
-        tap_native_image(session, target.centre()).await?;
+        tap_contact_image(
+            session,
+            plan,
+            &epoch,
+            target.centre(),
+            SheetContact::Row(index),
+        )
+        .await?;
     }
     wait_selected_row(session, plan, &fresh, index).await?;
     *row_proved = true;
@@ -1348,6 +1415,10 @@ mod tests {
         }
         async fn active_app_bundle(&self) -> anyhow::Result<String> {
             Ok("com.zhiliaoapp.musically".into())
+        }
+        // The fixture frames are 1080x2220; the contact tap proves the screen matches.
+        async fn window_size(&self) -> anyhow::Result<(f64, f64)> {
+            Ok((1080.0, 2220.0))
         }
         async fn screenshot_png(&self) -> anyhow::Result<Vec<u8>> {
             if (self.initially_selected || self.taps.load(Ordering::Relaxed) > 0)

@@ -345,6 +345,21 @@ pub(super) async fn confirm_editor_or_chip(
     candidate: &SoundCandidate,
 ) -> anyhow::Result<()> {
     match confirm_editor(session, plan, &candidate.title).await {
+        Ok(()) => {
+            // #44/#47: the editor reads fine on XML while the sheet is blind. This proof,
+            // not any OCR row or tab, is what marks the selection confirmed.
+            crate::publish_recovery::note_read(
+                "sound",
+                "editorProof",
+                unreadable_roots(),
+                "xml",
+                Some(&format!(
+                    "editorProof: true; hai snapshot XML mới của màn chỉnh sửa cùng tên nhạc '{}' của '{}' sau khi chọn bằng ảnh màn hình",
+                    candidate.title, candidate.artist
+                )),
+            );
+            Ok(())
+        }
         Err(error) if error.is::<EditorRootUnreadable>() && session.gui_reasoner().is_some() => {
             prove_editor_chip(session, plan, &candidate.title)
                 .await

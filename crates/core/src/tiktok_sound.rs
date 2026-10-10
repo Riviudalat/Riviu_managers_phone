@@ -395,7 +395,7 @@ pub(crate) struct SoundRootUnreadable {
 /// A sheet read found no root, inside a phase armed to recycle the session once.
 /// Returned before any further tap; the arming phase handles it.
 #[derive(Debug, thiserror::Error)]
-#[error("Không đọc được cây giao diện bảng nhạc; sẽ đọc qua mọi cửa sổ một lần, nếu vẫn không được thì khởi động lại UiAutomator một lần rồi đọc lại, chưa bấm Đăng")]
+#[error("Không đọc được cây giao diện bảng nhạc; sẽ đọc qua mọi cửa sổ một lần, nếu vẫn không được thì chuyển sang đọc ảnh màn hình (không có OCR thì khởi động lại UiAutomator một lần rồi đọc lại), chưa bấm Đăng")]
 pub(crate) struct SoundTabSwitchBlind;
 
 /// The editor root stayed unreadable for a whole editor proof: no read returned a tree.
@@ -1403,11 +1403,18 @@ async fn observe_measured_sound_pool(
     // The blind phase returned before any further tap and holds no target. Phones 44/47
     // (Global 45.7.3/en, 2026-10-09 21:36): the active-window root stayed null on a fresh
     // server too, so a tree built from every window is asked first, on this same session.
-    // The instrumentation restart stays the fallback for a sheet that is blind that way too.
     if let Some(observed) =
         reread_through_every_window(session, plan, maximum, allow_recommended).await
     {
         return observed;
+    }
+    // #47 (box3150e, 2026-10-10 00:17): the every-window tree was blind (unreadableRoots=3),
+    // the restart finished ok=true in 6.6 s, and the fresh server answered the same sheet
+    // with two more ~10.5 s unreadable roots. On this sheet the restart buys nothing; with
+    // ROOT_UNREADABLE_CAP met, a session with a measured visual route hands off at once and
+    // asks no further `/source`. The restart remains for sessions without that route.
+    if visual_handoff_due(session, plan) {
+        return observe_visual_after_blind_windows(session, plan, maximum).await;
     }
     match recycle_after_tab_switch(session, plan, "đọc bảng nhạc").await {
         Ok(()) => {
@@ -1433,6 +1440,44 @@ async fn observe_measured_sound_pool(
             .context(format!("không khởi động lại được UiAutomator: {recycle:#}")))
         }
     }
+}
+
+/// The sheet observed by sight after the every-window tree was blind as well. No `/source`
+/// is asked here: the frames skip the XML popup check past ROOT_UNREADABLE_CAP, Hot is proved
+/// by the selected-tab underline on fresh frames, and the pool returned binds rows by OCR
+/// only. The row tap and the editor proof stay with the existing visual `choose` path, so
+/// nothing here selects a sound or reaches Post.
+async fn observe_visual_after_blind_windows(
+    session: &dyn UiSession,
+    plan: SoundPickerPlan,
+    maximum: usize,
+) -> anyhow::Result<ObservedSoundPool> {
+    let epoch = session.gui_session_epoch();
+    anyhow::ensure!(!epoch.is_empty(), "sound sheet session missing");
+    let blind = anyhow::Error::new(SoundRootUnreadable {
+        reads: consecutive_unreadable_roots(),
+    });
+    tracing::warn!(serial=?session.gui_scope().map(|scope| scope.device_id), session=%epoch,
+        unreadableRoots=unreadable_roots(), consecutive=consecutive_unreadable_roots(),
+        "sound sheet blind through every window; handing off to the visual route without an instrumentation restart");
+    note_visual_handoff("đọc bảng nhạc qua mọi cửa sổ", &blind);
+    let mut diagnostics = SoundRouteDiagnostics {
+        scope: session.gui_scope(),
+        epoch: epoch.clone(),
+        deadline: SOUND_BUDGET.try_with(|budget| budget.deadline).ok(),
+        events: 0,
+    };
+    let started = Instant::now();
+    diagnostics.emit("visual", "start", started, "pending", None);
+    let visual = visual::observe_initial(session, plan, maximum).await;
+    diagnostics.emit(
+        "visual",
+        "finish",
+        started,
+        if visual.is_ok() { "ready" } else { "error" },
+        visual.as_ref().err(),
+    );
+    checked_measured_sound_observation(session, plan, &epoch, visual).await
 }
 
 /// Switch this session's tree reads to every window once per stage, then read the sheet again
@@ -1526,12 +1571,22 @@ async fn reread_through_every_window(
         }
         Err(error) if error.is::<SoundStopped>() => Some(Err(error)),
         Err(error) if error.is::<SoundRootUnreadable>() || unreadable_root(&error) => {
+            let next = if visual_handoff_due(session, plan) {
+                "visual"
+            } else {
+                "instrumentationRestart"
+            };
             tracing::warn!(serial=?session.gui_scope().map(|scope| scope.device_id), session=%epoch,
                 multiWindowRead=true, switchMs=switch_ms, readMs=read_ms, unreadableRoots=unreadable_roots(),
-                error=%format!("{error:#}"),
-                "sound sheet blind through every window too; falling back to the instrumentation restart");
+                next, error=%format!("{error:#}"),
+                "sound sheet blind through every window too");
             note("unreadable", format!(
-                "multiWindowRead: true; bật chế độ đọc qua mọi cửa sổ mất {switch_ms} ms, đọc lại {read_ms} ms vẫn không có cây giao diện của TikTok: {error:#}; chuyển sang khởi động lại UiAutomator"
+                "multiWindowRead: true; bật chế độ đọc qua mọi cửa sổ mất {switch_ms} ms, đọc lại {read_ms} ms vẫn không có cây giao diện của TikTok: {error:#}; {}",
+                if next == "visual" {
+                    "chuyển sang đọc ảnh màn hình ngay, không khởi động lại UiAutomator"
+                } else {
+                    "chuyển sang khởi động lại UiAutomator"
+                }
             ));
             None
         }
