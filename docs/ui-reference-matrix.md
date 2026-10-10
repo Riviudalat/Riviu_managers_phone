@@ -149,7 +149,7 @@ bộ lọc. Refresh lỗi giữ dữ liệu cũ khi còn hợp lệ; response c�
   đóng. Dòng được chọn chạy sau khi menu đóng hẳn. Hover chỉ đổi màu, không lấy focus khỏi ô tìm.
   **Ngoại lệ có tên — focus guard của Base UI:** span `data-base-ui-focus-guard` (aria-hidden,
   tabindex 0) chỉ chuyển focus; kiểm axe menu loại trừ đúng selector này.
-- **Bảng lệnh** (Ctrl+K, ⌘K trên macOS, hoặc nút **Tìm máy, trang…** trên header; dưới 1100 px chỉ còn
+- **Bảng lệnh** (Ctrl+K, ⌘K trên macOS, hoặc nút **Tìm máy, trang…** trên header; dưới 1366 px chỉ còn
   icon) dùng primitive `components/ui/CommandPalette.tsx`: Base UI Dialog + Autocomplete inline, CSS
   thuần, cùng alias với menu. Lọc không phân biệt dấu ("may 3" khớp "Máy 3"). Giai đoạn 1 chỉ điều
   hướng và chọn: đi tới trang (các trang của sidebar và Điều phối), đi tới **Máy N** (về Thiết bị,
@@ -190,8 +190,11 @@ Header luôn có bốn **bộ đếm fleet**: **Rảnh** (`kind` là `ready` ho�
 nối chỉ chưa rõ trước khi danh sách máy tải xong). Rảnh không có nghĩa là Sẵn sàng. Bấm một bộ đếm
 đặt đúng state lọc của select **Trạng thái thiết bị** trên lưới (select có thêm mục **Rảnh**), bấm lại
 thì bỏ lọc; từ trang khác thì chuyển về Control Center. Bộ đếm và bộ lọc dùng chung một state và
-cùng điều kiện của thẻ máy, không có bản sao thứ hai. Từ 981 đến 1279 px, bộ đếm thu nhỏ và nhãn **Toàn hệ thống**
-chỉ còn cho trình đọc màn hình để header giữ một hàng; dưới 980 px trạng thái xuống hàng riêng như trước. Mở và đóng **Chọn thiết bị**
+cùng điều kiện của thẻ máy, không có bản sao thứ hai. Từ 981 đến 1599 px (đến 1759 px khi cột theo dõi
+tác vụ đang ghim bên phải), bộ đếm thu nhỏ và nhãn **Toàn hệ thống** chỉ còn cho trình đọc màn hình để
+header giữ một hàng. Tiêu đề trang và bộ đếm không co: pill theo dõi tác vụ co và cắt chữ trước (tối
+thiểu 120 px), nên từ 1100 px tiêu đề luôn một dòng; dưới 1100 px tiêu đề dài chỉ xuống dòng giữa hai
+từ. Dưới 980 px trạng thái xuống hàng riêng như trước. Mở và đóng **Chọn thiết bị**
 mà không sửa thì giữ nguyên phạm vi Toàn bộ, Nhóm hoặc Máy cụ thể. Phạm vi chỉ thành Máy
 cụ thể khi người vận hành sửa trong drawer. Phạm vi rỗng không bao giờ thành Toàn bộ;
 nút chạy hiện lý do bị khóa.

@@ -146,10 +146,11 @@
   text-align: center;
 }
 
-/* The header entry. Collapses to its icon on a narrow window; the name stays for assistive
-   technology through `aria-label`. */
+/* The header entry. Collapses to its icon below 1366 px, where the title, the four counters and
+   the run pill need the room; the name stays for assistive technology through `aria-label`. */
 .ui-palette-launcher {
   display: inline-flex;
+  flex: none;
   align-items: center;
   gap: 0.5rem;
   min-width: 0;
@@ -165,7 +166,7 @@
 .ui-palette-launcher:hover {
   color: var(--text-1);
 }
-@media (max-width: 1100px) {
+@media (max-width: 1365px) {
   .ui-palette-launcher-text,
   .ui-palette-launcher kbd {
     display: none;

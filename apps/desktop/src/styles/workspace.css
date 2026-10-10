@@ -241,8 +241,10 @@
   color: var(--danger-strong);
 }
 
-/* Below 1280 px the four counters must still share one header row with the title and actions. */
-@media (max-width: 1279px) {
+/* Below 1600 px (1760 px beside the docked run column) the four counters must still share one
+   header row with the title, the run pill and the Ctrl+K entry. WebView2 at 1366x768 with 30
+   phones clipped the fourth counter under the pill when this started at 1280 px. */
+@media (max-width: 1599px) {
   .fleet-counter {
     min-height: 24px;
     gap: var(--space-1);
@@ -251,9 +253,29 @@
   }
 }
 
+@media (min-width: 1600px) and (max-width: 1759px) {
+  .shell:has(.run-monitor.is-docked:not(.is-maximized)) .fleet-counter {
+    min-height: 24px;
+    gap: var(--space-1);
+    padding: 0 var(--space-2);
+    font-size: var(--text-xs);
+  }
+}
+
 /* The scope label stays for screen readers; the counters' group name already says what they are. */
-@media (min-width: 981px) and (max-width: 1279px) {
+@media (min-width: 981px) and (max-width: 1599px) {
   .shell > .main-col > .page-header .fleet-status-label {
+    position: absolute;
+    width: 1px;
+    height: 1px;
+    overflow: hidden;
+    clip-path: inset(50%);
+    white-space: nowrap;
+  }
+}
+
+@media (min-width: 1600px) and (max-width: 1759px) {
+  .shell:has(.run-monitor.is-docked:not(.is-maximized)) > .main-col > .page-header .fleet-status-label {
     position: absolute;
     width: 1px;
     height: 1px;
@@ -271,6 +293,48 @@
 
 .shell > .main-col > .page-header > .page-header-icon {
   display: none;
+}
+
+/* The title and the counters keep their size and the title stays on one line; the run pill
+   gives way instead (it truncates). The actions box dissolves into the header row so the pill
+   shrinks against the whole row, not only against its sibling buttons. */
+.shell > .main-col > .page-header .page-header-copy {
+  flex: none;
+}
+
+.shell > .main-col > .page-header .page-header-copy h1 {
+  white-space: nowrap;
+}
+
+/* Below 1100 px a long title ("Trung tâm ứng dụng") wraps between words instead of pushing the row
+   wider than the window. */
+@media (min-width: 981px) and (max-width: 1099px) {
+  .shell > .main-col > .page-header .page-header-copy {
+    flex: 0 1 auto;
+    min-width: min-content;
+  }
+
+  .shell > .main-col > .page-header .page-header-copy h1 {
+    white-space: normal;
+  }
+}
+
+@media (min-width: 981px) {
+  .shell > .main-col > .page-header {
+    gap: var(--space-2);
+  }
+
+  .shell > .main-col > .page-header .page-header-actions {
+    display: contents;
+  }
+
+  .shell > .main-col > .page-header .page-header-drag {
+    min-width: 24px;
+  }
+}
+
+.shell > .main-col > .page-header .page-header-meta {
+  flex-shrink: 0;
 }
 
 @media (max-width: 980px) {

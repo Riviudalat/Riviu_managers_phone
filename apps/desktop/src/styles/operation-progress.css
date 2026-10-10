@@ -170,7 +170,7 @@
 .run-monitor.is-docked.is-maximized { position: fixed; inset: 12px; z-index: var(--z-flyout); width: auto; border: 1px solid var(--line-strong); border-top: 2px solid var(--primary); border-radius: var(--radius); box-shadow: var(--shadow-lg); }
 .run-monitor.is-docked .run-monitor-titlebar, .run-monitor.is-pill .run-monitor-titlebar { cursor: default; touch-action: auto; }
 .run-monitor-pill-slot { display: contents; }
-.run-monitor.is-pill { position: relative; inset: auto; z-index: auto; flex: 0 1 auto; width: 280px; max-width: 32vw; border-top-width: 1px; border-radius: var(--radius); box-shadow: none; }
+.run-monitor.is-pill { position: relative; inset: auto; z-index: auto; flex: 0 1000 auto; width: 280px; min-width: 120px; max-width: 32vw; border-top-width: 1px; border-radius: var(--radius); box-shadow: none; }
 .run-monitor.is-pill .run-monitor-titlebar { min-height: 32px; padding: 0 4px 0 6px; background: none; }
 .run-monitor.is-pill .run-monitor-toggle { cursor: pointer; }
 .run-monitor.is-pill .run-monitor-toggle strong { overflow: hidden; white-space: nowrap; text-overflow: ellipsis; font-size: var(--text-sm); }
