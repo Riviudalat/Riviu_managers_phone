@@ -39,6 +39,14 @@ trượt và Ctrl + lăn chuột, thêm ba cỡ: **Tổng quan** (ô tối thi�
 **Ngoại lệ có tên — dải Tổng quan:** chỉ ở cỡ Tổng quan, dải cao khoảng 64 px và chữ
 11,5 px (`--text-tile-compact`), dưới mức tối thiểu 12 px, để 20 ô trọn vẹn vừa màn
 1366×768 khi sidebar mở. Vừa và Lớn dùng dải 88 px với chữ ≥ 12 px; nút trong dải vẫn ≥ 12 px.
+Chế độ **Danh sách** của Thiết bị là bảng `<table>` gọn: mỗi máy một dòng 34 px, chữ 13 px,
+đủ ≥ 15 dòng ở 1366×768. Cột: Máy (số · tên), Tài khoản (@nick), Việc đang chạy (chip
+`deviceWork` + bước), Cần xử lý (chỉ máy cần xử lý; nút Khôi phục helper khi có), Bằng chứng
+gần nhất, Kết nối (ẩn dưới 1100 px). Ô dài bị cắt một dòng, còn đủ qua tooltip và tên truy cập
+của dòng. Nút **Chọn cột** dùng chung với `ResponsiveTable`, nhớ trên máy tính này; cột Máy luôn hiện.
+Bằng chứng gần nhất là mốc mới nhất backend ghi cho máy (cập nhật lượt chạy hoặc mẫu đo tải),
+không lấy từ toast hay lần UI đọc: không có thì ghi **Chưa có**, cũ hơn 3 phút ghi **Cũ · …**.
+Chưa dùng TanStack Table/Virtual: 50 dòng không cần.
 Monitor tiến trình vẫn không modal và hoạt động xuyên trang. **Thay đổi hợp đồng (10/2026):**
 từ 1500 px, monitor mở rộng ghim thành cột bên phải, làm hẹp lưới chứ không phủ lên;
 khi thu gọn hoặc màn hẹp hơn, nó là một nút gọn trong header. Trạng thái thu gọn của cột được

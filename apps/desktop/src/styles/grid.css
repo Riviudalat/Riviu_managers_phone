@@ -190,35 +190,69 @@ button.dev-phone-detail {
   pointer-events: auto;
 }
 
-/* List / table view */
+/* List / table view: the compact fleet list. One 34 px line per phone so 15+ fit at
+   1366×768; every cell truncates on one line and keeps its full text in the row's
+   accessible name and the cell tooltip. */
 .device-table {
   width: 100%;
-  border-collapse: collapse;
+  table-layout: fixed;
+  border-collapse: separate;
+  border-spacing: 0;
   background: var(--bg-elevated);
   border: 1px solid var(--line);
   border-radius: var(--radius);
-  overflow: hidden;
-  font-size: var(--text-base);
+  font-size: var(--text-sm);
 }
 .device-table th {
   text-align: left;
-  padding: 0.65rem 0.75rem;
+  height: 36px;
+  padding: 0 0.6rem;
   background: var(--bg-subtle);
   color: var(--text-2);
   font-weight: 600;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
   border-bottom: 1px solid var(--line);
 }
+.device-table th:first-child { border-top-left-radius: var(--radius); }
+.device-table th:last-child { border-top-right-radius: var(--radius); overflow: visible; }
 .device-table td {
-  padding: 0.55rem 0.75rem;
+  height: 34px;
+  padding: 0 0.6rem;
   border-bottom: 1px solid var(--line);
   color: var(--text-2);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
 }
-.device-table-alias {
-  display: block;
-  margin-top: 2px;
-  color: var(--text-3);
-  font-size: var(--text-sm);
+.device-table tbody tr:last-child td { border-bottom: 0; }
+.device-table .device-table-check { width: 36px; padding: 0 0 0 0.6rem; }
+.device-table .device-table-check input { display: block; width: 16px; height: 16px; min-height: 16px; margin: 0; }
+.device-table .device-table-machine { width: 18%; }
+.device-table .device-table-account { width: 14%; }
+.device-table .device-table-work { width: 25%; }
+.device-table .device-table-attention { width: 20%; }
+.device-table .device-table-evidence { width: 14%; font-variant-numeric: tabular-nums; }
+.device-table .device-table-connection { width: 64px; }
+.device-table .device-table-actions { width: 112px; padding-right: 0.4rem; text-overflow: clip; }
+.device-table th.device-table-actions { text-align: right; }
+.device-table .table-columns { display: inline-block; }
+.device-table .table-columns > summary { width: 28px; height: 28px; }
+.device-table .table-columns-menu { font-weight: 400; text-align: left; color: var(--text-1); }
+/* Below 1100 px the transport column gives its room to the operational ones; the details
+   drawer and the tile still show it. */
+@media (max-width: 1100px) {
+  .device-table .device-table-connection { display: none; }
 }
+.device-table-alias { color: var(--text-3); }
+.device-table .chip { padding: 0 0.4rem; line-height: 20px; vertical-align: middle; }
+.device-table-step { color: var(--text-3); }
+.device-table-missing,
+.device-table-evidence.is-stale { color: var(--text-3); font-style: italic; }
+.device-table tr.attention .device-table-attention { color: var(--danger); }
+.device-table td button { min-height: 26px; height: 26px; padding: 0 0.4rem; }
+.device-table td .icon-button { width: 26px; padding: 0; }
 .device-row-actions {
   display: flex;
   align-items: center;
@@ -228,7 +262,7 @@ button.dev-phone-detail {
 .device-table tr {
   cursor: pointer;
 }
-.device-table tr:hover td {
+.device-table tbody tr:hover td {
   background: var(--bg-muted);
 }
 .device-table tr.selected td {

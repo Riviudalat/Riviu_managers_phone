@@ -49,26 +49,7 @@ function ScopedTable<Row>({
           <input type="search" placeholder="Tìm kiếm…" value={query} onChange={(event) => setQuery(event.target.value)} />
         </label>}
         <span className="table-result-count" role="status">{displayed.length}/{rows.length}</span>
-        <details className="table-columns" onKeyDown={(event) => {
-          if (event.key === "Escape" && event.currentTarget.open) {
-            event.preventDefault();
-            event.stopPropagation();
-            event.currentTarget.open = false;
-            event.currentTarget.querySelector("summary")?.focus();
-          }
-        }}>
-          <summary aria-label={`Chọn cột: ${label}`} title="Chọn cột"><Columns3 size={16} aria-hidden="true" /></summary>
-          <div className="table-columns-menu">
-            {columns.map((column, index) => <label key={column.id}>
-              <input type="checkbox" checked={visible.includes(column)} disabled={index === 0 || column.required}
-                onChange={(event) => update({ ...view, hidden: event.target.checked ? view.hidden.filter((id) => id !== column.id) : [...view.hidden, column.id] })} />
-              {column.label}
-            </label>)}
-            <button type="button" className="ghost" onClick={() => update({ hidden: [], sort: null })}>
-              <RotateCcw size={14} aria-hidden="true" /> Mặc định
-            </button>
-          </div>
-        </details>
+        <TableColumnChooser label={label} columns={columns} view={view} onChange={update} />
       </div>}
       {!displayed.length ? <div className="table-empty" role="status">{rows.length ? "Không có kết quả phù hợp" : empty === undefined ? "Chưa có dữ liệu" : empty}</div> :
         <div className="responsive-table-wrap" tabIndex={0} role="region" aria-label={label}>
@@ -92,5 +73,43 @@ function ScopedTable<Row>({
           </table>
         </div>}
     </section>
+  );
+}
+
+/**
+ * The "Chọn cột" menu, shared by `ResponsiveTable` and tables that keep their own markup
+ * (the device list) so every table hides columns the same way. The first column and any
+ * `required` one stay on.
+ */
+export function TableColumnChooser({ label, columns, view, onChange }: {
+  label: string;
+  columns: Pick<ResponsiveTableColumn<unknown>, "id" | "label" | "required">[];
+  view: TableView;
+  onChange: (next: TableView) => void;
+}) {
+  return (
+    <details className="table-columns" onKeyDown={(event) => {
+      if (event.key === "Escape" && event.currentTarget.open) {
+        event.preventDefault();
+        event.stopPropagation();
+        event.currentTarget.open = false;
+        event.currentTarget.querySelector("summary")?.focus();
+      }
+    }}>
+      <summary aria-label={`Chọn cột: ${label}`} title="Chọn cột"><Columns3 size={16} aria-hidden="true" /></summary>
+      <div className="table-columns-menu">
+        {columns.map((column, index) => {
+          const locked = index === 0 || Boolean(column.required);
+          return <label key={column.id}>
+            <input type="checkbox" checked={locked || !view.hidden.includes(column.id)} disabled={locked}
+              onChange={(event) => onChange({ ...view, hidden: event.target.checked ? view.hidden.filter((id) => id !== column.id) : [...view.hidden, column.id] })} />
+            {column.label}
+          </label>;
+        })}
+        <button type="button" className="ghost" onClick={() => onChange({ hidden: [], sort: null })}>
+          <RotateCcw size={14} aria-hidden="true" /> Mặc định
+        </button>
+      </div>
+    </details>
   );
 }

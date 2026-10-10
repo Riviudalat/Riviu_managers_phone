@@ -47,6 +47,8 @@ import { PUBLISH_START_ACKNOWLEDGED } from "./features/operations/publishStartBr
 import { OperationProgressCenter } from "./features/operations/OperationProgressCenter";
 import { DeviceTile } from "./components/DeviceTile";
 import { FilterToolbar, type ViewMode } from "./components/FilterToolbar";
+import { DeviceListTable } from "./components/DeviceListTable";
+import { deviceEvidence } from "./deviceEvidence";
 import { DeviceContextMenu } from "./components/DeviceContextMenu";
 import { DeviceFilesPopup } from "./components/DeviceFilesPopup";
 import type { DeviceMenuNode } from "./deviceMenu";
@@ -99,7 +101,6 @@ import { MaterialPage } from "./pages/MaterialPage";
 import { HelpPage } from "./pages/HelpPage";
 import type { AgentStatus, DeviceInfo, DeviceLoadState, DeviceWorkOwner, DeviceWorkState, PageId, TargetRef } from "./types";
 import type { ActiveGroupSync, GroupSyncReadiness } from "./groupSync";
-import { MoreHorizontal } from "lucide-react";
 import { MENU_ICONS } from "./components/menuIcons";
 import { loadZoom, stepZoom, storeZoom, tileDensity, TILE_ZOOM, wheelWantsZoom } from "./zoom";
 import { operationSourcePage, type OperationSourceRef } from "./operationSource";
@@ -573,6 +574,15 @@ function App() {
     onCanvasMouseDown,
     band,
   } = useBoxSelection(devices, visibleDevices, page === "control" && viewMode === "window");
+  // The list's "Bằng chứng gần nhất" ages on a clock of its own: a phone nobody observes gets
+  // no new record, and it must still turn stale without waiting for an unrelated re-render.
+  const [listNowMs, setListNowMs] = useState(() => Date.now());
+  useEffect(() => {
+    if (page !== "control" || viewMode !== "list") return;
+    setListNowMs(Date.now());
+    const timer = window.setInterval(() => setListNowMs(Date.now()), 15_000);
+    return () => window.clearInterval(timer);
+  }, [page, viewMode]);
   const selectDevice = (udid:string,additive:boolean) => {
     onSelect(udid,additive);
     if(!additive&&focusUdid&&focusUdid!==udid)setFocusUdid(udid);
@@ -1340,108 +1350,34 @@ function App() {
               <div className="device-browser-content">
 
               {visibleDevices.length > 0 && viewMode === "list" && (
-                <table className="device-table" aria-label="Danh sách thiết bị">
-                  <caption className="visually-hidden">Danh sách thiết bị đang hiển thị</caption>
-                  <thead>
-                    <tr>
-                      <th scope="col">
-                        <span className="visually-hidden">Chọn</span>
-                      </th>
-                      <th scope="col">Máy</th>
-                      <th scope="col">Trạng thái</th>
-                      <th scope="col">Kết nối</th>
-                      <th scope="col">
-                        <span className="visually-hidden">Thao tác</span>
-                      </th>
-                    </tr>
-                  </thead>
-                  <tbody>
-                    {visibleDevices.map((device) => {
-                      const sel = selected.includes(device.udid);
-                      const machineNumber = fleetNumberByUdid.get(device.udid) ?? 0;
-                      const meta = metaMap.get(device.udid);
-                      const currentOwner = currentDeviceWorkOwner(device.udid);
-                      const status = deviceOperationalView(
+                <DeviceListTable
+                  rows={visibleDevices.map((device) => {
+                    const meta = metaMap.get(device.udid);
+                    const work = currentDeviceWorkState(device.udid);
+                    return {
+                      device,
+                      machineNumber: fleetNumberByUdid.get(device.udid) ?? 0,
+                      name: tileName(device, meta),
+                      handle: meta?.handle,
+                      status: deviceOperationalView(
                         device,
-                        currentOwner,
+                        currentDeviceWorkOwner(device.udid),
                         deviceWorkOwnerReadState,
                         cachedAgent(device.udid),
-                        currentDeviceWorkState(device.udid)?.activity,
+                        work?.activity,
                         cachedLoad(device.udid),
-                      );
-                      const statusLabel = status.ownerLabel
-                        ? `${status.label} · ${status.ownerLabel}`
-                        : status.label;
-                      return (
-                        <tr
-                          key={device.udid}
-                          className={sel ? "selected" : ""}
-                          tabIndex={0}
-                          aria-label={`${machineNumberLabel(machineNumber)}, ${tileName(device, meta)}, ${statusLabel}${status.step ? `, ${status.step}` : ""}${sel ? ", đã chọn" : ""}`}
-                          onClick={(e) => selectDevice(device.udid, e.metaKey || e.ctrlKey)}
-                          onKeyDown={(event) => {
-                            if (event.target !== event.currentTarget) return;
-                            if (event.key !== "Enter" && event.key !== " ") return;
-                            event.preventDefault();
-                            selectDevice(device.udid, event.metaKey || event.ctrlKey || event.shiftKey);
-                          }}
-                          onDoubleClick={() => setFocusUdid(device.udid)}
-                        >
-                          <td>
-                            <input
-                              type="checkbox"
-                              aria-label={`Chọn ${machineNumberLabel(machineNumber)}`}
-                              checked={sel}
-                              onChange={() => onSelect(device.udid, true)}
-                              onClick={(e) => e.stopPropagation()}
-                            />
-                          </td>
-                          <td>
-                            <strong>{machineNumberLabel(machineNumber)}</strong>
-                            <span className="device-table-alias">{tileName(device, meta)}</span>
-                          </td>
-                          <td>
-                            <span className={`chip ${status.tone}`} title={status.reason} style={{ display: "inline-flex", flexDirection: "column", alignItems: "flex-start", whiteSpace: "normal" }}>
-                              <span>{statusLabel}</span>
-                              {status.step && <span>{status.step}</span>}
-                            </span>
-                          </td>
-                          <td>{device.connection.toUpperCase()}</td>
-                          <td>
-                            <div className="device-row-actions">
-                              {status.helperRecovery && <button type="button" className="link" onClick={event => {
-                                event.stopPropagation();
-                                void runHelperMaintenance([device.udid]);
-                              }}>Khôi phục helper</button>}
-                              <button
-                                type="button"
-                                className="link"
-                                onClick={(e) => {
-                                  e.stopPropagation();
-                                  setFocusUdid(device.udid);
-                                }}
-                              >
-                                Mở
-                              </button>
-                              <button
-                                type="button"
-                                className="icon-button"
-                                aria-label={`Xem chi tiết ${machineNumberLabel(machineNumber)}`}
-                                title="Xem chi tiết"
-                                onClick={(event) => {
-                                  event.stopPropagation();
-                                  setDetailsFor(device.udid);
-                                }}
-                              >
-                                <MoreHorizontal size={18} />
-                              </button>
-                            </div>
-                          </td>
-                        </tr>
-                      );
-                    })}
-                  </tbody>
-                </table>
+                      ),
+                      evidence: deviceEvidence(work?.activity, cachedLoad(device.udid), listNowMs),
+                    };
+                  })}
+                  selected={selected}
+                  nowMs={listNowMs}
+                  onSelect={selectDevice}
+                  onToggle={(udid) => onSelect(udid, true)}
+                  onOpen={setFocusUdid}
+                  onDetails={setDetailsFor}
+                  onHelperMaintenance={(udid) => void runHelperMaintenance([udid])}
+                />
               )}
 
               {visibleDevices.length > 0 && viewMode === "window" && (
