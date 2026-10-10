@@ -503,11 +503,30 @@ async fn observe_publish_account_inner(
 ) -> anyhow::Result<String> {
     navigate_own_profile(session, labels).await?;
     let deadline = tokio::time::Instant::now() + PROFILE_WINDOW;
+    // Box 31-50, 10/10/2026 (ce051715e15b2c2e02, 21:35:02Z): the first-run "Swipe up for
+    // more" layer swallowed the Profile tap; the popup step inside the header read then
+    // swiped it away, and nothing tapped Profile again for the whole window. One more tap
+    // of the measured tab is navigation, never proof.
+    let mut profile_retap_used = false;
     let account = loop {
         if let Some(account) =
             crate::tiktok_account::restore_own_profile_header(session, *labels).await?
         {
             break account;
+        }
+        if !profile_retap_used {
+            profile_retap_used = true;
+            if let Some(profile) = labels.label(TikTokControl::ProfileTab) {
+                if let Some(tab) = session.locate(profile.to_query()).await? {
+                    tracing::info!(
+                        package = labels.package(),
+                        "chưa đọc được tiêu đề Hồ sơ sau khi bấm tab; bấm lại tab Hồ sơ một lần"
+                    );
+                    session.tap(tab.centre()).await?;
+                    tokio::time::sleep(POLL).await;
+                    continue;
+                }
+            }
         }
         if tokio::time::Instant::now() >= deadline {
             return Err(crate::tiktok_account::AccountDiagnostic::new(
@@ -546,6 +565,22 @@ async fn observe_publish_account_inner(
 /// Why account navigation stopped at the permission window when the popup step left no line.
 const PERMISSION_WINDOW_SAYS: &str = "hộp thoại quyền hệ thống vẫn che TikTok — Riviu không bấm Allow; cần người vận hành kiểm tra trên máy";
 
+/// Foreground reads allowed to settle after the permission question was answered.
+///
+/// Box 31-50, SM-G955F Android 9, Global 45.7.3, retry of 21:33Z on 10/10/2026: actors
+/// ce031713f3d3ec1d0c, ce0417141550322202, ce051715e15b2c2e02 and ce051715e9f964e10d each
+/// logged Deny on the contacts question and, inside the next three seconds, failed with
+/// "account navigation left TikTok" from the very next foreground read. The window was
+/// going away: the package read still named the permission controller while the activity
+/// read no longer did, which classifies as neither TikTok nor the question. Three reads at
+/// the navigation poll cover the dismissal measured there; the 15 s navigation deadline
+/// still bounds them.
+const PERMISSION_SETTLE_READS: u8 = 3;
+
+/// Why an in-app layer stopped account navigation when the popup step left no line.
+const PROFILE_LAYER_SAYS: &str =
+    "một lớp phủ chặn tab Hồ sơ — Riviu không bấm gì; cần người vận hành kiểm tra trên máy";
+
 /// Shared account navigation for manual account reads and publication preflight.
 /// A cold-start advertisement may hide Profile; use the same bounded navigation
 /// ladder instead of treating the first missing tab as an account failure.
@@ -566,15 +601,43 @@ pub async fn navigate_own_profile(
     let mut reopened_from_launcher = false;
     let mut permission_popups = crate::app_automation::dialogs::PopupBudget::default();
     let popup_stop = std::sync::atomic::AtomicBool::new(false);
+    let mut answered_permission_window = false;
+    let mut permission_settle_reads: u8 = 0;
     let within_deadline = || tokio::time::Instant::now() < deadline
         && session.gui_scope().and_then(|scope| scope.deadline_ms)
             .is_none_or(|end| chrono::Utc::now().timestamp_millis() < end);
     let tab = loop {
-        let active = if reopened_from_launcher {
+        let read = if reopened_from_launcher {
             anyhow::ensure!(within_deadline(), "account navigation recovery deadline exceeded");
-            tokio::time::timeout_at(deadline, session.active_app_bundle()).await
-                .context("account navigation foreground read deadline exceeded")??
-        } else { session.active_app_bundle().await? };
+            match tokio::time::timeout_at(deadline, session.active_app_bundle()).await {
+                Ok(read) => read,
+                Err(_) => anyhow::bail!("account navigation foreground read deadline exceeded"),
+            }
+        } else {
+            session.active_app_bundle().await
+        };
+        // The question going away can leave a system window focused for one read; the
+        // settle budget covers that read like any other transition read.
+        let settling = answered_permission_window
+            && permission_settle_reads < PERMISSION_SETTLE_READS
+            && within_deadline();
+        let active = match read {
+            Ok(active) => active,
+            Err(error) if settling => {
+                permission_settle_reads += 1;
+                tracing::info!(
+                    package = labels.package(),
+                    %error,
+                    "điều hướng tài khoản: chưa đọc được foreground ngay sau khi trả lời hộp thoại quyền; đọc lại"
+                );
+                tokio::time::sleep(
+                    POLL.min(deadline.saturating_duration_since(tokio::time::Instant::now())),
+                )
+                .await;
+                continue;
+            }
+            Err(error) => return Err(error),
+        };
         anyhow::ensure!(session.gui_session_epoch() == epoch, "account navigation session changed");
         if crate::tiktok_target::foreground_is_tiktok_or_permission_window(
             session,
@@ -585,6 +648,9 @@ pub async fn navigate_own_profile(
         .await
             == crate::tiktok_target::TikTokForeground::PermissionWindow
         {
+            // The question only stands over a launched TikTok task, so TikTok has been seen:
+            // a launcher after the answer gets the same one-time reopen as any other exit.
+            saw_tiktok = true;
             // Box 31-50, 10/10/2026: the measured contacts question over TikTok. The shared
             // popup step may only tick "Don't ask again" and Deny, once each per budget; a
             // spent, unknown or unproven window still fails below without a tap.
@@ -605,6 +671,8 @@ pub async fn navigate_own_profile(
                 crate::ui_automation::runtime::ReadWaitResult::Ready(
                     crate::app_automation::dialogs::PopupStep::Dismissed,
                 ) => {
+                    answered_permission_window = true;
+                    permission_settle_reads = 0;
                     tracing::info!(
                         package = labels.package(),
                         says = permission_popups.says().unwrap_or_default(),
@@ -635,10 +703,26 @@ pub async fn navigate_own_profile(
             }
         }
         if active != labels.package() {
+            if settling && active != "com.sec.android.app.launcher" {
+                permission_settle_reads += 1;
+                tracing::info!(
+                    package = labels.package(),
+                    foreground = %active,
+                    read = permission_settle_reads,
+                    "điều hướng tài khoản: màn hình chưa về TikTok sau khi trả lời hộp thoại quyền; đọc lại"
+                );
+                tokio::time::sleep(
+                    POLL.min(deadline.saturating_duration_since(tokio::time::Instant::now())),
+                )
+                .await;
+                continue;
+            }
             // Measured machine 1: Samsung Home after the owned account-navigation began.
             // This is one navigation repair, never a reset or permission to replay an action.
-            anyhow::ensure!(saw_tiktok && !reopened_from_launcher
-                && active == "com.sec.android.app.launcher", "account navigation left TikTok");
+            anyhow::ensure!(
+                saw_tiktok && !reopened_from_launcher && active == "com.sec.android.app.launcher",
+                "account navigation left TikTok (foreground: {active})"
+            );
             anyhow::ensure!(within_deadline(), "account navigation recovery deadline exceeded");
             reopened_from_launcher = true;
             tracing::info!(package = labels.package(), "account navigation returned to Samsung launcher; reopening bound TikTok once");
@@ -653,6 +737,51 @@ pub async fn navigate_own_profile(
             tokio::time::timeout_at(deadline, crate::tiktok_account::account_snapshot(session, *labels)).await
                 .context("account navigation profile read deadline exceeded")??
         } else { crate::tiktok_account::account_snapshot(session, *labels).await? };
+        // Box 31-50, 10/10/2026 (ce051715e15b2c2e02, 21:35:02Z): the first-run "Swipe up for
+        // more" layer stood over the feed and swallowed the Profile tap. A measured popup or
+        // first-run layer on this tree goes to the shared step first, which may send only
+        // its one measured negative gesture; a spent or unknown layer stops here untouched.
+        if crate::app_automation::dialogs::optional_decline(&tree, *labels).is_some()
+            || crate::app_automation::dialogs::first_run_screen(&tree, *labels).is_some()
+        {
+            anyhow::ensure!(
+                within_deadline(),
+                "account navigation recovery deadline exceeded"
+            );
+            match crate::app_automation::dialogs::step_before_deadline(
+                session,
+                *labels,
+                &mut permission_popups,
+                deadline,
+                &popup_stop,
+                &popup_stop,
+            )
+            .await?
+            {
+                crate::ui_automation::runtime::ReadWaitResult::Ready(
+                    crate::app_automation::dialogs::PopupStep::Dismissed,
+                ) => {
+                    tracing::info!(
+                        package = labels.package(),
+                        says = permission_popups.says().unwrap_or_default(),
+                        "điều hướng tài khoản: đã đóng một lớp phủ đã đo trước khi bấm tab Hồ sơ; đọc lại màn hình"
+                    );
+                    tokio::time::sleep(
+                        POLL.min(deadline.saturating_duration_since(tokio::time::Instant::now())),
+                    )
+                    .await;
+                    continue;
+                }
+                crate::ui_automation::runtime::ReadWaitResult::Ready(
+                    crate::app_automation::dialogs::PopupStep::Blocked,
+                ) => anyhow::bail!(
+                    "account navigation blocked: {}",
+                    permission_popups.says().unwrap_or(PROFILE_LAYER_SAYS)
+                ),
+                // Clear, or the step could not read in time: the tree in hand decides below.
+                _ => {}
+            }
+        }
         if let Some(diagnostic) = crate::tiktok_account::blocker_diagnostic(&tree, *labels) {
             if diagnostic.state == crate::tiktok_account::AccountState::SecurityPrompt
                 && !security_close_used
