@@ -401,6 +401,11 @@ pub async fn publish_preflight(
     } else {
         Vec::new()
     };
+    // The one device effect a preflight may cause: superseding a stale helper owner on an
+    // idle phone whose ledger holds nothing uncertain, exactly as the on-connect worker
+    // would. A phone that keeps the operator gate gets its blocking record named below.
+    let gated =
+        crate::agent_commands::reconcile_helpers_for_admission(&state, &request.udids).await;
     let preparation_id = Uuid::new_v4().to_string();
     preparation::initialize(&state.db, &state.events, &state.registry);
     let context = preparation::PreparationContext::new(
@@ -452,6 +457,22 @@ pub async fn publish_preflight(
                 .is_some_and(|udid| releasable.contains(udid))
     };
     prepared.report.issues.retain(|issue| !owed(issue));
+    let named_blockers = prepared.report.issues.iter_mut().chain(
+        prepared
+            .report
+            .assignments
+            .iter_mut()
+            .flat_map(|row| row.issues.iter_mut()),
+    );
+    for issue in named_blockers.filter(|issue| issue.code == "device_not_ready") {
+        if let Some((udid, refusal)) = issue
+            .udid
+            .as_deref()
+            .and_then(|udid| gated.get_key_value(udid))
+        {
+            issue.message = format!("{udid}: {refusal}");
+        }
+    }
     for row in &mut prepared.report.assignments {
         let releasing = row.issues.iter().any(owed);
         row.issues.retain(|issue| !owed(issue));

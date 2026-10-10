@@ -98,6 +98,15 @@ impl AndroidHelperSetup {
                                         Err(error) => return Err((SetupStop::Terminal, automatic_failure(&error))),
                                     }
                                 }
+                                // Automatic only when the durable ledger proves nothing on this
+                                // phone is uncertain or in flight; otherwise the operator decides.
+                                if let Some(blocker) = crate::agent_commands::helper_auto_reconcile_blocker(&db, &serial)
+                                    .map_err(|error| (SetupStop::PreEffect, error))?
+                                {
+                                    return Err((SetupStop::Terminal, crate::command_error::CommandError::code(
+                                        "HelperAutoReconcileBlocked",
+                                        crate::agent_commands::helper_auto_reconcile_blocked_message(&blocker))));
+                                }
                                 crate::agent_commands::automatic_helper_maintenance(&control, &db, &context, &serial).await
                                     .map_err(|error| match error {
                                         AutomaticMaintenanceError::Prepare(error) => (SetupStop::PreEffect, error),
@@ -105,8 +114,10 @@ impl AndroidHelperSetup {
                                     })?;
                                 // After an execution the replacement claim is never retried here.
                                 android.prepare_helper_runtime(&serial).await
-                                    .map(|_| ())
-                                    .map_err(|error| (SetupStop::Terminal, automatic_failure(&error)))
+                                    .map_err(|error| (SetupStop::Terminal, automatic_failure(&error)))?;
+                                record(&db, "agent.helper.auto_reconcile", &serial,
+                                    crate::agent_commands::HELPER_AUTO_RECONCILE_NOTE);
+                                Ok(())
                             }.await;
                             match result {
                                 Ok(()) => {

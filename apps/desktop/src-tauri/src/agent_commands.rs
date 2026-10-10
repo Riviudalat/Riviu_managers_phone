@@ -330,6 +330,124 @@ pub(crate) async fn automatic_helper_maintenance(
     Ok(())
 }
 
+/// Operator line for an automatic reconcile the durable ledger proved safe.
+pub(crate) const HELPER_AUTO_RECONCILE_NOTE: &str =
+    "tự đối soát helper: không có thao tác chưa rõ — nhận phiên mới";
+
+/// The ledger half of automatic reconcile: the named record that keeps the
+/// "Khôi phục helper" gate, or `None` when nothing on this phone is uncertain or
+/// in flight. Records already archived by this phone's last settled maintenance
+/// do not block again; that supersession was itself authorized.
+pub(crate) fn helper_auto_reconcile_blocker(
+    db: &riviu_core::db::Database,
+    serial: &str,
+) -> Result<Option<String>, CommandError> {
+    let since = load_maintenance_ledger(db, serial)?
+        .iter()
+        .filter(|entry| entry.phase == HelperMaintenancePhase::Settled)
+        .map(|entry| entry.prepared_at_ms)
+        .max()
+        .and_then(chrono::DateTime::<chrono::Utc>::from_timestamp_millis);
+    db.helper_auto_reconcile_blocker(serial, since)
+        .map_err(|_| {
+            CommandError::operation("cannot read the effect ledger for automatic helper reconcile")
+        })
+}
+
+pub(crate) fn helper_auto_reconcile_blocked_message(record: &str) -> String {
+    format!("Chưa tự đối soát helper vì còn {record}; cần Khôi phục helper sau khi kiểm tra bản ghi này.")
+}
+
+/// Job admission: one automatic reconcile per phone whose retained helper owner fences
+/// it, when the ledger proves nothing is uncertain. Returns the refusal to show for each
+/// phone that keeps the human gate; every other phone is left to its normal preflight.
+pub(crate) async fn reconcile_helpers_for_admission(
+    state: &AppState,
+    udids: &[String],
+) -> std::collections::HashMap<String, String> {
+    let Some(android) = state.android.clone() else {
+        return Default::default();
+    };
+    let attempts = udids
+        .iter()
+        .collect::<std::collections::BTreeSet<_>>()
+        .into_iter()
+        .map(|udid| {
+            let android = android.clone();
+            async move {
+                reconcile_helper_for_admission(&state.control, &state.db, &android, udid)
+                    .await
+                    .map(|refusal| (udid.clone(), refusal))
+            }
+        });
+    futures_util::future::join_all(attempts)
+        .await
+        .into_iter()
+        .flatten()
+        .collect()
+}
+
+async fn reconcile_helper_for_admission(
+    control: &DeviceControlPlane,
+    db: &std::sync::Arc<riviu_core::db::Database>,
+    android: &riviu_android_driver::AndroidDriver,
+    udid: &str,
+) -> Option<String> {
+    // Only a phone fenced by a retained owner, and only while no other owner holds it.
+    if !control.reports_element_bounds(udid) || control.current_work_owner(udid).is_some() {
+        return None;
+    }
+    match control.verify_automation_readiness(udid).await {
+        Err(error) if is_helper_recovery_required(&error.to_string()) => {}
+        _ => return None,
+    }
+    let context = control
+        .try_acquire_exclusive_keeping_stream(udid, DeviceWorkOwner::Repair)
+        .await
+        .ok()?;
+    let record = |action: &str, message: &str| {
+        if let Err(error) = db.log_op(action, &format!("Máy {udid}: {message}")) {
+            log::error!("could not persist automatic helper reconcile for {udid}: {error:#}");
+        }
+    };
+    match helper_auto_reconcile_blocker(db, udid) {
+        Ok(None) => {}
+        // Returned, not logged: each caller shows or logs its own refusal, and a
+        // repeated preflight must not repeat the operation log.
+        Ok(Some(blocker)) => return Some(helper_auto_reconcile_blocked_message(&blocker)),
+        Err(error) => return Some(error.message.into()),
+    }
+    // A resumable owner needs no supersession; only a refused resume reaches maintenance.
+    match android.prepare_helper_runtime(udid).await {
+        Ok(_) => return None,
+        Err(error)
+            if error.is::<riviu_android_driver::riviu_agent::HelperRecoveryRequired>()
+                && !error.is::<HelperShellIdentityRefused>() => {}
+        Err(_) => return None,
+    }
+    if let Err(error) = automatic_helper_maintenance(control, db, &context, udid).await {
+        let error = match error {
+            AutomaticMaintenanceError::Prepare(error)
+            | AutomaticMaintenanceError::Execute(error) => error,
+        };
+        record(
+            "agent.helper.auto_reconcile.failed",
+            &format!("{}: {}", error.code, error.message),
+        );
+        return Some(error.message.into());
+    }
+    // Same as the button's qualifyReplacement: settlement is durable and never undone here.
+    if android.prepare_helper_runtime(udid).await.is_err() {
+        let message = "Đã tự đối soát helper; chưa xác minh được phiên helper mới. Kiểm tra chẩn đoán của đúng máy.";
+        record("agent.helper.auto_reconcile.failed", message);
+        return Some(message.into());
+    }
+    log::info!("{udid}: {HELPER_AUTO_RECONCILE_NOTE}");
+    record("agent.helper.auto_reconcile", HELPER_AUTO_RECONCILE_NOTE);
+    drop(context);
+    None
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
 pub struct AgentRuntimeView {

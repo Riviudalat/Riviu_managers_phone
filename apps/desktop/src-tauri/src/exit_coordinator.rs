@@ -36,14 +36,17 @@ impl ExitCoordinator {
         let worker = std::thread::Builder::new()
             .name("riviu-graceful-exit".into())
             .spawn(move || {
-                if drain() {
-                    state.store(2, Ordering::Release);
-                    exit();
-                } else {
-                    // Preserve the native window/runtime and unresolved ownership.
-                    // A later explicit reconciliation may request a fresh drain.
-                    state.store(0, Ordering::Release);
+                // The drain is finite: every device step carries its own deadline.
+                // An unsettled drain still exits. Keeping the window open only made the
+                // operator kill the process (2026-10-10: every phone had left adb, so
+                // owned-helper absence was unprovable). Unresolved ownership lives in the
+                // durable helper journals, not in this process, and the next start
+                // reconciles it automatically when the effect ledger allows.
+                if !drain() {
+                    log::warn!("đóng ứng dụng: chưa xác minh xong việc dọn phiên trên máy; giữ nguyên bản ghi để tự đối soát ở lần mở sau");
                 }
+                state.store(2, Ordering::Release);
+                exit();
             });
         if let Err(error) = worker {
             self.0.store(0, Ordering::Release);
@@ -59,17 +62,17 @@ mod tests {
     use std::{sync::mpsc, time::Duration};
 
     #[test]
-    fn failed_diagnostic_drain_does_not_exit_or_mark_completion() {
+    fn failed_drain_still_exits_once_and_marks_completion() {
         let gate = ExitCoordinator::default();
-        let (failed, done) = mpsc::channel();
-        assert!(gate.request_checked(move || { failed.send(()).unwrap(); false }, || panic!("unresolved cleanup must not exit")).unwrap());
-        done.recv_timeout(Duration::from_secs(3)).unwrap();
-        for _ in 0..100 {
-            if gate.0.load(Ordering::Acquire) == 0 { break; }
-            std::thread::sleep(Duration::from_millis(1));
-        }
-        assert_eq!(gate.0.load(Ordering::Acquire), 0);
-        assert!(!gate.completed());
+        let (exited, wait_exit) = mpsc::channel();
+        assert!(gate
+            .request_checked(|| false, move || exited.send(()).unwrap())
+            .unwrap());
+        wait_exit.recv_timeout(Duration::from_secs(3)).unwrap();
+        assert!(gate.completed());
+        assert!(!gate
+            .request_checked(|| panic!("second drain"), || panic!("second exit"))
+            .unwrap());
     }
 
     #[test]

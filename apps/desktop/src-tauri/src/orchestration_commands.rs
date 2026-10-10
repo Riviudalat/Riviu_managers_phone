@@ -456,12 +456,29 @@ impl ProductionOrchestrationPort {
         crate::nurture_commands::validate_nurture_settings(&settings)
             .map_err(OrchestrationChildFailure::before_effect)?;
         let requested_udids = Self::target_udids(request);
-        let preflight = crate::nurture_commands::preflight_comment_job(
+        let gated = match self.app.try_state::<AppState>() {
+            Some(state) => {
+                crate::agent_commands::reconcile_helpers_for_admission(&state, &requested_udids)
+                    .await
+            }
+            None => Default::default(),
+        };
+        let admitted_udids: Vec<String> = requested_udids
+            .iter()
+            .filter(|udid| !gated.contains_key(*udid))
+            .cloned()
+            .collect();
+        let mut preflight = crate::nurture_commands::preflight_comment_job(
             &self.control,
-            &requested_udids,
+            &admitted_udids,
             &settings,
         )
         .await;
+        preflight.skipped.extend(
+            gated
+                .into_iter()
+                .map(|(udid, refusal)| format!("{udid}: {refusal}")),
+        );
         if preflight.ready.is_empty() {
             return Err(OrchestrationChildFailure::before_effect(
                 preflight.refusal(),

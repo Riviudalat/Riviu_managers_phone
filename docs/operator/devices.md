@@ -140,8 +140,15 @@ lặp cài liên tục. Kế hoạch khôi phục đã thực thi chỉ được
 chứng minh trước mọi thao tác trên máy (chuẩn bị kế hoạch khôi phục chỉ đọc, adb shell
 sai quyền trước khi cài hoặc nhận phiên) được tự kiểm tra lại sau 30 giây, 2 phút và
 5 phút rồi dừng, nên sửa máy (như `adb unroot`) không cần cắm lại cáp. Khi việc khôi
-phục đã bắt đầu thực thi, app không tự thử lại. Nút **Khôi phục helper** vẫn có để xử
-lý trường hợp cần người vận hành kiểm tra.
+phục đã bắt đầu thực thi, app không tự thử lại.
+
+Sau khi tắt app giữa chừng, rút cáp hoặc khởi động lại điện thoại, app tự đối soát
+helper khi máy kết nối lại hoặc khi bắt đầu Nuôi, Tương tác hay Đăng bài, nếu máy
+không còn thao tác nào chưa rõ (đăng bài, tim, lưu, bình luận, follow, bước Flow hoặc
+ghi Sheet chưa xác nhận). Nhật ký ghi "tự đối soát helper: không có thao tác chưa rõ —
+nhận phiên mới" và tác vụ chạy tiếp, không cần bấm gì. Nút **Khôi phục helper** chỉ
+còn cần khi máy có thao tác chưa rõ: lý do nêu đúng bản ghi đang chặn (ví dụ "bài đăng
+… đang ở trạng thái uncertain"); kiểm tra bản ghi đó rồi mới bấm.
 
 Lỗi chuẩn bị helper phân biệt `runtime_acquisition` (nhận phiên runtime) và
 `clipboard_qualification` (xác minh clipboard). Thông báo chỉ dùng các nhóm nguyên

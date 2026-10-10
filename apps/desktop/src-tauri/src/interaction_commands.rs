@@ -592,6 +592,11 @@ pub async fn interaction_start_thread(
         &request.actor_udids,
     )?;
     let plan = plan_threads(&request).map_err(interaction_error)?;
+    let gated =
+        crate::agent_commands::reconcile_helpers_for_admission(&state, &request.actor_udids).await;
+    if let Some((udid, refusal)) = gated.into_iter().next() {
+        return Err(interaction_error(format!("{udid}: {refusal}")));
+    }
     let _idle = state.control.defer_idle_work(&request.actor_udids, riviu_core::DeviceWorkOwner::Interaction);
     let actions = riviu_core::app_automation::interaction_actions(request.actions);
     let checks = futures_util::future::join_all(request.actor_udids.iter()

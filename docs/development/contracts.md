@@ -597,6 +597,31 @@ Mỗi kết nối hoặc episode lỗi mới có một lần chuẩn bị; conte
 tiêu thụ bản ghi lỗi đã quan sát, không gọi HTTP helper trong lượt quét. Preflight
 gặp clipboard đang làm việc không được chốt thành helper hỏng. Chỉ runtime được
 xác minh mới xóa lỗi chuẩn bị; package presence hoặc reconnect không đủ.
+
+Tự đối soát helper (retained owner bị fence `HelperRecoveryRequired`) chỉ được phép
+khi ledger bền vững chứng minh an toàn, qua `helper_auto_reconcile_blocker`: không còn
+`publish_assignments` ở `posting`/`verifying`/`uncertain`, `interaction_assignments` ở
+`sending`/`uncertain`, `tiktok_action_runs` hoặc `public_cleanup_runs` ở
+`armed`/`uncertain`, `flow_node_attempts` có hiệu ứng ở
+`intentCommitted`/`effectDispatched`/`verifying`/`uncertain`, và không có claim ghi
+Sheet nào của máy. Bản ghi cập nhật trước maintenance đã settle gần nhất của máy không
+chặn lại (lần supersession đó đã lưu trữ chúng); thời gian không đọc được coi là mới.
+Phải giữ được lease Repair (không owner sống nào khác). Tiến trình helper vắng hoặc
+dừng được bằng chính kế hoạch maintenance. Khi đủ điều kiện, app chạy đúng luồng của
+nút (`pending` → `prepare` → `execute`, không `reconcileOnly`, rồi qualify phiên
+mới), giữ `recordsRetained`/`archivedUnresolved`, ghi một dòng
+`agent.helper.auto_reconcile` "tự đối soát helper: không có thao tác chưa rõ — nhận
+phiên mới". Điểm chạy: worker kết nối (khởi động controller, cắm lại, reboot) và
+admission của Nuôi, Tương tác, Điều phối Nuôi và preflight Đăng bài, mỗi máy tối đa một
+lần mỗi admission, không lặp. Preflight Đăng bài vì vậy có thể dừng helper cũ của máy
+rảnh. Còn bản ghi chặn thì giữ cổng người vận hành và lý do nêu đúng bản ghi đó. Máy
+reboot hoặc mất tiến trình helper được coi là phiên cũ đã mất, không phải chưa rõ, khi
+ledger không có gì đang chạy.
+
+Đóng app không bị giữ vô hạn: drain có deadline từng bước; drain không settle (ví dụ máy
+đã rời adb nên không chứng minh được helper vắng) vẫn thoát, giữ nguyên journal helper để
+lần mở sau tự đối soát theo luật trên.
+
 Inventory dùng dữ liệu máy đã đọc khi cùng máy đang giữ khóa chuẩn bị helper; lỗi
 scan Android không được coi là disconnect để cấp lại lượt cài. Gói `com.riviu.agent`
 có versionCode tối thiểu 5 cho launcher; APK, manifest và NOTICE phải khớp hash.

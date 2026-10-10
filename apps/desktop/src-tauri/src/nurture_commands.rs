@@ -533,7 +533,17 @@ pub async fn nurture_start(
         .get_nurture_settings()
         .map_err(CommandError::operation)?;
     validate_nurture_settings(&settings).map_err(CommandError::operation)?;
-    let preflight = preflight_comment_job(&state.control, &udids, &settings).await;
+    let gated = crate::agent_commands::reconcile_helpers_for_admission(&state, &udids).await;
+    let udids: Vec<String> = udids
+        .into_iter()
+        .filter(|udid| !gated.contains_key(udid))
+        .collect();
+    let mut preflight = preflight_comment_job(&state.control, &udids, &settings).await;
+    preflight.skipped.extend(
+        gated
+            .into_iter()
+            .map(|(udid, refusal)| format!("{udid}: {refusal}")),
+    );
     if preflight.ready.is_empty() {
         return Err(CommandError::operation(preflight.refusal()));
     }
