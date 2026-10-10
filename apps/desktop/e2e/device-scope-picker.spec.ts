@@ -9,13 +9,20 @@ for (const width of [1440, 820]) {
     const errors: string[] = [];
     page.on("pageerror", error => errors.push(error.message));
     await page.goto("/");
-    for (const name of ["Nuôi TikTok", "Tương tác", "Đăng bài"]) {
+    // Nuôi edits its scope in its own "Chọn máy" drawer; the others share the scope drawer.
+    for (const [name, opener, title] of [
+      ["Nuôi TikTok", "Chọn máy", "Chọn máy Nuôi TikTok"],
+      ["Tương tác", "Chọn thiết bị", "Chọn thiết bị thực hiện"],
+      ["Đăng bài", "Chọn thiết bị", "Chọn thiết bị thực hiện"],
+    ]) {
       await openOperatorPage(page, name);
-      await page.getByRole("button", { name: "Chọn thiết bị", exact: true }).click();
-      const dialog = page.getByRole("dialog", { name: "Chọn thiết bị thực hiện" });
+      await page.getByRole("button", { name: opener, exact: true }).click();
+      const dialog = page.getByRole("dialog", { name: title });
       await expect(dialog).toBeVisible();
-      await dialog.getByText("Máy cụ thể", { exact: true }).click();
-      await expect(dialog.getByRole("radio", { name: "Máy cụ thể", exact: true })).toBeChecked();
+      if (name !== "Nuôi TikTok") {
+        await dialog.getByText("Máy cụ thể", { exact: true }).click();
+        await expect(dialog.getByRole("radio", { name: "Máy cụ thể", exact: true })).toBeChecked();
+      }
       const choices = dialog.getByRole("checkbox");
       expect(await choices.count()).toBeGreaterThan(1);
       await choices.first().check();

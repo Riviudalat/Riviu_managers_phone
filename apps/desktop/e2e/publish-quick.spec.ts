@@ -122,8 +122,8 @@ test("approved quick desk scans, selects, assigns and checks without public disp
     await expect(page.getByRole("textbox", {name:"Tìm số máy"})).toBeVisible();
   }
   await page.getByRole("button",{name:"Kiểm tra & đăng",exact:true}).click();
-  await expect(page.getByRole("button",{name:"Xác nhận đăng 10 bài",exact:true})).toBeEnabled();
+  await expect(page.getByRole("button",{name:"Xác nhận đăng công khai 10 bài",exact:true})).toBeEnabled();
   await expect(page.locator(".pq-run-options")).toHaveText("Sheet bật · Dọn bản chuyển bật");
-  await expect(page.getByRole("dialog", {name:"Kiểm tra đợt đăng"})).not.toContainText("Ghi Sheet đang tắt");
+  await expect(page.getByRole("dialog", {name: "Xem lại và xác nhận đăng công khai"})).not.toContainText("Ghi Sheet đang tắt");
   expect(await page.evaluate(() => (window as unknown as { __PUBLISH_CALLS__: { command: string }[] }).__PUBLISH_CALLS__.map(call => call.command))).toEqual(["publish_preflight"]);
 });

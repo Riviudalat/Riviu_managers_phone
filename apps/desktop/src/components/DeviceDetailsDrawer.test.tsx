@@ -7,6 +7,8 @@ vi.mock("../api", () => ({
   deviceActionCapabilities: vi.fn(),
   deviceAppCandidates: vi.fn(),
   deviceAppSelect: vi.fn(),
+  getDeviceMeta: vi.fn(async (udid: string) => ({ udid, notes: "", tags: [] })),
+  tiktokCredentialsList: vi.fn(async () => []),
 }));
 
 const device = {

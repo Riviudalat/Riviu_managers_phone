@@ -1175,6 +1175,24 @@ export async function installTauriMock(
       sheetUrl: "https://docs.google.com/spreadsheets/d/FIXTURE/edit#gid=0",
     }) : ({ configured: false, connected: false, active: false,
       clientId: "", pickerConfigured: false, phase: "idle" }));
+    // The Sheet panel re-proves the saved binding with a readonly read on mount; without it
+    // the panel shows an Unknown-mock error and never admits the publish preflight.
+    commandHandlers.set("google_sheets_verify_readonly", () => {
+      if (!fixtureOptions.publishSheetReady) throw new Error("Đăng nhập Google trước khi kiểm tra kết nối.");
+      const now = Date.now();
+      return {
+        readyRead: true,
+        result: {
+          sheetUrl: "https://docs.google.com/spreadsheets/d/FIXTURE/edit#gid=0", spreadsheetId: "FIXTURE", sheetGid: 0,
+          readable: true, connectionVerified: true, reportingReady: true, layout: "internal", columns: [], message: "Đã xác minh Sheet",
+        },
+        binding: {
+          clientId: "fixture.apps.googleusercontent.com", accountId: "account-a", spreadsheetId: "FIXTURE", sheetGid: 0,
+          writerId: "fixture-writer", reportingEpoch: null, authorizationGeneration: 0,
+        },
+        verifiedAt: now, expiresAt: now + 300_000, writePermission: "verified",
+      };
+    });
     commandHandlers.set("publish_sheet_save_config", () => ({
       webhookUrl: "",
       hasToken: false,

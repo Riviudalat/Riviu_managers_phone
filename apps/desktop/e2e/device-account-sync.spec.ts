@@ -15,6 +15,7 @@ for (const width of [1440, 820]) {
       };
       const original = w.__TAURI_INTERNALS__.invoke;
       const metas = [1, 2, 3].map(n => ({ udid: `MOCK-FLEET-${n}`, number: [1, 7, 9][n - 1], alias: `Máy phụ ${n}`, handle: "", notes: "", tags: [], groupId: null }));
+      const plans = new Map<string, { udid: string; expectedHandle: string; observedHandle: string }[]>();
       const pendingControl: (() => void)[] = [];
       let holdControl = true;
       w.__READY_SYNC__ = () => {
@@ -25,17 +26,25 @@ for (const width of [1440, 820]) {
       w.__TAURI_INTERNALS__.invoke = async (cmd, args = {}) => {
         if (cmd === "startup_error") return null;
         if (cmd === "list_device_metas") return structuredClone(metas);
-        if (cmd === "interaction_read_account") {
+        // Reconciliation is a read-only preview, then an apply of that exact operation.
+        if (cmd === "preview_account_reconciliation") {
           w.__MENU_CALLS__.push({ cmd, args });
-          const meta = metas.find(m => m.udid === args.udid)!;
-          return { udid: meta.udid, expectedHandle: meta.handle, observedHandle: `nick_${meta.number}`, status: meta.handle ? "matched" : "unassigned", checkedAt: new Date().toISOString(), snapshotSha256: "proof" };
+          const operationId = `op-${plans.size + 1}`;
+          const rows = (args.udids as string[]).map(udid => {
+            const meta = metas.find(m => m.udid === udid)!;
+            return { udid, expectedHandle: meta.handle, observedHandle: `nick_${meta.number}` };
+          });
+          plans.set(operationId, rows);
+          return { operationId, blocker: null, rows: rows.map(row => ({ ...row, checkedAt: new Date().toISOString(), snapshotSha256: "proof", error: null })) };
         }
-        if (cmd === "save_device_handle") {
-          w.__MENU_CALLS__.push({ cmd, args });
-          const meta = metas.find(m => m.udid === args.udid)!;
-          if (meta.handle !== args.expectedHandle) throw Error("stale account");
-          meta.handle = String(args.handle);
-          return meta.handle;
+        if (cmd === "apply_account_reconciliation") {
+          return plans.get(String(args.operationId))!.map(row => {
+            const meta = metas.find(m => m.udid === row.udid)!;
+            if (meta.handle !== row.expectedHandle) throw Error("stale account");
+            meta.handle = row.observedHandle;
+            w.__MENU_CALLS__.push({ cmd, args: { operationId: args.operationId, udid: row.udid } });
+            return row;
+          });
         }
         if (cmd === "device_control_begin") {
           if (!holdControl) return null;
@@ -118,7 +127,7 @@ for (const width of [1440, 820]) {
     await expect(tiles.nth(0).locator(".dev-phone-handle")).toHaveText("@nick_1");
     await expect(tiles.nth(1).locator(".dev-phone-handle")).toHaveText("@nick_7");
     await expect(tiles.nth(2).locator(".dev-phone-handle")).toHaveCount(0);
-    expect((await calls()).filter(c => c.cmd === "save_device_handle").map(c => c.args.udid)).toEqual(["MOCK-FLEET-1", "MOCK-FLEET-2"]);
+    expect((await calls()).filter(c => c.cmd === "apply_account_reconciliation").map(c => c.args.udid)).toEqual(["MOCK-FLEET-1", "MOCK-FLEET-2"]);
 
     await tiles.nth(2).click({ modifiers: ["Control"] });
     const toolbar = page.getByRole("group", { name: "Thao tác với máy đã chọn" });

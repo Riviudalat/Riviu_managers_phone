@@ -210,17 +210,17 @@ for (const viewport of [
       await expect(page.getByRole("checkbox", { name: label })).toHaveCount(0);
     }
     await page.getByRole("button", { name: "Kiểm tra & đăng", exact: true }).click();
-    await expect(page.getByRole("button", { name: "Xác nhận đăng 10 bài", exact: true })).toBeEnabled();
+    await expect(page.getByRole("button", { name: "Xác nhận đăng công khai 10 bài", exact: true })).toBeEnabled();
     await expect(page.getByText("Nhạc được chọn sau khi mở TikTok.", { exact: false })).toBeVisible();
     await page.screenshot({ path: test.info().outputPath(`preflight-${viewport.width}.png`) });
     const axe = await new AxeBuilder({ page }).include(".publish-dialog[open]").withTags(["wcag2a", "wcag2aa"]).analyze();
     expect(axe.violations).toEqual([]);
-    await page.getByRole("button", { name: "Xác nhận đăng 10 bài", exact: true }).click();
+    await page.getByRole("button", { name: "Xác nhận đăng công khai 10 bài", exact: true }).click();
     const publicConfirm = page.getByRole("alertdialog", { name: "Xác nhận đăng công khai?" });
     await expect(publicConfirm).toBeVisible();
     await expect(publicConfirm.getByRole("button", { name: "Đăng bài", exact: true })).toBeFocused();
     await publicConfirm.getByRole("button", { name: "Huỷ", exact: true }).click();
-    const checkDialog = page.getByRole("dialog", { name: "Kiểm tra đợt đăng" });
+    const checkDialog = page.getByRole("dialog", { name: "Xem lại và xác nhận đăng công khai" });
     await expect(checkDialog).toBeVisible();
     const calls = await page.evaluate(() => (window as unknown as { __PUBLISH_CALLS__: { command: string; args: { request?: { udids: string[]; bundleIds: string[]; deleteAfterPublish: boolean; sheetEnabled: boolean } } }[] }).__PUBLISH_CALLS__);
     expect(calls).toHaveLength(1);
