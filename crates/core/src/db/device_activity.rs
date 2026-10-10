@@ -138,7 +138,9 @@ mod tests {
             owner: DeviceWorkOwner::Script,
             since: "2026-09-07T00:01:00Z".parse().unwrap(),
         };
-        let rows = db.device_activity_progress(&[scope.clone()]).unwrap();
+        let rows = db
+            .device_activity_progress(std::slice::from_ref(&scope))
+            .unwrap();
         assert_eq!(
             rows.len(),
             1,
@@ -183,7 +185,7 @@ mod tests {
         };
         db.save_job(&job).unwrap();
         assert!(
-            db.device_activity_progress(&[scope.clone()])
+            db.device_activity_progress(std::slice::from_ref(&scope))
                 .unwrap()
                 .is_empty(),
             "two active sources under shared Script ownership are ambiguous"
@@ -219,14 +221,18 @@ mod tests {
             owner: DeviceWorkOwner::Interaction,
             since: "2026-09-07T00:01:00Z".parse().unwrap(),
         };
-        let rows = db.device_activity_progress(&[interaction.clone()]).unwrap();
+        let rows = db
+            .device_activity_progress(std::slice::from_ref(&interaction))
+            .unwrap();
         assert_eq!(
             (rows[0].action.as_str(), rows[0].state.as_str()),
             ("like", "armed")
         );
         conn.execute("UPDATE tiktok_action_runs SET state='confirmed',updated_at='2026-09-07T00:02:02Z' WHERE id='like'", []).unwrap();
         assert_eq!(
-            db.device_activity_progress(&[interaction.clone()]).unwrap()[0].state,
+            db.device_activity_progress(std::slice::from_ref(&interaction))
+                .unwrap()[0]
+                .state,
             "confirmed"
         );
         conn.execute("UPDATE interaction_assignments SET state='succeeded',updated_at='2026-09-07T00:02:03Z' WHERE id='like-only'", []).unwrap();

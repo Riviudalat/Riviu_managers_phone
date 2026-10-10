@@ -321,12 +321,12 @@ async fn capture_interaction_evidence(
             path
         ],
         |db| db.add_interaction_artifact(
-            &campaign_id,
-            &target_key,
-            Some(&assignment_id),
-            &kind,
-            &metadata_text,
-            &sha,
+            campaign_id,
+            target_key,
+            Some(assignment_id),
+            kind,
+            metadata_text,
+            sha,
             path.as_deref(),
         )
     ) {
@@ -680,7 +680,7 @@ async fn file_target_context(
     };
     if let Err(error) =
         interaction_mutation!(db, "target_context", [campaign_id, target, json], |db| db
-            .record_interaction_target_context(campaign_id, &target.target_key, &json))
+            .record_interaction_target_context(campaign_id, &target.target_key, json))
     {
         tracing::warn!(
             "interaction {}: không ghi được ghi chú web: {error}",
@@ -1108,9 +1108,9 @@ pub async fn execute_thread_campaign(
             "claim_conversation",
             [campaign_id, script, token],
             |db| db.claim_conversation_session(
-                &campaign_id,
+                campaign_id,
                 script,
-                &token,
+                token,
                 chrono::Utc::now().timestamp_millis(),
             )
         ) {
@@ -1616,7 +1616,7 @@ async fn join_campaign(
         let _ =
             interaction_mutation!(db, "settle_campaign", [campaign_id, reason], |db| db
                 .settle_interaction_campaign_if_running(
-                    &campaign_id,
+                    campaign_id,
                     final_state,
                     reason.as_deref(),
                 ))?;
@@ -2382,10 +2382,10 @@ async fn run_cohort(
             "ensure_actions",
             [campaign_id, assignment, request],
             |db| db.ensure_interaction_action_runs(
-                &campaign_id,
+                campaign_id,
                 &assignment.id,
                 request.seeding.as_ref().map_or(request.actions, |s| {
-                    s.actions_for(&request, assignment.ordinal)
+                    s.actions_for(request, assignment.ordinal)
                 }),
             )
         )?;
@@ -2543,12 +2543,12 @@ async fn run_cohort(
                             only_assignments
                         ],
                         |db| fail_whole_target(
-                            &db,
-                            &plan,
-                            &assignment_ids,
-                            &protected,
+                            db,
+                            plan,
+                            assignment_ids,
+                            protected,
                             target,
-                            &failure_detail,
+                            failure_detail,
                             only_assignments.as_ref(),
                         )
                     )?;
@@ -2838,8 +2838,8 @@ async fn run_cohort(
                 "release_cancelled",
                 [campaign_id, prepared_messages],
                 |db| release_cancelled_preparations_if_needed(
-                    &db,
-                    &campaign_id,
+                    db,
+                    campaign_id,
                     &prepared_messages[index..],
                 )
             )? {
@@ -2890,7 +2890,7 @@ async fn run_cohort(
                             id,
                             *ownership_revision,
                             ThreadMessageState::Failed,
-                            Some(&failure_detail),
+                            Some(failure_detail),
                             None,
                         )
                     )?;
@@ -2954,7 +2954,7 @@ async fn run_cohort(
                     let account=crate::tiktok_share::observe_publish_account(session.as_ref(),&labels).await?;
                     anyhow::ensure!(account.eq_ignore_ascii_case(role.username.trim_start_matches('@')),"Tài khoản trên máy không khớp vai {}",role.role_id);
                     driver.bind_account(&account);
-                    interaction_mutation!(db, "observed_account", [prepared, account], |db| db.record_observed_interaction_account(&prepared.actor_udid,&account))?;
+                    interaction_mutation!(db, "observed_account", [prepared, account], |db| db.record_observed_interaction_account(&prepared.actor_udid,account))?;
                 } else if request.actions.any() && session.supports_accessibility_readback() {
                     let language=session.ui_language().await.context("Chưa đọc được ngôn ngữ TikTok")?;
                     let version=session.app_version(&opened_package).await.context("Chưa đọc được phiên bản TikTok")?;
@@ -2965,7 +2965,7 @@ async fn run_cohort(
                         anyhow::ensure!(!expected.is_empty()&&account.eq_ignore_ascii_case(expected.trim().trim_start_matches('@')), "Tài khoản trên máy không khớp nick đã gán; chưa tương tác");
                     }
                     driver.bind_account(&account);
-                    interaction_mutation!(db, "observed_account", [prepared, account], |db| db.record_observed_interaction_account(&prepared.actor_udid,&account))?;
+                    interaction_mutation!(db, "observed_account", [prepared, account], |db| db.record_observed_interaction_account(&prepared.actor_udid,account))?;
                 }
                 if actions.comment && request.mention_parent && prepared.parent_ordinal.is_some() {
                     anyhow::ensure!(!prepared.mentions.is_empty(),"Chưa xác định username của người được trả lời; chưa gửi bình luận");
@@ -3236,7 +3236,7 @@ async fn run_cohort(
                 if session.supports_accessibility_readback() {
                     let account=request.scripted_conversation.as_ref().and_then(|s|s.role_bindings.iter().find(|r|r.udid==prepared.actor_udid).map(|r|r.username.clone())).unwrap_or(db.get_device_meta(&prepared.actor_udid)?.handle);
                     let verification=crate::comment_verification::VerificationContext{target:target.clone(),device_id:prepared.actor_udid.clone(),account,text:prepared.text.clone(),mentions:prepared.mentions.clone(),parent:parent_identity.clone(),root:prepared.root_identity.clone()};
-                    interaction_mutation!(db, "prepare_comment_verification", [id, verification], |db| db.prepare_comment_verification(id,&verification))?;
+                    interaction_mutation!(db, "prepare_comment_verification", [id, verification], |db| db.prepare_comment_verification(id,verification))?;
                     let draft_db=db.clone();let draft_id=id.clone();
                     effect_gate.record_draft_with(move |text|{let mut context=verification.clone();context.text=text.into();draft_db.prepare_comment_verification(&draft_id,&context)});
                 }
@@ -3439,7 +3439,7 @@ async fn run_cohort(
                 "artifact",
                 [campaign_id, target, id, cleanup_evidence],
                 |db| db.add_interaction_artifact(
-                    &campaign_id,
+                    campaign_id,
                     &target.target_key,
                     Some(id),
                     "tiktok-cleanup",
@@ -3452,7 +3452,7 @@ async fn run_cohort(
                 let cleanup_detail = format!("{}: {error}", prepared.actor_udid);
                 let _ = interaction_mutation!(db, "operation_log", [cleanup_detail], |db| db.log_op(
                     "interaction.cleanup.failed",
-                    &cleanup_detail,
+                    cleanup_detail,
                 ));
             }
             if effect_claim_lost {
@@ -3545,7 +3545,7 @@ async fn run_cohort(
                             } else {
                                 terminal_note.as_deref()
                             },
-                            Some(&evidence_text),
+                            Some(evidence_text),
                         )
                     )?;
                     if !settled {
@@ -3587,8 +3587,8 @@ async fn run_cohort(
                             id,
                             *ownership_revision,
                             state,
-                            Some(&failure_detail),
-                            Some(&failure_evidence),
+                            Some(failure_detail),
+                            Some(failure_evidence),
                         )
                     )?;
                     failed += 1;

@@ -138,11 +138,20 @@ impl DeviceControlPlane {
     }
     /// Diagnostic preparation retains ownership when session setup fails after helper setup.
     pub async fn start_interaction_session_or_quarantine(
-        &self, context: DeviceExclusiveContext, bundle_id: &str, kind: InteractionSessionKind,
+        &self,
+        context: DeviceExclusiveContext,
+        bundle_id: &str,
+        kind: InteractionSessionKind,
     ) -> Result<UiSessionContext, DeviceControlError> {
-        match self.try_start_interaction_session(context, bundle_id, kind).await {
+        match self
+            .try_start_interaction_session(context, bundle_id, kind)
+            .await
+        {
             Ok(session) => Ok(session),
-            Err(failure) => { self.quarantined.push_context(failure.context); Err(failure.error) }
+            Err(failure) => {
+                self.quarantined.push_context(failure.context);
+                Err(failure.error)
+            }
         }
     }
 
@@ -222,9 +231,16 @@ impl DeviceControlPlane {
             })
     }
     /// Retain a failed helper-canary lease until explicit reconciliation.
-    pub fn quarantine_exclusive_context(&self, context: DeviceExclusiveContext) -> Result<(), DeviceControlError> {
+    pub fn quarantine_exclusive_context(
+        &self,
+        context: DeviceExclusiveContext,
+    ) -> Result<(), DeviceControlError> {
         let same_plane = context.plane_id == self.plane_id;
-        if !same_plane { return Err(DeviceControlError::InvalidContext { reason: "quarantine context belongs to another plane" }); }
+        if !same_plane {
+            return Err(DeviceControlError::InvalidContext {
+                reason: "quarantine context belongs to another plane",
+            });
+        }
         self.quarantined.push_context(context);
         Ok(())
     }
@@ -758,48 +774,47 @@ pub(super) async fn execute_recovery(
             .inspect_app_process(&plan.binding.udid, &plan.package)
             .await
             .map_err(|error| driver_error(&plan.binding.udid, "recheckRecoveryProcess", error))?;
-        if ticket.recovery_process.is_none() {
-            let package = driver
-                .read_active_app_bundle(&plan.binding.udid)
-                .await
-                .map_err(|error| {
-                    driver_error(&plan.binding.udid, "recheckRecoveryPackage", error)
-                })?;
-            if package != plan.package
-                || process.bundle_id != plan.package
-                || !process.running
-                || process.pid != Some(plan.observed_pid)
-            {
-                return Err(recovery_error("prepared foreground package/PID changed"));
+        match ticket.recovery_process.as_ref() {
+            None => {
+                let package = driver
+                    .read_active_app_bundle(&plan.binding.udid)
+                    .await
+                    .map_err(|error| {
+                        driver_error(&plan.binding.udid, "recheckRecoveryPackage", error)
+                    })?;
+                if package != plan.package
+                    || process.bundle_id != plan.package
+                    || !process.running
+                    || process.pid != Some(plan.observed_pid)
+                {
+                    return Err(recovery_error("prepared foreground package/PID changed"));
+                }
+                validate_recovery_ticket(ticket, work, streams, plane_id, &plan.binding)?;
+                recovery_not_cancelled(&response)?;
+                let proof = driver
+                    .terminate_app(&plan.binding.udid, &plan.package)
+                    .await
+                    .map_err(|error| {
+                        driver_error(&plan.binding.udid, "terminateQuarantinedTikTok", error)
+                    })?;
+                if proof.bundle_id != plan.package || proof.old_pid != Some(plan.observed_pid) {
+                    return Err(recovery_error(
+                        "termination did not prove the prepared package/PID",
+                    ));
+                }
+                ticket.recovery_process = Some(proof);
             }
-            validate_recovery_ticket(ticket, work, streams, plane_id, &plan.binding)?;
-            recovery_not_cancelled(&response)?;
-            let proof = driver
-                .terminate_app(&plan.binding.udid, &plan.package)
-                .await
-                .map_err(|error| {
-                    driver_error(&plan.binding.udid, "terminateQuarantinedTikTok", error)
-                })?;
-            if proof.bundle_id != plan.package || proof.old_pid != Some(plan.observed_pid) {
-                return Err(recovery_error(
-                    "termination did not prove the prepared package/PID",
-                ));
-            }
-            ticket.recovery_process = Some(proof);
-        } else {
-            let prior = ticket
-                .recovery_process
-                .as_ref()
-                .expect("retained process proof");
-            if prior.bundle_id != plan.package
-                || prior.old_pid != Some(plan.observed_pid)
-                || process.bundle_id != plan.package
-                || process.running
-                || process.pid.is_some()
-            {
-                return Err(recovery_error(
+            Some(prior) => {
+                if prior.bundle_id != plan.package
+                    || prior.old_pid != Some(plan.observed_pid)
+                    || process.bundle_id != plan.package
+                    || process.running
+                    || process.pid.is_some()
+                {
+                    return Err(recovery_error(
                     "terminated TikTok restarted or proof changed; retained ticket not releasable",
                 ));
+                }
             }
         }
         recovery_not_cancelled(&response)?;

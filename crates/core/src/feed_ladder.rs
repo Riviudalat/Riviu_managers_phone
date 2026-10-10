@@ -616,13 +616,17 @@ mod tests {
                 ElementQuery::ResourceIdSuffix(suffix) => {
                     if let Some(xml) = &self.xml {
                         let tree = crate::ui_automation::tree::Tree::parse(
-                            crate::HierarchySourceSnapshot { generation: 1, xml: xml.clone() },
+                            crate::HierarchySourceSnapshot {
+                                generation: 1,
+                                xml: xml.clone(),
+                            },
                         )?;
                         return Ok(tree.nodes.iter().enumerate().find_map(|(index, node)| {
                             (node.attr("resource-id").ends_with(suffix)
                                 && node.visibility() == Some(true)
                                 && tree.ancestors_visible(index))
-                                .then(|| node.rect()).flatten()
+                            .then(|| node.rect())
+                            .flatten()
                         }));
                     }
                     false
@@ -698,7 +702,8 @@ mod tests {
     /// Keep this at the ladder boundary so a recognizer without its caller still fails.
     #[tokio::test]
     async fn optional_location_permission_declines_only_the_measured_tiktok_prompt() {
-        let xml = include_str!("../fixtures/tiktok-publish/optional-location-trill-38.3.2-en.fixture");
+        let xml =
+            include_str!("../fixtures/tiktok-publish/optional-location-trill-38.3.2-en.fixture");
         // (xml, decline taps, the unanswered container still shows as a modal)
         for (xml, expected_taps, modal) in [
             (xml.to_owned(), 1, true),
@@ -722,9 +727,10 @@ mod tests {
             assert_eq!(phone.backs.load(Ordering::Relaxed), 0);
             if expected_taps == 1 {
                 assert!(matches!(result, LadderStep::Tapped { control: TikTokControl::DialogDismiss, .. }));
-                let points = phone.tapped.lock().unwrap();
-                assert_eq!((points[0].x, points[0].y), (710.0, 1176.0));
-                drop(points);
+                {
+                    let points = phone.tapped.lock().unwrap();
+                    assert_eq!((points[0].x, points[0].y), (710.0, 1176.0));
+                }
                 assert_eq!(step(&phone, measured(), &mut spend).await, LadderStep::Stuck);
                 assert_eq!(phone.taps(), 1, "unchanged modal must not be replayed");
             } else if modal {

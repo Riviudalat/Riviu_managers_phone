@@ -150,20 +150,37 @@ fn unique(
     }
     node.rect().context("no-public publish role geometry")
 }
-fn navigation_target(tree: &Tree, labels: TikTokControls, query: ElementQuery<'_>) -> anyhow::Result<ElementBox> {
+fn navigation_target(
+    tree: &Tree,
+    labels: TikTokControls,
+    query: ElementQuery<'_>,
+) -> anyhow::Result<ElementBox> {
     let target = unique(tree, labels, query, true)?;
     let found = indices(tree, labels, query);
-    let [index] = found.as_slice() else { anyhow::bail!("navigation role ambiguous") };
+    let [index] = found.as_slice() else {
+        anyhow::bail!("navigation role ambiguous")
+    };
     let target_index = *index;
     for (other_index, node) in tree.nodes.iter().enumerate() {
-        if other_index == target_index || !node.visible(labels.package()) || !tree.ancestors_visible(other_index)
-            || node.attr("clickable") != "true" { continue }
-        if node.rect().is_some_and(|r| r.x < target.x + target.width && r.x + r.width > target.x
-            && r.y < target.y + target.height && r.y + r.height > target.y) {
+        if other_index == target_index
+            || !node.visible(labels.package())
+            || !tree.ancestors_visible(other_index)
+            || node.attr("clickable") != "true"
+        {
+            continue;
+        }
+        if node.rect().is_some_and(|r| {
+            r.x < target.x + target.width
+                && r.x + r.width > target.x
+                && r.y < target.y + target.height
+                && r.y + r.height > target.y
+        }) {
             let background = node.attr("class") == "android.widget.FrameLayout"
                 && node.attr("resource-id") == "com.zhiliaoapp.musically:id/hpk"
-                && node.attr("text").is_empty() && node.attr("content-desc").is_empty()
-                && labels.package() == "com.zhiliaoapp.musically" && labels.resource_version() == Some("45.7.3");
+                && node.attr("text").is_empty()
+                && node.attr("content-desc").is_empty()
+                && labels.package() == "com.zhiliaoapp.musically"
+                && labels.resource_version() == Some("45.7.3");
             anyhow::ensure!(background, "no-public navigation actionable overlap");
         }
     }
@@ -222,6 +239,8 @@ fn feed_proof(
 }
 
 /// Refuses stale draft/upload before Back/Discard, account navigation or transfer.
+// The arguments mirror the no-public canary tuple checked by four callers; bundling them would change every caller for no behaviour gain.
+#[allow(clippy::too_many_arguments)]
 pub async fn prove_safe_publish_screen<'a>(
     session: &'a dyn UiSession,
     labels: TikTokControls,
@@ -234,8 +253,12 @@ pub async fn prove_safe_publish_screen<'a>(
 ) -> anyhow::Result<SafePublishScreen<'a>> {
     validate(caption, images)?;
     anyhow::ensure!(
-        labels.language() == "en" && matches!((labels.package(), labels.resource_version()),
-            ("com.ss.android.ugc.trill", Some("38.3.2")) | ("com.zhiliaoapp.musically", Some("45.7.3"))),
+        labels.language() == "en"
+            && matches!(
+                (labels.package(), labels.resource_version()),
+                ("com.ss.android.ugc.trill", Some("38.3.2"))
+                    | ("com.zhiliaoapp.musically", Some("45.7.3"))
+            ),
         "no-public publish first canary tuple unsupported"
     );
     anyhow::ensure!(
@@ -259,7 +282,8 @@ pub async fn prove_safe_publish_screen<'a>(
     // Reuse production account navigation while keeping deadline/public-point
     // checks. Profile/Home use exact unique actionable roles rather than rejecting
     // every background container. Any navigation failure retains ownership.
-    let account = crate::tiktok_share::observe_publish_account(&guard, &labels).await
+    let account = crate::tiktok_share::observe_publish_account(&guard, &labels)
+        .await
         .map_err(|error| error.context(SafeScreenNeedsAttention))?;
     if !account
         .trim_start_matches('@')
@@ -362,8 +386,14 @@ pub async fn prepare_images_before_post(
             .is_some_and(|error| error.is::<StopBeforePost>())
         && selected.as_ref().is_some_and(|s| s.confirmed);
     if !reached {
-        let code = result.as_ref().err().map(|error| crate::publish_recovery::describe(error).code);
-        let _ = phase("composerPreparationBlocked", &serde_json::json!({"failureCode":code,"boundaryCalls":calls,"publicPostDenied":true}));
+        let code = result
+            .as_ref()
+            .err()
+            .map(|error| crate::publish_recovery::describe(error).code);
+        let _ = phase(
+            "composerPreparationBlocked",
+            &serde_json::json!({"failureCode":code,"boundaryCalls":calls,"publicPostDenied":true}),
+        );
     }
     let snapshot = guard.hierarchy_source_snapshot().await;
     let final_proof = if reached {
@@ -550,8 +580,17 @@ impl<'a> PrepareSession<'a> {
     }
     fn sound_navigation_ids(&self) -> &'static [&'static str] {
         match (self.labels.package(), self.labels.resource_version()) {
-            ("com.ss.android.ugc.trill", Some("38.3.2")) => &[":id/c_4", ":id/ta8", ":id/title", ":id/aun"],
-            ("com.zhiliaoapp.musically", Some("45.7.3")) => &[":id/dou", ":id/tv_top_text", ":id/wrv", ":id/vertical_item_music_new_rl", ":id/title", ":id/bix"],
+            ("com.ss.android.ugc.trill", Some("38.3.2")) => {
+                &[":id/c_4", ":id/ta8", ":id/title", ":id/aun"]
+            }
+            ("com.zhiliaoapp.musically", Some("45.7.3")) => &[
+                ":id/dou",
+                ":id/tv_top_text",
+                ":id/wrv",
+                ":id/vertical_item_music_new_rl",
+                ":id/title",
+                ":id/bix",
+            ],
             _ => &[],
         }
     }
@@ -733,17 +772,23 @@ impl UiSession for PrepareSession<'_> {
         let stable_navigation = if self.account_navigation && !self.cleanup {
             let first = Tree::parse(before.clone())?;
             let second = Tree::parse(after.clone())?;
-            [TikTokControl::ProfileTab, TikTokControl::HomeTab].into_iter().any(|role| {
-                self.labels.label(role).is_some_and(|label| {
-                    let a = navigation_target(&first, self.labels, label.to_query());
-                    let b = navigation_target(&second, self.labels, label.to_query());
-                    match (a, b) {
-                        (Ok(a), Ok(b)) => a == b && a.centre().x == point.x && a.centre().y == point.y,
-                        _ => false,
-                    }
+            [TikTokControl::ProfileTab, TikTokControl::HomeTab]
+                .into_iter()
+                .any(|role| {
+                    self.labels.label(role).is_some_and(|label| {
+                        let a = navigation_target(&first, self.labels, label.to_query());
+                        let b = navigation_target(&second, self.labels, label.to_query());
+                        match (a, b) {
+                            (Ok(a), Ok(b)) => {
+                                a == b && a.centre().x == point.x && a.centre().y == point.y
+                            }
+                            _ => false,
+                        }
+                    })
                 })
-            })
-        } else { false };
+        } else {
+            false
+        };
         anyhow::ensure!(
             after.generation > before.generation && (before.xml == after.xml || stable_navigation),
             "no-public publish layout changed before tap"
@@ -910,12 +955,29 @@ mod tests {
         let phone = Phone::new(String::new());
         let stop = AtomicBool::new(false);
         let deadline = Instant::now() + Duration::from_secs(10);
-        let global = crate::tiktok_labels::controls_for("com.zhiliaoapp.musically", "en", "45.7.3").unwrap();
+        let global =
+            crate::tiktok_labels::controls_for("com.zhiliaoapp.musically", "en", "45.7.3").unwrap();
         let global_plan = ComposerPlan::resolve(&global).unwrap();
-        let guard = PrepareSession::new(&phone, global, global_plan, "fixture-epoch", &stop, deadline, false);
+        let guard = PrepareSession::new(
+            &phone,
+            global,
+            global_plan,
+            "fixture-epoch",
+            &stop,
+            deadline,
+            false,
+        );
         assert!(guard.sound_navigation_ids().contains(&":id/dou"));
         assert!(!guard.sound_navigation_ids().contains(&":id/c_4"));
-        let trill = PrepareSession::new(&phone, labels(), plan(), "fixture-epoch", &stop, deadline, false);
+        let trill = PrepareSession::new(
+            &phone,
+            labels(),
+            plan(),
+            "fixture-epoch",
+            &stop,
+            deadline,
+            false,
+        );
         assert!(trill.sound_navigation_ids().contains(&":id/c_4"));
         assert!(!trill.sound_navigation_ids().contains(&":id/dou"));
     }
@@ -981,9 +1043,19 @@ mod tests {
                 match point.y as u32 {
                     330 => {
                         let mut xml = String::from("<hierarchy>");
-                        xml += &element(labels().label(TikTokControl::HomeTab).unwrap().to_query(), 200, "");
-                        xml += &format!(r#"<node package="{PACKAGE}" class="android.widget.TextView" resource-id="{PACKAGE}:id/dby" text="Edit profile" displayed="true" enabled="true" clickable="true" bounds="[100,500][300,560]"/>"#);
-                        xml += &element(ElementQuery::ResourceIdSuffix(":id/mjf"), 600, "@fixture.actor");
+                        xml += &element(
+                            labels().label(TikTokControl::HomeTab).unwrap().to_query(),
+                            200,
+                            "",
+                        );
+                        xml += &format!(
+                            r#"<node package="{PACKAGE}" class="android.widget.TextView" resource-id="{PACKAGE}:id/dby" text="Edit profile" displayed="true" enabled="true" clickable="true" bounds="[100,500][300,560]"/>"#
+                        );
+                        xml += &element(
+                            ElementQuery::ResourceIdSuffix(":id/mjf"),
+                            600,
+                            "@fixture.actor",
+                        );
                         *self.xml.lock() = xml + "</hierarchy>";
                     }
                     230 => *self.xml.lock() = feed_xml(),
@@ -1048,34 +1120,76 @@ mod tests {
     }
     #[tokio::test(start_paused = true)]
     async fn measured_profile_background_exception_is_preflight_only_and_exact_center() {
-        let global = crate::tiktok_labels::controls_for("com.zhiliaoapp.musically", "en", "45.7.3").unwrap();
+        let global =
+            crate::tiktok_labels::controls_for("com.zhiliaoapp.musically", "en", "45.7.3").unwrap();
         let global_plan = ComposerPlan::resolve(&global).unwrap();
-        let xml = include_str!("../../fixtures/tiktok-publish/musically-45.7.3-en/profile-background-order.xml");
+        let xml = include_str!(
+            "../../fixtures/tiktok-publish/musically-45.7.3-en/profile-background-order.xml"
+        );
         let phone = Phone::new(xml.into());
         // This helper validates a point; no underlying tap or public trap runs.
         struct GlobalPhone<'a>(&'a Phone);
         #[async_trait::async_trait]
         impl UiSession for GlobalPhone<'_> {
-            async fn tap(&self, _: crate::TapPoint) -> anyhow::Result<()> { panic!("point proof must not dispatch") }
-            async fn swipe(&self, _: crate::SwipeGesture) -> anyhow::Result<()> { panic!("no swipe") }
-            async fn type_text(&self, _: &str) -> anyhow::Result<()> { panic!("no type") }
-            async fn home(&self) -> anyhow::Result<()> { panic!("no Home") }
-            async fn find_and_tap(&self, _: &str) -> anyhow::Result<()> { panic!("no find tap") }
-            async fn assert_visible(&self, _: &str) -> anyhow::Result<()> { Ok(()) }
-            fn stream_url(&self) -> Option<String> { None }
-            fn gui_session_epoch(&self) -> String { "fixture-epoch".into() }
-            async fn active_app_bundle(&self) -> anyhow::Result<String> { Ok("com.zhiliaoapp.musically".into()) }
-            async fn hierarchy_source_snapshot(&self) -> anyhow::Result<crate::HierarchySourceSnapshot> { self.0.hierarchy_source_snapshot().await }
+            async fn tap(&self, _: crate::TapPoint) -> anyhow::Result<()> {
+                panic!("point proof must not dispatch")
+            }
+            async fn swipe(&self, _: crate::SwipeGesture) -> anyhow::Result<()> {
+                panic!("no swipe")
+            }
+            async fn type_text(&self, _: &str) -> anyhow::Result<()> {
+                panic!("no type")
+            }
+            async fn home(&self) -> anyhow::Result<()> {
+                panic!("no Home")
+            }
+            async fn find_and_tap(&self, _: &str) -> anyhow::Result<()> {
+                panic!("no find tap")
+            }
+            async fn assert_visible(&self, _: &str) -> anyhow::Result<()> {
+                Ok(())
+            }
+            fn stream_url(&self) -> Option<String> {
+                None
+            }
+            fn gui_session_epoch(&self) -> String {
+                "fixture-epoch".into()
+            }
+            async fn active_app_bundle(&self) -> anyhow::Result<String> {
+                Ok("com.zhiliaoapp.musically".into())
+            }
+            async fn hierarchy_source_snapshot(
+                &self,
+            ) -> anyhow::Result<crate::HierarchySourceSnapshot> {
+                self.0.hierarchy_source_snapshot().await
+            }
         }
         let phone = GlobalPhone(&phone);
         let stop = AtomicBool::new(false);
         let deadline = Instant::now() + Duration::from_secs(10);
-        let mut guard = PrepareSession::new(&phone, global, global_plan, "fixture-epoch", &stop, deadline, false);
-        let center = crate::TapPoint { x: 972.0, y: 2029.5 };
+        let mut guard = PrepareSession::new(
+            &phone,
+            global,
+            global_plan,
+            "fixture-epoch",
+            &stop,
+            deadline,
+            false,
+        );
+        let center = crate::TapPoint {
+            x: 972.0,
+            y: 2029.5,
+        };
         assert!(guard.safe_point(&center).await.is_err());
         guard.account_navigation = true;
         guard.safe_point(&center).await.unwrap();
-        assert!(guard.safe_point(&crate::TapPoint { x: 973.0, y: 2029.5 }).await.is_err());
+        assert!(guard
+            .safe_point(&crate::TapPoint {
+                x: 973.0,
+                y: 2029.5
+            })
+            .await
+            .is_err());
         guard.cleanup = true;
         assert!(guard.safe_point(&center).await.is_err());
     }
@@ -1091,59 +1205,150 @@ mod tests {
         }
         #[async_trait::async_trait]
         impl UiSession for Fixture {
-            async fn tap(&self, _: crate::TapPoint) -> anyhow::Result<()> { panic!("point proof must not dispatch") }
-            async fn swipe(&self, _: crate::SwipeGesture) -> anyhow::Result<()> { panic!("no swipe") }
-            async fn type_text(&self, _: &str) -> anyhow::Result<()> { panic!("no type") }
-            async fn home(&self) -> anyhow::Result<()> { panic!("no Home") }
+            async fn tap(&self, _: crate::TapPoint) -> anyhow::Result<()> {
+                panic!("point proof must not dispatch")
+            }
+            async fn swipe(&self, _: crate::SwipeGesture) -> anyhow::Result<()> {
+                panic!("no swipe")
+            }
+            async fn type_text(&self, _: &str) -> anyhow::Result<()> {
+                panic!("no type")
+            }
+            async fn home(&self) -> anyhow::Result<()> {
+                panic!("no Home")
+            }
             async fn back(&self) -> anyhow::Result<()> {
                 self.backs.fetch_add(1, Ordering::Relaxed);
                 Ok(())
             }
-            async fn find_and_tap(&self, _: &str) -> anyhow::Result<()> { panic!("no find tap") }
-            async fn assert_visible(&self, _: &str) -> anyhow::Result<()> { Ok(()) }
-            fn stream_url(&self) -> Option<String> { None }
-            fn gui_session_epoch(&self) -> String { "fixture-epoch".into() }
-            async fn active_app_bundle(&self) -> anyhow::Result<String> { Ok("com.zhiliaoapp.musically".into()) }
-            async fn hierarchy_source_snapshot(&self) -> anyhow::Result<crate::HierarchySourceSnapshot> {
-                Ok(crate::HierarchySourceSnapshot { generation: 1, xml: self.xml.into() })
+            async fn find_and_tap(&self, _: &str) -> anyhow::Result<()> {
+                panic!("no find tap")
+            }
+            async fn assert_visible(&self, _: &str) -> anyhow::Result<()> {
+                Ok(())
+            }
+            fn stream_url(&self) -> Option<String> {
+                None
+            }
+            fn gui_session_epoch(&self) -> String {
+                "fixture-epoch".into()
+            }
+            async fn active_app_bundle(&self) -> anyhow::Result<String> {
+                Ok("com.zhiliaoapp.musically".into())
+            }
+            async fn hierarchy_source_snapshot(
+                &self,
+            ) -> anyhow::Result<crate::HierarchySourceSnapshot> {
+                Ok(crate::HierarchySourceSnapshot {
+                    generation: 1,
+                    xml: self.xml.into(),
+                })
             }
         }
-        let global = crate::tiktok_labels::controls_for("com.zhiliaoapp.musically", "en", "45.7.3").unwrap();
+        let global =
+            crate::tiktok_labels::controls_for("com.zhiliaoapp.musically", "en", "45.7.3").unwrap();
         let global_plan = ComposerPlan::resolve(&global).unwrap();
         let stop = AtomicBool::new(false);
         let deadline = Instant::now() + Duration::from_secs(10);
-        let session = |xml| Fixture { xml, backs: AtomicUsize::new(0) };
+        let session = |xml| Fixture {
+            xml,
+            backs: AtomicUsize::new(0),
+        };
 
         // Author button [32,1687][368,1745], the only `:id/title` on the card.
-        let feed = session(include_str!("../../fixtures/tiktok-publish/musically-45.7.3-en/real-20261009-home-feed.xml"));
-        let guard = PrepareSession::new(&feed, global, global_plan, "fixture-epoch", &stop, deadline, false);
-        assert!(guard.safe_point(&crate::TapPoint { x: 200.0, y: 1716.0 }).await.is_err());
+        let feed = session(include_str!(
+            "../../fixtures/tiktok-publish/musically-45.7.3-en/real-20261009-home-feed.xml"
+        ));
+        let guard = PrepareSession::new(
+            &feed,
+            global,
+            global_plan,
+            "fixture-epoch",
+            &stop,
+            deadline,
+            false,
+        );
+        assert!(guard
+            .safe_point(&crate::TapPoint {
+                x: 200.0,
+                y: 1716.0
+            })
+            .await
+            .is_err());
         assert!(guard.back().await.is_err());
         assert_eq!(feed.backs.load(Ordering::Relaxed), 0);
 
         // The editor's Back [32,95][137,200]: same id, no caption field beside it.
-        let editor = session(include_str!("../../fixtures/tiktok-publish/musically-45.7.3-en/real-20261009-editor.xml"));
-        let guard = PrepareSession::new(&editor, global, global_plan, "fixture-epoch", &stop, deadline, false);
-        assert!(guard.safe_point(&crate::TapPoint { x: 84.0, y: 147.0 }).await.is_err());
+        let editor = session(include_str!(
+            "../../fixtures/tiktok-publish/musically-45.7.3-en/real-20261009-editor.xml"
+        ));
+        let guard = PrepareSession::new(
+            &editor,
+            global,
+            global_plan,
+            "fixture-epoch",
+            &stop,
+            deadline,
+            false,
+        );
+        assert!(guard
+            .safe_point(&crate::TapPoint { x: 84.0, y: 147.0 })
+            .await
+            .is_err());
 
         // The caption page's Back is the measured post-back control.
-        let caption = session(include_str!("../../fixtures/tiktok-publish/musically-45.7.3-en/18-typed.xml"));
-        let guard = PrepareSession::new(&caption, global, global_plan, "fixture-epoch", &stop, deadline, false);
-        guard.safe_point(&crate::TapPoint { x: 84.0, y: 147.0 }).await.unwrap();
+        let caption = session(include_str!(
+            "../../fixtures/tiktok-publish/musically-45.7.3-en/18-typed.xml"
+        ));
+        let guard = PrepareSession::new(
+            &caption,
+            global,
+            global_plan,
+            "fixture-epoch",
+            &stop,
+            deadline,
+            false,
+        );
+        guard
+            .safe_point(&crate::TapPoint { x: 84.0, y: 147.0 })
+            .await
+            .unwrap();
         // ...only while it carries this build's `@2131823215` desc.
-        let renamed = include_str!("../../fixtures/tiktok-publish/musically-45.7.3-en/18-typed.xml")
-            .replace("@2131823215", "@2131823216");
+        let renamed =
+            include_str!("../../fixtures/tiktok-publish/musically-45.7.3-en/18-typed.xml")
+                .replace("@2131823215", "@2131823216");
         let renamed = session(Box::leak(renamed.into_boxed_str()));
-        let guard = PrepareSession::new(&renamed, global, global_plan, "fixture-epoch", &stop, deadline, false);
-        assert!(guard.safe_point(&crate::TapPoint { x: 84.0, y: 147.0 }).await.is_err());
+        let guard = PrepareSession::new(
+            &renamed,
+            global,
+            global_plan,
+            "fixture-epoch",
+            &stop,
+            deadline,
+            false,
+        );
+        assert!(guard
+            .safe_point(&crate::TapPoint { x: 84.0, y: 147.0 })
+            .await
+            .is_err());
     }
 
     #[tokio::test(start_paused = true)]
     async fn publish_preflight_reads_account_and_returns_home_without_recovery_actions() {
         let mut phone = Phone::new(feed_xml());
         phone.account_journey = true;
-        let token = prove_safe_publish_screen(&phone, labels(), plan(), "fixture.actor", "fixture caption", 2,
-            &phone.stop, Instant::now() + Duration::from_secs(30)).await.unwrap();
+        let token = prove_safe_publish_screen(
+            &phone,
+            labels(),
+            plan(),
+            "fixture.actor",
+            "fixture caption",
+            2,
+            &phone.stop,
+            Instant::now() + Duration::from_secs(30),
+        )
+        .await
+        .unwrap();
         assert_eq!(token.account, "fixture.actor");
         assert_eq!(phone.taps.load(Ordering::Relaxed), 2);
         assert_eq!(phone.backs.load(Ordering::Relaxed), 0);
@@ -1170,10 +1375,28 @@ mod tests {
     }
     #[test]
     fn publish_feed_proof_distinguishes_empty_unfocused_widget_from_draft() {
-        let widget = format!(r#"<node package="{PACKAGE}" class="android.widget.EditText" text="" focused="false" displayed="true" bounds="[501,603][579,677]"/>"#);
+        let widget = format!(
+            r#"<node package="{PACKAGE}" class="android.widget.EditText" text="" focused="false" displayed="true" bounds="[501,603][579,677]"/>"#
+        );
         let xml = feed_xml().replace("</hierarchy>", &format!("{widget}</hierarchy>"));
-        assert!(feed_proof(crate::HierarchySourceSnapshot { generation: 1, xml: xml.clone() }, labels(), plan()).is_ok());
-        assert!(feed_proof(crate::HierarchySourceSnapshot { generation: 2, xml: xml.replace("focused=\"false\"", "focused=\"true\"") }, labels(), plan()).is_err());
+        assert!(feed_proof(
+            crate::HierarchySourceSnapshot {
+                generation: 1,
+                xml: xml.clone()
+            },
+            labels(),
+            plan()
+        )
+        .is_ok());
+        assert!(feed_proof(
+            crate::HierarchySourceSnapshot {
+                generation: 2,
+                xml: xml.replace("focused=\"false\"", "focused=\"true\"")
+            },
+            labels(),
+            plan()
+        )
+        .is_err());
     }
 
     #[tokio::test(start_paused = true)]
