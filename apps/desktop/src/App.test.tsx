@@ -216,9 +216,11 @@ describe("operation source navigation", () => {
     vi.mocked(api.operationGetRun).mockResolvedValue({summary:run,items:[{id:"item-old",kind:"device",label:"Máy lịch sử",state:"failed",udid:"old-phone",errorCode:null,detail:null,evidence:null,retryable:true}]});
     render(<App />);
     await navigate("Tác vụ");
-    fireEvent.click(await screen.findByRole("button", { name: `Xem lượt chạy ${run.title}` }));
-    // A full-document role scan can monopolize jsdom while the two async loads
-    // are settling. Wait on the small detail region before its accessible action.
+    // A full-document role scan can monopolize jsdom while the async loads are
+    // settling, so each accessible query is scoped to the small region it targets.
+    await waitFor(() => expect(document.querySelector(".runs-table")).not.toBeNull());
+    const table = document.querySelector(".runs-table") as HTMLElement;
+    fireEvent.click(await within(table).findByRole("button", { name: `Xem lượt chạy ${run.title}` }));
     await waitFor(() => expect(document.querySelector(".operations-monitor-detail header")).not.toBeNull());
     const detail = document.querySelector(".operations-monitor-detail") as HTMLElement;
     fireEvent.click(await within(detail).findByRole("button", {name:"Mở mục cần xử lý", hidden: true}));
