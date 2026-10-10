@@ -128,6 +128,15 @@ bộ lọc. Refresh lỗi giữ dữ liệu cũ khi còn hợp lệ; response c�
 
 - Nút công cụ dùng icon quen thuộc, tooltip và accessible name. Lệnh nghiệp vụ dùng icon+kèm nhãn khi cần.
 - Chế độ dùng segmented control; binary dùng checkbox/toggle; số dùng input/stepper/slider; option dùng menu.
+- Menu chức năng của máy (chuột phải trên thẻ hoặc trong cửa sổ điện thoại; Shift+F10 hay phím
+  ContextMenu trên thẻ) dùng primitive `components/ui/Menu.tsx`: Base UI, CSS thuần, alias riêng
+  `--ui-hover`/`--ui-border`/`--ui-ring`/`--primary-foreground`, không đổi `--accent`. Tên máy và ô
+  **Tìm chức năng** nằm ngoài phần tử `menu`. Mở bằng bàn phím thì focus vào ô tìm; ↓ vào danh sách,
+  → hoặc Enter mở menu con, ← hoặc Escape đóng một cấp, Escape nữa đóng menu và trả focus về thẻ đã mở.
+  Menu không modal: không khóa cuộn, không làm inert/ẩn cửa sổ điện thoại phía sau; bấm ra ngoài thì
+  đóng. Dòng được chọn chạy sau khi menu đóng hẳn. Hover chỉ đổi màu, không lấy focus khỏi ô tìm.
+  **Ngoại lệ có tên — focus guard của Base UI:** span `data-base-ui-focus-guard` (aria-hidden,
+  tabindex 0) chỉ chuyển focus; kiểm axe menu loại trừ đúng selector này.
 - Không card lồng card, không hero marketing. Toolbar/bảng/section có kích thước ổn định.
 - Không resize control theo label/hover/loading. Chữ wrap có chủ đích; không tràn, đè hàng sau hoặc scale theo viewport.
 - Dùng khoảng cách/màu/icon nhất quán; disabled/loading/error/empty phải phân biệt và có hành động tiếp theo.

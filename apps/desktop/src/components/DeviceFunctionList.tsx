@@ -16,23 +16,6 @@ interface Props {
   onRun?: () => void;
   /** Hidden when the list is short enough to read; the menu always shows it. */
   showSearch?: boolean;
-  /**
-   * Focus the box as soon as the surface opens. True for the right-click menu, which is
-   * opened *at* the pointer and answered by typing; false for the overlay panel, which
-   * stays open while the operator drives the phone — stealing focus there would send their
-   * next keystroke into a filter box instead of the phone.
-   */
-  autoFocusSearch?: boolean;
-  /**
-   * Mark the rows as `menuitem`.
-   *
-   * True inside the right-click menu, whose container carries `role="menu"` — rows there are
-   * menu items and a screen reader should say so. False in the focus overlay's panel, which is
-   * an `<aside>`: a `menuitem` with no `menu` around it is invalid ARIA and reads worse than
-   * the plain button it actually is. Rows inside a flyout are always menu items, because the
-   * flyout itself is a menu.
-   */
-  menuSemantics?: boolean;
 }
 
 /** Width of a flyout, in px. Matches `.device-flyout` in App.css; used to decide which side. */
@@ -62,8 +45,9 @@ interface FlyoutState {
  * still get those functions?" A tile's right-click menu and the focus overlay's side panel
  * are two views of the same phone, so a function present in one and missing in the other is a
  * bug in the product rather than a difference in layout. The rows come from one catalog
- * (`App.tsx`), the search and platform gating from one module (`deviceMenu.ts`), and the
- * drawing from here.
+ * (`App.tsx`) and the search and platform gating from one module (`deviceMenu.ts`). This draws
+ * them as the panel's plain buttons; the right-click menu draws them with the menu primitive
+ * (`DeviceContextMenu`, `ui/Menu.tsx`).
  *
  * **Submenus open on hover, in a flyout beside the row.** They used to expand inline on a
  * click, on the reasoning that a flyout must be clamped to the viewport at every level. The
@@ -81,8 +65,6 @@ export function DeviceFunctionList({
   platform,
   onRun,
   showSearch = true,
-  autoFocusSearch = false,
-  menuSemantics = false,
 }: Props) {
   const menuId = useId();
   const [query, setQuery] = useState("");
@@ -186,7 +168,7 @@ export function DeviceFunctionList({
       <button
         key={node.id}
         type="button"
-        role={menuSemantics || inFlyout ? "menuitem" : undefined}
+        role={inFlyout ? "menuitem" : undefined}
         className={`${node.danger ? "danger" : ""}${node.disabled ? " is-disabled" : ""}`}
         disabled={node.disabled}
         title={node.pathLabel ?? node.label}
@@ -208,7 +190,6 @@ export function DeviceFunctionList({
         key={node.id}
         id={`${menuId}-${node.id}`}
         type="button"
-        role={menuSemantics ? "menuitem" : undefined}
         className={`device-menu-parent${isOpen ? " is-open" : ""}`}
         title={node.label}
         aria-expanded={isOpen}
@@ -248,7 +229,6 @@ export function DeviceFunctionList({
         <input
           className="device-menu-search"
           value={query}
-          autoFocus={autoFocusSearch}
           placeholder="Tìm chức năng…"
           aria-label="Tìm chức năng"
           onChange={(event) => setQuery(event.target.value)}

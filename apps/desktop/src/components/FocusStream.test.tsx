@@ -163,12 +163,15 @@ describe("FocusStream hit mapping", () => {
     fireEvent.contextMenu(view.getByTestId("focus-screen"),{clientX:100,clientY:100});
     const menu=view.getByRole("menu");
     expect(deviceTap).not.toHaveBeenCalled();
-    fireEvent.keyDown(within(menu).getByRole("textbox"),{key:"Escape"});
+    expect(menu).toHaveAccessibleName("Tác vụ cho "+fixture.name);
+    // The search box sits above the rows, outside the `menu` element (and the side panel has its own).
+    fireEvent.keyDown(within(menu.closest<HTMLElement>(".ui-menu")!).getByRole("textbox",{name:"Tìm chức năng"}),{key:"Escape"});
     expect(view.queryByRole("menu")).toBeNull();
     expect(onClose).not.toHaveBeenCalled();
     fireEvent.contextMenu(view.getByTestId("focus-screen"),{clientX:100,clientY:100});
     fireEvent.click(view.getByRole("menuitem",{name:"Đọc và gán nick TikTok"}));
-    expect(read).toHaveBeenCalledOnce();
+    // The row runs once the menu has closed, so its dialog is not left under the menu.
+    await waitFor(()=>expect(read).toHaveBeenCalledOnce());
     expect(view.queryByRole("menu")).toBeNull();
   });
   beforeEach(() => {

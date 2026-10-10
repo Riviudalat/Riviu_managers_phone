@@ -1,6 +1,5 @@
 import { machineNumberLabel } from "../deviceNaming";
 import { useEffect, useMemo, useRef, useState, type ReactElement } from "react";
-import { createPortal } from "react-dom";
 import { DeviceContextMenu } from "./DeviceContextMenu";
 import type { DeviceInfo, GroupInputReport, HardwareKey } from "../types";
 import { groupInputOutcome } from "../groupInput";
@@ -916,7 +915,7 @@ export function FocusStream({
       onPointerDownCapture={onActivate}
       onKeyDown={event => { if (event.key === "Escape" && active && !event.defaultPrevented) { event.stopPropagation(); if(contextMenu) setContextMenu(null); else onClose(); } }}
     >
-      {contextMenu?.udid===device.udid && createPortal(<DeviceContextMenu device={device} groups={[]} x={contextMenu.x} y={contextMenu.y} nodes={panelNodes} onAddToGroup={()=>{}} onClose={()=>setContextMenu(null)} />,document.body)}
+      {contextMenu?.udid===device.udid && <DeviceContextMenu key={`${contextMenu.x}:${contextMenu.y}`} device={device} groups={[]} x={contextMenu.x} y={contextMenu.y} nodes={panelNodes} onAddToGroup={()=>{}} onClose={()=>setContextMenu(current=>current===contextMenu?null:current)} />}
       <div ref={stageRef} className={`focus-stage${layout.stacked ? " is-stacked" : ""}${layout.landscape ? " is-landscape" : ""}`} onClick={(event) => event.stopPropagation()}>
         <div
           ref={screenRef}

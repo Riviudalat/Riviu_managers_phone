@@ -1,0 +1,119 @@
+/* The menu primitive (`Menu.tsx`). Scoped aliases, not new global tokens: the names follow
+   the shadcn vocabulary so a later adoption can map them, and each points at a token this app
+   already has. `--accent` is deliberately absent — here it means brand orange, in shadcn the
+   neutral hover surface, and redefining it would repaint every orange control. */
+.ui-menu-positioner {
+  --ui-hover: var(--bg-muted);
+  --ui-border: var(--line-strong);
+  --ui-ring: var(--primary-ring);
+  --primary-foreground: var(--text-inverse);
+  z-index: var(--z-menu);
+  outline: none;
+}
+.ui-menu {
+  min-width: 196px;
+  max-width: 280px;
+  padding: 4px;
+  border: 1px solid var(--ui-border);
+  border-radius: var(--radius);
+  background: var(--bg-elevated);
+  box-shadow: var(--shadow-lg);
+  display: flex;
+  flex-direction: column;
+  outline: none;
+}
+.ui-menu-header {
+  display: flex;
+  flex-direction: column;
+}
+/* The rows scroll and the header does not; a submenu scrolls on its own. */
+.ui-menu-list {
+  display: flex;
+  flex-direction: column;
+  max-height: min(60vh, 460px);
+  overflow-y: auto;
+  overscroll-behavior: contain;
+  outline: none;
+}
+.ui-menu-sub {
+  width: 236px;
+  max-height: 60vh;
+}
+.ui-menu-item {
+  display: flex;
+  align-items: center;
+  gap: 0.45rem;
+  min-height: 30px;
+  padding: 0.4rem 0.55rem;
+  border-radius: 6px;
+  color: var(--text-2);
+  font-size: var(--text-sm);
+  cursor: pointer;
+  user-select: none;
+  outline: none;
+}
+.ui-menu-item[data-highlighted],
+.ui-menu-item:hover:not([data-disabled]),
+.ui-menu-parent[data-popup-open] {
+  background: var(--ui-hover);
+  color: var(--text-1);
+}
+.ui-menu-item[data-highlighted]:focus-visible {
+  box-shadow: inset 0 0 0 2px var(--ui-ring);
+}
+.ui-menu-item.is-danger {
+  color: var(--danger-deep);
+}
+.ui-menu-item.is-danger[data-highlighted],
+.ui-menu-item.is-danger:hover {
+  background: var(--danger-soft);
+}
+.ui-menu-item[data-disabled] {
+  color: var(--text-3);
+  cursor: default;
+}
+.ui-menu-item[data-disabled][data-highlighted] {
+  background: none;
+}
+.ui-menu-item > svg,
+.ui-menu-item > img {
+  flex: 0 0 auto;
+}
+.ui-menu-text {
+  flex: 1 1 auto;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.ui-menu-chev {
+  flex: 0 0 auto;
+  color: var(--text-3);
+  font-size: var(--text-xs);
+}
+.ui-menu-note {
+  min-height: 0;
+  padding: 0.3rem 0.7rem;
+  font-size: var(--text-xs);
+}
+.ui-menu-note .ui-menu-text {
+  white-space: normal;
+}
+.ui-menu-group {
+  display: flex;
+  flex-direction: column;
+}
+.ui-menu-group-label {
+  margin: 0.25rem 0 0.1rem;
+  padding: 0 0.55rem;
+  color: var(--text-3);
+  font-size: var(--text-xs);
+  letter-spacing: 0.04em;
+}
+/* The hidden trigger the menu is positioned against; see `ContextMenu`. */
+.ui-menu-anchor {
+  position: fixed;
+  width: 0;
+  height: 0;
+  overflow: hidden;
+  pointer-events: none;
+}

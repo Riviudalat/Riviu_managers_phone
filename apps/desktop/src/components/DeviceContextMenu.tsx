@@ -1,7 +1,13 @@
-import { useEffect, useRef, useState } from "react";
+import { useCallback, useMemo, useRef, useState } from "react";
+import { describeError } from "../describeError";
 import type { DeviceGroup, DeviceInfo } from "../types";
-import type { DeviceMenuNode } from "../deviceMenu";
-import { DeviceFunctionList } from "./DeviceFunctionList";
+import {
+  filterDeviceMenu,
+  gateDeviceMenu,
+  isSubmenu,
+  type DeviceMenuNode,
+} from "../deviceMenu";
+import { ContextMenu, MenuGroup, MenuItem, MenuNote, MenuSubmenu } from "./ui/Menu";
 
 interface Props {
   device: DeviceInfo;
@@ -28,8 +34,14 @@ interface Props {
  * against its thirty-five, and the eight commands the difference needed were written that
  * day. If a row is missing now, check `api.ts` before assuming it cannot exist.
  *
- * The rows themselves are drawn by `DeviceFunctionList`, which the focus overlay's side panel
- * also uses — so zooming into a phone cannot lose a function that the tile menu offers.
+ * The rows come from the same catalog, gating and search (`deviceMenu.ts`) as the focus
+ * overlay's side panel (`DeviceFunctionList`), so zooming into a phone cannot lose a function
+ * that the tile menu offers. The menu itself — roles, arrow keys, submenus, focus going back to
+ * the tile — is the shared primitive in `ui/Menu.tsx`.
+ *
+ * Keyboard: Shift+F10 or the ContextMenu key on a tile opens it with the search box focused;
+ * typing filters, ArrowDown enters the rows, ArrowRight opens a submenu, Enter runs a row,
+ * Escape closes one level and then the menu.
  */
 export function DeviceContextMenu({
   device,
@@ -40,81 +52,129 @@ export function DeviceContextMenu({
   onAddToGroup,
   onClose,
 }: Props) {
-  const ref = useRef<HTMLDivElement>(null);
-  const [searching, setSearching] = useState(false);
+  const [open, setOpen] = useState(true);
+  const [query, setQuery] = useState("");
+  /// Rows fetched from the phone, per lazy submenu id: `undefined` = never opened,
+  /// `null` = still asking, an array = the answer (empty included, which is itself news).
+  const [loaded, setLoaded] = useState<Record<string, DeviceMenuNode[] | null>>({});
+  const searchRef = useRef<HTMLInputElement>(null);
+  /// The chosen row's action, run once the menu has closed. The other order leaves a menu
+  /// sitting over a confirm dialog the action opened, and hands focus back to the tile after
+  /// that dialog took it.
+  const chosen = useRef<(() => void) | null>(null);
 
-  useEffect(() => {
-    // Close on anything that means "I am done here". Pointerdown rather than click so a
-    // press that starts outside cannot land on a menu item that moved under it.
-    const away = (event: PointerEvent) => {
-      if (!ref.current?.contains(event.target as Node)) onClose();
-    };
-    const escape = (event: KeyboardEvent) => {
-      if (event.key === "Escape") onClose();
-    };
-    window.addEventListener("pointerdown", away, true);
-    window.addEventListener("keydown", escape);
-    window.addEventListener("resize", onClose);
-    return () => {
-      window.removeEventListener("pointerdown", away, true);
-      window.removeEventListener("keydown", escape);
-      window.removeEventListener("resize", onClose);
-    };
-  }, [onClose]);
+  const gated = useMemo(() => gateDeviceMenu(nodes, device.platform), [nodes, device.platform]);
+  const shown = useMemo(() => filterDeviceMenu(gated, query), [gated, query]);
+  const searching = query.trim().length > 0;
+
+  const choose = (action: (() => void) | undefined) => {
+    chosen.current = action ?? null;
+  };
+
+  const load = useCallback(
+    (node: DeviceMenuNode) => {
+      if (!node.loadChildren || loaded[node.id] !== undefined) return;
+      setLoaded((current) => ({ ...current, [node.id]: null }));
+      void node
+        .loadChildren()
+        .then((rows) => setLoaded((current) => ({ ...current, [node.id]: rows })))
+        .catch((error) =>
+          setLoaded((current) => ({
+            ...current,
+            // The phone's own sentence, as an unclickable row. A submenu that silently shows
+            // nothing is indistinguishable from a phone that has nothing to show. The
+            // sentence, not "[object Object]" — a command rejects with an object.
+            [node.id]: [
+              { id: `${node.id}-error`, label: describeError(error), disabled: true } as DeviceMenuNode,
+            ],
+          })),
+        );
+    },
+    [loaded],
+  );
+
+  const renderLeaf = (node: DeviceMenuNode) => (
+    <MenuItem
+      key={node.id}
+      icon={node.Icon}
+      danger={node.danger}
+      disabled={node.disabled}
+      title={node.pathLabel ?? node.label}
+      onSelect={() => choose(node.run)}
+    >
+      {node.pathLabel ?? node.label}
+    </MenuItem>
+  );
+
+  const renderRow = (node: DeviceMenuNode) => {
+    if (!isSubmenu(node)) return renderLeaf(node);
+    const children = node.children ?? loaded[node.id] ?? [];
+    const pending = loaded[node.id] === null;
+    return (
+      <MenuSubmenu
+        key={node.id}
+        label={node.label}
+        icon={node.Icon}
+        title={node.label}
+        onOpenChange={(next) => {
+          if (next) load(node);
+        }}
+      >
+        {pending && <MenuNote>Đang đọc từ máy…</MenuNote>}
+        {!pending && children.length === 0 && <MenuNote>Máy không trả về mục nào.</MenuNote>}
+        {children.map(renderLeaf)}
+      </MenuSubmenu>
+    );
+  };
 
   return (
-    <div
-      ref={ref}
-      className="device-menu"
-      role="menu"
-      aria-label={`Tác vụ cho ${device.name}`}
-      // Clamped to the viewport: opened near the right or bottom edge, an unclamped menu
-      // renders half off-screen and the rows underneath are unreachable. The menu is now
-      // tall enough to need the vertical clamp on almost every click, not just near the
-      // bottom — hence a fixed height budget rather than "wherever it fits".
-      style={{
-        left: Math.min(x, window.innerWidth - 264),
-        top: Math.min(y, Math.max(8, window.innerHeight - 420)),
+    <ContextMenu
+      open={open}
+      point={{ x, y }}
+      label={`Tác vụ cho ${device.name}`}
+      onOpenChange={setOpen}
+      onClosed={() => {
+        const action = chosen.current;
+        chosen.current = null;
+        onClose();
+        action?.();
       }}
-      // The group section hides while a search is running, and the flag has to come from
-      // the box that owns the query — hence this listener rather than a second query state.
-      onInput={(event) => {
-        const target = event.target as HTMLElement;
-        if (target instanceof HTMLInputElement) setSearching(target.value.trim().length > 0);
-      }}
+      initialFocus={searchRef}
+      header={
+        <>
+          <p className="device-menu-head" title={device.udid}>
+            {device.name}
+          </p>
+          {/* The reference product's 搜索菜单 box. With this many rows it stops being a
+              nicety: scrolling to find "Reset DPI" is slower than typing "dpi". */}
+          <input
+            ref={searchRef}
+            className="device-menu-search"
+            value={query}
+            placeholder="Tìm chức năng…"
+            aria-label="Tìm chức năng"
+            onChange={(event) => setQuery(event.target.value)}
+          />
+        </>
+      }
     >
-      <p className="device-menu-head" title={device.udid}>
-        {device.name}
-      </p>
-      <div className="device-menu-scroll">
-        <DeviceFunctionList
-          nodes={nodes}
-          platform={device.platform}
-          autoFocusSearch
-          menuSemantics
-          onRun={onClose}
-        />
-
-        {groups.length > 0 && !searching && (
-          <>
-            <p className="device-menu-label">Thêm vào nhóm</p>
-            {groups.map((group) => (
-              <button
-                key={group.id}
-                type="button"
-                role="menuitem"
-                onClick={() => {
-                  onClose();
-                  onAddToGroup(group.id);
-                }}
-              >
-                <span className="device-menu-dot" style={{ background: group.color }} />
-                {group.name}
-              </button>
-            ))}
-          </>
-        )}
-      </div>
-    </div>
+      {shown.length === 0 && <MenuNote>Không có chức năng nào khớp.</MenuNote>}
+      {shown.map(renderRow)}
+      {/* Hidden while a search runs: the results are functions, and a group name matching
+          the query would read as one. */}
+      {groups.length > 0 && !searching && (
+        <MenuGroup label="Thêm vào nhóm">
+          {groups.map((group) => (
+            <MenuItem
+              key={group.id}
+              marker={<span className="device-menu-dot" style={{ background: group.color }} />}
+              onSelect={() => choose(() => onAddToGroup(group.id))}
+            >
+              {group.name}
+            </MenuItem>
+          ))}
+        </MenuGroup>
+      )}
+    </ContextMenu>
   );
 }

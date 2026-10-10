@@ -66,7 +66,7 @@ describe("DeviceContextMenu", () => {
 
     await userEvent.hover(screen.getByRole("menuitem", { name: /ADB/ }));
 
-    expect(screen.getByText("Đặt lại mật độ điểm")).toBeTruthy();
+    expect(await screen.findByText("Đặt lại mật độ điểm")).toBeTruthy();
   });
 
   it("still opens on a click, for touch and for the keyboard", async () => {
@@ -76,7 +76,7 @@ describe("DeviceContextMenu", () => {
 
     await userEvent.click(screen.getByRole("menuitem", { name: /ADB/ }));
 
-    expect(screen.getByText("Đặt lại mật độ điểm")).toBeTruthy();
+    expect(await screen.findByText("Đặt lại mật độ điểm")).toBeTruthy();
   });
 
   /**
@@ -91,8 +91,7 @@ describe("DeviceContextMenu", () => {
     const row = screen.getByRole("menuitem", { name: /ADB/ });
     await userEvent.hover(row);
 
-    const child = screen.getByText("Đặt lại mật độ điểm");
-    await userEvent.unhover(row);
+    const child = await screen.findByText("Đặt lại mật độ điểm");
     await userEvent.hover(child);
 
     await new Promise((resolve) => setTimeout(resolve, 260));
@@ -105,7 +104,7 @@ describe("DeviceContextMenu", () => {
     ]);
     const row = screen.getByRole("menuitem", { name: /ADB/ });
     await userEvent.hover(row);
-    expect(screen.getByText("Đặt lại mật độ điểm")).toBeTruthy();
+    expect(await screen.findByText("Đặt lại mật độ điểm")).toBeTruthy();
 
     await userEvent.unhover(row);
 

@@ -1451,11 +1451,14 @@ function App() {
 
               {tileMenu && menuDevice && (
                 <DeviceContextMenu
+                  // A right-click elsewhere while one menu is closing opens a fresh one, and
+                  // the closing menu must not clear it when it finishes.
+                  key={`${tileMenu.udid}:${tileMenu.x}:${tileMenu.y}`}
                   device={menuDevice}
                   groups={groups}
                   x={tileMenu.x}
                   y={tileMenu.y}
-                  onClose={() => setTileMenu(null)}
+                  onClose={() => setTileMenu((current) => (current === tileMenu ? null : current))}
                   nodes={tileActions(menuDevice)}
                   onAddToGroup={async (groupId) => {
                     const next = withDeviceAdded(groups, groupId, menuDevice.udid);

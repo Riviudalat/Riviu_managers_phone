@@ -1,3 +1,4 @@
+import AxeBuilder from "@axe-core/playwright";
 import { expect, test } from "@playwright/test";
 import { installTauriMock } from "./fixtures/tauriMock";
 
@@ -65,6 +66,54 @@ for (const width of [1440, 820]) {
     const menu = page.getByRole("menu", { name: /Tác vụ cho/ });
     await expect(menu.getByRole("menuitem", { name: "Đọc và gán nick TikTok (2 máy đã chọn)" })).toBeVisible();
     await page.screenshot({ path: info.outputPath(`account-menu-${width}.png`) });
+    // The title and search box sit outside the `menu` element, so the menu passes axe; and it
+    // is not modal: nothing behind it is hidden from assistive tech or made inert. Base UI's
+    // focus guards are excluded by name: aria-hidden tab stops that only hand focus on.
+    expect((await new AxeBuilder({ page }).include(".ui-menu").exclude("[data-base-ui-focus-guard]").analyze()).violations).toEqual([]);
+    expect(await tiles.nth(2).evaluate(tile => tile.closest("[inert], [aria-hidden='true']") === null)).toBe(true);
+    // A submenu opens on hover and survives the pointer crossing onto it.
+    const clipboardRow = menu.getByRole("menuitem", { name: "Clipboard" });
+    const clipboard = page.getByRole("menu", { name: "Clipboard" });
+    await clipboardRow.hover();
+    const from = (await clipboardRow.boundingBox())!;
+    const to = (await clipboard.getByRole("menuitem").first().boundingBox())!;
+    // In steps, as a hand moves: a teleporting pointer never crosses the gap at all.
+    await page.mouse.move(from.x + from.width / 2, from.y + from.height / 2);
+    await page.mouse.move(to.x + to.width / 2, to.y + to.height / 2, { steps: 12 });
+    await page.waitForTimeout(300);
+    await expect(clipboard).toBeVisible();
+    // Escape closes one level, then the menu, and focus goes back to the tile that opened it.
+    await page.keyboard.press("Escape");
+    await expect(clipboard).toHaveCount(0);
+    await expect(menu).toBeVisible();
+    await page.keyboard.press("Escape");
+    await expect(menu).toHaveCount(0);
+    await expect(tiles.nth(0)).toBeFocused();
+    // The keyboard alone: Shift+F10 opens the menu with its search box focused, ArrowDown
+    // enters the rows, Enter or ArrowRight opens a submenu and ArrowLeft closes it.
+    const search = page.getByRole("textbox", { name: "Tìm chức năng" });
+    const adbRow = menu.getByRole("menuitem", { name: "ADB" });
+    const adb = page.getByRole("menu", { name: "ADB" });
+    await tiles.nth(0).press("Shift+F10");
+    await expect(search).toBeFocused();
+    await page.keyboard.type("adb");
+    await page.keyboard.press("ArrowDown");
+    await expect(adbRow).toBeFocused();
+    await page.keyboard.press("Enter");
+    await expect(adb).toBeVisible();
+    await page.keyboard.press("ArrowLeft");
+    await expect(adb).toHaveCount(0);
+    await expect(adbRow).toBeFocused();
+    await page.keyboard.press("ArrowRight");
+    await expect(adb).toBeVisible();
+    await page.keyboard.press("Escape");
+    await page.keyboard.press("Escape");
+    await expect(menu).toHaveCount(0);
+    await expect(tiles.nth(0)).toBeFocused();
+    await tiles.nth(0).press("ContextMenu");
+    await expect(search).toBeFocused();
+    await page.keyboard.press("ArrowDown");
+    await expect(menu.getByRole("menuitem", { name: "Đọc và gán nick TikTok (2 máy đã chọn)" })).toBeFocused();
     await menu.getByRole("menuitem", { name: "Đọc và gán nick TikTok (2 máy đã chọn)" }).click();
     await expect(tiles.nth(0).locator(".dev-phone-handle")).toHaveText("@nick_1");
     await expect(tiles.nth(1).locator(".dev-phone-handle")).toHaveText("@nick_7");
