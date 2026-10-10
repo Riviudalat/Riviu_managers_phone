@@ -827,6 +827,11 @@ struct CardReads {
     last: Option<Duration>,
     /// A read still running when even [`CARD_READ_GRACE`] had run out.
     cut_after: Option<Duration>,
+    /// The OS cancelled the swipe part-way ([`crate::driver::GestureCancelled`]); the judgement
+    /// comes from the re-read that followed it, not from the gesture.
+    gesture_cancelled: bool,
+    /// What the shared popup step did on that re-read, when it did anything.
+    popup: Option<&'static str>,
 }
 
 impl CardReads {
@@ -843,6 +848,19 @@ impl CardReads {
             line.push_str(&format!(", một lần đọc bị cắt sau {} ms", cut.as_millis()));
         }
         line
+    }
+
+    /// The operator line for a cancelled swipe, `None` when the swipe was not cancelled.
+    fn cancelled_says(&self) -> Option<String> {
+        self.gesture_cancelled.then(|| {
+            let mut line =
+                "vuốt bị hệ thống huỷ giữa chừng (cửa sổ bị chạm đã đóng) — đọc lại màn hình"
+                    .to_string();
+            if let Some(popup) = self.popup {
+                line.push_str(&format!("; {popup}"));
+            }
+            line
+        })
     }
 }
 
@@ -1892,6 +1910,9 @@ impl<'a> HierarchyRun<'a> {
         from: Option<TapPoint>,
         stop: &AtomicBool,
     ) -> anyhow::Result<(bool, CardReads)> {
+        use crate::app_automation::dialogs::{
+            step_before_deadline_with_tree, PopupBudget, PopupStep,
+        };
         let mut reads = CardReads::default();
         if stop.load(Ordering::Relaxed) {
             return Ok((false, reads));
@@ -1913,11 +1934,57 @@ impl<'a> HierarchyRun<'a> {
         } else {
             self.planner.plan_swipe(from, to, duration_ms)
         };
-        self.session.swipe_path(path).await?;
+        let sent = self.session.swipe_path(path).await;
         // Keep the former settle + arrival budget, but an outgoing, non-empty rail
         // is still a pending transition. Read until the card actually changes. A read still
         // running at the deadline finishes and is judged (see [`CARD_READ_GRACE`]).
         let deadline = tokio::time::Instant::now() + SWIPE_SETTLE + RAIL_RETURN_WINDOW;
+        if let Err(error) = sent {
+            // A swipe the OS cancelled part-way is a navigation that may or may not have
+            // moved the feed, never a dead session: the window its DOWN touched closed under
+            // it (see [`crate::driver::GestureCancelled`]). One fresh snapshot through the
+            // shared popup step, then the same fingerprint judgement as any swipe; an
+            // unproven result costs the caller's `stuck_swipes`, so the budget stays the one
+            // it was. Any other error, and a failing re-read, stay errors.
+            if !error.is::<crate::driver::GestureCancelled>() {
+                return Err(error);
+            }
+            reads.gesture_cancelled = true;
+            if !self.session.supports_accessibility_readback() {
+                return Ok((false, reads));
+            }
+            let mut popup = PopupBudget::default();
+            let started = tokio::time::Instant::now();
+            match step_before_deadline_with_tree(
+                self.session,
+                self.labels,
+                &mut popup,
+                deadline,
+                stop,
+                stop,
+            )
+            .await?
+            {
+                ReadWaitResult::Ready((step, tree)) => {
+                    reads.completed += 1;
+                    reads.last = Some(started.elapsed());
+                    reads.popup = popup.says();
+                    match (step, tree) {
+                        (PopupStep::Clear, Some(tree)) => {
+                            let after = tree_fingerprint(&tree, self.labels);
+                            if !after.is_empty() && after != *before {
+                                return Ok((true, reads));
+                            }
+                        }
+                        (PopupStep::Blocked, _) => return Ok((false, reads)),
+                        (PopupStep::Clear | PopupStep::Dismissed, _) => {}
+                    }
+                }
+                ReadWaitResult::Cancelled | ReadWaitResult::DeadlineExceeded => {
+                    return Ok((false, reads))
+                }
+            }
+        }
         loop {
             match read_card_in_window(self.session, self.labels, deadline, stop, &mut reads).await?
             {
@@ -2389,6 +2456,7 @@ async fn leave_railless_card(
     straight_flick: bool,
     stop: &AtomicBool,
     status: &mut NurtureSessionStatus,
+    report: &(dyn Fn(&mut NurtureSessionStatus, String) + Send + Sync),
 ) -> anyhow::Result<(bool, CardReads)> {
     status.swipe_attempts += 1;
     sleep_interruptible(Duration::from_millis(human.think_pause_ms()), stop).await;
@@ -2401,6 +2469,9 @@ async fn leave_railless_card(
             stop,
         )
         .await?;
+    if let Some(line) = judged.1.cancelled_says() {
+        report(status, line);
+    }
     if !stop.load(Ordering::Relaxed) {
         sleep_interruptible(Duration::from_millis(human.after_swipe_pause_ms()), stop).await;
     }
@@ -3386,17 +3457,18 @@ pub(super) async fn run_feed(
                 // proven by the rail of whatever arrives. A skipped card, never a watched
                 // video: `videos_done` does not move in this branch.
                 let before = railless_card.take().unwrap_or_default();
-                let (advanced, reads) =
-                    match leave_railless_card(&mut run, &mut human, &before, true, stop, status)
-                        .await
-                    {
-                        Ok(judged) => judged,
-                        Err(error) => {
-                            report(status, format!("không đọc được kết quả vuốt: {error}"));
-                            outcome = Outcome::Failed;
-                            break;
-                        }
-                    };
+                let (advanced, reads) = match leave_railless_card(
+                    &mut run, &mut human, &before, true, stop, status, report,
+                )
+                .await
+                {
+                    Ok(judged) => judged,
+                    Err(error) => {
+                        report(status, format!("không đọc được kết quả vuốt: {error}"));
+                        outcome = Outcome::Failed;
+                        break;
+                    }
+                };
                 if stop.load(Ordering::Relaxed) {
                     outcome = Outcome::Stopped;
                     break;
@@ -3454,7 +3526,7 @@ pub(super) async fn run_feed(
                                     ),
                                 );
                                 match leave_railless_card(
-                                    &mut run, &mut human, &card, true, stop, status,
+                                    &mut run, &mut human, &card, true, stop, status, report,
                                 )
                                 .await
                                 {
@@ -3555,6 +3627,7 @@ pub(super) async fn run_feed(
                 straight_flick,
                 stop,
                 status,
+                report,
             )
             .await
             {
@@ -4152,6 +4225,9 @@ pub(super) async fn run_feed(
             break;
         }
         sleep_interruptible(Duration::from_millis(human.after_swipe_pause_ms()), stop).await;
+        if let Some(line) = reads.cancelled_says() {
+            report(status, line);
+        }
         if advanced && sponsored.is_some() {
             // A skipped card, never a watched video: the count is the operator's videos.
             stuck_swipes = 0;

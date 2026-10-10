@@ -305,6 +305,21 @@ fn observation_deadline_error() -> anyhow::Error {
     .into()
 }
 
+/// The one place UiAutomator2's cancelled-injection answer is recognised: `/actions` failing
+/// with `invalid element state` / "Unable to perform W3C actions" (`W3CActions.java`), which
+/// it raises when Android refused an injected event of the sequence. Classification only:
+/// nothing here retries, and a tap carrying it is as uncertain as before.
+/// See [`riviu_core::driver::GestureCancelled`].
+fn gesture_cancelled_by_os(suffix: &str, response: &Value) -> bool {
+    suffix == "/actions"
+        && (response.pointer("/value/error").and_then(Value::as_str)
+            == Some("invalid element state")
+            || response
+                .pointer("/value/message")
+                .and_then(Value::as_str)
+                .is_some_and(|message| message.contains("Unable to perform W3C actions")))
+}
+
 /// Whether a failed accessibility request may be repeated after replacing the agent session.
 ///
 /// UiAutomator2 models element lookup as `POST`, so HTTP method alone cannot separate reads from
@@ -989,7 +1004,13 @@ impl AgentClient {
                 .pointer("/value/message")
                 .and_then(Value::as_str)
                 .unwrap_or(text.as_ref());
-            return Err(anyhow!("agent {suffix} lỗi {status}: {message}"));
+            let failure = format!("agent {suffix} lỗi {status}: {message}");
+            if gesture_cancelled_by_os(suffix, &value) {
+                return Err(anyhow::Error::new(riviu_core::driver::GestureCancelled {
+                    message: failure,
+                }));
+            }
+            return Err(anyhow!(failure));
         }
         trace.finish("completed");
         Ok(value)

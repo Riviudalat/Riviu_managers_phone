@@ -14,6 +14,21 @@ pub struct AccessibilityReadUnavailable {
     pub message: String,
 }
 
+/// The OS cancelled an injected pointer sequence part-way through, and the agent said so.
+///
+/// UiAutomator2 answers `/actions` with `invalid element state` / "Unable to perform W3C
+/// actions" when an injected event fails. Measured on ce0417141d4decde0c (SM-G955N,
+/// Android 9, Global 45.7.3) on 10/10/2026: the swipe's DOWN landed on a TikTok popup window,
+/// the touch dismissed it, InputDispatcher cancelled the gesture ("touched window was
+/// removed") and every later MOVE failed. Part of the sequence may have reached the screen,
+/// so this proves neither that the gesture acted nor that it did not. A navigation caller
+/// re-reads the screen; an effect tap keeps treating it as uncertain and never retries.
+#[derive(Debug, Error)]
+#[error("{message}")]
+pub struct GestureCancelled {
+    pub message: String,
+}
+
 /// The driver closed this UI session for good and nothing may be sent through it again.
 ///
 /// Raised before any network I/O. Two causes today, both Android: the instrumentation was
