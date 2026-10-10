@@ -2,6 +2,7 @@ import type { PageId } from "../types";
 import { useState } from "react";
 import { ChevronDown, PanelLeftClose, PanelLeftOpen } from "lucide-react";
 import { MENU_ICONS } from "./menuIcons";
+import { MENU } from "./navigationMenu";
 
 interface Props {
   page: PageId;
@@ -13,46 +14,6 @@ interface Props {
   forceCompact?: boolean;
   onPage: (page: PageId) => void;
 }
-
-const MENU: { label: string; items: { id: PageId; label: string }[] }[] = [
-  {
-    label: "Thiết bị",
-    items: [
-      { id: "control", label: "Control Center" },
-      { id: "deviceSettings", label: "Cài đặt máy" },
-    ],
-  },
-  {
-    label: "Automation",
-    items: [
-      { id: "nurture", label: "Nuôi TikTok" },
-      { id: "interaction", label: "Tương tác" },
-      { id: "publish", label: "Đăng bài" },
-      { id: "myApps", label: "My Apps" },
-      { id: "jobs", label: "Lượt chạy" },
-      { id: "savedTasks", label: "Tác vụ đã lưu" },
-      { id: "scripts", label: "Flow thiết bị" },
-    ],
-  },
-  {
-    label: "Tài nguyên",
-    items: [
-      { id: "accounts", label: "Quản lý tài khoản" },
-      { id: "schedules", label: "Lịch chạy" },
-      { id: "material", label: "Kho nội dung" },
-      { id: "apps", label: "Trung tâm ứng dụng" },
-    ],
-  },
-  {
-    label: "Hệ thống",
-    items: [
-      { id: "api", label: "API" },
-      { id: "diagnostics", label: "Chẩn đoán" },
-      { id: "settings", label: "Cài đặt" },
-      { id: "help", label: "Trợ giúp" },
-    ],
-  },
-];
 
 const unknownReadyTitle = "Sẵn sàng chỉ được xác nhận trong Control Center; trang này chưa đọc trạng thái điều khiển.";
 

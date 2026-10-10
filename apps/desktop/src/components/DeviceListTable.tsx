@@ -104,6 +104,7 @@ export function DeviceListTable({ rows, selected, nowMs, onSelect, onToggle, onO
           return (
             <tr
               key={device.udid}
+              data-udid={device.udid}
               className={`${sel ? "selected" : ""} ${status.kind === "warning" ? "attention" : ""}`.trim() || undefined}
               tabIndex={0}
               aria-label={accessibleName}

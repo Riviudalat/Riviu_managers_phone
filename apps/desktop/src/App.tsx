@@ -65,8 +65,11 @@ import { FleetDiagnosticsPage } from "./components/FleetDiagnosticsPage";
 import { ALL_DEVICES_TAB, devicesInTab, groupTabs, withDeviceAdded } from "./deviceGroups";
 import { FocusStream } from "./components/FocusStream";
 import { InspectorLauncher } from "./components/InspectorLauncher";
+import { NavigationPalette, type PaletteDevice } from "./components/NavigationPalette";
+import { usePaletteShortcut } from "./components/ui/usePaletteShortcut";
 import { useDeviceWindows } from "./components/useDeviceWindows";
 import { IconPhone, IconRefresh } from "./components/Icons";
+import { Search } from "lucide-react";
 import { Banner, EmptyState, LoadingState } from "./components/States";
 import { AutomationWorkspace } from "./components/AutomationWorkspace";
 import { isDeviceAutomation } from "./features/devices/deviceAutomation";
@@ -891,6 +894,67 @@ function App() {
     () => jobs.filter((j) => j.status === "running" || j.status === "queued").length,
     [jobs],
   );
+
+  // Ctrl+K. The rows are read only while it is open; nothing here is worth a render otherwise.
+  const [paletteOpen, setPaletteOpen] = useState(false);
+  usePaletteShortcut(() => setPaletteOpen((open) => !open));
+  const paletteDevices = useMemo((): PaletteDevice[] => {
+    if (!paletteOpen) return [];
+    return orderedDevices.map((device) => ({
+      udid: device.udid,
+      label: automationDeviceLabels.get(device.udid) ?? device.udid,
+      handle: metaMap.get(device.udid)?.handle,
+      status: deviceOperationalView(device, currentDeviceWorkOwner(device.udid), deviceWorkOwnerReadState,
+        cachedAgent(device.udid), currentDeviceWorkState(device.udid)?.activity, cachedLoad(device.udid)).label,
+    }));
+  }, [paletteOpen, orderedDevices, automationDeviceLabels, metaMap, currentDeviceWorkOwner, deviceWorkOwnerReadState, cachedAgent, currentDeviceWorkState, cachedLoad]);
+  // "Cần xử lý" is the header counter's set: the tile's warning state, unknown exactly when that
+  // counter is (owners unread, or a phone's control state not read yet), never "all".
+  const paletteAttention = useMemo((): string[] | null => {
+    if (!paletteOpen) return [];
+    if (counts.attention === null) return null;
+    return orderedDevices
+      .filter((device) => deviceOperationalView(device, currentDeviceWorkOwner(device.udid), deviceWorkOwnerReadState,
+        cachedAgent(device.udid), null, cachedLoad(device.udid)).kind === "warning")
+      .map((device) => device.udid);
+  }, [paletteOpen, counts.attention, orderedDevices, currentDeviceWorkOwner, deviceWorkOwnerReadState, cachedAgent, cachedLoad]);
+  // A palette row runs after the palette has handed focus back to where it was opened. Going to
+  // a page moves focus on to that page's own control in the sidebar (or the Điều phối tab):
+  // the element the palette was opened from may be gone with the old page, or still there and
+  // pointing at it.
+  const paletteNavigate = (navigation: Promise<boolean>, landing = '.menu-item[aria-current="page"]') => {
+    void navigation.then((activated) => {
+      if (!activated) return;
+      window.requestAnimationFrame(() => window.requestAnimationFrame(() =>
+        document.querySelector<HTMLElement>(landing)?.focus()));
+    });
+  };
+  // Going to a phone selects it alone and focuses its tile or row. A phone the filters hide is
+  // shown by clearing them: going to a phone nobody can see would select it out of sight.
+  const [revealUdid, setRevealUdid] = useState<string | null>(null);
+  const goToDevice = (udid: string) => {
+    void requestPage("control", true).then((activated) => {
+      if (!activated) return;
+      if (!visibleDevices.some((device) => device.udid === udid)) {
+        setGroupTab(ALL_DEVICES_TAB);
+        setDeviceSearch("");
+        setDeviceStatusFilter("all");
+        setConnectionFilter("all");
+      }
+      setSelected([udid]);
+      setRevealUdid(udid);
+    });
+  };
+  useEffect(() => {
+    if (!revealUdid || page !== "control") return;
+    const target = document.querySelector<HTMLElement>(`.content [tabindex][data-udid="${CSS.escape(revealUdid)}"]`);
+    // One attempt: the tile renders in the same commit as the page and the cleared filters, and
+    // a phone that left the fleet meanwhile must not steal focus whenever it comes back.
+    setRevealUdid(null);
+    if (!target) return;
+    target.scrollIntoView({ block: "nearest" });
+    target.focus({ preventScroll: true });
+  }, [revealUdid, page, visibleDevices, viewMode]);
   const syncStatusLabel = activeSync
     ? `Máy chính: ${machineNumberLabel(fleetNumberByUdid.get(activeSync.masterUdid))} · ${activeSync.targetUdids.length - 1} máy nhận · ${
         syncReadiness?.state === "active"
@@ -1021,6 +1085,19 @@ function App() {
           actions={
             <>
               <span ref={setMonitorPill} className="run-monitor-pill-slot" />
+              <button
+                type="button"
+                className="ui-palette-launcher"
+                aria-label="Mở bảng lệnh (Ctrl+K)"
+                aria-haspopup="dialog"
+                aria-keyshortcuts="Control+K"
+                title="Tìm máy, trang, lệnh (Ctrl+K)"
+                onClick={() => setPaletteOpen(true)}
+              >
+                <Search size={15} aria-hidden="true" />
+                <span className="ui-palette-launcher-text">Tìm máy, trang…</span>
+                <kbd>Ctrl</kbd><kbd>K</kbd>
+              </button>
               <InspectorLauncher devices={orderedDevices} deviceLabels={automationDeviceLabels} />
               <ActivityCenter onSelectDevices={(udids) => { setPage("control"); setSelected(udids); }} />
               {page !== "control" && <button
@@ -1043,6 +1120,26 @@ function App() {
           }
         />
 
+        <NavigationPalette
+          open={paletteOpen}
+          onOpenChange={setPaletteOpen}
+          devices={paletteDevices}
+          attentionUdids={paletteAttention}
+          onPage={(next) => paletteNavigate(requestPage(next, true))}
+          onOrchestration={() => paletteNavigate(
+            requestPage("scripts", true).then((activated) => activated && requestAutomationView("orchestration")),
+            "#flow-mode-tab-orchestration",
+          )}
+          onGoToDevice={goToDevice}
+          onSelectDevices={(udids) => {
+            // Selecting from another page lands on Thiết bị; on it, focus stays where it was.
+            const leaving = pageRef.current !== "control";
+            paletteNavigate(requestPage("control", true).then((activated) => {
+              if (activated) setSelected(udids);
+              return activated && leaving;
+            }));
+          }}
+        />
         {!focusDevice && recordingControls}
         <OperationProgressCenter deviceLabels={automationDeviceLabels} dockHost={monitorDock} pillHost={monitorPill} />
         <div

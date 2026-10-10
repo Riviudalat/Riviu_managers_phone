@@ -1,0 +1,173 @@
+/* The command palette (`CommandPalette.tsx`). Same scoped aliases as `menu.css`, each pointing
+   at an existing token; `--accent` is deliberately absent. Above the phone windows and the
+   menus, below toasts and confirmations — a confirmation a row opens must cover the palette,
+   and it does, because the palette has already closed by then. */
+.ui-palette-backdrop,
+.ui-palette-viewport {
+  --ui-hover: var(--bg-muted);
+  --ui-border: var(--line-strong);
+  --ui-ring: var(--primary-ring);
+  position: fixed;
+  inset: 0;
+  z-index: var(--z-modal-backdrop);
+}
+.ui-palette-backdrop {
+  background: rgb(15 23 42 / 30%);
+}
+.ui-palette-viewport {
+  display: flex;
+  align-items: flex-start;
+  justify-content: center;
+  padding: 12vh 16px 16px;
+}
+.ui-palette {
+  display: flex;
+  flex-direction: column;
+  width: min(620px, 100%);
+  max-height: min(560px, 100%);
+  border: 1px solid var(--ui-border);
+  border-radius: 12px;
+  background: var(--bg-elevated);
+  box-shadow: var(--shadow-lg);
+  overflow: hidden;
+  outline: none;
+}
+.ui-palette-search {
+  display: flex;
+  flex: 0 0 auto;
+  align-items: center;
+  gap: 0.6rem;
+  padding: 0 16px;
+  border-bottom: 1px solid var(--line);
+  color: var(--text-3);
+}
+.ui-palette-search:focus-within {
+  box-shadow: inset 0 -2px 0 var(--ui-ring);
+}
+.ui-palette-input {
+  flex: 1 1 auto;
+  min-width: 0;
+  height: 46px;
+  border: 0;
+  background: transparent;
+  color: var(--text-1);
+  font: inherit;
+  font-size: var(--text-md);
+  outline: none;
+  box-shadow: none;
+}
+.ui-palette-list {
+  flex: 1 1 auto;
+  min-height: 0;
+  padding: 4px 8px 8px;
+  overflow-y: auto;
+  overscroll-behavior: contain;
+  outline: none;
+}
+.ui-palette-list:empty {
+  display: none;
+}
+.ui-palette-group-label {
+  margin: 8px 8px 4px;
+  color: var(--text-3);
+  font-size: var(--text-xs);
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+}
+.ui-palette-item {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  min-height: 34px;
+  padding: 0 10px;
+  border-radius: 6px;
+  color: var(--text-2);
+  font-size: var(--text-sm);
+  cursor: pointer;
+  user-select: none;
+  scroll-margin-block: 4px;
+}
+.ui-palette-item[data-highlighted] {
+  background: var(--primary-soft);
+  color: var(--primary-deep);
+}
+.ui-palette-item[data-disabled] {
+  color: var(--text-3);
+  cursor: default;
+}
+.ui-palette-item[data-disabled][data-highlighted] {
+  background: var(--ui-hover);
+}
+.ui-palette-text {
+  flex: 1 1 auto;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.ui-palette-hint {
+  flex: 0 1 auto;
+  max-width: 45%;
+  overflow: hidden;
+  color: var(--text-3);
+  font-size: var(--text-xs);
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.ui-palette-empty:empty {
+  display: none;
+}
+.ui-palette-empty {
+  padding: 24px 18px;
+  color: var(--text-3);
+  font-size: var(--text-sm);
+}
+.ui-palette-footer {
+  flex: 0 0 auto;
+  margin: 0;
+  padding: 8px 16px;
+  border-top: 1px solid var(--line);
+  color: var(--text-3);
+  font-size: var(--text-xs);
+}
+.ui-palette-footer kbd,
+.ui-palette-launcher kbd {
+  display: inline-block;
+  min-width: 1.4em;
+  margin: 0 1px;
+  padding: 0 4px;
+  border: 1px solid var(--line-strong);
+  border-radius: 4px;
+  background: var(--bg-muted);
+  color: var(--text-2);
+  font: inherit;
+  font-size: 11px;
+  line-height: 1.5;
+  text-align: center;
+}
+
+/* The header entry. Collapses to its icon on a narrow window; the name stays for assistive
+   technology through `aria-label`. */
+.ui-palette-launcher {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.5rem;
+  min-width: 0;
+  height: 32px;
+  padding: 0 0.6rem;
+  border: 1px solid var(--line-strong);
+  border-radius: var(--radius);
+  background: var(--bg-elevated);
+  color: var(--text-3);
+  font-size: var(--text-sm);
+  white-space: nowrap;
+}
+.ui-palette-launcher:hover {
+  color: var(--text-1);
+}
+@media (max-width: 1100px) {
+  .ui-palette-launcher-text,
+  .ui-palette-launcher kbd {
+    display: none;
+  }
+}

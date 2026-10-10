@@ -137,6 +137,18 @@ bộ lọc. Refresh lỗi giữ dữ liệu cũ khi còn hợp lệ; response c�
   đóng. Dòng được chọn chạy sau khi menu đóng hẳn. Hover chỉ đổi màu, không lấy focus khỏi ô tìm.
   **Ngoại lệ có tên — focus guard của Base UI:** span `data-base-ui-focus-guard` (aria-hidden,
   tabindex 0) chỉ chuyển focus; kiểm axe menu loại trừ đúng selector này.
+- **Bảng lệnh** (Ctrl+K, ⌘K trên macOS, hoặc nút **Tìm máy, trang…** trên header; dưới 1100 px chỉ còn
+  icon) dùng primitive `components/ui/CommandPalette.tsx`: Base UI Dialog + Autocomplete inline, CSS
+  thuần, cùng alias với menu. Lọc không phân biệt dấu ("may 3" khớp "Máy 3"). Giai đoạn 1 chỉ điều
+  hướng và chọn: đi tới trang (các trang của sidebar và Điều phối), đi tới **Máy N** (về Thiết bị,
+  chỉ chọn máy đó, focus thẻ/dòng của nó; nếu bộ lọc đang ẩn máy thì bỏ lọc), và **Chọn N máy cần
+  xử lý** (đúng tập của bộ đếm Cần xử lý trên header; khi bộ đếm đó chưa biết thì dòng này tắt, không
+  chọn cả đội máy). **Chạy tác vụ đã lưu…** chỉ mở trang Tác vụ đã lưu; nút Chạy ở đó vẫn hỏi xác
+  nhận. Bảng lệnh không chạy tác vụ trên máy và không thay menu chức năng của máy. Bảng lệnh là
+  dialog modal khi mở; Escape trả focus về nơi đã mở (kể cả cửa sổ điện thoại), đóng xong cửa sổ
+  điện thoại vẫn non-modal. Dòng được chọn chạy sau khi bảng đóng hẳn; đi tới trang thì focus
+  chuyển sang mục sidebar của trang đó (hoặc tab Điều phối). Ctrl+K không mở khi đang có một dialog
+  modal khác (ví dụ hộp xác nhận).
 - Không card lồng card, không hero marketing. Toolbar/bảng/section có kích thước ổn định.
 - Không resize control theo label/hover/loading. Chữ wrap có chủ đích; không tràn, đè hàng sau hoặc scale theo viewport.
 - Dùng khoảng cách/màu/icon nhất quán; disabled/loading/error/empty phải phân biệt và có hành động tiếp theo.
