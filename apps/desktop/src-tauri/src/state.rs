@@ -841,7 +841,12 @@ impl AppState {
                 bundled_minicap_apk: tools.minicap_apk,
                 bundled_scrcpy_server: tools.scrcpy_server,
                 automatic_setup_allowed: false,
-                diagnostic_runner_devices: diagnostic.devices.iter().filter(|d|d.allow_installed_runner).map(|d|d.udid.clone()).collect(),
+                diagnostic_runner_devices: diagnostic
+                    .devices
+                    .iter()
+                    .filter(|d| d.allow_installed_runner)
+                    .map(|d| d.udid.clone())
+                    .collect(),
                 ..Default::default()
             };
             let driver = riviu_android_driver::detect_driver(&config).await.map_err(anyhow::Error::msg)?;
