@@ -31,7 +31,6 @@
 .window-canvas > .dev-phone {
   width: 100% !important;
   height: auto !important;
-  aspect-ratio: 1 / 2;
   min-width: 0;
 }
 

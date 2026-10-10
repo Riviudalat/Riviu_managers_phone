@@ -11,7 +11,7 @@ import {
   ChevronRight,
   Plus,
 } from "lucide-react";
-import { FOCUS_ZOOM, TILE_ZOOM, loadZoom, storeZoom } from "../zoom";
+import { FOCUS_ZOOM, TILE_PRESETS, TILE_ZOOM, loadZoom, storeZoom, tileDensity } from "../zoom";
 import type { ConnectionKind } from "../types";
 import { useEffect, useRef, useState } from "react";
 import { ControlStreamSettings } from "./ControlStreamSettings";
@@ -116,6 +116,19 @@ export function ControlCenterRail(p: Props) {
           onChange={(e) => p.onTileWidth(Number(e.target.value))}
         />
       </label>
+      <div className="control-tile-presets" role="group" aria-label="Cỡ ô xem trước">
+        {TILE_PRESETS.map((preset) => (
+          <button
+            type="button"
+            key={preset.density}
+            aria-pressed={tileDensity(p.tileWidth) === preset.density}
+            title={`${preset.label} · ${preset.width}px`}
+            onClick={() => p.onTileWidth(preset.width)}
+          >
+            {preset.label}
+          </button>
+        ))}
+      </div>
       <ControlStreamSettings />
       <div className="control-shortcuts"><button type="button" onClick={p.onSettings}><SlidersHorizontal size={15}/>Cài đặt</button><button type="button" onClick={p.onGroups}><Monitor size={15}/>Thiết bị</button><button type="button" onClick={p.onRotate}><Grid2X2 size={15}/>Xoay</button></div>
       <div

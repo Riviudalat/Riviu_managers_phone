@@ -98,7 +98,7 @@ import type { AgentStatus, DeviceInfo, DeviceWorkOwner, DeviceWorkState, PageId,
 import type { ActiveGroupSync, GroupSyncReadiness } from "./groupSync";
 import { MoreHorizontal } from "lucide-react";
 import { MENU_ICONS } from "./components/menuIcons";
-import { loadZoom, stepZoom, storeZoom, TILE_ZOOM, wheelWantsZoom } from "./zoom";
+import { loadZoom, stepZoom, storeZoom, tileDensity, TILE_ZOOM, wheelWantsZoom } from "./zoom";
 import { operationSourcePage, type OperationSourceRef } from "./operationSource";
 import "./App.css";
 
@@ -1423,6 +1423,7 @@ function App() {
                 <div
                   className="window-canvas"
                   style={{ "--device-tile-min-width": `${tileWidth}px` } as CSSProperties}
+                  data-density={tileDensity(tileWidth)}
                   ref={canvasRef}
                   role="grid"
                   aria-label="Lưới thiết bị"

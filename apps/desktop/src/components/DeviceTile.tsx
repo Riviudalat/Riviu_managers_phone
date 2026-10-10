@@ -1,6 +1,6 @@
 import { machineNumberLabel } from "../deviceNaming";
 import { memo } from "react";
-import { Maximize2 } from "lucide-react";
+import { Check, Maximize2 } from "lucide-react";
 import { deviceOperationalView } from "../deviceWork";
 import type { DeviceOperationalView } from "../deviceWork";
 import type { DeviceInfo } from "../types";
@@ -63,6 +63,33 @@ function DeviceTileInner({
   const operationalLabel = operational.ownerLabel
     ? `${operational.label} · ${operational.ownerLabel}`
     : operational.label;
+  // The alias usually is the model when the operator has not named the phone, so the model is
+  // only worth a second mention when it says something the name does not.
+  const model = device.model?.trim();
+  const shownModel = model && model !== displayName ? model : undefined;
+  const identity = [username ? `@${username}` : "", shownModel ?? ""].filter(Boolean).join(" · ");
+  // A phone that needs the operator gets a red ring and its reason on the strip. The reason a
+  // healthy phone carries ("connected" explains when control gets checked) stays in the tooltip.
+  const attention = operational.kind === "warning";
+  const detail = operational.step ?? (attention ? operational.reason : undefined);
+  // Hovering anywhere on the strip shows every line in full, including the ones the compact
+  // Tổng quan strip leaves out.
+  const stripTitle = [
+    `${machineNumberLabel(index)} · ${displayName}`,
+    identity,
+    operationalLabel,
+    operational.step,
+    attention ? operational.reason : undefined,
+  ].filter(Boolean).join("\n");
+  const accessibleName = [
+    machineNumberLabel(index),
+    displayName,
+    operationalLabel,
+    operational.step,
+    identity,
+    attention ? operational.reason : undefined,
+    selected ? "đã chọn" : undefined,
+  ].filter(Boolean).join(", ");
   const hasView = useViewLive(device.udid);
   const viewSize = useViewSize(device.udid);
   // Read at last. This existed the whole time and nothing consulted it, so a stream every
@@ -78,15 +105,15 @@ function DeviceTileInner({
 
   return (
     <article
-      className={`dev-phone ${selected ? "selected" : ""} ${focused ? "focused" : ""}`}
+      className={`dev-phone ${selected ? "selected" : ""} ${focused ? "focused" : ""} ${attention ? "attention" : ""}`}
       data-testid="device-tile"
       data-udid={device.udid}
       role="row"
       aria-selected={selected}
       tabIndex={0}
       aria-roledescription="thẻ thiết bị"
-      aria-label={`${machineNumberLabel(index)}, ${displayName}, ${operationalLabel}${operational.step ? `, ${operational.step}` : ""}${selected ? ", đã chọn" : ""}`}
-      style={{ width, height: width * 2 }}
+      aria-label={accessibleName}
+      style={{ width }}
       onClick={(e) => onSelect(device.udid, e.metaKey || e.ctrlKey || e.shiftKey)}
       onKeyDown={(event) => {
         if (event.target !== event.currentTarget) return;
@@ -108,9 +135,42 @@ function DeviceTileInner({
       }}
       onDoubleClick={() => onOpen(device.udid)}
     >
+      {/* The caption lives on its own light strip above the picture, never over it: white
+          text over a stream disappeared on every bright screen, and anything drawn on the
+          phone image hides the one thing the operator is watching. Every line truncates; the
+          full text stays in the row's accessible name and each line's tooltip. */}
+      <div className="dev-phone-strip" role="gridcell" title={stripTitle}>
+        <div className="dev-phone-strip-head">
+          <span className="dev-phone-index">{machineNumberLabel(index)}</span>
+          <span className="dev-phone-name" title={displayName}>{displayName}</span>
+          <span className="dev-phone-check" aria-hidden="true">{selected && <Check size={10} strokeWidth={3.5} />}</span>
+        </div>
+        {identity && (
+          <span className="dev-phone-ident" title={identity}>
+            {username && <span className="dev-phone-handle">@{username}</span>}
+            {username && shownModel && " · "}
+            {shownModel && <span className="dev-phone-model">{shownModel}</span>}
+          </span>
+        )}
+        <div className="dev-phone-run">
+          <span className={`dev-phone-status is-${operational.kind}`} title={operational.reason ?? operationalLabel}>
+            {operationalLabel}
+          </span>
+          {operational.helperRecovery && onHelperMaintenance ? (
+            <button type="button" className="link dev-phone-detail" title={operational.reason}
+              onDoubleClick={event => event.stopPropagation()}
+              onClick={event => { event.stopPropagation(); onHelperMaintenance(device.udid); }}>
+              Khôi phục helper
+            </button>
+          ) : detail && <span className="dev-phone-detail" title={detail}>{detail}</span>}
+        </div>
+      </div>
+
       {/* Every tile keeps the same phone-shaped frame regardless of stream
           state or the stream's own aspect, so the grid never reflows when a
-          frame arrives — the "fixed frame" the operator asked for. */}
+          frame arrives — the "fixed frame" the operator asked for. The canvas is
+          always the first child here and never behind a condition, so a status change
+          re-renders the strip without remounting the decoder surface. */}
       <div className="dev-phone-screen" role="gridcell">
         <PhoneCanvas udid={device.udid} surfaceId="tile" />
         {focused && <div className="dev-phone-focused-message" role="status">Đang mở phóng to</div>}
@@ -147,28 +207,6 @@ function DeviceTileInner({
             Máy chính
           </span>
         )}
-
-        <div className="dev-phone-info">
-          <span className="dev-phone-index">{machineNumberLabel(index)}</span>
-          <span className="dev-phone-name" title={displayName}>
-            {displayName}
-          </span>
-          {username && <span className="dev-phone-handle" title={`@${username}`}>@{username}</span>}
-          <span className={`dev-phone-status is-${operational.kind}`} title={operational.reason} style={{ pointerEvents: "auto", whiteSpace: "normal", overflowWrap: "anywhere", lineHeight: 1.35 }}>
-            {operationalLabel}
-          </span>
-          {operational.step && <span className={`dev-phone-status is-${operational.kind}`} title={operational.step}
-            style={{ pointerEvents: "auto", whiteSpace: "normal", overflowWrap: "anywhere", lineHeight: 1.35 }}>
-            {operational.step}
-          </span>}
-          {operational.helperRecovery && onHelperMaintenance && (
-            <button type="button" className="link" title={operational.reason} style={{ pointerEvents: "auto" }}
-              onDoubleClick={event => event.stopPropagation()}
-              onClick={event => { event.stopPropagation(); onHelperMaintenance(device.udid); }}>
-              Khôi phục helper
-            </button>
-          )}
-        </div>
       </div>
 
       {/* Selection stays on the tile itself. The small open action is intentionally separate:

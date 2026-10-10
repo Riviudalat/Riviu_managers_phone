@@ -13,11 +13,30 @@ export interface ZoomRange {
 }
 
 export const TILE_ZOOM: ZoomRange = {
-  min: 120,
+  min: 100,
   max: 420,
   fallback: 180,
   key: "riviu.tile.width",
 };
+
+/**
+ * The three named sizes on the "Hiển thị" rail. Each one only sets a starting width for the
+ * same slider and Ctrl+wheel. The strip style follows the width band rather than the button
+ * that was pressed, so a width picked by hand still lands in exactly one band.
+ */
+export type TileDensity = "overview" | "medium" | "large";
+
+export const TILE_PRESETS: readonly { density: TileDensity; label: string; width: number }[] = [
+  { density: "overview", label: "Tổng quan", width: 100 },
+  { density: "medium", label: "Vừa", width: 140 },
+  { density: "large", label: "Lớn", width: 190 },
+];
+
+export function tileDensity(width: number): TileDensity {
+  if (width < 140) return "overview";
+  if (width < 190) return "medium";
+  return "large";
+}
 
 export const FOCUS_ZOOM: ZoomRange = {
   min: 260,

@@ -31,6 +31,14 @@ riêng với thư viện hành động bên trái, canvas chính, cấu hình v�
 Tên, model, tài khoản và trạng thái máy nằm trên nền sáng riêng phía trên preview;
 không che hình điện thoại. Preview trong lưới giữ tỉ lệ 1:2; thẻ có thêm phần thông tin
 cao 88 px. Dấu chọn trên thẻ và bộ đếm dưới thanh lọc dùng cùng selection hiện có.
+Dải thông tin gồm số máy/tên, @nick · model, chip trạng thái theo `deviceWork` và bước đang
+chạy hoặc lý do cần xử lý; chữ dài bị cắt nhưng vẫn đọc đủ qua tên truy cập và tooltip.
+Máy cần xử lý có viền đỏ; máy đã chọn có viền cam và dấu tích. Rail **Hiển thị** giữ thanh
+trượt và Ctrl + lăn chuột, thêm ba cỡ: **Tổng quan** (ô tối thiểu 100 px), **Vừa** (140 px),
+**Lớn** (190 px). Kiểu dải theo dải độ rộng hiện tại, không theo nút đã bấm.
+**Ngoại lệ có tên — dải Tổng quan:** chỉ ở cỡ Tổng quan, dải cao khoảng 64 px và chữ
+11,5 px (`--text-tile-compact`), dưới mức tối thiểu 12 px, để 20 ô trọn vẹn vừa màn
+1366×768 khi sidebar mở. Vừa và Lớn dùng dải 88 px với chữ ≥ 12 px; nút trong dải vẫn ≥ 12 px.
 Monitor tiến trình vẫn không modal và hoạt động xuyên trang, mặc định nằm góc phải phía trên; có thể kéo đổi vị trí.
 Tab Thiết lập/Hẹn giờ/Theo dõi dùng chung nền trắng và mục chọn cam nhạt. Bảng có cuộn riêng;
 thanh hành động và nút chạy nằm trong viewport ở kích thước laptop. Chuyển màu nhẹ

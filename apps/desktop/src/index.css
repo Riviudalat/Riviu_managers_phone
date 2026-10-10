@@ -120,6 +120,9 @@
   --text-lg: 1rem;
   --text-xl: 1.25rem;
   --text-2xl: 1.5rem;
+  /* Named exception to the 12 px floor (docs/ui-reference-matrix.md): only the
+     Tổng quan tile strip, where 20 phones must fit a 1366×768 wall. */
+  --text-tile-compact: 0.71875rem;
 
   --leading-tight: 1.25;
   --leading-normal: 1.45;
