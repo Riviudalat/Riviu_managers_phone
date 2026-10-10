@@ -974,24 +974,22 @@ impl AdbProgram {
                 return Ok(());
             }
         }
-        let launch_receipt = self
+        // Never `monkey`: its rotation handling turns auto-rotate back on. Measured on
+        // SM-G955F Android 9 (10/10/2026): `accelerometer_rotation` 0 -> 1 after one
+        // `monkey -p … 1`. Launch the resolved launcher component with `am start`.
+        let resolved = self
             .shell(
                 serial,
-                &format!("monkey -p {package} -c android.intent.category.LAUNCHER 1"),
+                &format!("cmd package resolve-activity --brief -a android.intent.action.MAIN -c android.intent.category.LAUNCHER {package}"),
             )
-            .await?;
-        for _ in 0..4 {
-            if self
-                .foreground_package(serial)
-                .await
-                .is_ok_and(|p| p == package)
-            {
-                return Ok(());
-            }
-            tokio::time::sleep(Duration::from_millis(250)).await;
-        }
-        let resolved=self.shell(serial,&format!("cmd package resolve-activity --brief -a android.intent.action.MAIN -c android.intent.category.LAUNCHER {package}")).await?;
-        let command = foreground_activity_command(package, &resolved)?;
+            .await
+            .with_context(|| format!("không đọc được activity launcher của {package}; không mở ứng dụng"))?;
+        let command = foreground_activity_command(package, &resolved).with_context(|| {
+            format!(
+                "không xác định được activity launcher duy nhất của {package}; không mở ứng dụng; kết quả: {}",
+                resolved.trim().chars().take(512).collect::<String>()
+            )
+        })?;
         let activity_receipt = match self.shell(serial, &command).await {
             Ok(receipt) => receipt,
             Err(error) => {
@@ -1018,11 +1016,7 @@ impl AdbProgram {
         .await
         .with_context(|| {
             let receipt = |value: &str| value.trim().chars().take(512).collect::<String>();
-            format!(
-                "mở launcher: {}; mở activity: {}",
-                receipt(&launch_receipt),
-                receipt(&activity_receipt)
-            )
+            format!("mở activity: {}", receipt(&activity_receipt))
         })
     }
 }
@@ -2703,7 +2697,8 @@ mod tests {
                     "if \"%~1\" neq \"-s\" exit /b 90\r\nif \"%~3\" neq \"shell\" exit /b 91\r\n",
                     "if \"%script:~0,7%\"==\"dumpsys\" goto focus\r\n",
                     "if \"%script:~0,5%\"==\"pidof\" goto pid\r\n",
-                    "if \"%script:~0,6%\"==\"monkey\" goto launch\r\n",
+                    "if \"%script:~0,3%\"==\"cmd\" goto resolve\r\n",
+                    "if \"%script:~0,8%\"==\"am start\" goto launch\r\n",
                     ">>\"%~dp0unexpected.txt\" echo unexpected\r\nexit /b 92\r\n",
                     ":focus\r\n>>\"%~dp0calls.txt\" echo focus\r\n",
                     "echo mCurrentFocus=Window{123 u0 app.test/.MainActivity}\r\nexit /b 0\r\n",
@@ -2711,8 +2706,10 @@ mod tests {
                     "if exist \"%~dp0launched.txt\" (echo 22849 & exit /b 0)\r\n",
                     "set \"pid=\"\r\nset /p pid=<\"%~dp0pid.txt\"\r\n",
                     "if not defined pid exit /b 1\r\necho %pid%\r\nexit /b 0\r\n",
+                    ":resolve\r\n>>\"%~dp0calls.txt\" echo resolve\r\n",
+                    "echo app.test/.MainActivity\r\nexit /b 0\r\n",
                     ":launch\r\n>>\"%~dp0calls.txt\" echo launch\r\n",
-                    ">\"%~dp0launched.txt\" echo launched\r\necho Events injected: 1\r\nexit /b 0\r\n",
+                    ">\"%~dp0launched.txt\" echo launched\r\necho Status: ok\r\nexit /b 0\r\n",
                 )).unwrap();
                 path
             };
@@ -2725,7 +2722,8 @@ mod tests {
                     "[ \"$1\" = -s ] && [ \"$3\" = shell ] || exit 91\ncase \"$4\" in\n",
                     "dumpsys*) echo focus >> calls.txt; echo 'mCurrentFocus=Window{123 u0 app.test/.MainActivity}';;\n",
                     "pidof*) echo pid >> calls.txt; if [ -f launched.txt ]; then echo 22849; else pid=$(cat pid.txt); [ -n \"$pid\" ] || exit 1; echo \"$pid\"; fi;;\n",
-                    "monkey*) echo launch >> calls.txt; echo launched > launched.txt; echo 'Events injected: 1';;\n",
+                    "cmd\\ package\\ resolve-activity*) echo resolve >> calls.txt; echo 'app.test/.MainActivity';;\n",
+                    "am\\ start*) echo launch >> calls.txt; echo launched > launched.txt; echo 'Status: ok';;\n",
                     "*) echo unexpected >> unexpected.txt; exit 92;;\nesac\n",
                 )).unwrap();
                 std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o700)).unwrap();

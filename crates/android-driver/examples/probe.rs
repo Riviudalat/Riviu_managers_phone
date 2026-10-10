@@ -50,7 +50,7 @@ fn to_android_locator(label: LabelMatch) -> Locator {
 /// Not a constant, because the package name is regional: the global build is
 /// `com.zhiliaoapp.musically` and the South-East Asian build is
 /// `com.ss.android.ugc.trill`. A phone carrying the other one made this probe
-/// fail at `launch_app` with `monkey -p … failed` and go no further, so none of
+/// fail at `launch_app` (the app launch failed) and go no further, so none of
 /// the agent measurements below were reachable on it. Default is unchanged.
 static TIKTOK: LazyLock<String> = LazyLock::new(|| {
     std::env::var("RIVIU_TIKTOK_PACKAGE")

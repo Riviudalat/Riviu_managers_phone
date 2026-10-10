@@ -53,7 +53,7 @@ const INTERACTION_FIRST_FRAME_TIMEOUT: Duration = Duration::from_secs(12);
 /// was launching TikTok perfectly well, and the natural next move was to go looking for
 /// a broken `dumpsys` command. It was not broken; the deadline was.
 ///
-/// Still a deadline and not a fallback: a locked screen makes `monkey` report success
+/// Still a deadline and not a fallback: a locked screen makes the launch report success
 /// while nothing moves, and that has to end in a refusal rather than a session driving a
 /// lock screen. 40 s is the slowest measured start plus room, on the oldest phone here.
 pub(crate) const FOREGROUND_PROOF_TIMEOUT: Duration = Duration::from_secs(40);
@@ -3023,7 +3023,7 @@ impl DeviceDriver for AndroidDriver {
 
     /// Open a session with the target app proven to be in front.
     ///
-    /// The foreground **proof** is the point. `monkey` exits 0 in cases where it did
+    /// The foreground **proof** is the point. `am start` exits 0 in cases where it did
     /// not do what was asked — it is the "HTTP 200" of this path — so the answer
     /// comes from `active_app_bundle`, which reads `mCurrentFocus` and is real
     /// evidence. Nothing else on the nurture path foregrounds the app, so without
@@ -3227,7 +3227,7 @@ impl DeviceDriver for AndroidDriver {
                 }
                 anyhow::bail!(
                     "{bundle_id} did not reach the foreground on {udid} within {}s; the phone is \
-                     showing {observed}. A locked screen does this — `monkey` reports success \
+                     showing {observed}. A locked screen does this — the launch reports success \
                      and nothing moves",
                     FOREGROUND_PROOF_TIMEOUT.as_secs()
                 );
@@ -3249,7 +3249,7 @@ impl DeviceDriver for AndroidDriver {
     /// Delegate, so the target is not launched twice.
     ///
     /// The trait default calls `launch_app` and *then* `start_interaction_session`,
-    /// which on Android would `monkey` TikTok twice — an extra round trip and a
+    /// which on Android would launch TikTok twice — an extra round trip and a
     /// redundant resume. `start_interaction_session` already foregrounds and proves
     /// it. iOS overrides this for the same reason.
     async fn foreground_target_app_and_start_interaction_session(

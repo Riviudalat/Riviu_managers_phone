@@ -145,13 +145,12 @@ async fn cold_feed(driver: &AndroidDriver, serial: &str) -> anyhow::Result<()> {
     driver
         .device_shell(
             serial,
-            &format!(
-                "input keyevent KEYCODE_WAKEUP; am force-stop {package}; \
-                 monkey -p {package} -c android.intent.category.LAUNCHER 1"
-            ),
+            &format!("input keyevent KEYCODE_WAKEUP; am force-stop {package}"),
         )
-        .await
-        .map(|_| ())
+        .await?;
+    // `launch_app` starts the resolved launcher component with `am start`, never
+    // `monkey`, which turns auto-rotate back on (SM-G955F Android 9, 10/10/2026).
+    driver.launch_app(serial, &package).await
 }
 
 #[tokio::main]

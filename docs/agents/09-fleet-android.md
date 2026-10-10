@@ -31,6 +31,9 @@ Khi chỉ một máy có root không đọc được hoặc tap bị nuốt, so 
   đọc được và tap chỉ hiện sau ≥110 s. surfaceflinger ~92% CPU trong khi máy cùng đời
   ~3%, swap dùng 1,1 GB, Choreographer báo bỏ khung. `adb reboot` hết lỗi.
 - Chỉ reboot khi máy đó không còn Post/Send nào ở trạng thái chưa rõ.
+- Baseline giữ auto-rotate tắt (`accelerometer_rotation=0`). `monkey -p … 1` bật lại
+  auto-rotate (đo trên SM-G955F, Android 9, 10/10/2026), nên Riviu mở app bằng
+  `am start` trên component launcher đã resolve, không dùng `monkey`.
 - Sau reboot: kiểm lại auto-rotate (đã bật lại sau reboot) và khóa màn hình, rồi chạy
   "Khôi phục helper" (pending → prepare → execute). Bỏ bước này thì job kế tiếp lỗi
   `media_transfer_failed` / `recovery_required`.
