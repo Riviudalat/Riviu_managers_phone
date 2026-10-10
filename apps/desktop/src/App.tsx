@@ -827,10 +827,19 @@ function App() {
     }
   };
 
-  const readyCount = useMemo(
-    () => devices.filter(device => deviceOperationalView(device, currentDeviceWorkOwner(device.udid), deviceWorkOwnerReadState, cachedAgent(device.udid)).kind === "ready").length,
-    [devices, currentDeviceWorkOwner, deviceWorkOwnerReadState, cachedAgent],
-  );
+  // `null` is unknown, never 0: owners are unread, or an idle Android phone has no cached helper
+  // proof (only Control Center reads that cache), so the tile predicate cannot be applied.
+  const readyCount = useMemo((): number | null => {
+    if (deviceWorkOwnerReadState !== "known") return null;
+    let count = 0;
+    for (const device of devices) {
+      const owner = currentDeviceWorkOwner(device.udid);
+      const agent = cachedAgent(device.udid);
+      if (device.platform === "android" && device.status !== "disconnected" && !owner && !agent) return null;
+      if (deviceOperationalView(device, owner, deviceWorkOwnerReadState, agent).kind === "ready") count += 1;
+    }
+    return count;
+  }, [devices, currentDeviceWorkOwner, deviceWorkOwnerReadState, cachedAgent]);
 
   const runningJobs = useMemo(
     () => jobs.filter((j) => j.status === "running" || j.status === "queued").length,
@@ -900,7 +909,7 @@ function App() {
             <>
               <span className="fleet-status-label">Toàn hệ thống</span>
               {syncStatusLabel && <StatusChip>{syncStatusLabel}</StatusChip>}
-              {readyCount > 0 && (
+              {readyCount !== null && readyCount > 0 && (
                 <StatusChip tone="success">{readyCount} sẵn sàng</StatusChip>
               )}
               {runningJobs > 0 && (

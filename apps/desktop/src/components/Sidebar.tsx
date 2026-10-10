@@ -7,7 +7,8 @@ interface Props {
   page: PageId;
   selectedCount: number;
   total: number;
-  readyCount: number;
+  /** Proved-ready phones; `null` when readiness is not known on this page. */
+  readyCount: number | null;
   groupMode: boolean;
   forceCompact?: boolean;
   onPage: (page: PageId) => void;
@@ -52,6 +53,8 @@ const MENU: { label: string; items: { id: PageId; label: string }[] }[] = [
     ],
   },
 ];
+
+const unknownReadyTitle = "Sẵn sàng chỉ được xác nhận trong Control Center; trang này chưa đọc trạng thái điều khiển.";
 
 export function Sidebar({
   page,
@@ -131,12 +134,12 @@ export function Sidebar({
       </nav>
 
       <footer className="aside-stats" aria-label="Trạng thái hệ thống">
-        {compactRail && <strong className="aside-compact-status" title={`${readyCount}/${total} máy sẵn sàng`}>{readyCount}/{total}</strong>}
+        {compactRail && <strong className="aside-compact-status" title={readyCount === null ? unknownReadyTitle : `${readyCount}/${total} máy sẵn sàng`}>{readyCount === null ? "?" : readyCount}/{total}</strong>}
         <h4>Kết nối</h4>
         <div className="aside-stat-row">
           <span>Sẵn sàng</span>
           <span />
-          <strong>{readyCount}/{total}</strong>
+          <strong title={readyCount === null ? unknownReadyTitle : undefined}>{readyCount === null ? "Chưa rõ" : `${readyCount}/${total}`}</strong>
         </div>
         {page === "control" && <div className="aside-stat-row">
           <span>Đã chọn trong lưới</span>

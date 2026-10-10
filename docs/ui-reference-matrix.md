@@ -111,7 +111,10 @@ Bốn trạng thái khác nhau; nhãn và số đếm đứng cạnh nhãn phả
 | **Sẵn sàng** | Đã chứng minh điều khiển được: Android có helper, phiên và xác thực sẵn sàng; iOS ở trạng thái `ready` hoặc WDA sẵn sàng | chỉ `deviceOperationalView(...).kind === "ready"` |
 
 Không dùng "sẵn sàng" cho tập rộng hơn `kind === "ready"`. Thẻ chọn máy chỉ có trạng thái roster,
-nên roster `ready` hiện là **Đã chuẩn bị**, còn `connected` là **Chưa chuẩn bị**. Mở và đóng **Chọn thiết bị**
+nên roster `ready` hiện là **Đã chuẩn bị**, còn `connected` là **Chưa chuẩn bị**. Số **Sẵn sàng**
+ở header và sidebar đếm đúng điều kiện của thẻ máy. Khi chưa đọc được chủ sở hữu tác vụ hoặc
+bằng chứng helper Android (bộ nhớ đệm này chỉ được đọc trong Control Center), số đó hiện
+**Chưa rõ**, không hiện 0. Mở và đóng **Chọn thiết bị**
 mà không sửa thì giữ nguyên phạm vi Toàn bộ, Nhóm hoặc Máy cụ thể. Phạm vi chỉ thành Máy
 cụ thể khi người vận hành sửa trong drawer. Phạm vi rỗng không bao giờ thành Toàn bộ;
 nút chạy hiện lý do bị khóa.
