@@ -203,9 +203,13 @@ thống** trên header khác phạm vi **Máy thực hiện** của từng tác 
 Các cửa sổ chi tiết giữ thao tác bàn phím bên trong; Escape đóng cửa sổ trên cùng
 và trả focus về nơi mở. Cửa sổ tiến trình cho phép tiếp tục làm việc với trang chính.
 Trong **Chi tiết thiết bị → Khả năng thiết bị**, **Chọn ứng dụng TikTok** liệt kê
-các gói TikTok thực sự đang cài. Máy có cả Global và Trill phải chọn một lần trước
+các gói TikTok thực sự đang cài. Máy có cả Global và Trill nên chọn một lần trước
 khi kiểm tra khả năng hoặc chạy; lựa chọn được lưu theo serial. Không đổi được lựa
-chọn khi máy đang bị tác vụ giữ hoặc còn nghĩa vụ đóng ứng dụng/bài đăng cũ.
+chọn khi máy đang bị tác vụ giữ hoặc còn nghĩa vụ đóng ứng dụng/bài đăng cũ. Khi
+chưa chọn, Riviu lấy build đang ở foreground; nếu không build nào ở foreground, Riviu
+chọn build đang cài đúng gói và phiên bản trong cấu hình đội máy (hiện là TikTok Global
+45.7.3) và ghi vào log "chọn TikTok ... theo cấu hình đội máy". Cả hai cách đều chỉ
+đọc, không mở ứng dụng; máy không có build nào đúng cấu hình đội máy vẫn bị từ chối.
 
 ### Ghi Macro
 

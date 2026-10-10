@@ -881,6 +881,69 @@ fn select_foreground_tiktok_package(
     anyhow::bail!("{}", refusal())
 }
 
+/// The fleet-pin tie-break, after the foreground has failed to break it.
+///
+/// Box3150f, ce031713f3d3ec1d0c and ce04171411ae6a1504 (Global + Trill), 10/10/2026: the
+/// interaction campaign opened with TikTok on neither phone's screen, so every actor
+/// refused and the whole campaign failed before any effect. With no device selection
+/// stored, the fleet policy is the remaining measured answer: of the installed builds,
+/// the one whose `versionName` is exactly the pinned package + version is the build the
+/// fleet runs effects on. `versions` pairs each installed package with the `versionName`
+/// read for it (empty when `dumpsys` did not answer). An unread version is not "any
+/// version", a build outside the policy is never chosen, and two matches leave the tie
+/// standing. Read-only: nothing is launched or brought forward here.
+fn select_fleet_pinned_tiktok_package(
+    udid: &str,
+    installed: &[String],
+    versions: &[(String, String)],
+) -> anyhow::Result<&'static riviu_core::tiktok_fleet_policy::FleetBuild> {
+    use riviu_core::tiktok_fleet_policy::TIKTOK_FLEET_BUILDS;
+    let version_of = |package: &str| {
+        versions
+            .iter()
+            .find(|(candidate, _)| candidate == package)
+            .map_or("", |(_, version)| version.trim())
+    };
+    let matches = TIKTOK_FLEET_BUILDS
+        .iter()
+        .filter(|build| {
+            installed.iter().any(|candidate| candidate == build.package)
+                && version_of(build.package) == build.version
+        })
+        .collect::<Vec<_>>();
+    let pinned = TIKTOK_FLEET_BUILDS
+        .iter()
+        .map(|build| format!("{} {}", build.package, build.version))
+        .collect::<Vec<_>>()
+        .join(" / ");
+    let readings = installed
+        .iter()
+        .map(|package| {
+            let version = version_of(package);
+            format!(
+                "{package}={}",
+                if version.is_empty() {
+                    "unread"
+                } else {
+                    version
+                }
+            )
+        })
+        .collect::<Vec<_>>()
+        .join(", ");
+    match matches.as_slice() {
+        [build] => Ok(build),
+        [] => anyhow::bail!(
+            "{udid}: no installed TikTok build is the fleet policy's pinned build ({pinned}); \
+             read {readings}"
+        ),
+        _ => anyhow::bail!(
+            "{udid}: more than one installed TikTok build matches the fleet policy ({pinned}); \
+             read {readings}"
+        ),
+    }
+}
+
 /// The package half of a `package/activity` foreground read.
 fn focused_owner(focused: &str) -> &str {
     focused.split_once('/').map_or(focused, |(owner, _)| owner)
@@ -1442,15 +1505,42 @@ impl AndroidDriver {
         }
         let installed = self.installed_tiktok_packages(udid).await?;
         let resolved = if let Some(preferred) = preferred {
-            select_preferred_tiktok_package(udid, &installed, preferred)?
+            let package = select_preferred_tiktok_package(udid, &installed, preferred)?;
+            if installed.len() > 1 {
+                tracing::info!(
+                    udid,
+                    package,
+                    "{udid}: chọn TikTok {package} theo lựa chọn của máy (đang cài {})",
+                    installed.join(", ")
+                );
+            }
+            package
         } else if installed.len() == 1 {
             installed[0].clone()
         } else {
-            select_foreground_tiktok_package(
-                udid,
-                &installed,
-                self.adb.foreground_component(udid).await,
-            )?
+            let foreground = self.adb.foreground_component(udid).await;
+            match select_foreground_tiktok_package(udid, &installed, foreground) {
+                Ok(package) => package,
+                Err(unbroken) => {
+                    // No build on screen and no device selection: the fleet pin decides,
+                    // or the tie stands with both reasons in the error.
+                    let versions = self.installed_tiktok_versions(udid, &installed).await;
+                    let build = select_fleet_pinned_tiktok_package(udid, &installed, &versions)
+                        .map_err(|pin| unbroken.context(format!("{pin:#}")))?;
+                    tracing::info!(
+                        udid,
+                        package = build.package,
+                        version = build.version,
+                        "{udid}: chọn TikTok {} {} theo cấu hình đội máy ({}) vì đang cài {} và \
+                         không build nào ở foreground",
+                        build.package,
+                        build.version,
+                        build.label,
+                        installed.join(", ")
+                    );
+                    build.package.to_string()
+                }
+            }
         };
         self.tiktok_packages
             .lock()
@@ -1461,6 +1551,34 @@ impl AndroidDriver {
     async fn available_storage_bytes_for(&self, serial: &str) -> anyhow::Result<u64> {
         let output = self.adb.shell(serial, "df -k /data/local/tmp").await?;
         parse_available_storage_bytes(&output)
+    }
+
+    /// `versionName` of each installed TikTok candidate, read through `dumpsys package`
+    /// the way [`Self::tiktok_build_with_preference`] reads the chosen build's. Read-only.
+    /// A package whose `dumpsys` does not answer pairs with an empty string, so
+    /// [`select_fleet_pinned_tiktok_package`] treats it as unread rather than as a match.
+    async fn installed_tiktok_versions(
+        &self,
+        serial: &str,
+        installed: &[String],
+    ) -> Vec<(String, String)> {
+        let mut versions = Vec::with_capacity(installed.len());
+        for package in installed {
+            let version = match adb::validate_package_name(package) {
+                Ok(checked) => self
+                    .adb
+                    .shell(serial, &format!("dumpsys package {checked}"))
+                    .await
+                    .ok()
+                    .and_then(|out| {
+                        riviu_core::tiktok_labels::parse_version_name(&out).map(str::to_string)
+                    })
+                    .unwrap_or_default(),
+                Err(_) => String::new(),
+            };
+            versions.push((package.clone(), version));
+        }
+        versions
     }
 
     /// Build around an `adb` that has already been chosen.
