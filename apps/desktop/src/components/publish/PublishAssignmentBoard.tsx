@@ -454,7 +454,7 @@ export function PublishAssignmentBoard(p: Props) {
             </label>
           </header>
           <div className="pw-machine-tools">
-            <button type="button" className="ghost" title="Ghép các bài chưa có máy với máy sẵn sàng còn trống, mỗi máy một bài" disabled={p.disabled || !missing.length || !selectAllMap} onClick={() => {
+            <button type="button" className="ghost" title="Ghép các bài chưa có máy với máy có thể gán còn trống, mỗi máy một bài" disabled={p.disabled || !missing.length || !selectAllMap} onClick={() => {
               if (selectAllMap) commit(selectAllMap);
             }}>Chọn tất cả</button>
             <button type="button" className="ghost" disabled={p.disabled || missing.length === p.bundles.length} onClick={() => commit({})}>Bỏ chọn</button>

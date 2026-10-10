@@ -37,7 +37,8 @@ export function AutomationWorkspace({ kind, devices, groups, selected, targetRef
     <option value="explicit">{targetUdids.length ? `${targetUdids.length} máy đã chọn` : "Chọn từng máy"}</option><option value="all">Toàn bộ máy</option>
     {groups.map(group => <option key={group.id} value={`group:${group.id}`}>{group.name}</option>)}
   </select><button type="button" className="ghost machine-scope-pick" aria-label="Chọn thiết bị" aria-haspopup="dialog" aria-expanded={scopeOpen}
-    onClick={() => { onTargetRefChange({ type: "explicit", udids: targetUdids }); setScopeOpen(true); }}><span className="scope-pick-full">Chọn thiết bị</span><span className="scope-pick-short" aria-hidden="true">Chọn</span></button></>;
+    // Opening only views the scope. All/Group become Explicit when the operator edits it in the drawer.
+    onClick={() => setScopeOpen(true)}><span className="scope-pick-full">Chọn thiết bị</span><span className="scope-pick-short" aria-hidden="true">Chọn</span></button></>;
   return <div className={`automation-page-stack${kind === "publish" ? " is-publish-workspace" : ""}`}
     style={kind === "publish" ? undefined : { gridTemplateRows: "minmax(0, 1fr)" }}>
     {kind === "nurture" && <NurturePopup {...common} surface="page" scopeControl={scopeControl} />}

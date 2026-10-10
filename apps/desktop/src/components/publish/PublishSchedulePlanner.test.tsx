@@ -14,7 +14,7 @@ beforeEach(() => { localStorage.clear(); vi.clearAllMocks(); vi.mocked(publishSc
 afterEach(() => { cleanup(); vi.restoreAllMocks(); });
 async function assignAll() {
   await userEvent.click(screen.getByRole("button", { name: "Chọn tất cả bài" }));
-  await userEvent.click(screen.getByRole("button", { name: "Chọn tất cả sẵn sàng" }));
+  await userEvent.click(screen.getByRole("button", { name: "Chọn tất cả máy có thể gán" }));
   await userEvent.click(screen.getByRole("button", { name: "Gán bài đã chọn" }));
   fireEvent.change(screen.getByLabelText("Ngày đăng"), { target: { value: "2099-09-10" } });
   fireEvent.change(screen.getByLabelText("Giờ chung"), { target: { value: "20:00" } });
@@ -23,7 +23,7 @@ describe("schedule assignment workspace", () => {
   it("keeps the assignment command visible as the next step and distinguishes mapped from available machines", async () => {
     render(<PublishSchedulePlanner {...props} />);
     await userEvent.click(screen.getByRole("button", { name: "Chọn tất cả bài" }));
-    await userEvent.click(screen.getByRole("button", { name: "Chọn tất cả sẵn sàng" }));
+    await userEvent.click(screen.getByRole("button", { name: "Chọn tất cả máy có thể gán" }));
     expect(screen.getByRole("button", { name: /^Gán bài$/ })).toBeVisible();
     await userEvent.click(screen.getByRole("button", { name: /^Gán bài$/ }));
     expect(screen.getByText("3/3 bài có máy khả dụng")).toBeVisible();
@@ -279,7 +279,7 @@ describe("schedule assignment workspace", () => {
     Object.defineProperty(HTMLElement.prototype, "setPointerCapture", { configurable: true, value: vi.fn() });
     Object.defineProperty(HTMLElement.prototype, "hasPointerCapture", { configurable: true, value: () => false });
     const view = render(<PublishSchedulePlanner {...props} />);
-    fireEvent.click(screen.getByRole("button", { name: "Chọn tất cả sẵn sàng" }));
+    fireEvent.click(screen.getByRole("button", { name: "Chọn tất cả máy có thể gán" }));
     const zone = screen.getByRole("region", { name: "Vùng máy nhận bài" });
     const root = screen.getByRole("region", { name: "Lịch đăng nhiều khung giờ" });
     elementFromPoint.mockReturnValue(zone);

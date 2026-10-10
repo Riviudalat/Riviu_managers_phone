@@ -129,7 +129,7 @@ export function PublishSchedulePlanner(p: Props) {
     edit(() => result.next);
     const overLimit = ids.filter(id => !result.rows.some(r => r.bundleId === id)).length;
     setNotice(overLimit ? `Mỗi lịch tối đa 100 bài. Còn ${overLimit} bài chưa được thêm.`
-      : result.missing.length && target.machine ? "Máy này chưa sẵn sàng hoặc đã nhận bài cùng giờ. Phân công cũ được giữ nguyên."
+      : result.missing.length && target.machine ? "Máy này chưa thể gán hoặc đã nhận bài cùng giờ. Phân công cũ được giữ nguyên."
       : result.missing.length ? `Đã gán ${result.assigned.length} bài. Còn ${result.missing.length} bài chưa có máy trống cùng giờ.`
       : result.assigned.length ? `Đã gán ${result.assigned.length} bài vào máy.` : "Các bài đã có máy; giữ nguyên phân công hiện tại.");
   };
@@ -153,11 +153,11 @@ export function PublishSchedulePlanner(p: Props) {
     const leftover = p.bundles.length - rows.length;
     const freeAfter = readyIds.length - assignedMachines.length;
     setNotice(!rows.length
-      ? "Chưa có máy sẵn sàng trong phạm vi. Kiểm tra kết nối hoặc chọn lại nhóm máy."
+      ? "Chưa có máy có thể gán trong phạm vi. Kiểm tra kết nối hoặc chọn lại nhóm máy."
       : leftover
-        ? `Đã gán ${rows.length} bài cho ${rows.length} máy. ${leftover} bài còn lại vì hết máy sẵn sàng.`
+        ? `Đã gán ${rows.length} bài cho ${rows.length} máy. ${leftover} bài còn lại vì hết máy có thể gán.`
         : freeAfter
-          ? `Đã gán ${rows.length} bài cho ${rows.length} máy. Còn ${freeAfter} máy sẵn sàng nhưng hết bài trong nguồn.`
+          ? `Đã gán ${rows.length} bài cho ${rows.length} máy. Còn ${freeAfter} máy có thể gán nhưng hết bài trong nguồn.`
           : `Đã gán ${rows.length} bài cho ${rows.length} máy.`);
   };
   const drag = useScheduleDrag({ disabled: locked, getIds: id => draftRef.current.rows.some(r => r.bundleId === id) ? orderedIds(draftRef.current.rows.map(r => r.bundleId)) : [id], onDrop: drop });
@@ -173,7 +173,7 @@ export function PublishSchedulePlanner(p: Props) {
   const preview = drag.view?.target ? allocation(drag.view.ids, drag.view.target) : null;
   const setMachine = (row: ScheduleRow, udid: string) => {
     if (udid && (!readyIds.includes(udid) || machineHasScheduleConflict(draftRef.current.rows, row.bundleId, udid, draftRef.current.commonTime))) {
-      setNotice("Máy này chưa sẵn sàng hoặc đã nhận bài khác cùng giờ. Chọn máy trống hay đổi giờ bài."); return;
+      setNotice("Máy này chưa thể gán hoặc đã nhận bài khác cùng giờ. Chọn máy trống hay đổi giờ bài."); return;
     }
     edit(d => ({ ...d, rows: d.rows.map(r => r.id === row.id ? { ...r, udid } : r), selectedMachines: udid ? [...new Set([...d.selectedMachines, udid])] : d.selectedMachines }));
   };
@@ -182,7 +182,7 @@ export function PublishSchedulePlanner(p: Props) {
     if (!row.udid) return "Chưa có máy";
     const pending = deviceGuardBlock(p.deviceGuards,row.udid);
     if (pending) return pending;
-    if (!readyIds.includes(row.udid)) return "Máy chưa sẵn sàng trong phạm vi";
+    if (!readyIds.includes(row.udid)) return "Máy chưa thể gán trong phạm vi";
     if (machineHasScheduleConflict(draft.rows, row.bundleId, row.udid, draft.commonTime)) return "Trùng máy và giờ";
     const time = scheduleTime(row, draft.commonTime);
     return scheduleDateIssue(draft.date, time, now);
@@ -289,7 +289,7 @@ export function PublishSchedulePlanner(p: Props) {
         <section className={`ps-machines ${preview ? "is-drag-over" : ""}`} data-schedule-drop aria-label="Vùng máy nhận bài">
           <header><h3>Thả bài vào máy</h3><span>{draft.selectedMachines.filter(id => readyIds.includes(id)).length} máy đã chọn</span></header>
           <label className="ps-search"><Search size={15} aria-hidden="true"/><input aria-label="Tìm máy hẹn giờ" placeholder="Tìm số máy" value={machineQuery} onChange={e => setMachineQuery(e.target.value)}/></label>
-          <div className="ps-selection-tools"><button type="button" className="ps-quick-select" title="Tự chọn bài và máy phù hợp, rồi gán ngay" disabled={locked || !p.bundles.length} onClick={quickAssign}><Zap size={16} aria-hidden="true"/>Chọn nhanh</button><button type="button" disabled={locked || !readyIds.length} onClick={() => edit(d => ({ ...d, selectedMachines: readyIds }))}>Chọn tất cả sẵn sàng</button><button type="button" disabled={locked || !draft.selectedMachines.length} onClick={() => edit(d => ({ ...d, selectedMachines: [] }))}>Bỏ chọn máy</button></div>
+          <div className="ps-selection-tools"><button type="button" className="ps-quick-select" title="Tự chọn bài và máy phù hợp, rồi gán ngay" disabled={locked || !p.bundles.length} onClick={quickAssign}><Zap size={16} aria-hidden="true"/>Chọn nhanh</button><button type="button" disabled={locked || !readyIds.length} onClick={() => edit(d => ({ ...d, selectedMachines: readyIds }))}>Chọn tất cả máy có thể gán</button><button type="button" disabled={locked || !draft.selectedMachines.length} onClick={() => edit(d => ({ ...d, selectedMachines: [] }))}>Bỏ chọn máy</button></div>
           <div className="ps-machine-list" data-schedule-scroll>{filteredMachines.map(d => {
             const assigned = draft.rows.filter(r => r.udid === d.udid);
             const willReceive = preview?.assigned.filter(a => a.udid === d.udid) ?? [];
@@ -309,7 +309,7 @@ export function PublishSchedulePlanner(p: Props) {
         <div className="ps-table-scroll"><table className="ps-plan-table" aria-label="Bảng phân công"><thead><tr><th>Bài đăng</th><th>Máy nhận</th><th>Giờ đăng</th><th>Kết quả kiểm tra</th><th><span className="ps-sr-only">Thao tác</span></th></tr></thead><tbody>
           {draft.rows.map((row, index) => <tr key={row.id} data-schedule-row={row.bundleId} className={activePost === row.bundleId ? "is-linked" : ""} onMouseEnter={() => setHoveredPost(row.bundleId)} onMouseLeave={() => setHoveredPost(null)} onFocusCapture={() => setFocusedPost(row.bundleId)} onBlurCapture={e => { if (!e.currentTarget.contains(e.relatedTarget)) setFocusedPost(null); }}>
             <td data-schedule-field="verdict" tabIndex={-1}><strong title={name(row.bundleId)}>{name(row.bundleId)}</strong><small className="ps-mobile-result">{rowStatus(row, index)}</small></td>
-            <td><select data-schedule-field="rowMachine" aria-label={`Máy nhận ${name(row.bundleId)}`} value={row.udid} disabled={locked} onChange={e => setMachine(row, e.target.value)}><option value="">Chưa có máy</option>{row.udid && !inScope.some(d => d.udid === row.udid) && <option value={row.udid}>Máy ngoài phạm vi / mất kết nối</option>}{inScope.map(d => <option key={d.udid} value={d.udid} disabled={d.status !== "ready"}>{label(d.udid)}{d.status !== "ready" ? " · Chưa sẵn sàng" : ""}</option>)}</select></td>
+            <td><select data-schedule-field="rowMachine" aria-label={`Máy nhận ${name(row.bundleId)}`} value={row.udid} disabled={locked} onChange={e => setMachine(row, e.target.value)}><option value="">Chưa có máy</option>{row.udid && !inScope.some(d => d.udid === row.udid) && <option value={row.udid}>Máy ngoài phạm vi / mất kết nối</option>}{inScope.map(d => <option key={d.udid} value={d.udid} disabled={d.status !== "ready"}>{label(d.udid)}{d.status !== "ready" ? " · Chưa thể gán" : ""}</option>)}</select></td>
             <td>{individualTimes ? <div className="ps-row-time"><input data-schedule-field="rowTime" type="time" aria-label={`Giờ bài ${name(row.bundleId)}`} disabled={locked} value={scheduleTime(row, draft.commonTime)} onChange={e => edit(d => ({ ...d, rows: d.rows.map(r => r.id === row.id ? { ...r, time: e.target.value, timeMode: "custom" } : r) }))}/>{row.timeMode === "custom" ? <button type="button" disabled={locked} aria-label={`Dùng giờ chung cho ${name(row.bundleId)}`} onClick={() => edit(d => ({ ...d, rows: d.rows.map(r => r.id === row.id ? { ...r, timeMode: "common" } : r) }))}>Dùng giờ chung</button> : <small>Giờ chung</small>}</div> : <span>{scheduleTime(row, draft.commonTime) || "Chưa đặt giờ"}{row.timeMode === "custom" && <small>Giờ riêng</small>}</span>}</td>
             <td className={rowIssue(row) && rowIssue(row) !== "Chọn ngày và giờ đăng" ? "ps-row-issue" : "ps-row-status"}>{rowStatus(row, index)}</td>
             <td><div className="ps-row-actions"><button type="button" disabled={locked || !row.udid} aria-label={`Gỡ gán ${name(row.bundleId)}`} onClick={() => setMachine(row, "")}><Unlink size={15} aria-hidden="true"/></button><button type="button" disabled={locked} aria-label={`Bỏ bài ${name(row.bundleId)}`} onClick={() => selection(row.bundleId, false)}><X size={15} aria-hidden="true"/></button></div></td>

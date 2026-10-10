@@ -81,12 +81,12 @@ export function NurtureMachinePicker({ devices, metas, targets, onTargetRefChang
     <header className="nurture-card-heading"><h2>Máy thực hiện</h2><span className="nurture-count" role="status">Đã chọn {targets.length}</span></header>
     <label className="nurture-machine-search"><Search size={16} aria-hidden="true" /><input type="search" aria-label="Tìm máy Nuôi TikTok" placeholder="Tìm số máy hoặc tên" value={query} onChange={(event) => setQuery(event.target.value)} /></label>
     <div className="nurture-machine-tools">
-      <button type="button" className="ghost" title="Chọn tất cả máy đang kết nối, kể cả máy ngoài kết quả tìm kiếm; kiểm tra sẵn sàng khi bắt đầu" disabled={!onTargetRefChange || !available.length} onClick={() => setTargets(available.map(({device}) => device.udid))}>Chọn tất cả đang kết nối</button>
+      <button type="button" className="ghost" title="Chọn mọi máy đang kết nối, kể cả máy đang bận và máy ngoài kết quả tìm kiếm; sẵn sàng được kiểm tra khi bắt đầu" disabled={!onTargetRefChange || !available.length} onClick={() => setTargets(available.map(({device}) => device.udid))}>Chọn tất cả máy chọn được</button>
       <button type="button" className="ghost" disabled={!onTargetRefChange || !targets.length} onClick={() => setTargets([])}>Bỏ chọn</button>
-      <small className="nurture-machine-ready-hint">{available.length} có thể chọn · {devices.length} tổng</small>
+      <small className="nurture-machine-ready-hint">{available.length} chọn được · {devices.length} tổng</small>
     </div>
     {query && <p className="nurture-machine-filter-count">{filtered.length} máy khớp tìm kiếm</p>}
-    {unavailable > 0 && <p className="nurture-setup-note">{unavailable} máy chưa sẵn sàng, chưa thể chọn thêm.</p>}
+    {unavailable > 0 && <p className="nurture-setup-note">{unavailable} máy chưa chọn được (mất kết nối, đang chuẩn bị hoặc lỗi).</p>}
     <div className={`nurture-machine-grid machine-choice-grid${devices.length > 12 ? " is-compact" : ""}`} role="group" aria-label="Danh sách chọn máy Nuôi TikTok">
       {filtered.map(({ device, number, name }) => {
         const ready = device.status === "ready" || device.status === "busy" || device.status === "connected";

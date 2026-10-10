@@ -70,7 +70,7 @@ for (const viewport of [{ width: 1440, height: 900 }, { width: 900, height: 700 
     await expect(machines.getByRole("checkbox")).toHaveCount(20);
     expect(await machines.evaluate(element => getComputedStyle(element).gridTemplateColumns.split(" ").length)).toBe(2);
     await expect(workspace.getByRole("button", { name: "Trang máy sau" })).toHaveCount(0);
-    await workspace.getByRole("button", { name: "Chọn tất cả sẵn sàng", exact: true }).click();
+    await workspace.getByRole("button", { name: "Chọn tất cả máy chọn được", exact: true }).click();
     await expect(machines.getByRole("checkbox", { checked: true })).toHaveCount(20);
     await machines.getByRole("checkbox").last().scrollIntoViewIfNeeded();
     await expect(machines.getByRole("checkbox").last()).toBeInViewport();

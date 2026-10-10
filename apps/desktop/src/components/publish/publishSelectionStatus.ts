@@ -19,7 +19,7 @@ export function publishSelectionStatus(input: {
     const udid = input.assignments[bundle.id];
     if (!udid) reason = `${bundle.name}: chưa ghép máy. Bấm Chọn nhanh hoặc chọn máy nhận bài.`;
     else if (!input.eligible.includes(udid)) reason = `${bundle.name}: máy đã gán không còn trong phạm vi hoặc đang mất kết nối.`;
-    else if (!input.ready.includes(udid)) reason = `${bundle.name}: máy đã gán chưa sẵn sàng. Cặp gán vẫn được giữ.`;
+    else if (!input.ready.includes(udid)) reason = `${bundle.name}: máy đã gán hiện chưa thể gán (mất kết nối, đang chuẩn bị hoặc lỗi). Cặp gán vẫn được giữ.`;
     else if (used.has(udid)) reason = `${bundle.name}: máy đang nhận nhiều hơn một bài.`;
     else if (!(input.captions[bundle.id] ?? bundle.caption).trim()) reason = `${bundle.name}: nội dung chữ đang trống.`;
     used.add(udid);

@@ -371,7 +371,7 @@ describe("NurturePopup", () => {
     expect(picker).toHaveAttribute("aria-expanded", "false");
     expect(screen.queryByRole("searchbox", { name: "Tìm máy Nuôi TikTok" })).toBeNull();
     fireEvent.click(picker);
-    fireEvent.click(screen.getByRole("button", { name: "Chọn tất cả đang kết nối" }));
+    fireEvent.click(screen.getByRole("button", { name: "Chọn tất cả máy chọn được" }));
     expect(new Set(onTargetRefChange.mock.calls[0][0].udids)).toEqual(new Set(roster.map(device => device.udid)));
     fireEvent.change(screen.getByRole("searchbox", { name: "Tìm máy Nuôi TikTok" }), { target: { value: "dalat" } });
     expect(screen.getByText("Đà Lạt")).toBeVisible();

@@ -705,8 +705,19 @@ export async function installTauriMock(
     });
 
     commandHandlers.set("list_devices", () => clone(devices));
+    // A fleet of three or more carries the four operator states the UI must keep apart: the
+    // last phone is busy under a running Nuôi, the one before it is connected but its helper is
+    // not proved, and the rest are proved ready. Smaller fleets stay all-ready.
+    const busyFleetUdid = fixtureOptions.fleetSize && fixtureOptions.fleetSize >= 3
+      ? devices[devices.length - 1].udid : null;
+    const unprovedFleetUdid = fixtureOptions.fleetSize && fixtureOptions.fleetSize >= 3
+      ? devices[devices.length - 2].udid : null;
     commandHandlers.set("list_device_work_states", () =>
-      devices.map((device) => ({ udid: device.udid, currentOwner: null })),
+      devices.map((device) => device.udid === busyFleetUdid ? {
+        udid: device.udid,
+        currentOwner: "nurture",
+        activity: { operationId: "nurture:fixture-busy", kind: "nurture", label: "Đang nuôi TikTok", step: "Video 3/20", state: "running", updatedAt: AT },
+      } : { udid: device.udid, currentOwner: null }),
     );
     commandHandlers.set("refresh_devices", () => clone(devices));
     commandHandlers.set("list_jobs", () => []);
@@ -1256,7 +1267,9 @@ export async function installTauriMock(
       artifactVersion: "0.5.8-media-text",
       bundleId: "com.riviu.managersphone.agent.xctrunner",
       protocolVersion: 1,
-      features: ["stream", "gesture", "text"],
+      // A numbered fleet proves its Android helpers, except the one phone kept connected-only.
+      features: fixtureOptions.fleetSize && udid !== unprovedFleetUdid
+        ? ["stream", "gesture", "text", "helperReady"] : ["stream", "gesture", "text"],
       installedVersion: "10.6.2",
       installedBuild: "274",
       authReady: true,
@@ -1301,7 +1314,20 @@ export async function installTauriMock(
     // handler the mock *rejects*, which the call site catches — so the page still renders and
     // the omission would only show up as a fleet with no labels, which is also what an empty
     // answer looks like. Mocked so the two stay distinguishable.
-    commandHandlers.set("list_device_metas", () => []);
+    // Numbers follow roster order, which is what the tiles show for unnumbered phones anyway, so
+    // answering the allocation changes no label; without it every page carried the yellow
+    // `Unknown mock command: ensure_device_numbers` banner.
+    const deviceMetas = new Map<string, JsonRecord>();
+    commandHandlers.set("ensure_device_numbers", (args) => {
+      const udids = Array.isArray(args.udids) ? (args.udids as string[]) : [];
+      for (const udid of udids) {
+        if (deviceMetas.has(udid)) continue;
+        const index = devices.findIndex((device) => device.udid === udid);
+        deviceMetas.set(udid, { udid, notes: "", tags: [], number: index >= 0 ? index + 1 : deviceMetas.size + 1 });
+      }
+      return udids.flatMap((udid) => deviceMetas.has(udid) ? [clone(deviceMetas.get(udid))] : []);
+    });
+    commandHandlers.set("list_device_metas", () => [...deviceMetas.values()].map((meta) => clone(meta)));
     commandHandlers.set("device_shell", () => ({ exitCode: 0, stdout: "", stderr: "" }));
     commandHandlers.set("set_screen_rotation", () => 0);
 

@@ -166,7 +166,7 @@ for (const viewport of [
     await expect(machineList.getByRole("checkbox")).toHaveCount(20);
     expect(await machineList.evaluate(element => element.scrollHeight >= element.clientHeight)).toBe(true);
     await machines.locator(".pq-device-filters > summary").click();
-    await machines.getByRole("button", { name: "Chọn tất cả sẵn sàng", exact: true }).click();
+    await machines.getByRole("button", { name: "Chọn tất cả máy có thể gán", exact: true }).click();
     await page.getByRole("button", { name: "Chọn tất cả bài", exact: true }).click();
     await page.getByRole("button", { name: "Chọn nhanh", exact: true }).click();
     await expect(page.locator(".pq-footer")).toContainText("10/10 bài có máy");
@@ -197,7 +197,7 @@ for (const viewport of [
     await page.getByRole("combobox", { name: "Phạm vi thiết bị" }).selectOption("all");
     await page.getByRole("button", { name: "Chọn tất cả bài", exact: true }).click();
     await machines.locator(".pq-device-filters > summary").click();
-    await machines.getByRole("button", { name: "Chọn tất cả sẵn sàng", exact: true }).click();
+    await machines.getByRole("button", { name: "Chọn tất cả máy có thể gán", exact: true }).click();
     await machines.locator(".pq-device-filters > summary").click();
     await page.getByRole("button", { name: "Chọn nhanh", exact: true }).click();
     await expect(page.locator(".pq-footer")).toContainText("10/10 bài có máy");

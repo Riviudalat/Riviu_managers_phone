@@ -133,11 +133,11 @@ export function PublishQuickSetup(p: QuickProps) {
     const leftover = bundles.length - next.ids.length;
     const freeReady = ready.length - next.picked.length;
     setNotice(!next.ids.length
-      ? "Chưa có máy sẵn sàng trong phạm vi. Kiểm tra kết nối hoặc chọn lại nhóm máy."
+      ? "Chưa có máy có thể gán trong phạm vi. Kiểm tra kết nối hoặc chọn lại nhóm máy."
       : leftover
-        ? `Đã gán ${next.ids.length} bài cho ${next.ids.length} máy. ${leftover} bài còn lại vì hết máy sẵn sàng hoặc đạt giới hạn 100 bài.`
+        ? `Đã gán ${next.ids.length} bài cho ${next.ids.length} máy. ${leftover} bài còn lại vì hết máy có thể gán hoặc đạt giới hạn 100 bài.`
         : freeReady
-          ? `Đã gán ${next.ids.length} bài cho ${next.ids.length} máy. Còn ${freeReady} máy sẵn sàng nhưng hết bài trong nguồn.`
+          ? `Đã gán ${next.ids.length} bài cho ${next.ids.length} máy. Còn ${freeReady} máy có thể gán nhưng hết bài trong nguồn.`
           : `Đã gán ${next.ids.length} bài cho ${next.ids.length} máy.`);
   };
   const undoAssignment = () => {
@@ -246,25 +246,25 @@ export function PublishQuickSetup(p: QuickProps) {
             return <article key={b.id} className={`pq-link${b.id === active?.id ? " is-active" : ""}${valid ? "" : " needs-machine"}`}>
               <button type="button" className="pq-link-post" title={b.name} aria-label={`Chọn cặp bài · ${b.name}`} aria-pressed={b.id === active?.id} onClick={() => setActiveId(b.id)}><span>{String(index + 1).padStart(2, "0")}</span><strong>{b.name}</strong></button>
               <label className="pq-link-target"><span aria-hidden="true">→</span><select aria-label={`Máy nhận bài ${b.name}`} disabled={locked || confirming} value={udid ?? ""} onChange={e => void assign(b.id, e.target.value)}><option value="">Chưa ghép</option>
-                {udid && !selectable.some(d => d.udid === udid) && <option value={udid}>{label(udid)} · {p.eligible.includes(udid) ? "Chưa sẵn sàng" : "Ngoài phạm vi"}</option>}
+                {udid && !selectable.some(d => d.udid === udid) && <option value={udid}>{label(udid)} · {p.eligible.includes(udid) ? "Chưa thể gán" : "Ngoài phạm vi"}</option>}
                 {selectable.map(d => <option key={d.udid} value={d.udid} disabled={!canReceive(p, d.udid)}>{label(d.udid)}{deviceGuardBlock(p.deviceGuards, d.udid) ? ` · ${deviceGuardBlock(p.deviceGuards, d.udid)}` : ""}</option>)}
               </select></label>
               <div className="pq-link-detail"><span>{b.mediaKind === "video" ? "Video MP4" : `${b.images.length} ảnh`}</span><button type="button" className="ghost" aria-label={`Sửa caption · ${b.name}`} onClick={e => openCaption(b.id, e.currentTarget)}>Sửa caption</button></div>
               <div className="pq-link-account"><span title={handle || (udid ? label(udid) : "Cần chọn máy")}>{handle || (udid ? valid ? "Đã ghép máy" : "Máy chưa hợp lệ" : "Cần chọn máy")}</span><button type="button" className="pq-unlink ghost" aria-label={`Bỏ ghép bài ${b.name}`} title="Bỏ ghép bài này" disabled={locked || confirming || !udid} onClick={() => void assign(b.id, "")}><X size={14}/></button></div>
             </article>;
-          })}{!selected.length && <div className="pq-list-empty"><strong>Chưa chọn bài nào</strong><p>Tick bài bên trái hoặc dùng Chọn nhanh để ghép với máy sẵn sàng.</p></div>}</div>
+          })}{!selected.length && <div className="pq-list-empty"><strong>Chưa chọn bài nào</strong><p>Tick bài bên trái hoặc dùng Chọn nhanh để ghép với máy có thể gán.</p></div>}</div>
         </section>
         <section className="pq-devices pq-panel" aria-label="Máy thực hiện">
-          <header className="pq-devices-header"><div><h2>Thiết bị</h2><div className={`pq-active-post${active && !activeVisible ? " is-hidden" : ""}`} role="status">{active && !activeVisible ? <><span>Bài đang gán bị lọc ẩn.</span><button type="button" className="ghost" onClick={() => { revealAfterCommit.current = active.id; setQuery(""); }}>Hiện bài</button></> : <span title={active?.name}>Gán: <strong>{active?.name ?? "Chưa chọn bài"}</strong>{active && !p.selectedIds.includes(active.id) ? " · Tick bài trước" : ""}</span>}</div></div>{p.scopeControl ?? <span>{ready.length} sẵn sàng</span>}</header>
+          <header className="pq-devices-header"><div><h2>Thiết bị</h2><div className={`pq-active-post${active && !activeVisible ? " is-hidden" : ""}`} role="status">{active && !activeVisible ? <><span>Bài đang gán bị lọc ẩn.</span><button type="button" className="ghost" onClick={() => { revealAfterCommit.current = active.id; setQuery(""); }}>Hiện bài</button></> : <span title={active?.name}>Gán: <strong>{active?.name ?? "Chưa chọn bài"}</strong>{active && !p.selectedIds.includes(active.id) ? " · Tick bài trước" : ""}</span>}</div></div>{p.scopeControl ?? <span>{ready.length} có thể gán</span>}</header>
           <div className="pq-panel-tools pq-device-tools">
             <div className="pq-quick-actions"><button type="button" className="pq-quick-button" disabled={locked || confirming || !bundles.length} onClick={autoAssign}><Zap size={15} aria-hidden="true"/>Chọn nhanh</button><button type="button" aria-label="Hoàn tác gán nhanh" disabled={locked || confirming || !undo || undo.source !== p.sourceRoot || undo.after !== mappingKey} onClick={undoAssignment}><Undo2 size={15} aria-hidden="true"/>Hoàn tác</button></div>
             <div className="pq-device-searchbar"><label className="pq-search"><Search size={15}/><input aria-label="Tìm số máy" value={deviceQuery} onChange={e => setDeviceQuery(e.target.value)} placeholder="Tìm máy / tài khoản"/></label>
             <details className="pq-device-filters" onKeyDown={e => { if (e.key === "Escape") { e.currentTarget.open = false; e.currentTarget.querySelector("summary")?.focus(); } }}><summary aria-label="Bộ lọc thiết bị" title="Bộ lọc thiết bị"><ListFilter size={15}/><span>Bộ lọc thiết bị</span></summary><div>
-              <label><input type="checkbox" checked={onlyFree} onChange={e => setOnlyFree(e.target.checked)}/>Chỉ hiện máy sẵn sàng chưa có bài</label>
+              <label><input type="checkbox" checked={onlyFree} onChange={e => setOnlyFree(e.target.checked)}/>Chỉ hiện máy có thể gán chưa có bài</label>
               {p.scopeControl && <label><input type="checkbox" checked={showOutOfScope} onChange={e => setShowOutOfScope(e.target.checked)}/>Hiện máy ngoài phạm vi</label>}
-              <button type="button" className="ghost" title="Chọn tất cả máy sẵn sàng trong phạm vi, kể cả ngoài kết quả tìm kiếm" disabled={locked || confirming || !ready.length} onClick={() => { if (!locked && !confirming) setPicked(ready.map(d => d.udid)); }}>Chọn tất cả sẵn sàng</button>
+              <button type="button" className="ghost" title="Chọn mọi máy có thể gán trong phạm vi (đã kết nối, kể cả đang bận), kể cả ngoài kết quả tìm kiếm" disabled={locked || confirming || !ready.length} onClick={() => { if (!locked && !confirming) setPicked(ready.map(d => d.udid)); }}>Chọn tất cả máy có thể gán</button>
               <button type="button" className="ghost" disabled={locked || confirming || (!picked.length && !selected.some(b => p.assignments[b.id]))} onClick={() => { if (!locked && !confirming) { setPicked([]); p.onAssign({}); } }}>Bỏ chọn toàn bộ máy</button>
-              <small>{mapped} bài đã ghép · {ready.length} máy sẵn sàng / {devices.length} tổng. Bộ lọc chỉ đổi danh sách đang xem, không đổi Chọn nhanh.</small>
+              <small>{mapped} bài đã ghép · {ready.length} máy có thể gán / {devices.length} tổng. Bộ lọc chỉ đổi danh sách đang xem, không đổi Chọn nhanh.</small>
             </div></details></div>
           </div>
           {!p.eligible.length && <p className="pq-scope-hint">Chọn Toàn bộ máy hoặc một nhóm để ghép bài.</p>}

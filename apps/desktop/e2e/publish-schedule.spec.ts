@@ -63,7 +63,7 @@ for (const viewport of [{ width: 1440, height: 900 }, { width: 900, height: 900 
     await page.setViewportSize(viewport); await fixture(page);
     const errors: string[] = []; page.on("pageerror", error => errors.push(error.message));
     await page.getByRole("button", { name: "Chọn tất cả bài", exact: true }).click();
-    await page.getByRole("button", { name: "Chọn tất cả sẵn sàng", exact: true }).click();
+    await page.getByRole("button", { name: "Chọn tất cả máy có thể gán", exact: true }).click();
     await drag(page, page.getByRole("button", { name: "Kéo bài Bài Đà Lạt 1", exact: true }), page.locator(".ps-machines>header"));
     await expect(page.locator(".ps-notice")).toHaveText("Đã gán 10 bài vào máy.");
     const values = await page.locator(".ps-plan-table select").evaluateAll(nodes => nodes.map(n => (n as HTMLSelectElement).value));
@@ -103,7 +103,7 @@ test("successive direct drops, occupied machines, insufficient capacity, escape 
   await expect(page.getByLabel("Máy nhận Bài Đà Lạt 2", { exact: true })).toHaveValue("");
   await expect(page.getByLabel("Máy nhận Bài Đà Lạt 1", { exact: true })).toHaveValue(first);
   // A selected group is intentionally kept together; target the shared region to fill only its missing rows.
-  await page.getByRole("button", { name: "Chọn tất cả sẵn sàng" }).click();
+  await page.getByRole("button", { name: "Chọn tất cả máy có thể gán" }).click();
   await drag(page, post(2), page.locator(".ps-machines>header"));
   await drag(page, post(3), page.locator(".ps-machines>header"));
   await expect(page.getByLabel("Máy nhận Bài Đà Lạt 3", { exact: true })).toHaveValue("");
@@ -118,7 +118,7 @@ test("successive direct drops, occupied machines, insufficient capacity, escape 
 test("drag preview follows auto-scroll and blur cancels without changing the draft", async ({ page }) => {
   await page.setViewportSize({ width: 1440, height: 900 }); await fixture(page, 10, 20);
   await page.getByRole("button", { name: "Chọn tất cả bài", exact: true }).click();
-  await page.getByRole("button", { name: "Chọn tất cả sẵn sàng", exact: true }).click();
+  await page.getByRole("button", { name: "Chọn tất cả máy có thể gán", exact: true }).click();
   const start = (await page.locator("[data-schedule-drag]").first().boundingBox())!;
   const list = page.locator(".ps-machine-list");
   const end = (await list.boundingBox())!;
@@ -143,7 +143,7 @@ for (const viewport of [{ width: 1440, height: 900 }, { width: 820, height: 560 
     expect(bounds.height).toBeGreaterThanOrEqual(36);
     expect(bounds.y + bounds.height).toBeLessThanOrEqual(viewport.height);
     await quick.focus(); await page.keyboard.press("Enter");
-    await expect(page.locator(".ps-notice")).toHaveText("Đã gán 10 bài cho 10 máy. Còn 2 máy sẵn sàng nhưng hết bài trong nguồn.");
+    await expect(page.locator(".ps-notice")).toHaveText("Đã gán 10 bài cho 10 máy. Còn 2 máy có thể gán nhưng hết bài trong nguồn.");
     const rows = page.locator(".ps-plan-table select");
     const before = await rows.evaluateAll(nodes => nodes.map(n => (n as HTMLSelectElement).value));
     expect(new Set(before).size).toBe(10);
