@@ -601,6 +601,49 @@ Inventory dùng dữ liệu máy đã đọc khi cùng máy đang giữ khóa ch
 scan Android không được coi là disconnect để cấp lại lượt cài. Gói `com.riviu.agent`
 có versionCode tối thiểu 5 cho launcher; APK, manifest và NOTICE phải khớp hash.
 
+## Start Publish và handoff máy đã chọn
+
+### Vào và phục hồi
+
+- Preflight chỉ quan sát readiness và owner; không dừng thao tác hay đóng TikTok.
+  `needsRelease` liệt kê máy đã chọn và phạm vi owner mà xác nhận sẽ nhả.
+- Preflight và Start dùng chung một request ID dự định. Bị chặn do acceptance mode hoặc
+  owner không tách được đều làm `canExecute` false. Một owner không nhả được thắng mọi
+  hàng nhả được khác trên cùng máy.
+- Report hết hạn bị bỏ để operator kiểm lại. Receipt failed không có campaign là từ chối
+  bền; retire xóa pending marker local và phát cho cả trang lẫn progress monitor. Lỗi
+  storage không phát retire. Receipt null không bao giờ có nghĩa là bị từ chối.
+- ID pending lịch sử không có receipt có nút **Hủy yêu cầu chưa được tiếp nhận** trên
+  progress monitor. Nút hủy vĩnh viễn ID đó, không hủy campaign. Một transaction
+  IMMEDIATE trả nguyên start receipt đã có, hoặc nhận create receipt đã có thành uncertain
+  cùng campaign của nó; chỉ khi không có cả hai mới ghi tombstone failed
+  `cancelledBeforeAcceptance`. Fingerprint sentinel cố ý không bind body chưa biết.
+- Start và đường tạo legacy kiểm cùng receipt bền trong transaction ghi. Start/create
+  trễ cùng ID hoặc thắng trước khi hủy, hoặc thua tombstone. Sau khi hủy đã xác nhận,
+  operator phải preflight ID mới.
+
+### Thay thế đã xác nhận
+
+- Đăng ngay kiểm cả assignment đang xếp hàng lẫn owner sống và guard Post/link. Tạo lịch
+  không ngắt việc đang chạy.
+- Loại theo từng assignment đã chọn. Đường loại chung thu hồi composer và verifier link
+  có guard của nó. Nuôi dừng theo từng máy đã chọn. Thao tác không chia được có máy ngoài
+  vùng chọn bị từ chối trước khi thu hồi.
+- Marker handoff-pending được ghi atomic cùng lần loại, nên settle không nhả account
+  reservation của assignment trước khi đóng app thật.
+- Handoff chờ dispatch job đang chạy, claim của assignment, device work owner và trạng
+  thái Nuôi của máy đã chọn drain hết. Đóng app thật dùng giới hạn chung hai máy và
+  deadline hiện có; không tăng giới hạn.
+- Closer độc quyền kiểm lại quyền của assignment, đóng app, bỏ context độc quyền rồi lưu
+  release proof riêng của assignment. Proof bind lần loại mới nhất, máy, state, revision,
+  Post intent và evidence; assignment đổi hoặc resume xác minh tường minh mới hơn làm
+  proof mất hiệu lực. Chỉ account reservation của assignment đó bị xóa; link chưa giải
+  quyết trở thành nợ review, không phải owner máy sống.
+- Thay thế không dừng publish toàn campaign. Assignment cùng campaign không được chọn
+  không bị loại hay đóng. Caller handoff thủ công cũ giữ hành vi cũ.
+- `require_current_preflight_digest` không đổi. Readiness mới được kiểm sau khi nhả;
+  invalidate cache không nới duyệt nội dung nguồn hay mapping đích.
+
 ## Xác minh Publish và kết quả qua restart
 
 VerificationQueue giữ một observer mỗi máy, không dùng trần observer toàn máy chủ.

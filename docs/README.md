@@ -20,7 +20,7 @@ Tài liệu hiện tại phân biệt hợp đồng sản phẩm với bằng ch
 
 - [Cài đặt/chuyển máy/backup](operator/installation-and-data.md)
 - [Thiết bị](operator/devices.md), [Nuôi/Tương tác](operator/automation.md), [Đăng bài](operator/publish.md), [Flow/API](operator/flow-api.md)
-- [Kiểm thử](development/testing.md), [Build/release](development/build-release.md), [Contract](development/contracts.md), [Publish acceptance](development/publish-acceptance.md)
+- [Kiểm thử](development/testing.md), [Build/release](development/build-release.md), [Contract](development/contracts.md), [Publish acceptance](development/publish-acceptance.md), [No-public rehearsal](development/no-public-rehearsal.md)
 
 ## Bằng chứng và tài nguyên
 

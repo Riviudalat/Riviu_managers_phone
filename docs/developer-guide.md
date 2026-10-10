@@ -75,7 +75,7 @@ snapshot lịch sử; khi tài liệu mâu thuẫn không làm theo assertion l�
 - Proof Sheet có thể tái dùng tối đa năm phút theo binding local; delivery vẫn kiểm
   remote protocol/receipt. Cache không chứng minh quyền remote chưa đổi.
 
-[Start/handoff](publish-start-handoff.md) · [Contract thực thi](development/contracts.md).
+[Start/handoff](development/contracts.md#start-publish-và-handoff-máy-đã-chọn) · [Contract thực thi](development/contracts.md).
 
 ## Xác minh Publish và kết quả qua restart
 
