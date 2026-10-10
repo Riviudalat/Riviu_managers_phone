@@ -1002,6 +1002,29 @@ pub(crate) async fn transfer_publish_campaign_inner(
                 anyhow::bail!("media transfer context failed: {message}");
             }
         };
+        // Load admission before any byte reaches the phone: an overloaded phone is cleaned
+        // (tier 1) or settles here as `device_overloaded`, not five minutes later in the
+        // sound sheet (phone 44, 10/10/2026).
+        if let Err(error) = control.ensure_load_admissible(&context, None).await {
+            let message = error.to_string();
+            drop(context);
+            let code = if riviu_core::device_control::load::mentions_device_overloaded(&message) {
+                riviu_core::device_control::load::DEVICE_OVERLOADED_CODE
+            } else {
+                "media_transfer_context_failed"
+            };
+            db.update_publish_assignment_state(
+                &assignment.id,
+                riviu_core::PublishCampaignState::FailedBeforeDispatch,
+                Some(code),
+                Some(&serde_json::json!({"message": message}).to_string()),
+            )?;
+            db.settle_publish_transfer(
+                &campaign_id,
+                riviu_core::db::PublishTransferSettle::FailedBeforeDispatch { error_code: code },
+            )?;
+            anyhow::bail!("{message}");
+        }
         record_progress(
             &db,
             &campaign_id,
@@ -3159,13 +3182,18 @@ pub(super) fn refuse_when_the_route_authorities_disagree(
     })
 }
 
-/// The typed recovery failure for a session that could not open because the phone was locked,
-/// or `None` for every other open failure (which keeps its existing classification).
+/// The typed recovery failure for a session that could not open because the phone was locked
+/// or overloaded, or `None` for every other open failure (which keeps its existing
+/// classification).
 pub(super) fn screen_locked_failure(
     error: &anyhow::Error,
 ) -> Option<riviu_core::publish_recovery::RecoveryFailure> {
     let failure = riviu_core::publish_recovery::describe(error);
-    (failure.code == riviu_core::device_control::baseline::SCREEN_LOCKED_CODE).then_some(failure)
+    // An overload refusal at the session's load admission is the same kind of typed,
+    // retryable pre-Post reason.
+    (failure.code == riviu_core::device_control::baseline::SCREEN_LOCKED_CODE
+        || failure.code == riviu_core::device_control::load::DEVICE_OVERLOADED_CODE)
+        .then_some(failure)
 }
 
 pub(super) fn state_for_outcome(

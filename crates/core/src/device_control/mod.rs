@@ -157,6 +157,7 @@ pub enum AppCompletionDisposition {
 mod apps;
 pub mod baseline;
 mod leases;
+pub mod load;
 mod roster;
 mod sessions;
 mod streams;
@@ -346,6 +347,11 @@ impl DeviceControlPlane {
             Ok(token) => token,
             Err(error) => return Err(SessionContextUpgradeFailure { context, error }),
         };
+        // Load admission before the app opens: an overloaded phone is cleaned (tier 1) or
+        // refused here, before any effect of this job.
+        if let Err(error) = self.ensure_load_admissible(&context, Some(bundle_id)).await {
+            return Err(SessionContextUpgradeFailure { context, error });
+        }
         let udid = context.udid().to_string();
         let handoff = match self.driver.confirm_interaction_stream_stopped(&udid).await {
             Ok(proof) => proof,
@@ -397,6 +403,11 @@ impl DeviceControlPlane {
             Ok(token) => token,
             Err(error) => return Err(SessionContextUpgradeFailure { context, error }),
         };
+        // Load admission before the app opens: an overloaded phone is cleaned (tier 1) or
+        // refused here, before any effect of this job.
+        if let Err(error) = self.ensure_load_admissible(&context, Some(bundle_id)).await {
+            return Err(SessionContextUpgradeFailure { context, error });
+        }
         let udid = context.udid().to_string();
         let handoff = match self.driver.confirm_interaction_stream_stopped(&udid).await {
             Ok(proof) => proof,

@@ -588,6 +588,29 @@ pub trait DeviceDriver: Send + Sync {
         Ok(None)
     }
 
+    /// Read-only load sample (`device_control::load`): one bounded shell round trip, recorded
+    /// in the phone's load history. `None` from a backend without the probe: unknown, never
+    /// healthy or overloaded.
+    async fn sample_load(
+        &self,
+        _udid: &str,
+        _target_package: Option<&str>,
+    ) -> anyhow::Result<Option<crate::device_control::load::DeviceLoadSample>> {
+        Ok(None)
+    }
+
+    /// Admission gate for job work. The caller holds the phone's exclusive lease and no effect
+    /// step is running. Samples; when overloaded, runs the light cleanup and samples again; a
+    /// phone still overloaded is refused with `device_control::load::DEVICE_OVERLOADED_MARKER`.
+    /// A backend without the probe admits.
+    async fn ensure_load_admissible(
+        &self,
+        _udid: &str,
+        _target_package: Option<&str>,
+    ) -> anyhow::Result<()> {
+        Ok(())
+    }
+
     /// Read-only readiness. Does not wake, unlock, open a session or repair an agent.
     async fn verify_automation_readiness(&self, udid: &str) -> anyhow::Result<()> {
         self.verify_automation_transport(udid).await

@@ -37,6 +37,7 @@ pub mod baseline;
 mod capability;
 pub mod driver;
 pub mod frames;
+pub mod load;
 pub mod publish;
 pub mod riviu_agent;
 pub mod scrcpy;

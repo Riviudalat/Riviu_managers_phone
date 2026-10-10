@@ -16,6 +16,43 @@ impl DeviceControlPlane {
             .map_err(|error| driver_error(udid, "screenLockBlocker", error))
     }
 
+    /// Read-only load sample; see `DeviceDriver::sample_load`. Needs no lease: one shell round
+    /// trip that waits for an adb slot like any other call.
+    pub async fn sample_load(
+        &self,
+        udid: &str,
+        target_package: Option<&str>,
+    ) -> Result<Option<load::DeviceLoadSample>, DeviceControlError> {
+        self.driver
+            .sample_load(udid, target_package)
+            .await
+            .map_err(|error| driver_error(udid, "sampleLoad", error))
+    }
+
+    /// The load admission gate under the caller's exclusive lease, before any effect of the
+    /// job; see `DeviceDriver::ensure_load_admissible`. Only job owners are gated: an operator
+    /// session or a repair must still reach an overloaded phone.
+    pub async fn ensure_load_admissible(
+        &self,
+        context: &DeviceExclusiveContext,
+        target_package: Option<&str>,
+    ) -> Result<(), DeviceControlError> {
+        let lease = self.validate_exclusive(context)?;
+        if !matches!(
+            lease.owner(),
+            DeviceWorkOwner::Script | DeviceWorkOwner::Interaction | DeviceWorkOwner::Nurture
+        ) {
+            return Ok(());
+        }
+        let udid = lease.udid().to_string();
+        self.driver
+            .ensure_load_admissible(&udid, target_package)
+            .await
+            .map_err(|error| driver_error(&udid, "deviceLoad", error))?;
+        self.validate_exclusive(context)?;
+        Ok(())
+    }
+
     pub async fn verify_automation_readiness(&self, udid: &str) -> Result<(), DeviceControlError> {
         self.driver
             .verify_automation_readiness(udid)

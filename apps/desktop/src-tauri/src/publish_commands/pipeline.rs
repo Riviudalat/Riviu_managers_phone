@@ -163,6 +163,9 @@ impl Runtime {
         // The transfer lease is dropped before the same phone enters its composer.
         let result=async {
             anyhow::ensure!(self.db.publish_pipeline_current(&self.run)? && !self.db.publish_assignment_excluded(&a.id)?,"pipeline stopped before device transfer");
+            // Load admission before any byte reaches the phone; a refusal settles below as
+            // `device_overloaded` before dispatch.
+            self.control.ensure_load_admissible(&context,None).await?;
             self.progress(a,progress::PublishProgress::DeviceReady);
             self.progress(a,progress::PublishProgress::TransferringMedia{count:if bundle.video.is_some(){1}else{bundle.images.len()},video:bundle.video.is_some()});
             let id=execution::device_campaign_id(&self.run.campaign_id,a.ordinal);
@@ -644,19 +647,33 @@ pub(crate) async fn run_dispatcher(
                                 .iter()
                                 .find(|r| r.id == a.id && r.effect_intent.is_none())
                             {
+                                // A load-admission refusal keeps its own code and sentence: the
+                                // phone was overloaded, no media was sent.
+                                let overloaded =
+                                    riviu_core::device_control::load::mentions_device_overloaded(
+                                        &format!("{error:#}"),
+                                    );
+                                let (code, what) = if overloaded {
+                                    (
+                                        riviu_core::device_control::load::DEVICE_OVERLOADED_CODE,
+                                        "máy quá tải, chưa chuyển ảnh/video",
+                                    )
+                                } else {
+                                    ("media_transfer_failed", "chuyển ảnh/video thất bại")
+                                };
                                 if runtime.advance(
                                     row,
                                     &mut revision,
                                     row.state.clone(),
                                     Stage::FailedBeforeDispatch,
-                                    Some("media_transfer_failed"),
+                                    Some(code),
                                     Some(
                                         &serde_json::json!({"message":format!("{error:#}")})
                                             .to_string(),
                                     ),
                                 ).is_ok() {
                                     runtime.progress(row, progress::PublishProgress::FailedBeforePost {
-                                        reason: format!("{}: chuyển ảnh/video thất bại: {error:#}", row.udid),
+                                        reason: format!("{}: {what}: {error:#}", row.udid),
                                     });
                                 }
                             }

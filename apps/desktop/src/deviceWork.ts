@@ -1,4 +1,4 @@
-import type { AgentStatus, DeviceInfo, DeviceWorkOwner, DeviceActivity } from "./types";
+import type { AgentStatus, DeviceInfo, DeviceLoadState, DeviceWorkOwner, DeviceActivity } from "./types";
 import { describeError, helperRecoveryMessage } from "./describeError";
 
 export type DeviceOperationalStatus = "ready" | "connected" | "busy" | "warning" | "offline";
@@ -36,6 +36,7 @@ export function deviceOperationalView(
   ownerReadState: DeviceWorkOwnerReadState = "known",
   agent?: AgentStatus,
   activity?: DeviceActivity | null,
+  load?: DeviceLoadState,
 ): DeviceOperationalView {
   const ownerLabel = currentOwner ? deviceWorkOwnerLabel(currentOwner) : null;
   if (device.status === "disconnected") {
@@ -65,6 +66,11 @@ export function deviceOperationalView(
       return { kind: "warning", label: "Chưa điều khiển được", ownerLabel: null, tone: "warn", reason: agent.message ? describeError(agent.message) : "Mở Chẩn đoán để kiểm tra Agent trên máy này." };
     }
     if (device.status === "error") return { kind: "warning", label: "Cần xem", ownerLabel: null, tone: "warn" };
+    // An overloaded phone ("máy quá tải") takes no new job until a fresh sample passes, so it is
+    // never shown as ready. Existing vocabulary: the reason carries the overload sentence.
+    if (load && (load.status === "overloaded" || load.status === "awaitingOperator")) {
+      return { kind: "warning", label: "Cần xem", ownerLabel: null, tone: "warn", reason: load.reason ?? "Máy quá tải" };
+    }
     // UiAutomator preflight and USB discovery do not prove helper attachment.
     if (agent?.state === "ready" && agent.authReady && agent.sessionReady && agent.features.includes("helperReady")) {
       return { kind: "ready", label: "Sẵn sàng", ownerLabel: null, tone: "ok" };

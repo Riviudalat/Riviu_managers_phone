@@ -219,6 +219,7 @@ fn smoke_read_command(command: &str) -> bool {
             | "android_tool_problems"
             | "get_stream_settings"
             | "device_baseline_get_config"
+            | "device_load_states"
             | "agent_get_settings"
             | "agent_list_statuses"
             | "list_groups"

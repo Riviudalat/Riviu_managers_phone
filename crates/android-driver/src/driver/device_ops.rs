@@ -981,6 +981,275 @@ impl AndroidDriver {
         ))
     }
 
+    /// Install the desktop's durable activity-log writer for load ("sức khỏe máy") events.
+    pub fn set_load_journal(&self, journal: crate::load::LoadJournal) {
+        self.load.set_journal(journal);
+    }
+
+    /// Every phone's last known load state, for the device tiles. No device I/O.
+    pub fn load_states(&self) -> Vec<riviu_core::device_control::load::DeviceLoadState> {
+        self.load.snapshot()
+    }
+
+    pub fn load_status(
+        &self,
+        serial: &str,
+    ) -> Option<riviu_core::device_control::load::DeviceLoadStatus> {
+        self.load.status(serial)
+    }
+
+    pub fn load_reason(&self, serial: &str) -> Option<String> {
+        self.load.reason(serial)
+    }
+
+    pub fn mark_load_awaiting_operator(&self, serial: &str, why: &str) {
+        self.load.mark_awaiting_operator(serial, why);
+    }
+
+    pub fn load_cleanup_allowed(&self, serial: &str) -> bool {
+        self.load.cleanup_allowed(serial, crate::load::now_ms())
+    }
+
+    pub fn load_reboot_budget_left(&self, serial: &str) -> bool {
+        self.load.reboot_budget_left(serial, crate::load::now_ms())
+    }
+
+    pub fn journal_load(&self, serial: &str, action: &str, message: &str) {
+        self.load.journal(serial, action, message);
+    }
+
+    /// One read-only load sample (`top`, `/proc/meminfo`, `/proc/uptime`, battery temperature)
+    /// in a single shell round trip with [`crate::load::LOAD_SAMPLE_DEADLINE`], recorded in the
+    /// phone's history. Waits for an adb slot like any other call. Never `uiautomator dump`.
+    pub async fn sample_load(
+        &self,
+        serial: &str,
+        target_package: Option<&str>,
+    ) -> anyhow::Result<(
+        riviu_core::device_control::load::DeviceLoadSample,
+        riviu_core::device_control::load::LoadVerdict,
+    )> {
+        let out = self
+            .adb
+            .shell_output(
+                serial,
+                crate::load::LOAD_SAMPLE_SCRIPT,
+                crate::load::LOAD_SAMPLE_DEADLINE,
+            )
+            .await
+            .map_err(|e| anyhow!("đo tải máy thất bại: {e}"))?;
+        // A non-zero exit is not fatal: each section decides for itself, and a section the
+        // phone did not print stays unknown.
+        let sample = crate::load::parse_sample(&out.stdout, target_package, crate::load::now_ms());
+        let verdict = self.load.record(serial, sample.clone());
+        Ok((sample, verdict))
+    }
+
+    /// [`Self::sample_load`], and once more after a short gap when surfaceflinger alone is
+    /// high, so the "sustained over two samples" rule can decide.
+    pub async fn sample_load_confirmed(
+        &self,
+        serial: &str,
+        target_package: Option<&str>,
+    ) -> anyhow::Result<(
+        riviu_core::device_control::load::DeviceLoadSample,
+        riviu_core::device_control::load::LoadVerdict,
+    )> {
+        const CONFIRM_GAP: Duration = Duration::from_secs(2);
+        let first = self.sample_load(serial, target_package).await?;
+        if first.1 == riviu_core::device_control::load::LoadVerdict::NeedsConfirmation {
+            tokio::time::sleep(CONFIRM_GAP).await;
+            return self.sample_load(serial, target_package).await;
+        }
+        Ok(first)
+    }
+
+    /// Tier 1, light cleanup: `am kill-all`, `am force-stop` for the reviewed hogs, `pm
+    /// trim-caches 2G`. No reboot, no account effect, never `pm clear`. The caller holds the
+    /// phone's lease and no effect step is running. The intent is journaled before the effect.
+    pub async fn light_cleanup(&self, serial: &str, why: &str) -> anyhow::Result<()> {
+        let script = crate::load::light_cleanup_script();
+        self.load.note_cleanup(serial, crate::load::now_ms());
+        self.load.journal(
+            serial,
+            "device.load.cleanup",
+            &format!("dọn nhẹ (tầng 1) vì {why}: {script}"),
+        );
+        match self
+            .adb
+            .shell_output(serial, &script, crate::load::LIGHT_CLEANUP_DEADLINE)
+            .await
+        {
+            Ok(out) if out.exit_code == 0 => {
+                self.load
+                    .journal(serial, "device.load.cleanup.done", "đã dọn nhẹ xong");
+                Ok(())
+            }
+            Ok(out) => {
+                // One step refused (e.g. a hog that is not installed): the others ran. The
+                // fresh sample after this, not the exit code, decides.
+                let detail: String = format!("{}{}", out.stderr, out.stdout)
+                    .trim()
+                    .chars()
+                    .take(300)
+                    .collect();
+                self.load.journal(
+                    serial,
+                    "device.load.cleanup.done",
+                    &format!(
+                        "đã dọn nhẹ, một bước báo lỗi (exit {}): {detail}",
+                        out.exit_code
+                    ),
+                );
+                Ok(())
+            }
+            Err(error) => {
+                self.load.journal(
+                    serial,
+                    "device.load.cleanup.failed",
+                    &format!("dọn nhẹ không chạy được: {error}"),
+                );
+                Err(anyhow!("dọn nhẹ thất bại: {error}"))
+            }
+        }
+    }
+
+    /// Tier 2, the reboot command. The caller has proven the ledger holds nothing uncertain or
+    /// in flight on this phone and holds its lease. The intent is journaled before the effect
+    /// and counts against the 6 h budget whatever happens next. Wait with
+    /// [`Self::wait_for_load_reboot`].
+    pub async fn issue_load_reboot(
+        &self,
+        serial: &str,
+        why: &str,
+    ) -> anyhow::Result<crate::load::LoadReboot> {
+        let before = self
+            .adb
+            .shell_output(
+                serial,
+                crate::load::BOOT_PROBE,
+                crate::load::BOOT_PROBE_TIMEOUT,
+            )
+            .await
+            .ok()
+            .and_then(|out| crate::load::parse_boot_probe(&out.stdout).boot_id);
+        self.load.note_reboot(serial, crate::load::now_ms());
+        self.load.journal(
+            serial,
+            "device.load.reboot",
+            &format!("khởi động lại máy (tầng 2) vì {why}"),
+        );
+        self.adb
+            .device(serial, &["reboot"], adb::DEFAULT_TIMEOUT)
+            .await
+            .map_err(|e| anyhow!("adb reboot thất bại: {e}"))?;
+        Ok(crate::load::LoadReboot {
+            boot_id_before: before,
+            issued: std::time::Instant::now(),
+        })
+    }
+
+    /// Wait, bounded by [`crate::load::REBOOT_DEADLINE`], for a new boot with
+    /// `sys.boot_completed=1`. Read-only polling.
+    pub async fn wait_for_load_reboot(
+        &self,
+        serial: &str,
+        reboot: &crate::load::LoadReboot,
+    ) -> anyhow::Result<()> {
+        const POLL: Duration = Duration::from_secs(3);
+        let deadline = reboot.issued + crate::load::REBOOT_DEADLINE;
+        loop {
+            tokio::time::sleep(POLL).await;
+            if std::time::Instant::now() >= deadline {
+                let message = format!(
+                    "chưa khởi động xong sau {}s",
+                    crate::load::REBOOT_DEADLINE.as_secs()
+                );
+                self.load
+                    .journal(serial, "device.load.reboot.failed", &message);
+                anyhow::bail!("{serial}: {message}");
+            }
+            let Ok(out) = self
+                .adb
+                .shell_output(
+                    serial,
+                    crate::load::BOOT_PROBE,
+                    crate::load::BOOT_PROBE_TIMEOUT,
+                )
+                .await
+            else {
+                continue;
+            };
+            if reboot.finished(&crate::load::parse_boot_probe(&out.stdout)) {
+                self.load
+                    .journal(serial, "device.load.reboot.done", "đã khởi động xong");
+                return Ok(());
+            }
+        }
+    }
+
+    /// The load admission gate (`DeviceDriver::ensure_load_admissible`). The caller holds the
+    /// job's exclusive lease and no effect step is running.
+    ///
+    /// A fresh pass skips the sample. An overloaded phone gets tier 1 and a fresh sample; a
+    /// phone still overloaded is refused with the overload marker, so publish settles it as
+    /// `device_overloaded` before dispatch instead of timing out in the sound sheet. An
+    /// unreadable sample admits: unknown is never overloaded.
+    pub async fn ensure_load_admissible(
+        &self,
+        serial: &str,
+        target_package: Option<&str>,
+    ) -> anyhow::Result<()> {
+        use riviu_core::device_control::load::{LoadVerdict, DEVICE_OVERLOADED_MARKER};
+        const SETTLE: Duration = Duration::from_secs(3);
+        if !self.automatic_setup_allowed {
+            return Ok(());
+        }
+        if self.load.fresh_pass(serial, crate::load::now_ms()) {
+            return Ok(());
+        }
+        let verdict = match self.sample_load_confirmed(serial, target_package).await {
+            Ok((_, verdict)) => verdict,
+            Err(error) => {
+                tracing::warn!(serial, %error, "load sample unreadable; admitting");
+                return Ok(());
+            }
+        };
+        let LoadVerdict::Overloaded { reasons } = verdict else {
+            return Ok(());
+        };
+        let why = reasons.join("; ");
+        if !self.load.cleanup_allowed(serial, crate::load::now_ms()) {
+            anyhow::bail!(
+                "{serial}: {DEVICE_OVERLOADED_MARKER} ({why}); đã dọn nhẹ trong 30 phút qua mà \
+                 chưa hết — chờ khởi động lại tự động hoặc người vận hành"
+            );
+        }
+        if let Err(error) = self.light_cleanup(serial, &why).await {
+            anyhow::bail!("{serial}: {DEVICE_OVERLOADED_MARKER} ({why}); {error}");
+        }
+        tokio::time::sleep(SETTLE).await;
+        match self.sample_load_confirmed(serial, target_package).await {
+            Ok((_, LoadVerdict::Overloaded { reasons })) => anyhow::bail!(
+                "{serial}: {DEVICE_OVERLOADED_MARKER} sau khi dọn nhẹ ({}); không nhận việc — \
+                 chờ khởi động lại tự động hoặc người vận hành",
+                reasons.join("; ")
+            ),
+            Ok((sample, _)) => {
+                self.load.journal(
+                    serial,
+                    "device.load.admitted",
+                    &format!("dọn nhẹ xong, đo lại đạt ({})", sample.summary()),
+                );
+                Ok(())
+            }
+            Err(error) => {
+                tracing::warn!(serial, %error, "load re-sample unreadable after cleanup; admitting");
+                Ok(())
+            }
+        }
+    }
+
     /// Take a screenshot and leave it *on the phone* (xiaowei "Screenshot to phone").
     ///
     /// The other screenshot command copies the picture to this machine; this one is the row

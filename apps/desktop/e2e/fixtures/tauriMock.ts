@@ -1281,6 +1281,8 @@ export async function installTauriMock(
       const udids = Array.isArray(args.udids) ? (args.udids as string[]) : [];
       return udids.map(fixtureAgentStatus);
     });
+    // The load book starts empty: no phone has been sampled in a browser scenario.
+    commandHandlers.set("device_load_states", () => []);
     commandHandlers.set("agent_save_settings", () => ({
       settings: { autoRepair: true },
       tokenConfigured: true,

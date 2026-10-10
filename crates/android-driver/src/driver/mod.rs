@@ -1121,6 +1121,8 @@ pub struct AndroidDriver {
     /// what the async paths learn has to be left somewhere a non-async reader can find it.
     /// The iOS driver keeps the same map for the same reason.
     agent_statuses: Mutex<HashMap<String, riviu_core::AgentStatus>>,
+    /// serial -> load history and overload mark ("sức khỏe máy"); see [`crate::load`].
+    load: crate::load::LoadBook,
 }
 
 mod agent;
@@ -1694,6 +1696,7 @@ impl AndroidDriver {
             helper_inventory_snapshot: Mutex::new(None),
             app_descriptions: Mutex::new(HashMap::new()),
             agent_statuses: Mutex::new(HashMap::new()),
+            load: crate::load::LoadBook::default(),
         }
     }
 
@@ -2892,6 +2895,24 @@ impl DeviceDriver for AndroidDriver {
 
     async fn screen_lock_blocker(&self, udid: &str) -> anyhow::Result<Option<String>> {
         AndroidDriver::screen_lock_blocker(self, udid).await
+    }
+
+    async fn sample_load(
+        &self,
+        udid: &str,
+        target_package: Option<&str>,
+    ) -> anyhow::Result<Option<riviu_core::device_control::load::DeviceLoadSample>> {
+        AndroidDriver::sample_load(self, udid, target_package)
+            .await
+            .map(|(sample, _)| Some(sample))
+    }
+
+    async fn ensure_load_admissible(
+        &self,
+        udid: &str,
+        target_package: Option<&str>,
+    ) -> anyhow::Result<()> {
+        AndroidDriver::ensure_load_admissible(self, udid, target_package).await
     }
 
     async fn verify_automation_readiness(&self, udid: &str) -> anyhow::Result<()> {

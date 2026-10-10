@@ -24,6 +24,7 @@ import {
   agentQuarantineReceipt,
   type InteractionQuarantinePlan,
   agentListStatuses,
+  deviceLoadStates,
   deploymentFrontendReady,
   listDeviceWorkStates,
   refreshDevices,
@@ -94,7 +95,7 @@ import { DataPage } from "./pages/DataPage";
 import { DeviceSettingsPage } from "./pages/DeviceSettingsPage";
 import { MaterialPage } from "./pages/MaterialPage";
 import { HelpPage } from "./pages/HelpPage";
-import type { AgentStatus, DeviceInfo, DeviceWorkOwner, DeviceWorkState, PageId, TargetRef } from "./types";
+import type { AgentStatus, DeviceInfo, DeviceLoadState, DeviceWorkOwner, DeviceWorkState, PageId, TargetRef } from "./types";
 import type { ActiveGroupSync, GroupSyncReadiness } from "./groupSync";
 import { MoreHorizontal } from "lucide-react";
 import { MENU_ICONS } from "./components/menuIcons";
@@ -311,6 +312,27 @@ function App() {
   const cachedAgent = useCallback((udid: string) =>
     page === "control" && cachedAgents.roster === agentRosterKey ? cachedAgents.statuses.get(udid) : undefined,
   [agentRosterKey, cachedAgents, page]);
+  // Load ("sức khỏe máy") marks: the backend's in-memory book, no phone I/O. A failed read is
+  // unknown and shows nothing, never "healthy".
+  const [loadStates, setLoadStates] = useState<Map<string, DeviceLoadState>>(new Map());
+  useEffect(() => {
+    if (page !== "control" || !fleetSettled) return;
+    let active = true;
+    const read = async () => {
+      try {
+        const states = await deviceLoadStates();
+        if (active) setLoadStates(new Map(states.map(state => [state.udid, state])));
+      } catch {
+        if (active) setLoadStates(new Map());
+      }
+    };
+    void read();
+    const timer = window.setInterval(() => void read(), 5_000);
+    return () => { active = false; window.clearInterval(timer); };
+  }, [fleetSettled, page]);
+  const cachedLoad = useCallback((udid: string) =>
+    page === "control" ? loadStates.get(udid) : undefined,
+  [loadStates, page]);
 
   const currentDeviceWorkState = useCallback((udid: string) =>
     deviceWorkOwners.state === "known" && deviceWorkOwners.roster === rosterKey
@@ -836,10 +858,10 @@ function App() {
       const owner = currentDeviceWorkOwner(device.udid);
       const agent = cachedAgent(device.udid);
       if (device.platform === "android" && device.status !== "disconnected" && !owner && !agent) return null;
-      if (deviceOperationalView(device, owner, deviceWorkOwnerReadState, agent).kind === "ready") count += 1;
+      if (deviceOperationalView(device, owner, deviceWorkOwnerReadState, agent, null, cachedLoad(device.udid)).kind === "ready") count += 1;
     }
     return count;
-  }, [devices, currentDeviceWorkOwner, deviceWorkOwnerReadState, cachedAgent]);
+  }, [devices, currentDeviceWorkOwner, deviceWorkOwnerReadState, cachedAgent, cachedLoad]);
 
   const runningJobs = useMemo(
     () => jobs.filter((j) => j.status === "running" || j.status === "queued").length,
@@ -1343,6 +1365,7 @@ function App() {
                         deviceWorkOwnerReadState,
                         cachedAgent(device.udid),
                         currentDeviceWorkState(device.udid)?.activity,
+                        cachedLoad(device.udid),
                       );
                       const statusLabel = status.ownerLabel
                         ? `${status.label} · ${status.ownerLabel}`
@@ -1455,6 +1478,7 @@ function App() {
                         deviceWorkOwnerReadState,
                         cachedAgent(device.udid),
                         currentDeviceWorkState(device.udid)?.activity,
+                        cachedLoad(device.udid),
                       )}
                       onHelperMaintenance={udid => void runHelperMaintenance([udid])}
                       onContextMenu={(udid, x, y) => setTileMenu({ udid, x, y })}

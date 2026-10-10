@@ -399,6 +399,24 @@ impl DeviceDriver for MultiplexDriver {
         self.route(udid)?.verify_automation_readiness(udid).await
     }
 
+    async fn sample_load(
+        &self,
+        udid: &str,
+        target_package: Option<&str>,
+    ) -> anyhow::Result<Option<crate::device_control::load::DeviceLoadSample>> {
+        self.route(udid)?.sample_load(udid, target_package).await
+    }
+
+    async fn ensure_load_admissible(
+        &self,
+        udid: &str,
+        target_package: Option<&str>,
+    ) -> anyhow::Result<()> {
+        self.route(udid)?
+            .ensure_load_admissible(udid, target_package)
+            .await
+    }
+
     async fn available_storage_bytes(&self, udid: &str) -> anyhow::Result<u64> {
         self.route(udid)?.available_storage_bytes(udid).await
     }

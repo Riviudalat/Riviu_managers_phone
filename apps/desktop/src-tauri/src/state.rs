@@ -30,6 +30,9 @@ use crate::nurture_commands::NurtureRuntime;
 #[path = "android_helper_setup.rs"]
 mod android_helper_setup;
 use android_helper_setup::AndroidHelperSetup;
+#[path = "device_load.rs"]
+mod device_load;
+use device_load::DeviceLoadMonitor;
 
 const DEFAULT_DESKTOP_STREAM_CAPACITY: usize = 2;
 const MAX_DESKTOP_STREAM_CAPACITY: usize = 100;
@@ -2305,13 +2308,35 @@ impl AppState {
         let helper_android = self.android.clone();
         let helper_admission = self.command_admission.clone();
         let helper_db = self.db.clone();
+        let load_db = self.db.clone();
+        let load_admission = self.command_admission.clone();
         let numbering_db = self.db.clone();
+        // Load ("sức khỏe máy") events reach the durable activity log from the driver,
+        // including the job-time admission gate, whether or not the automatic workers run.
+        if let Some(android) = &self.android {
+            let journal_db = self.db.clone();
+            android.set_load_journal(Arc::new(
+                move |serial: &str, action: &str, message: &str| {
+                    if let Err(error) =
+                        journal_db.log_op(action, &format!("Máy {serial}: {message}"))
+                    {
+                        log::error!("could not persist device load event for {serial}: {error:#}");
+                    }
+                },
+            ));
+        }
         let automatic_device_workers_frozen = self.dev_acceptance.automatic_device_workers_frozen();
         tauri::async_runtime::spawn(async move {
             let mut interval = tokio::time::interval(Duration::from_millis(250));
             let mut last_scan = Instant::now() - Duration::from_secs(3);
             let mut sampler =
                 BackgroundStreamSampler::new(control.clone(), streams, registry.clone());
+            let mut load_monitor = (!automatic_device_workers_frozen)
+                .then(|| helper_android.clone())
+                .flatten()
+                .map(|android| {
+                    DeviceLoadMonitor::new(control.clone(), android, load_admission, load_db)
+                });
             let mut helper_setup = (!automatic_device_workers_frozen)
                 .then_some(helper_android)
                 .flatten()
@@ -2321,6 +2346,9 @@ impl AppState {
             loop {
                 interval.tick().await;
                 if background_stop.load(Ordering::Acquire) {
+                    if let Some(monitor) = &mut load_monitor {
+                        monitor.drain().await;
+                    }
                     if let Some(setup) = &mut helper_setup {
                         setup.drain().await;
                     }
@@ -2341,6 +2369,9 @@ impl AppState {
                         }
                         if let Some(setup) = &mut helper_setup {
                             setup.tick_latest();
+                        }
+                        if let Some(monitor) = &mut load_monitor {
+                            monitor.tick(&devices);
                         }
                         control.grow_foreground_stream_capacity(devices.len());
                         if configured_desktop_stream_capacity().is_none() {

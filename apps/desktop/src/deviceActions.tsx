@@ -2,6 +2,8 @@ import { listDeviceMetas } from "./api";
 import { applyNumberWallpaper } from "./wallpaperSync";
 import {
   deviceGetClipboard,
+  deviceLoadCheck,
+  deviceLoadCleanup,
   previewAccountReconciliation,
   applyAccountReconciliation,
   deviceKey,
@@ -721,6 +723,42 @@ export function buildDeviceActions(
           // sections do not apply instead of hiding the whole diagnosis.
           keywords: "health kiem tra chan doan diagnostics agent helper root tiktok",
           run: () => setHealthFor(device.udid),
+        },
+        {
+          id: "device-load-check",
+          label: "Kiểm tra sức khỏe",
+          androidOnly: true,
+          keywords: "load cpu ram swap surfaceflinger qua tai suc khoe",
+          run: () => {
+            void deviceLoadCheck(device.udid)
+              .then((check) =>
+                pushToast(check.verdict.kind === "healthy" ? "ok" : "warn", "Sức khỏe máy", check.message),
+              )
+              .catch((error) => toastError("Không đo được sức khỏe máy", error));
+          },
+        },
+        {
+          id: "device-load-cleanup",
+          label: "Dọn máy",
+          androidOnly: true,
+          keywords: "clean kill background cache don dep qua tai",
+          run: () => {
+            void requestConfirm({
+              title: `Dọn ${device.name}?`,
+              message:
+                "Tắt các app chạy nền, dừng các app nền đã duyệt (Facebook services) và dọn bộ nhớ đệm. " +
+                "Không đụng TikTok, Riviu Helper hay dữ liệu tài khoản, không khởi động lại máy. " +
+                "Máy đang chạy việc sẽ bị từ chối.",
+              confirmLabel: "Dọn máy",
+            }).then((ok) => {
+              if (!ok) return;
+              void deviceLoadCleanup(device.udid)
+                .then((check) =>
+                  pushToast(check.verdict.kind === "healthy" ? "ok" : "warn", "Dọn máy", check.message),
+                )
+                .catch((error) => toastError("Dọn máy thất bại", error));
+            });
+          },
         },
         {
           id: "wifi-on",

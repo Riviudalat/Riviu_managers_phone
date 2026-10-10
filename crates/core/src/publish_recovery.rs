@@ -114,6 +114,11 @@ impl RecoveryFailure {
             {
                 crate::device_control::baseline::SCREEN_LOCKED_CODE
             }
+            FailureKind::Retryable
+                if crate::device_control::load::mentions_device_overloaded(&message) =>
+            {
+                crate::device_control::load::DEVICE_OVERLOADED_CODE
+            }
             FailureKind::Retryable if unavailable_android_agent_status(&message) => {
                 "agent_status_unavailable"
             }
@@ -319,6 +324,11 @@ pub fn classify(message: &str) -> FailureKind {
     // A lock screen refused the app before anything reached TikTok. Retrying the same phone
     // is safe once someone unlocks it (or the "Cài đặt máy" baseline turns the lock off).
     if crate::device_control::baseline::mentions_screen_locked(message) {
+        return FailureKind::Retryable;
+    }
+    // An overloaded phone ("máy quá tải") was refused at load admission before anything
+    // reached TikTok. Retrying is safe once a fresh sample passes after cleanup or a reboot.
+    if crate::device_control::load::mentions_device_overloaded(message) {
         return FailureKind::Retryable;
     }
     if s.contains("device offline")

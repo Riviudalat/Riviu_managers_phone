@@ -356,6 +356,44 @@ export interface DeviceBaselineConfig {
   autoApplyOnConnect: boolean;
 }
 
+/** One read-only load sample ("sức khỏe máy", `riviu_core::device_control::load`). Absent = unknown. */
+export interface DeviceLoadSample {
+  sampledAtMs: number;
+  surfaceflingerCpuPercent?: number | null;
+  targetPackage?: string | null;
+  targetAppCpuPercent?: number | null;
+  cpuIdlePercent?: number | null;
+  memAvailableKb?: number | null;
+  swapTotalKb?: number | null;
+  swapFreeKb?: number | null;
+  uptimeSecs?: number | null;
+  batteryTempTenthsC?: number | null;
+}
+
+export type LoadVerdict =
+  | { kind: "healthy" }
+  | { kind: "needsConfirmation" }
+  | { kind: "overloaded"; reasons: string[] }
+  | { kind: "unknown" };
+
+export type DeviceLoadStatus = "healthy" | "overloaded" | "awaitingOperator" | "unknown";
+
+export interface DeviceLoadState {
+  udid: string;
+  status: DeviceLoadStatus;
+  /** Vietnamese; set while overloaded. */
+  reason?: string;
+  lastSample?: DeviceLoadSample;
+}
+
+export interface DeviceLoadCheck {
+  udid: string;
+  verdict: LoadVerdict;
+  sample?: DeviceLoadSample;
+  /** Vietnamese summary for a toast. */
+  message: string;
+}
+
 export interface DeviceMeta {
   udid: string;
   notes: string;

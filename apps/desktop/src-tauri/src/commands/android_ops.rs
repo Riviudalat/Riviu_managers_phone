@@ -562,3 +562,103 @@ pub async fn device_baseline_apply(
     );
     Ok(result)
 }
+
+/// Every phone's last known load ("sức khỏe máy") state, for the device tiles. No device I/O:
+/// the driver's in-memory book, filled by the job-time gate, the background monitor and
+/// "Kiểm tra sức khỏe".
+#[tauri::command]
+pub fn device_load_states(
+    state: State<'_, AppState>,
+) -> Result<Vec<riviu_core::device_control::load::DeviceLoadState>, CommandError> {
+    let _admission = state.ensure_accepting_work()?;
+    Ok(state
+        .android
+        .as_ref()
+        .map(|android| android.load_states())
+        .unwrap_or_default())
+}
+
+fn load_check(
+    udid: String,
+    sample: Option<riviu_core::device_control::load::DeviceLoadSample>,
+    verdict: riviu_core::device_control::load::LoadVerdict,
+    prefix: &str,
+) -> riviu_core::device_control::load::DeviceLoadCheck {
+    use riviu_core::device_control::load::LoadVerdict;
+    let numbers = sample
+        .as_ref()
+        .map(|sample| sample.summary())
+        .unwrap_or_default();
+    let message = match &verdict {
+        LoadVerdict::Healthy => format!("{prefix}Đạt: {numbers}"),
+        LoadVerdict::NeedsConfirmation => {
+            format!("{prefix}surfaceflinger cao ở một lần đo, cần đo lại: {numbers}")
+        }
+        LoadVerdict::Overloaded { reasons } => format!(
+            "{prefix}{}: {} ({numbers})",
+            riviu_core::device_control::load::DEVICE_OVERLOADED_MARKER,
+            reasons.join("; ")
+        ),
+        LoadVerdict::Unknown => format!("{prefix}Chưa đo được tải máy"),
+    };
+    riviu_core::device_control::load::DeviceLoadCheck {
+        udid,
+        verdict,
+        sample,
+        message,
+    }
+}
+
+/// "Kiểm tra sức khỏe": one read-only load sample (`top`, `/proc/meminfo`, uptime, battery
+/// temperature), judged against the thresholds and recorded for the tile.
+#[tauri::command]
+pub async fn device_load_check(
+    state: State<'_, AppState>,
+    udid: String,
+) -> Result<riviu_core::device_control::load::DeviceLoadCheck, CommandError> {
+    let _admission = state.ensure_accepting_work()?;
+    if baseline_platform(&state, &udid)? != riviu_core::DevicePlatform::Android {
+        return Ok(load_check(
+            udid,
+            None,
+            riviu_core::device_control::load::LoadVerdict::Unknown,
+            "iOS chưa hỗ trợ đo tải máy. ",
+        ));
+    }
+    let android = state.require_android()?;
+    let (sample, verdict) = android
+        .sample_load_confirmed(&udid, None)
+        .await
+        .map_err(|e| CommandError::operation(format!("Không đo được tải máy: {e:#}")))?;
+    Ok(load_check(udid, Some(sample), verdict, ""))
+}
+
+/// "Dọn máy": tier 1 light cleanup (`am kill-all`, force-stop of the reviewed background hogs,
+/// `pm trim-caches 2G`; never `pm clear`, TikTok, the helper or UiAutomator2), then a fresh
+/// sample. Holds the phone, so a phone with a running job is refused, never preempted.
+#[tauri::command]
+pub async fn device_load_cleanup(
+    state: State<'_, AppState>,
+    udid: String,
+) -> Result<riviu_core::device_control::load::DeviceLoadCheck, CommandError> {
+    let _admission = state.ensure_accepting_work()?;
+    if baseline_platform(&state, &udid)? != riviu_core::DevicePlatform::Android {
+        return Err(CommandError::operation(
+            "iOS chưa hỗ trợ Dọn máy; không thay đổi gì trên máy",
+        ));
+    }
+    let _hold = hold_this_phone(&state, &udid).await?;
+    let android = state.require_android()?;
+    android
+        .light_cleanup(&udid, "người vận hành bấm Dọn máy")
+        .await
+        .map_err(|e| CommandError::operation(e.to_string()))?;
+    tokio::time::sleep(std::time::Duration::from_secs(3)).await;
+    let (sample, verdict) = android
+        .sample_load_confirmed(&udid, None)
+        .await
+        .map_err(|e| {
+            CommandError::operation(format!("Đã dọn máy nhưng không đo lại được: {e:#}"))
+        })?;
+    Ok(load_check(udid, Some(sample), verdict, "Đã dọn máy. "))
+}

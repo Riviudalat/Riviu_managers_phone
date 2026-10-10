@@ -143,6 +143,8 @@ import type {
   DeviceBaselineConfig,
   DeviceBaselineReading,
   DeviceBaselineResult,
+  DeviceLoadCheck,
+  DeviceLoadState,
 } from "./types";
 import { asAppEvent } from "./types";
 
@@ -529,6 +531,24 @@ export async function deviceBaselineGetConfig() {
 /** Save the baseline; resolves with the persisted readback (sorted, de-duplicated). */
 export async function deviceBaselineSaveConfig(config: DeviceBaselineConfig) {
   return invoke<DeviceBaselineConfig>("device_baseline_save_config", { config });
+}
+
+/** Every phone's last known load ("sức khỏe máy") state. In-memory on the backend, no device I/O. */
+export async function deviceLoadStates() {
+  return invoke<DeviceLoadState[]>("device_load_states");
+}
+
+/** "Kiểm tra sức khỏe": one read-only load sample. A device probe, so never cached. */
+export async function deviceLoadCheck(udid: string) {
+  return invoke<DeviceLoadCheck>("device_load_check", { udid });
+}
+
+/**
+ * "Dọn máy": light cleanup (background apps, reviewed hogs, caches; never TikTok, the helper or
+ * app data), then a fresh sample. Takes the phone's lease: a busy phone is refused.
+ */
+export async function deviceLoadCleanup(udid: string) {
+  return invoke<DeviceLoadCheck>("device_load_cleanup", { udid });
 }
 
 /// Screenshot into the phone's own gallery (xiaowei "Screenshot to phone"). Returns the

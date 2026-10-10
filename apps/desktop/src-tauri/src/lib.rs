@@ -542,6 +542,9 @@ pub fn run() {
             commands::device_baseline_apply,
             commands::device_baseline_get_config,
             commands::device_baseline_save_config,
+            commands::device_load_states,
+            commands::device_load_check,
+            commands::device_load_cleanup,
             commands::screenshot_to_device,
             commands::set_input_method,
             commands::launch_device_app,
@@ -1903,6 +1906,14 @@ mod tests {
             "device_baseline_read",
             "read-only: `dumpsys`/`settings get`, and `locksettings get-disabled` only on a \
              phone proven to have no lock credential; writes nothing",
+        ),
+        (
+            "device_load_states",
+            "no device I/O: returns the driver's in-memory load book",
+        ),
+        (
+            "device_load_check",
+            "read-only: one bounded `top`/`/proc/meminfo`/uptime/battery-temperature read;              waits for an adb slot like any other call and writes nothing",
         ),
         (
             "device_pull_path",
