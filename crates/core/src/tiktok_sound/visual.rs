@@ -9,6 +9,11 @@ use unicode_normalization::{char::is_combining_mark, UnicodeNormalization};
 /// showed as selected in the frame completed at +21.6 s; the frame 4 s after the tap still showed
 /// the old tab. A second Hot tap waits out this window on fresh frames first.
 const HOT_TAP_SETTLE: Duration = Duration::from_secs(15);
+/// Row contact taps per sound stage, across `wait_selected_row` and the composer's recovery.
+/// Phone 44 (ce031713d903001b01, box3150k, 2026-10-10 13:15:13): the first row tap, like its
+/// first Hot tap at 13:14:24, left the sheet unchanged; the second selected the row. The second
+/// tap needs HOT_TAP_SETTLE and two fresh frames proving no row selected.
+const ROW_TAP_CAP: u32 = 2;
 
 // Scoped only to the existing pool observation. No extra reads or effect permission;
 // production tracing retains the binding even without opt-in stage diagnostics.
@@ -134,6 +139,15 @@ async fn tap_contact_image(
         "visual sound app/session changed before the contact tap"
     );
     check_wait()?;
+    let row_tap = match contact {
+        SheetContact::Hot => None,
+        SheetContact::Row(_) => Some(claim_row_tap(ROW_TAP_CAP).ok_or_else(|| {
+            crate::publish_recovery::retryable_error(
+                "sound_row_tap_cap",
+                "Đã bấm hàng nhạc đủ số lần cho phép trong lượt này mà chưa chứng minh được hàng đã chọn; không bấm thêm, chưa bấm Đăng",
+            )
+        })?),
+    };
     let serial = session.gui_scope().map(|scope| scope.device_id);
     let (dispatch, ack, index) = match contact {
         SheetContact::Hot => ("contactHotDispatch", "contactHotAck", None),
@@ -147,12 +161,13 @@ async fn tap_contact_image(
     });
     // The row tap runs outside the observation's diagnostic scope; #47's row step logged
     // nothing for 60 s. This event is the dispatch evidence either way.
+    let row_tap = row_tap.map(|count| format!("{count}/{ROW_TAP_CAP}"));
     tracing::info!(serial=?serial, session=%epoch, phase=dispatch, rowIndex=?index,
-        x=point.x, y=point.y, "visual sound contact tap");
+        rowTap=?row_tap, x=point.x, y=point.y, "visual sound contact tap");
     let result = session.tap(point).await;
     visual_diagnostic(|state| state.emit(ack, Some(result.is_ok())));
     tracing::info!(serial=?serial, session=%epoch, phase=ack, rowIndex=?index,
-        acknowledged=result.is_ok(), "visual sound contact tap");
+        rowTap=?row_tap, acknowledged=result.is_ok(), "visual sound contact tap");
     result?;
     check_wait()
 }
@@ -210,20 +225,99 @@ pub(super) async fn open_loading_entry(
     Ok(true)
 }
 
+fn red_pixel([a, b, c]: [u8; 3]) -> bool {
+    a > 170 && f64::from(a) > f64::from(b) * 1.5 && f64::from(a) > f64::from(c) * 1.2
+}
+
 fn red_fraction(img: &image::RgbImage, r: OcrRect) -> f64 {
     let (mut red, mut dark) = (0u32, 0u32);
     for y in r.y..(r.y + r.height).min(img.height()) {
         for x in r.x..(r.x + r.width).min(img.width()) {
-            let [a, b, c] = img.get_pixel(x, y).0;
-            if a > 170 && f64::from(a) > f64::from(b) * 1.5 && f64::from(a) > f64::from(c) * 1.2 {
+            let pixel = img.get_pixel(x, y).0;
+            if red_pixel(pixel) {
                 red += 1;
             }
-            if a.max(b).max(c) < 180 {
+            if pixel.iter().all(|c| *c < 180) {
                 dark += 1;
             }
         }
     }
     f64::from(red) / f64::from((red + dark).max(1))
+}
+
+/// Sheet list band. 45.7.3/en rows start at y≈1370 without the region chips and y≈1686 under
+/// them (phone 44 ce031713d903001b01, 2026-10-10, `44-after-fail.png`); the list clips at ~1930.
+const ROW_LIST: std::ops::Range<u32> = 1200..1935;
+/// A selected row's thumbnail gains a 4 px red frame at x 110..234 (unselected art spans
+/// ~115..230). Measured on `hot-visual-selected.png`, `hot-selected-third.png` and phone 44's
+/// `44-after-fail.png`: both columns red for 107 px; no unselected thumbnail reaches them.
+const THUMB_FRAME_COLUMNS: [u32; 2] = [112, 232];
+const THUMB_FRAME_MIN_RUN: u32 = 90;
+/// Title, equalizer and artist column; unselected titles are black on white.
+const ROW_TEXT_COLUMNS: std::ops::Range<u32> = 250..1040;
+
+/// What the list pixels alone say about selection, independent of OCR.
+struct RowPixels {
+    /// y-spans where both thumbnail frame columns are red for a full row height.
+    framed: Vec<(u32, u32)>,
+    /// Any red at the frame columns or on a text-column scanline (≥3 px) in the list.
+    any_red: bool,
+}
+
+fn row_pixels(img: &image::RgbImage) -> RowPixels {
+    let mut framed = Vec::new();
+    let mut any_red = false;
+    let mut run: Option<u32> = None;
+    let bottom = ROW_LIST.end.min(img.height());
+    for y in ROW_LIST.start..=bottom {
+        let both = y < bottom
+            && THUMB_FRAME_COLUMNS
+                .iter()
+                .all(|x| *x < img.width() && red_pixel(img.get_pixel(*x, y).0));
+        if y < bottom {
+            any_red |= THUMB_FRAME_COLUMNS.iter().any(|centre| {
+                (centre - 1..=centre + 1)
+                    .any(|x| x < img.width() && red_pixel(img.get_pixel(x, y).0))
+            }) || ROW_TEXT_COLUMNS
+                .clone()
+                .filter(|x| *x < img.width() && red_pixel(img.get_pixel(*x, y).0))
+                .nth(2)
+                .is_some();
+        }
+        match (both, run) {
+            (true, None) => run = Some(y),
+            (false, Some(start)) => {
+                if y - start >= THUMB_FRAME_MIN_RUN {
+                    framed.push((start, y));
+                }
+                run = None;
+            }
+            _ => {}
+        }
+    }
+    RowPixels { framed, any_red }
+}
+
+fn target_rect(target: &ElementBox) -> OcrRect {
+    OcrRect {
+        x: target.x as u32,
+        y: target.y as u32,
+        width: target.width as u32,
+        height: target.height as u32,
+    }
+}
+
+/// Pool targets whose vertical centre lies inside a framed row.
+fn targets_in_span(targets: &[ElementBox], (top, bottom): (u32, u32)) -> Vec<usize> {
+    targets
+        .iter()
+        .enumerate()
+        .filter(|(_, target)| {
+            let centre = target.y + target.height / 2.0;
+            centre >= f64::from(top) && centre < f64::from(bottom)
+        })
+        .map(|(index, _)| index)
+        .collect()
 }
 
 fn hot_selected(img: &image::RgbImage, tabs: &[OcrRect]) -> bool {
@@ -358,6 +452,22 @@ fn pool_from_image(
         !candidates.is_empty(),
         "visual sound has no complete unselected row"
     );
+    // A selected row OCR could not bind (its red title is often clipped or missing) still shows
+    // its red thumbnail frame. Such a frame is never read as "no row selected".
+    match row_pixels(image).framed.as_slice() {
+        [] => {}
+        [span] => {
+            let [row] = targets_in_span(&targets, *span)[..] else {
+                anyhow::bail!("visual sound selected row unbound");
+            };
+            anyhow::ensure!(
+                selected_index.is_none_or(|selected| selected == row),
+                "visual sound selected row ambiguous"
+            );
+            selected_index = Some(row);
+        }
+        _ => anyhow::bail!("visual sound selected row ambiguous"),
+    }
     Ok(ObservedSoundPool {
         effective_plan: None,
         candidates,
@@ -375,6 +485,7 @@ fn visual_rejection_code(error: &anyhow::Error) -> &'static str {
         "visual sound title clipped" => "title_clipped",
         "visual sound identity ambiguous" => "identity_ambiguous",
         "visual sound selected row ambiguous" => "selected_row_ambiguous",
+        "visual sound selected row unbound" => "selected_row_unbound",
         "visual sound has no complete unselected row" => "no_complete_row",
         _ => "other",
     }
@@ -985,11 +1096,28 @@ pub(super) async fn choose_provisional(
         if tabs.len() == 4 {
             let fresh = pool_from_image(&image, &lines, &tabs, plan, pool.maximum_visible)?;
             reproof_target(pool, &fresh, index)?;
+            let pixels = row_pixels(&image);
+            let proof = row_proof(&image, &tabs, pool, index, &pixels);
+            log_row_proof(
+                session,
+                RowProofFrame {
+                    phase: "rowRecoveryProof",
+                    generation: 1,
+                    image: &image,
+                    tabs: &tabs,
+                    pool,
+                    index,
+                    pixels: &pixels,
+                    proof,
+                    started: Instant::now(),
+                    deadline: phase_deadline(Duration::from_secs(60)),
+                },
+            );
             anyhow::ensure!(
-                selected_row_ready(&image, &tabs, pool, index),
+                proof == RowProof::Selected,
                 "provisional sound selection remains unknown; refusing another row tap"
             );
-            wait_selected_row(session, plan, pool, index).await?;
+            wait_selected_row(session, plan, pool, index, None).await?;
             *row_proved = true;
             check_wait()?;
             session.back().await?;
@@ -1021,6 +1149,7 @@ async fn select_row_and_close(
         session.gui_session_epoch() == epoch,
         "visual sound session changed before the row tap"
     );
+    let mut tapped = None;
     if let Some(selected) = fresh.selected_index {
         if selected != index {
             anyhow::ensure!(
@@ -1039,6 +1168,7 @@ async fn select_row_and_close(
                 SheetContact::Row(index),
             )
             .await?;
+            tapped = Some(Instant::now());
         } else {
             reproof_target(pool, &fresh, index)?;
         }
@@ -1052,8 +1182,9 @@ async fn select_row_and_close(
             SheetContact::Row(index),
         )
         .await?;
+        tapped = Some(Instant::now());
     }
-    wait_selected_row(session, plan, &fresh, index).await?;
+    wait_selected_row(session, plan, &fresh, index, tapped).await?;
     *row_proved = true;
     // One reversible selection only. The fresh sheet frame that ended `wait_selected_row`
     // authorizes Back; exact title on two XML editor snapshots is the final verification.
@@ -1069,6 +1200,7 @@ pub(super) async fn recover(
     index: usize,
 ) -> anyhow::Result<()> {
     let candidate = pool.candidates.get(index).context("sound index missing")?;
+    let started = Instant::now();
     let (image, _, tabs, _) = capture(session, plan, 1).await?;
     if tabs.len() != 4 {
         let source = read_sound(session.hierarchy_source_snapshot()).await?;
@@ -1084,30 +1216,69 @@ pub(super) async fn recover(
         }
         return selection_recovery::confirm_editor_or_chip(session, plan, candidate).await;
     }
-    if selected_row_ready(&image, &tabs, pool, index) {
-        wait_selected_row(session, plan, pool, index).await?;
-        check_wait()?;
-        session.back().await?;
-        return selection_recovery::confirm_editor_or_chip(session, plan, candidate).await;
+    let pixels = row_pixels(&image);
+    let proof = row_proof(&image, &tabs, pool, index, &pixels);
+    log_row_proof(
+        session,
+        RowProofFrame {
+            phase: "rowRecoveryProof",
+            generation: 1,
+            image: &image,
+            tabs: &tabs,
+            pool,
+            index,
+            pixels: &pixels,
+            proof,
+            started,
+            deadline: phase_deadline(Duration::from_secs(60)),
+        },
+    );
+    match proof {
+        // Only a frame that positively shows no red row lets `choose` re-observe and tap; the
+        // stage-wide ROW_TAP_CAP still bounds that tap.
+        RowProof::NoRowRed if row_taps() < ROW_TAP_CAP => choose(session, plan, pool, index).await,
+        RowProof::NoRowRed => Err(crate::publish_recovery::retryable_error(
+            "sound_row_tap_cap",
+            "Đã bấm hàng nhạc đủ số lần cho phép trong lượt này mà chưa chứng minh được hàng đã chọn; không bấm thêm, chưa bấm Đăng",
+        )),
+        RowProof::WrongRowRed | RowProof::ManyRowsRed => {
+            Err(crate::publish_recovery::retryable_error(
+                "sound_selection_wrong_row",
+                "Ảnh màn hình cho thấy hàng nhạc khác (hoặc nhiều hàng) đang được chọn; không bấm thêm, chưa bấm Đăng",
+            ))
+        }
+        // Our row, or a frame that cannot be judged: observe only. Nothing is tapped here; a
+        // proven selection continues with Back and the editor proof.
+        RowProof::Selected
+        | RowProof::TabsUnreadable
+        | RowProof::HotNotUnderlined
+        | RowProof::Unjudgeable => {
+            wait_selected_row(session, plan, pool, index, None).await?;
+            check_wait()?;
+            session.back().await?;
+            selection_recovery::confirm_editor_or_chip(session, plan, candidate).await
+        }
     }
-    // choose reobserves two stable rows and either proves the same selected identity
-    // or performs one selection from a fully unselected pool.
-    choose(session, plan, pool, index).await
 }
 
 /// Returns on the second fresh frame in a row that shows the measured sheet (four tabs, Hot
 /// underlined) with only `index` red. That last frame is the sheet proof for the Back that
 /// follows: #44 (box3150j, 2026-10-10) spent ~11 s on a further two-frame OCR proof here.
+/// With `last_tap` set (this caller just tapped the row), one more contact tap is allowed once
+/// HOT_TAP_SETTLE has passed since it and two consecutive fresh frames positively prove that no
+/// row is red while OCR re-binds the same row within 4 px; ROW_TAP_CAP bounds the stage.
 async fn wait_selected_row(
     session: &dyn UiSession,
     plan: SoundPickerPlan,
     pool: &ObservedSoundPool,
     index: usize,
+    mut last_tap: Option<Instant>,
 ) -> anyhow::Result<()> {
-    let deadline =
-        phase_deadline(Duration::from_secs(60)).min(Instant::now() + Duration::from_secs(60));
+    let started = Instant::now();
+    let deadline = phase_deadline(Duration::from_secs(60)).min(started + Duration::from_secs(60));
     let epoch = session.gui_session_epoch();
     let mut stable = 0;
+    let mut unselected = 0;
     let mut generation = 0;
     loop {
         check_wait()?;
@@ -1116,52 +1287,231 @@ async fn wait_selected_row(
             "TikTok chưa xác nhận tải nhạc đã chọn; chưa bấm Đăng"
         );
         generation += 1;
-        let (image, _, tabs, current) = capture(session, plan, generation).await?;
+        let frame_started = Instant::now();
+        let (image, lines, tabs, current) = capture(session, plan, generation).await?;
         anyhow::ensure!(current == epoch, "sound selection session changed");
-        if selected_row_ready(&image, &tabs, pool, index) {
-            stable += 1;
-            if stable == 2 {
-                anyhow::ensure!(
-                    session.gui_session_epoch() == epoch,
-                    "sound selection session changed"
-                );
-                return Ok(());
+        let pixels = row_pixels(&image);
+        let proof = row_proof(&image, &tabs, pool, index, &pixels);
+        log_row_proof(
+            session,
+            RowProofFrame {
+                phase: "rowProof",
+                generation,
+                image: &image,
+                tabs: &tabs,
+                pool,
+                index,
+                pixels: &pixels,
+                proof,
+                started,
+                deadline,
+            },
+        );
+        match proof {
+            RowProof::Selected => {
+                unselected = 0;
+                stable += 1;
+                if stable == 2 {
+                    anyhow::ensure!(
+                        session.gui_session_epoch() == epoch,
+                        "sound selection session changed"
+                    );
+                    return Ok(());
+                }
             }
-        } else {
-            stable = 0;
+            RowProof::NoRowRed => {
+                stable = 0;
+                let rebound = pool_from_image(&image, &lines, &tabs, plan, pool.maximum_visible)
+                    .ok()
+                    .filter(|fresh| fresh.selected_index.is_none())
+                    .and_then(|fresh| {
+                        let target = reproof_target(pool, &fresh, index).ok()?.clone();
+                        let before = pool.targets.get(index)?;
+                        ((target.x - before.x).abs() <= 4.0
+                            && (target.y - before.y).abs() <= 4.0
+                            && (target.width - before.width).abs() <= 4.0
+                            && (target.height - before.height).abs() <= 4.0)
+                            .then_some(target)
+                    });
+                unselected = if rebound.is_some() { unselected + 1 } else { 0 };
+                if let (Some(target), Some(tapped)) = (rebound, last_tap) {
+                    if unselected >= 2
+                        && frame_started.saturating_duration_since(tapped) >= HOT_TAP_SETTLE
+                        && row_taps() < ROW_TAP_CAP
+                        && session.gui_session_epoch() == epoch
+                    {
+                        tap_contact_image(
+                            session,
+                            plan,
+                            &epoch,
+                            target.centre(),
+                            SheetContact::Row(index),
+                        )
+                        .await?;
+                        last_tap = Some(Instant::now());
+                        unselected = 0;
+                        crate::publish_recovery::note_read(
+                            "sound",
+                            "visualRowRetap",
+                            row_taps(),
+                            "awaitingProof",
+                            Some("Hai ảnh mới sau khi chờ ổn định đều cho thấy chưa hàng nào được chọn; bấm lại đúng hàng đó một lần, chờ ảnh chứng minh"),
+                        );
+                    }
+                }
+            }
+            RowProof::TabsUnreadable
+            | RowProof::HotNotUnderlined
+            | RowProof::ManyRowsRed
+            | RowProof::WrongRowRed
+            | RowProof::Unjudgeable => {
+                stable = 0;
+                unselected = 0;
+            }
         }
         tokio::time::sleep(POLL).await;
     }
 }
 
-fn selected_row_ready(
+/// What one fresh sheet frame proves about the row we tapped.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+enum RowProof {
+    /// Exactly one red row, and it is `index`.
+    Selected,
+    /// Four tabs, Hot underlined and no red at all in the list: positively nothing selected.
+    NoRowRed,
+    TabsUnreadable,
+    HotNotUnderlined,
+    ManyRowsRed,
+    WrongRowRed,
+    /// Red in the list that is not one framed or title-red pool row.
+    Unjudgeable,
+}
+
+impl RowProof {
+    fn rejection(self) -> Option<&'static str> {
+        match self {
+            Self::Selected => None,
+            Self::NoRowRed => Some("zero_red_rows"),
+            Self::TabsUnreadable => Some("tabs_not_4"),
+            Self::HotNotUnderlined => Some("hot_not_underlined"),
+            Self::ManyRowsRed => Some("many_red_rows"),
+            Self::WrongRowRed => Some("wrong_row_red"),
+            Self::Unjudgeable => Some("red_unjudgeable"),
+        }
+    }
+}
+
+/// Selection inserts an equalizer and trim controls and shifts the red title right, clipping
+/// even a title previously read in full; on measured 45.7.3 the red title can disappear from
+/// OCR entirely. The selected row is found by its own pixels in this frame (red thumbnail
+/// frame) and mapped to the pool by the vertical centre of the target we tapped; a red title at
+/// the pre-tap bounds is accepted alone only when no frame is drawn. A unique red row only
+/// acknowledges our pick: the exact full title on two editor XML snapshots stays mandatory.
+fn row_proof(
     image: &image::RgbImage,
     tabs: &[OcrRect],
     pool: &ObservedSoundPool,
     index: usize,
-) -> bool {
-    if tabs.len() != 4 || !hot_selected(image, tabs) || index >= pool.targets.len() {
-        return false;
+    pixels: &RowPixels,
+) -> RowProof {
+    if tabs.len() != 4 {
+        return RowProof::TabsUnreadable;
     }
-    // Selection inserts an equalizer and trim controls, clipping even a title
-    // previously read in full. On measured 45.7.3 the red title can disappear
-    // from OCR entirely. A unique red row only acknowledges our single pick;
-    // choose() still requires the exact full title on two editor XML snapshots.
-    let selected: Vec<_> = pool
+    if !hot_selected(image, tabs) {
+        return RowProof::HotNotUnderlined;
+    }
+    if index >= pool.targets.len() {
+        return RowProof::Unjudgeable;
+    }
+    let red_titles: Vec<_> = pool
         .targets
         .iter()
         .enumerate()
-        .filter_map(|(i, target)| {
-            let bounds = OcrRect {
-                x: target.x as u32,
-                y: target.y as u32,
-                width: target.width as u32,
-                height: target.height as u32,
-            };
-            (red_fraction(image, bounds) > 0.5).then_some(i)
+        .filter(|(_, target)| red_fraction(image, target_rect(target)) > 0.5)
+        .map(|(row, _)| row)
+        .collect();
+    if pixels.framed.len() > 1 || red_titles.len() > 1 {
+        return RowProof::ManyRowsRed;
+    }
+    if let [span] = pixels.framed[..] {
+        return match targets_in_span(&pool.targets, span)[..] {
+            [row] if row == index && red_titles.iter().all(|title| *title == index) => {
+                RowProof::Selected
+            }
+            [row] if row == index => RowProof::ManyRowsRed,
+            [_] => RowProof::WrongRowRed,
+            _ => RowProof::Unjudgeable,
+        };
+    }
+    match red_titles[..] {
+        [row] if row == index => RowProof::Selected,
+        [_] => RowProof::WrongRowRed,
+        _ if !pixels.any_red => RowProof::NoRowRed,
+        _ => RowProof::Unjudgeable,
+    }
+}
+
+struct RowProofFrame<'a> {
+    phase: &'static str,
+    generation: u64,
+    image: &'a image::RgbImage,
+    tabs: &'a [OcrRect],
+    pool: &'a ObservedSoundPool,
+    index: usize,
+    pixels: &'a RowPixels,
+    proof: RowProof,
+    started: Instant,
+    deadline: Instant,
+}
+
+/// The row proof runs outside `observe_loop`'s diagnostic scope; phone 44 (box3150k,
+/// 2026-10-10 13:15:13-13:16:18) logged nothing for 65 s. One line per frame, coordinates and
+/// numbers only: no OCR text.
+fn log_row_proof(session: &dyn UiSession, frame: RowProofFrame<'_>) {
+    let now = Instant::now();
+    let millis = |duration: Duration| duration.as_millis().min(u64::MAX as u128) as u64;
+    let remaining_effective_budget_ms = SOUND_BUDGET
+        .try_with(|budget| millis(budget.deadline.saturating_duration_since(now)))
+        .ok();
+    let targets: Vec<[u32; 4]> = frame
+        .pool
+        .targets
+        .iter()
+        .map(|target| {
+            let rect = target_rect(target);
+            [rect.x, rect.y, rect.width, rect.height]
         })
         .collect();
-    selected == [index]
+    // Per-mille of red among red-or-dark pixels in each pre-tap target box.
+    let red_permille: Vec<u32> = frame
+        .pool
+        .targets
+        .iter()
+        .map(|target| (red_fraction(frame.image, target_rect(target)) * 1000.0).round() as u32)
+        .collect();
+    let tab_bounds: Vec<[u32; 4]> = frame
+        .tabs
+        .iter()
+        .take(4)
+        .map(|rect| [rect.x, rect.y, rect.width, rect.height])
+        .collect();
+    tracing::info!(
+        serial=?session.gui_scope().map(|scope| scope.device_id),
+        session=%session.gui_session_epoch(), phase=frame.phase,
+        captureGeneration=frame.generation, rowIndex=frame.index,
+        tabCount=frame.tabs.len(), tabBounds=?tab_bounds,
+        selectedTabIndex=?selected_tab(frame.image, frame.tabs),
+        hotSelected=hot_selected(frame.image, frame.tabs),
+        targets=?targets, redPermille=?red_permille,
+        framedRows=?frame.pixels.framed, anyRed=frame.pixels.any_red,
+        proof=?frame.proof, rejection=?frame.proof.rejection(),
+        rowTaps=row_taps(), rowTapCap=ROW_TAP_CAP,
+        elapsedMs=millis(now.saturating_duration_since(frame.started)),
+        remainingPhaseMs=millis(frame.deadline.saturating_duration_since(now)),
+        remainingEffectiveBudgetMs=?remaining_effective_budget_ms,
+        "visual sound observation diagnostic"
+    );
 }
 
 #[cfg(test)]
@@ -1169,6 +1519,15 @@ mod tests {
     use super::*;
     use crate::ui_automation::{GuiReasoner, GuiRequest, GuiResponse, OcrResponse};
     use std::sync::atomic::AtomicUsize;
+
+    fn selected_row_ready(
+        image: &image::RgbImage,
+        tabs: &[OcrRect],
+        pool: &ObservedSoundPool,
+        index: usize,
+    ) -> bool {
+        row_proof(image, tabs, pool, index, &row_pixels(image)) == RowProof::Selected
+    }
     fn fixture() -> (image::RgbImage, Vec<OcrLine>, Vec<OcrRect>, SoundPickerPlan) {
         let img = image::load_from_memory(include_bytes!(
             "../../fixtures/tiktok-publish/musically-45.7.3-en/hot-visual.png"

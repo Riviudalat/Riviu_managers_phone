@@ -91,6 +91,8 @@ struct SoundRouteEvidence {
     /// A read-only `/source` on the sheet spent a request deadline this stage; see
     /// [`source_request_timed_out`]. The next unreadable root hands off without a second one.
     source_timed_out: AtomicBool,
+    /// Visual row taps dispatched in this stage, across the composer's inline recovery.
+    row_taps: AtomicU32,
 }
 const ROUTE_XML: u8 = 1;
 const ROUTE_VISUAL: u8 = 2;
@@ -109,6 +111,30 @@ fn note_tab_tap() {
             .store(roots, Ordering::Relaxed);
         budget.route.tab_tapped.store(true, Ordering::Relaxed);
     });
+}
+
+/// Claims one visual row tap for this stage, or `None` once `cap` taps were dispatched.
+/// Outside a sound stage nothing is shared to count against, so the claim is `Some(1)`.
+fn claim_row_tap(cap: u32) -> Option<u32> {
+    SOUND_BUDGET
+        .try_with(|budget| {
+            budget
+                .route
+                .row_taps
+                .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |taps| {
+                    (taps < cap).then_some(taps + 1)
+                })
+                .ok()
+                .map(|taps| taps + 1)
+        })
+        .unwrap_or(Some(1))
+}
+
+/// Visual row taps already dispatched in this stage.
+fn row_taps() -> u32 {
+    SOUND_BUDGET
+        .try_with(|budget| budget.route.row_taps.load(Ordering::Relaxed))
+        .unwrap_or(0)
 }
 
 /// Unreadable roots met since the last tab tap.
