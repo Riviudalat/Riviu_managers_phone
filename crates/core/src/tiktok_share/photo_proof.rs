@@ -1,8 +1,8 @@
 //! Measured expanded photo viewer plus independent public metadata proof.
 use super::*;
-use crate::publish_submission::MetadataDiagnostic;
 use anyhow::Context;
 use hierarchy::Tree;
+use crate::publish_submission::MetadataDiagnostic;
 
 fn normalize(text: &str) -> String {
     text.split_whitespace().collect::<Vec<_>>().join(" ")
@@ -30,36 +30,19 @@ pub(super) struct PublicMetadataUnavailable {
 #[error("canonical candidate awaits public metadata")]
 pub(super) struct CapturedMetadataFailure(pub crate::publish_submission::CapturedMetadataCandidate);
 
-fn retain_metadata_candidate(
-    error: anyhow::Error,
-    canonical: &str,
-    caption: &str,
-    identity: &SubmissionIdentity,
-) -> anyhow::Error {
+fn retain_metadata_candidate(error: anyhow::Error, canonical: &str, caption: &str,
+    identity: &SubmissionIdentity) -> anyhow::Error {
     use crate::publish_submission::*;
-    let Some(unavailable) = error.downcast_ref::<PublicMetadataUnavailable>() else {
-        return error;
-    };
-    let Ok(post_id) = validate_photo_identity(canonical, identity) else {
-        return error;
-    };
+    let Some(unavailable) = error.downcast_ref::<PublicMetadataUnavailable>() else { return error; };
+    let Ok(post_id) = validate_photo_identity(canonical, identity) else { return error; };
     let now = chrono::Utc::now().to_rfc3339();
     let captured = CapturedMetadataCandidate {
-        canonical_url: canonical.into(),
-        post_id,
-        expected_account: identity.account.clone(),
+        canonical_url: canonical.into(), post_id, expected_account: identity.account.clone(),
         normalized_caption_sha256: normalized_caption_sha256(caption),
-        prepared_at: identity.prepared_at.clone(),
-        submitted_at: identity.submitted_at.clone(),
-        captured_at: now.clone(),
-        provenance: MetadataCandidateProvenance::MeasuredViewerClipboard,
-        metadata: MetadataAttempt {
-            state: MetadataAttemptState::Unavailable,
-            attempts: 1,
-            checked_at: now,
-            stage: unavailable.stage,
-            http_status: unavailable.http_status,
-        },
+        prepared_at: identity.prepared_at.clone(), submitted_at: identity.submitted_at.clone(),
+        captured_at: now.clone(), provenance: MetadataCandidateProvenance::MeasuredViewerClipboard,
+        metadata: MetadataAttempt { state: MetadataAttemptState::Unavailable, attempts: 1,
+            checked_at: now, stage: unavailable.stage, http_status: unavailable.http_status },
     };
     error.context(CapturedMetadataFailure(captured))
 }
@@ -437,8 +420,8 @@ pub(super) async fn capture_expanded_photo_link_counted(
                     .matching(package, ElementQuery::Description { value, exact: true })
                     .is_empty()
             }) && labels
-                .label(TikTokControl::Comments)
-                .is_some_and(|q| !tree.matching(package, q.to_query()).is_empty()),
+                    .label(TikTokControl::Comments)
+                    .is_some_and(|q| !tree.matching(package, q.to_query()).is_empty()),
             "not a measured post detail"
         );
         if let Some(share) = labels.label(TikTokControl::Share) {
@@ -493,56 +476,27 @@ pub(super) async fn validate_public_link(
     let client = reqwest::Client::builder()
         .timeout(Duration::from_secs(15))
         .redirect(reqwest::redirect::Policy::none())
-        .build()
-        .map_err(|_| PublicMetadataUnavailable {
-            stage: MetadataDiagnostic::RequestConfig,
-            http_status: None,
-        })?;
+        .build().map_err(|_| PublicMetadataUnavailable { stage: MetadataDiagnostic::RequestConfig, http_status: None })?;
     let mut response = client
         .get("https://www.tiktok.com/oembed")
         .query(&[("url", video_url.as_str())])
         .send()
-        .await
-        .map_err(|error| PublicMetadataUnavailable {
-            stage: MetadataDiagnostic::Request,
-            http_status: error.status().map(|status| status.as_u16()),
-        })?
-        .error_for_status()
-        .map_err(|error| PublicMetadataUnavailable {
-            stage: MetadataDiagnostic::HttpStatus,
-            http_status: error.status().map(|status| status.as_u16()),
-        })?;
+        .await.map_err(|error| PublicMetadataUnavailable { stage: MetadataDiagnostic::Request, http_status: error.status().map(|status| status.as_u16()) })?
+        .error_for_status().map_err(|error| PublicMetadataUnavailable { stage: MetadataDiagnostic::HttpStatus, http_status: error.status().map(|status| status.as_u16()) })?;
     let status = Some(response.status().as_u16());
     if response.content_length().is_some_and(|size| size > 262144) {
-        return Err(PublicMetadataUnavailable {
-            stage: MetadataDiagnostic::BodyLimit,
-            http_status: status,
-        }
-        .into());
+        return Err(PublicMetadataUnavailable { stage: MetadataDiagnostic::BodyLimit, http_status: status }.into());
     }
     let mut bytes = Vec::new();
-    while let Some(chunk) = response
-        .chunk()
-        .await
-        .map_err(|_| PublicMetadataUnavailable {
-            stage: MetadataDiagnostic::BodyRead,
-            http_status: status,
-        })?
-    {
+    while let Some(chunk) = response.chunk().await
+        .map_err(|_| PublicMetadataUnavailable { stage: MetadataDiagnostic::BodyRead, http_status: status })? {
         if bytes.len() + chunk.len() > 262144 {
-            return Err(PublicMetadataUnavailable {
-                stage: MetadataDiagnostic::BodyLimit,
-                http_status: status,
-            }
-            .into());
+            return Err(PublicMetadataUnavailable { stage: MetadataDiagnostic::BodyLimit, http_status: status }.into());
         }
         bytes.extend_from_slice(&chunk);
     }
-    let embed: serde_json::Value =
-        serde_json::from_slice(&bytes).map_err(|_| PublicMetadataUnavailable {
-            stage: MetadataDiagnostic::ResponseParse,
-            http_status: status,
-        })?;
+    let embed: serde_json::Value = serde_json::from_slice(&bytes)
+        .map_err(|_| PublicMetadataUnavailable { stage: MetadataDiagnostic::ResponseParse, http_status: status })?;
     validate_public_metadata(&embed, caption, &identity.account, &id)?;
     Ok(())
 }
@@ -642,10 +596,7 @@ pub(super) async fn capture_visible_video_link_counted(
     } else {
         false
     };
-    anyhow::ensure!(
-        kind_proven,
-        "copied content kind does not match measured viewer"
-    );
+    anyhow::ensure!(kind_proven, "copied content kind does not match measured viewer");
     validate_public_link(&canonical, caption, identity)
         .await
         .map_err(|error| {
@@ -793,7 +744,8 @@ fn video_viewer_caption(
     {
         // Only a complete, non-ellipsized caption excludes this tile. A folded
         // caption may still need expansion or the public metadata fallback.
-        let folded = visible.trim_end_matches(['\u{2060}', '\u{200e}', '\u{200f}']);
+        let folded =
+            visible.trim_end_matches(['\u{2060}', '\u{200e}', '\u{200f}']);
         if package == "com.zhiliaoapp.musically"
             && version == "45.7.3"
             && !folded.is_empty()

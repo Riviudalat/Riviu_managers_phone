@@ -616,17 +616,13 @@ mod tests {
                 ElementQuery::ResourceIdSuffix(suffix) => {
                     if let Some(xml) = &self.xml {
                         let tree = crate::ui_automation::tree::Tree::parse(
-                            crate::HierarchySourceSnapshot {
-                                generation: 1,
-                                xml: xml.clone(),
-                            },
+                            crate::HierarchySourceSnapshot { generation: 1, xml: xml.clone() },
                         )?;
                         return Ok(tree.nodes.iter().enumerate().find_map(|(index, node)| {
                             (node.attr("resource-id").ends_with(suffix)
                                 && node.visibility() == Some(true)
                                 && tree.ancestors_visible(index))
-                            .then(|| node.rect())
-                            .flatten()
+                                .then(|| node.rect()).flatten()
                         }));
                     }
                     false
@@ -702,8 +698,7 @@ mod tests {
     /// Keep this at the ladder boundary so a recognizer without its caller still fails.
     #[tokio::test]
     async fn optional_location_permission_declines_only_the_measured_tiktok_prompt() {
-        let xml =
-            include_str!("../fixtures/tiktok-publish/optional-location-trill-38.3.2-en.fixture");
+        let xml = include_str!("../fixtures/tiktok-publish/optional-location-trill-38.3.2-en.fixture");
         // (xml, decline taps, the unanswered container still shows as a modal)
         for (xml, expected_taps, modal) in [
             (xml.to_owned(), 1, true),

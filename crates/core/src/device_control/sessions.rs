@@ -138,20 +138,11 @@ impl DeviceControlPlane {
     }
     /// Diagnostic preparation retains ownership when session setup fails after helper setup.
     pub async fn start_interaction_session_or_quarantine(
-        &self,
-        context: DeviceExclusiveContext,
-        bundle_id: &str,
-        kind: InteractionSessionKind,
+        &self, context: DeviceExclusiveContext, bundle_id: &str, kind: InteractionSessionKind,
     ) -> Result<UiSessionContext, DeviceControlError> {
-        match self
-            .try_start_interaction_session(context, bundle_id, kind)
-            .await
-        {
+        match self.try_start_interaction_session(context, bundle_id, kind).await {
             Ok(session) => Ok(session),
-            Err(failure) => {
-                self.quarantined.push_context(failure.context);
-                Err(failure.error)
-            }
+            Err(failure) => { self.quarantined.push_context(failure.context); Err(failure.error) }
         }
     }
 
@@ -231,16 +222,9 @@ impl DeviceControlPlane {
             })
     }
     /// Retain a failed helper-canary lease until explicit reconciliation.
-    pub fn quarantine_exclusive_context(
-        &self,
-        context: DeviceExclusiveContext,
-    ) -> Result<(), DeviceControlError> {
+    pub fn quarantine_exclusive_context(&self, context: DeviceExclusiveContext) -> Result<(), DeviceControlError> {
         let same_plane = context.plane_id == self.plane_id;
-        if !same_plane {
-            return Err(DeviceControlError::InvalidContext {
-                reason: "quarantine context belongs to another plane",
-            });
-        }
+        if !same_plane { return Err(DeviceControlError::InvalidContext { reason: "quarantine context belongs to another plane" }); }
         self.quarantined.push_context(context);
         Ok(())
     }
@@ -812,8 +796,8 @@ pub(super) async fn execute_recovery(
                     || process.pid.is_some()
                 {
                     return Err(recovery_error(
-                    "terminated TikTok restarted or proof changed; retained ticket not releasable",
-                ));
+                        "terminated TikTok restarted or proof changed; retained ticket not releasable",
+                    ));
                 }
             }
         }
