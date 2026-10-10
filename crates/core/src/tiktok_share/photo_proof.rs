@@ -339,7 +339,7 @@ fn viewer_controls(package: &str, version: &str) -> anyhow::Result<(&'static str
 
 /// Recognize only the measured full-caption surface. This permits navigation
 /// back to the profile; publication still needs caption/account/ID/time proof.
-pub(super) fn expanded_photo_surface(tree: &Tree, package: &str, version: &str) -> bool {
+pub(crate) fn expanded_photo_surface(tree: &Tree, package: &str, version: &str) -> bool {
     let Ok((caption_id, share_id)) = viewer_controls(package, version) else {
         return false;
     };

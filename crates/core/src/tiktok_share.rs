@@ -56,7 +56,7 @@ use crate::driver::{ElementBox, ElementQuery, UiSession};
 use crate::tiktok_labels::{TikTokControl, TikTokControls};
 
 pub(crate) mod hierarchy;
-mod photo_proof;
+pub(crate) mod photo_proof;
 mod processing;
 pub use processing::{is_processing_notice, ProcessingNotice};
 mod verification;

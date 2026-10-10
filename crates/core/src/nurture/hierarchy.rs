@@ -271,15 +271,34 @@ fn carousel_target(total: u32, portion_percent: u32, ceiling: u32) -> u32 {
     wanted.clamp(1, total).min(ceiling.max(1))
 }
 
-/// How many sideways turns in a row may go unproved before the traversal stops.
+/// How long one screen capture used as page-turn evidence may take.
 ///
-/// The page counter is a transient overlay, so an unreadable counter means "could not tell"
-/// rather than "the post ended" — treating the two the same left a 15-image post at one
-/// image (measured 12/08/2026). But an unproved turn is still a gesture on a card that may
-/// have nothing left to show, so the stretch is bounded: three is enough to ride out an
-/// overlay that fades between the swipe and the read, and short enough that a
-/// single-image post costs three gestures rather than the whole ceiling.
-const CAROUSEL_UNPROVEN_LIMIT: u32 = 3;
+/// The capture is `screencap` over adb (the driver's own ceiling is 60 s), and it is only
+/// asked for on a photo post whose counter never renders. A capture that outlives this is
+/// "could not tell", which ends the traversal: a turn nobody could see is never counted, and
+/// a traversal must never wait a minute on one picture while the card sits still.
+const CAROUSEL_FRAME_BUDGET: Duration = Duration::from_secs(4);
+
+/// How many consecutive railless passes the loop may spend before it stops.
+///
+/// Box 31–50 acceptance round 4, 10/10/2026 (`ce031713b064841e0c`, Galaxy S8+,
+/// `com.zhiliaoapp.musically` / en): after one unproven swipe the feed tab stayed on screen
+/// and no card showed a rail again — twenty passes of `thẻ không có thanh hành động … chỉ
+/// vuốt tiếp` until the whole pass budget was gone, `3/15`. A LIVE card or a card still
+/// drawing is one railless pass, two at most; three in a row is a screen this loop does
+/// not understand, and the honest answer is to say so rather than swipe it blind.
+const NO_RAIL_STREAK_LIMIT: u32 = 3;
+
+/// How long the feed tab gets to come back after the one Back this loop presses itself.
+///
+/// Back out of the author's profile is a single activity pop. The ladder in
+/// [`await_feed`] waits [`MODAL_BACK_DELAY`] before it will press Back at all, and that is
+/// right for a splash screen; measured on box 31–50 round 3, 09/10/2026
+/// (`ce0317139ca344520c` 21:39:13–21:39:28), it cost fifteen seconds per visit to a
+/// profile page the loop had walked onto itself. Four seconds covers the pop and the
+/// feed's first draw, and a feed that is not back by then goes to that ladder as before.
+const BACK_RETURN_WINDOW: Duration = Duration::from_secs(4);
+const BACK_RETURN_POLL: Duration = Duration::from_millis(500);
 
 /// How long TikTok gets to reach the foreground after being launched here.
 ///
@@ -1554,18 +1573,31 @@ impl<'a> HierarchyRun<'a> {
     /// * The **first turn happens before the total is known**, because on the feed the
     ///   digits only materialise once paging starts. So the post's own image count arrives
     ///   with the first turn and the portion is applied from there.
-    /// * When the digits never materialise, the traversal falls back to "keep turning until
-    ///   a turn changes nothing", bounded by the ceiling. Safe, because the gate has already
-    ///   established this is a photo post — just less precise, since a fraction of an
-    ///   unknown total is not a fraction.
+    /// * When the digits never materialise, a turn is proved by the **picture** changing
+    ///   instead — a screen capture before and after, hashed by [`super::picture_digest_of`],
+    ///   which ignores the status bar — and the card has to still be a photo post with its
+    ///   rail afterwards. The tree cannot see a page turn (the `ImageView` rectangles and the
+    ///   `TextView` list were identical across turns that provably advanced the counter,
+    ///   `probe --measure-feed-carousel`, 18/08/2026), so the picture is the only other
+    ///   witness there is. Bounded by the ceiling, since a fraction of an unknown total is
+    ///   not a fraction.
     ///
-    /// Every turn is **proved** by the counter advancing, or in the fallback by the tree
-    /// changing. A turn that proves nothing ends the traversal instead of being counted, the
-    /// same rule [`Self::swipe_next`] applies to the feed.
+    /// Every turn is **proved**, by the counter advancing or by the picture changing. A turn
+    /// that proves nothing ends the traversal instead of being counted, the same rule
+    /// [`Self::swipe_next`] applies to the feed.
     ///
-    /// Stops at `current == total` rather than turning until the counter disappears. Both end
-    /// the loop, but measured behaviour is that the counter vanishes only *after* the last
-    /// image, so waiting for that spends one gesture past the end of the post.
+    /// **Never swipes left from the last image, and never on a counter that has gone.** One
+    /// swipe past the last slide does not stay put and does not wrap: it leaves for the
+    /// author's profile page, Follow button and all (measured 25/08/2026 on
+    /// `/photo/7668948504827448583`, see `interaction_hierarchy::photograph_photo_post`).
+    /// This loop used to read an unreadable counter as "could not tell, keep turning" for up
+    /// to three more gestures, and on box 31–50 (round 3, 09/10/2026, `ce0317139ca344520c`
+    /// 21:39:02–21:39:28; round 4, 10/10/2026, `ce031713aadf361905` 00:10:49–00:12:07) a
+    /// second pass over a post already on its last image did exactly that: four unproven
+    /// sideways gestures, `TikTok đang khởi động — chờ feed lên`, Back, and the session
+    /// ended on unproven vertical swipes. So the loop stops at `current == total`, and once
+    /// the counter has rendered on a post, a read that no longer finds it is the end of the
+    /// post, not an invitation.
     ///
     /// One consequence worth stating plainly: on the feed the floor is **two** images
     /// whenever the feature is on, because the total cannot be read until the first turn has
@@ -1612,8 +1644,6 @@ impl<'a> HierarchyRun<'a> {
         }
 
         let mut seen = 1u32;
-        // Consecutive turns whose effect could not be read. Reset by any readable counter.
-        let mut unproven = 0u32;
         let mut at = known_before.map(|(current, _)| current);
         let mut total = known_before.map(|(_, total)| total);
         // Recomputed as soon as the total is known, which on the feed is after the first
@@ -1621,10 +1651,28 @@ impl<'a> HierarchyRun<'a> {
         let mut wanted = total.map_or(ceiling.max(1), |t| {
             carousel_target(t, portion_percent, ceiling)
         });
+        // The picture before the next turn, the witness for a turn whose counter cannot be
+        // read. Taken once up front — one capture per photo post — and refreshed only by a
+        // turn the picture itself proved, so it is never stale against the turn it judges.
+        // `None` on a backend that cannot photograph the screen, and then an unreadable
+        // counter ends the traversal rather than being guessed at.
+        let mut picture = self.picture_digest(stop).await;
 
         while seen < wanted {
             if stop.load(Ordering::Relaxed) {
                 break;
+            }
+            if let (Some(now), Some(post_total)) = (at, total) {
+                if now >= post_total {
+                    // The gate above lets a post that is already on its last image in — the
+                    // feed hides the counter until a turn, so the first turn is the first
+                    // reading — and that turn is the one that leaves the post.
+                    report(
+                        status,
+                        format!("bài ảnh: đang ở ảnh cuối ({now}/{post_total}) — không vuốt tiếp"),
+                    );
+                    break;
+                }
             }
             if let Err(error) = self.swipe_slide(stop).await {
                 report(status, format!("vuốt ngang lỗi: {error}"));
@@ -1632,30 +1680,15 @@ impl<'a> HierarchyRun<'a> {
             }
             let position = self.carousel_position().await;
             // **After `CAROUSEL_SETTLE` and a full hierarchy dump**, which is the most settled
-            // this loop ever is, so it needs no new wait and costs no new round trip. Offered
-            // in the advancing arm and in the `None` arm: the `None` arm is the only one reached
-            // on a post whose counter never renders, and that was 6 of 10 photo posts on one
-            // fleet run — a sink fed only where the counter is readable would miss the majority
-            // case.
+            // this loop ever is, so it needs no new wait and costs no new round trip.
             //
-            // **But not when the counter is readable and did not move.** That arm is the one
-            // place this loop holds *proof* the page did not turn, and offering the slide before
-            // reading the counter spent that proof: the same image went to the comment evidence
-            // twice and `seen` counted a turn that provably did not happen, so a comment could be
-            // published as carousel-grounded over one duplicated image. The two arms that keep
-            // `note_slide` are the ones with no such proof.
-            let advanced_or_unreadable = match position {
-                Some((now, _)) => at != Some(now),
-                None => true,
-            };
-            if advanced_or_unreadable {
-                if let Some(evidence) = evidence {
-                    evidence.note_slide();
-                }
-            }
+            // The slide is offered to the comment evidence only by an arm that holds proof the
+            // page turned. Offering it before reading the counter spent that proof: the same
+            // image went to the comment evidence twice and `seen` counted a turn that
+            // provably did not happen, so a comment could be published as carousel-grounded
+            // over one duplicated image.
             match position {
                 Some((now, post_total)) => {
-                    unproven = 0;
                     if total.is_none() {
                         // First sight of the total: the operator's fraction becomes a real
                         // number of images now, not a fraction of a ceiling.
@@ -1672,30 +1705,70 @@ impl<'a> HierarchyRun<'a> {
                     }
                     at = Some(now);
                     seen += 1;
-                }
-                // No digits. **Not the same as the end of the post**, and reading it that way
-                // cost real coverage: a 15-image post was left at `1/15` because the
-                // indicator faded between the swipe and the read (measured 12/08/2026). The
-                // badge has already established this is a photo post, so the honest response
-                // is to keep turning for a bounded stretch rather than to stop or to swipe
-                // forever.
-                //
-                // **And there is nothing better to reach for, which is measured rather than
-                // assumed.** The obvious idea is to fingerprint the tree instead — if the
-                // page turned, something changed. It did not: on 38.3.2, across turns that
-                // provably advanced the counter, the `ImageView` rectangles and the
-                // `TextView` list were **identical** before and after (`probe
-                // --measure-feed-carousel`, 18/08/2026). The counter is the only thing in the
-                // hierarchy that can see a page turn, so on a post that never renders one,
-                // four turns is the most this can honestly claim. On a whole-fleet run that
-                // was 6 of 10 photo posts one time and 2 of 13 another — it is feed content,
-                // not a phone or a build.
-                None => {
-                    unproven += 1;
-                    if unproven > CAROUSEL_UNPROVEN_LIMIT {
-                        break;
+                    if let Some(evidence) = evidence {
+                        evidence.note_slide();
                     }
-                    seen += 1;
+                }
+                // The counter rendered on this post and a read no longer finds it. Measured
+                // 12/08/2026 on an SM-N950F: the counter advances to `N / N` and then
+                // **disappears once the last image is passed**. A gesture here would be the
+                // one that leaves the post, so this is the end of it — not "could not tell".
+                None if at.is_some() => {
+                    report(
+                        status,
+                        "bài ảnh: số ảnh không còn đọc được sau lượt vuốt — coi là hết ảnh, không vuốt tiếp"
+                            .into(),
+                    );
+                    break;
+                }
+                // No digits, on a post whose counter has never rendered — 6 of 10 photo posts
+                // on one fleet run, 2 of 13 on another; it is feed content, not a phone or a
+                // build. **Not the same as the end of the post**: a 15-image post was once
+                // left at `1/15` for reading it that way (measured 12/08/2026). The picture is
+                // the witness instead, and a changed picture still has to be *this card* —
+                // the swipe that leaves a post changes the picture too, into the author's
+                // profile page, which has no photo badge beside a caption and no rail.
+                None => {
+                    let now_picture = self.picture_digest(stop).await;
+                    let turned = match (picture, now_picture) {
+                        (Some(before), Some(after)) => Some(before != after),
+                        _ => None,
+                    };
+                    match turned {
+                        Some(true) => {
+                            let still_this_card = self.looks_like_photo_post().await
+                                && present(self.session, self.labels, TikTokControl::Comments)
+                                    .await;
+                            if !still_this_card {
+                                report(
+                                    status,
+                                    "bài ảnh: màn hình đổi nhưng không còn thẻ bài ảnh — có thể đã rời thẻ, dừng vuốt ngang"
+                                        .into(),
+                                );
+                                break;
+                            }
+                            picture = now_picture;
+                            seen += 1;
+                            if let Some(evidence) = evidence {
+                                evidence.note_slide();
+                            }
+                        }
+                        Some(false) => {
+                            report(
+                                status,
+                                "bài ảnh: ảnh không đổi sau lượt vuốt — hết ảnh".into(),
+                            );
+                            break;
+                        }
+                        None => {
+                            report(
+                                status,
+                                "bài ảnh: không đọc được số ảnh và không chụp được màn hình — dừng vuốt ngang"
+                                    .into(),
+                            );
+                            break;
+                        }
+                    }
                 }
             }
         }
@@ -1709,12 +1782,43 @@ impl<'a> HierarchyRun<'a> {
         seen
     }
 
+    /// A hash of what is on screen right now, ignoring the status bar, or `None` when the
+    /// screen could not be photographed inside [`CAROUSEL_FRAME_BUDGET`].
+    ///
+    /// `None` is "could not tell", never "unchanged": the callers stop on it.
+    async fn picture_digest(&self, stop: &AtomicBool) -> Option<u64> {
+        let deadline = tokio::time::Instant::now() + CAROUSEL_FRAME_BUDGET;
+        match read_before_deadline(self.session.screenshot_png(), deadline, stop).await {
+            Ok(ReadWaitResult::Ready(frame)) => super::picture_digest_of(&frame),
+            Ok(ReadWaitResult::Cancelled | ReadWaitResult::DeadlineExceeded) => None,
+            Err(error) => {
+                tracing::debug!(%error, "nurture carousel screen capture unread");
+                None
+            }
+        }
+    }
+
     /// Swipe to the next post and report whether the change was provable, with what the
     /// card reads that judged it cost.
+    ///
+    /// `leaving_photo` is set when the card being left was just paged sideways. A photo
+    /// card's own image pager watches the horizontal axis, and the bow `plan_swipe` puts on
+    /// a vertical gesture is horizontal — into exactly that axis — so a bowed, decelerating
+    /// vertical swipe can be claimed by the image pager as a short sideways drag, which it
+    /// ignores (a drag turns nothing, see [`Self::swipe_slide`]) and the feed never sees.
+    /// Box 31–50 rounds 3–4 (09–10/10/2026): the vertical swipe straight after a paged
+    /// carousel was unproven on `ce031713aadf361905` at 00:10:39 and 00:11:13 and on
+    /// `ce0317139ca344520c` at 21:38:54, and proven on `ce031713b064841e0c` at 00:09:11
+    /// and `ce0317139ca344520c` at 21:35:43 — the odds of a gesture whose bow direction is
+    /// drawn per swipe. Leaving a photo card therefore uses the flick: jittered ends and
+    /// varied legs, no bow and no pause, which is the gesture the pager measured as acting
+    /// 19 of 19 times, here sent up the feed axis instead of across it. **Not yet proved on
+    /// a phone** as of this change; the live check is the vertical swipe after a carousel.
     async fn swipe_next(
         &mut self,
         duration_ms: u64,
         before: &PostFingerprint,
+        leaving_photo: bool,
         stop: &AtomicBool,
     ) -> anyhow::Result<(bool, CardReads)> {
         let mut reads = CardReads::default();
@@ -1736,7 +1840,11 @@ impl<'a> HierarchyRun<'a> {
             x: self.screen.0 * 0.5,
             y: self.screen.1 * 0.28,
         };
-        let path = self.planner.plan_swipe(from, to, duration_ms);
+        let path = if leaving_photo {
+            self.planner.plan_flick(from, to, duration_ms)
+        } else {
+            self.planner.plan_swipe(from, to, duration_ms)
+        };
         self.session.swipe_path(path).await?;
         // Keep the former settle + arrival budget, but an outgoing, non-empty rail
         // is still a pending transition. Read until the card actually changes. A read still
@@ -2322,6 +2430,191 @@ async fn await_feed(
     }
 }
 
+/// What the screen is, judged only by measured shapes, for the one recovery this loop
+/// performs itself: a single Back.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum FeedScreen {
+    /// The feed tab is on screen.
+    Feed,
+    /// TikTok's main shell on another tab: the bottom bar is there and the feed tab is not.
+    /// The ladder's Home rung owns this one; Back here would be a guess.
+    OtherTab,
+    /// A TikTok screen that one Back is known to leave, named for the operator.
+    NonFeed(&'static str),
+    /// Nothing measured matched, or the screen could not be read. Nothing is pressed.
+    Unknown,
+}
+
+/// Classify the screen from one hierarchy snapshot.
+///
+/// The shapes, in the order they are asked, each measured on the Global build:
+///
+/// * the feed tab (`For You` / `Đề xuất`, the catalogued [`TikTokControl::FeedTab`]);
+/// * the bottom bar's Home tab ([`TikTokControl::HomeTab`]);
+/// * the author's profile page — `Followers`, `Following` and `Likes` as visible text, the
+///   header the 45.7.3/en fixtures `tiktok-follow/global-profile-{before,after}.fixture`
+///   carry, or the Vietnamese pair `comment_verification::search` reads on a profile;
+/// * the expanded photo viewer, [`crate::tiktok_share::photo_proof::expanded_photo_surface`],
+///   measured per build from its own fixtures;
+/// * failing those, the build's Back control ([`TikTokControls::back_descriptions`]) with no
+///   tab bar at all — a sub-screen inside TikTok, whatever it is.
+///
+/// A backend without snapshots answers only the first question, through `on_feed`.
+async fn classify_screen(run: &HierarchyRun<'_>) -> FeedScreen {
+    let labels = run.labels;
+    let package = labels.package();
+    let tree = match run.session.hierarchy_source_snapshot().await {
+        Ok(snapshot) => match crate::ui_automation::tree::Tree::parse(snapshot) {
+            Ok(tree) => tree,
+            Err(error) => {
+                tracing::debug!(%error, "nurture screen snapshot unparsed");
+                return FeedScreen::Unknown;
+            }
+        },
+        Err(_) => {
+            return if run.on_feed().await {
+                FeedScreen::Feed
+            } else {
+                FeedScreen::Unknown
+            };
+        }
+    };
+    let has = |control: TikTokControl| {
+        labels
+            .label(control)
+            .is_some_and(|label| match label.to_query() {
+                ElementQuery::Semantic(role) => {
+                    !crate::app_automation::tiktok_roles::indices(&tree, package, role).is_empty()
+                }
+                query => !tree.matching(package, query).is_empty(),
+            })
+    };
+    if has(TikTokControl::FeedTab) {
+        return FeedScreen::Feed;
+    }
+    if has(TikTokControl::HomeTab) {
+        return FeedScreen::OtherTab;
+    }
+    let visible = |attribute: &str, value: &str| {
+        tree.nodes.iter().enumerate().any(|(index, node)| {
+            node.visible(package) && tree.ancestors_visible(index) && node.attr(attribute) == value
+        })
+    };
+    let profile = ["Followers", "Following", "Likes"]
+        .iter()
+        .all(|text| visible("text", text))
+        || ["Người theo dõi", "Đang Follow"]
+            .iter()
+            .all(|text| visible("text", text));
+    if profile {
+        return FeedScreen::NonFeed("trang hồ sơ tác giả");
+    }
+    if labels.resource_version().is_some_and(|version| {
+        crate::tiktok_share::photo_proof::expanded_photo_surface(&tree, package, version)
+    }) {
+        return FeedScreen::NonFeed("trình xem ảnh phóng to");
+    }
+    if labels
+        .back_descriptions()
+        .iter()
+        .any(|value| visible("content-desc", value))
+    {
+        return FeedScreen::NonFeed("màn hình con của TikTok (có nút Back, không có tab feed)");
+    }
+    FeedScreen::Unknown
+}
+
+/// Press Back once, from a screen [`classify_screen`] proved is a TikTok screen Back
+/// leaves, and wait [`BACK_RETURN_WINDOW`] for the feed tab. `false` when nothing was
+/// pressed or the feed did not come back; the caller decides what that costs.
+///
+/// One press, never a burst: the second press on a screen that did not move is the one
+/// that closes TikTok from its root, and a session that has to be restarted costs more
+/// than the ladder in [`await_feed`] this hands over to.
+async fn back_to_feed(
+    run: &HierarchyRun<'_>,
+    stop: &AtomicBool,
+    status: &mut NurtureSessionStatus,
+    report: &(dyn Fn(&mut NurtureSessionStatus, String) + Send + Sync),
+    why: &str,
+) -> bool {
+    if stop.load(Ordering::Relaxed) {
+        return false;
+    }
+    // The same foreground proof the ladder takes before its own Back: a key sent to
+    // whatever is in front is only ours to send when that is TikTok.
+    if run.session.supports_accessibility_readback() {
+        match run.session.active_app_bundle().await {
+            Ok(bundle) if bundle == run.labels.package() => {}
+            _ => {
+                report(
+                    status,
+                    format!("đang ở {why} nhưng không chứng minh được TikTok ở foreground — không bấm Back"),
+                );
+                return false;
+            }
+        }
+    }
+    report(
+        status,
+        format!("đang ở {why} — bấm Back một lần để về feed"),
+    );
+    if let Err(error) = run.session.back().await {
+        report(status, format!("bấm Back không được: {error}"));
+        return false;
+    }
+    let deadline = tokio::time::Instant::now() + BACK_RETURN_WINDOW;
+    loop {
+        sleep_interruptible(
+            BACK_RETURN_POLL.min(deadline.saturating_duration_since(tokio::time::Instant::now())),
+            stop,
+        )
+        .await;
+        if stop.load(Ordering::Relaxed) {
+            return false;
+        }
+        if run.on_feed().await {
+            report(status, "feed đã lên sau Back".into());
+            return true;
+        }
+        if tokio::time::Instant::now() >= deadline {
+            report(
+                status,
+                format!(
+                    "chờ {}s sau Back mà chưa thấy tab feed",
+                    BACK_RETURN_WINDOW.as_secs()
+                ),
+            );
+            return false;
+        }
+    }
+}
+
+/// Get the feed back on screen: one Back from a proved non-feed screen first, the ladder
+/// in [`await_feed`] for everything else, including a Back that did not work.
+///
+/// Cheap when the feed is already there — one snapshot — which is the ordinary case after a
+/// carousel. The reason it exists is the other case: box 31–50 round 3, 09/10/2026
+/// (`ce0317139ca344520c` 21:39:13–21:39:28), where the ladder's own route back from the
+/// author's profile page was "TikTok đang khởi động — chờ feed lên", ten seconds of
+/// waiting for a splash that was not there, then Back. The screen was readable the whole
+/// time; nothing had asked it what it was.
+async fn recover_feed(
+    run: &HierarchyRun<'_>,
+    stop: &AtomicBool,
+    status: &mut NurtureSessionStatus,
+    report: &(dyn Fn(&mut NurtureSessionStatus, String) + Send + Sync),
+) -> bool {
+    match classify_screen(run).await {
+        FeedScreen::Feed => true,
+        FeedScreen::NonFeed(why) => {
+            back_to_feed(run, stop, status, report, why).await
+                || await_feed(run, stop, status, report).await
+        }
+        FeedScreen::OtherTab | FeedScreen::Unknown => await_feed(run, stop, status, report).await,
+    }
+}
+
 /// Run a hierarchy-driven session, updating `status` as it goes.
 ///
 /// `bundle_id` is TikTok's app id **on this device**, resolved by the caller rather than
@@ -2608,6 +2901,15 @@ pub(super) async fn run_feed(
     // pass may use it: it waits for a railless card's rail instead of spending the pass on
     // swiping it past, and counts the earlier swipe only when the rail returns on another card.
     let mut unproven_swipe_from: Option<PostFingerprint> = None;
+    // Consecutive passes that found no action rail. See [`NO_RAIL_STREAK_LIMIT`].
+    let mut no_rail_streak = 0u32;
+    // The last card whose images were paged sideways. A swallowed vertical swipe leaves it
+    // on screen, and paging it again starts blind from its last image — the feed hides the
+    // counter until a turn — so the first turn is the one that leaves the post for the
+    // author's profile. Box 31–50 round 4, 10/10/2026 (`ce031713aadf361905`
+    // 00:10:49–00:12:07) and round 3, 09/10/2026 (`ce0317139ca344520c` 21:39:02): the
+    // second pass over a 14- and an 11-image post did exactly that.
+    let mut last_paged_card: Option<PostFingerprint> = None;
     let mut outcome = Outcome::Done;
     // Latched so an operator who switches comments on mid-run is told once why nothing
     // happens, instead of watching a switch that reports nothing at all.
@@ -2677,7 +2979,7 @@ pub(super) async fn run_feed(
             break;
         }
         policy.begin_post();
-        let left_unproven = unproven_swipe_from.take();
+        let mut left_unproven = unproven_swipe_from.take();
 
         let (mood, mood_changed) = moods.next();
         if mood_changed {
@@ -2711,7 +3013,7 @@ pub(super) async fn run_feed(
                 status,
                 format!("rời khỏi feed ({off_feed_streak}/{OFF_FEED_LIMIT}) — tìm đường về"),
             );
-            if !await_feed(&run, stop, status, report).await {
+            if !recover_feed(&run, stop, status, report).await {
                 report(status, "không quay lại được feed — dừng".into());
                 outcome = Outcome::Partial;
                 break;
@@ -2735,7 +3037,10 @@ pub(super) async fn run_feed(
         // missing. Swiping it past charged a second attempt for one card and left it unwatched
         // (see [`LATE_RAIL_WINDOW`]). Wait for its rail first, within that finite window.
         if no_rail && !live_label {
-            if let Some(left) = left_unproven.as_ref() {
+            // Taken, not borrowed: judged here either way, and the railed path below must
+            // not judge it a second time against the same card. When no rail comes at all the
+            // pass ends in the railless branch, where it was never read.
+            if let Some(left) = left_unproven.take() {
                 report(
                     status,
                     "vuốt trước chưa chứng minh được, thẻ hiện tại chưa có thanh hành động — chờ thanh hiện lại trước khi vuốt tiếp".into(),
@@ -2747,7 +3052,7 @@ pub(super) async fn run_feed(
                         // Unproven is not advanced: the earlier swipe counts only now that a
                         // railed card reads differently from the one it left, by the full
                         // fingerprint and by the stable author/sound identity.
-                        if card != *left && !left.same_card_for_duplicate_guard(&card) {
+                        if card != left && !left.same_card_for_duplicate_guard(&card) {
                             stuck_swipes = 0;
                             status.videos_done += 1;
                             report(
@@ -2803,6 +3108,62 @@ pub(super) async fn run_feed(
             }
         }
         if live_label || no_rail {
+            no_rail_streak += 1;
+            // **A railless card must not consume the whole pass budget.** From the second
+            // railless pass in a row the screen is classified; a proved non-feed screen gets
+            // one Back and the feed is re-proved by a railed card. At
+            // [`NO_RAIL_STREAK_LIMIT`] with still no rail the session stops and says why,
+            // instead of the twenty blind swipes of round 4 (see the constant).
+            if no_rail_streak >= 2 {
+                if let FeedScreen::NonFeed(why) = classify_screen(&run).await {
+                    report(
+                        status,
+                        format!("{no_rail_streak} thẻ liên tiếp không có thanh hành động — màn hình là {why}"),
+                    );
+                    if back_to_feed(&run, stop, status, report, why).await {
+                        let mut reads = CardReads::default();
+                        match await_late_rail(&run, stop, &mut reads).await {
+                            Ok(ReadWaitResult::Ready(_)) => {
+                                report(
+                                    status,
+                                    format!(
+                                        "thẻ có thanh hành động đã hiện lại sau Back ({})",
+                                        reads.says()
+                                    ),
+                                );
+                                no_rail_streak = 0;
+                                continue;
+                            }
+                            Ok(ReadWaitResult::Cancelled) => {
+                                outcome = Outcome::Stopped;
+                                break;
+                            }
+                            Ok(ReadWaitResult::DeadlineExceeded) => {}
+                            Err(error) => {
+                                report(
+                                    status,
+                                    format!("không đọc được thanh hành động sau Back: {error}"),
+                                );
+                            }
+                        }
+                    }
+                }
+                if stop.load(Ordering::Relaxed) {
+                    outcome = Outcome::Stopped;
+                    break;
+                }
+            }
+            if no_rail_streak >= NO_RAIL_STREAK_LIMIT {
+                report(
+                    status,
+                    format!(
+                        "{no_rail_streak} thẻ liên tiếp không có thanh hành động và không chứng minh được feed — dừng thay vì vuốt hết lượt. \
+                         Máy có thể đang ở LIVE, tab Khám phá hoặc một màn hình con của TikTok; cần kiểm tra tay"
+                    ),
+                );
+                outcome = Outcome::Partial;
+                break;
+            }
             report(
                 status,
                 if live_label {
@@ -2815,7 +3176,7 @@ pub(super) async fn run_feed(
             let before = fingerprint(run.session, run.labels).await;
             sleep_interruptible(Duration::from_millis(human.think_pause_ms()), stop).await;
             let (advanced, _) = match run
-                .swipe_next(human.swipe_duration_ms(false), &before, stop)
+                .swipe_next(human.swipe_duration_ms(false), &before, false, stop)
                 .await
             {
                 Ok(judged) => judged,
@@ -2835,6 +3196,7 @@ pub(super) async fn run_feed(
             sleep_interruptible(Duration::from_millis(human.after_swipe_pause_ms()), stop).await;
             continue;
         }
+        no_rail_streak = 0;
 
         let watch = human.watch_seconds(settings.watch_min, settings.watch_max) * mood.watch_mult();
         report(status, format!("xem {watch:.1}s ({})", mood.label()));
@@ -2877,6 +3239,28 @@ pub(super) async fn run_feed(
         }
 
         let before = fingerprint(run.session, run.labels).await;
+        // **A swipe proven one pass late, by a railed card.** The late-rail wait above counts
+        // the previous swipe only when the next card arrived *without* a rail. When it
+        // arrived with one, the swipe that produced it was dropped unjudged: the card the
+        // session had just watched to the end of its dwell was never counted, and
+        // `stuck_swipes` kept the strike. The card watched here is the proof — a railed card
+        // that reads as another post than the one the swipe left.
+        if let Some(left) = left_unproven.take() {
+            if !before.is_empty() && before != left && !left.same_card_for_duplicate_guard(&before)
+            {
+                stuck_swipes = 0;
+                status.videos_done += 1;
+                report(
+                    status,
+                    "thẻ vừa xem khác thẻ trước — lượt vuốt trước đã đổi thẻ, tính một video"
+                        .into(),
+                );
+                // A cap, not a target.
+                if status.videos_done.saturating_sub(videos_at_start) >= total_videos {
+                    break;
+                }
+            }
+        }
         human.note_action();
         // Hoisted above the roll because the Comment arm needs it to decide whether to wait.
         // Safe to read here: `apply_live_settings` runs only at the top of the loop, so this
@@ -3098,20 +3482,42 @@ pub(super) async fn run_feed(
             // Found by an independent review on 28/08/2026.
             before = fingerprint(run.session, run.labels).await;
         }
+        // Whether this pass paged a photo post, which decides the gesture that leaves it.
+        let mut paged_this_pass = false;
         if ceiling > 0 {
-            let slides = run
-                .traverse_carousel(
+            // Only a deferred comment has a use for the slides. Handing the sink over on every
+            // photo post would fill it on posts nobody is going to comment on, and the next
+            // comment would then be grounded on the wrong card.
+            let evidence = deferred_comment.is_some().then_some(comments).flatten();
+            let already_paged = last_paged_card
+                .as_ref()
+                .is_some_and(|paged| paged.same_card_for_duplicate_guard(&before));
+            let slides = if already_paged || still_on_acted_card {
+                // The card never left (see `last_paged_card`). Its images were paged on an
+                // earlier pass, and paging again would start blind from its last image.
+                if already_paged {
+                    report(
+                        status,
+                        "vẫn ở bài ảnh vừa vuốt ngang — không vuốt ngang lại".into(),
+                    );
+                }
+                // Slide one is still one slide of evidence for a comment deferred on it.
+                if let Some(evidence) = evidence {
+                    evidence.note_slide();
+                }
+                1
+            } else {
+                run.traverse_carousel(
                     settings.carousel_portion_percent,
                     ceiling,
                     stop,
                     status,
                     report,
-                    // Only a deferred comment has a use for the slides. Handing the sink over
-                    // on every photo post would fill it on posts nobody is going to comment
-                    // on, and the next comment would then be grounded on the wrong card.
-                    deferred_comment.is_some().then_some(comments).flatten(),
+                    evidence,
                 )
-                .await;
+                .await
+            };
+            paged_this_pass = slides > 1;
             // **The deferred comment, before the stop check below.** A session told to stop
             // mid-traversal has already spent this post's comment budget, so the row has to
             // be written either way — that is the same hole `no_api_key` used to leave, and
@@ -3176,6 +3582,9 @@ pub(super) async fn run_feed(
                 // traversal it had just finished.
                 sleep_interruptible(SWIPE_SETTLE, stop).await;
                 before = fingerprint(run.session, run.labels).await;
+            }
+            if slides >= 1 && !before.is_empty() {
+                last_paged_card = Some(before.clone());
             }
         }
 
@@ -3276,8 +3685,11 @@ pub(super) async fn run_feed(
             last_acted_fingerprint = Some(before.clone());
         }
 
+        // After a carousel this is also where an overshoot is caught: the screen is
+        // classified, a proved profile page or photo viewer gets one Back, and the feed is
+        // re-proved before the swipe. See [`recover_feed`].
         if !run.on_feed().await {
-            if !await_feed(&run, stop, status, report).await {
+            if !recover_feed(&run, stop, status, report).await {
                 report(status, "không quay lại được feed — dừng".into());
                 outcome = Outcome::Partial;
                 break;
@@ -3303,6 +3715,7 @@ pub(super) async fn run_feed(
             .swipe_next(
                 human.swipe_duration_ms(roll_bool(settings.frenzy_prob)),
                 &before,
+                paged_this_pass,
                 stop,
             )
             .await
@@ -5063,6 +5476,7 @@ mod tests {
             run.swipe_next(
                 320,
                 &original_stuck_feed_fingerprint(),
+                false,
                 &AtomicBool::new(false)
             )
             .await
@@ -5103,7 +5517,7 @@ mod tests {
             };
             let started = tokio::time::Instant::now();
             let result = run
-                .swipe_next(320, &original_stuck_feed_fingerprint(), &stop)
+                .swipe_next(320, &original_stuck_feed_fingerprint(), false, &stop)
                 .await;
             if failed {
                 assert!(result
