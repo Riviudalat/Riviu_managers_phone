@@ -5,6 +5,11 @@ use base64::Engine;
 use sha2::{Digest, Sha256};
 use unicode_normalization::{char::is_combining_mark, UnicodeNormalization};
 
+/// #47 (Global 45.7.3/en, box3150g, 2026-10-10 01:00:19-57): the Hot contact tap at +8.7 s first
+/// showed as selected in the frame completed at +21.6 s; the frame 4 s after the tap still showed
+/// the old tab. A second Hot tap waits out this window on fresh frames first.
+const HOT_TAP_SETTLE: Duration = Duration::from_secs(15);
+
 // Scoped only to the existing pool observation. No extra reads or effect permission;
 // production tracing retains the binding even without opt-in stage diagnostics.
 struct VisualSoundDiagnostics {
@@ -626,17 +631,24 @@ pub(super) struct VisualSoundPoolUnavailable;
 
 /// Reserve time for a hierarchy read when OCR sees the sheet but cannot bind
 /// its rows. Later selection/readback still uses the full shared sound budget.
+/// Past the blind-root cap that read cannot answer, so until Hot is proven the frames get the
+/// enclosing sound budget, which stays finite. #44 (box3150j, 2026-10-10 08:32:08): the 60 s cap timed out
+/// with 23.7 s of that budget left while a Hot tap was still settling (see HOT_TAP_SETTLE).
 pub(super) async fn observe_initial(
     session: &dyn UiSession,
     plan: SoundPickerPlan,
     maximum: usize,
 ) -> anyhow::Result<ObservedSoundPool> {
     let saw_hot = AtomicBool::new(false);
-    let deadline =
-        phase_deadline(Duration::from_secs(60)).min(Instant::now() + Duration::from_secs(60));
+    let window = if visual_handoff_due(session, plan) {
+        SOUND_WINDOW
+    } else {
+        Duration::from_secs(60)
+    };
+    let deadline = phase_deadline(window).min(Instant::now() + window);
     let result = with_stage_budget(
-        Duration::from_secs(60),
-        observe_inner(session, plan, maximum, true, &saw_hot),
+        window,
+        observe_inner(session, plan, maximum, true, &saw_hot, window),
     )
     .await;
     check_wait()?;
@@ -663,7 +675,15 @@ pub(super) async fn observe(
     maximum: usize,
     navigate: bool,
 ) -> anyhow::Result<ObservedSoundPool> {
-    observe_inner(session, plan, maximum, navigate, &AtomicBool::new(false)).await
+    observe_inner(
+        session,
+        plan,
+        maximum,
+        navigate,
+        &AtomicBool::new(false),
+        Duration::from_secs(60),
+    )
+    .await
 }
 
 async fn observe_inner(
@@ -672,9 +692,13 @@ async fn observe_inner(
     maximum: usize,
     navigate: bool,
     saw_hot: &AtomicBool,
+    window: Duration,
 ) -> anyhow::Result<ObservedSoundPool> {
     let started = Instant::now();
-    let deadline = phase_deadline(Duration::from_secs(60));
+    let deadline = phase_deadline(window);
+    // Once Hot is proven, rows that do not bind within 60 s of the stage start will not bind by
+    // sight; the rest of a longer window stays for the caller's hierarchy read.
+    let rows_deadline = phase_deadline(Duration::from_secs(60));
     let diagnostics = VisualSoundDiagnostics {
         scope: session.gui_scope(), epoch: session.gui_session_epoch(), started, deadline,
         generation: 0, request_id: None, observation_id: None,
@@ -684,10 +708,21 @@ async fn observe_inner(
         rejection: None, rejection_events: 0,
     };
     VISUAL_SOUND_DIAGNOSTICS.scope(std::cell::RefCell::new(diagnostics), async {
-        let result = observe_loop(session, plan, maximum, navigate, saw_hot, deadline).await;
+        let result = observe_loop(
+            session,
+            plan,
+            maximum,
+            navigate,
+            saw_hot,
+            deadline,
+            rows_deadline,
+        )
+        .await;
         if result.is_err() {
+            let expired = Instant::now() >= deadline
+                || (saw_hot.load(Ordering::Relaxed) && Instant::now() >= rows_deadline);
             visual_diagnostic(|state| state.emit(
-                if Instant::now() >= deadline { "timeout" } else { "observationError" }, None));
+                if expired { "timeout" } else { "observationError" }, None));
         }
         result
     }).await
@@ -700,15 +735,19 @@ async fn observe_loop(
     navigate: bool,
     saw_hot: &AtomicBool,
     deadline: Instant,
+    rows_deadline: Instant,
 ) -> anyhow::Result<ObservedSoundPool> {
     let mut prior: Option<(String, ObservedSoundPool)> = None;
     let mut navigation_attempts = 0;
+    let mut last_hot_tap: Option<Instant> = None;
     let mut unselected_tabs: Option<(String, usize, Vec<OcrRect>)> = None;
     let mut generation = 0;
     let mut last_rejection = None;
     loop {
         check_wait()?;
-        if Instant::now() >= deadline {
+        if Instant::now() >= deadline
+            || (saw_hot.load(Ordering::Relaxed) && Instant::now() >= rows_deadline)
+        {
             return visual_pool_timeout(saw_hot);
         }
         generation += 1;
@@ -748,8 +787,8 @@ async fn observe_loop(
             .filter(|index| *index != 0)
             .map(|index| (epoch.clone(), index, tabs.clone()));
         // A navigation ACK is not arrival: machine25 stayed on For You after
-        // its first Hot tap. One retry requires two fresh unchanged tab reads;
-        // never retry after Hot has appeared or enlarge the shared deadline.
+        // its first Hot tap. One retry requires two fresh unchanged tab reads and
+        // HOT_TAP_SETTLE since the last tap; never retry after Hot has appeared.
         // Both attempts are contact taps at the OCR-located Hot centre: the 16 ms
         // native tap was acknowledged and did nothing on machine29 and #47
         // (see `tap_contact_image`); the retry still needs fresh Hot proof.
@@ -757,11 +796,22 @@ async fn observe_loop(
             && !saw_hot.load(Ordering::Relaxed)
             && !hot_selected(&img, &tabs)
             && navigation_attempts < 2
-            && (navigation_attempts == 0 || same_unselected_tabs)
+            && (navigation_attempts == 0
+                || (same_unselected_tabs
+                    && last_hot_tap.is_some_and(|at: Instant| at.elapsed() >= HOT_TAP_SETTLE)))
         {
             visual_diagnostic(|state| state.emit("navigationProofStart", None));
-            let point = selection_recovery::prove_sheet(session, plan).await?;
+            // #44 (box3150j, 2026-10-10 08:31:14-25): a second two-frame OCR proof here cost
+            // ~11 s (two ~5.5 s screenshot+OCR passes) between this frame and the tap. This
+            // frame is already fresh, on this epoch and app, with four unique tab labels in
+            // the measured geometry (`selection_recovery::tabs`), so its Hot box is the target.
+            let hot = tabs[0];
+            let point = crate::TapPoint {
+                x: f64::from(hot.x) + f64::from(hot.width) / 2.0,
+                y: f64::from(hot.y) + f64::from(hot.height) / 2.0,
+            };
             anyhow::ensure!(Instant::now() < deadline, "Hot navigation deadline expired");
+            last_hot_tap = Some(Instant::now());
             let tapped = tap_contact_image(session, plan, &epoch, point, SheetContact::Hot).await;
             note_tab_tap();
             tapped?;
@@ -941,7 +991,6 @@ pub(super) async fn choose_provisional(
             );
             wait_selected_row(session, plan, pool, index).await?;
             *row_proved = true;
-            selection_recovery::prove_sheet(session, plan).await?;
             check_wait()?;
             session.back().await?;
         }
@@ -1006,9 +1055,8 @@ async fn select_row_and_close(
     }
     wait_selected_row(session, plan, &fresh, index).await?;
     *row_proved = true;
-    // One reversible selection only. Fresh sheet proof authorizes Back; exact
-    // title on two XML editor snapshots is the final independent verification.
-    selection_recovery::prove_sheet(session, plan).await?;
+    // One reversible selection only. The fresh sheet frame that ended `wait_selected_row`
+    // authorizes Back; exact title on two XML editor snapshots is the final verification.
     check_wait()?;
     session.back().await?;
     Ok(())
@@ -1038,7 +1086,6 @@ pub(super) async fn recover(
     }
     if selected_row_ready(&image, &tabs, pool, index) {
         wait_selected_row(session, plan, pool, index).await?;
-        selection_recovery::prove_sheet(session, plan).await?;
         check_wait()?;
         session.back().await?;
         return selection_recovery::confirm_editor_or_chip(session, plan, candidate).await;
@@ -1048,6 +1095,9 @@ pub(super) async fn recover(
     choose(session, plan, pool, index).await
 }
 
+/// Returns on the second fresh frame in a row that shows the measured sheet (four tabs, Hot
+/// underlined) with only `index` red. That last frame is the sheet proof for the Back that
+/// follows: #44 (box3150j, 2026-10-10) spent ~11 s on a further two-frame OCR proof here.
 async fn wait_selected_row(
     session: &dyn UiSession,
     plan: SoundPickerPlan,
@@ -1071,6 +1121,10 @@ async fn wait_selected_row(
         if selected_row_ready(&image, &tabs, pool, index) {
             stable += 1;
             if stable == 2 {
+                anyhow::ensure!(
+                    session.gui_session_epoch() == epoch,
+                    "sound selection session changed"
+                );
                 return Ok(());
             }
         } else {

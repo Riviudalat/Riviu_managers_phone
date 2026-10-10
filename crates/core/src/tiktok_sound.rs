@@ -331,6 +331,75 @@ fn visual_handoff_due(session: &dyn UiSession, plan: SoundPickerPlan) -> bool {
         && session.gui_reasoner().is_some()
 }
 
+/// How long a blind sheet on one UiAutomator2 server is remembered across attempts. Finite: a
+/// later attempt on the same server past this window asks the root again first.
+const BLIND_SHEET_MEMORY: Duration = Duration::from_secs(600);
+/// (device serial, UiAutomator2 server identity, when the sheet was found blind).
+static BLIND_SHEETS: parking_lot::Mutex<Vec<(String, String, Instant)>> =
+    parking_lot::const_mutex(Vec::new());
+
+/// The device and the read server behind its session epoch (`<gui epoch>:<agent session>`).
+/// A clean app restart keeps the server; an instrumentation restart replaces it.
+fn read_server_key(session: &dyn UiSession) -> Option<(String, String)> {
+    let serial = session.gui_scope()?.device_id;
+    let epoch = session.gui_session_epoch();
+    let (_, server) = epoch.rsplit_once(':')?;
+    (!serial.is_empty() && !server.is_empty()).then(|| (serial, server.to_owned()))
+}
+
+/// The stage handed the sheet to the visual route. Phone 44 (box3150j, 2026-10-10 08:25:53):
+/// the any-choice hand-off ended attempt 1, and attempt 2 on the same UiAutomator2 server spent
+/// ~2 x 10.5 s of blind `/source` again before the same hand-off.
+fn remember_blind_sheet(session: &dyn UiSession) {
+    let Some((serial, server)) = read_server_key(session) else {
+        return;
+    };
+    let mut sheets = BLIND_SHEETS.lock();
+    sheets.retain(|(known, _, at)| known != &serial && at.elapsed() < BLIND_SHEET_MEMORY);
+    sheets.push((serial, server, Instant::now()));
+}
+
+/// A recent stage on this device and read server already found the sheet blind: this stage
+/// starts with the run of unreadable roots at ROOT_UNREADABLE_CAP, so it asks the sheet root
+/// nothing and observes by sight. Every tap still needs fresh frames, and the editor XML proof
+/// before Post is unchanged.
+fn adopt_remembered_blind_sheet(session: &dyn UiSession, plan: SoundPickerPlan) {
+    if !selection_recovery::measured(plan)
+        || session.gui_reasoner().is_none()
+        || blind_handoff_reached(consecutive_unreadable_roots())
+    {
+        return;
+    }
+    let Some((serial, server)) = read_server_key(session) else {
+        return;
+    };
+    let remembered = BLIND_SHEETS.lock().iter().any(|(known, known_server, at)| {
+        known == &serial && known_server == &server && at.elapsed() < BLIND_SHEET_MEMORY
+    });
+    if !remembered {
+        return;
+    }
+    let seeded = SOUND_BUDGET
+        .try_with(|budget| {
+            budget
+                .route
+                .consecutive_unreadable
+                .fetch_max(ROOT_UNREADABLE_CAP, Ordering::Relaxed);
+        })
+        .is_ok();
+    if seeded {
+        tracing::info!(serial=%serial, session=%session.gui_session_epoch(),
+            "sound sheet was blind on this read server in a recent attempt; starting in the visual route");
+        crate::publish_recovery::note_read(
+            "sound",
+            "rootUnreadable",
+            unreadable_roots(),
+            "visualHandoff",
+            Some("Lượt trước trên cùng máy và cùng UiAutomator không đọc được cây giao diện bảng nhạc; lượt này đọc bảng nhạc bằng ảnh màn hình ngay, không đọc lại cây giao diện"),
+        );
+    }
+}
+
 /// Recorded once per stage: the visual route reads frames without the XML popup check.
 fn note_popup_check_skipped(step: &str) {
     let first = SOUND_BUDGET
@@ -1516,6 +1585,7 @@ async fn observe_visual_after_blind_windows(
         unreadableRoots=unreadable_roots(), consecutive=consecutive_unreadable_roots(),
         "sound sheet blind through every window; handing off to the visual route without an instrumentation restart");
     note_visual_handoff("đọc bảng nhạc qua mọi cửa sổ", &blind);
+    remember_blind_sheet(session);
     let mut diagnostics = SoundRouteDiagnostics {
         scope: session.gui_scope(),
         epoch: epoch.clone(),
@@ -1782,7 +1852,24 @@ async fn observe_measured_sound_pool_once(
         deadline: SOUND_BUDGET.try_with(|budget| budget.deadline).ok(), events: 0,
     };
     let started = Instant::now();
-    let root_unreadable =
+    adopt_remembered_blind_sheet(session, plan);
+    // #44 (box3150j, 2026-10-10 08:29:32-08:31:08 and 08:32:30): each phase that started past
+    // the cap still asked the sheet root once or twice more (~10.5 s each), or switched to
+    // every-window reads first. Past the cap this phase goes straight to the frames.
+    let root_unreadable = if visual_handoff_due(session, plan) {
+        let error = anyhow::Error::new(SoundRootUnreadable {
+            reads: consecutive_unreadable_roots(),
+        });
+        diagnostics.emit(
+            "currentXml",
+            "skip",
+            started,
+            "rootUnreadable",
+            Some(&error),
+        );
+        note_visual_handoff("mở bảng nhạc", &error);
+        true
+    } else {
         match observe_current_recommended_routed(session, plan, maximum, allow_recommended, true)
             .await
         {
@@ -1824,13 +1911,15 @@ async fn observe_measured_sound_pool_once(
                 true
             }
             Err(error) => return Err(error),
-        };
+        }
+    };
     // The measured 45.7.3 sheet can expose a complete Hot hierarchy even
     // when local OCR is unavailable. Require two fresh, stable XML pools from
     // this same app/session before returning; an incomplete root falls back
     // to the existing visual route and never authorizes a row tap.
     // After two unreadable roots in a row, a third wait here would only delay OCR.
     if root_unreadable {
+        remember_blind_sheet(session);
         checked_measured_sound_observation(session, plan, &epoch, Ok(())).await?;
     } else {
         let started = Instant::now();
@@ -2059,6 +2148,8 @@ async fn hand_off_frozen_pool(
     pool: &ObservedSoundPool,
     index: usize,
 ) -> anyhow::Result<()> {
+    // Every caller met the blind-root cap. A fresh attempt on this read server starts by sight.
+    remember_blind_sheet(session);
     if plan.section_label == "Hot" {
         return visual::hand_off(session, plan, pool, index).await;
     }
