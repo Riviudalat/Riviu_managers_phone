@@ -88,6 +88,30 @@ backend cung cấp; gửi lệnh không đồng nghĩa đã thích hay đã đă
 hoặc đổi chủ giữ máy, nhãn cũ được bỏ ở lần đọc tiếp theo. Chưa có hoạt động phù hợp
 thì hiện chủ giữ máy: Tác vụ tự động, Điều khiển trực tiếp hoặc Đồng bộ nhóm.
 
+### Sức khỏe máy (máy quá tải)
+
+Riviu đo tải từng máy Android (CPU của surfaceflinger, RAM trống, swap) khi một việc
+Nuôi, Tương tác, Đăng bài hoặc Flow nhận máy, và khoảng mỗi phút trên máy đang chạy việc.
+Phép đo chỉ đọc, không chạm TikTok. Máy quá tải hiện **Cần xem** trên ô máy, kèm lý do
+bắt đầu bằng "máy quá tải". Mỗi bước dưới đây được ghi vào Nhật ký hoạt động.
+
+- Khi nhận việc, máy quá tải được **dọn nhẹ** trước: tắt app chạy nền, dừng các app nền
+  đã duyệt (Facebook services) và dọn bộ nhớ đệm. Không đụng TikTok, Riviu Helper hay dữ
+  liệu tài khoản, không khởi động lại. Đo lại đạt thì việc chạy tiếp.
+- Đo lại vẫn quá tải thì máy không nhận bài đăng: bài báo **trước khi gửi** với mã
+  `device_overloaded`, không chờ năm phút ở bảng nhạc rồi mới lỗi. Bấm đăng lại sau khi
+  máy đã hồi phục là an toàn.
+- Khi máy rảnh, Riviu tự **khởi động lại** máy quá tải, nhưng chỉ khi sổ ghi không còn
+  Đăng/Gửi/Thích/Bình luận/Theo dõi nào chưa rõ hoặc đang chạy trên máy đó, và tối đa
+  một lần mỗi 6 giờ. Sau khi khởi động lại, Riviu áp lại **Cài đặt máy** và helper được
+  chuẩn bị lại khi máy kết nối lại. Máy chỉ nhận việc mới khi một lần đo mới đạt.
+- Không được tự khởi động lại thì ô máy báo **quá tải — chờ người vận hành** và nêu lý
+  do (việc chưa rõ, máy đang bận, hoặc đã khởi động lại trong 6 giờ qua).
+
+Trong menu chuột phải của ô máy, **ADB → Kiểm tra sức khỏe** đo ngay và báo số liệu;
+**ADB → Dọn máy** chạy bước dọn nhẹ rồi đo lại. Dọn máy cần máy rảnh: máy đang chạy việc
+bị từ chối, không bị chiếm quyền. Khởi động lại bằng tay vẫn là lệnh riêng có hỏi xác nhận.
+
 ### Riviu Helper trên Android
 
 **Đã kết nối** chỉ xác nhận máy có kết nối, không có kiểm tra điều khiển đang chạy.

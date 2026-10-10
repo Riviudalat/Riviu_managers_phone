@@ -31,6 +31,28 @@ Khi chỉ một máy có root không đọc được hoặc tap bị nuốt, so 
   đọc được và tap chỉ hiện sau ≥110 s. surfaceflinger ~92% CPU trong khi máy cùng đời
   ~3%, swap dùng 1,1 GB, Choreographer báo bỏ khung. `adb reboot` hết lỗi.
 - Chỉ reboot khi máy đó không còn Post/Send nào ở trạng thái chưa rõ.
+- Riviu tự đo việc này (`crates/core/src/device_control/load.rs`, mẫu đo ở
+  `crates/android-driver/src/load.rs`): một lượt shell ≤2 s gồm `top -b -n 1 -m 10`,
+  `/proc/meminfo`, `/proc/uptime`, nhiệt độ pin; không dùng `uiautomator dump`. Không đọc
+  được là chưa rõ, không bao giờ là quá tải.
+- Ngưỡng quá tải (đo trên máy 44 và máy cùng đời 47/39, 10/10/2026): surfaceflinger
+  ≥ 60% CPU trong 2 lần đo liên tiếp; hoặc MemAvailable < 600 MB; hoặc swap dùng > 1,0 GB
+  cùng MemAvailable < 900 MB.
+- Lúc đo: cổng nhận việc ở `DeviceControlPlane::ensure_load_admissible` (khi mở phiên app
+  cho owner Script/Interaction/Nurture, và trước khi chuyển media của Đăng bài), và mỗi
+  ~60 s trên máy đang giữ việc qua vòng quét roster (`device_load.rs`). Lượt đo chờ slot
+  adb như mọi lệnh khác.
+- Tầng 1, dọn nhẹ: `am kill-all`, `am force-stop` cho danh sách đã duyệt
+  (`com.facebook.services`, `com.facebook.appmanager`), `pm trim-caches 2G`. Không bao giờ
+  `pm clear`, TikTok/Trill, Riviu Helper, UiAutomator2 hay gói hệ thống. Chỉ chạy khi máy
+  không có bước effect đang chạy: dưới lease của job lúc nhận việc, hoặc lease Repair khi
+  máy rảnh và sổ ghi không còn việc chưa rõ/đang chạy (tối đa một lần mỗi 30 phút).
+- Tầng 2, `adb reboot`: chỉ khi máy rảnh, `app_completion_block_reason` không còn việc
+  chưa rõ hoặc đang chạy, và chưa reboot trong 6 giờ. Chờ `sys.boot_completed` (≤120 s,
+  boot id đổi), áp lại baseline, giữ lease Repair suốt lúc chờ; helper được chuẩn bị lại
+  khi máy kết nối lại. Không được reboot thì đánh dấu "quá tải — chờ người vận hành".
+- Đăng bài bị từ chối ở cổng này settle `failedBeforeDispatch` với `device_overloaded`
+  (retryable). Nuôi/Tương tác chạy tiếp nếu tầng 1 đạt.
 - Baseline giữ auto-rotate tắt (`accelerometer_rotation=0`). `monkey -p … 1` bật lại
   auto-rotate (đo trên SM-G955F, Android 9, 10/10/2026), nên Riviu mở app bằng
   `am start` trên component launcher đã resolve, không dùng `monkey`.
