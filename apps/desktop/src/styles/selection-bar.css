@@ -1,0 +1,66 @@
+/* Sticky selection bar under the wall; shares the toolbar's button styles. */
+.selection-bar.profile-toolbar {
+  position: sticky;
+  bottom: 8px;
+  z-index: var(--z-toolbar);
+  margin-top: auto;
+  gap: 6px var(--space-2);
+  border-color: var(--line-strong);
+  box-shadow: var(--shadow-lg);
+}
+/* The bar is its own stacking context; an open panel lifts it above toasts so they never cover it. */
+.selection-bar.profile-toolbar:has(.toolbar-sync-panel, .selection-bar-group-list) { z-index: calc(var(--z-flyout) + 1); }
+.selection-bar-count { display: grid; gap: 1px; margin-right: var(--space-1); }
+.selection-bar-count > strong { color: var(--text-1); font-size: var(--text-base); white-space: nowrap; }
+.selection-bar-hidden { color: var(--warn-strong); font-size: var(--text-xs); font-weight: var(--weight-semibold); }
+.selection-bar-groups { position: relative; }
+.selection-bar-group-list,
+.selection-bar .toolbar-sync-panel {
+  position: absolute;
+  top: auto;
+  bottom: calc(100% + 6px);
+  z-index: var(--z-menu);
+}
+.selection-bar .toolbar-sync-panel { max-height: min(640px, calc(100dvh - 140px)); }
+.selection-bar-group-list {
+  left: 0;
+  display: grid;
+  width: max-content;
+  min-width: 200px;
+  max-width: min(320px, calc(100vw - 24px));
+  max-height: min(360px, calc(100dvh - 140px));
+  overflow: auto;
+  padding: 4px;
+  border: 1px solid var(--line-strong);
+  border-radius: var(--radius-sm);
+  background: var(--bg-elevated);
+  box-shadow: var(--shadow);
+}
+.selection-bar-group-list > button {
+  display: flex;
+  align-items: center;
+  justify-content: flex-start;
+  gap: 8px;
+  min-height: 36px;
+  padding: 6px 9px;
+  border: 0;
+  background: none;
+  color: var(--text-1);
+  font: inherit;
+  text-align: left;
+}
+.selection-bar-group-list > button:hover { background: var(--bg-muted); }
+.selection-bar-group-list > p { margin: 0; padding: 8px 9px; color: var(--text-3); font-size: var(--text-sm); }
+.selection-bar-group-list > .selection-bar-manage { border-top: 1px solid var(--line); color: var(--text-2); }
+/* Keyboard focus scrolls a tile clear of the bar instead of leaving it underneath. */
+.content:has(> .device-browser .selection-bar) { scroll-padding-bottom: calc(var(--selection-bar-clearance, 0px) + 12px); }
+/* Narrow walls: count and Bỏ chọn share the first row, commands drop their icons on the second. */
+@media (max-width: 1279px) {
+  .selection-bar.profile-toolbar { gap: 2px; padding: 6px 8px; }
+  .selection-bar-count { flex: 1 0 calc(100% - 140px); order: -2; }
+  .selection-bar > .tb-btn:last-child { order: -1; }
+  .selection-bar > .grow { display: none; }
+  .selection-bar.profile-toolbar .tb-btn { padding: 4px 6px; font-size: var(--text-sm); }
+  .selection-bar > .tb-btn:not(:last-child) > svg,
+  .selection-bar-groups > .tb-btn > svg { display: none; }
+}

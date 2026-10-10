@@ -14,7 +14,7 @@
 .activity-center-current {
   position: fixed;
   right: 12px;
-  bottom: 12px;
+  bottom: calc(12px + var(--selection-bar-clearance, 0px));
   z-index: var(--z-flyout);
   width: min(420px, calc(100vw - 24px));
   padding: 12px;

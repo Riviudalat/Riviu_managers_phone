@@ -39,7 +39,16 @@ trượt và Ctrl + lăn chuột, thêm ba cỡ: **Tổng quan** (ô tối thi�
 **Ngoại lệ có tên — dải Tổng quan:** chỉ ở cỡ Tổng quan, dải cao khoảng 64 px và chữ
 11,5 px (`--text-tile-compact`), dưới mức tối thiểu 12 px, để 20 ô trọn vẹn vừa màn
 1366×768 khi sidebar mở. Vừa và Lớn dùng dải 88 px với chữ ≥ 12 px; nút trong dải vẫn ≥ 12 px.
-Monitor tiến trình vẫn không modal và hoạt động xuyên trang, mặc định nằm góc phải phía trên; có thể kéo đổi vị trí.
+Monitor tiến trình vẫn không modal và hoạt động xuyên trang. **Thay đổi hợp đồng (10/2026):**
+từ 1500 px, monitor mở rộng ghim thành cột bên phải, làm hẹp lưới chứ không phủ lên;
+khi thu gọn hoặc màn hẹp hơn, nó là một nút gọn trong header. Trạng thái thu gọn của cột được
+nhớ trên máy. Cột ghim và nút header không kéo được nữa; chỉ cửa sổ nổi (mở từ nút header dưới
+1500 px) còn kéo đổi vị trí. Đổi chỗ ghim/thu gọn không dựng lại canvas điện thoại. Toast không
+che lệnh: nằm trên thanh chọn máy và bên trái cột monitor.
+Khi có máy được chọn, mọi lệnh trên các máy đó nằm ở một **thanh chọn máy** dính dưới lưới:
+Mở màn hình, Đồng bộ thao tác, Chạy Flow…, Công cụ nhóm…, Thêm vào nhóm, Bỏ chọn. Toolbar chỉ
+giữ lệnh toàn fleet (Mở toàn bộ và Công cụ khi chưa chọn máy, Nhóm, Bảo trì, quét lại). Khi bộ
+lọc đang ẩn máy đã chọn, thanh ghi rõ "N máy đã chọn đang bị bộ lọc ẩn", vì lệnh vẫn đến các máy đó.
 Tab Thiết lập/Hẹn giờ/Theo dõi dùng chung nền trắng và mục chọn cam nhạt. Bảng có cuộn riêng;
 thanh hành động và nút chạy nằm trong viewport ở kích thước laptop. Chuyển màu nhẹ
 120–180 ms, không hiệu ứng lặp trang trí; hỗ trợ giảm chuyển động.

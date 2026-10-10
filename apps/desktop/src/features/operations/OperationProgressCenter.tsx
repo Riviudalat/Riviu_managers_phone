@@ -1,4 +1,4 @@
-import { Activity, useCallback, useEffect, useId, useRef, useState } from "react";
+import { Activity, useCallback, useEffect, useId, useLayoutEffect, useRef, useState } from "react";
 import { createPortal } from "react-dom";
 import { Clock3, Maximize2, Minimize2, Minus, MoreHorizontal, Trash2, TriangleAlert, Undo2, Square } from "lucide-react";
 import { operationGetRun, publishStartStatus, publishCancelUnacceptedStart, nurtureSessionStatus, operationQueryRuns, operationStop, operationStopStatus, type OperationStopResult } from "../../api";
@@ -9,12 +9,34 @@ import { useMonitorRead } from "./useMonitorRead";
 import { describeError } from "../../describeError";
 import { dismissMonitorRecords, monitorRecordKey, readDismissedRecords, visibleMonitorRuns, writeDismissedRecords, type DismissedRecord } from "./monitorRecords";
 import { useFloatingMonitor } from "./useFloatingMonitor";
+import { useMediaQuery } from "../../useMediaQuery";
 import { MonitorReadError, OperationRunDevices } from "./OperationRunDevices";
 import { acknowledgePublishStart, publishStageLabel, PUBLISH_START_PENDING, PUBLISH_START_ACKNOWLEDGED, PUBLISH_START_RETIRED, readPendingPublishStart, retirePublishStart, type PendingPublishStart } from "./publishStartBridge";
 import "../../styles/operation-progress.css";
 
-/** Monitor plus an explicit stop. Dismissing a record still leaves its source audit intact. */
-export function OperationProgressCenter({ deviceLabels }: { deviceLabels: ReadonlyMap<string, string> }) {
+/** Wide enough to give the monitor its own column and still keep a useful wall. */
+export const MONITOR_DOCK_QUERY = "(min-width: 1500px)";
+const COLLAPSED_KEY = "riviu.runMonitor.collapsed";
+function readCollapsed(): boolean {
+  try { return localStorage.getItem(COLLAPSED_KEY) === "1"; } catch { return false; }
+}
+function writeCollapsed(collapsed: boolean): void {
+  try { localStorage.setItem(COLLAPSED_KEY, collapsed ? "1" : "0"); } catch { /* optional preference */ }
+}
+
+/**
+ * Monitor plus an explicit stop. Dismissing a record still leaves its source audit intact.
+ *
+ * One component, three placements: a column docked beside the wall from 1500 px (the wall
+ * narrows, nothing is covered), a pill in the page header when folded or narrower, and the
+ * floating non-modal window when opened below the dock width. Without hosts (unit tests,
+ * startup) it keeps the floating placement on `document.body`.
+ */
+export function OperationProgressCenter({ deviceLabels, dockHost = null, pillHost = null }: {
+  deviceLabels: ReadonlyMap<string, string>;
+  dockHost?: HTMLElement | null;
+  pillHost?: HTMLElement | null;
+}) {
   const [initialStart] = useState(() => {
     try { return { pending: readPendingPublishStart(), error: null as string | null }; }
     catch (error) { return { pending: null, error: describeError(error) }; }
@@ -58,7 +80,31 @@ export function OperationProgressCenter({ deviceLabels }: { deviceLabels: Readon
   const toggleRef = useRef<HTMLButtonElement>(null);
   const menuRef = useRef<HTMLDetailsElement>(null);
   const bodyId = useId();
-  const floating = useFloatingMonitor(expanded, expanded && maximized);
+  const wide = useMediaQuery(MONITOR_DOCK_QUERY) && dockHost !== null;
+  const lastWide = useRef(false);
+  useEffect(() => {
+    if (wide === lastWide.current) return;
+    lastWide.current = wide;
+    // Entering dock width restores the remembered fold. Leaving it folds into the pill: a
+    // floating window appearing on its own would cover the narrower wall.
+    setExpanded(current => wide ? current || !readCollapsed() : false);
+  }, [wide]);
+  const placement = wide && expanded ? "docked" : expanded || !pillHost ? "floating" : "pill";
+  const dialog = expanded && placement === "floating";
+  const floating = useFloatingMonitor(dialog, dialog && maximized);
+  // Opening or folding moves the monitor to another host, so focus follows its toggle.
+  const focusToggle = useRef(false);
+  useLayoutEffect(() => {
+    if (!focusToggle.current) return;
+    focusToggle.current = false;
+    toggleRef.current?.focus();
+  });
+  const open = (next: boolean) => {
+    setExpanded(next);
+    // Only the dock remembers its fold; the floating window is always opened on purpose.
+    if (wide) writeCollapsed(!next);
+    if (pillHost) focusToggle.current = true;
+  };
   const read = useCallback(async () => {
     const page = await operationQueryRuns({ limit: 200, offset: 0, since: new Date(Date.now() - 24 * 60 * 60_000).toISOString() });
     const sessions = page.runs.some((run) => run.kind === "nurture" && activeRun(run)) ? await nurtureSessionStatus() : [];
@@ -212,19 +258,21 @@ export function OperationProgressCenter({ deviceLabels }: { deviceLabels: Readon
   const fraction = !pendingStart && progress.length && progress.every((value) => value !== null)
     ? progress.reduce((sum, value) => sum + value!, 0) / progress.length : null;
   if (!pendingStart && !startReadError && !runs.length && !state.error && !dismissal.error && (!expanded || !undoKeys.length)) return null;
-  const minimize = () => { setExpanded(false); toggleRef.current?.focus(); };
-  return createPortal(<section ref={floating.ref} style={floating.style}
-    className={`run-monitor is-floating${expanded ? " is-expanded" : " is-minimized"}${expanded && maximized ? " is-maximized" : " is-compact"}`}
-    role={expanded ? "dialog" : "region"} aria-modal={expanded ? false : undefined} aria-label="Cửa sổ tiến trình"
+  const minimize = () => { open(false); focusToggle.current = true; };
+  const host = placement === "docked" && dockHost ? dockHost : placement === "pill" && pillHost ? pillHost : document.body;
+  return createPortal(<section ref={floating.ref} style={placement === "floating" ? floating.style : undefined}
+    className={`run-monitor is-${placement}${expanded ? " is-expanded" : " is-minimized"}${expanded && maximized ? " is-maximized" : " is-compact"}`}
+    role={dialog ? "dialog" : "region"} aria-modal={dialog ? false : undefined} aria-label="Cửa sổ tiến trình"
     onKeyDown={(event) => {
       if (event.key !== "Escape" || !expanded) return;
-      event.stopPropagation();
-      if (menuRef.current?.open) { menuRef.current.open = false; menuRef.current.querySelector("summary")?.focus(); }
-      else minimize();
+      if (menuRef.current?.open) { event.stopPropagation(); menuRef.current.open = false; menuRef.current.querySelector("summary")?.focus(); }
+      // The dock is part of the layout, not a window: Escape only leaves its maximized view.
+      else if (dialog) { event.stopPropagation(); minimize(); }
+      else if (maximized) { event.stopPropagation(); setMaximized(false); }
     }}>
-    <header className="run-monitor-titlebar" {...floating.handle}>
+    <header className="run-monitor-titlebar" {...(placement === "floating" ? floating.handle : {})}>
       <button ref={toggleRef} type="button" className="run-monitor-toggle" aria-label="Tiến trình công việc"
-        aria-expanded={expanded} aria-controls={bodyId} onClick={() => setExpanded((value) => !value)}>
+        aria-expanded={expanded} aria-controls={bodyId} onClick={() => expanded ? minimize() : open(true)}>
         <Clock3 size={16} aria-hidden="true" /><strong>{expanded ? "Theo dõi tác vụ" : state.error ? "Chưa đọc được tiến trình" : pendingStart ? "Lượt đăng đang chuẩn bị" : active.length ? `${active.length} tác vụ đang xử lý / chờ` : runs.length ? `${runs.length} tác vụ đã kết thúc` : "Không còn bản ghi"}</strong>
       </button>
       {expanded && <span className="run-monitor-total">{runs.length} bản ghi</span>}
@@ -234,7 +282,7 @@ export function OperationProgressCenter({ deviceLabels }: { deviceLabels: Readon
         aria-label={maximized ? "Khôi phục kích thước" : "Phóng rộng tiến trình"} title={maximized ? "Khôi phục kích thước" : "Phóng rộng tiến trình"}
         onClick={() => setMaximized((value) => !value)}>{maximized ? <Minimize2 size={16} /> : <Maximize2 size={16} />}</button>}
       <button type="button" className="icon-btn" data-monitor-no-drag aria-label={expanded ? "Thu nhỏ tiến trình" : "Mở rộng tiến trình"}
-        title={expanded ? "Thu nhỏ tiến trình" : "Mở rộng tiến trình"} onClick={() => expanded ? minimize() : setExpanded(true)}>
+        title={expanded ? "Thu nhỏ tiến trình" : "Mở rộng tiến trình"} onClick={() => expanded ? minimize() : open(true)}>
         {expanded ? <Minus size={16} /> : <Maximize2 size={15} />}
       </button>
     </header>
@@ -284,5 +332,5 @@ export function OperationProgressCenter({ deviceLabels }: { deviceLabels: Readon
         : pendingStart ? null : <p className="run-monitor-empty">Không còn bản ghi trong cửa sổ này.</p>}
       <p className="run-monitor-history-note">24 giờ gần nhất · Tối đa 200 bản ghi. {state.value?.page.hasMore ? "Các tác vụ khác nằm trong trang Tác vụ." : "Xem lịch sử đầy đủ tại trang Tác vụ."}</p>
     </div></Activity>
-  </section>, document.body);
+  </section>, host);
 }

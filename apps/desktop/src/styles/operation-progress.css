@@ -161,3 +161,20 @@
 .run-device-recovery button { margin: 3px 4px 0 0; font-size: var(--text-sm); }
 
 .run-start-bridge { display: grid; gap: 6px; padding: 12px 14px; border-left: 3px solid var(--primary); background: var(--primary-soft); overflow-wrap: anywhere; }
+/* Placements. From 1500 px the expanded monitor docks as a column beside the wall (the
+   wall narrows, nothing is covered); folded or narrower, it is a pill in the page header. */
+.run-monitor-dock { display: flex; flex: 0 0 auto; min-width: 0; min-height: 0; }
+.run-monitor-dock:empty { display: none; }
+.run-monitor.is-docked { position: relative; inset: auto; z-index: auto; max-width: none; border: 0; border-left: 1px solid var(--line); border-radius: 0; box-shadow: none; }
+.run-monitor.is-docked.is-expanded { width: 320px; height: auto; align-self: stretch; }
+.run-monitor.is-docked.is-maximized { position: fixed; inset: 12px; z-index: var(--z-flyout); width: auto; border: 1px solid var(--line-strong); border-top: 2px solid var(--primary); border-radius: var(--radius); box-shadow: var(--shadow-lg); }
+.run-monitor.is-docked .run-monitor-titlebar, .run-monitor.is-pill .run-monitor-titlebar { cursor: default; touch-action: auto; }
+.run-monitor-pill-slot { display: contents; }
+.run-monitor.is-pill { position: relative; inset: auto; z-index: auto; flex: 0 1 auto; width: 280px; max-width: 32vw; border-top-width: 1px; border-radius: var(--radius); box-shadow: none; }
+.run-monitor.is-pill .run-monitor-titlebar { min-height: 32px; padding: 0 4px 0 6px; background: none; }
+.run-monitor.is-pill .run-monitor-toggle { cursor: pointer; }
+.run-monitor.is-pill .run-monitor-toggle strong { overflow: hidden; white-space: nowrap; text-overflow: ellipsis; font-size: var(--text-sm); }
+.run-monitor.is-pill .run-monitor-overview { padding: 0 8px 4px; }
+.run-monitor.is-pill .run-monitor-overview .nu-bar { height: 3px; }
+/* Toasts stay clear of the docked column's commands. */
+.shell:has(.run-monitor.is-docked:not(.is-maximized)) .activity-center-current { right: calc(320px + 12px); }

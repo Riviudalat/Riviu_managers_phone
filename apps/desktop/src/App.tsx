@@ -73,6 +73,7 @@ import { GroupToolsPopup } from "./components/GroupToolsPopup";
 import { MacroRecordingBar } from "./components/MacroRecordingBar";
 import { stopRecording } from "./macroStore";
 import { ProfileToolbar } from "./components/ProfileToolbar";
+import { SelectionBar } from "./components/SelectionBar";
 import { SettingsPanel } from "./components/SettingsPanel";
 import { MyAppsPage } from "./pages/MyAppsPage";
 import { OperatorRecordsPage } from "./pages/OperatorRecordsPage";
@@ -216,6 +217,9 @@ function App() {
     setMacroSession(null);
   }, []);
   const [groupsOpen, setGroupsOpen] = useState(false);
+  // Hosts the run monitor moves between; both stay mounted so the wall never remounts.
+  const [monitorDock, setMonitorDock] = useState<HTMLDivElement | null>(null);
+  const [monitorPill, setMonitorPill] = useState<HTMLSpanElement | null>(null);
   const workspaceDirty = useWorkspaceDirty();
   const [automationView, setAutomationView] = useState<"device" | "orchestration">("device");
   const [myAppsEditorOpen, setMyAppsEditorOpen] = useState(false);
@@ -879,6 +883,53 @@ function App() {
     : null;
 
 
+  // Shared by the toolbar (whole fleet) and the selection bar (selected phones).
+  const startPreview = async () => {
+    const targets = selected.length
+      ? devices.filter((device) => selected.includes(device.udid))
+      : devices;
+    if (!targets.length) {
+      pushToast("warn", "Chưa có thiết bị", "Cắm máy qua USB rồi bấm Làm mới.");
+      return;
+    }
+    try {
+      const failures = await startFleetPreview(targets);
+      await reload();
+      if (failures.length === 0) {
+        pushToast("ok", "Đã gửi lệnh khởi động", `${targets.length} máy`);
+      } else if (failures.length === targets.length) {
+        toastError("Không máy nào khởi động được", failures[0].reason, { udids: failures.map((failure) => failure.udid) });
+      } else {
+        // The count first, the names second. On twenty phones the list is
+        // what an operator acts on, and "Khởi động thất bại" with one
+        // message used to be all they got — for a run where most succeeded.
+        pushToast(
+          "warn",
+          `Khởi động ${targets.length - failures.length}/${targets.length} máy`,
+          `${failures.map((failure) => failure.name).join(", ")} chưa khởi động được: ${describeError(failures[0].reason)}`,
+          undefined,
+          fanOutActivity(targets.map((device) => device.udid), targets.map((device) => {
+            const failure = failures.find((item) => item.udid === device.udid);
+            return failure
+              ? { status: "rejected" as const, reason: failure.reason }
+              : { status: "fulfilled" as const, value: undefined };
+          })),
+        );
+      }
+    } catch (error) {
+      toastError("Khởi động thất bại", error);
+    }
+  };
+  const toggleGroupTools = () => {
+    if (groupToolsView === "recording") {
+      document.querySelector<HTMLElement>(".macro-recording-bar button")?.focus();
+      return;
+    }
+    setGroupsOpen(false);
+    if (groupToolsView === "dialog") closeGroupTools();
+    else setGroupToolsView("dialog");
+  };
+
   const title = PAGE_TITLE[page] ?? page;
   const PageIcon = MENU_ICONS[page];
 
@@ -942,6 +993,7 @@ function App() {
           }
           actions={
             <>
+              <span ref={setMonitorPill} className="run-monitor-pill-slot" />
               <InspectorLauncher devices={orderedDevices} deviceLabels={automationDeviceLabels} />
               <ActivityCenter onSelectDevices={(udids) => { setPage("control"); setSelected(udids); }} />
               {page !== "control" && <button
@@ -965,7 +1017,7 @@ function App() {
         />
 
         {!focusDevice && recordingControls}
-        <OperationProgressCenter deviceLabels={automationDeviceLabels} />
+        <OperationProgressCenter deviceLabels={automationDeviceLabels} dockHost={monitorDock} pillHost={monitorPill} />
         <div
           ref={contentRef}
           className={`content content-${page} ${page === "scripts" ? "content-flow" : ""}`}
@@ -1039,66 +1091,14 @@ function App() {
               <ProfileToolbar
                 selected={selectedDevices}
                 deviceCount={devices.length}
-                activeSync={activeSync}
-                readiness={syncReadiness}
-                resolvedMasterUdid={resolvedMasterUdid}
-                onMasterChange={setControlCenter}
-                onEnableSync={beginGroupSync}
-                onDisableSync={() => stopGroupSync()}
-                deviceNumbers={fleetNumberByUdid}
-                metas={metaMap}
                 groupsOpen={groupsOpen}
                 onGroups={() => {
                   if (groupToolsView !== "recording") closeGroupTools();
                   setGroupsOpen((v) => !v);
                 }}
                 groupToolsOpen={groupToolsView === "dialog"}
-                onGroupTools={() => {
-                  if (groupToolsView === "recording") {
-                    document.querySelector<HTMLElement>(".macro-recording-bar button")?.focus();
-                    return;
-                  }
-                  setGroupsOpen(false);
-                  if (groupToolsView === "dialog") closeGroupTools();
-                  else setGroupToolsView("dialog");
-                }}
-                onStart={async () => {
-                  const targets = selected.length
-                    ? devices.filter((device) => selected.includes(device.udid))
-                    : devices;
-                  if (!targets.length) {
-                    pushToast("warn", "Chưa có thiết bị", "Cắm máy qua USB rồi bấm Làm mới.");
-                    return;
-                  }
-                  try {
-                    const failures = await startFleetPreview(targets);
-                    await reload();
-                    if (failures.length === 0) {
-                      pushToast("ok", "Đã gửi lệnh khởi động", `${targets.length} máy`);
-                    } else if (failures.length === targets.length) {
-                      toastError("Không máy nào khởi động được", failures[0].reason, { udids: failures.map((failure) => failure.udid) });
-                    } else {
-                      // The count first, the names second. On twenty phones the list is
-                      // what an operator acts on, and "Khởi động thất bại" with one
-                      // message used to be all they got — for a run where most succeeded.
-                      pushToast(
-                        "warn",
-                        `Khởi động ${targets.length - failures.length}/${targets.length} máy`,
-                        `${failures.map((failure) => failure.name).join(", ")} chưa khởi động được: ${describeError(failures[0].reason)}`,
-                        undefined,
-                        fanOutActivity(targets.map((device) => device.udid), targets.map((device) => {
-                          const failure = failures.find((item) => item.udid === device.udid);
-                          return failure
-                            ? { status: "rejected" as const, reason: failure.reason }
-                            : { status: "fulfilled" as const, value: undefined };
-                        })),
-                      );
-                    }
-                  } catch (error) {
-                    toastError("Khởi động thất bại", error);
-                  }
-                }}
-                onStop={() => setSelected([])}
+                onGroupTools={toggleGroupTools}
+                onStart={startPreview}
                 onHelperMaintenance={async () => {
                   if (selected.length) return runHelperMaintenance(selected);
                   // No selection: only phones that report a helper recovery need.
@@ -1332,14 +1332,6 @@ function App() {
                   >
                     Chọn tất cả ({visibleDevices.length})
                   </button>
-                  <button
-                    type="button"
-                    className="ghost"
-                    disabled={!selected.length}
-                    onClick={() => setSelected([])}
-                  >
-                    Bỏ chọn
-                  </button>
                 </div>
                 <FilterToolbar viewMode={viewMode} onViewMode={setViewMode} />
               </div>
@@ -1568,6 +1560,43 @@ function App() {
                   }
                 />
               )}
+              {selectedDevices.length > 0 && (
+                <SelectionBar
+                  selected={selectedDevices}
+                  hiddenCount={selectedDevices.filter(device => !visibleDevices.some(shown => shown.udid === device.udid)).length}
+                  groups={groups}
+                  activeSync={activeSync}
+                  readiness={syncReadiness}
+                  resolvedMasterUdid={resolvedMasterUdid}
+                  onMasterChange={setControlCenter}
+                  onEnableSync={beginGroupSync}
+                  onDisableSync={() => stopGroupSync()}
+                  deviceNumbers={fleetNumberByUdid}
+                  metas={metaMap}
+                  onOpen={startPreview}
+                  onRunFlow={() => void requestPage("scripts").then(opened => opened && requestAutomationView("device"))}
+                  groupToolsOpen={groupToolsView === "dialog"}
+                  onGroupTools={toggleGroupTools}
+                  onManageGroups={() => {
+                    if (groupToolsView !== "recording") closeGroupTools();
+                    setGroupsOpen(true);
+                  }}
+                  onAddToGroup={async (groupId) => {
+                    const group = groups.find(candidate => candidate.id === groupId);
+                    const missing = selectedDevices.map(device => device.udid).filter(udid => !group?.udids.includes(udid));
+                    // Nothing to add, or the group is gone: saving anyway would rewrite the record for nothing.
+                    if (!group || !missing.length) return;
+                    try {
+                      await saveGroup({ ...group, udids: [...group.udids, ...missing] });
+                      await reload();
+                      pushToast("ok", `Đã thêm ${missing.length} máy vào nhóm ${group.name}`);
+                    } catch (error) {
+                      toastError("Thêm vào nhóm thất bại", error);
+                    }
+                  }}
+                  onClear={() => setSelected([])}
+                />
+              )}
               </div>
             </section>
           )}
@@ -1713,6 +1742,8 @@ function App() {
           )}
         </div>
       </div>
+      {/* A flex sibling, so a docked monitor narrows the wall instead of covering it. */}
+      <div ref={setMonitorDock} className="run-monitor-dock" />
 
       {/* **Outside the control-page block, and that placement is the fix.** Both of these are
           opened from `tileActions`, which `FocusStream` renders — and `FocusStream` is mounted

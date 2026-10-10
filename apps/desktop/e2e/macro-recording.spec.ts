@@ -148,7 +148,8 @@ function recordingBar(page: Page) {
 }
 
 async function openMacro(page: Page) {
-  await page.getByRole("button", { name: "Công cụ", exact: true }).click();
+  // With phones selected, group tools live on the selection bar; otherwise on the toolbar.
+  await page.getByRole("button", { name: /^Công cụ( nhóm…)?$/ }).click();
   await macroDialog(page).getByRole("tab", { name: "Macro", exact: true }).click();
 }
 

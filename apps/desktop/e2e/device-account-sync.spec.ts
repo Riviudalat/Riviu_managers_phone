@@ -72,8 +72,8 @@ for (const width of [1440, 820]) {
     expect((await calls()).filter(c => c.cmd === "save_device_handle").map(c => c.args.udid)).toEqual(["MOCK-FLEET-1", "MOCK-FLEET-2"]);
 
     await tiles.nth(2).click({ modifiers: ["Control"] });
-    const toolbar = page.getByRole("group", { name: "Thao tác thiết bị" });
-    await toolbar.getByRole("button", { name: "Đồng bộ", exact: true }).click();
+    const toolbar = page.getByRole("group", { name: "Thao tác với máy đã chọn" });
+    await toolbar.getByRole("button", { name: "Đồng bộ thao tác", exact: true }).click();
     const sync = page.getByRole("region", { name: "Điều khiển đồng bộ" });
     await expect(sync).toContainText("Đang tắt");
     await sync.getByLabel("Máy chính").selectOption("MOCK-FLEET-2");
@@ -121,7 +121,7 @@ for (const width of [1440, 820]) {
     await tiles.nth(2).evaluate((tile) => {
       tile.dispatchEvent(new MouseEvent("click", { bubbles: true, ctrlKey: true }));
     });
-    await expect(toolbar.getByRole("button", { name: "Đồng bộ", exact: true })).toBeVisible();
+    await expect(toolbar.getByRole("button", { name: "Đồng bộ thao tác", exact: true })).toBeVisible();
     await expect(focus).toBeVisible();
     await expect(focus.getByTestId("focus-control-status")).toHaveCount(0);
     await expect(focus.getByRole("button", { name: "Home", exact: true })).toBeEnabled();
