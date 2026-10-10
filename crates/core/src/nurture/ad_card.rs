@@ -11,8 +11,11 @@
 //!
 //! * The **playing ad** is an ordinary card with its rail, plus the CTA strip
 //!   `ad_feed_card_container_v2` inside the interact area (layouts `b7l` and `d07`, a child of
-//!   `y8z`, `visibility=gone` until the card is an ad) and the server's `Sponsored` label under
-//!   the author name. [`sponsored_card`] reads those.
+//!   `y8z`, `visibility=gone` until the card is an ad), the server's `Sponsored` label under
+//!   the author name, or the bottom label `Ad` ([`AD_LABEL_ID`]). [`sponsored_card`] reads
+//!   those. The `Ad` label is the one **measured on a phone dump**: box 31–50, 10/10/2026,
+//!   `ce0417141d4decde0c` (Galaxy S8+, 45.7.3, en), a Shopee photo ad whose tree had no
+//!   `ad_feed_card_container` and no `Sponsored` at all — the session liked it.
 //! * The **end-card** comes up when the ad's video ends. `CommerceVideoDelegateKt` inflates
 //!   the Lynx mask through `view_stub_ad_mask` (a child of `a4v`, the card root) and sets the
 //!   whole `widget_container` **INVISIBLE** — the rail, caption and author drop out of the
@@ -21,7 +24,9 @@
 //!   and sets `widget_container` visible again (no navigation, no landing page); a swipe up on
 //!   it is the mask's own `action_ad_swipe_up_video`, which asks the vertical pager for the
 //!   next item — so the feed pager never sees the raw gesture. [`end_card`] reads that.
-use crate::{tiktok_labels::TikTokControls, ui_automation::tree::Tree, ElementBox};
+use crate::{
+    tiktok_labels::TikTokControls, types::TapPoint, ui_automation::tree::Tree, ElementBox,
+};
 
 /// The only package whose ad surfaces were researched. The resource *names* are stable
 /// across builds (their numbers are not, and nothing here reads a number).
@@ -54,6 +59,42 @@ const CTA_TEXTS: &[&str] = &[
     "Get showtimes",
 ];
 
+/// The bottom label that marks a feed card as an ad on 45.7.3: a `Button` with exact text
+/// `Ad`, inside `lzt` (the root of layout `b5d`, `FeedBottomLabelLayout`) under the caption.
+/// Measured at [32,1903] 60×42 on `ce0417141d4decde0c` (Galaxy S8+, 1080×2220, en),
+/// 10/10/2026, `evidence-j/4dec-ad-photo.xml`. The id is an obfuscated name and is renamed
+/// per build, so it is bound to [`AD_LABEL_BUILD`] through the session's resource set.
+const AD_LABEL_ID: &str = ":id/hnj";
+const AD_LABEL_BUILD: &str = "45.7.3";
+
+/// The label's text per locale, exact. `en` is measured (above). `vi` is **not** measured on
+/// a dump: `QC` and `Quảng cáo` are the `vi-VN` values of the 45.7.3 string ids whose default
+/// value is `Ad` (`nxstring_vi-VN.tsv`), and which of them this label uses is unknown.
+fn ad_label_texts(language: &str) -> &'static [&'static str] {
+    match language {
+        "en" => &["Ad"],
+        "vi" => &["Quảng cáo", "QC"],
+        _ => &[],
+    }
+}
+
+/// The sound control's description prefix on a sponsored card (45.7.3 string `Promoted
+/// music`, rendered `Sound: Promoted Music by …` on the same 10/10/2026 card). Supporting
+/// evidence only: it names the sound library, not the card, so it never marks a card alone.
+const PROMOTED_SOUND_PREFIX: &str = "Sound: Promoted Music";
+
+/// A sponsored card with its rail, as one snapshot shows it.
+#[derive(Debug, Clone, PartialEq)]
+pub(super) struct SponsoredCard {
+    /// What marked it, for the operator line.
+    pub(super) evidence: &'static str,
+    /// Bounds on that snapshot that take a touch for the ad itself — the CTA strip, the
+    /// Lynx ad body's `click_container` (the product anchor is drawn inside it and is not in
+    /// the tree on its own), small clickable controls of the interact area. A swipe that
+    /// leaves the card must not start on one; see [`swipe_start`].
+    pub(super) touch_owners: Vec<ElementBox>,
+}
+
 /// The ad end-card as one snapshot shows it.
 #[derive(Debug, Clone, PartialEq)]
 pub(super) struct AdEndCard {
@@ -75,29 +116,106 @@ fn visible_nodes<'t>(tree: &'t Tree) -> impl Iterator<Item = (usize, ElementBox)
     })
 }
 
-/// The surface that marks a card with a rail as an ad: the CTA strip's container or the
-/// `Sponsored` label. Returns what was seen, for the log.
-pub(super) fn sponsored_card(tree: &Tree, labels: TikTokControls) -> Option<&'static str> {
+/// The surface that marks a card with a rail as an ad: the CTA strip's container, the
+/// `Sponsored` label or the `Ad` bottom label. Returns what was seen and where the ad takes
+/// touches, from the same snapshot.
+pub(super) fn sponsored_card(tree: &Tree, labels: TikTokControls) -> Option<SponsoredCard> {
     if labels.package() != PACKAGE {
         return None;
     }
+    let ad_label_measured = labels.resource_version() == Some(AD_LABEL_BUILD);
+    let ad_texts = ad_label_texts(labels.language());
+    let mut container = false;
+    let mut ad_label = false;
     let mut sponsored_label = false;
+    let mut promoted_sound = false;
     for (index, _) in visible_nodes(tree) {
         let node = &tree.nodes[index];
         let id = node.attr("resource-id");
-        if id.ends_with(":id/ad_feed_card_container_v2")
-            || id.ends_with(":id/ad_feed_card_container")
-        {
-            return Some("khung nút quảng cáo (ad_feed_card_container)");
-        }
-        if labels.language() == "en"
+        let text = node.attr("text");
+        container |= id.ends_with(":id/ad_feed_card_container_v2")
+            || id.ends_with(":id/ad_feed_card_container");
+        ad_label |= ad_label_measured && id.ends_with(AD_LABEL_ID) && ad_texts.contains(&text);
+        sponsored_label |= labels.language() == "en"
             && node.attr("class") == "android.widget.TextView"
-            && node.attr("text") == "Sponsored"
-        {
-            sponsored_label = true;
-        }
+            && text == "Sponsored";
+        promoted_sound |= node.attr("content-desc").starts_with(PROMOTED_SOUND_PREFIX);
     }
-    sponsored_label.then_some("nhãn Sponsored")
+    let evidence = if container {
+        "khung nút quảng cáo (ad_feed_card_container)"
+    } else if ad_label && promoted_sound {
+        "nhãn Ad dưới chú thích, nhạc Promoted Music"
+    } else if ad_label {
+        "nhãn Ad dưới chú thích"
+    } else if sponsored_label {
+        "nhãn Sponsored"
+    } else {
+        return None;
+    };
+    Some(SponsoredCard {
+        evidence,
+        touch_owners: touch_owners(tree),
+    })
+}
+
+/// Where the ad takes a touch on this snapshot (see [`SponsoredCard::touch_owners`]).
+///
+/// Clickable containers that span much of the card (the card root, the long-press layer,
+/// the whole interact column `kqi`, 993 px of 2220 on the 10/10/2026 dump) are left out: they
+/// are under every point and their drag goes to the feed pager like any card's.
+fn touch_owners(tree: &Tree) -> Vec<ElementBox> {
+    let extent = visible_nodes(tree)
+        .map(|(_, rect)| rect.y + rect.height)
+        .fold(0.0_f64, f64::max);
+    visible_nodes(tree)
+        .filter(|(index, rect)| {
+            let node = &tree.nodes[*index];
+            let id = node.attr("resource-id");
+            node.attr("content-desc") == "click_container"
+                || id.ends_with(":id/ad_feed_card_container_v2")
+                || id.ends_with(":id/ad_feed_card_container")
+                || (rect.clickable && rect.enabled && rect.height < extent * 0.25)
+        })
+        .map(|(_, rect)| rect)
+        .collect()
+}
+
+/// The start of the vertical swipe that leaves a sponsored card: the caller's target when it
+/// is clear of every [`SponsoredCard::touch_owners`] box, otherwise the clear point nearest
+/// to it inside `zone` (y bounds), in the same column. `None` when the column has no clear
+/// point in the zone; the caller then keeps its target.
+///
+/// The clearance is the planner's own scatter: endpoint jitter σ 9 px plus a hand bias of up
+/// to 7 px (`super::touch`), so 36 px keeps a 3σ draw off the box. On the 10/10/2026 dump
+/// (`ce0417141d4decde0c`, 1080×2220) the column x=540 is owned by `click_container`
+/// [312,1391] (the product anchor is drawn at y≈1162–1367 inside it), by the CTA strip with
+/// `Get` [1564,1701] and by the caption rows below it; the clear band is the page-dot strip
+/// between them, y≈1428–1527.
+pub(super) fn swipe_start(
+    owners: &[ElementBox],
+    target: &TapPoint,
+    zone: (f64, f64),
+) -> Option<TapPoint> {
+    const CLEARANCE: f64 = 36.0;
+    let blocked: Vec<(f64, f64)> = owners
+        .iter()
+        .filter(|rect| {
+            target.x >= rect.x - CLEARANCE && target.x <= rect.x + rect.width + CLEARANCE
+        })
+        .map(|rect| (rect.y - CLEARANCE, rect.y + rect.height + CLEARANCE))
+        .collect();
+    let clear = |y: f64| {
+        y >= zone.0 && y <= zone.1 && blocked.iter().all(|(top, bottom)| y < *top || y > *bottom)
+    };
+    std::iter::once(target.y)
+        .chain(
+            blocked
+                .iter()
+                .flat_map(|(top, bottom)| [top - 1.0, bottom + 1.0]),
+        )
+        .filter(|y| clear(*y))
+        .min_by(|a, b| (a - target.y).abs().total_cmp(&(b - target.y).abs()))
+        .map(|y| TapPoint { x: target.x, y })
 }
 
 /// The ad end-card: one CTA button and one `Close` under it, both in the centre column of

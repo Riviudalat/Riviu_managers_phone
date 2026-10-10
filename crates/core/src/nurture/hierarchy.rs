@@ -701,12 +701,12 @@ async fn fingerprint(session: &dyn UiSession, labels: TikTokControls) -> PostFin
 }
 
 /// What one card read says about the card besides its identity.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq)]
 enum CardSurface {
     /// A snapshot was read and carried no sponsored marker.
     Ordinary,
     /// A snapshot was read and carried one; see [`super::ad_card::sponsored_card`].
-    Sponsored(&'static str),
+    Sponsored(super::ad_card::SponsoredCard),
     /// The backend has no snapshots, so the markers can never be looked for there. The
     /// per-control path reads four rail labels and nothing else; it keeps its old behaviour.
     Unsupported,
@@ -1853,6 +1853,14 @@ impl<'a> HierarchyRun<'a> {
         }
     }
 
+    /// The default start of the feed swipe in [`Self::swipe_next`].
+    fn feed_swipe_from(&self) -> TapPoint {
+        TapPoint {
+            x: self.screen.0 * 0.5,
+            y: self.screen.1 * 0.72,
+        }
+    }
+
     /// Swipe to the next post and report whether the change was provable, with what the
     /// card reads that judged it cost.
     ///
@@ -1879,6 +1887,9 @@ impl<'a> HierarchyRun<'a> {
         duration_ms: u64,
         before: &PostFingerprint,
         straight_flick: bool,
+        // A start the caller has cleared of the card's own touch targets (a sponsored card,
+        // see [`super::ad_card::swipe_start`]); `None` keeps [`Self::feed_swipe_from`].
+        from: Option<TapPoint>,
         stop: &AtomicBool,
     ) -> anyhow::Result<(bool, CardReads)> {
         let mut reads = CardReads::default();
@@ -1892,10 +1903,7 @@ impl<'a> HierarchyRun<'a> {
         // path and shapes the velocity, so no two feed swipes are the same gesture. Before
         // that, every swipe in every session was the identical dead-straight line between
         // the identical two pixels, traversed at a constant speed — see `super::touch`.
-        let from = TapPoint {
-            x: self.screen.0 * 0.5,
-            y: self.screen.1 * 0.72,
-        };
+        let from = from.unwrap_or_else(|| self.feed_swipe_from());
         let to = TapPoint {
             x: self.screen.0 * 0.5,
             y: self.screen.1 * 0.28,
@@ -2385,7 +2393,13 @@ async fn leave_railless_card(
     status.swipe_attempts += 1;
     sleep_interruptible(Duration::from_millis(human.think_pause_ms()), stop).await;
     let judged = run
-        .swipe_next(human.swipe_duration_ms(false), before, straight_flick, stop)
+        .swipe_next(
+            human.swipe_duration_ms(false),
+            before,
+            straight_flick,
+            None,
+            stop,
+        )
         .await?;
     if !stop.load(Ordering::Relaxed) {
         sleep_interruptible(Duration::from_millis(human.after_swipe_pause_ms()), stop).await;
@@ -3666,16 +3680,21 @@ pub(super) async fn run_feed(
         // (see [`super::ad_card::sponsored_card`]). A snapshot that failed to read is unknown,
         // not ordinary, so that pass watches and leaves; a backend without snapshots cannot
         // tell and keeps its rolls, which is what it did before.
+        // The ad's own touch targets, kept for the swipe that leaves it; `Some` marks the card
+        // as a skipped ad for the carousel, the gesture and the count below.
+        let mut sponsored: Option<Vec<ElementBox>> = None;
         let plan = match surface {
-            CardSurface::Sponsored(evidence) => {
+            CardSurface::Sponsored(card) => {
                 ads_skipped += 1;
                 report(
                     status,
                     format!(
-                        "quảng cáo ({evidence}) — chỉ xem, không tim/lưu/bình luận/follow, không bấm nút \
-                         quảng cáo (đã bỏ qua {ads_skipped} quảng cáo)"
+                        "quảng cáo — bỏ qua ({}): không tim/lưu/bình luận/follow, không vuốt ngang, \
+                         không bấm nút quảng cáo; vuốt thẳng qua (đã bỏ qua {ads_skipped} quảng cáo)",
+                        card.evidence
                     ),
                 );
+                sponsored = Some(card.touch_owners);
                 crate::human_behavior::FeedActionPlan::default()
             }
             CardSurface::Unread if !still_on_acted_card => {
@@ -3879,7 +3898,8 @@ pub(super) async fn run_feed(
         }
         // Whether this pass paged a photo post, which decides the gesture that leaves it.
         let mut paged_this_pass = false;
-        if ceiling > 0 {
+        // Never on an ad: its photos are the advertiser's Lynx body, and paging it is touching it.
+        if ceiling > 0 && sponsored.is_none() {
             // Only a deferred comment has a use for the slides. Handing the sink over on every
             // photo post would fill it on posts nobody is going to comment on, and the next
             // comment would then be grounded on the wrong card.
@@ -4106,11 +4126,16 @@ pub(super) async fn run_feed(
         // `pause_after_swipes` swipes. Never calling it left that setting **inert on Android** —
         // switched on in the UI, doing nothing on the twenty phones that actually run.
         sleep_interruptible(Duration::from_millis(human.think_pause_ms()), stop).await;
+        // An ad leaves by the flick, like the end-card, from a clear start: see `ad_swipe_from`.
+        let ad_from = sponsored
+            .as_deref()
+            .map(|owners| ad_swipe_from(&run, owners, status, report));
         let (advanced, reads) = match run
             .swipe_next(
                 human.swipe_duration_ms(roll_bool(settings.frenzy_prob)),
                 &before,
-                paged_this_pass,
+                paged_this_pass || sponsored.is_some(),
+                ad_from,
                 stop,
             )
             .await
@@ -4127,7 +4152,11 @@ pub(super) async fn run_feed(
             break;
         }
         sleep_interruptible(Duration::from_millis(human.after_swipe_pause_ms()), stop).await;
-        if advanced {
+        if advanced && sponsored.is_some() {
+            // A skipped card, never a watched video: the count is the operator's videos.
+            stuck_swipes = 0;
+            report(status, format!("đã rời thẻ quảng cáo ({})", reads.says()));
+        } else if advanced {
             stuck_swipes = 0;
             // Keep the duplicate guard until the next pass reads a different stable identity.
             // Full fingerprint inequality proves enough to count a swipe, but our own delayed
@@ -4197,6 +4226,55 @@ pub(super) async fn run_feed(
     }
 
     outcome
+}
+
+/// The start of the vertical swipe off a railed sponsored card, cleared of the ad's own touch
+/// targets ([`super::ad_card::swipe_start`]) inside the feed's swipe zone, said in the log.
+///
+/// Box 31–50, 10/10/2026, `ce0417141d4decde0c` 08:57:15–08:58:21 (Galaxy S8+, 45.7.3): four
+/// swipes off one Shopee photo ad were all unproven and the session stopped at 9/15; the card
+/// on screen at the stop was the same ad, already liked (`Video liked`), so the gesture never
+/// reached the feed pager. All four were the bowed `plan_swipe` from (0.5, 0.72) of the
+/// screen: y=1508 on a 2094 px window, 56 px above the `Get` CTA strip [32,1564][870,1701]
+/// and inside the bow's reach of it, or y=1598 on the 2220 px display, on the strip itself
+/// (the log does not record which). The whole card also sits under the ad's Lynx
+/// `fullscreen_container` — the same surface family as the end-card mask, which forwards a
+/// flick and not a drag (see [`HierarchyRun::swipe_next`]). So an ad is left by the flick, from
+/// the clear point nearest the usual start, kept between 50 % and 80 % of the screen: below
+/// the swipe's end (28 %) by a full flick's travel and above the bottom bar (88.5 % on that
+/// phone). **Not yet proved on a phone.**
+fn ad_swipe_from(
+    run: &HierarchyRun<'_>,
+    owners: &[ElementBox],
+    status: &mut NurtureSessionStatus,
+    report: &(dyn Fn(&mut NurtureSessionStatus, String) + Send + Sync),
+) -> TapPoint {
+    let target = run.feed_swipe_from();
+    let zone = (run.screen.1 * 0.50, run.screen.1 * 0.80);
+    match super::ad_card::swipe_start(owners, &target, zone) {
+        Some(from) => {
+            report(
+                status,
+                format!(
+                    "quảng cáo: vuốt thẳng từ y={:.0} (tránh {} vùng bấm của quảng cáo; mặc định y={:.0})",
+                    from.y,
+                    owners.len(),
+                    target.y
+                ),
+            );
+            from
+        }
+        None => {
+            report(
+                status,
+                format!(
+                    "quảng cáo: không có điểm vuốt trống trong vùng feed — vuốt thẳng từ y={:.0} như mặc định",
+                    target.y
+                ),
+            );
+            target
+        }
+    }
 }
 
 /// Hold off until the configured gap since the last interaction has passed.
@@ -5872,6 +5950,7 @@ mod tests {
                 320,
                 &original_stuck_feed_fingerprint(),
                 false,
+                None,
                 &AtomicBool::new(false)
             )
             .await
@@ -5912,7 +5991,7 @@ mod tests {
             };
             let started = tokio::time::Instant::now();
             let result = run
-                .swipe_next(320, &original_stuck_feed_fingerprint(), false, &stop)
+                .swipe_next(320, &original_stuck_feed_fingerprint(), false, None, &stop)
                 .await;
             if failed {
                 assert!(result
