@@ -53,8 +53,8 @@ export function TextDistributionTool({
       const report = await distributeText(pairs);
       const outcome = groupInputOutcome(report);
       if (outcome.kind === "ok") pushToast("ok", "Đã phân phối văn bản", `${pairs.length} máy`);
-      else if (outcome.kind === "partial") pushToast("warn", outcome.title, outcome.detail);
-      else pushToast("error", outcome.title, outcome.detail);
+      else if (outcome.kind === "partial") pushToast("warn", outcome.title, outcome.detail, undefined, outcome.activity);
+      else pushToast("error", outcome.title, outcome.detail, undefined, outcome.activity);
     } catch (e) {
       toastError("Phân phối văn bản thất bại", e);
     } finally {

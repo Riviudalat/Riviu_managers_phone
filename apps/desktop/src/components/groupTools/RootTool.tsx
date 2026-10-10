@@ -3,7 +3,7 @@ import { factoryReset, isRooted, rootShell, setDeviceIdentity } from "../../api"
 import { requestConfirm } from "../../confirmStore";
 import { describeError } from "../../describeError";
 import { pushToast } from "../../toastStore";
-import { fanOutReasons } from "../../fanout";
+import { fanOutActivity, fanOutReasons } from "../../fanout";
 import { randomAndroidId, randomMac, randomSerial } from "./randomIdentity";
 
 /**
@@ -47,7 +47,7 @@ export function RootTool({ targets, scopeLabel }: { targets: string[]; scopeLabe
     // phones or seventeen that failed to answer -- and those have completely different fixes.
     const unreachable = fanOutReasons(targets, results);
     if (unreachable) {
-      pushToast("warn", "Có máy không trả lời được", unreachable);
+      pushToast("warn", "Có máy không trả lời được", unreachable, undefined, fanOutActivity(targets, results));
     }
   };
 
@@ -110,6 +110,8 @@ export function RootTool({ targets, scopeLabel }: { targets: string[]; scopeLabe
         "warn",
         `Khôi phục ${ok}/${targets.length} máy`,
         fanOutReasons(targets, results) ?? "Máy còn lại chưa root.",
+        undefined,
+        fanOutActivity(targets, results),
       );
   };
 

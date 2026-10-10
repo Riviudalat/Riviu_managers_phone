@@ -50,6 +50,16 @@ giữ bản nháp và phạm vi UDID đã chốt; không đóng điện thoại 
 Phần tài khoản Tương tác cuộn dọc trong khung máy trên cửa sổ hẹp. Điều phối chuyển
 thành một cột ở 1100 px; toolbar tự xuống hàng nhưng nhãn Lưu/Chạy vẫn một dòng.
 
+**Hoạt động** dùng một `toastStore` duy nhất và ghi rõ đây là nhật ký tạm trong RAM, mất khi
+đóng app, không phải bằng chứng lưu bền. Mỗi mục mang metadata có kiểu do nơi tạo gán
+(`cause`, `udid`/`udids`, `runId`); `toastError` lấy `code` có tên, `udid`, `runId` từ lỗi
+qua `errorFacts`, fan-out lấy đúng các máy lỗi qua `fanOutActivity`. Panel gom các mục cùng
+`cause` thành một dòng có số mục và "N máy", mở ra xem từng mục, và nút "Chọn N máy này" thay
+lựa chọn bằng đúng các ID đó rồi về Thiết bị. Câu cho người đọc đứng trước; mã nguyên nhân,
+mã lượt chạy và mã thiết bị nằm trong **Chi tiết**. Mục không có `cause` không bị gom theo chữ.
+Lời toast theo nguyên tắc ACK chưa phải bằng chứng: "Đã gửi lệnh…", không "Thành công" cho
+tác động chưa được xác minh.
+
 ## Nguồn và cách áp dụng
 
 | Nguồn | Mẫu tham khảo | Áp dụng trong Riviu | Không sao chép |

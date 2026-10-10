@@ -1,3 +1,5 @@
+import { errorFacts } from "./describeError";
+import type { ActivityMeta } from "./toastStore";
 import type { GroupInputReport } from "./types";
 
 /// What to tell the operator after an action aimed at several phones at once.
@@ -11,9 +13,16 @@ export type GroupInputOutcome =
   /// Every phone took it. Say nothing special.
   | { kind: "ok" }
   /// Some took it, some did not.
-  | { kind: "partial"; title: string; detail: string }
+  | { kind: "partial"; title: string; detail: string; activity: ActivityMeta }
   /// None took it. This is a failure however the promise resolved.
-  | { kind: "none"; title: string; detail: string };
+  | { kind: "none"; title: string; detail: string; activity: ActivityMeta };
+
+/// Exactly the skipped phones, plus their code when they all share one named code.
+function skippedActivity(report: GroupInputReport): ActivityMeta {
+  const codes = new Set(report.skipped.map((skip) => errorFacts(skip).code));
+  const [code] = codes;
+  return { udids: report.skipped.map((skip) => skip.udid), cause: codes.size === 1 ? code : undefined };
+}
 
 /// Names the phones, not just the count.
 ///
@@ -45,11 +54,13 @@ export function groupInputOutcome(report: GroupInputReport): GroupInputOutcome {
       kind: "none",
       title: `Không máy nào nhận được thao tác (${report.skipped.length})`,
       detail: describe(report),
+      activity: skippedActivity(report),
     };
   }
   return {
     kind: "partial",
     title: `${reached} máy nhận, ${report.skipped.length} máy bỏ qua`,
     detail: describe(report),
+    activity: skippedActivity(report),
   };
 }

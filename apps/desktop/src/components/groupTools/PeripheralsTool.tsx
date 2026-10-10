@@ -25,7 +25,7 @@ import { getGroupSync } from "../../groupSync";
 import { groupInputOutcome } from "../../groupInput";
 import { describeError } from "../../describeError";
 import type { GroupInputReport } from "../../types";
-import { pushToast, toastError } from "../../toastStore";
+import { pushToast, toastError, type ActivityMeta } from "../../toastStore";
 
 /** Human label for a peripheral action, shown as "vừa gửi …" feedback. */
 function describeAction(action: PeripheralAction): string {
@@ -132,18 +132,18 @@ export function PeripheralsTool({ targets, scopeLabel }: { targets: string[]; sc
     // now read, and a bad one is throttled rather than dropped: without a throttle a fleet
     // that rejects everything would push a toast every frame.
     let lastComplaint = 0;
-    const complain = (title: string, detail: string) => {
+    const complain = (title: string, detail: string, activity?: ActivityMeta) => {
       setLastProblem(title);
       const now = performance.now();
       if (now - lastComplaint < COMPLAIN_THROTTLE_MS) return;
       lastComplaint = now;
-      pushToast("warn", title, detail);
+      pushToast("warn", title, detail, undefined, activity);
     };
     const watch = (sent: Promise<GroupInputReport>, what: string) => {
       sent
         .then((report) => {
           const outcome = groupInputOutcome(report);
-          if (outcome.kind !== "ok") complain(`${what}: ${outcome.title}`, outcome.detail);
+          if (outcome.kind !== "ok") complain(`${what}: ${outcome.title}`, outcome.detail, outcome.activity);
         })
         .catch((error) => complain(`${what} thất bại`, describeError(error)));
     };

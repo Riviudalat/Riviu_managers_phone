@@ -38,6 +38,7 @@ import { hasWorkspaceDrafts, requestWorkspaceLeave, useWorkspaceDirty, useWorksp
 import { readTargetDraft, writeFormDraft } from "./formDraftStorage";
 import { useDeviceSurface } from "./features/devices/useDeviceSurface";
 import { describeError } from "./describeError";
+import { fanOutActivity } from "./fanout";
 import { pushToast, toastError } from "./toastStore";
 import { ConfirmHost } from "./components/ConfirmHost";
 import { ActivityCenter } from "./components/ActivityCenter";
@@ -809,7 +810,7 @@ function App() {
     };
     try {
       await bounded(targets, async (device) => {
-        pushToast("info", `Helper · ${helperDeviceLabel(device.udid)}`, "Đang kiểm tra phiên cũ trước khi khôi phục.");
+        pushToast("info", `Helper · ${helperDeviceLabel(device.udid)}`, "Đang kiểm tra phiên cũ trước khi khôi phục.", undefined, { cause: "helper_recovery_checking", udid: device.udid });
         try {
           const pending = await agentHelperMaintenancePending(device.udid);
           if (pending) {
@@ -817,12 +818,12 @@ function App() {
             if (pending.observationOnly) observationOnly.add(pending.plan.maintenanceId);
             pushToast("info", `Helper · ${helperDeviceLabel(device.udid)}`, pending.observationOnly
               ? "Đang đối soát phiên cũ; không dừng helper lần nữa."
-              : "Kế hoạch chưa chạy đang chờ xác nhận.");
+              : "Kế hoạch chưa chạy đang chờ xác nhận.", undefined, { cause: "helper_recovery_pending", udid: device.udid });
           } else {
             plans.push(await agentHelperMaintenancePrepare(device.udid));
           }
         } catch (error) {
-          toastError(`Chưa chuẩn bị được khôi phục · ${helperDeviceLabel(device.udid)}`, error);
+          toastError(`Chưa chuẩn bị được khôi phục · ${helperDeviceLabel(device.udid)}`, error, { udid: device.udid });
         }
       });
       if (!plans.length) return;
@@ -832,15 +833,15 @@ function App() {
         confirmLabel: "Khôi phục helper",
       });
       if (!proceed) {
-        for (const plan of plans) pushToast("info", `Helper · ${plan.udid}`, "Đã hủy trước thực thi.");
+        for (const plan of plans) pushToast("info", `Helper · ${plan.udid}`, "Đã hủy trước thực thi.", undefined, { cause: "helper_recovery_cancelled", udid: plan.udid });
         return;
       }
       await bounded(plans, async (plan) => {
         try {
           const receipt = await agentHelperMaintenanceExecute(plan, true, observationOnly.has(plan.maintenanceId));
-            pushToast("warn", `Helper · ${helperDeviceLabel(receipt.udid)}`, "Đã kết thúc phiên helper cũ và giữ bản ghi. Chưa xác nhận clipboard cũ đã khôi phục; app sẽ kiểm tra phiên mới trước khi chạy.");
+            pushToast("warn", `Helper · ${helperDeviceLabel(receipt.udid)}`, "Đã kết thúc phiên helper cũ và giữ bản ghi. Chưa xác nhận clipboard cũ đã khôi phục; app sẽ kiểm tra phiên mới trước khi chạy.", undefined, { cause: "helper_recovery_unverified", udid: receipt.udid });
         } catch (error) {
-          toastError(`Khôi phục helper chưa hoàn tất · ${helperDeviceLabel(plan.udid)}`, error);
+          toastError(`Khôi phục helper chưa hoàn tất · ${helperDeviceLabel(plan.udid)}`, error, { udid: plan.udid });
         }
       });
     } finally {
@@ -942,7 +943,7 @@ function App() {
           actions={
             <>
               <InspectorLauncher devices={orderedDevices} deviceLabels={automationDeviceLabels} />
-              <ActivityCenter />
+              <ActivityCenter onSelectDevices={(udids) => { setPage("control"); setSelected(udids); }} />
               {page !== "control" && <button
               type="button"
               className="icon-btn"
@@ -1073,9 +1074,9 @@ function App() {
                     const failures = await startFleetPreview(targets);
                     await reload();
                     if (failures.length === 0) {
-                      pushToast("ok", "Đã khởi động", `Chuẩn bị ${targets.length} máy`);
+                      pushToast("ok", "Đã gửi lệnh khởi động", `${targets.length} máy`);
                     } else if (failures.length === targets.length) {
-                      toastError("Không máy nào khởi động được", failures[0].reason);
+                      toastError("Không máy nào khởi động được", failures[0].reason, { udids: failures.map((failure) => failure.udid) });
                     } else {
                       // The count first, the names second. On twenty phones the list is
                       // what an operator acts on, and "Khởi động thất bại" with one
@@ -1084,6 +1085,13 @@ function App() {
                         "warn",
                         `Khởi động ${targets.length - failures.length}/${targets.length} máy`,
                         `${failures.map((failure) => failure.name).join(", ")} chưa khởi động được: ${describeError(failures[0].reason)}`,
+                        undefined,
+                        fanOutActivity(targets.map((device) => device.udid), targets.map((device) => {
+                          const failure = failures.find((item) => item.udid === device.udid);
+                          return failure
+                            ? { status: "rejected" as const, reason: failure.reason }
+                            : { status: "fulfilled" as const, value: undefined };
+                        })),
                       );
                     }
                   } catch (error) {
@@ -1122,11 +1130,12 @@ function App() {
                   };
                   const plans: InteractionQuarantinePlan[] = [];
                   const reconcile = async (plan: InteractionQuarantinePlan) => {
-                    pushToast("info", `Phiên điều khiển · ${plan.binding.udid}`, `Chỉ tra cứu kế hoạch ${plan.planId}; không thực thi lại.`);
+                    pushToast("info", `Phiên điều khiển · ${plan.binding.udid}`, `Chỉ tra cứu kế hoạch ${plan.planId}; không thực thi lại.`, undefined, { cause: "quarantine_lookup", udid: plan.binding.udid });
                     const receipt = await agentQuarantineReceipt(plan.planId);
                     if (!receipt) {
                       pushToast("warn", `Phiên điều khiển · ${plan.binding.udid}`,
-                        `Chưa có kết quả cho kế hoạch ${plan.planId}. Bấm lại Bảo trì chỉ tra cứu kế hoạch này; không thực thi lại, không đăng lại bài.`);
+                        `Chưa có kết quả cho kế hoạch ${plan.planId}. Bấm lại Bảo trì chỉ tra cứu kế hoạch này; không thực thi lại, không đăng lại bài.`,
+                        undefined, { cause: "quarantine_outcome_unknown", udid: plan.binding.udid });
                       return;
                     }
                     acceptReceipt(plan, receipt.plan);
@@ -1141,7 +1150,8 @@ function App() {
                       return next;
                     });
                     pushToast("warn", `Phiên điều khiển · ${plan.binding.udid}`,
-                      "Đã dừng phiên TikTok được giữ lại và nhả quyền điều khiển. Bản nháp và kết quả bấm Đăng (Post) trước đó vẫn chưa được xác minh; không đăng lại bài.");
+                      "Đã dừng phiên TikTok được giữ lại và nhả quyền điều khiển. Bản nháp và kết quả bấm Đăng (Post) trước đó vẫn chưa được xác minh; không đăng lại bài.",
+                      undefined, { cause: "quarantine_released_unverified", udid: plan.binding.udid });
                   };
                   try {
                     await bounded(targets, async (device) => {
@@ -1152,10 +1162,10 @@ function App() {
                           await reconcile(pending);
                           return;
                         }
-                        pushToast("info", `Phiên điều khiển · ${device.udid}`, "Đang chuẩn bị phạm vi khôi phục; chưa ghi lên điện thoại.");
+                        pushToast("info", `Phiên điều khiển · ${device.udid}`, "Đang chuẩn bị phạm vi khôi phục; chưa ghi lên điện thoại.", undefined, { cause: "quarantine_preparing", udid: device.udid });
                         const snapshots = await agentQuarantineSnapshot(device.udid);
                         if (!snapshots.length) {
-                          pushToast("info", `Phiên điều khiển · ${device.udid}`, "Không có phiên được giữ lại cần khôi phục; bỏ qua máy này.");
+                          pushToast("info", `Phiên điều khiển · ${device.udid}`, "Không có phiên được giữ lại cần khôi phục; bỏ qua máy này.", undefined, { cause: "quarantine_nothing_held", udid: device.udid });
                           return;
                         }
                         if (snapshots.length !== 1) {
@@ -1167,7 +1177,7 @@ function App() {
                         }
                         plans.push(plan);
                       } catch (error) {
-                        toastError(`Chưa khôi phục phiên điều khiển · ${device.udid}`, error);
+                        toastError(`Chưa khôi phục phiên điều khiển · ${device.udid}`, error, { udid: device.udid });
                       }
                     });
                     if (!plans.length) return;
@@ -1178,12 +1188,12 @@ function App() {
                       danger: true,
                     });
                     if (!proceed) {
-                      for (const plan of plans) pushToast("info", `Phiên điều khiển · ${plan.binding.udid}`, "Đã hủy trước thực thi; không ghi lên điện thoại.");
+                      for (const plan of plans) pushToast("info", `Phiên điều khiển · ${plan.binding.udid}`, "Đã hủy trước thực thi; không ghi lên điện thoại.", undefined, { cause: "quarantine_cancelled", udid: plan.binding.udid });
                       return;
                     }
                     await bounded(plans, async (plan) => {
                       if (Date.now() >= plan.expiresAtMs) {
-                        pushToast("warn", `Phiên điều khiển · ${plan.binding.udid}`, "Kế hoạch đã hết hạn; không thực thi. Cần chuẩn bị và xác nhận lượt mới.");
+                        pushToast("warn", `Phiên điều khiển · ${plan.binding.udid}`, "Kế hoạch đã hết hạn; không thực thi. Cần chuẩn bị và xác nhận lượt mới.", undefined, { cause: "quarantine_plan_expired", udid: plan.binding.udid });
                         return;
                       }
                       // Save identity before sending: an IPC error never grants permission to replay.
@@ -1192,11 +1202,11 @@ function App() {
                         const receipt = await agentQuarantineExecute(plan.planId);
                         acceptReceipt(plan, receipt.plan);
                       } catch (error) {
-                        toastError(`Khôi phục chưa rõ kết quả · ${plan.binding.udid}`, error);
+                        toastError(`Khôi phục chưa rõ kết quả · ${plan.binding.udid}`, error, { cause: "quarantine_outcome_unknown", udid: plan.binding.udid });
                         try {
                           await reconcile(plan);
                         } catch (lookupError) {
-                          toastError(`Không tra được kế hoạch ${plan.planId} · ${plan.binding.udid}`, lookupError);
+                          toastError(`Không tra được kế hoạch ${plan.planId} · ${plan.binding.udid}`, lookupError, { cause: "quarantine_outcome_unknown", udid: plan.binding.udid });
                         }
                       }
                     });

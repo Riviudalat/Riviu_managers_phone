@@ -51,8 +51,8 @@ export function FileDistributionTool({
       const report = await distributeFiles(pairs);
       const outcome = groupInputOutcome(report);
       if (outcome.kind === "ok") pushToast("ok", "Đã phân phối tệp", `${pairs.length} máy`);
-      else if (outcome.kind === "partial") pushToast("warn", outcome.title, outcome.detail);
-      else pushToast("error", outcome.title, outcome.detail);
+      else if (outcome.kind === "partial") pushToast("warn", outcome.title, outcome.detail, undefined, outcome.activity);
+      else pushToast("error", outcome.title, outcome.detail, undefined, outcome.activity);
     } catch (e) {
       toastError("Phân phối tệp thất bại", e);
     } finally {

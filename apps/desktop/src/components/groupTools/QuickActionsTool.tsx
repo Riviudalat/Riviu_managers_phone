@@ -6,7 +6,7 @@ import { pickFiles } from "../../pickFile";
 import { groupInputOutcome } from "../../groupInput";
 import { getGroupSync } from "../../groupSync";
 import { pushToast, toastError } from "../../toastStore";
-import { fanOutReached, fanOutReasons } from "../../fanout";
+import { fanOutActivity, fanOutReached, fanOutReasons } from "../../fanout";
 
 export function QuickActionsTool({ targets, scopeLabel }: { targets: string[]; scopeLabel: string }) {
   const wallpaperSync = useWallpaperSyncState();
@@ -32,8 +32,8 @@ export function QuickActionsTool({ targets, scopeLabel }: { targets: string[]; s
       const report = await groupInput({ udids: targets, kind: "key", key, sync: getGroupSync() });
       const outcome = groupInputOutcome(report);
       if (outcome.kind === "ok") pushToast("ok", label, `${targets.length} máy`);
-      else if (outcome.kind === "partial") pushToast("warn", outcome.title, outcome.detail);
-      else pushToast("error", outcome.title, outcome.detail);
+      else if (outcome.kind === "partial") pushToast("warn", outcome.title, outcome.detail, undefined, outcome.activity);
+      else pushToast("error", outcome.title, outcome.detail, undefined, outcome.activity);
     } catch (e) {
       toastError(`${label} thất bại`, e);
     } finally {
@@ -56,7 +56,7 @@ export function QuickActionsTool({ targets, scopeLabel }: { targets: string[]; s
         await applyNumberWallpaper(udid, number);
       }));
       const ok = fanOutReached(results);
-      pushToast(ok === targets.length ? "ok" : "warn", `Đã đặt hình nền ${ok}/${targets.length} máy`, fanOutReasons(targets, results) ?? undefined);
+      pushToast(ok === targets.length ? "ok" : "warn", `Đã đặt hình nền ${ok}/${targets.length} máy`, fanOutReasons(targets, results) ?? undefined, undefined, fanOutActivity(targets, results));
     } catch (error) {
       toastError("Chưa đặt được hình nền theo số máy", error);
     } finally {
@@ -80,6 +80,8 @@ export function QuickActionsTool({ targets, scopeLabel }: { targets: string[]; s
         "warn",
         `${label} ${ok}/${targets.length} máy`,
         fanOutReasons(targets, results) ?? "Máy còn lại không hỗ trợ hoặc bận.",
+        undefined,
+        fanOutActivity(targets, results),
       );
   };
 
@@ -104,6 +106,8 @@ export function QuickActionsTool({ targets, scopeLabel }: { targets: string[]; s
         "warn",
         `Đặt ảnh nền ${ok}/${targets.length} máy`,
         fanOutReasons(targets, results) ?? "Máy còn lại cần Riviu helper.",
+        undefined,
+        fanOutActivity(targets, results),
       );
   };
 

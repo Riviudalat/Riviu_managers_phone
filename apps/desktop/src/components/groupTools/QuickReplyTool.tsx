@@ -63,8 +63,8 @@ export function QuickReplyTool({ targets, scopeLabel }: { targets: string[]; sco
       });
       const outcome = groupInputOutcome(report);
       if (outcome.kind === "ok") pushToast("ok", "Đã gõ câu trả lời", phrase.name);
-      else if (outcome.kind === "partial") pushToast("warn", outcome.title, outcome.detail);
-      else pushToast("error", outcome.title, outcome.detail);
+      else if (outcome.kind === "partial") pushToast("warn", outcome.title, outcome.detail, undefined, outcome.activity);
+      else pushToast("error", outcome.title, outcome.detail, undefined, outcome.activity);
     } catch (e) {
       toastError("Gõ câu trả lời thất bại", e);
     } finally {

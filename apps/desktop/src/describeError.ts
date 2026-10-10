@@ -143,6 +143,28 @@ export function describeError(cause: unknown): string {
   return String(cause);
 }
 
+/** What an error says about itself beyond its sentence: the typed half of an Activity entry. */
+export interface ErrorFacts {
+  /** A named code. Generic codes are left out so unrelated failures never group together. */
+  code?: string;
+  udid?: string;
+  runId?: string;
+}
+
+/** Read the typed fields a `CommandError` payload carries; prose is never parsed for them. */
+export function errorFacts(cause: unknown): ErrorFacts {
+  const record = cause && typeof cause === "object" && !(cause instanceof Error)
+    ? cause as Record<string, unknown> : null;
+  const text = (key: string) => {
+    const value = record?.[key];
+    return typeof value === "string" && value.length > 0 ? value : undefined;
+  };
+  const named = text("code");
+  const code = named && !GENERIC_CODES.has(named) ? named
+    : helperRecoveryMessage(cause) ? "HelperRecoveryRequired" : undefined;
+  return { code, udid: text("udid"), runId: text("runId") };
+}
+
 /** Shared typed ownership boundary, with one narrow legacy-string compatibility parser. */
 export function controlFailure(cause: unknown) {
   const detail = describeError(cause);

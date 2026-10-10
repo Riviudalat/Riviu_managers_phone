@@ -60,11 +60,13 @@ export function MacroTool({ targets, scopeLabel, onStartRecording, nameInputId }
     // not. Found by an independent review on 27/08/2026.
     let unreached = 0;
     let lastOutcome: string | null = null;
+    const skippedUdids = new Set<string>();
     const account = (report: GroupInputReport) => {
       const outcome = groupInputOutcome(report);
       if (outcome.kind === "ok") return;
       unreached += 1;
       lastOutcome = outcome.detail;
+      outcome.activity.udids?.forEach((udid) => skippedUdids.add(udid));
     };
     try {
       for (const step of plan) {
@@ -119,6 +121,8 @@ export function MacroTool({ targets, scopeLabel, onStartRecording, nameInputId }
           ]
             .filter(Boolean)
             .join("\n"),
+          undefined,
+          { cause: "macro_steps_skipped", udids: [...skippedUdids] },
         );
       else pushToast("ok", "Đã chạy macro", `${macro.name} × ${loops}`);
     } finally {

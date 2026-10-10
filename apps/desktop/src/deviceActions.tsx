@@ -77,11 +77,12 @@ export async function readAndAssignTikTokAccounts(targets: DeviceInfo[], deps: D
     if (number == null || !Number.isInteger(number) || number <= 0) numbers.delete(id);
   }
   const label = (udid: string) => numbers.get(udid) == null ? udid : `Máy ${numbers.get(udid)} (${udid})`;
-  const report = (title: string, detail: string, confirmed: Set<string> = new Set()) => {
+  const report = (title: string, detail: string, confirmed: Set<string> = new Set(), runId?: string) => {
     const failed = [...reserved].filter(id => !confirmed.has(id));
     const short = failed.slice(0, 5).map(id => numbers.get(id) ?? id.slice(-6)).join(", ");
     pushToast(failed.length ? "warn" : "ok", title, detail,
-      failed.length ? `Máy chưa cập nhật: ${short}${failed.length > 5 ? `… +${failed.length - 5} máy` : ""}` : undefined);
+      failed.length ? `Máy chưa cập nhật: ${short}${failed.length > 5 ? `… +${failed.length - 5} máy` : ""}` : undefined,
+      { cause: failed.length ? "account_reconcile_unconfirmed" : undefined, udids: failed, runId });
   };
   serials.forEach(id => accountReads.add(id));
   try {
@@ -112,7 +113,7 @@ export async function readAndAssignTikTokAccounts(targets: DeviceInfo[], deps: D
           const row = plan.rows.find(item => item.udid === id);
           return `${label(id)}: ${row?.error ? describeError(row.error) : "Chưa đọc được tài khoản"}`;
         }),
-      ].join("\n"));
+      ].join("\n"), new Set(), plan.operationId);
       return;
     }
     let saved;
@@ -120,7 +121,8 @@ export async function readAndAssignTikTokAccounts(targets: DeviceInfo[], deps: D
       saved = await applyAccountReconciliation(plan.operationId);
     } catch (error) {
       // Keep identity visible for ROOT/operator reconciliation after a lost ACK.
-      toastError(`Chưa xác nhận cập nhật · mã thao tác ${plan.operationId}`, error);
+      toastError(`Chưa xác nhận cập nhật · mã thao tác ${plan.operationId}`, error,
+        { cause: "account_reconcile_outcome_unknown", udids: [...reserved], runId: plan.operationId });
       return;
     }
     const confirmedRows = new Map(saved.filter(row => reserved.has(row.udid)).map(row => [row.udid, row]));
@@ -138,7 +140,7 @@ export async function readAndAssignTikTokAccounts(targets: DeviceInfo[], deps: D
     try {
       await deps.refreshMetas();
     } catch (error) { details.push(`Đã lưu nhưng chưa làm mới danh sách: ${describeError(error)}`); }
-    report(`Đã cập nhật thành công ${confirmed.size}/${reserved.size}`, details.join("\n"), confirmed);
+    report(`Đã cập nhật thành công ${confirmed.size}/${reserved.size}`, details.join("\n"), confirmed, plan.operationId);
   } catch (error) { toastError("Đọc/đối soát nick thất bại", error); }
   finally { reserved.forEach(id => accountReads.delete(id)); }
 }

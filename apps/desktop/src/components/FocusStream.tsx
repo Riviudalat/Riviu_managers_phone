@@ -262,10 +262,10 @@ export function FocusStream({
       ),
     );
     if (outcome.kind === "none") {
-      pushToast("error", outcome.title, outcome.detail);
+      pushToast("error", outcome.title, outcome.detail, undefined, outcome.activity);
       return false;
     }
-    if (!quiet) pushToast("warn", outcome.title, outcome.detail);
+    if (!quiet) pushToast("warn", outcome.title, outcome.detail, undefined, outcome.activity);
     return true;
   };
   /// Whether this gesture may go down the scrcpy control socket.
@@ -582,7 +582,7 @@ export function FocusStream({
             })),
           );
           const uncertain = outcomes.filter((row) => row.outcome === "uncertain");
-          if (uncertain.length) pushToast("warn", "Không chắc thao tác đã tới máy", `${uncertain.map(row => row.udid).join(", ")}: không gửi lại tap để tránh thao tác hai lần.`);
+          if (uncertain.length) pushToast("warn", "Không chắc thao tác đã tới máy", `${uncertain.map(row => row.udid).join(", ")}: không gửi lại tap để tránh thao tác hai lần.`, undefined, { cause: "input_outcome_unknown", udids: uncertain.map(row => row.udid) });
           remaining = outcomes
             .filter((row) => row.outcome === "fallback")
             .map((row) => row.udid);
@@ -1082,7 +1082,7 @@ export function FocusStream({
                 // The split, not a single verdict: the phones that ran it live already have
                 // the gesture, and replaying it on them would scroll everything twice.
                 const split = await held.live.end(end.x, end.y, !stationary, stationary ? heldMs >= LONG_PRESS_MS ? LONG_PRESS_MS : MIN_TAP_MS : 0);
-                if (split.uncertain.length) pushToast("warn", "Không chắc thao tác đã tới máy", `${split.uncertain.join(", ")}: không gửi lại để tránh thao tác hai lần.`);
+                if (split.uncertain.length) pushToast("warn", "Không chắc thao tác đã tới máy", `${split.uncertain.join(", ")}: không gửi lại để tránh thao tác hai lần.`, undefined, { cause: "input_outcome_unknown", udids: split.uncertain });
                 if (stationary && heldMs >= LONG_PRESS_MS) {
                   if (split.fallback.length) pushToast("warn", "Không gửi được nhấn giữ", "Máy không có luồng điều khiển trực tiếp; không đổi nhấn giữ thành tap.");
                   return;

@@ -281,6 +281,67 @@
 .activity-center-current-copy { flex: 1; }
 .activity-center-copy p { white-space: pre-wrap; }
 
+/* Grouped causes: the sentence first, actions next, raw codes folded under Chi tiết. */
+.activity-center-copy > .activity-center-group-actions {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: flex-start;
+  gap: var(--space-2);
+  margin-top: var(--space-2);
+}
+
+.activity-center-expand,
+.activity-center-select {
+  min-height: 28px;
+  display: inline-flex;
+  align-items: center;
+  gap: var(--space-1);
+  padding: 0 var(--space-2);
+  border-radius: var(--radius-sm);
+  font-size: var(--text-sm);
+}
+
+.activity-center-copy > .activity-center-select {
+  margin-top: var(--space-2);
+}
+
+.activity-center-facts {
+  margin-top: var(--space-2);
+  color: var(--text-3);
+  font-size: var(--text-xs);
+}
+
+.activity-center-facts summary {
+  width: max-content;
+  cursor: pointer;
+}
+
+.activity-center-facts dl {
+  display: grid;
+  grid-template-columns: max-content minmax(0, 1fr);
+  gap: var(--space-1) var(--space-2);
+  margin: var(--space-1) 0 0;
+  line-height: var(--leading-normal);
+}
+
+.activity-center-facts dd {
+  margin: 0;
+  overflow-wrap: anywhere;
+}
+
+.activity-center-group-records {
+  margin: var(--space-2) 0 0;
+  padding: 0;
+  list-style: none;
+  border: 1px solid var(--line);
+  border-radius: var(--radius-sm);
+}
+
+.activity-center-group-records li {
+  padding: var(--space-3);
+}
+
 /* ——— Confirm dialog · replace window.confirm ——— */
 .confirm-layer {
   position: fixed;

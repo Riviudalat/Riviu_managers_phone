@@ -108,7 +108,8 @@ describe("buildDeviceActions", () => {
     expect(api.applyAccountReconciliation).toHaveBeenCalledExactlyOnceWith("partial");
     expect(toastError).not.toHaveBeenCalled();
     expect(pushToast).toHaveBeenCalledTimes(1);
-    expect(pushToast).toHaveBeenCalledWith("warn", "Đã cập nhật thành công 2/3", expect.stringContaining("1 máy thay đổi · 1 máy đã đúng · 1 máy chưa cập nhật"), "Máy chưa cập nhật: 8");
+    expect(pushToast).toHaveBeenCalledWith("warn", "Đã cập nhật thành công 2/3", expect.stringContaining("1 máy thay đổi · 1 máy đã đúng · 1 máy chưa cập nhật"), "Máy chưa cập nhật: 8",
+      { cause: "account_reconcile_unconfirmed", udids: ["a"], runId: "partial" });
     expect(vi.mocked(pushToast).mock.calls[0][2]).toContain("refresh failed");
   });
 
@@ -126,12 +127,14 @@ describe("buildDeviceActions", () => {
     await readAndAssignTikTokAccounts([device({ udid: "a" })], deps());
     expect(api.applyAccountReconciliation).toHaveBeenCalledTimes(1);
     expect(api.previewAccountReconciliation).toHaveBeenCalledTimes(1);
-    expect(toastError).toHaveBeenCalledWith(expect.stringContaining("op-proof"), expect.any(Error));
+    expect(toastError).toHaveBeenCalledWith(expect.stringContaining("op-proof"), expect.any(Error),
+      { cause: "account_reconcile_outcome_unknown", udids: ["a"], runId: "op-proof" });
   });
   it("uses serial identity for an unassigned number instead of reporting machine zero", async () => {
     vi.mocked(api.applyAccountReconciliation).mockResolvedValue([]);
     await readAndAssignTikTokAccounts([device({ udid: "pending-phone" })], deps({ deviceNumbers: new Map([["pending-phone", 0]]) }));
-    expect(pushToast).toHaveBeenCalledWith("warn", "Đã cập nhật thành công 0/1", expect.stringContaining("pending-phone:"), "Máy chưa cập nhật: -phone");
+    expect(pushToast).toHaveBeenCalledWith("warn", "Đã cập nhật thành công 0/1", expect.stringContaining("pending-phone:"), "Máy chưa cập nhật: -phone",
+      { cause: "account_reconcile_unconfirmed", udids: ["pending-phone"], runId: "op-proof" });
   });
   it("reports a wholly failed read once without attempting an empty apply", async () => {
     vi.mocked(api.previewAccountReconciliation).mockResolvedValueOnce({ operationId: "empty", blocker: null, rows: [
@@ -139,7 +142,8 @@ describe("buildDeviceActions", () => {
     ] });
     await readAndAssignTikTokAccounts([device({ udid: "a" })], deps({ deviceNumbers: new Map([["a", 8]]) }));
     expect(api.applyAccountReconciliation).not.toHaveBeenCalled();
-    expect(pushToast).toHaveBeenCalledExactlyOnceWith("warn", "Đã cập nhật thành công 0/1", expect.stringContaining("Máy 8 (a): offline"), "Máy chưa cập nhật: 8");
+    expect(pushToast).toHaveBeenCalledExactlyOnceWith("warn", "Đã cập nhật thành công 0/1", expect.stringContaining("Máy 8 (a): offline"), "Máy chưa cập nhật: 8",
+      { cause: "account_reconcile_unconfirmed", udids: ["a"], runId: "empty" });
   });
   it("keeps current metadata after a successful rename whose refresh fails", async () => {
     const state = deps();

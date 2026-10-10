@@ -1,7 +1,7 @@
 import { useState } from "react";
 import { setMockLocation, stopMockLocation } from "../../api";
 import { pushToast } from "../../toastStore";
-import { fanOutReached, fanOutReasons } from "../../fanout";
+import { fanOutActivity, fanOutReached, fanOutReasons } from "../../fanout";
 
 export function GpsTool({ targets, scopeLabel }: { targets: string[]; scopeLabel: string }) {
   const [coords, setCoords] = useState("");
@@ -41,6 +41,8 @@ export function GpsTool({ targets, scopeLabel }: { targets: string[]; scopeLabel
         // when it was wrong it hid the sentence the phone actually sent back.
         fanOutReasons(targets, results) ??
           "Máy còn lại cần Riviu helper + quyền mock-location.",
+        undefined,
+        fanOutActivity(targets, results),
       );
   };
 
@@ -61,6 +63,8 @@ export function GpsTool({ targets, scopeLabel }: { targets: string[]; scopeLabel
         "warn",
         `Tắt giả lập vị trí ${ok}/${targets.length} máy`,
         fanOutReasons(targets, results) ?? "Máy còn lại không trả lời.",
+        undefined,
+        fanOutActivity(targets, results),
       );
     }
   };

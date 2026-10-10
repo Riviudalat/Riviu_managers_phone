@@ -1,4 +1,5 @@
-import { describeError } from "./describeError";
+import { describeError, errorFacts } from "./describeError";
+import type { ActivityMeta } from "./toastStore";
 
 /**
  * Why the phones that failed, failed — grouped, named, and in the phone's own words.
@@ -39,6 +40,26 @@ export function fanOutReasons(
   return [...byReason.entries()]
     .map(([reason, named]) => `${named.join(", ")} — ${reason}`)
     .join("\n");
+}
+
+/**
+ * The typed half of a fan-out report: exactly the phones that failed, and their shared code
+ * when they all failed for the same named reason, so Activity can group and select them.
+ */
+export function fanOutActivity(
+  udids: readonly string[],
+  results: readonly PromiseSettledResult<unknown>[],
+): ActivityMeta | undefined {
+  const failed: string[] = [];
+  const codes = new Set<string | undefined>();
+  results.forEach((result, index) => {
+    if (result.status !== "rejected" || !udids[index]) return;
+    failed.push(udids[index]);
+    codes.add(errorFacts(result.reason).code);
+  });
+  if (!failed.length) return undefined;
+  const [code] = codes;
+  return { udids: failed, cause: codes.size === 1 ? code : undefined };
 }
 
 /** How many of a fan-out actually succeeded. */
