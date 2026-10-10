@@ -819,6 +819,120 @@ async fn read_card(
 /// at the end of this grace is cut as before, so the wait stays finite.
 const CARD_READ_GRACE: Duration = Duration::from_millis(11_000);
 
+/// The page-indicator band of a photo post on the global 45.7.3 build: a full-width
+/// `FrameLayout` 180 px tall (child `q9w` holding the dots `q_b`/`q9x`, layout `eb0`) that sits
+/// on the bottom edge of the image, so its height on screen follows the image's aspect ratio.
+/// Measured on 45.7.3 feed dumps (1080×2094 window, Galaxy S8+): [1363,1543]
+/// (`share-deeplink-probe/raw/B2h_photo_url.xml`), [1481,1661]
+/// (`acceptance-20261010/phaseA/riviu43/07-after-7.xml`), and [986,1166] up to [1260,1440]
+/// on others. The usual feed swipe starts at 72 % of that window, y≈1508 ± the planner's
+/// jitter, which is inside the band on a tall image and clear of it on a short one. Box
+/// 31–50 round 8 (10/10/2026) left about half of its paged photo posts and stuck on the
+/// rest with both the flick and the bowed path — `ce011711c354be2005` 14:42:41 and
+/// 14:47:14–14:48:08, `ce031713b064841e0c` 14:41:00, `ce0317139ca344520c` 14:41:18 — while
+/// the same start left every video. The band reports `clickable=false` and the tree does
+/// not say what it does with a drag; it is avoided, not interpreted. The id is an obfuscated
+/// name, so it is bound to [`PHOTO_INDICATOR_BUILD`] the way [`super::ad_card`] binds its own.
+const PHOTO_INDICATOR_ID: &str = ":id/q9t";
+const PHOTO_INDICATOR_BUILD: &str = "45.7.3";
+const PHOTO_INDICATOR_PACKAGE: &str = "com.zhiliaoapp.musically";
+
+/// Evidence bundles of unproven vertical swipes one session may write: one per card, this
+/// many in all. See [`capture_unproven_swipe`].
+const UNPROVEN_SWIPE_EVIDENCE_LIMIT: usize = 3;
+
+/// The visible photo page-indicator bands on `tree`, empty on a build whose band is not
+/// measured.
+fn photo_indicator_bands(
+    tree: &crate::ui_automation::tree::Tree,
+    labels: TikTokControls,
+) -> Vec<ElementBox> {
+    if labels.package() != PHOTO_INDICATOR_PACKAGE
+        || labels.resource_version() != Some(PHOTO_INDICATOR_BUILD)
+    {
+        return Vec::new();
+    }
+    tree.nodes
+        .iter()
+        .enumerate()
+        .filter(|(index, node)| {
+            node.visible(PHOTO_INDICATOR_PACKAGE)
+                && tree.ancestors_visible(*index)
+                && node.attr("resource-id").ends_with(PHOTO_INDICATOR_ID)
+        })
+        .filter_map(|(_, node)| node.rect())
+        .collect()
+}
+
+fn fingerprint_json(card: &PostFingerprint) -> serde_json::Value {
+    serde_json::json!({
+        "author": card.author,
+        "comments": card.comments,
+        "share": card.share,
+        "sound": card.sound,
+    })
+}
+
+/// One redacted evidence bundle for a vertical swipe that is unproven for the second time in
+/// a row, through the popup-artifact path ([`crate::app_automation::popup_evidence`]): the
+/// screen, the hierarchy, and in `meta.json` the swipe's ends, the card before it and the card
+/// read now, the carousel this card had and the photo indicator band. Answers the folder for
+/// the operator line; `None` when nothing was written. Bounded by [`CARD_READ_GRACE`].
+async fn capture_unproven_swipe(
+    run: &HierarchyRun<'_>,
+    before: &PostFingerprint,
+    reads: &CardReads,
+    carousel_pages: Option<u32>,
+    stop: &AtomicBool,
+) -> Option<String> {
+    let deadline = tokio::time::Instant::now() + CARD_READ_GRACE;
+    let snapshot =
+        match read_before_deadline(run.session.hierarchy_source_snapshot(), deadline, stop).await {
+            Ok(ReadWaitResult::Ready(snapshot)) => snapshot,
+            _ => return None,
+        };
+    let tree = crate::ui_automation::tree::Tree::parse(snapshot).ok()?;
+    let after = tree_fingerprint(&tree, run.labels);
+    let bands: Vec<_> = photo_indicator_bands(&tree, run.labels)
+        .iter()
+        .map(|band| {
+            [
+                band.x.round() as i64,
+                band.y.round() as i64,
+                (band.x + band.width).round() as i64,
+                (band.y + band.height).round() as i64,
+            ]
+        })
+        .collect();
+    let detail = serde_json::json!({
+        "screen": [run.screen.0, run.screen.1],
+        "swipe": reads.swipe.map(|[fx, fy, tx, ty]| serde_json::json!({
+            "from": [fx, fy],
+            "to": [tx, ty],
+        })),
+        "gestureCancelled": reads.gesture_cancelled,
+        "fingerprintBefore": fingerprint_json(before),
+        "fingerprintAfter": fingerprint_json(&after),
+        "sameCard": before.same_card_for_duplicate_guard(&after),
+        "carousel": {
+            "ran": carousel_pages.is_some(),
+            "page": carousel_pages,
+        },
+        "photoIndicatorBands": bands,
+    });
+    crate::app_automation::popup_evidence::capture_with(
+        run.session,
+        &tree,
+        run.labels,
+        "nurture-unproven-swipe",
+        "vuốt dọc chưa chứng minh được đổi thẻ hai lần liên tiếp",
+        detail,
+        deadline,
+        stop,
+    )
+    .await
+}
+
 /// What the card reads inside one bounded wait cost, for the unproven-swipe and late-rail
 /// lines, so the windows can be sized from measurement rather than guessed.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
@@ -832,6 +946,9 @@ struct CardReads {
     gesture_cancelled: bool,
     /// What the shared popup step did on that re-read, when it did anything.
     popup: Option<&'static str>,
+    /// The swipe as sent, `[from x, from y, to x, to y]` in screen pixels, for the evidence
+    /// bundle of an unproven swipe.
+    swipe: Option<[i64; 4]>,
 }
 
 impl CardReads {
@@ -1879,6 +1996,64 @@ impl<'a> HierarchyRun<'a> {
         }
     }
 
+    /// The start of the vertical swipe off a photo post: [`Self::feed_swipe_from`] when it is
+    /// clear of the page-indicator band ([`PHOTO_INDICATOR_ID`]), otherwise the clear point
+    /// nearest it in the same column, kept between 50 % and 80 % of the screen like the ad's
+    /// start ([`super::ad_card::swipe_start`], with its 36 px clearance for the planner's
+    /// scatter). On the [1363,1543] band that is y=1580, in the caption, and on [1481,1661]
+    /// it is y=1444, on the image. `None` keeps the usual start: an unmeasured build, a tree
+    /// that could not be read inside [`CARD_READ_GRACE`], or a band with no clear point. The
+    /// line says what happened when the start moved or could not be checked.
+    async fn photo_swipe_from(&self, stop: &AtomicBool) -> (Option<TapPoint>, Option<String>) {
+        if self.labels.package() != PHOTO_INDICATOR_PACKAGE
+            || self.labels.resource_version() != Some(PHOTO_INDICATOR_BUILD)
+        {
+            return (None, None);
+        }
+        let deadline = tokio::time::Instant::now() + CARD_READ_GRACE;
+        let tree =
+            match read_before_deadline(self.session.hierarchy_source_snapshot(), deadline, stop)
+                .await
+            {
+                Ok(ReadWaitResult::Ready(snapshot)) => {
+                    crate::ui_automation::tree::Tree::parse(snapshot).ok()
+                }
+                _ => None,
+            };
+        let Some(tree) = tree else {
+            return (
+                None,
+                Some("bài ảnh: không đọc được dải chấm trang ảnh — vuốt dọc từ điểm thường".into()),
+            );
+        };
+        let bands = photo_indicator_bands(&tree, self.labels);
+        let target = self.feed_swipe_from();
+        let zone = (self.screen.1 * 0.50, self.screen.1 * 0.80);
+        match super::ad_card::swipe_start(&bands, &target, zone) {
+            Some(from) if (from.y - target.y).abs() < 0.5 => (None, None),
+            Some(from) => {
+                let line = format!(
+                    "bài ảnh: vuốt dọc từ y={:.0} thay vì y={:.0} để tránh dải chấm trang ảnh ({})",
+                    from.y,
+                    target.y,
+                    bands
+                        .iter()
+                        .map(|band| format!("y {:.0}–{:.0}", band.y, band.y + band.height))
+                        .collect::<Vec<_>>()
+                        .join(", ")
+                );
+                (Some(from), Some(line))
+            }
+            None => (
+                None,
+                Some(
+                    "bài ảnh: không có điểm trống ngoài dải chấm trang ảnh — vuốt dọc từ điểm thường"
+                        .into(),
+                ),
+            ),
+        }
+    }
+
     /// Swipe to the next post and report whether the change was provable, with what the
     /// card reads that judged it cost.
     ///
@@ -1934,6 +2109,14 @@ impl<'a> HierarchyRun<'a> {
         } else {
             self.planner.plan_swipe(from, to, duration_ms)
         };
+        reads.swipe = path.steps.last().map(|last| {
+            [
+                path.start.x.round() as i64,
+                path.start.y.round() as i64,
+                last.point.x.round() as i64,
+                last.point.y.round() as i64,
+            ]
+        });
         let sent = self.session.swipe_path(path).await;
         // Keep the former settle + arrival budget, but an outgoing, non-empty rail
         // is still a pending transition. Read until the card actually changes. A read still
@@ -3152,6 +3335,11 @@ pub(super) async fn run_feed(
     // 00:10:49–00:12:07) and round 3, 09/10/2026 (`ce0317139ca344520c` 21:39:02): the
     // second pass over a 14- and an 11-image post did exactly that.
     let mut last_paged_card: Option<PostFingerprint> = None;
+    // The pages the carousel traversal reached on `last_paged_card`, for the evidence bundle.
+    let mut last_paged_pages: Option<u32> = None;
+    // Cards an unproven-swipe evidence bundle was attempted for; see
+    // [`UNPROVEN_SWIPE_EVIDENCE_LIMIT`].
+    let mut evidenced_cards: Vec<PostFingerprint> = Vec::new();
     let mut outcome = Outcome::Done;
     // Latched so an operator who switches comments on mid-run is told once why nothing
     // happens, instead of watching a switch that reports nothing at all.
@@ -3980,7 +4168,8 @@ pub(super) async fn run_feed(
             let already_paged = last_paged_card
                 .as_ref()
                 .is_some_and(|paged| paged.same_card_for_duplicate_guard(&before));
-            let slides = if already_paged || still_on_acted_card {
+            let traversed = !(already_paged || still_on_acted_card);
+            let slides = if !traversed {
                 // The card never left (see `last_paged_card`). Its images were paged on an
                 // earlier pass, and paging again would start blind from its last image.
                 if already_paged {
@@ -4073,6 +4262,9 @@ pub(super) async fn run_feed(
             }
             if slides >= 1 && !before.is_empty() {
                 last_paged_card = Some(before.clone());
+                if traversed {
+                    last_paged_pages = Some(slides);
+                }
             }
         }
 
@@ -4185,6 +4377,22 @@ pub(super) async fn run_feed(
             before = fingerprint(run.session, run.labels).await;
         }
 
+        // A photo post is left from a start clear of its page-indicator band: see
+        // [`PHOTO_INDICATOR_ID`]. Every pass on the card, not only the one that paged it — the
+        // bowed swipe of a later pass starts on the same band.
+        let photo_card = sponsored.is_none()
+            && last_paged_card
+                .as_ref()
+                .is_some_and(|paged| paged.same_card_for_duplicate_guard(&before));
+        let photo_from = if photo_card {
+            let (from, line) = run.photo_swipe_from(stop).await;
+            if let Some(line) = line {
+                report(status, line);
+            }
+            from
+        } else {
+            None
+        };
         status.swipe_attempts += 1;
         // **The two `HumanBehavior` pauses this module's own header promises are shared.**
         //
@@ -4208,7 +4416,7 @@ pub(super) async fn run_feed(
                 human.swipe_duration_ms(roll_bool(settings.frenzy_prob)),
                 &before,
                 paged_this_pass || sponsored.is_some(),
-                ad_from,
+                ad_from.or(photo_from),
                 stop,
             )
             .await
@@ -4255,6 +4463,30 @@ pub(super) async fn run_feed(
                     reads.says()
                 ),
             );
+            // The second unproven swipe in a row: keep one bundle of what the phone showed,
+            // once per card and at most [`UNPROVEN_SWIPE_EVIDENCE_LIMIT`] per session. Before
+            // the restart below, which would replace the screen it is about.
+            if stuck_swipes >= 2
+                && !before.is_empty()
+                && evidenced_cards.len() < UNPROVEN_SWIPE_EVIDENCE_LIMIT
+                && !evidenced_cards
+                    .iter()
+                    .any(|card| card.same_card_for_duplicate_guard(&before))
+            {
+                evidenced_cards.push(before.clone());
+                let carousel_pages = if photo_card { last_paged_pages } else { None };
+                match capture_unproven_swipe(&run, &before, &reads, carousel_pages, stop).await {
+                    Some(folder) => report(
+                        status,
+                        format!("đã lưu bằng chứng vuốt chưa chứng minh: popups/{folder}"),
+                    ),
+                    None => report(
+                        status,
+                        "không lưu được bằng chứng vuốt chưa chứng minh (không đọc được màn hình hoặc đã đủ giới hạn)"
+                            .into(),
+                    ),
+                }
+            }
             if stuck_swipes >= STUCK_RESTART_AFTER && !restarted && run.search_keyword.is_none() {
                 // **Restart TikTok once before believing the feed is over.**
                 //

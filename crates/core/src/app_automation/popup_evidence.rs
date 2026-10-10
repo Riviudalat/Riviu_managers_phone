@@ -64,23 +64,49 @@ pub(crate) async fn capture(
     deadline: Instant,
     stop: &AtomicBool,
 ) {
-    let Some(root) = ROOT.get() else {
-        return;
-    };
+    capture_with(
+        session,
+        tree,
+        labels,
+        kind,
+        reason,
+        serde_json::Value::Null,
+        deadline,
+        stop,
+    )
+    .await;
+}
+
+/// [`capture`] with caller facts added to `meta.json` under `detail`, answering the folder
+/// as `<date>/<name>` for the operator line, or `None` when nothing was written.
+#[allow(clippy::too_many_arguments)]
+pub(crate) async fn capture_with(
+    session: &dyn crate::UiSession,
+    tree: &Tree,
+    labels: TikTokControls,
+    kind: &'static str,
+    reason: &str,
+    detail: serde_json::Value,
+    deadline: Instant,
+    stop: &AtomicBool,
+) -> Option<String> {
+    let root = ROOT.get()?;
     if !admit(kind) {
-        return;
+        return None;
     }
     let device = session
         .gui_scope()
         .map(|scope| scope.device_id)
         .unwrap_or_default();
     let now = chrono::Local::now();
-    let directory = root.join(now.format("%Y%m%d").to_string()).join(format!(
+    let day = now.format("%Y%m%d").to_string();
+    let name = format!(
         "{}-{}-{}",
         now.format("%H%M%S%.3f"),
         path_part(kind),
         path_part(&device)
-    ));
+    );
+    let directory = root.join(&day).join(&name);
     let window = deadline.min(Instant::now() + SCREENSHOT_WINDOW);
     let screenshot = match crate::ui_automation::runtime::read_before_deadline(
         session.screenshot_png(),
@@ -104,6 +130,7 @@ pub(crate) async fn capture(
         "sessionEpoch": session.gui_session_epoch(),
         "capturedAt": now.to_rfc3339(),
         "screenshot": screenshot.is_some(),
+        "detail": detail,
     });
     let xml = tree.redacted_xml();
     let written = async {
@@ -118,8 +145,12 @@ pub(crate) async fn capture(
     .await;
     match written {
         Ok(()) => {
-            tracing::info!(kind, path = %directory.display(), "đã lưu bằng chứng popup để rà soát")
+            tracing::info!(kind, path = %directory.display(), "đã lưu bằng chứng popup để rà soát");
+            Some(format!("{day}/{name}"))
         }
-        Err(error) => tracing::warn!(kind, %error, "không lưu được bằng chứng popup"),
+        Err(error) => {
+            tracing::warn!(kind, %error, "không lưu được bằng chứng popup");
+            None
+        }
     }
 }
