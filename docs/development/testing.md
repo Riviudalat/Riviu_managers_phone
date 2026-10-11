@@ -77,6 +77,13 @@ Playwright dùng mock Tauri bridge, cần Chromium đúng version. Screenshot ba
 chỉ thay sau khi xem actual. Vitest không thay typecheck. Lỗi mock/export khác lỗi
 UI thật; timeout khác lỗi assertion. Không tăng timeout hoặc bỏ assertion tùy tiện.
 
+- `playwright.config.ts` cố định cổng 1421 và `reuseExistingServer`, nên khi nhiều
+  worktree chạy song song, Playwright có thể âm thầm test dev server của worktree khác.
+  Mỗi worktree dùng một cổng riêng.
+- Fixture e2e nào ghi đè `google_sheets_status` cũng phải trả lời
+  `google_sheets_verify_readonly`. Nếu không, bước tự kiểm tra read-only biến panel
+  Sheet thành cảnh báo.
+
 ### Python, tooling và docs — tại gốc
 
 ```powershell
