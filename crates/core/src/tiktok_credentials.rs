@@ -139,7 +139,7 @@ fn phone_digits(value: &str) -> Option<String> {
 
 /// The form an operator sees: enough to tell two accounts apart, not enough to reuse.
 ///
-/// `thuc.nhan@gmail.com` → `th***@gmail.com`, `+84901234567` → `+84***567`,
+/// `tran.minh@example.com` → `tr***@example.com`, `+84901234567` → `+84***567`,
 /// `riviu.demo` → `ri***o`.
 pub fn mask_tiktok_identifier(identifier: &str, kind: TikTokIdentifierKind) -> String {
     fn head(value: &str, count: usize) -> String {
@@ -253,9 +253,9 @@ mod tests {
     fn identifiers_are_classified_masked_and_never_echoed_in_errors() {
         let cases = [
             (
-                " thuc.nhan@gmail.com ",
+                " tran.minh@example.com ",
                 TikTokIdentifierKind::Email,
-                "th***@gmail.com",
+                "tr***@example.com",
             ),
             ("ab@x.vn", TikTokIdentifierKind::Email, "a***@x.vn"),
             ("+84 901-234-567", TikTokIdentifierKind::Phone, "+84***567"),
