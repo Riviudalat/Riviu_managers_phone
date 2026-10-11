@@ -955,3 +955,23 @@ button.linkish,
   border: 0 !important;
   opacity: 0 !important;
 }
+
+/* The GenFarmer caption overlays the picture (the tile size never depends on it), so it sizes
+   to its lines instead of the fixed metadata-strip heights above: five lines never overlap. */
+.window-canvas[data-mode="window"] .dev-phone-strip {
+  height: auto;
+  max-height: 100%;
+  justify-content: flex-start;
+}
+.window-canvas[data-mode="window"] .dev-phone-strip > * {
+  flex: none;
+}
+/* A long TikTok name wraps to a second line instead of being cut (owner request). */
+.window-canvas[data-mode="window"] .dev-phone-handle {
+  white-space: normal;
+  overflow-wrap: anywhere;
+  display: -webkit-box;
+  -webkit-line-clamp: 2;
+  -webkit-box-orient: vertical;
+  overflow: hidden;
+}
