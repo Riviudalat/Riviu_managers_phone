@@ -1,5 +1,5 @@
 import { machineNumberLabel } from "../deviceNaming";
-import { useEffect, useMemo, useRef, useState, type ReactElement } from "react";
+import { useEffect, useLayoutEffect, useMemo, useRef, useState, type ReactElement } from "react";
 import { createPortal } from "react-dom";
 import { DeviceContextMenu } from "./DeviceContextMenu";
 import type { DeviceInfo, GroupInputReport, HardwareKey } from "../types";
@@ -110,6 +110,35 @@ interface Props {
 
 /// Below this width the wall keeps no useful room beside a docked phone, so a pinned window floats.
 const DOCK_MIN_VIEWPORT = 900;
+/// The wall keeps at least this much beside a docked phone: two default 96 px "Màn hình nhỏ" tiles,
+/// their gaps and the content's right padding (browser mock, 900×900 with the Cài đặt panel open,
+/// where a 565 px dock left the wall 0 px). With less room a pinned window floats, still pinned.
+const DOCK_MIN_WALL = 240;
+
+/** Where a docked window starts: after the wall row's left panel (`cc-wall-row` in App.tsx). It
+ *  never depends on the dock itself, so docking or floating cannot flip the decision back. */
+function dockStart(dock: HTMLElement): number {
+  const row = dock.parentElement;
+  const before = dock.previousElementSibling;
+  if (!row) return 0;
+  const gap = Number.parseFloat(getComputedStyle(row).columnGap) || 0;
+  return before ? before.getBoundingClientRect().right + gap : row.getBoundingClientRect().left;
+}
+
+function useDockStart(dock: HTMLElement | null): number {
+  const [start, setStart] = useState(() => dock ? dockStart(dock) : 0);
+  useLayoutEffect(() => {
+    if (!dock) return;
+    const measure = () => setStart(dockStart(dock));
+    measure();
+    // The panel folding and the sidebar collapsing move the start; neither resizes the window.
+    const observer = typeof ResizeObserver === "undefined" ? null : new ResizeObserver(measure);
+    if (dock.parentElement) observer?.observe(dock.parentElement);
+    if (dock.previousElementSibling) observer?.observe(dock.previousElementSibling);
+    return () => observer?.disconnect();
+  }, [dock]);
+  return start;
+}
 /// Height above the dock (title bar, wall toolbar, box chips: 209 px) plus a bottom margin, measured
 /// in the 40-phone browser mock at 1920×1080 and 1366×768; a constant, so a toolbar notice never
 /// resizes the docked phone under the pointer.
@@ -150,9 +179,7 @@ export function FocusStream({
   const { closing, close: onClose } = useClosingTransition(onClosed, 180, device.udid);
   const dialogRef = useRef<HTMLDivElement>(null);
   const [viewport, setViewport] = useState(() => ({ width: window.innerWidth, height: window.innerHeight }));
-  const docked = dock !== null && viewport.width >= DOCK_MIN_VIEWPORT;
-  // `docked` re-runs it: pin/unpin remounts the window's DOM, and the pressed button goes with it.
-  useEffect(() => { if (active && document.activeElement !== screenRef.current) dialogRef.current?.focus({ preventScroll: true }); }, [active, docked]);
+  const dockLeft = useDockStart(dock);
   useEffect(() => {
     void viewSetPreset(device.udid, "overlay").catch(error => console.warn("overlay preset refused", error));
     return () => { void viewSetPreset(device.udid, "tile").catch(() => {}); };
@@ -176,6 +203,13 @@ export function FocusStream({
   const [showKeyboards, setShowKeyboards] = useState(false);
   const [frameWidth, setFrameWidth] = useState(() => loadZoom(FOCUS_ZOOM));
   const resizeDrag = useRef<{ x: number; width: number } | null>(null);
+  // The dock's width comes from the size setting and the window, never from the frame: a first
+  // frame, a status change or a landscape frame must not reflow the wall beside it.
+  const dockScreenWidth = focusLayout(0, 0, frameWidth, viewport.width, viewport.height - DOCK_TOP_RESERVE).screenWidth;
+  const dockWidth = dockScreenWidth + 228;
+  const docked = dock !== null && viewport.width >= DOCK_MIN_VIEWPORT && dockLeft + dockWidth + DOCK_MIN_WALL <= viewport.width;
+  // `docked` re-runs it: pin/unpin remounts the window's DOM, and the pressed button goes with it.
+  useEffect(() => { if (active && document.activeElement !== screenRef.current) dialogRef.current?.focus({ preventScroll: true }); }, [active, docked]);
   useEffect(()=>{stageDrag.current=null;stageOffset.current={x:0,y:0};if(stageRef.current)stageRef.current.style.transform="";},[device.udid,viewport.width,viewport.height,docked]);
   useEffect(() => {
     const resized = () => setViewport({ width: window.innerWidth, height: window.innerHeight });
@@ -305,14 +339,10 @@ export function FocusStream({
   const encodedH =
     viewSize?.height && viewSize.height > 0 ? viewSize.height : 0;
   const rawLayout = focusLayout(encodedW, encodedH, frameWidth, viewport.width, docked ? viewport.height - DOCK_TOP_RESERVE : viewport.height);
-  // The dock's width comes from the size setting and the window, never from the frame: a first
-  // frame, a status change or a landscape frame must not reflow the wall beside it. A landscape
-  // frame is letterboxed inside the portrait allocation instead.
-  const dockScreenWidth = focusLayout(0, 0, frameWidth, viewport.width, viewport.height - DOCK_TOP_RESERVE).screenWidth;
+  // A landscape frame is letterboxed inside the dock's portrait allocation.
   const layout = docked && rawLayout.screenWidth > dockScreenWidth
     ? { ...rawLayout, screenWidth: dockScreenWidth, screenHeight: dockScreenWidth * (rawLayout.screenHeight / rawLayout.screenWidth) }
     : rawLayout;
-  const dockWidth = dockScreenWidth + 228;
   useEffect(() => () => {
     // Never finish a gesture using coordinates from a newer orientation/generation
     // or carry a held pointer across a confirmed device disconnect.

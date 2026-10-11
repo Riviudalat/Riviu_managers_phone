@@ -50,7 +50,9 @@ máy, trả phiên cũ trước khi mở phiên mới. Như GenFarmer, cửa s�
 cỡ "Màn hình lớn" và danh sách chức năng nằm cố định bên trái lưới trong Trung tâm (lưới dàn lại
 bên phải); nút ghim/bỏ ghim trên đầu danh sách chức năng chuyển sang cửa sổ nổi kéo được, lựa chọn
 nhớ theo người dùng. Bề rộng ô ghim chỉ theo cỡ màn hình lớn và cửa sổ, không theo trạng thái máy;
-ở trang khác hoặc cửa sổ hẹp hơn 900 px cửa sổ nổi. Menu/confirm vẫn ở trên.
+ở trang khác, cửa sổ hẹp hơn 900 px, hoặc khi ô ghim cộng bảng Cài đặt không còn chừa cho lưới ít
+nhất 240 px (hai ô 96 px), cửa sổ nổi nhưng vẫn giữ trạng thái ghim và ghim lại khi đủ chỗ.
+Menu/confirm vẫn ở trên.
 **Bảng Cài đặt bên trái** (GF1, chép GenFarmer) nằm giữa sidebar và lưới, mở sẵn,
 thu/mở bằng «/» (nhớ theo người dùng; khi thu vẫn giữ trạng thái đang áp dụng): thanh trượt
 **Màn hình lớn**, **Màn hình nhỏ** (cỡ ô, cùng Ctrl + lăn chuột), chất lượng lưới, chất lượng
