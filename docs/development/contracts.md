@@ -733,6 +733,7 @@ này là Đã xác minh; UI không hạ các bài ấy. Ngược lại, bản gh
 trong evidence hoặc account diagnostic khác tài khoản frozen trong effect intent, hoặc tác giả trong
 link khác tài khoản đó) không được hiện là Đã xác minh. Effect intent là nguồn tài khoản chính; so
 handle đã chuẩn hóa (bỏ `@`, khoảng trắng, không phân biệt hoa thường).
+Trong backend, "đã xác minh" là `succeeded` + `post.publicationVerified` + `postUrl` chuẩn. `checkLink.reason = "alreadyVerified"` và `evidence_has_post_link` chỉ kiểm hình dạng link, nên UI không bao giờ coi chúng là bằng chứng.
 
 Lượt mới ghi `verificationContractVersion: 1` và `verificationBuilds` từ preflight.
 `PublishSubmissionProof` bắt buộc tại transaction claim: tài khoản, submittedAt,

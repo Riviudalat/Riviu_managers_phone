@@ -37,6 +37,8 @@ Mọi sửa WDA/iOS phải đọc toàn bộ [WDA safety](agents/02-wda-doc-truo
 6. Reviewer kiểm diff, scenario sai và evidence; main xác minh findings trước sửa.
 7. Cập nhật đúng tài liệu sở hữu hành vi, không chép nhật ký thay đổi vào mọi guide.
 
+Windows không phân biệt hoa thường trong tên file: module `postOutcome.ts` đặt cạnh component `PostOutcome.tsx` làm `tsc` lỗi (TS1149/TS1261). Đặt cho model một tên gốc khác.
+
 ## Cổng theo thay đổi
 
 [Testing matrix và bằng chứng](development/testing.md#cổng-theo-thay-đổi).
