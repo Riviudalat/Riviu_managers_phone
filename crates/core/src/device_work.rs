@@ -111,6 +111,14 @@ impl DeviceWorkCoordinator {
             }
         }
 
+        if metadata.fenced(owner) {
+            return Err(DeviceBusy {
+                udid,
+                requested_owner: owner,
+                current_owner: DeviceWorkOwner::ManualControl,
+            });
+        }
+
         if let Some(current_owner) = metadata.busy_owner() {
             return Err(DeviceBusy {
                 udid,
@@ -155,10 +163,39 @@ impl DeviceWorkCoordinator {
 
         let udid = udid.to_string();
         let device = self.state.device(&udid);
+        loop {
+            // A start fence (a reviewed handoff applying its release plan) is waited out,
+            // never jumped: queueing behind it would hand the phone to new work mid-handoff.
+            loop {
+                let changed = device.changed.notified();
+                tokio::pin!(changed);
+                changed.as_mut().enable();
+                if !device.metadata.lock().fenced(owner) {
+                    break;
+                }
+                changed.await;
+            }
+            if let Some(lease) = self.acquire_unfenced(&udid, &device, owner).await {
+                return Ok(lease);
+            }
+        }
+    }
+
+    /// One queued attempt; `None` when a fence arrived while queued and the phone was given back.
+    async fn acquire_unfenced(
+        &self,
+        udid: &str,
+        device: &Arc<PerDeviceState>,
+        owner: DeviceWorkOwner,
+    ) -> Option<DeviceWorkLease> {
+        let udid = udid.to_string();
         let waiter_id = Uuid::new_v4();
 
         {
             let mut metadata = device.metadata.lock();
+            if metadata.fenced(owner) {
+                return None;
+            }
             if metadata.current.is_none() && metadata.waiters.is_empty() {
                 if let Ok(permit) = device.semaphore.clone().try_acquire_owned() {
                     let token = Uuid::new_v4();
@@ -168,7 +205,7 @@ impl DeviceWorkCoordinator {
                         acquired_at: chrono::Utc::now(),
                     });
                     drop(metadata);
-                    return Ok(DeviceWorkLease {
+                    return Some(DeviceWorkLease {
                         udid,
                         owner,
                         token,
@@ -201,15 +238,22 @@ impl DeviceWorkCoordinator {
         let token = Uuid::new_v4();
         let mut metadata = device.metadata.lock();
         metadata.remove_waiter(waiter_id);
+        registration.armed = false;
+        if metadata.fenced(owner) {
+            // The phone came free during a handoff: give it back and wait the fence out.
+            drop(permit);
+            drop(metadata);
+            device.changed.notify_waiters();
+            return None;
+        }
         metadata.current = Some(CurrentWork {
             owner,
             token,
             acquired_at: chrono::Utc::now(),
         });
-        registration.armed = false;
         drop(metadata);
 
-        Ok(DeviceWorkLease {
+        Some(DeviceWorkLease {
             udid,
             owner,
             token,
@@ -277,6 +321,23 @@ impl DeviceWorkCoordinator {
         DeviceIdleWorkDeferral { devices, token }
     }
 
+    /// Fence new work on exactly these phones while a reviewed handoff validates and applies
+    /// its release plan (PLAN §3). Until the guard drops, only `ManualControl` (the handoff's own
+    /// close and the operator's direct taps) may acquire; every other owner is refused or waits.
+    /// Existing leases are untouched and drain normally.
+    pub fn fence_new_work(&self, udids: &[String]) -> DeviceWorkFence {
+        let token = Uuid::new_v4();
+        let devices = udids
+            .iter()
+            .map(|udid| {
+                let device = self.state.device(udid);
+                device.metadata.lock().start_fences.push(token);
+                device
+            })
+            .collect();
+        DeviceWorkFence { devices, token }
+    }
+
     pub fn idle_work_deferred(&self, udid: &str) -> bool {
         self.state
             .existing_device(udid)
@@ -327,6 +388,25 @@ pub struct DeviceWorkLease {
 pub struct DeviceIdleWorkDeferral {
     devices: Vec<Arc<PerDeviceState>>,
     token: Uuid,
+}
+
+/// A start fence from [`DeviceWorkCoordinator::fence_new_work`]; dropping it lets waiters in.
+pub struct DeviceWorkFence {
+    devices: Vec<Arc<PerDeviceState>>,
+    token: Uuid,
+}
+
+impl Drop for DeviceWorkFence {
+    fn drop(&mut self) {
+        for device in &self.devices {
+            device
+                .metadata
+                .lock()
+                .start_fences
+                .retain(|token| *token != self.token);
+            device.changed.notify_waiters();
+        }
+    }
 }
 
 impl Drop for DeviceIdleWorkDeferral {
@@ -426,9 +506,14 @@ struct DeviceMetadata {
     current: Option<CurrentWork>,
     waiters: VecDeque<WaitingWork>,
     idle_deferrals: Vec<CurrentWork>,
+    start_fences: Vec<Uuid>,
 }
 
 impl DeviceMetadata {
+    fn fenced(&self, owner: DeviceWorkOwner) -> bool {
+        !self.start_fences.is_empty() && owner != DeviceWorkOwner::ManualControl
+    }
+
     fn busy_owner(&self) -> Option<DeviceWorkOwner> {
         self.current
             .map(|work| work.owner)
@@ -611,6 +696,34 @@ mod tests {
             .expect("nurture should be second")
             .expect("nurture may queue");
         assert_eq!(nurture_lease.owner(), DeviceWorkOwner::Nurture);
+
+        // A reviewed handoff fences new work while it applies its release plan (PLAN §3,
+        // review R2-F1): a queued run freed by the release does not get the phone, a new
+        // start is refused, and only the handoff's own close (ManualControl) may acquire.
+        let mut queued = Box::pin(coordinator.acquire("iphone-a", DeviceWorkOwner::Script));
+        assert!(timeout(QUICK_WAIT, queued.as_mut()).await.is_err());
+        let fence = coordinator.fence_new_work(&["iphone-a".into()]);
+        drop(nurture_lease);
+        assert!(
+            timeout(QUICK_WAIT, queued.as_mut()).await.is_err(),
+            "a waiter freed during the handoff gives the phone back"
+        );
+        assert!(coordinator
+            .try_acquire("iphone-a", DeviceWorkOwner::Interaction)
+            .is_err());
+        assert!(coordinator
+            .try_acquire("other", DeviceWorkOwner::Interaction)
+            .is_ok());
+        let close = coordinator
+            .try_acquire("iphone-a", DeviceWorkOwner::ManualControl)
+            .expect("the handoff's close passes its own fence");
+        drop(close);
+        drop(fence);
+        let resumed = timeout(TEST_TIMEOUT, queued.as_mut())
+            .await
+            .expect("the waiter resumes once the fence drops")
+            .expect("script may queue");
+        assert_eq!(resumed.owner(), DeviceWorkOwner::Script);
     }
 
     #[tokio::test]

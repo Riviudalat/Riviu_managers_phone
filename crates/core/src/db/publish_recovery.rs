@@ -704,6 +704,59 @@ mod tests {
         assert!(db
             .reserve_publish_step_retry(&job.assignment_id, &run.token, "timeout")
             .is_err());
+
+        // Review R2-F2: the approval must hold from admission to the effect itself.
+        let (fx, _, fx_campaign, _) = fixture();
+        let fx_run = fx.claim_publish_pipeline(&fx_campaign).unwrap().unwrap();
+        let mut jobs = fx.pending_publish_dispatch(10).unwrap();
+        let admitted = jobs.remove(0);
+        fx.init_publish_recovery(&admitted.assignment_id, &fx_run.token)
+            .unwrap();
+        assert!(fx.admit_publish_reconnect(&admitted, true, 1000).unwrap());
+        assert!(fx.claim_publish_dispatch(&admitted, 0).unwrap());
+        // After admission returned, this phone's step is running: its account cannot change.
+        let edit = fx
+            .set_device_handle(&admitted.udid, "", "other.account")
+            .unwrap_err();
+        assert!(
+            edit.to_string().contains("đang chạy một bước đăng bài"),
+            "{edit:#}"
+        );
+        // With the lease held and nothing changed, the effect is admitted.
+        assert!(fx
+            .admit_publish_effect(&admitted.assignment_id)
+            .unwrap()
+            .is_ok());
+        // A sibling's account changes after the claim: the next effect admission refuses the
+        // whole remaining set, terminally, before any transfer or app session; the waiting
+        // sibling's job ends and its row needs review.
+        let sibling = jobs[0].clone();
+        fx.set_device_handle(&sibling.udid, "", "sibling.changed")
+            .unwrap();
+        let refusal = fx
+            .admit_publish_effect(&admitted.assignment_id)
+            .unwrap()
+            .unwrap_err();
+        assert_eq!(refusal.kind, FailureKind::Terminal);
+        assert!(
+            refusal
+                .message
+                .contains(&format!("{}: tài khoản đã đổi", sibling.udid)),
+            "{}",
+            refusal.message
+        );
+        let conn = fx.conn().unwrap();
+        let (job_state, row_state): (String, String) = conn
+            .query_row(
+                "SELECT j.state,a.state FROM publish_dispatch_jobs j JOIN publish_assignments a ON a.id=j.assignment_id WHERE j.assignment_id=?1",
+                [&sibling.assignment_id],
+                |r| Ok((r.get(0)?, r.get(1)?)),
+            )
+            .unwrap();
+        assert_eq!(
+            (job_state.as_str(), row_state.as_str()),
+            ("finished", "failed_before_dispatch")
+        );
     }
     #[test]
     fn retries_rotate_attempt_identity_and_old_worker_cannot_settle_new_attempt() {

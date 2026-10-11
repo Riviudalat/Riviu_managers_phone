@@ -93,13 +93,17 @@ impl Database {
                     .all(|c| c.is_ascii_alphanumeric() || matches!(c, b'_' | b'.')),
             "observed interaction account invalid"
         );
-        let changed=self.conn()?.execute("INSERT INTO device_meta(udid,handle) VALUES(?1,?2)
+        let mut conn = self.conn()?;
+        let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
+        super::fleet::ensure_account_edit_allowed(&tx, udid, handle)?;
+        let changed=tx.execute("INSERT INTO device_meta(udid,handle) VALUES(?1,?2)
             ON CONFLICT(udid) DO UPDATE SET handle=excluded.handle
             WHERE trim(device_meta.handle)='' OR lower(ltrim(trim(device_meta.handle),'@'))=lower(excluded.handle)",params![udid,handle])?;
         anyhow::ensure!(
             changed == 1,
             "Tài khoản quan sát khác nick đã gán; giữ nguyên metadata"
         );
+        tx.commit()?;
         Ok(())
     }
     pub fn defer_parent_recheck(&self, assignment: &str, now: i64) -> anyhow::Result<bool> {

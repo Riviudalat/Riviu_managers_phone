@@ -163,6 +163,12 @@ impl Runtime {
         // The transfer lease is dropped before the same phone enters its composer.
         let result=async {
             anyhow::ensure!(self.db.publish_pipeline_current(&self.run)? && !self.db.publish_assignment_excluded(&a.id)?,"pipeline stopped before device transfer");
+            // Effect admission (PLAN §3, review R2-F2): with the lease held, after every wait and
+            // before load sampling, transfer or import, the approval must still match every
+            // remaining phone. A refusal is terminal and settles the rest review-required.
+            if let Err(refusal) = self.db.admit_publish_effect(&a.id)? {
+                return Err(refusal.into());
+            }
             // Load admission before any byte reaches the phone; a refusal settles below as
             // `device_overloaded` before dispatch.
             self.control.ensure_load_admissible(&context,None).await?;

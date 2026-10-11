@@ -84,6 +84,93 @@ impl Database {
         Ok(())
     }
 
+    /// Effect admission (PLAN §3, review R2-F2). Called with the device lease held and after
+    /// every capacity wait, immediately before the first transfer, app-session or composer
+    /// effect. One short transaction compares the frozen approval with the current account of
+    /// every phone in this campaign that has not crossed the effect boundary; nothing is held
+    /// across device I/O. A passing admission stays valid for the running step because
+    /// account edits on a phone with a running publish step are refused
+    /// (`ensure_account_edit_allowed`). On any change the whole remaining pre-dispatch set is
+    /// settled review-required and the caller gets a terminal refusal, so the old approval is
+    /// never retried. A row already past the effect boundary only reconciles and is admitted.
+    pub fn admit_publish_effect(
+        &self,
+        assignment_id: &str,
+    ) -> anyhow::Result<Result<(), crate::publish_recovery::RecoveryFailure>> {
+        let mut conn = self.conn()?;
+        let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
+        let (campaign_id, raw, intent): (String, String, Option<String>) = tx.query_row(
+            "SELECT a.campaign_id,c.request_json,a.effect_intent FROM publish_assignments a
+             JOIN publish_campaigns c ON c.id=a.campaign_id WHERE a.id=?1",
+            [assignment_id],
+            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+        )?;
+        if intent.is_some() {
+            return Ok(Ok(()));
+        }
+        let request: crate::PublishCampaignRequest = serde_json::from_str(&raw)?;
+        let remaining = {
+            let mut statement = tx.prepare(
+                "SELECT a.udid,COALESCE((SELECT handle FROM device_meta WHERE udid=a.udid),'')
+                 FROM publish_assignments a WHERE a.campaign_id=?1 AND a.effect_intent IS NULL
+                 AND a.state NOT IN ('cancelled','missed','succeeded','uncertain','verifying')
+                 ORDER BY a.ordinal",
+            )?;
+            let rows = statement
+                .query_map([&campaign_id], |row| {
+                    Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
+                })?
+                .collect::<Result<Vec<_>, _>>()?;
+            rows
+        };
+        let refusals: Vec<String> = if request.approval.is_none() {
+            crate::publish::publish_approval_refusal(&request, "", "")
+                .into_iter()
+                .collect()
+        } else {
+            remaining
+                .iter()
+                .filter_map(|(udid, handle)| {
+                    crate::publish::publish_approval_refusal(&request, udid, handle)
+                })
+                .collect()
+        };
+        if refusals.is_empty() {
+            tx.commit()?;
+            return Ok(Ok(()));
+        }
+        let message = format!("publish_approval_changed: {}", refusals.join("; "));
+        let now = Utc::now();
+        // Siblings waiting for their own step stop here too: queued jobs finish, recovery
+        // records fail, rows become failed_before_dispatch. This assignment is settled by the
+        // caller's terminal failure; rows past the effect boundary are untouched.
+        tx.execute(
+            "UPDATE publish_dispatch_jobs SET state='finished',reason='publish_approval_changed',
+             finished_at_ms=?2,revision=revision+1 WHERE state='queued' AND assignment_id<>?3 AND assignment_id IN
+             (SELECT id FROM publish_assignments WHERE campaign_id=?1 AND effect_intent IS NULL)",
+            params![campaign_id, now.timestamp_millis(), assignment_id],
+        )?;
+        tx.execute(
+            "UPDATE publish_recovery_state SET payload=json_set(payload,'$.state','failed','$.lastError',?2,
+             '$.nextRetryAt',NULL,'$.reconnectDeadline',NULL) WHERE assignment_id<>?3 AND assignment_id IN
+             (SELECT id FROM publish_assignments WHERE campaign_id=?1 AND effect_intent IS NULL
+              AND state IN ('queued','scheduled','ready','imported','failed_before_dispatch'))",
+            params![campaign_id, message, assignment_id],
+        )?;
+        tx.execute(
+            "UPDATE publish_assignments SET state='failed_before_dispatch',error_code=?2,revision=revision+1,updated_at=?3
+             WHERE campaign_id=?1 AND id<>?4 AND effect_intent IS NULL
+             AND state IN ('queued','scheduled','ready','imported','failed_before_dispatch')",
+            params![campaign_id, message, now.to_rfc3339(), assignment_id],
+        )?;
+        tx.commit()?;
+        Ok(Err(crate::publish_recovery::RecoveryFailure::new(
+            "publish_approval_changed",
+            crate::publish_recovery::FailureKind::Terminal,
+            message,
+        )))
+    }
+
     pub fn claim_publish_pipeline(
         &self,
         campaign_id: &str,

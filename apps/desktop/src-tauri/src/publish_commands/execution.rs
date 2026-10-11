@@ -524,33 +524,26 @@ pub async fn publish_create_campaign(
 /// Step 3 of the start check order: the approval the operator reviewed must still be current
 /// before this request changes any owner (PLAN §3).
 ///
-/// Read-only: the plain preflight builder (no helper reconciliation), allowed to reuse the
-/// device evidence the review just read, compared with the approved digest; and, when the
-/// request will release phones, every holder observed now must be one the review listed. A
-/// mismatch settles the start as a refusal with no owner touched. The fresh post-release
-/// preflight further down stays the authority for readiness and the final digest.
+/// Read-only: the plain preflight builder (no helper reconciliation) on fresh device evidence,
+/// compared with the approved digest; and, when the request will release phones, every holder
+/// observed now must be one the review listed. A mismatch settles the start as a refusal with
+/// no owner touched. This is an early refusal only: the release itself re-checks the exact
+/// plan under a start fence (`prepare_publish_devices`), and the fresh post-release preflight
+/// further down stays the authority for readiness and the final digest.
 async fn require_approval_before_effects(
     state: &AppState,
     request: &riviu_core::PublishPreflightRequest,
     approved_input_digest: &str,
     approved_release: Option<&[String]>,
 ) -> Result<(), CommandError> {
-    let (request_id, preparation_id) = preparation::CONTEXT
-        .try_with(|context| (context.request_id.clone(), context.preparation_id.clone()))
-        .unwrap_or_else(|_| (Uuid::new_v4().to_string(), Uuid::new_v4().to_string()));
-    let context = preparation::PreparationContext::new(
-        state.events.clone(),
-        request_id,
-        preparation_id,
-        false,
-    );
-    let current = preparation::CONTEXT
-        .scope(
-            context,
-            build_publish_preflight(&state.control, &state.registry, &state.db, request.clone()),
-        )
-        .await
-        .map_err(err)?;
+    // Fresh evidence (review R2-F1): Start's own context re-probes the build, storage and
+    // account rather than reusing the review's cached device metadata, so a build or storage
+    // change refuses here, before any owner is touched. Readiness of a held phone is not part
+    // of the digest, so an old hold that will be released does not count as a mismatch.
+    let current =
+        build_publish_preflight(&state.control, &state.registry, &state.db, request.clone())
+            .await
+            .map_err(err)?;
     require_current_preflight_digest(&current.report, approved_input_digest).map_err(err)?;
     if let Some(approved) = approved_release {
         let needs = crate::commands::observe_release_needs(state, &request.udids)?;
@@ -2870,13 +2863,23 @@ async fn post_one_assignment_owned(
     };
     let progress = |step| record_progress(db, campaign_id, &assignment.id, step);
     progress(PublishProgress::OpeningApp);
-    let context = match open_publish_context_until(control, &assignment.udid, || {
-        run.is_some_and(|r| !db.publish_pipeline_current(r).unwrap_or(false))
-            || db
-                .publish_campaign_state(campaign_id)
-                .map(|s| matches!(s, Some(riviu_core::PublishCampaignState::Cancelled)))
-                .unwrap_or(true)
-    })
+    let context = match open_publish_context_until(
+        control,
+        &assignment.udid,
+        || {
+            run.is_some_and(|r| !db.publish_pipeline_current(r).unwrap_or(false))
+                || db
+                    .publish_campaign_state(campaign_id)
+                    .map(|s| matches!(s, Some(riviu_core::PublishCampaignState::Cancelled)))
+                    .unwrap_or(true)
+        },
+        // Effect admission (PLAN §3, review R2-F2): checked with the lease held and after the
+        // UI-capacity wait, before TikTok is stopped or started on the phone.
+        || {
+            db.admit_publish_effect(&assignment.id)?
+                .map_err(anyhow::Error::new)
+        },
+    )
     .await
     {
         Ok(context) => context,
@@ -2892,7 +2895,11 @@ async fn post_one_assignment_owned(
             // A lock screen in front of TikTok is a typed, retryable pre-Post reason
             // (`device_screen_locked`), not the generic `post_refused_before_dispatch`.
             // Nothing reached the composer, so retrying the same phone after unlock is safe.
-            attempt.recovery_failure = screen_locked_failure(&error);
+            // A stale approval is a typed terminal refusal and must reach settlement as one.
+            attempt.recovery_failure = error
+                .downcast_ref::<riviu_core::publish_recovery::RecoveryFailure>()
+                .cloned()
+                .or_else(|| screen_locked_failure(&error));
             return attempt;
         }
     };
@@ -3423,13 +3430,14 @@ pub(crate) async fn open_publish_context(
     control: &DeviceControlPlane,
     udid: &str,
 ) -> anyhow::Result<riviu_core::UiWithStreamContext> {
-    open_publish_context_until(control, udid, || false).await
+    open_publish_context_until(control, udid, || false, || Ok(())).await
 }
 
 async fn open_publish_context_until(
     control: &DeviceControlPlane,
     udid: &str,
     cancelled: impl Fn() -> bool + Send,
+    admit: impl FnOnce() -> anyhow::Result<()> + Send,
 ) -> anyhow::Result<riviu_core::UiWithStreamContext> {
     let exclusive = control
         .acquire_exclusive(udid, DeviceWorkOwner::Script)
@@ -3441,6 +3449,9 @@ async fn open_publish_context_until(
         })
         .await
         .map_err(anyhow::Error::new)?;
+    // The last wait is over and the lease is held: admit the effect now, before the app is
+    // touched. Dropping the lease and capacity on refusal leaves the phone as it was.
+    admit()?;
     // TikTok restores its last composer/gallery screen when launched with
     // kill_existing=false. Publish needs a deterministic feed entry point, so
     // terminate only the target bundle while the exclusive lease is held;

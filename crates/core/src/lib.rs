@@ -87,8 +87,8 @@ pub use device_control::{
     UiCapacityReservation, UiSessionContext, UiWithStreamContext,
 };
 pub use device_work::{
-    DeviceBusy, DeviceIdleWorkDeferral, DeviceWorkAcquireError, DeviceWorkCoordinator, DeviceWorkLease, DeviceWorkOwner,
-    DeviceWorkTokenError,
+    DeviceBusy, DeviceIdleWorkDeferral, DeviceWorkAcquireError, DeviceWorkCoordinator,
+    DeviceWorkFence, DeviceWorkLease, DeviceWorkOwner, DeviceWorkTokenError,
 };
 pub use driver::{
     ui_error_kind, AppProcessState, DeviceDriver, ElementBox, ElementQuery,

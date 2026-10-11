@@ -700,7 +700,19 @@ struct NurtureRuntimeInner {
 
 struct NurtureRuns {
     accepting_starts: bool,
-    stops: HashMap<String, Arc<AtomicBool>>,
+    /// Per phone: the run holding it and that run's stop flag.
+    stops: HashMap<String, (uuid::Uuid, Arc<AtomicBool>)>,
+}
+
+/// What an exact-run stop found (PLAN §3, review R2-F1).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum NurtureRunStop {
+    /// The reviewed run was still the phone's run and is now asked to stop.
+    Stopped,
+    /// No run holds the phone any more; nothing to stop.
+    Gone,
+    /// A different, unreviewed run holds the phone; it was left running.
+    Replaced,
 }
 
 impl NurtureRuntime {
@@ -774,13 +786,26 @@ impl NurtureRuntime {
     }
 
     pub fn stop(&self, udid: &str) {
-        if let Some(flag) = self.inner.runs.lock().stops.get(udid) {
+        if let Some((_, flag)) = self.inner.runs.lock().stops.get(udid) {
             flag.store(true, Ordering::Relaxed);
         }
     }
 
+    /// Stop exactly `run` on this phone. The run is compared under the runs lock, so a newer
+    /// run that replaced the reviewed one is never stopped by a handoff that reviewed the old.
+    pub fn stop_run(&self, udid: &str, run: uuid::Uuid) -> NurtureRunStop {
+        match self.inner.runs.lock().stops.get(udid) {
+            None => NurtureRunStop::Gone,
+            Some((current, flag)) if *current == run => {
+                flag.store(true, Ordering::Relaxed);
+                NurtureRunStop::Stopped
+            }
+            Some(_) => NurtureRunStop::Replaced,
+        }
+    }
+
     pub fn stop_all(&self) {
-        for flag in self.inner.runs.lock().stops.values() {
+        for (_, flag) in self.inner.runs.lock().stops.values() {
             flag.store(true, Ordering::Relaxed);
         }
     }
@@ -788,18 +813,18 @@ impl NurtureRuntime {
     pub fn begin_shutdown(&self) {
         let mut runs = self.inner.runs.lock();
         runs.accepting_starts = false;
-        for flag in runs.stops.values() {
+        for (_, flag) in runs.stops.values() {
             flag.store(true, Ordering::Relaxed);
         }
     }
 
-    fn reserve_start(&self, udid: &str) -> Option<Arc<AtomicBool>> {
+    fn reserve_start(&self, udid: &str, run: uuid::Uuid) -> Option<Arc<AtomicBool>> {
         let mut runs = self.inner.runs.lock();
         if !runs.accepting_starts || runs.stops.contains_key(udid) {
             return None;
         }
         let stop = Arc::new(AtomicBool::new(false));
-        runs.stops.insert(udid.to_string(), stop.clone());
+        runs.stops.insert(udid.to_string(), (run, stop.clone()));
         Some(stop)
     }
 
@@ -808,7 +833,7 @@ impl NurtureRuntime {
         if runs
             .stops
             .get(udid)
-            .is_some_and(|current| Arc::ptr_eq(current, stop))
+            .is_some_and(|(_, current)| Arc::ptr_eq(current, stop))
         {
             runs.stops.remove(udid);
         }
@@ -862,7 +887,7 @@ impl NurtureRuntime {
         });
         let reservations = udids
             .iter()
-            .map(|udid| (udid.clone(), self.reserve_start(udid)))
+            .map(|udid| (udid.clone(), self.reserve_start(udid, run_id)))
             .collect::<Vec<_>>();
         let initial_statuses = reservations
             .iter()
@@ -1026,6 +1051,7 @@ mod tests {
     #[test]
     fn concurrent_starts_reserve_exactly_one_stop_token_per_device() {
         let runtime = NurtureRuntime::new();
+        let reviewed_run = uuid::Uuid::new_v4();
         let barrier = Arc::new(std::sync::Barrier::new(3));
         let mut workers = Vec::new();
         for _ in 0..2 {
@@ -1033,7 +1059,7 @@ mod tests {
             let barrier = barrier.clone();
             workers.push(std::thread::spawn(move || {
                 barrier.wait();
-                runtime.reserve_start("same-device")
+                runtime.reserve_start("same-device", reviewed_run)
             }));
         }
         barrier.wait();
@@ -1056,7 +1082,9 @@ mod tests {
             ..NurtureSessionStatus::new("same-device")
         };
         runtime.store_live_status(active.clone());
-        let sibling = runtime.reserve_start("sibling").expect("sibling token");
+        let sibling = runtime
+            .reserve_start("sibling", active_run)
+            .expect("sibling token");
         runtime.store_live_status(NurtureSessionStatus {
             running: true,
             run_id: Some(active_run),
@@ -1084,8 +1112,22 @@ mod tests {
                 .running
         );
 
-        runtime.stop("same-device");
+        // A handoff stops only the run it reviewed (review R2-F1): another run id on the
+        // same phone is reported as a replacement and left running.
         let owner_stop = reservations.iter().flatten().next().unwrap();
+        assert_eq!(
+            runtime.stop_run("same-device", uuid::Uuid::new_v4()),
+            NurtureRunStop::Replaced
+        );
+        assert!(!owner_stop.load(Ordering::Relaxed));
+        assert_eq!(
+            runtime.stop_run("absent", reviewed_run),
+            NurtureRunStop::Gone
+        );
+        assert_eq!(
+            runtime.stop_run("same-device", reviewed_run),
+            NurtureRunStop::Stopped
+        );
         assert!(owner_stop.load(Ordering::Relaxed));
         assert!(!sibling.load(Ordering::Relaxed));
         let mut finished = active;
@@ -1100,18 +1142,24 @@ mod tests {
                 .running
         );
         runtime.finish_start("same-device", owner_stop);
-        assert!(runtime.reserve_start("same-device").is_some());
+        assert!(runtime
+            .reserve_start("same-device", uuid::Uuid::new_v4())
+            .is_some());
     }
 
     #[test]
     fn shutdown_atomically_blocks_new_starts_and_signals_existing_tokens() {
         let runtime = NurtureRuntime::new();
-        let active = runtime.reserve_start("active").expect("active token");
+        let active = runtime
+            .reserve_start("active", uuid::Uuid::new_v4())
+            .expect("active token");
 
         runtime.begin_shutdown();
 
         assert!(active.load(Ordering::Relaxed));
-        assert!(runtime.reserve_start("late").is_none());
+        assert!(runtime
+            .reserve_start("late", uuid::Uuid::new_v4())
+            .is_none());
     }
 
     #[test]

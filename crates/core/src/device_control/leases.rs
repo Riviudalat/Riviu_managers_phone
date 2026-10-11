@@ -19,6 +19,12 @@ impl DeviceControlPlane {
         self.work.idle_work_deferred(udid)
     }
 
+    /// See [`DeviceWorkCoordinator::fence_new_work`]: no new work starts on these phones
+    /// while a reviewed handoff applies its release plan.
+    pub fn fence_new_work(&self, udids: &[String]) -> crate::DeviceWorkFence {
+        self.work.fence_new_work(udids)
+    }
+
     pub async fn try_acquire_exclusive(
         &self,
         udid: &str,

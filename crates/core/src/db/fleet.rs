@@ -353,6 +353,7 @@ impl Database {
                 if item.expected_handle == item.observed_handle {
                     continue;
                 }
+                ensure_account_edit_allowed(&tx, &item.udid, &item.observed_handle)?;
                 tx.execute("INSERT INTO device_meta(udid,handle) VALUES(?1,?2) ON CONFLICT(udid) DO UPDATE SET handle=excluded.handle",
                     params![item.udid, item.observed_handle])?;
             }
@@ -412,8 +413,12 @@ impl Database {
     }
 
     pub fn upsert_device_meta(&self, meta: &crate::types::DeviceMeta) -> anyhow::Result<()> {
-        let conn = self.conn()?;
-        write_device_meta(&conn, meta)
+        let mut conn = self.conn()?;
+        // The account-edit fence and the write must see the same state.
+        let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
+        write_device_meta(&tx, meta)?;
+        tx.commit()?;
+        Ok(())
     }
 
     pub fn patch_device_meta(
@@ -515,6 +520,7 @@ impl Database {
                 .into());
             }
         }
+        ensure_account_edit_allowed(&tx, udid, handle)?;
         tx.execute("INSERT INTO device_meta(udid,handle) VALUES(?1,?2) ON CONFLICT(udid) DO UPDATE SET handle=excluded.handle",params![udid,handle])?;
         tx.commit()?;
         Ok(handle.to_string())
@@ -588,7 +594,41 @@ impl Database {
     }
 }
 
+/// A phone whose publish step is running keeps the account that step was admitted under
+/// (PLAN §3, review R2-F2): `admit_publish_effect` checks the approval with the device lease
+/// held, and this refusal keeps that check true until the step ends. Writing the same account
+/// (any spelling) is not a change and always passes. Call inside the writer's transaction.
+pub(crate) fn ensure_account_edit_allowed(
+    conn: &Connection,
+    udid: &str,
+    handle: &str,
+) -> anyhow::Result<()> {
+    let current: String = conn.query_row(
+        "SELECT COALESCE((SELECT handle FROM device_meta WHERE udid=?1),'')",
+        [udid],
+        |row| row.get(0),
+    )?;
+    if crate::publish::normalize_publish_account(&current)
+        == crate::publish::normalize_publish_account(handle)
+    {
+        return Ok(());
+    }
+    let running: bool = conn.query_row(
+        "SELECT EXISTS(SELECT 1 FROM publish_dispatch_jobs j JOIN publish_assignments a ON a.id=j.assignment_id
+                       WHERE a.udid=?1 AND j.state='running')
+             OR EXISTS(SELECT 1 FROM publish_work_claims WHERE udid=?1)",
+        [udid],
+        |row| row.get(0),
+    )?;
+    anyhow::ensure!(
+        !running,
+        "{udid}: máy đang chạy một bước đăng bài; đổi tài khoản sau khi bước này xong"
+    );
+    Ok(())
+}
+
 fn write_device_meta(conn: &Connection, meta: &crate::DeviceMeta) -> anyhow::Result<()> {
+    ensure_account_edit_allowed(conn, &meta.udid, &meta.handle)?;
     conn.execute(
         r#"INSERT INTO device_meta (udid, notes, tags_json, group_id, handle, alias, number)
                VALUES (?1,?2,?3,?4,?5,?6,?7)

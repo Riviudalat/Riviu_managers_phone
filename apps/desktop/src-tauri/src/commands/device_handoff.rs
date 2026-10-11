@@ -101,9 +101,36 @@ pub(crate) fn observe_release_needs(
     state: &AppState,
     udids: &[String],
 ) -> Result<Vec<NeedsRelease>, CommandError> {
+    Ok(observe_release_plan(state, udids)?.needs)
+}
+
+/// One frozen observation of what a confirmed handoff may stop (PLAN §3, review R2-F1).
+///
+/// The rows the operator reviews and the exact items a handoff stops come from the same
+/// enumeration, so each stop is backed by a reviewed envelope: an operation by id, a Nuôi
+/// run by run id, a publish assignment by its revision. A handoff builds it once under the
+/// start fence and applies exactly it; nothing found later is added.
+pub(crate) struct ReleasePlan {
+    pub(crate) needs: Vec<NeedsRelease>,
+    /// Non-splittable operations wholly inside the selection, with their device scope.
+    operations: Vec<(String, HashSet<String>)>,
+    /// Publish assignments to exclude: (phone, assignment, revision observed and approved).
+    assignments: Vec<(String, String, i64)>,
+    /// Exact Nuôi runs to stop: (phone, run id).
+    nurture: Vec<(String, uuid::Uuid)>,
+}
+
+pub(crate) fn observe_release_plan(
+    state: &AppState,
+    udids: &[String],
+) -> Result<ReleasePlan, CommandError> {
     let selected: HashSet<_> = udids.iter().cloned().collect();
     let mut needs = Vec::new();
     let mut covered = HashSet::new();
+    let mut operations = Vec::new();
+    let mut nurture = Vec::new();
+    // Publish rows get their envelope once the exact assignments are known: (row, phone, campaign).
+    let mut publish_rows: Vec<(usize, String, String)> = Vec::new();
     let mut ids: HashSet<String> = state
         .db
         .active_operation_source_ids()
@@ -146,15 +173,31 @@ pub(crate) fn observe_release_needs(
             detail.summary.kind,
             riviu_core::OperationRunKind::Publish | riviu_core::OperationRunKind::Nurture
         );
-        let releasable = splittable || outside == 0;
+        let mut releasable = splittable || outside == 0;
+        // A Nuôi run is stopped by its run id; one without an id cannot be stopped exactly.
+        let nurture_run = (detail.summary.kind == riviu_core::OperationRunKind::Nurture)
+            .then(|| uuid::Uuid::parse_str(&detail.summary.source_id).ok());
+        if nurture_run == Some(None) {
+            releasable = false;
+        }
+        let publish = detail.summary.kind == riviu_core::OperationRunKind::Publish;
+        if releasable && !splittable {
+            operations.push((id.clone(), devices.iter().cloned().collect::<HashSet<_>>()));
+        }
         // Keyed per (device, owner): a publish run matches its own guard hold only.
-        let key = if detail.summary.kind == riviu_core::OperationRunKind::Publish {
+        let key = if publish {
             format!("publish:{}", detail.summary.source_id)
         } else {
             detail.summary.kind.as_key().to_owned()
         };
         for udid in devices.iter().filter(|d| selected.contains(*d)) {
             covered.insert((udid.clone(), key.clone()));
+            if let Some(Some(run)) = nurture_run {
+                nurture.push((udid.clone(), run));
+            }
+            if publish {
+                publish_rows.push((needs.len(), udid.clone(), detail.summary.source_id.clone()));
+            }
             needs.push(NeedsRelease {
                 envelope: format!("operation:{udid}:{}", detail.summary.id),
                 udid: udid.clone(),
@@ -163,6 +206,8 @@ pub(crate) fn observe_release_needs(
                 releasable,
                 message: if releasable {
                     "Xác nhận sẽ chỉ dừng tác vụ cũ trên máy này".into()
+                } else if nurture_run == Some(None) {
+                    "Phiên Nuôi này không có mã lượt nên không dừng đúng phiên được; dừng nó ở Theo dõi trước".into()
                 } else {
                     format!(
                         "Tác vụ này còn chạy trên {outside} máy ngoài lựa chọn; dừng nó ở Theo dõi hoặc chọn thêm các máy đó"
@@ -187,8 +232,9 @@ pub(crate) fn observe_release_needs(
             // A new post may interrupt link verification: confirmation excludes only this
             // assignment (stopping its verifier) and closes the phone. A possibly public
             // post becomes needsReview, so the verification debt is kept, not cleared.
+            publish_rows.push((needs.len(), udid.clone(), hold.campaign_id.clone()));
             needs.push(NeedsRelease {
-                envelope: format!("publish-hold:{udid}:{}:{}", hold.campaign_id, hold.assignment_id),
+                envelope: String::new(),
                 udid: udid.clone(),
                 owner: "publish".into(),
                 title: hold.campaign_id.clone(),
@@ -238,8 +284,58 @@ pub(crate) fn observe_release_needs(
             });
         }
     }
+    // The publish work a handoff excludes is exactly these assignments at these revisions; each
+    // (phone, campaign) gets a reviewed row whose envelope names them, so a moved revision or a
+    // new assignment is a different envelope.
+    let mut assignments = Vec::new();
+    let mut by_campaign: std::collections::BTreeMap<(String, String), Vec<String>> =
+        Default::default();
+    for udid in udids {
+        for (assignment, revision) in state
+            .db
+            .publish_handoff_assignments(udid)
+            .map_err(CommandError::operation)?
+        {
+            let campaign = state
+                .db
+                .publication_campaign_id(&assignment)
+                .map_err(CommandError::operation)?
+                .unwrap_or_default();
+            by_campaign
+                .entry((udid.clone(), campaign))
+                .or_default()
+                .push(format!("{assignment}@{revision}"));
+            assignments.push((udid.clone(), assignment, revision));
+        }
+    }
+    for (udid, campaign) in by_campaign.keys() {
+        if covered.insert((udid.clone(), format!("publish:{campaign}"))) {
+            publish_rows.push((needs.len(), udid.clone(), campaign.clone()));
+            needs.push(NeedsRelease {
+                envelope: String::new(),
+                udid: udid.clone(),
+                owner: "publish".into(),
+                title: campaign.clone(),
+                releasable: true,
+                message: "Xác nhận sẽ loại bài cũ của lượt này khỏi máy và giữ việc kiểm tra link trong Theo dõi".into(),
+            });
+        }
+    }
+    for (row, udid, campaign) in publish_rows {
+        let mut exact = by_campaign
+            .get(&(udid.clone(), campaign.clone()))
+            .cloned()
+            .unwrap_or_default();
+        exact.sort();
+        needs[row].envelope = format!("publish:{udid}:{campaign}:{}", exact.join(","));
+    }
     needs.sort_by(|a, b| a.udid.cmp(&b.udid));
-    Ok(needs)
+    Ok(ReleasePlan {
+        needs,
+        operations,
+        assignments,
+        nurture,
+    })
 }
 
 #[tauri::command]
@@ -534,47 +630,48 @@ pub(crate) async fn prepare_publish_devices(
     let selected: HashSet<_> = udids.into_iter().collect();
     let mut devices: Vec<_> = selected.iter().cloned().collect();
     devices.sort();
-    let needs = observe_release_needs(state, &devices)?;
-    if let Some(blocked) = needs.iter().find(|row| !row.releasable) {
+    // (1) Fence: from here until the phones are closed, no new work starts or re-acquires on
+    // them through the ownership coordinator; only this handoff's own close may acquire.
+    let _fence = state.control.fence_new_work(&devices);
+    // (2) One observation under the fence is the plan, compared with what the operator
+    // reviewed, and then applied exactly: no later enumeration adds a stop.
+    let plan = observe_release_plan(state, &devices)?;
+    if let Some(blocked) = plan.needs.iter().find(|row| !row.releasable) {
         return Err(CommandError::operation(format!("{}: {}", blocked.udid, blocked.message)));
     }
-    // Compare-and-stop: re-observed under the handoff lock, right before the first exclusion
-    // or stop. Only holders the operator reviewed may be released; anything else refuses.
-    if let Some(refusal) = unapproved_release(&needs, approved_release) {
+    if let Some(refusal) = unapproved_release(&plan.needs, approved_release) {
         return Err(CommandError::operation(refusal));
     }
     let mut stopped = HandoffStops { scoped: true, ..Default::default() };
-    // Complete the scope check before stopping even one operation.
-    for id in state.db.active_operation_source_ids().map_err(CommandError::operation)? {
-        let Some(detail) = super::jobs::read_operation_run(state, &id)? else { continue };
-        if detail.summary.state.is_terminal()
-            || matches!(detail.summary.kind, riviu_core::OperationRunKind::Publish | riviu_core::OperationRunKind::Nurture) {
-            continue;
-        }
-        let scope = super::operation_stop::source_devices(&state.db, &detail).map_err(CommandError::operation)?;
-        if !intersects(&selected, &scope) { continue; }
-        if scope.iter().any(|id| !selected.contains(id)) {
-            return Err(CommandError::operation("Tác vụ không thể tách còn giữ máy ngoài lựa chọn; dừng ở Theo dõi hoặc chọn đủ máy"));
-        }
-        stopped.operation_devices.insert(id.clone(), scope.into_iter().collect());
-        stopped.operations.push(id);
+    for (id, scope) in &plan.operations {
+        stopped.operation_devices.insert(id.clone(), scope.clone());
+        stopped.operations.push(id.clone());
     }
-    for udid in &devices {
-        let assignments = state.db.publish_handoff_assignments(udid).map_err(CommandError::operation)?;
-        for (assignment, revision) in assignments {
-            let request = uuid::Uuid::new_v4().to_string();
-            // This inserts the exclusion used by observer_authorized, fencing the selected
-            // verifier as well as the composer. No campaign-wide stop marker is written.
-            state.db.request_publish_handoff_exclusion(&assignment, revision, &request)
-                .map_err(CommandError::operation)?;
-            stopped.assignments.insert(assignment, (udid.clone(), request));
+    // (3) Exclusions at the approved revision (CAS): a row that moved since the review
+    // refuses before any further stop. This fences the selected verifier as well as the
+    // composer; no campaign-wide stop marker is written.
+    for (udid, assignment, revision) in &plan.assignments {
+        let request = uuid::Uuid::new_v4().to_string();
+        state.db.request_publish_handoff_exclusion(assignment, *revision, &request)
+            .map_err(|error| CommandError::operation(format!(
+                "{udid}: bài đăng cũ đã đổi so với lúc xem lại ({error}); kiểm tra lại rồi xác nhận")))?;
+        stopped
+            .assignments
+            .insert(assignment.clone(), (udid.clone(), request));
+    }
+    // (4) Exact Nuôi runs, compared with the reviewed run id under the runtime's lock. A
+    // newer run on the same phone is never stopped; it refuses the handoff instead.
+    for (udid, run) in &plan.nurture {
+        if state.nurture.stop_run(udid, *run) == crate::nurture_commands::NurtureRunStop::Replaced {
+            return Err(CommandError::operation(format!(
+                "{udid}: phiên Nuôi khác với lúc xem lại đang giữ máy; chưa dừng phiên đó, kiểm tra lại rồi xác nhận")));
         }
     }
+    // (5) Operations by id, only those in the plan.
     for id in &stopped.operations {
         super::operation_stop(app.clone(), app.state(), id.clone()).await?;
     }
     for udid in &devices {
-        state.nurture.stop(udid);
         state.end_overlay_session(udid).await?;
     }
     let mut waiting = HashSet::new();
@@ -973,6 +1070,31 @@ mod tests {
         assert_eq!(control.current_work_owner(udid), None);
         assert_eq!(driver.ordinary_session_calls(), 0);
         assert_eq!(driver.stream_restart_calls(), 0);
+
+        // Review R2-F1: while a handoff applies its plan, a run arriving after the envelope
+        // comparison cannot take the phone (so it is never the thing stopped), and the
+        // handoff's own close still can.
+        let fence = control.fence_new_work(&[udid.to_owned()]);
+        assert!(matches!(
+            control
+                .try_acquire_exclusive_keeping_stream(udid, DeviceWorkOwner::Interaction)
+                .await,
+            Err(riviu_core::DeviceControlError::Busy(_))
+        ));
+        let deadline = tokio::time::Instant::now() + Duration::from_millis(500);
+        let manual = acquire_handoff_context(&control, udid, deadline)
+            .await
+            .expect("the handoff's own close passes its fence");
+        assert_eq!(manual.owner(), DeviceWorkOwner::ManualControl);
+        control
+            .close_exclusive_context(manual)
+            .expect("handoff releases its own lease");
+        drop(fence);
+        let later = control
+            .try_acquire_exclusive_keeping_stream(udid, DeviceWorkOwner::Interaction)
+            .await
+            .expect("new work starts once the handoff has finished");
+        control.close_exclusive_context(later).expect("release");
     }
 
 }

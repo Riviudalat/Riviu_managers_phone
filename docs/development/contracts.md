@@ -700,33 +700,44 @@ có versionCode tối thiểu 5 cho launcher; APK, manifest và NOTICE phải kh
   kết luận dung lượng, cùng `sheetDelivery` (spreadsheet, gid, phiên bản). Không bind: số
   byte trống, mtime, bài nhạc cụ thể (chọn lúc chạy theo `soundPolicy`), chủ giữ máy. Chủ giữ
   máy được duyệt riêng bằng phong bì nhả máy bên dưới, vì nhả máy đã duyệt cố ý đổi chủ.
-- Mỗi dòng `needsRelease` có `envelope`: máy, loại chủ và đúng việc đang giữ (id thao tác,
-  lượt/assignment đăng, hoặc thế hệ lease khi chủ không có thao tác nào được liệt kê). Điều
-  khiển trực tiếp và dọn nền là tạm thời, không thuộc phong bì. Start gửi kèm phong bì đã
-  xem (`approvedRelease`); chỉ các chủ trong phong bì được nhả. Chủ đã đi thì không cần duyệt;
-  chủ mới hoặc việc khác trên cùng máy làm Start bị từ chối trước khi dừng bất cứ gì.
+- Mỗi dòng `needsRelease` có `envelope`: máy, loại chủ và đúng việc đang giữ: id thao tác (Nuôi
+  theo mã lượt), lượt đăng kèm từng assignment và revision (`publish:{máy}:{lượt}:{assignment@revision,…}`),
+  hoặc thế hệ lease khi chủ không có thao tác nào được liệt kê. Điều khiển trực tiếp và dọn nền
+  là tạm thời, không thuộc phong bì. Start gửi kèm phong bì đã xem (`approvedRelease`). Chủ đã
+  đi thì không cần duyệt; chủ mới, việc khác trên cùng máy hoặc revision đã đổi làm Start bị từ
+  chối mà không dừng chủ nào chưa được duyệt.
 - Thứ tự kiểm của Start (`publish_create_campaign`): (1) replay đúng request ID và
   fingerprint, trả receipt cũ, không dừng/tạo lại; (2) kiểm request, rồi vào khóa handoff (chỉ
   chờ); (3) `require_approval_before_effects`: preflight chỉ đọc bằng builder gốc (không
-  reconcile helper, được dùng lại bằng chứng máy mà bản xem lại vừa đọc), so digest đã duyệt,
-  rồi so mọi chủ đang giữ với phong bì; lệch thì receipt thành từ chối, không đổi chủ nào;
-  (4) chỉ sau đó mới `defer_idle_work`, loại assignment, dừng/đóng máy, và
-  `prepare_publish_devices` quan sát lại dưới khóa, so phong bì lần nữa ngay trước loại/dừng
-  đầu tiên; (5) preflight mới sau khi nhả, `canExecute` và digest trước staging, chuyển media,
-  Post. Kiểm lại ở UI trước khi gửi chỉ giúp báo sớm, không thay các bước backend này.
+  reconcile helper) trên bằng chứng máy mới (build, dung lượng, tài khoản đọc lại), so digest
+  đã duyệt rồi so các chủ đang giữ với phong bì; lệch thì receipt thành từ chối, không đổi chủ
+  nào. Đây chỉ là từ chối sớm; (4) `defer_idle_work`, rồi `prepare_publish_devices`:
+  `fence_new_work` chặn mọi việc mới hoặc lấy lại lease trên các máy đó qua bộ điều phối chủ
+  sở hữu (chỉ ManualControl của chính lượt nhả được lấy máy), một lần quan sát dưới hàng rào
+  thành **kế hoạch nhả bất biến**, so với phong bì, và chỉ kế hoạch đó được thực hiện: loại
+  assignment theo đúng revision đã duyệt (CAS), dừng Nuôi bằng `stop_run` so mã lượt dưới khóa
+  của runtime (lượt Nuôi khác thì từ chối, không dừng), dừng thao tác theo id; không có lần liệt
+  kê sau nào thêm việc để dừng. Hàng rào giữ tới khi đóng máy xong; các kiểm tra lúc đóng vẫn
+  từ chối nếu có chủ mới; (5) preflight mới sau khi nhả, `canExecute` và digest trước staging,
+  chuyển media, Post. Kiểm lại ở UI trước khi gửi chỉ giúp báo sớm, không thay các bước này.
 - Lượt tạo mới mang `approval` bất biến trong `request_json`: digest đã duyệt và tài khoản đã
-  chuẩn hóa của từng máy nhận. Một bộ kiểm duy nhất (`publish_approval_refusal`, kiểm cả tập máy
-  nhận chưa qua biên hiệu lực) chạy trước claim của bộ hẹn giờ, trước claim của
-  `execute_pipeline` (chạy tay, lịch qua điều phối, thử lại) và lặp theo từng máy ở cổng nhận
-  của dispatcher (`admit_publish_reconnect`, cùng transaction nhận việc, trước chuyển media hay
-  composer). Lượt không có `approval` (tạo trước 10/2026), máy không có trong bản duyệt, hoặc
-  tài khoản hiện tại khác tài khoản đã duyệt đều chuyển `failed_before_dispatch` với
-  `publish_approval_changed: lý do`; thử lại vẫn so với cùng bản duyệt nên không "hợp thức
-  hóa" thay đổi, chỉ lượt mới được xem lại mới mang đầu vào mới. Recovery lấy
-  `expectedAccount` từ bản duyệt, không từ metadata hiện tại; bằng chứng tài khoản trên điện
-  thoại trước Post so với tài khoản đó. Hàng đã gửi hoặc chưa rõ không phải việc mới: chỉ đối
-  chiếu, không đăng lại. Nội dung của lịch là bản sao managed đã kiểm hash lúc tạo; sửa file
-  nguồn sau đó không đổi thứ được đăng.
+  chuẩn hóa của từng máy nhận. Một bộ kiểm (`publish_approval_refusal`, cả tập máy nhận chưa qua
+  biên hiệu lực) chạy trước claim của bộ hẹn giờ và trước claim của `execute_pipeline` (chạy tay,
+  lịch qua điều phối, thử lại); `admit_publish_reconnect` kiểm lại khi nhận việc từ hàng đợi.
+  Biên hiệu lực thật là `admit_publish_effect`: sau khi đã giữ lease thiết bị và qua mọi lượt chờ
+  (staging, lease, UI capacity), ngay trước chuyển media, dừng/mở TikTok hay composer, một
+  transaction ngắn so bản duyệt với tài khoản hiện tại của mọi máy còn lại (không giữ transaction
+  qua I/O thiết bị). Khi một bước đăng đang chạy trên máy (job `running` hoặc work claim), mọi
+  đường ghi tài khoản (`set_device_handle`, đối soát tài khoản, nhập metadata, tài khoản quan sát
+  từ tương tác) bị từ chối, nên kết quả kiểm đó còn đúng tới khi bước xong. Lệch ở bất kỳ máy nào
+  thì toàn bộ việc còn lại chưa qua biên hiệu lực chuyển cần xem lại (`failed_before_dispatch`,
+  `publish_approval_changed: lý do`, job đang chờ kết thúc), và lỗi là `Terminal` nên không thử
+  lại. Lượt không có `approval` (tạo trước 10/2026) cũng vậy; thử lại vẫn so với cùng bản duyệt
+  nên không "hợp thức hóa" thay đổi. Recovery lấy `expectedAccount` từ bản duyệt; bằng chứng tài
+  khoản trên điện thoại trước Post vẫn là lớp chặn sau. Hàng đã gửi hoặc chưa rõ chỉ đối chiếu,
+  không đăng lại; giữ nguyên không chiếm quyền, ngân sách thử lại và đối soát link/Sheet. Nội dung
+  của lịch là bản sao managed đã kiểm hash lúc tạo và kiểm lại trước chuyển; sửa file nguồn sau
+  đó không đổi thứ được đăng (nội dung được chốt khi lưu lịch).
 
 ## Xác minh Publish và kết quả qua restart
 

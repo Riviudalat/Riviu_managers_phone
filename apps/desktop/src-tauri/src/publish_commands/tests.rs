@@ -2388,10 +2388,21 @@ fn the_post_fan_out_runs_only_the_unposted_participants() {
 #[test]
 fn the_publish_session_targets_the_device_own_tiktok_build() {
     let wrapper = code_of("pub(crate) async fn open_publish_context(");
-    assert!(wrapper
-        .iter()
-        .any(|line| line.contains("open_publish_context_until(control, udid, || false)")));
+    assert!(wrapper.iter().any(
+        |line| line.contains("open_publish_context_until(control, udid, || false, || Ok(()))")
+    ));
     let body = code_of("async fn open_publish_context_until(");
+    // Review R2-F2: the compose effect is admitted after the lease and the UI-capacity wait,
+    // before TikTok is stopped or started on the phone.
+    let line_of = |needle: &str| {
+        body.iter()
+            .position(|line| line.contains(needle))
+            .unwrap_or_else(|| panic!("{needle} missing from open_publish_context_until"))
+    };
+    assert!(line_of("acquire_exclusive(udid") < line_of("reserve_ui_capacity_until("));
+    assert!(line_of("reserve_ui_capacity_until(") < line_of("admit()?"));
+    assert!(line_of("admit()?") < line_of("resolve_tiktok_package("));
+    assert!(line_of("admit()?") < line_of("start_clean_app_session("));
     assert!(
         body.iter()
             .any(|line| line.contains("resolve_tiktok_package")),
@@ -2709,12 +2720,51 @@ fn new_publications_require_sheet_and_verified_import_cleanup() {
     let release = &handoff[handoff
         .find("pub(crate) async fn prepare_publish_devices(")
         .unwrap()..];
+    // The function ends at the first line that is a lone closing brace (CRLF or LF).
+    let release = &release[..release.find("\n}").unwrap()];
+    // Review R2-F1: one fenced observation is the plan, and only the plan is applied.
+    let step = |needle: &str| {
+        release
+            .find(needle)
+            .unwrap_or_else(|| panic!("{needle} missing from release"))
+    };
+    let release_order = [
+        "fence_new_work(&devices)",
+        "observe_release_plan(state, &devices)",
+        "unapproved_release(&plan.needs, approved_release)",
+        "request_publish_handoff_exclusion(assignment, *revision",
+        "stop_run(udid, *run)",
+        "operation_stop(app",
+        "close_handoff_device(",
+    ];
+    for pair in release_order.windows(2) {
+        assert!(
+            step(pair[0]) < step(pair[1]),
+            "{} must come before {}",
+            pair[0],
+            pair[1]
+        );
+    }
     assert!(
-        release.find("unapproved_release(&needs, approved_release)")
-            < release.find("request_publish_handoff_exclusion(")
-            && release.find("unapproved_release(&needs, approved_release)")
-                < release.find("operation_stop(app")
+        !release.contains("nurture.stop(udid)")
+            && !release.contains("active_operation_source_ids")
+            && !release.contains("publish_handoff_assignments("),
+        "no stop may come from a later enumeration or a phone-wide Nuôi stop"
     );
+    // Review R2-F2: the transfer effect is admitted with the lease held, before any byte moves.
+    let pipeline = include_str!("pipeline.rs");
+    let transfer = &pipeline[pipeline.find("async fn transfer(").unwrap()..];
+    let at = |needle: &str| {
+        transfer
+            .find(needle)
+            .unwrap_or_else(|| panic!("{needle} missing from transfer"))
+    };
+    assert!(
+        at("acquire_exclusive(&a.udid, DeviceWorkOwner::Script)")
+            < at("admit_publish_effect(&a.id)")
+    );
+    assert!(at("admit_publish_effect(&a.id)") < at("ensure_load_admissible("));
+    assert!(at("admit_publish_effect(&a.id)") < at("stage_publish_media("));
     let schedule = code_of("async fn prepare_schedule(").join("\n");
     assert!(schedule.contains("preflight::require_new_publish_delivery(request.sheet_enabled, request.delete_after_publish)"));
     let schedule_create = code_of("pub async fn publish_schedule_create(").join("\n");
