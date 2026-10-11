@@ -34,7 +34,10 @@ snapshot, log nghiệm thu, file phụ tái tạo được và cache compiler.
 
 Vòng chung cho mọi nghiệm thu máy thật (preflight, một controller, bằng chứng trước,
 khôi phục, ghi kết quả) nằm ở skill
-[riviu-device-acceptance](../../.claude/skills/riviu-device-acceptance/SKILL.md).
+[riviu-device-acceptance](../../.claude/skills/riviu-device-acceptance/SKILL.md); lệnh nằm ở
+[bộ script nghiệm thu](../../scripts/device-acceptance/README.md). Vòng sửa lỗi trọn gói từ
+yêu cầu tới báo cáo ở [riviu-fix-cycle](../../.claude/skills/riviu-fix-cycle/SKILL.md), điều
+phối worker Orca ở [riviu-orca-coordinator](../../.claude/skills/riviu-orca-coordinator/SKILL.md).
 
 ### Đầu vào, ownership và candidate
 
