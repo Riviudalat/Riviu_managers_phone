@@ -43,7 +43,9 @@ test("shell keeps navigation, current page and fleet status usable at operator s
     expect(geometry.status.bottom).toBeLessThanOrEqual(viewport.height + 1);
     expect(geometry.header.right).toBeLessThanOrEqual(viewport.width + 1);
     expect(geometry.header.scrollWidth).toBeLessThanOrEqual(geometry.header.clientWidth + 1);
-    await expect(page.getByText("Toàn hệ thống", { exact: true })).toBeVisible();
+    // The system bar names the scope its counters count, and the time that roster was read.
+    await expect(page.getByText("Laptop này · 2 máy", { exact: true })).toBeVisible();
+    await expect(page.locator(".main-col > .page-header .roster-updated")).toContainText(/Cập nhật \d{2}:\d{2}:\d{2}/);
     await page.screenshot({ path: testInfo.outputPath(`shell-${viewport.width}x${viewport.height}.png`) });
   }
 });

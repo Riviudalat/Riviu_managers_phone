@@ -75,7 +75,7 @@
 .ps-row-issue{color:var(--warn);font-size:var(--text-xs)}.ps-row-status{color:var(--text-3);font-size:var(--text-xs)}
 .ps-mobile-result{display:none}
 .ps-time-note{color:var(--text-3);font-size:var(--text-xs);line-height:1.5;margin:6px 0 0}
-.ps-notice{flex:none;padding:7px 10px;border-left:3px solid var(--primary);background:var(--primary-50);font-size:var(--text-sm);line-height:1.5;margin:7px 0 0}
+.ps-notice{flex:none;padding:7px 10px;border-left:3px solid var(--rv-status-attention-solid);background:var(--rv-status-attention-fill);color:var(--rv-status-attention-text);font-size:var(--text-sm);line-height:1.5;margin:7px 0 0}
 .ps-empty{font-size:var(--text-sm);color:var(--text-3);padding:12px 4px;line-height:1.6;margin:0}
 .ps-review{flex:none;margin-top:7px;padding-top:7px;border-top:1px solid var(--line);font-size:var(--text-sm)}
 .ps-workspace .ps-review .ps-inline-check{margin:5px 0 0}

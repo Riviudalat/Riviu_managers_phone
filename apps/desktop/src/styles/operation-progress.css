@@ -160,7 +160,7 @@
 .run-device-recovery small { display: block; overflow-wrap: anywhere; }
 .run-device-recovery button { margin: 3px 4px 0 0; font-size: var(--text-sm); }
 
-.run-start-bridge { display: grid; gap: 6px; padding: 12px 14px; border-left: 3px solid var(--primary); background: var(--primary-soft); overflow-wrap: anywhere; }
+.run-start-bridge { display: grid; gap: 6px; padding: 12px 14px; border-left: 3px solid var(--rv-status-running-solid); background: var(--rv-status-running-fill); overflow-wrap: anywhere; }
 /* Placements. From 1500 px the expanded monitor docks as a column beside the wall (the
    wall narrows, nothing is covered); folded or narrower, it is a pill in the page header. */
 .run-monitor-dock { display: flex; flex: 0 0 auto; min-width: 0; min-height: 0; }

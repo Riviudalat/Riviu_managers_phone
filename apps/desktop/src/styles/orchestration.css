@@ -37,9 +37,9 @@
 }
 
 .orchestration-mode-tabs button[aria-selected="true"] {
-  border-color: var(--primary-200);
-  background: var(--primary-50);
-  color: var(--primary);
+  border-color: var(--rv-border-strong);
+  background: var(--rv-selected-fill);
+  color: var(--rv-selected-text);
 }
 
 .orchestration-mode-panel {

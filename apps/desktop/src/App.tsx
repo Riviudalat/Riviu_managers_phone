@@ -91,6 +91,7 @@ import { ControlCenterRail } from "./components/ControlCenterRail";
 import { Sidebar } from "./components/Sidebar";
 import { TargetSelector } from "./components/TargetSelector";
 import { PageHeader, StatusChip } from "./components/WorkspacePrimitives";
+import { RosterUpdated } from "./components/RosterUpdated";
 import { resolveAutomationTarget } from "./automationTargets";
 import {
   deviceMatchesFleetFilter,
@@ -185,6 +186,7 @@ function App() {
     startupIssue,
     bootError,
     fleetSettled,
+    rosterReadAt,
     driverIssue,
     androidIssue,
     androidToolProblems,
@@ -1074,7 +1076,15 @@ function App() {
           density="default"
           meta={
             <>
-              <span className="fleet-status-label">Toàn hệ thống</span>
+              {/* The scope the counters count — the phones on this laptop's controller — over the
+                  time that roster was read. Unknown until the first read, so an unread fleet never
+                  reads as "0 máy". */}
+              <div className="system-bar-scope">
+                <span className="fleet-status-label">
+                  Laptop này · {rosterReadAt === null ? "Chưa rõ" : `${devices.length} máy`}
+                </span>
+                <RosterUpdated at={rosterReadAt} />
+              </div>
               <FleetCounters
                 counts={counts}
                 filter={deviceStatusFilter}
@@ -1084,11 +1094,8 @@ function App() {
                 }}
               />
               {syncStatusLabel && <StatusChip>{syncStatusLabel}</StatusChip>}
-              {readyCount !== null && readyCount > 0 && (
-                <StatusChip tone="success">{readyCount} sẵn sàng</StatusChip>
-              )}
               {runningJobs > 0 && (
-                <StatusChip tone="warning">{runningJobs} tác vụ</StatusChip>
+                <StatusChip tone="info">{runningJobs} tác vụ</StatusChip>
               )}
             </>
           }
@@ -1109,6 +1116,8 @@ function App() {
                 <kbd>Ctrl</kbd><kbd>K</kbd>
               </button>
               <InspectorLauncher devices={orderedDevices} deviceLabels={automationDeviceLabels} />
+              {/* Reserved for the Sáng/Tối switch; empty until the dark theme covers every surface. */}
+              <span className="theme-toggle-slot" data-slot="theme-toggle" />
               <ActivityCenter onSelectDevices={(udids) => { setPage("control"); setSelected(udids); }} />
               {page !== "control" && <button
               type="button"

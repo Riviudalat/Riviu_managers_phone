@@ -69,7 +69,8 @@ for (const viewport of [{ width: 1440, height: 900 }, { width: 1024, height: 768
       expect(dimensions.pageWidth, route).toBeLessThanOrEqual(dimensions.viewportWidth + 1);
       expect(dimensions.contentWidth, route).toBeLessThanOrEqual(dimensions.available + 1);
       expect(dimensions.mainWidth, route).toBeLessThanOrEqual(dimensions.mainAvailable + 1);
-      expect(dimensions.headingSize, route).toBeGreaterThanOrEqual(20);
+      // The page name sits in the 48 px system bar at the 16 px primary-label size (PLAN §1).
+      expect(dimensions.headingSize, route).toBeGreaterThanOrEqual(16);
       expect(dimensions.controls.every(value => value >= 12), route).toBe(true);
       await page.screenshot({ path: testInfo.outputPath(`page-${pages.findIndex(([name]) => name === route)}-${viewport.width}.png`), animations: "disabled" });
     }

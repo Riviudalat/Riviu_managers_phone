@@ -49,8 +49,9 @@ export function InspectorLauncher({ devices, deviceLabels }: {
   if (selectedUdid && !selectedConnected) setSelectedUdid(null);
 
   return <>
-    <button type="button" className="icon-btn" title="Bắt thuộc tính & ghi Flow" aria-label="Mở Inspector" onClick={() => setPickerOpen(true)}>
-      <ScanLine size={17} aria-hidden="true" />
+    <button type="button" className="inspector-launcher" title="Bắt thuộc tính & ghi Flow (chỉ máy Android)" aria-label="Mở Inspector" onClick={() => setPickerOpen(true)}>
+      <ScanLine size={16} aria-hidden="true" />
+      <span>Inspector</span>
     </button>
     {pickerOpen && <InspectorPicker
       devices={connectedAndroid}

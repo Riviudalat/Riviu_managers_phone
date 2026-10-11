@@ -1317,7 +1317,7 @@
 .pw-inline-settings[open] { max-height: 230px; overflow: auto; border: 1px solid var(--line); border-radius: 5px; padding: 8px; background: var(--bg-elevated); }
 .pw-steps { display: flex; gap: 20px; padding: 0; }
 .pw-steps button { height: 38px; padding: 8px 2px; border-bottom: 2px solid transparent; border-radius: 0; font-size: var(--text-sm); }
-.pw-steps button[aria-selected="true"] { color: var(--primary); border-bottom-color: var(--primary); }
+.pw-steps button[aria-selected="true"] { color: var(--rv-selected-text); border-bottom-color: var(--rv-selected-line); font-weight: 600; }
 .pw-step-label small { display: none; }
 .pw-header { min-height: 36px; }
 .pw-header > strong { font-size: var(--text-sm); }
@@ -1329,4 +1329,4 @@
 .pw-preflight-device { padding: 10px 12px; }
 .pw-preflight-device > p { margin: 3px 0; }
 .pw-preflight-expanded > summary { cursor: pointer; color: var(--primary); font-size: var(--text-sm); }
-.pw-start-status { border-left: 3px solid var(--primary); padding: 8px 12px; background: var(--primary-soft); }
+.pw-start-status { border-left: 3px solid var(--rv-status-running-solid); padding: 8px 12px; background: var(--rv-status-running-fill); }

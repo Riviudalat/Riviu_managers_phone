@@ -3,50 +3,184 @@
 /* Riviu orange identity; reference products inform layout and interaction. */
 :root {
   color-scheme: only light;
+
+  /* ==== Riviu system tokens (`--rv-*`) =======================================================
+     The one layer every colour, step and size reads from (docs/ui-reference-matrix.md, "Token").
+     A theme redefines only this block — a dark theme goes under `:root[data-theme="dark"]` and
+     touches nothing else — so every older name further down is an alias of one of these, and
+     a stylesheet that hard-codes a light colour is a stylesheet the theme cannot reach. */
+
+  /* Three surface levels: the ground pages sit on, a region (sidebar, system bar, panel,
+     table), and what floats over both (menu, dialog, popover, toast). At most two framed
+     levels nest; a well inside a panel is `sunken`, not a third frame. */
+  --rv-surface-workspace: #f5f6f8;
+  --rv-surface-panel: #ffffff;
+  --rv-surface-overlay: #ffffff;
+  --rv-surface-sunken: #f1f5f9;
+  --rv-surface-subtle: #f8fafc;
+  /* Behind a phone's video: black on purpose, so letterboxing is invisible; and the chrome
+     that floats over that video. These stay dark in every theme. */
+  --rv-surface-stage: #000000;
+  --rv-surface-stage-raised: #151515;
+  --rv-stage-scrim: rgb(0 0 0 / 55%);
+  --rv-stage-control: rgb(10 14 22 / 78%);
+  --rv-stage-control-strong: rgb(10 14 22 / 94%);
+  --rv-stage-line: rgb(255 255 255 / 42%);
+  --rv-stage-text-muted: rgb(255 255 255 / 45%);
+  --rv-stage-text: rgb(255 255 255 / 72%);
+  /* Dims the page behind a modal drawer or dialog. */
+  --rv-scrim: rgb(15 23 42 / 24%);
+  --rv-shadow-tint: rgb(15 23 42 / 7%);
+  --rv-shadow-hairline: 0 1px 3px rgb(15 23 42 / 5%);
+  --rv-shadow-raised: 0 4px 16px var(--rv-shadow-tint);
+  --rv-shadow-overlay: 0 12px 32px rgb(15 23 42 / 12%);
+
+  --rv-border: #e2e8f0;
+  --rv-border-strong: #cbd5e1;
+
+  --rv-text-1: #172033;
+  --rv-text-2: #475569;
+  --rv-text-3: #596579;
+  --rv-text-inverse: #ffffff;
+  /* A secondary action written as text. Neutral, not orange: orange is spent on the primary
+     action and the current selection (below), and a link is neither. */
+  --rv-link: var(--rv-text-1);
+
+  /* Orange, and only for two things: the one primary action of a region, and the current
+     selection or active navigation item. A selected tab, a hover, a warning or a decoration
+     is never orange (tabs use `--rv-selected-*`, warnings `--rv-status-attention-*`). */
+  --rv-primary: #c2410c;
+  --rv-primary-hover: #9a3412;
+  /* Orange as text on a light surface (AA 7.3:1), for the active nav item and selected rows. */
+  --rv-primary-text: #9a3412;
+  --rv-primary-soft: #fff7ed;
+  --rv-primary-soft-strong: #ffedd5;
+  --rv-primary-line: #fed7aa;
+  --rv-primary-tint: rgb(194 65 12 / 8%);
+  --rv-on-primary: #ffffff;
+  --rv-focus-ring: var(--rv-primary);
+  /* "Which one is open" for tabs, segments and pressed filters: weight and an underline or a
+     sunken fill in the text colour, never the action colour. */
+  --rv-selected-text: var(--rv-text-1);
+  --rv-selected-line: var(--rv-text-1);
+  --rv-selected-fill: #e7ebf0;
+
+  /* Status palette (PLAN §1). Each status has a text-safe colour (AA on white, on its own fill
+     and on the workspace), a fill, a line, and a solid for dots, icons and rings. A status is
+     always shown with words and an icon too; colour alone never carries it. */
+  /* Sẵn sàng — green. */
+  --rv-status-ready-text: #166534;
+  --rv-status-ready-fill: #f0fdf4;
+  --rv-status-ready-line: #bbf7d0;
+  --rv-status-ready-solid: #15803d;
+  /* Chưa kiểm (control not yet proven) — blue-grey. */
+  --rv-status-unchecked-text: #3b5670;
+  --rv-status-unchecked-fill: #eef3f8;
+  --rv-status-unchecked-line: #cbd8e5;
+  --rv-status-unchecked-solid: #5b7a96;
+  /* Đang chạy — blue. */
+  --rv-status-running-text: #1d4ed8;
+  --rv-status-running-fill: #eff6ff;
+  --rv-status-running-line: #bfdbfe;
+  --rv-status-running-solid: #2563eb;
+  /* Cần xử lý, and every warning — amber, a yellower hue than the orange primary. */
+  --rv-status-attention-text: #8a5a00;
+  --rv-status-attention-fill: #fffbeb;
+  --rv-status-attention-line: #fde68a;
+  --rv-status-attention-solid: #b7791f;
+  /* Lỗi — red. */
+  --rv-status-error-text: #b91c1c;
+  --rv-status-error-fill: #fef2f2;
+  --rv-status-error-line: #fecaca;
+  --rv-status-error-solid: #c91f27;
+  /* Mất kết nối — grey, always with the cut-connection icon. */
+  --rv-status-offline-text: #4b5563;
+  --rv-status-offline-fill: #f3f4f6;
+  --rv-status-offline-line: #d1d5db;
+  --rv-status-offline-solid: #6b7280;
+  /* Chưa rõ — purple-grey: missing evidence, never shown as ready or as disconnected. */
+  --rv-status-unknown-text: #5b4f78;
+  --rv-status-unknown-fill: #f5f3f9;
+  --rv-status-unknown-line: #ddd8e8;
+  --rv-status-unknown-solid: #7a6f96;
+
+  /* Spacing 4/8/12/16/24. */
+  --rv-space-1: 4px;
+  --rv-space-2: 8px;
+  --rv-space-3: 12px;
+  --rv-space-4: 16px;
+  --rv-space-6: 24px;
+
+  --rv-radius-control: 6px;
+  --rv-radius-panel: 8px;
+  --rv-radius-pill: 999px;
+
+  /* Type: body never below 14 px, primary labels 16 px, the device number 18–20 px. 12 px is
+     the floor for captions; 13 px for secondary text in dense rows. Every counter, table cell
+     and number uses `--rv-numeric`. */
+  --rv-font-caption: 0.75rem;
+  --rv-font-secondary: 0.8125rem;
+  --rv-font-body: 0.875rem;
+  --rv-font-label: 1rem;
+  --rv-font-device: 1.125rem;
+  --rv-font-device-lg: 1.25rem;
+  --rv-font-title: 1.25rem;
+  --rv-numeric: tabular-nums;
+
+  /* Heights: the system bar, one toolbar row, a primary button (≥ 40 px), an ordinary control,
+     and a dense icon button (≥ 32 px, always with an accessible name). */
+  --rv-bar-height: 48px;
+  --rv-toolbar-height: 40px;
+  --rv-control-primary: 40px;
+  --rv-control: 36px;
+  --rv-control-dense: 32px;
+
+  /* ==== Older names ===========================================================================
+     Aliases of the tokens above, kept so the stylesheets not yet migrated keep rendering. */
   --motion-ui: 180ms;
   --ease-ui: cubic-bezier(.2,.75,.25,1);
-  --primary: #c2410c;
-  --primary-deep: #9a3412;
-  --primary-50: #fff7ed;
-  --primary-100: #ffedd5;
-  --primary-200: #fed7aa;
-  --primary-soft: rgb(194 65 12 / 8%);
-  --primary-ring: #c2410c;
+  --primary: var(--rv-primary);
+  --primary-deep: var(--rv-primary-hover);
+  --primary-50: var(--rv-primary-soft);
+  --primary-100: var(--rv-primary-soft-strong);
+  --primary-200: var(--rv-primary-line);
+  --primary-soft: var(--rv-primary-tint);
+  --primary-ring: var(--rv-focus-ring);
   --orange: var(--primary);
   --orange-deep: var(--primary-deep);
   --orange-soft: var(--primary-100);
   --orange-ring: var(--primary-ring);
 
-  --nav-bg: #ffffff;
-  --nav-bg-hover: #fff1e8;
-  --nav-panel: #f5f6f8;
-  --nav-line: #e5e7eb;
-  --nav-text: #374151;
-  --nav-muted: #596579;
-  --nav-active: #9a3412;
+  --nav-bg: var(--rv-surface-panel);
+  --nav-bg-hover: var(--rv-surface-sunken);
+  --nav-panel: var(--rv-surface-workspace);
+  --nav-line: var(--rv-border);
+  --nav-text: var(--rv-text-1);
+  --nav-muted: var(--rv-text-3);
+  --nav-active: var(--rv-primary-text);
 
-  --bg: #f5f6f8;
-  --bg-canvas: #f5f6f8;
-  --bg-content: #f5f6f8;
-  --bg-elevated: #ffffff;
-  --bg-panel: #ffffff;
-  --bg-aside: #f8fafc;
-  --bg-muted: #f1f5f9;
-  --line: #e2e8f0;
-  --line-strong: #cbd5e1;
-  --text: #172033;
-  --text-1: #172033;
-  --text-2: #475569;
-  --text-3: #596579;
+  --bg: var(--rv-surface-workspace);
+  --bg-canvas: var(--rv-surface-workspace);
+  --bg-content: var(--rv-surface-workspace);
+  --bg-elevated: var(--rv-surface-panel);
+  --bg-panel: var(--rv-surface-panel);
+  --bg-aside: var(--rv-surface-subtle);
+  --bg-muted: var(--rv-surface-sunken);
+  --line: var(--rv-border);
+  --line-strong: var(--rv-border-strong);
+  --text: var(--rv-text-1);
+  --text-1: var(--rv-text-1);
+  --text-2: var(--rv-text-2);
+  --text-3: var(--rv-text-3);
   --muted: var(--text-3);
   --accent: var(--primary);
   --accent-dim: var(--primary-deep);
-  --warn: #b45309;
-  --danger: #c91f27;
-  --ok: #15803d;
-  --info: #2563eb;
-  --tile: #ffffff;
-  --shadow: 0 4px 16px rgb(15 23 42 / 7%);
+  --warn: var(--rv-status-attention-text);
+  --danger: var(--rv-status-error-solid);
+  --ok: var(--rv-status-ready-solid);
+  --info: var(--rv-status-running-solid);
+  --tile: var(--rv-surface-panel);
+  --shadow: 0 4px 16px var(--rv-shadow-tint);
   --radius: 8px;
   /* ---- Scales -------------------------------------------------------------
      Added 18/08/2026. Everything above this point is the palette the app already
@@ -63,48 +197,47 @@
      distinct hardcoded colours; these are the roles that appeared more than once
      and can be told apart by what they are for. ------------------------------- */
   /* Text and icons drawn on a filled control — primary, danger, the stage. */
-  --text-inverse: #ffffff;
+  --text-inverse: var(--rv-text-inverse);
   /* A hair off white: zebra rows and inset wells. */
-  --bg-subtle: #f8fafc;
+  --bg-subtle: var(--rv-surface-subtle);
   /* Behind a phone's video. Black on purpose, so letterboxing is invisible. */
-  --bg-stage: #000000;
+  --bg-stage: var(--rv-surface-stage);
   /* Chrome floating over the stage — overlay bars, menus. */
-  --bg-stage-elevated: #151515;
+  --bg-stage-elevated: var(--rv-surface-stage-raised);
   /* Danger fill. */
-  --danger-soft: #fef2f2;
+  --danger-soft: var(--rv-status-error-fill);
   /* Danger border. */
-  --danger-line: #fecaca;
+  --danger-line: var(--rv-status-error-line);
   /* Danger text on a danger fill, where --danger itself is too light to read. */
-  --danger-strong: #b91c1c;
+  --danger-strong: var(--rv-status-error-text);
   /* The heaviest danger text, for a destructive confirmation. */
-  --danger-deep: #b91c1c;
+  --danger-deep: var(--rv-status-error-text);
   /* Warning fill. */
-  --warn-soft: #fffbeb;
+  --warn-soft: var(--rv-status-attention-fill);
   /* Warning border. */
-  --warn-line: #fde68a;
-  --warn-strong: #92400e;
+  --warn-line: var(--rv-status-attention-line);
+  --warn-strong: var(--rv-status-attention-text);
   /* Success fill. */
-  --ok-soft: #f0fdf4;
-  --ok-line: #bbf7d0;
-  --ok-strong: #166534;
-  --info-soft: #eff6ff;
-  --info-line: #bfdbfe;
-  --info-strong: #1d4ed8;
+  --ok-soft: var(--rv-status-ready-fill);
+  --ok-line: var(--rv-status-ready-line);
+  --ok-strong: var(--rv-status-ready-text);
+  --info-soft: var(--rv-status-running-fill);
+  --info-line: var(--rv-status-running-line);
+  --info-strong: var(--rv-status-running-text);
   /* An interactive text colour: a link in body copy, and the hover colour of a menu row.
-     It was a blue (`#2b6cb0`) on the reasoning that the orange primary reads as a button in
-     running text. Changed to the deep orange on 21/08/2026 because the operator asked for it
-     in as many words — "UI hiện tại lại có màu xanh ở nhiều chỗ, chuyển qua màu cam" — and a
-     blue accent inside an orange product does read as two brands. Deep rather than
-     `--primary`, so it still passes as *text* on white. */
-  --link: var(--primary-deep);
+     It was a blue (`#2b6cb0`), then the deep orange from 21/08/2026 ("UI hiện tại lại có màu
+     xanh ở nhiều chỗ, chuyển qua màu cam"). Neutral since 11/10/2026: the operator panel of
+     the "ra hệ thống" review spent orange on the primary action and the current selection
+     only, and a link or a hovered row is neither. */
+  --link: var(--rv-link);
 
   --space-0h: 2px;
-  --space-1: 4px;
-  --space-2: 8px;
-  --space-3: 12px;
-  --space-4: 16px;
+  --space-1: var(--rv-space-1);
+  --space-2: var(--rv-space-2);
+  --space-3: var(--rv-space-3);
+  --space-4: var(--rv-space-4);
   --space-5: 20px;
-  --space-6: 24px;
+  --space-6: var(--rv-space-6);
   --space-8: 32px;
   --space-10: 40px;
   --space-12: 48px;
@@ -113,12 +246,12 @@
   /* A 16px root gives 12px captions, 13px secondary text and 14px body.
      Stream labels retain their separate zoom-dependent geometry. */
   --text-2xs: 0.75rem;
-  --text-xs: 0.75rem;
-  --text-sm: 0.8125rem;
-  --text-md: 0.8125rem;
-  --text-base: 0.875rem;
-  --text-lg: 1rem;
-  --text-xl: 1.25rem;
+  --text-xs: var(--rv-font-caption);
+  --text-sm: var(--rv-font-secondary);
+  --text-md: var(--rv-font-secondary);
+  --text-base: var(--rv-font-body);
+  --text-lg: var(--rv-font-label);
+  --text-xl: var(--rv-font-title);
   --text-2xl: 1.5rem;
   /* Named exception to the 12 px floor (docs/ui-reference-matrix.md): only the
      Tổng quan tile strip, where 20 phones must fit a 1366×768 wall. */
@@ -136,9 +269,9 @@
 
   /* `--radius` keeps its old value: it is referenced in 3332 lines of App.css and
      changing it silently restyles the whole app. The scale grows around it. */
-  --radius-sm: 6px;
-  --radius-lg: 8px;
-  --radius-pill: 999px;
+  --radius-sm: var(--rv-radius-control);
+  --radius-lg: var(--rv-radius-panel);
+  --radius-pill: var(--rv-radius-pill);
 
   /* Stacking order, as one list instead of eighteen numbers spread over 4,000 lines.
    *
@@ -174,7 +307,7 @@
   /* Likewise `--shadow`. One elevation was never enough to tell a resting card
      from a menu floating over it. */
   --shadow-sm: 0 1px 3px rgba(0, 0, 0, 0.05);
-  --shadow-lg: 0 12px 32px rgba(0, 0, 0, 0.12);
+  --shadow-lg: var(--rv-shadow-overlay);
 
   /* Motion. Named rather than inlined so a future "reduce animation" switch has
      one place to turn, and because 120ms and 200ms mean different things: the
@@ -182,8 +315,8 @@
   --ease: cubic-bezier(0.4, 0, 0.2, 1);
   --duration-fast: 120ms;
   --duration-base: 180ms;
-  --control-height: 36px;
-  --header-height: 56px;
+  --control-height: var(--rv-control);
+  --header-height: var(--rv-bar-height);
 
   --aside-w: 196px;
   --aside-w-compact: 184px;

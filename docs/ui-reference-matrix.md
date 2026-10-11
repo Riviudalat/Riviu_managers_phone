@@ -2,9 +2,11 @@
 
 Thiết kế hiện tại: giao diện sáng cố định kể cả khi hệ điều hành dùng dark mode;
 shell trắng, nền trung tính `#F5F6F8`, primary
-cam Riviu `#C2410C`; control 36 px, body 14 px, chữ phụ 13 px, chú thích tối thiểu 12 px,
-heading trang 20 px. Noto Sans/Noto Sans Mono đóng gói cùng app. Control bo 6 px,
-panel bo 8 px; khoảng cách theo thang 4/8/12/16/24 px. Giữ Tauri/React/Rust,
+cam Riviu `#C2410C`; control 36 px, nút chính ≥ 40 px, nút icon dày đặc ≥ 32 px (luôn có tên
+đọc được), body 14 px, nhãn chính và tên trang 16 px, **Máy N 18 px đậm**, chữ phụ 13 px,
+chú thích tối thiểu 12 px. Noto Sans/Noto Sans Mono đóng gói cùng app. Control bo 6 px,
+panel bo 8 px; khoảng cách theo thang 4/8/12/16/24 px; mọi con số (bộ đếm, bảng, giờ) dùng
+`tabular-nums`. Giá trị lấy từ lớp token `--rv-*` (mục **Token** bên dưới). Giữ Tauri/React/Rust,
 tile/canvas, mật độ và cử chỉ thiết bị. Thông báo ngắn có thể dùng toast đóng được; lỗi và trạng thái bền vẫn ở cạnh
 hành động, monitor nguồn và ActivityCenter. Đây là tiêu chí triển khai, không tự xác nhận mọi
 màn hình đã vượt cổng screenshot/accessibility.
@@ -12,12 +14,15 @@ màn hình đã vượt cổng screenshot/accessibility.
 Sidebar rộng 196 px (184 px từ 1100 px trở xuống), có nút thu gọn thành icon; khi mở,
 tên **Riviu Manager** hiện đủ cạnh logo và nút thu gọn, không bị cắt;
 dưới 960 px mặc định dùng thanh icon, vẫn mở rộng được bằng nút điều hướng;
-tiêu đề nhóm ẩn/hiện các mục bên trong. Mục đang chọn dùng nền cam nhạt,
-chữ cam đậm và vạch cam bên trái. Automation có ba trang Nuôi TikTok, Tương tác,
-Đăng bài cùng My Apps, Lượt chạy, Tác vụ đã lưu và Flow thiết bị. Header cao tối thiểu 68 px, trạng thái có nhãn **Toàn hệ thống**;
-máy thực hiện của mỗi workspace là một phạm vi riêng. Mỗi vùng có một hành động
-chính màu cam, thao tác phụ trung tính. **Bảo trì → Sửa Riviu Agent** tách khỏi
-các lệnh mở máy/đồng bộ. Quét thiết bị xuất hiện tại toolbar Thiết bị hoặc header
+tiêu đề nhóm ẩn/hiện các mục bên trong. Mục đang chọn dùng nền cam đặc, chữ trắng; hàng logo
+cao bằng thanh hệ thống (48 px). Automation có ba trang Nuôi TikTok, Tương tác,
+Đăng bài cùng My Apps, Lượt chạy, Tác vụ đã lưu và Flow thiết bị. Đầu trang là **thanh hệ
+thống** (mục riêng bên dưới); máy thực hiện của mỗi workspace là một phạm vi riêng.
+**Màu cam chỉ dùng cho hai việc:** một hành động chính của mỗi vùng, và mục đang chọn (máy
+đã chọn, mục điều hướng đang mở). Tab, nút phân đoạn và bộ lọc đang bật là trung tính (chữ
+đậm, gạch chân hoặc nền xám, không cam); hover trung tính; link và thao tác phụ trung tính;
+cảnh báo màu hổ phách, lỗi màu đỏ. **Bảo trì → Sửa Riviu Agent** tách khỏi
+các lệnh mở máy/đồng bộ. Quét thiết bị xuất hiện tại toolbar Thiết bị hoặc thanh hệ thống
 của trang khác, không lặp trong cùng một màn hình.
 
 Modal và drawer giữ focus, Escape đóng lớp đang thao tác, đóng trả focus về nút mở.
@@ -25,8 +30,8 @@ Các cửa sổ điện thoại là non-modal: không phủ tối, không giữ 
 chọn được máy và trang khác khi cửa sổ đang mở. Một cửa sổ phóng to dùng lại khi đổi
 máy, trả phiên cũ trước khi mở phiên mới. Menu/confirm vẫn ở trên. Chất lượng và FPS
 Android chỉnh trực tiếp tại rail; hover bung bảng nổi, ghim giữ bảng cạnh lưới, nhóm
-bung/thu số máy bên trong. Dropdown dùng chung nền trắng, viền trung tính, option
-hover/đã chọn màu cam nhạt, dấu chọn và menu cuộn, chuyển động 180–200 ms.
+bung/thu số máy bên trong. Dropdown dùng chung nền lớp nổi, viền trung tính, option
+hover/đang trỏ nền xám, dấu chọn và menu cuộn, chuyển động 180–200 ms.
 My Apps dùng bảng ứng dụng gọn. Mở ứng dụng vào trang vận hành cũ; Thêm Flow mở editor
 riêng với thư viện hành động bên trái, canvas chính, cấu hình và thiết bị bên phải.
 Tên, model, tài khoản và trạng thái máy nằm trên nền sáng riêng phía trên preview;
@@ -34,12 +39,15 @@ không che hình điện thoại. Preview trong lưới giữ tỉ lệ 1:2; th�
 cao 88 px. Dấu chọn trên thẻ và bộ đếm dưới thanh lọc dùng cùng selection hiện có.
 Dải thông tin gồm số máy/tên, @nick · model, chip trạng thái theo `deviceWork` và bước đang
 chạy hoặc lý do cần xử lý; chữ dài bị cắt nhưng vẫn đọc đủ qua tên truy cập và tooltip.
-Máy cần xử lý có viền đỏ; máy đã chọn có viền cam và dấu tích. Rail **Hiển thị** giữ thanh
+Máy cần xử lý có viền hổ phách; máy đã chọn có viền cam và dấu tích. Rail **Hiển thị** giữ thanh
 trượt và Ctrl + lăn chuột, thêm ba cỡ: **Tổng quan** (ô tối thiểu 100 px), **Vừa** (140 px),
 **Lớn** (190 px). Kiểu dải theo dải độ rộng hiện tại, không theo nút đã bấm.
-**Ngoại lệ có tên — dải Tổng quan:** chỉ ở cỡ Tổng quan, dải cao khoảng 64 px và chữ
+**Ngoại lệ có tên — dải Tổng quan:** chỉ ở cỡ Tổng quan, dải cao khoảng 64 px và chữ phụ
 11,5 px (`--text-tile-compact`), dưới mức tối thiểu 12 px, để 20 ô trọn vẹn vừa màn
-1366×768 khi sidebar mở. Vừa và Lớn dùng dải 88 px với chữ ≥ 12 px; nút trong dải vẫn ≥ 12 px.
+1366×768 khi sidebar mở; riêng **Máy N** vẫn 18 px đậm và đọc đủ. Vừa và Lớn dùng dải 88 px
+với chữ ≥ 12 px; nút trong dải vẫn ≥ 12 px. Chip trạng thái trên ô theo bảng màu trạng thái:
+Sẵn sàng xanh lá, Đã kết nối (chưa kiểm điều khiển) xanh xám, Bận xanh dương, Cần xem hổ
+phách, Ngoại tuyến xám.
 Chế độ **Danh sách** của Thiết bị là bảng `<table>` gọn: mỗi máy một dòng 34 px, chữ 13 px,
 đủ ≥ 15 dòng ở 1366×768. Cột: Máy (số · tên), Tài khoản (@nick), Việc đang chạy (chip
 `deviceWork` + bước), Cần xử lý (chỉ máy cần xử lý; nút Khôi phục helper khi có), Bằng chứng
@@ -58,7 +66,8 @@ Khi có máy được chọn, mọi lệnh trên các máy đó nằm ở một 
 Mở màn hình, Đồng bộ thao tác, Chạy Flow…, Công cụ nhóm…, Thêm vào nhóm, Bỏ chọn. Toolbar chỉ
 giữ lệnh toàn fleet (Mở toàn bộ và Công cụ khi chưa chọn máy, Nhóm, Bảo trì, quét lại). Khi bộ
 lọc đang ẩn máy đã chọn, thanh ghi rõ "N máy đã chọn đang bị bộ lọc ẩn", vì lệnh vẫn đến các máy đó.
-Tab Thiết lập/Hẹn giờ/Theo dõi dùng chung nền trắng và mục chọn cam nhạt. Bảng có cuộn riêng;
+Tab Thiết lập/Hẹn giờ/Theo dõi, tab con (Phiên nuôi/Hành vi/AI), bước Tương tác và Đăng bài dùng
+chung kiểu chọn trung tính: chữ đậm màu chữ chính và gạch chân cùng màu. Bảng có cuộn riêng;
 thanh hành động và nút chạy nằm trong viewport ở kích thước laptop. Chuyển màu nhẹ
 120–180 ms, không hiệu ứng lặp trang trí; hỗ trợ giảm chuyển động.
 
@@ -89,6 +98,43 @@ thành một dải: thông báo trùng chữ hiện một lần kèm (×N), thô
 cuộn ngang ẩn; toolbar Flow tách hai hàng từ 1400 px trở xuống; tên trong tiêu đề cửa sổ điện thoại,
 chọn Flow và "Gán:" của Đăng bài cắt chữ nhưng có tooltip. Mọi lệnh của các vùng này vẫn bấm được
 ở 1366×768 và 820×560.
+
+## Thanh hệ thống
+
+Thay tiêu đề lớn và các viên trạng thái: một thanh cố định cao 48 px trên cùng cột chính, không cuộn
+theo nội dung. Thứ tự: **tên trang** (16 px) · **phạm vi** "Laptop này · N máy" xếp trên **"Cập nhật
+hh:mm:ss"** · bốn bộ đếm fleet · pill theo dõi tác vụ (khi có) · **Tìm máy, trang…** (Ctrl+K) ·
+**Inspector** có chữ (tooltip ghi chỉ máy Android) · chỗ dành cho công tắc Sáng/Tối (trống, không chiếm
+chỗ khi chưa có) · chuông **Hoạt động** · nút quét lại ở các trang khác Thiết bị. N đếm máy trong danh
+sách đọc được; trước lần đọc đầu tiên ghi **Chưa rõ**, không ghi 0. "Cập nhật" là giờ máy tính lúc danh
+sách máy được đọc gần nhất (`listDevices` hoặc sự kiện `devicesUpdated`); lần đọc lỗi giữ giờ cũ; chưa
+đọc lần nào thì ghi **Cập nhật: Chưa rõ**. Đây là tuổi của danh sách, không phải tuổi hình hay kiểm
+trạng thái của từng máy.
+
+Một hàng từ 1100 px (và ở 1093×614); tên trang dài xuống dòng giữa hai từ trong 48 px trước khi hàng
+tràn; pill theo dõi co tới 120 px. Dưới 1024 px thanh xuống hai hàng: tên trang và các nút ở hàng trên,
+phạm vi, bộ đếm và giờ cập nhật ở hàng dưới. Không cuộn ngang ở 820 px.
+
+## Token
+
+Mọi màu, khoảng cách, bo góc, cỡ chữ và chiều cao lấy từ lớp `--rv-*` trong
+`apps/desktop/src/index.css`; tên cũ (`--primary`, `--line`, `--text-2`, `--warn`, …) là alias của lớp
+này. Theme khác chỉ định nghĩa lại các `--rv-*` (Tối sẽ nằm dưới `:root[data-theme="dark"]`), nên
+stylesheet không được viết cứng màu sáng: `shell.css`, `workspace.css`, `controls.css`, `grid.css`,
+`control-center.css` và `components/ui/` đã đọc thẳng `--rv-*` cho bề mặt; các file khác còn đọc alias.
+
+| Nhóm | Token | Ghi chú |
+|---|---|---|
+| Bề mặt 3 tầng | `--rv-surface-workspace` · `--rv-surface-panel` · `--rv-surface-overlay` (thêm `-sunken`, `-subtle` cho giếng trong panel) | nền làm việc / vùng (sidebar, thanh hệ thống, panel, bảng) / lớp nổi (menu, hộp thoại, Ctrl+K, toast) |
+| Sân khấu điện thoại | `--rv-surface-stage`, `--rv-stage-*` | luôn tối ở mọi theme |
+| Viền, chữ | `--rv-border`, `--rv-border-strong`, `--rv-text-1/2/3`, `--rv-text-inverse`, `--rv-link` | link trung tính, có gạch chân |
+| Cam | `--rv-primary`, `--rv-primary-hover`, `--rv-primary-text`, `--rv-primary-soft`, `--rv-focus-ring` | chỉ hành động chính và mục đang chọn |
+| Chọn trung tính | `--rv-selected-text`, `--rv-selected-line`, `--rv-selected-fill` | tab, phân đoạn, bộ lọc đang bật |
+| Trạng thái | `--rv-status-{ready,unchecked,running,attention,error,offline,unknown}-{text,fill,line,solid}` | Sẵn sàng xanh lá · Chưa kiểm xanh xám · Đang chạy xanh dương · Cần xử lý hổ phách · Lỗi đỏ · Mất kết nối xám · Chưa rõ tím xám; chữ đạt AA trên trắng, trên nền của nó và trên nền làm việc; luôn kèm chữ và icon |
+| Khoảng cách | `--rv-space-1/2/3/4/6` = 4/8/12/16/24 px | |
+| Bo góc | `--rv-radius-control` 6 px, `--rv-radius-panel` 8 px, `--rv-radius-pill` | |
+| Chữ | `--rv-font-caption` 12 · `-secondary` 13 · `-body` 14 · `-label` 16 · `-device` 18 · `-device-lg` 20 · `-title` 20 px; `--rv-numeric` | |
+| Chiều cao | `--rv-bar-height` 48 · `--rv-toolbar-height` 40 · `--rv-control-primary` 40 · `--rv-control` 36 · `--rv-control-dense` 32 px | |
 
 ## Nguồn và cách áp dụng
 
@@ -171,8 +217,8 @@ Lịch đăng bài là lịch một lần theo từng bài, mỗi dòng gắn m�
   đóng. Dòng được chọn chạy sau khi menu đóng hẳn. Hover chỉ đổi màu, không lấy focus khỏi ô tìm.
   **Ngoại lệ có tên — focus guard của Base UI:** span `data-base-ui-focus-guard` (aria-hidden,
   tabindex 0) chỉ chuyển focus; kiểm axe menu loại trừ đúng selector này.
-- **Bảng lệnh** (Ctrl+K, ⌘K trên macOS, hoặc nút **Tìm máy, trang…** trên header; dưới 1366 px chỉ còn
-  icon) dùng primitive `components/ui/CommandPalette.tsx`: Base UI Dialog + Autocomplete inline, CSS
+- **Bảng lệnh** (Ctrl+K, ⌘K trên macOS, hoặc nút **Tìm máy, trang…** trên thanh hệ thống; dưới
+  1600 px, và dưới 1760 px khi cột theo dõi đang ghim, chỉ còn icon có tooltip ghi phím tắt) dùng primitive `components/ui/CommandPalette.tsx`: Base UI Dialog + Autocomplete inline, CSS
   thuần, cùng alias với menu. Lọc không phân biệt dấu ("may 3" khớp "Máy 3"). Giai đoạn 1 chỉ điều
   hướng và chọn: đi tới trang (các trang của sidebar và Điều phối), đi tới **Máy N** (về Thiết bị,
   chỉ chọn máy đó, focus thẻ/dòng của nó; nếu bộ lọc đang ẩn máy thì bỏ lọc), và **Chọn N máy cần
@@ -183,7 +229,12 @@ Lịch đăng bài là lịch một lần theo từng bài, mỗi dòng gắn m�
   điện thoại vẫn non-modal. Dòng được chọn chạy sau khi bảng đóng hẳn; đi tới trang thì focus
   chuyển sang mục sidebar của trang đó (hoặc tab Điều phối). Ctrl+K không mở khi đang có một dialog
   modal khác (ví dụ hộp xác nhận).
-- Không card lồng card, không hero marketing. Toolbar/bảng/section có kích thước ổn định.
+- Không card lồng card, không hero marketing: tối đa hai tầng khung lồng nhau, viền chỉ ở ranh
+  giới vùng. Bảng (`ResponsiveTable`) và thanh bước (`WorkflowStepper`) nằm trong panel nên chỉ kẻ
+  đường trên/dưới, không tự vẽ khung; toolbar Thiết bị là một hàng trên nền làm việc với một
+  đường kẻ dưới, không phải thẻ. Toolbar/bảng/section có kích thước ổn định.
+- Toolbar: một hàng 40 px ở màn rộng (Thiết bị: lệnh fleet rồi tìm, lọc trạng thái, Chọn tất cả,
+  chế độ xem); khi không đủ chỗ phần lọc xuống hàng thứ hai, thông báo luôn chiếm một hàng riêng.
 - Không resize control theo label/hover/loading. Chữ wrap có chủ đích; không tràn, đè hàng sau hoặc scale theo viewport.
 - Dùng khoảng cách/màu/icon nhất quán; disabled/loading/error/empty phải phân biệt và có hành động tiếp theo.
 - Desktop/laptop và viewport hẹp giữ nút chạy, filter, status đọc được; overflow thuộc bảng/canvas phù hợp.
@@ -206,17 +257,15 @@ nên roster `ready` hiện là **Đã chuẩn bị**, còn `connected` là **Ch�
 bằng chứng helper Android (bộ nhớ đệm này chỉ được đọc trong Control Center), số đó hiện
 **Chưa rõ**, không hiện 0.
 
-Header luôn có bốn **bộ đếm fleet**: **Rảnh** (`kind` là `ready` hoặc `connected`), **Đang chạy**
+Thanh hệ thống luôn có bốn **bộ đếm fleet**: **Rảnh** (`kind` là `ready` hoặc `connected`), **Đang chạy**
 (`busy`), **Cần xử lý** (`warning`, gồm cả máy quá tải theo sức khỏe máy) và **Mất kết nối**
 (`offline`). Số 0 vẫn hiện; số chưa biết hiện **Chưa rõ** theo đúng quy tắc của số Sẵn sàng (Mất kết
 nối chỉ chưa rõ trước khi danh sách máy tải xong). Rảnh không có nghĩa là Sẵn sàng. Bấm một bộ đếm
 đặt đúng state lọc của select **Trạng thái thiết bị** trên lưới (select có thêm mục **Rảnh**), bấm lại
 thì bỏ lọc; từ trang khác thì chuyển về Control Center. Bộ đếm và bộ lọc dùng chung một state và
-cùng điều kiện của thẻ máy, không có bản sao thứ hai. Từ 981 đến 1599 px (đến 1759 px khi cột theo dõi
-tác vụ đang ghim bên phải), bộ đếm thu nhỏ và nhãn **Toàn hệ thống** chỉ còn cho trình đọc màn hình để
-header giữ một hàng. Tiêu đề trang và bộ đếm không co: pill theo dõi tác vụ co và cắt chữ trước (tối
-thiểu 120 px), nên từ 1100 px tiêu đề luôn một dòng; dưới 1100 px tiêu đề dài chỉ xuống dòng giữa hai
-từ. Dưới 980 px trạng thái xuống hàng riêng như trước. Mở và đóng **Chọn thiết bị**
+cùng điều kiện của thẻ máy, không có bản sao thứ hai. Bộ đếm là dòng đọc trạng thái (chấm màu ·
+nhãn · số), không viền; bộ đếm đang lọc có nền xám và chữ đậm, không cam. Dưới 1600 px (dưới 1760 px
+khi cột theo dõi tác vụ đang ghim) bộ đếm thu về cỡ chú thích. Mở và đóng **Chọn thiết bị**
 mà không sửa thì giữ nguyên phạm vi Toàn bộ, Nhóm hoặc Máy cụ thể. Phạm vi chỉ thành Máy
 cụ thể khi người vận hành sửa trong drawer. Phạm vi rỗng không bao giờ thành Toàn bộ;
 nút chạy hiện lý do bị khóa.

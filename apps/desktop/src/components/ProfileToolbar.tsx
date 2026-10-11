@@ -95,8 +95,8 @@ export function ProfileToolbar({
           </button>
         </div>
       </details>
-      <button type="button" className="tb-btn refresh" onClick={() => void onRefresh()} title="Quét lại thiết bị">
-        <IconRefresh size={15} />
+      <button type="button" className="tb-btn refresh" onClick={() => void onRefresh()} title="Quét lại thiết bị" aria-label="Quét lại thiết bị">
+        <IconRefresh size={15} aria-hidden="true" />
       </button>
     </div>
   );

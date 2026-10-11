@@ -168,7 +168,7 @@
   border-bottom: 2px solid transparent;
   cursor: pointer;
 }
-.interaction-tabs button[aria-selected="true"] { color: var(--primary); border-bottom-color: var(--primary); font-weight: 700; }
+.interaction-tabs button[aria-selected="true"] { color: var(--rv-selected-text); border-bottom-color: var(--rv-selected-line); font-weight: 700; }
 .interaction-body { display: flex; flex-direction: column; gap: 0.55rem; padding: 0.7rem; }
 .interaction-body label { display: flex; flex-direction: column; gap: 0.25rem; font-size: var(--text-sm); color: var(--text-2); }
 .interaction-body textarea,

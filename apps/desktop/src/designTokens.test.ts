@@ -30,9 +30,13 @@ const code = (css: string) => css.replace(/\/\*[\s\S]*?\*\//g, " ");
 
 describe("the token layer", () => {
   it("uses white navigation and Riviu orange actions", () => {
-    expect(code(indexCssRaw)).toMatch(/--nav-bg:\s*#ffffff;/);
-    expect(code(indexCssRaw)).toMatch(/--primary:\s*#c2410c;/);
-    expect(code(indexCssRaw)).toMatch(/--nav-text:\s*#374151;/);
+    // The values live in the `--rv-*` layer a theme redefines; the older names alias it.
+    expect(code(indexCssRaw)).toMatch(/--rv-surface-panel:\s*#ffffff;/);
+    expect(code(indexCssRaw)).toMatch(/--nav-bg:\s*var\(--rv-surface-panel\);/);
+    expect(code(indexCssRaw)).toMatch(/--rv-primary:\s*#c2410c;/);
+    expect(code(indexCssRaw)).toMatch(/--primary:\s*var\(--rv-primary\);/);
+    expect(code(indexCssRaw)).toMatch(/--rv-text-1:\s*#172033;/);
+    expect(code(indexCssRaw)).toMatch(/--nav-text:\s*var\(--rv-text-1\);/);
   });
   // The point of the layer is one place to change a step, and a step that exists at
   // all. A half-declared scale is worse than none: callers reach for `var(--space-7)`,

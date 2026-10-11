@@ -16,8 +16,8 @@
   padding: 4px;
   border: 1px solid var(--ui-border);
   border-radius: var(--radius);
-  background: var(--bg-elevated);
-  box-shadow: var(--shadow-lg);
+  background: var(--rv-surface-overlay);
+  box-shadow: var(--rv-shadow-overlay);
   display: flex;
   flex-direction: column;
   outline: none;

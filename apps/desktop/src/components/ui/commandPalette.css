@@ -12,7 +12,7 @@
   z-index: var(--z-modal-backdrop);
 }
 .ui-palette-backdrop {
-  background: rgb(15 23 42 / 30%);
+  background: var(--rv-scrim);
 }
 .ui-palette-viewport {
   display: flex;
@@ -27,8 +27,8 @@
   max-height: min(560px, 100%);
   border: 1px solid var(--ui-border);
   border-radius: 12px;
-  background: var(--bg-elevated);
-  box-shadow: var(--shadow-lg);
+  background: var(--rv-surface-overlay);
+  box-shadow: var(--rv-shadow-overlay);
   overflow: hidden;
   outline: none;
 }
@@ -88,8 +88,8 @@
   scroll-margin-block: 4px;
 }
 .ui-palette-item[data-highlighted] {
-  background: var(--primary-soft);
-  color: var(--primary-deep);
+  background: var(--rv-selected-fill);
+  color: var(--rv-selected-text);
 }
 .ui-palette-item[data-disabled] {
   color: var(--text-3);
@@ -146,8 +146,9 @@
   text-align: center;
 }
 
-/* The header entry. Collapses to its icon below 1366 px, where the title, the four counters and
-   the run pill need the room; the name stays for assistive technology through `aria-label`. */
+/* The system bar entry. Collapses to its icon below 1600 px (and beside the docked run column),
+   where the page name, scope, counters, Inspector and the run pill need the room; the name stays
+   for assistive technology through `aria-label` and the shortcut in the tooltip. */
 .ui-palette-launcher {
   display: inline-flex;
   flex: none;
@@ -155,6 +156,7 @@
   gap: 0.5rem;
   min-width: 0;
   height: 32px;
+  min-height: 32px;
   padding: 0 0.6rem;
   border: 1px solid var(--line-strong);
   border-radius: var(--radius);
@@ -166,9 +168,15 @@
 .ui-palette-launcher:hover {
   color: var(--text-1);
 }
-@media (max-width: 1365px) {
+@media (max-width: 1599px) {
   .ui-palette-launcher-text,
   .ui-palette-launcher kbd {
+    display: none;
+  }
+}
+@media (max-width: 1759px) {
+  .shell:has(.run-monitor.is-docked:not(.is-maximized)) .ui-palette-launcher-text,
+  .shell:has(.run-monitor.is-docked:not(.is-maximized)) .ui-palette-launcher kbd {
     display: none;
   }
 }

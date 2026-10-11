@@ -317,8 +317,9 @@
   color: var(--text-1);
 }
 .nurture-tab.is-on {
-  background: var(--bg);
-  color: var(--primary);
+  background: var(--rv-surface-panel);
+  color: var(--rv-selected-text);
+  font-weight: var(--weight-semibold);
   box-shadow: 0 1px 2px rgba(0, 0, 0, 0.06);
 }
 .nurture-live {
@@ -1064,7 +1065,8 @@
   inset: 0 auto 0 0;
   width: var(--fill, 0%);
   border-radius: inherit;
-  background: var(--primary);
+  /* Work in progress is the running colour, not the action colour. */
+  background: var(--rv-status-running-solid);
   transition: width var(--duration-base) var(--ease);
 }
 /* The share of a finished run that failed, drawn from the right so a full bar still shows

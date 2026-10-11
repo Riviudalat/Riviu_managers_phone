@@ -58,6 +58,10 @@ export interface Fleet {
   bootError: string | null;
   /// True after the first complete fleet read, including a failed read.
   fleetSettled: boolean;
+  /// When the whole roster was last read from the backend (`listDevices` or a
+  /// `devicesUpdated` event), in epoch ms; null until the first read lands. A failed
+  /// read keeps the previous time, because the list on screen is still that old.
+  rosterReadAt: number | null;
   /// The device sidecar is degraded, so an empty fleet has a cause worth naming.
   driverIssue: string | null;
   /// Android specifically is unavailable; asked apart because the two halves fail apart.
@@ -111,6 +115,7 @@ export function useFleet(): Fleet {
   const [jobs, setJobs] = useState<JobRecord[]>([]);
   const [bootError, setBootError] = useState<string | null>(null);
   const [fleetSettled, setFleetSettled] = useState(false);
+  const [rosterReadAt, setRosterReadAt] = useState<number | null>(null);
   const [driverIssue, setDriverIssue] = useState<string | null>(null);
   const [androidIssue, setAndroidIssue] = useState<string | null>(null);
   // Named apart from the imported command on purpose: calling the state variable the same
@@ -163,6 +168,7 @@ export function useFleet(): Fleet {
     try {
       const [d, j] = await Promise.all([listDevices(), listJobs()]);
       setDevices(d);
+      setRosterReadAt(Date.now());
       setJobs(j);
       // Groups are auxiliary and load separately, on purpose. Inside the Promise.all
       // above, a group-listing failure rejected the whole reload and left the grid empty
@@ -209,6 +215,7 @@ export function useFleet(): Fleet {
         void listenRiviuEvents((event) => {
           if (event.type === "devicesUpdated") {
             setDevices(event.devices);
+            setRosterReadAt(Date.now());
           } else if (event.type === "deviceUpdated") {
             const { device } = event;
             setDevices((prev) => {
@@ -299,6 +306,7 @@ export function useFleet(): Fleet {
     startupIssue,
     bootError,
     fleetSettled,
+    rosterReadAt,
     driverIssue,
     androidIssue,
     androidToolProblems: toolProblems,

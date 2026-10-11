@@ -68,9 +68,9 @@
 }
 
 .device-automation-bar [aria-selected="true"] {
-  color: var(--primary-deep);
-  border-bottom-color: var(--primary);
-  background: var(--primary-50);
+  color: var(--rv-selected-text);
+  border-bottom-color: var(--rv-selected-line);
+  background: var(--rv-selected-fill);
 }
 
 .device-automation-head {
