@@ -52,7 +52,7 @@ kiểm helper và clipboard trong quyền điều khiển của máy trước kh
 
 ### Phiên điều khiển còn được giữ
 
-Khi máy bị giữ bởi một lượt tương tác đã kết thúc, chọn máy ở trang Thiết bị,
+Khi máy bị giữ bởi một lượt tương tác đã kết thúc, chọn máy ở Trung tâm điều khiển,
 mở **Bảo trì → Khôi phục phiên điều khiển**. Ứng dụng chuẩn bị đúng phiên trước
 khi xác nhận. Thao tác xác nhận dừng phiên TikTok được giữ và nhả quyền điều khiển;
 nó giữ nguyên kết quả chưa rõ của bản nháp hoặc bài đã gửi.

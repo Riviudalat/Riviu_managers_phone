@@ -26,8 +26,8 @@ Ctrl+K). Tên thuần Việt; tiêu đề trang trùng tên mục điều hướ
   (nhóm gốc vẫn là Dàn máy/Công việc/Hệ thống, Ctrl+K ghi nhóm đó).
 - Cửa sổ thấp hơn 900 px gập mọi nhóm người vận hành chưa tự mở/gập; màn cao hơn mở sẵn; lựa chọn
   mở/gập được nhớ trên máy. Tới một trang trong nhóm đang gập từ ngoài sidebar (Ctrl+K, Trợ giúp)
-  thì nhóm đó tự mở để thấy mục đang chọn; đổi trang không bao giờ gập nhóm. Nhóm đang gập chứa trang hiện tại
-  có tiêu đề cam.
+  thì nhóm đó tự mở để thấy mục đang chọn; đổi trang không bao giờ gập nhóm. Nhóm đang gập chứa
+  trang hiện tại có tiêu đề cam.
 - Thanh thu gọn rộng 76 px giữ icon và tên ngắn dưới icon (Trung tâm, Tài khoản, …), không bao giờ
   chỉ có icon; editor Quy trình ứng dụng tự dùng thanh này.
 - **Ứng dụng** là hai trang riêng, chuyển bằng hàng thẻ trên đầu: **Quy trình ứng dụng** (trước là
@@ -35,6 +35,7 @@ Ctrl+K). Tên thuần Việt; tiêu đề trang trùng tên mục điều hướ
   đầu; bấm lại khi đang ở Gói cài đặt thì giữ nguyên thẻ.
 - Trợ giúp có bảng **Từ GenFarmer sang Riviu** (Control Center, My Apps, Automation, Runs, Tasks,
   Schedules, Inspector, Groups, Settings/stream), ghi rõ giới hạn: Inspector chỉ máy Android.
+
 **Màu cam chỉ dùng cho hai việc:** một hành động chính của mỗi vùng, và mục đang chọn (máy
 đã chọn, mục điều hướng đang mở). Tab, nút phân đoạn và bộ lọc đang bật là trung tính (chữ
 đậm, gạch chân hoặc nền xám, không cam); hover trung tính; link và thao tác phụ trung tính;
@@ -100,7 +101,7 @@ thành một cột ở 1100 px; toolbar tự xuống hàng nhưng nhãn Lưu/Ch�
 (`cause`, `udid`/`udids`, `runId`); `toastError` lấy `code` có tên, `udid`, `runId` từ lỗi
 qua `errorFacts`, fan-out lấy đúng các máy lỗi qua `fanOutActivity`. Panel gom các mục cùng
 `cause` thành một dòng có số mục và "N máy", mở ra xem từng mục, và nút "Chọn N máy này" thay
-lựa chọn bằng đúng các ID đó rồi về Thiết bị. Câu cho người đọc đứng trước; mã nguyên nhân,
+lựa chọn bằng đúng các ID đó rồi về Trung tâm điều khiển. Câu cho người đọc đứng trước; mã nguyên nhân,
 mã lượt chạy và mã thiết bị nằm trong **Chi tiết**. Mục không có `cause` không bị gom theo chữ.
 Lời toast theo nguyên tắc ACK chưa phải bằng chứng: "Đã gửi lệnh…", không "Thành công" cho
 tác động chưa được xác minh.
@@ -314,7 +315,7 @@ bằng chứng. Thiếu dữ liệu không bao giờ tự thành Sẵn sàng hay
 | Trục | Giá trị | Điều kiện |
 |---|---|---|
 | **Kết nối** | Đã kết nối · Mất kết nối · Chưa rõ | Mất kết nối = roster `disconnected`; trạng thái roster chưa nhận diện = Chưa rõ |
-| **Điều khiển** | Sẵn sàng · Chưa kiểm · Không đạt (+ lý do) · Chưa rõ | Sẵn sàng chỉ khi có bằng chứng còn hiệu lực cho kết nối hiện tại: Android cần bản ghi agent `ready` + `authReady` + `sessionReady` + `helperReady` (bộ nhớ đệm, chỉ đọc trong Control Center, đọc lại khi dòng roster đổi); iOS roster `ready` hoặc WDA sẵn sàng. Agent `unknown`/`starting` hoặc thiếu helper = Chưa kiểm; agent lỗi hoặc cần khôi phục helper = Không đạt; chưa đọc được bản ghi = Chưa rõ |
+| **Điều khiển** | Sẵn sàng · Chưa kiểm · Không đạt (+ lý do) · Chưa rõ | Sẵn sàng chỉ khi có bằng chứng còn hiệu lực cho kết nối hiện tại: Android cần bản ghi agent `ready` + `authReady` + `sessionReady` + `helperReady` (bộ nhớ đệm, chỉ đọc trong Trung tâm điều khiển, đọc lại khi dòng roster đổi); iOS roster `ready` hoặc WDA sẵn sàng. Agent `unknown`/`starting` hoặc thiếu helper = Chưa kiểm; agent lỗi hoặc cần khôi phục helper = Không đạt; chưa đọc được bản ghi = Chưa rõ |
 | **Công việc** | Rảnh · Đang chạy (+ việc) · Cần xử lý (+ lý do) · Chưa rõ | Đang chạy = có chủ sở hữu hiện tại hoặc roster `busy` (không nhận việc mới); Cần xử lý = điều khiển Không đạt, roster `error` hoặc máy quá tải; chưa đọc được chủ sở hữu = Chưa rõ |
 
 **Chọn được** (Nuôi, Tương tác) / **có thể gán** (Đăng bài) là quy tắc riêng của từng workspace,
@@ -338,7 +339,7 @@ nhau, nên bộ đếm ghi rõ điều này trong tooltip), nên các số cộn
 khi máy Chưa rõ có thể thuộc nhóm đó (chưa đọc chủ sở hữu → Sẵn sàng/Chưa kiểm/Đang chạy/Cần xử lý;
 chưa đọc bản ghi điều khiển → Sẵn sàng/Chưa kiểm/Cần xử lý); trước khi danh sách máy tải xong mọi
 số đều **?**. Bấm một bộ đếm đặt đúng state lọc của select **Trạng thái thiết bị** trên lưới (cùng
-bảy giá trị), bấm lại hoặc bấm **Tổng** thì bỏ lọc; từ trang khác thì chuyển về Control Center.
+bảy giá trị), bấm lại hoặc bấm **Tổng** thì bỏ lọc; từ trang khác thì chuyển về Trung tâm điều khiển.
 Khi đang lọc, cạnh select có nhãn **Đang lọc: …** và nút **Bỏ lọc**. Bộ đếm là dòng đọc trạng
 thái (icon trạng thái · nhãn · số), không viền; bộ đếm đang lọc có nền xám và chữ đậm, không cam.
 Bộ đếm và bộ lọc dùng chung một state và cùng điều kiện của thẻ máy, không có bản sao thứ hai;

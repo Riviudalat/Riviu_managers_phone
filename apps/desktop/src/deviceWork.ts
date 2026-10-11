@@ -298,7 +298,7 @@ const COUNT_KEY: Record<DeviceOperationalStatus, Exclude<keyof FleetCounts, "tot
  * Counts with the tile's own predicate, so a counter and the wall filter it sets always agree.
  * A counter turns unknown when a phone counted as "Chưa rõ" could belong to it: an unread work
  * owner could hide a running, attention, ready or unchecked phone; an unread control proof
- * (only Control Center reads that cache) a ready, unchecked or failed one.
+ * (only Trung tâm điều khiển reads that cache) a ready, unchecked or failed one.
  */
 export function fleetCounts(
   devices: Pick<DeviceInfo, "udid" | "platform" | "status" | "wdaReady">[],

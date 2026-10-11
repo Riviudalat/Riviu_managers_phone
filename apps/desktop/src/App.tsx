@@ -1146,7 +1146,7 @@ function App() {
           }), ".group-manager .group-new button")}
           onGoToDevice={goToDevice}
           onSelectDevices={(udids) => {
-            // Selecting from another page lands on Thiết bị; on it, focus stays where it was.
+            // Selecting from another page lands on Trung tâm điều khiển; on it, focus stays where it was.
             const leaving = pageRef.current !== "control";
             paletteNavigate(requestPage("control", true).then((activated) => {
               if (activated) setSelected(udids);

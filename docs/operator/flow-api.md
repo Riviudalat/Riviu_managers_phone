@@ -192,9 +192,9 @@ client gửi Content-Length. Run/cancel dùng chung admission và engine Flow v�
 **Bảo trì → Riviu Agent** hiển thị phần mềm điều khiển của từng điện thoại. Android
 dùng ADB/UiAutomator2 và helper Riviu; iPhone dùng Riviu Agent/WDA. Thông tin gói và
 xác thực iOS nằm riêng trong **Cấu hình Agent iOS**. Khi chỉ dùng Android hoặc chưa có
-iPhone đang kết nối, trang Thiết bị không hiện cảnh báo nhánh iOS; vẫn mở mục cấu hình
+iPhone đang kết nối, Trung tâm điều khiển không hiện cảnh báo nhánh iOS; vẫn mở mục cấu hình
 này để xem lý do nếu đang chuẩn bị kết nối iPhone. Khi có iPhone kết nối mà nhánh iOS
-báo lỗi, cảnh báo hiện trên trang Thiết bị. Trạng thái này không thay kết quả kiểm tra
+báo lỗi, cảnh báo hiện trên Trung tâm điều khiển. Trạng thái này không thay kết quả kiểm tra
 từng máy và không tự cài hoặc khôi phục Agent.
 
 **Đầu vào:** giá trị của từng section và credential tương ứng. **Thao tác:** chỉnh sửa,

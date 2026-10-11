@@ -15,7 +15,7 @@ export function WifiAdbSection() {
     const target = host.includes(":") ? host : `${host}:5555`;
     try {
       await wifiAdbConnect(target);
-      setWifiMessage({ tone: "success", text: `Đã kết nối ${target}. Làm mới trang Thiết bị để thấy máy.` });
+      setWifiMessage({ tone: "success", text: `Đã kết nối ${target}. Làm mới Trung tâm điều khiển để thấy máy.` });
     } catch (error) {
       setWifiMessage({ tone: "error", text: describeError(error) });
     }

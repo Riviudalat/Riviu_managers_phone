@@ -81,7 +81,7 @@ async function assertNoPageWideOverflow(page: Page): Promise<void> {
       mainScroll: main?.scrollWidth ?? 0,
       contentClient: content?.clientWidth ?? 0,
       contentScroll: content?.scrollWidth ?? 0,
-      // The Control Center search, when it is on screen: no overflow is not the same as usable.
+      // The Trung tâm điều khiển search, when it is on screen: no overflow is not the same as usable.
       deviceSearch: document.querySelector<HTMLElement>(".device-filters input[type='search']")
         ?.getBoundingClientRect().width ?? null,
     };

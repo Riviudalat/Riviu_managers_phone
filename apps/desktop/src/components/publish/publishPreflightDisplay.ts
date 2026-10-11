@@ -93,7 +93,7 @@ export function publishPreflightProblem(
       return {
         title: "Máy đã mất kết nối",
         action:
-          "Kiểm tra nguồn và kết nối USB/Wi-Fi, chờ máy xuất hiện trong Thiết bị rồi kiểm tra lại. Có thể ghép bài sang máy khác.",
+          "Kiểm tra nguồn và kết nối USB/Wi-Fi, chờ máy xuất hiện trong Trung tâm điều khiển rồi kiểm tra lại. Có thể ghép bài sang máy khác.",
       };
     case "tiktok_build_unreadable":
       if (

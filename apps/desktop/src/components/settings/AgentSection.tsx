@@ -222,7 +222,7 @@ export function AgentSection({ connectedDevices, connectedUdids, deviceLabels, i
           compact
           icon={<IconPhone size={15} />}
           title="Chưa có điện thoại đang kết nối"
-          hint="Cắm máy qua USB rồi quét lại ở trang Thiết bị."
+          hint="Cắm máy qua USB rồi quét lại ở Trung tâm điều khiển."
         />
       ) : (
         <div className="agent-status-table" role="table" aria-label="Trạng thái Agent">
