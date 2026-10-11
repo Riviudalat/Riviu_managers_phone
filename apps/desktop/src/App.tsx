@@ -71,6 +71,7 @@ import { InspectorLauncher } from "./components/InspectorLauncher";
 import { NavigationPalette, type PaletteDevice } from "./components/NavigationPalette";
 import { usePaletteShortcut } from "./components/ui/usePaletteShortcut";
 import { useDeviceWindows } from "./components/useDeviceWindows";
+import { useAutoControlCheck } from "./useAutoControlCheck";
 import { IconPhone, IconRefresh } from "./components/Icons";
 import { Search } from "lucide-react";
 import { Banner, EmptyState, LoadingState } from "./components/States";
@@ -376,6 +377,16 @@ function App() {
       currentDeviceWorkState(udid)?.currentOwner ?? null,
     [currentDeviceWorkState],
   );
+  // Owner request: control is always checked, so idle phones reach "Sẵn sàng" by themselves
+  // instead of staying "Chưa kiểm" until someone opens them. Only once the cached agent read
+  // for this roster has arrived, so a still-loading cache never triggers a check.
+  const isDeviceBusy = useCallback((udid: string) => currentDeviceWorkOwner(udid) !== null, [currentDeviceWorkOwner]);
+  useAutoControlCheck({
+    enabled: page === "control" && fleetSettled && cachedAgents.roster === agentRosterKey && !cachedAgents.error,
+    devices,
+    cachedAgent,
+    isBusy: isDeviceBusy,
+  });
 
   useEffect(() => {
     if (startupIssue !== null || !fleetSettled || bootError) return;
