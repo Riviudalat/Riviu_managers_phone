@@ -80,6 +80,8 @@ impl Database {
              WHERE id=?1 AND state IN ('queued','scheduled','ready','imported','failed_before_dispatch')",
             params![campaign_id, code, now],
         )?;
+        // The approval is invalidated: its account locks end with it.
+        release_settled_account_locks(&tx, Some(campaign_id), None)?;
         tx.commit()?;
         Ok(())
     }
@@ -88,9 +90,10 @@ impl Database {
     /// every capacity wait, immediately before the first transfer, app-session or composer
     /// effect. One short transaction compares the frozen approval with the current account of
     /// every phone in this campaign that has not crossed the effect boundary; nothing is held
-    /// across device I/O. A passing admission stays valid for the running step because
-    /// account edits on a phone with a running publish step are refused
-    /// (`ensure_account_edit_allowed`). On any change the whole remaining pre-dispatch set is
+    /// across device I/O. A passing admission stays valid after it returns because every phone
+    /// of the set is account-locked until the set settles (`lock_campaign_accounts`, enforced by
+    /// `ensure_account_edit_allowed`), so this comparison is the backstop for a write that
+    /// bypassed the account writers. On any change the whole remaining pre-dispatch set is
     /// settled review-required and the caller gets a terminal refusal, so the old approval is
     /// never retried. A row already past the effect boundary only reconciles and is admitted.
     pub fn admit_publish_effect(
@@ -221,6 +224,8 @@ impl Database {
         )?;
         tx.execute("UPDATE publish_start_requests SET state='queued',stage='queued',revision=revision+1,updated_at=?2
             WHERE campaign_id=?1 AND state='preparing'",params![campaign_id,now])?;
+        // Fresh work re-enters the approved set, so its phones are account-locked again.
+        lock_campaign_accounts(&tx, campaign_id)?;
         pipeline_event(&tx, campaign_id, &now)?;
         tx.commit()?;
         Ok(Some(PublishPipelineRun {
@@ -394,6 +399,7 @@ impl Database {
             _ => Some("publish_assignment_failed"),
         };
         if tx.execute("UPDATE publish_campaigns SET state=?1,error_code=?2,revision=revision+1,updated_at=?3 WHERE id=?4 AND state='posting'",params![state,error,now,run.campaign_id])?==1{pipeline_event(&tx,&run.campaign_id,&now)?;}
+        release_settled_account_locks(&tx, Some(&run.campaign_id), None)?;
         tx.commit()?;
         Ok(true)
     }
@@ -401,6 +407,254 @@ impl Database {
 fn pipeline_event(tx: &rusqlite::Transaction<'_>, campaign: &str, now: &str) -> anyhow::Result<()> {
     tx.execute("INSERT INTO publish_events(campaign_id,revision,kind,payload_json,created_at) SELECT id,revision,'state',json_object('state',state,'errorCode',error_code,'source','per_device_pipeline'),?2 FROM publish_campaigns WHERE id=?1",params![campaign,now])?;
     Ok(())
+}
+
+/// Durable account locks (PLAN §3, review R3): from the moment an approval is accepted until its
+/// set settles, every phone in it keeps the account the approval bound, and every account writer
+/// refuses a change (`fleet::ensure_account_edit_allowed`). The approval validators
+/// (`publish_approval_refusal`, `admit_publish_effect`) keep comparing as the backstop.
+///
+/// Rows live in `settings` under `publish.account-lock.{kind}.{owner}.{udid}`, valued
+/// `{udid, owner, kind, account, label, session}`:
+/// - `preparing`, owner = request ID: taken in Start's acceptance transaction, or when creation
+///   begins without a Start, before the approval is compared with the phones. It binds while the
+///   process that took it runs and the Start has not settled without a campaign; the campaign
+///   insert replaces it in the same transaction, and creation releases it on every other exit.
+/// - `campaign`, owner = campaign ID: taken in the transaction that inserts a campaign carrying an
+///   approval, and again whenever fresh work re-enters the set (claim, assignment retry, recovery
+///   requeue). It binds while the campaign is not cancelled or missed and one of its rows can
+///   still start fresh work (no effect intent, and an active state or an open dispatch job); a
+///   row with an effect intent only reconciles under the approval.
+///
+/// A row that no longer binds is ignored, and deleted by the next writer check, at pipeline
+/// finish, cancel and Start settlement, and by the startup sweep.
+const ACCOUNT_LOCK_PREFIX: &str = "publish.account-lock.";
+
+/// Settings row `l` is a lock (`?2` is the prefix). Other settings values are not JSON, so a
+/// query reads `l.value` only behind this test, inside a `CASE`.
+const LOCK_ROW: &str = "substr(l.key,1,length(?2))=?2 AND json_valid(l.value)";
+
+/// Whether the lock in settings row `l` still binds; `?1` is this process's session.
+const LIVE_ACCOUNT_LOCK: &str = "COALESCE(CASE json_extract(l.value,'$.kind')
+    WHEN 'campaign' THEN EXISTS(SELECT 1 FROM publish_assignments a JOIN publish_campaigns c ON c.id=a.campaign_id
+        WHERE c.id=json_extract(l.value,'$.owner') AND c.state NOT IN ('cancelled','missed')
+        AND a.effect_intent IS NULL
+        AND (a.state IN ('queued','scheduled','preparing','ready','transferring','imported','posting')
+            OR EXISTS(SELECT 1 FROM publish_dispatch_jobs j WHERE j.assignment_id=a.id
+                AND j.state IN ('queued','running','paused'))))
+    ELSE json_extract(l.value,'$.session')=?1 AND NOT EXISTS(SELECT 1 FROM publish_start_requests s
+        WHERE s.request_id=json_extract(l.value,'$.owner')
+        AND (s.campaign_id IS NOT NULL OR s.state NOT IN ('accepted','preparing')))
+    END,0)";
+
+/// A preparation lock binds only inside the process that took it: preparation is not
+/// replayable after a restart, which settles an interrupted Start as uncertain.
+static ACCOUNT_LOCK_SESSION: std::sync::LazyLock<String> =
+    std::sync::LazyLock::new(|| Uuid::new_v4().to_string());
+
+fn account_lock_key(kind: &str, owner: &str, udid: &str) -> String {
+    format!("{ACCOUNT_LOCK_PREFIX}{kind}.{owner}.{udid}")
+}
+
+fn current_account(conn: &Connection, udid: &str) -> anyhow::Result<String> {
+    let handle: String = conn.query_row(
+        "SELECT COALESCE((SELECT handle FROM device_meta WHERE udid=?1),'')",
+        [udid],
+        |row| row.get(0),
+    )?;
+    Ok(crate::publish::normalize_publish_account(&handle))
+}
+
+/// Lock `udids` for a preparation that has no campaign yet, recording each current account for
+/// the backstop before the first owner effect. A lock this request already holds is kept.
+pub(super) fn lock_preparing_accounts(
+    conn: &Connection,
+    request: &str,
+    udids: &[String],
+) -> anyhow::Result<()> {
+    let label = format!(
+        "lượt đăng {} đang bắt đầu",
+        request.get(..8).unwrap_or(request)
+    );
+    for udid in udids {
+        let value = serde_json::json!({
+            "udid": udid, "owner": request, "kind": "preparing", "label": label,
+            "account": current_account(conn, udid)?, "session": *ACCOUNT_LOCK_SESSION,
+        });
+        conn.execute(
+            "INSERT OR IGNORE INTO settings(key,value) VALUES(?1,?2)",
+            params![
+                account_lock_key("preparing", request, udid),
+                value.to_string()
+            ],
+        )?;
+    }
+    Ok(())
+}
+
+pub(super) fn release_preparing_accounts(conn: &Connection, request: &str) -> anyhow::Result<()> {
+    conn.execute(
+        "DELETE FROM settings WHERE substr(key,1,length(?1))=?1",
+        [format!("{ACCOUNT_LOCK_PREFIX}preparing.{request}.")],
+    )?;
+    Ok(())
+}
+
+/// Lock every phone of `campaign` that can still start fresh work, with the account its
+/// approval bound. A campaign without an approval cannot dispatch fresh work and takes none.
+pub(super) fn lock_campaign_accounts(conn: &Connection, campaign: &str) -> anyhow::Result<()> {
+    let (raw, run_at): (String, Option<String>) = conn.query_row(
+        "SELECT request_json,run_at FROM publish_campaigns WHERE id=?1",
+        [campaign],
+        |row| Ok((row.get(0)?, row.get(1)?)),
+    )?;
+    // An unreadable legacy request has no approval either; the validators refuse its fresh work.
+    let Some(approval) = serde_json::from_str::<crate::PublishCampaignRequest>(&raw)
+        .ok()
+        .and_then(|request| request.approval)
+    else {
+        return Ok(());
+    };
+    let short = campaign.get(..8).unwrap_or(campaign);
+    let rows = {
+        let mut statement = conn.prepare(
+            "SELECT a.udid,COALESCE(b.name,a.bundle_id) FROM publish_assignments a
+             LEFT JOIN publish_bundles b ON b.campaign_id=a.campaign_id AND b.id=a.bundle_id
+             WHERE a.campaign_id=?1 AND a.effect_intent IS NULL
+             AND a.state IN ('queued','scheduled','preparing','ready','transferring','imported','posting','failed_before_dispatch')",
+        )?;
+        let rows = statement
+            .query_map([campaign], |row| {
+                Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
+            })?
+            .collect::<Result<Vec<_>, _>>()?;
+        rows
+    };
+    for (udid, bundle) in rows {
+        let label = match run_at.as_deref() {
+            Some(at) => format!(
+                "lịch đăng {short} lúc {} (bài \"{bundle}\")",
+                at.replace('T', " ")
+            ),
+            None => format!("lượt đăng {short} (bài \"{bundle}\")"),
+        };
+        let value = serde_json::json!({
+            "udid": udid, "owner": campaign, "kind": "campaign", "label": label,
+            "account": approval.accounts.get(&udid).cloned().unwrap_or_default(),
+        });
+        conn.execute(
+            "INSERT OR IGNORE INTO settings(key,value) VALUES(?1,?2)",
+            params![
+                account_lock_key("campaign", campaign, &udid),
+                value.to_string()
+            ],
+        )?;
+    }
+    Ok(())
+}
+
+/// Delete the locks that no longer bind, optionally only one owner's or one phone's.
+pub(super) fn release_settled_account_locks(
+    conn: &Connection,
+    owner: Option<&str>,
+    udid: Option<&str>,
+) -> anyhow::Result<()> {
+    conn.execute(
+        &format!(
+            "DELETE FROM settings WHERE key IN (SELECT l.key FROM settings l
+             WHERE CASE WHEN {LOCK_ROW} THEN
+                 (?3 IS NULL OR json_extract(l.value,'$.owner')=?3)
+                 AND (?4 IS NULL OR json_extract(l.value,'$.udid')=?4)
+                 AND NOT {LIVE_ACCOUNT_LOCK}
+             ELSE 0 END)"
+        ),
+        params![*ACCOUNT_LOCK_SESSION, ACCOUNT_LOCK_PREFIX, owner, udid],
+    )?;
+    Ok(())
+}
+
+/// The approval that keeps `udid`'s account locked now, named for the operator, if any.
+pub(super) fn live_account_lock(conn: &Connection, udid: &str) -> anyhow::Result<Option<String>> {
+    Ok(conn
+        .query_row(
+            &format!(
+                "SELECT json_extract(l.value,'$.label') FROM settings l
+                 WHERE CASE WHEN {LOCK_ROW} THEN
+                     json_extract(l.value,'$.udid')=?3 AND {LIVE_ACCOUNT_LOCK}
+                 ELSE 0 END ORDER BY l.key LIMIT 1"
+            ),
+            params![*ACCOUNT_LOCK_SESSION, ACCOUNT_LOCK_PREFIX, udid],
+            |row| row.get(0),
+        )
+        .optional()?)
+}
+
+impl Database {
+    /// Creation without a Start locks its phones before it reads their accounts; a Start's lock
+    /// from its acceptance is kept as it is.
+    pub fn lock_publish_preparation_accounts(
+        &self,
+        request: &str,
+        udids: &[String],
+    ) -> anyhow::Result<()> {
+        let mut conn = self.conn()?;
+        let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
+        lock_preparing_accounts(&tx, request, udids)?;
+        tx.commit()?;
+        Ok(())
+    }
+
+    /// Scoped release when creation ends; a created campaign has already replaced the lock.
+    pub fn release_publish_preparation_accounts(&self, request: &str) -> anyhow::Result<()> {
+        release_preparing_accounts(&self.conn()?, request)
+    }
+
+    /// Backstop before Start's first owner effect (review R3-F1): each selected phone must still
+    /// hold this request's binding lock with the account recorded when it was taken. The writers
+    /// already refuse while the lock binds; this catches anything that bypassed them.
+    pub fn publish_account_lock_drift(
+        &self,
+        request: &str,
+        udids: &[String],
+    ) -> anyhow::Result<Option<String>> {
+        let conn = self.conn()?;
+        let shown = |account: &str| {
+            if account.is_empty() {
+                "chưa gắn".to_owned()
+            } else {
+                format!("@{account}")
+            }
+        };
+        let mut refusals = Vec::new();
+        for udid in udids {
+            let lock: Option<(String, bool)> = conn
+                .query_row(
+                    &format!(
+                        "SELECT COALESCE(json_extract(l.value,'$.account'),''),{LIVE_ACCOUNT_LOCK}
+                         FROM settings l WHERE l.key=?2"
+                    ),
+                    params![
+                        *ACCOUNT_LOCK_SESSION,
+                        account_lock_key("preparing", request, udid)
+                    ],
+                    |row| Ok((row.get(0)?, row.get(1)?)),
+                )
+                .optional()?;
+            let current = current_account(&conn, udid)?;
+            match lock {
+                Some((locked, true)) if locked == current => {}
+                Some((locked, true)) => refusals.push(format!(
+                    "{udid}: tài khoản đã đổi từ {} sang {} trong lúc chuẩn bị; chưa đổi tác vụ cũ, xem lại rồi tạo lượt mới",
+                    shown(&locked),
+                    shown(&current)
+                )),
+                _ => refusals.push(format!(
+                    "{udid}: khóa tài khoản của lượt này không còn; chưa đổi tác vụ cũ, xem lại rồi bắt đầu lại"
+                )),
+            }
+        }
+        Ok((!refusals.is_empty()).then(|| refusals.join("; ")))
+    }
 }
 
 #[cfg(test)]

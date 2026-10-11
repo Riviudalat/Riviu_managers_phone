@@ -435,6 +435,25 @@ impl Database {
             "UPDATE publish_campaigns SET revision=1 WHERE id=?1",
             params![campaign_id],
         )?;
+        if request.approval.is_some() {
+            // Review R3: the approval and its account locks commit together. Every approved
+            // phone must still carry the approved account now; the creation's own preparation
+            // lock is replaced by the campaign's, which binds until the set settles.
+            for udid in &request.udids {
+                let current: String = transaction.query_row(
+                    "SELECT COALESCE((SELECT handle FROM device_meta WHERE udid=?1),'')",
+                    [udid],
+                    |row| row.get(0),
+                )?;
+                if let Some(refusal) =
+                    crate::publish::publish_approval_refusal(request, udid, &current)
+                {
+                    anyhow::bail!(refusal);
+                }
+            }
+            super::publish_pipeline::release_preparing_accounts(transaction, &request.request_id)?;
+            super::publish_pipeline::lock_campaign_accounts(transaction, campaign_id)?;
+        }
         if let Some((input_digest, status, retry_scope, report_json)) = prepared_snapshot {
             transaction.execute(
                 "INSERT INTO publish_execution_snapshots
@@ -908,6 +927,24 @@ impl Database {
         transaction.execute("UPDATE publish_campaigns SET state='posting',revision=revision+1 WHERE id IN(SELECT campaign_id FROM publish_pipeline_runs)",[])?;
         transaction.execute("UPDATE publish_attempts SET finished_at_ms=?1,result=(SELECT reason FROM publish_dispatch_jobs j WHERE j.attempt_id=publish_attempts.attempt_id)
           WHERE finished_at_ms IS NULL AND attempt_id IN(SELECT attempt_id FROM publish_dispatch_jobs WHERE state IN ('missed','finished','cancelled'))",[Utc::now().timestamp_millis()])?;
+        // Account locks after the reconciliation above: interrupted preparations and settled
+        // sets release theirs, and every approved set that can still start fresh work holds one
+        // (including campaigns created before the locks existed).
+        super::publish_pipeline::release_settled_account_locks(&transaction, None, None)?;
+        let unsettled: Vec<String> = transaction
+            .prepare(
+                "SELECT DISTINCT a.campaign_id FROM publish_assignments a
+                 JOIN publish_campaigns c ON c.id=a.campaign_id
+                 WHERE c.state NOT IN ('cancelled','missed') AND a.effect_intent IS NULL
+                 AND (a.state IN ('queued','scheduled','preparing','ready','transferring','imported','posting')
+                     OR EXISTS(SELECT 1 FROM publish_dispatch_jobs j WHERE j.assignment_id=a.id
+                         AND j.state IN ('queued','running','paused')))",
+            )?
+            .query_map([], |row| row.get(0))?
+            .collect::<Result<_, _>>()?;
+        for campaign_id in unsettled {
+            super::publish_pipeline::lock_campaign_accounts(&transaction, &campaign_id)?;
+        }
         transaction.commit()?;
         Ok(stranded.len())
     }
@@ -1604,6 +1641,7 @@ impl Database {
                     now
                 ],
             )?;
+            super::publish_pipeline::release_settled_account_locks(&transaction, Some(id), None)?;
         }
         transaction.commit()?;
         self.publish_campaign_state(id)

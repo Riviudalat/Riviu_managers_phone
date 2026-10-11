@@ -341,6 +341,19 @@ pub async fn publish_create_campaign(
         &preflight_request.udids,
     )
     .map_err(err)?;
+    // Review R3-F1: the receiving phones are account-locked before any account is read for the
+    // approval, until the campaign insert replaces the lock or this creation ends (a Start
+    // already took it when it was accepted). The handoff re-checks it before its first stop.
+    let (lock_request, lock_udids) = (request_id.clone(), udids.clone());
+    state
+        .db
+        .storage_write(move |db| db.lock_publish_preparation_accounts(&lock_request, &lock_udids))
+        .await
+        .map_err(err)?;
+    let _account_lock = PreparationAccountLock {
+        db: Arc::clone(&state.db),
+        request: request_id.clone(),
+    };
     let handoff_deadline = tokio::time::Instant::now() + Duration::from_secs(125);
     let releasing = confirmed && run_at.is_none();
     let handoff = if releasing {
@@ -402,6 +415,7 @@ pub async fn publish_create_campaign(
             &state,
             udids.clone(),
             &approved_release,
+            Some(&request_id),
             handoff,
             handoff_deadline,
         )
@@ -517,6 +531,23 @@ pub async fn publish_create_campaign(
         Err(error) => {
             let _ = fs::remove_dir_all(&staging_root);
             Err(err(error))
+        }
+    }
+}
+
+/// Scoped end of a creation's preparation account lock, on every exit. A created campaign has
+/// already replaced it in its insert transaction, so success releases nothing.
+struct PreparationAccountLock {
+    db: Arc<Database>,
+    request: String,
+}
+impl Drop for PreparationAccountLock {
+    fn drop(&mut self) {
+        if let Err(error) = self.db.release_publish_preparation_accounts(&self.request) {
+            log::warn!(
+                "Chưa nhả được khóa tài khoản của lượt {}: {error}",
+                self.request
+            );
         }
     }
 }

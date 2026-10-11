@@ -359,6 +359,7 @@ pub async fn operation_prepare_devices(
             &state,
             udids,
             &approved,
+            None,
             &handoff,
             tokio::time::Instant::now() + std::time::Duration::from_secs(125),
         )
@@ -617,6 +618,7 @@ pub(crate) async fn prepare_publish_devices(
     state: &AppState,
     udids: Vec<String>,
     approved_release: &[String],
+    account_lock: Option<&str>,
     _handoff: &tokio::sync::MutexGuard<'static, ()>,
     deadline: tokio::time::Instant,
 ) -> Result<OperationStopResult, CommandError> {
@@ -641,6 +643,18 @@ pub(crate) async fn prepare_publish_devices(
     }
     if let Some(refusal) = unapproved_release(&plan.needs, approved_release) {
         return Err(CommandError::operation(refusal));
+    }
+    // Review R3-F1: a publish Start's phones have been account-locked since its acceptance.
+    // The lock and the accounts it recorded are compared again before the first exclusion or
+    // stop, so a stale approval refuses with no old owner changed.
+    if let Some(request) = account_lock {
+        if let Some(refusal) = state
+            .db
+            .publish_account_lock_drift(request, &devices)
+            .map_err(CommandError::operation)?
+        {
+            return Err(CommandError::operation(refusal));
+        }
     }
     let mut stopped = HandoffStops { scoped: true, ..Default::default() };
     for (id, scope) in &plan.operations {

@@ -93,14 +93,18 @@ pub async fn publish_start(
     }
     let preparation_id = preparation_id.unwrap_or_else(|| Uuid::new_v4().to_string());
     Uuid::parse_str(&preparation_id).map_err(preflight::err)?;
-    let (id, digest, preparation) = (
+    let (id, digest, preparation, udids) = (
         request_id.clone(),
         approved_input_digest.clone(),
         preparation_id,
+        request.udids.clone(),
     );
+    // Acceptance account-locks the receiving phones in the same transaction (review R3).
     let (receipt, inserted) = state
         .db
-        .storage_write(move |db| db.accept_publish_start(&id, &digest, &fingerprint, &preparation))
+        .storage_write(move |db| {
+            db.accept_publish_start(&id, &digest, &fingerprint, &preparation, &udids)
+        })
         .await
         .map_err(preflight::err)?;
     if !inserted {

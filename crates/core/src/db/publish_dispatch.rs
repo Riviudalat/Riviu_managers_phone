@@ -164,6 +164,7 @@ impl Database {
         tx.execute("UPDATE publish_campaigns SET state='posting',error_code=NULL,revision=revision+1,updated_at=?2 WHERE id=?1",
             params![run.campaign_id,now.to_rfc3339()])?;
         tx.execute("UPDATE publish_assignments SET state='queued',error_code=NULL,revision=revision+1,updated_at=?2 WHERE id=?1 AND effect_intent IS NULL",params![assignment_id,now.to_rfc3339()])?;
+        super::publish_pipeline::lock_campaign_accounts(&tx, &run.campaign_id)?;
         tx.execute(
             "INSERT OR IGNORE INTO publish_pipeline_runs(campaign_id,token,created_at) VALUES(?1,?2,?3)",
             params![run.campaign_id, run.token, now.to_rfc3339()],

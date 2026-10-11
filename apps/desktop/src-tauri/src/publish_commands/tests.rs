@@ -2686,9 +2686,11 @@ fn new_publications_require_sheet_and_verified_import_cleanup() {
             .find(needle)
             .unwrap_or_else(|| panic!("{needle} missing from create"))
     };
+    // Review R3-F1: the receiving phones are account-locked before the approval reads them.
     let order = [
         "replay_publish_create(",
         "preflight::require_new_publish_delivery(",
+        "lock_publish_preparation_accounts(",
         "wait_manual_handoff_until(",
         "require_approval_before_effects(",
         "defer_idle_work(",
@@ -2732,6 +2734,7 @@ fn new_publications_require_sheet_and_verified_import_cleanup() {
         "fence_new_work(&devices)",
         "observe_release_plan(state, &devices)",
         "unapproved_release(&plan.needs, approved_release)",
+        "publish_account_lock_drift(request, &devices)",
         "request_publish_handoff_exclusion(assignment, *revision",
         "stop_run(udid, *run)",
         "operation_stop(app",

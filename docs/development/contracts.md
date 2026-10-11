@@ -707,14 +707,18 @@ có versionCode tối thiểu 5 cho launcher; APK, manifest và NOTICE phải kh
   đi thì không cần duyệt; chủ mới, việc khác trên cùng máy hoặc revision đã đổi làm Start bị từ
   chối mà không dừng chủ nào chưa được duyệt.
 - Thứ tự kiểm của Start (`publish_create_campaign`): (1) replay đúng request ID và
-  fingerprint, trả receipt cũ, không dừng/tạo lại; (2) kiểm request, rồi vào khóa handoff (chỉ
-  chờ); (3) `require_approval_before_effects`: preflight chỉ đọc bằng builder gốc (không
-  reconcile helper) trên bằng chứng máy mới (build, dung lượng, tài khoản đọc lại), so digest
-  đã duyệt rồi so các chủ đang giữ với phong bì; lệch thì receipt thành từ chối, không đổi chủ
-  nào. Đây chỉ là từ chối sớm; (4) `defer_idle_work`, rồi `prepare_publish_devices`:
+  fingerprint, trả receipt cũ, không dừng/tạo lại; (2) kiểm request, khóa tài khoản các máy nhận
+  (Start đã khóa ngay lúc tiếp nhận, xem "Khóa tài khoản theo bản duyệt"), rồi vào khóa handoff
+  (chỉ chờ); (3) `require_approval_before_effects`: preflight chỉ đọc bằng builder gốc (không
+  reconcile helper) trong context mới: đo lại build, dung lượng và đọc lại tài khoản, không dùng
+  lại báo cáo đã chuẩn bị (`reuse_prepared` chỉ phục vụ màn xem lại, context không `fresh`); so
+  digest đã duyệt rồi so các chủ đang giữ với phong bì; lệch thì receipt thành từ chối, không đổi
+  chủ nào. Đây chỉ là từ chối sớm; (4) `defer_idle_work`, rồi `prepare_publish_devices`:
   `fence_new_work` chặn mọi việc mới hoặc lấy lại lease trên các máy đó qua bộ điều phối chủ
   sở hữu (chỉ ManualControl của chính lượt nhả được lấy máy), một lần quan sát dưới hàng rào
-  thành **kế hoạch nhả bất biến**, so với phong bì, và chỉ kế hoạch đó được thực hiện: loại
+  thành **kế hoạch nhả bất biến**, so với phong bì, `publish_account_lock_drift` xác nhận khóa
+  tài khoản của request còn hiệu lực và tài khoản vẫn đúng như lúc khóa, rồi chỉ kế hoạch đó
+  được thực hiện: loại
   assignment theo đúng revision đã duyệt (CAS), dừng Nuôi bằng `stop_run` so mã lượt dưới khóa
   của runtime (lượt Nuôi khác thì từ chối, không dừng), dừng thao tác theo id; không có lần liệt
   kê sau nào thêm việc để dừng. Hàng rào giữ tới khi đóng máy xong; các kiểm tra lúc đóng vẫn
@@ -727,9 +731,9 @@ có versionCode tối thiểu 5 cho launcher; APK, manifest và NOTICE phải kh
   Biên hiệu lực thật là `admit_publish_effect`: sau khi đã giữ lease thiết bị và qua mọi lượt chờ
   (staging, lease, UI capacity), ngay trước chuyển media, dừng/mở TikTok hay composer, một
   transaction ngắn so bản duyệt với tài khoản hiện tại của mọi máy còn lại (không giữ transaction
-  qua I/O thiết bị). Khi một bước đăng đang chạy trên máy (job `running` hoặc work claim), mọi
-  đường ghi tài khoản (`set_device_handle`, đối soát tài khoản, nhập metadata, tài khoản quan sát
-  từ tương tác) bị từ chối, nên kết quả kiểm đó còn đúng tới khi bước xong. Lệch ở bất kỳ máy nào
+  qua I/O thiết bị). Kết quả kiểm còn đúng sau khi trả về là nhờ khóa tài khoản của cả tập (mục
+  dưới), không phải nhờ phép so này; phép so là lớp chặn sau cho thay đổi đi vòng qua các đường
+  ghi. Lệch ở bất kỳ máy nào
   thì toàn bộ việc còn lại chưa qua biên hiệu lực chuyển cần xem lại (`failed_before_dispatch`,
   `publish_approval_changed: lý do`, job đang chờ kết thúc), và lỗi là `Terminal` nên không thử
   lại. Lượt không có `approval` (tạo trước 10/2026) cũng vậy; thử lại vẫn so với cùng bản duyệt
@@ -738,6 +742,36 @@ có versionCode tối thiểu 5 cho launcher; APK, manifest và NOTICE phải kh
   không đăng lại; giữ nguyên không chiếm quyền, ngân sách thử lại và đối soát link/Sheet. Nội dung
   của lịch là bản sao managed đã kiểm hash lúc tạo và kiểm lại trước chuyển; sửa file nguồn sau
   đó không đổi thứ được đăng (nội dung được chốt khi lưu lịch).
+
+### Khóa tài khoản theo bản duyệt
+
+- Từ lúc bản duyệt được chấp nhận (Start, hoặc lưu lịch/tạo lượt con cho lượt hẹn giờ) đến khi
+  mọi assignment của tập đó xong, mọi máy trong tập giữ đúng tài khoản đã duyệt. Mọi đường ghi
+  tài khoản (`set_device_handle`, đối soát tài khoản, nhập/lưu metadata, tài khoản quan sát từ
+  tương tác) gọi `ensure_account_edit_allowed` trong transaction ghi của chính nó và từ chối, nêu
+  tên lượt: "tài khoản đang được giữ cho lượt đăng … đã duyệt và chưa xong; hủy lượt đó hoặc chờ
+  nó xong rồi mới đổi tài khoản". Ghi lại đúng tài khoản cũ (khác cách viết) không phải thay đổi.
+  Máy đang chạy một bước đăng (job `running` hoặc work claim) vẫn giữ tài khoản tới khi bước xong.
+- Khóa là dòng bền trong `settings`, khóa `publish.account-lock.{loại}.{chủ}.{máy}`, giá trị JSON
+  gồm máy, chủ, loại, tài khoản lúc khóa và tên hiển thị:
+  - `preparing` (chủ là request ID): tạo trong cùng transaction tiếp nhận Start
+    (`accept_publish_start`), hoặc khi tạo lượt không qua Start bắt đầu
+    (`lock_publish_preparation_accounts`), luôn trước khi đọc tài khoản để so bản duyệt. Chỉ có
+    hiệu lực trong tiến trình đã tạo nó và khi Start chưa kết thúc mà chưa có lượt. Insert lượt
+    thay nó trong cùng transaction; các lối ra khác của việc tạo nhả nó, và Start chuyển
+    `failed`/`uncertain` cũng nhả.
+  - `campaign` (chủ là lượt): tạo trong transaction insert lượt có `approval`; transaction đó so
+    tài khoản hiện tại của từng máy với bản duyệt và từ chối tạo lượt nếu lệch. Khóa lại khi việc
+    mới quay về tập (claim, thử lại assignment, recovery xếp lại). Còn hiệu lực khi lượt chưa hủy
+    hoặc lỡ lịch và còn hàng chưa có effect intent đang ở trạng thái chạy hoặc có job đang chờ/chạy.
+    Hàng đã gửi/chưa rõ chỉ đối chiếu theo bản duyệt nên không giữ khóa; hàng
+    `failed_before_dispatch` không còn job thì đã xong cho tới khi được thử lại.
+  - Dòng hết hiệu lực bị bỏ qua, và bị xóa ở lần ghi tài khoản kế tiếp trên máy đó, khi pipeline
+    kết thúc, khi hủy lượt, khi bản duyệt bị từ chối, khi Start kết thúc và ở lượt quét lúc mở app
+    (lượt quét này cũng khóa các lượt có `approval` còn việc, kể cả lượt tạo trước khi có khóa).
+- Các phép so vẫn chạy làm lớp chặn sau cho thay đổi đi vòng qua đường ghi:
+  `publish_account_lock_drift` trước lần loại assignment hoặc dừng đầu tiên của Start,
+  `publish_approval_refusal` trước claim và `admit_publish_effect` trước hiệu lực.
 
 ## Xác minh Publish và kết quả qua restart
 

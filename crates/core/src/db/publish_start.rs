@@ -182,12 +182,15 @@ impl Database {
     }
 
     /// Only the insert winner owns preparation. No phone, scan, handoff or network precedes it.
+    /// The same transaction account-locks every receiving phone (review R3), before Start reads
+    /// any account to compare with the approval.
     pub fn accept_publish_start(
         &self,
         request: &str,
         digest: &str,
         fingerprint: &str,
         preparation: &str,
+        udids: &[String],
     ) -> anyhow::Result<(PublishStartReceipt, bool)> {
         Uuid::parse_str(request)?;
         anyhow::ensure!(
@@ -229,6 +232,9 @@ impl Database {
         tx.execute("INSERT INTO publish_start_requests(request_id,input_digest,request_fingerprint,preparation_id,campaign_id,state,stage,updated_at)
             VALUES(?1,?2,?3,?4,?5,?6,?7,?8)", params![request,digest,fingerprint,preparation,campaign,
                 if is_new {"accepted"} else {"uncertain"}, if is_new {"accepted"} else {"existingCampaign"},Utc::now().to_rfc3339()])?;
+        if is_new {
+            super::publish_pipeline::lock_preparing_accounts(&tx, request, udids)?;
+        }
         let receipt = start_on(&tx, request)?.context("start receipt missing")?;
         tx.commit()?;
         Ok((receipt, is_new))
@@ -290,7 +296,9 @@ impl Database {
         error: Option<&PublishStartError>,
     ) -> anyhow::Result<bool> {
         let error = error.map(serde_json::to_string).transpose()?;
-        Ok(self.conn()?.execute(
+        let mut conn = self.conn()?;
+        let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
+        let changed = tx.execute(
             "UPDATE publish_start_requests SET state=?3,stage=?4,error_json=?5,
             revision=revision+1,updated_at=?6 WHERE request_id=?1 AND state=?2",
             params![
@@ -301,7 +309,14 @@ impl Database {
                 error,
                 Utc::now().to_rfc3339()
             ],
-        )? == 1)
+        )? == 1;
+        // A Start that settles without a campaign ends its preparation's account lock; a
+        // campaign has already replaced it with its own.
+        if changed && matches!(state, "failed" | "uncertain") {
+            super::publish_pipeline::release_preparing_accounts(&tx, request)?;
+        }
+        tx.commit()?;
+        Ok(changed)
     }
 
     pub fn publish_assignment_excluded(&self, assignment: &str) -> anyhow::Result<bool> {

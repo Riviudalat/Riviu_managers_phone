@@ -350,6 +350,7 @@ impl Database {
         tx.execute("INSERT INTO publish_attempts(attempt_id,publication_id,campaign_id,started_at_ms) SELECT ?2,publication_id,campaign_id,?3 FROM publish_assignments WHERE id=?1",params![job.assignment_id,attempt,now])?;
         tx.execute("UPDATE publish_dispatch_jobs SET state='queued',phase='transfer',attempt_id=?2,owner=NULL,reason='recovery_pending',revision=revision+1 WHERE assignment_id=?1",params![job.assignment_id,attempt])?;
         tx.execute("UPDATE publish_assignments SET state='queued',error_code=NULL,revision=revision+1,updated_at=?2 WHERE id=?1 AND effect_intent IS NULL",params![job.assignment_id,Utc::now().to_rfc3339()])?;
+        super::publish_pipeline::lock_campaign_accounts(&tx, &job.run.campaign_id)?;
         tx.commit()?;
         Ok(true)
     }
@@ -714,24 +715,39 @@ mod tests {
             .unwrap();
         assert!(fx.admit_publish_reconnect(&admitted, true, 1000).unwrap());
         assert!(fx.claim_publish_dispatch(&admitted, 0).unwrap());
-        // After admission returned, this phone's step is running: its account cannot change.
+        // Review R3: the whole approved set is account-locked from creation until it settles,
+        // so this phone's account cannot change while its step runs, and the refusal names
+        // the campaign.
+        let held = format!(
+            "tài khoản đang được giữ cho lượt đăng {}",
+            &fx_campaign[..8]
+        );
         let edit = fx
             .set_device_handle(&admitted.udid, "", "other.account")
             .unwrap_err();
-        assert!(
-            edit.to_string().contains("đang chạy một bước đăng bài"),
-            "{edit:#}"
-        );
+        assert!(edit.to_string().contains(&held), "{edit:#}");
         // With the lease held and nothing changed, the effect is admitted.
         assert!(fx
             .admit_publish_effect(&admitted.assignment_id)
             .unwrap()
             .is_ok());
-        // A sibling's account changes after the claim: the next effect admission refuses the
-        // whole remaining set, terminally, before any transfer or app session; the waiting
-        // sibling's job ends and its row needs review.
+        // Review R3-F2: after that admission returned, before the admitted phone's transfer or
+        // app session, a queued sibling's account cannot change either.
         let sibling = jobs[0].clone();
-        fx.set_device_handle(&sibling.udid, "", "sibling.changed")
+        let edit = fx
+            .set_device_handle(&sibling.udid, "", "sibling.changed")
+            .unwrap_err();
+        assert!(edit.to_string().contains(&held), "{edit:#}");
+        // Admission stays the backstop for a write that bypassed the writers: the next effect
+        // admission refuses the whole remaining set, terminally, before any transfer or app
+        // session; the waiting sibling's job ends and its row needs review.
+        fx.conn()
+            .unwrap()
+            .execute(
+                "INSERT INTO device_meta(udid,handle) VALUES(?1,'sibling.changed')
+                 ON CONFLICT(udid) DO UPDATE SET handle=excluded.handle",
+                [&sibling.udid],
+            )
             .unwrap();
         let refusal = fx
             .admit_publish_effect(&admitted.assignment_id)
@@ -757,6 +773,139 @@ mod tests {
             (job_state.as_str(), row_state.as_str()),
             ("finished", "failed_before_dispatch")
         );
+        drop(conn);
+        // The lock ends when the set settles: once the campaign is cancelled the sibling's
+        // account is editable, and only the still-running step keeps its own phone.
+        fx.cancel_publish_campaign(&fx_campaign).unwrap();
+        fx.set_device_handle(&sibling.udid, "sibling.changed", "after.settled")
+            .unwrap();
+        let edit = fx
+            .set_device_handle(&admitted.udid, "", "other.account")
+            .unwrap_err();
+        assert!(
+            edit.to_string().contains("đang chạy một bước đăng bài"),
+            "{edit:#}"
+        );
+
+        // Review R3-F1: Start's acceptance locks every receiving phone in its own transaction,
+        // before Start reads any account to compare with the approval.
+        let (st, _, seed, _) = fixture();
+        st.conn()
+            .unwrap()
+            .execute(
+                "INSERT INTO device_meta(udid,handle) VALUES('s1','start.account')",
+                [],
+            )
+            .unwrap();
+        let start = Uuid::new_v4().to_string();
+        let phones = vec!["s1".to_owned()];
+        assert!(
+            st.accept_publish_start(&start, &"0".repeat(64), &"1".repeat(64), &start, &phones)
+                .unwrap()
+                .1
+        );
+        let edit = st
+            .set_device_handle("s1", "start.account", "other.account")
+            .unwrap_err();
+        assert!(
+            edit.to_string()
+                .contains(&format!("lượt đăng {} đang bắt đầu", &start[..8])),
+            "{edit:#}"
+        );
+        assert_eq!(
+            st.publish_account_lock_drift(&start, &phones).unwrap(),
+            None
+        );
+        // A write that bypassed the writers refuses before the handoff's first exclusion or
+        // stop, and the campaign insert refuses the stale approval as well.
+        let bypass = |handle: &str| {
+            st.conn()
+                .unwrap()
+                .execute("UPDATE device_meta SET handle=?1 WHERE udid='s1'", [handle])
+                .unwrap();
+        };
+        bypass("other.account");
+        let drift = st
+            .publish_account_lock_drift(&start, &phones)
+            .unwrap()
+            .unwrap();
+        assert!(
+            drift.contains("s1: tài khoản đã đổi từ @start.account sang @other.account"),
+            "{drift}"
+        );
+        assert!(st
+            .advance_publish_start(&start, "accepted", "preparing", "preparingDevices", None)
+            .unwrap());
+        let mut request = st.publish_campaign_request(&seed).unwrap().unwrap();
+        let mut bundle = st
+            .get_publish_campaign(&seed)
+            .unwrap()
+            .unwrap()
+            .bundles
+            .remove(0);
+        bundle.id = format!("{start}:{}", bundle.id);
+        request.request_id = start.clone();
+        request.bundle_ids = vec![bundle.id.clone()];
+        request.udids = phones.clone();
+        request.approval.as_mut().unwrap().accounts =
+            [("s1".to_owned(), "start.account".to_owned())].into();
+        let snapshot = crate::PublishExecutionSnapshotDraft {
+            input_digest: "1".repeat(64),
+            status: crate::PublishExecutionStatus::Partial,
+            retry_scope: crate::PublishRetryScope::FullPipeline,
+            report_json: serde_json::json!({}),
+        };
+        let stale = st
+            .create_publish_with_receipt(
+                &request,
+                std::slice::from_ref(&bundle),
+                &snapshot,
+                &"1".repeat(64),
+            )
+            .unwrap_err();
+        assert!(
+            stale
+                .to_string()
+                .contains("s1: tài khoản đã đổi từ @start.account sang @other.account"),
+            "{stale:#}"
+        );
+        // Unchanged: the campaign insert replaces the preparation's lock with its own, in the
+        // same transaction that records the approval.
+        bypass("start.account");
+        let (created, _) = st
+            .create_publish_with_receipt(
+                &request,
+                std::slice::from_ref(&bundle),
+                &snapshot,
+                &"1".repeat(64),
+            )
+            .unwrap();
+        assert!(st
+            .publish_account_lock_drift(&start, &phones)
+            .unwrap()
+            .unwrap()
+            .contains("s1: khóa tài khoản của lượt này không còn"));
+        let edit = st
+            .set_device_handle("s1", "start.account", "other.account")
+            .unwrap_err();
+        assert!(
+            edit.to_string()
+                .contains(&format!("lượt đăng {} (bài", &created.id[..8])),
+            "{edit:#}"
+        );
+        st.cancel_publish_campaign(&created.id).unwrap();
+        st.set_device_handle("s1", "start.account", "other.account")
+            .unwrap();
+        // A Start that settles without a campaign releases its lock too.
+        let failed = Uuid::new_v4().to_string();
+        let others = vec!["s2".to_owned()];
+        st.accept_publish_start(&failed, &"0".repeat(64), &"2".repeat(64), &failed, &others)
+            .unwrap();
+        assert!(st.set_device_handle("s2", "", "free.account").is_err());
+        assert!(st
+            .advance_publish_start(&failed, "accepted", "failed", "failed", None)
+            .unwrap());
+        st.set_device_handle("s2", "", "free.account").unwrap();
     }
     #[test]
     fn retries_rotate_attempt_identity_and_old_worker_cannot_settle_new_attempt() {

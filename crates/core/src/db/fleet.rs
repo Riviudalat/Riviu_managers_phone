@@ -594,10 +594,11 @@ impl Database {
     }
 }
 
-/// A phone whose publish step is running keeps the account that step was admitted under
-/// (PLAN §3, review R2-F2): `admit_publish_effect` checks the approval with the device lease
-/// held, and this refusal keeps that check true until the step ends. Writing the same account
-/// (any spelling) is not a change and always passes. Call inside the writer's transaction.
+/// The one rule every account writer applies (PLAN §3, review R3), inside its own write
+/// transaction: a phone in an approved publish set keeps the approved account from the
+/// approval's acceptance until the set settles (`publish_pipeline::live_account_lock`), and a
+/// phone whose publish step is still running keeps the account that step was admitted under.
+/// Writing the same account (any spelling) is not a change and always passes.
 pub(crate) fn ensure_account_edit_allowed(
     conn: &Connection,
     udid: &str,
@@ -612,6 +613,12 @@ pub(crate) fn ensure_account_edit_allowed(
         == crate::publish::normalize_publish_account(handle)
     {
         return Ok(());
+    }
+    super::publish_pipeline::release_settled_account_locks(conn, None, Some(udid))?;
+    if let Some(label) = super::publish_pipeline::live_account_lock(conn, udid)? {
+        anyhow::bail!(
+            "{udid}: tài khoản đang được giữ cho {label} đã duyệt và chưa xong; hủy lượt đó hoặc chờ nó xong rồi mới đổi tài khoản"
+        );
     }
     let running: bool = conn.query_row(
         "SELECT EXISTS(SELECT 1 FROM publish_dispatch_jobs j JOIN publish_assignments a ON a.id=j.assignment_id
