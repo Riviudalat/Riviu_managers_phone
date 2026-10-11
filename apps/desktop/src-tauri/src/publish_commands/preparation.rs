@@ -205,6 +205,11 @@ pub(super) async fn reuse_prepared(
     sheet: &super::preflight::VerifiedSheetChoice,
 ) -> anyhow::Result<Option<super::preflight::PreparedPublishPreflight>> {
     use futures_util::stream::{self, StreamExt};
+    // Review R3-F3: only the review screen reuses a complete report. A fresh context (Start,
+    // and any caller without a context) probes build, storage and account again.
+    if CONTEXT.try_with(|context| context.fresh).unwrap_or(true) {
+        return Ok(None);
+    }
     let id = CONTEXT
         .try_with(|context| context.preparation_id.clone())
         .ok();

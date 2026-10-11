@@ -1272,6 +1272,76 @@ mod sheet_choice_tests {
                 .any(|issue| issue.code == "sheet_connection_unverified"
                     && issue.message.contains("shared writer refusal")));
         }
+        // Review R3-F3: a warmed complete report is reused only by the review screen. Start's
+        // fresh context, and a caller without a context, rebuild it from fresh device probes,
+        // so a stale build/storage verdict cannot carry its old digest into creation.
+        let events = riviu_core::EventBus::new(8);
+        preparation::initialize(&db, &events, &registry);
+        let mut warmed = first.clone();
+        warmed.report.can_execute = true;
+        warmed.report.input_digest = "f".repeat(64);
+        let context = |fresh| {
+            preparation::PreparationContext::new(
+                events.clone(),
+                Uuid::new_v4().to_string(),
+                "warmed".into(),
+                fresh,
+            )
+        };
+        let guard = preparation::guard_fingerprint(&db, &request).await.unwrap();
+        preparation::CONTEXT
+            .scope(
+                context(false),
+                preparation::remember_prepared(&db, request.clone(), &warmed, &guard),
+            )
+            .await
+            .unwrap();
+        let shared = first.report.sheet_delivery.clone();
+        let reviewed = preparation::CONTEXT
+            .scope(
+                context(false),
+                build_publish_preflight_reusing_sheet(
+                    &control,
+                    &registry,
+                    &db,
+                    request.clone(),
+                    &manifest,
+                    Ok(shared.clone()),
+                ),
+            )
+            .await
+            .unwrap();
+        assert_eq!(
+            reviewed.report.input_digest, warmed.report.input_digest,
+            "the review screen reuses its own warm report"
+        );
+        let fresh = preparation::CONTEXT
+            .scope(
+                context(true),
+                build_publish_preflight_reusing_sheet(
+                    &control,
+                    &registry,
+                    &db,
+                    request.clone(),
+                    &manifest,
+                    Ok(shared.clone()),
+                ),
+            )
+            .await
+            .unwrap();
+        let unscoped = build_publish_preflight_reusing_sheet(
+            &control,
+            &registry,
+            &db,
+            request.clone(),
+            &manifest,
+            Ok(shared),
+        )
+        .await
+        .unwrap();
+        for rebuilt in [fresh, unscoped] {
+            assert_eq!(rebuilt.report.input_digest, first.report.input_digest);
+        }
         assert_eq!(
             verify_sheet_delivery_choice(&db, false).await.unwrap(),
             None
