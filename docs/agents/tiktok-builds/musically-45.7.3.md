@@ -198,6 +198,13 @@ Hộp "Link email" (tiêu đề `xwe`; APK: `X.0Nct`, `global_email_auth_dialog`
 duy nhất là **Not now**; OK liên kết các địa chỉ email của máy vào tài khoản. Code:
 [`dialogs/catalog.rs`](../../../crates/core/src/app_automation/dialogs/catalog.rs).
 
+Hộp "Add to Home screen?" thấy trên máy 40/43/48 ngày 2026-10-10 do chính TikTok gây ra:
+`com.ss.android.ugc.aweme.shortcut.TiktokShortcutManager` (dịch vụ `IShortcutService`) gọi
+`ShortcutManager.requestPinShortcut`, rồi launcher Samsung hiện hộp xác nhận. Hộp này thuộc
+launcher, không thuộc TikTok, và không ảnh hưởng tới tài khoản. Hiện chưa có classifier cho
+hộp này và cũng chưa có bản dump XML. Thao tác hợp lý là **Cancel**, vì Add chỉ thêm biểu
+tượng ra màn hình chính. Khi có bản dump thì bổ sung vào catalog.
+
 ## 5. Sound picker
 
 Đo trên máy #44, giao diện en, ngày 2026-10-09:
