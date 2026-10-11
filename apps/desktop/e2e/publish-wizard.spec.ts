@@ -232,15 +232,17 @@ for (const viewport of [
     expect(axe.violations).toEqual([]);
     // The review dialog is the sole confirmation: one click sends one confirmed start for the
     // reviewed digest, with no second prompt, and a rejection keeps the dialog and the draft.
+    // Right before sending, the same request is checked once more; an unchanged review sends.
     await page.getByRole("button", { name: "Xác nhận đăng công khai 10 bài", exact: true }).click();
     const checkDialog = page.getByRole("dialog", { name: "Xem lại và xác nhận đăng công khai" });
     await expect(checkDialog.getByRole("alert")).toContainText("Fixture từ chối trước khi bắt đầu; chưa đăng bài.");
     await expect(page.getByRole("alertdialog")).toHaveCount(0);
     await expect(checkDialog).toBeVisible();
     const calls = await page.evaluate(() => (window as unknown as { __PUBLISH_CALLS__: { command: string; args: { request?: { udids: string[]; bundleIds: string[]; deleteAfterPublish: boolean; sheetEnabled: boolean }; approvedInputDigest?: string; confirmed?: boolean } }[] }).__PUBLISH_CALLS__);
-    expect(calls.map(call => call.command)).toEqual(["publish_preflight", "publish_start"]);
-    expect(calls[1].args).toMatchObject({ approvedInputDigest: "digest", confirmed: true });
-    expect(calls[1].args.request?.udids).toHaveLength(10);
+    expect(calls.map(call => call.command)).toEqual(["publish_preflight", "publish_preflight", "publish_start"]);
+    expect(calls[1].args.request).toEqual(calls[0].args.request);
+    expect(calls[2].args).toMatchObject({ approvedInputDigest: "digest", confirmed: true });
+    expect(calls[2].args.request?.udids).toHaveLength(10);
     expect(calls[0].args.request?.udids).toHaveLength(10);
     expect(calls[0].args.request?.bundleIds).toHaveLength(10);
     expect(calls[0].args.request?.deleteAfterPublish).toBe(true);

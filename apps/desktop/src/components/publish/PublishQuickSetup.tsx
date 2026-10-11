@@ -24,6 +24,10 @@ type QuickProps = PublishWizardProps & {
   deviceGuards?: PublishDeviceGuards;
   onPendingPublication?: (campaignId: string) => void;
   onAssignmentChange?: (ids: string[], assignments: Record<string, string>) => void;
+  /** What changed since the review (PLAN §3); the confirmation shown before is void. */
+  reviewChanges?: string[];
+  /** The change is already visible here, so confirming waits for Kiểm tra lại. */
+  reviewBlocked?: boolean;
 };
 type CaptionContext = { id: string; source: string; origin: HTMLButtonElement };
 type AssignmentSnapshot = { props: QuickProps; activeId?: string; activeVisible: boolean; locked: boolean; key: string };
@@ -315,10 +319,15 @@ export function PublishQuickSetup(p: QuickProps) {
         {duplicateCaptions > 0 && <p className="pq-hint">{duplicateCaptions} bài đã chọn có caption trùng; nội dung giữ nguyên, không tự sửa.</p>}
       </div></div>
     </PublishDialog>}
-    {dialog === "check" && <PublishDialog title="Xem lại và xác nhận đăng công khai" wide onClose={() => { if (!p.starting) setDialog(null); }} actions={<><button type="button" disabled={p.starting} onClick={() => setDialog(null)}>Quay lại</button>{(p.preflightError || !p.preflight || !p.preflight.canExecute) && !p.preflightLoading && <button type="button" disabled={locked} onClick={() => { void p.onPreflight(); }}>Kiểm tra lại</button>}<button type="button" className="primary" disabled={locked || !p.preflight?.canExecute || !complete} onClick={() => void p.onExecute()}><Check size={16}/> {p.starting ? "Đang bắt đầu…" : `Xác nhận đăng công khai ${selected.length} bài`}</button></>}>
+    {dialog === "check" && <PublishDialog title="Xem lại và xác nhận đăng công khai" wide onClose={() => { if (!p.starting) setDialog(null); }} actions={<><button type="button" disabled={p.starting} onClick={() => setDialog(null)}>Quay lại</button>{(p.preflightError || !p.preflight || !p.preflight.canExecute || p.reviewBlocked) && !p.preflightLoading && <button type="button" disabled={locked} onClick={() => { void p.onPreflight(); }}>Kiểm tra lại</button>}<button type="button" className="primary" disabled={locked || !p.preflight?.canExecute || !complete || p.reviewBlocked} onClick={() => void p.onExecute()}><Check size={16}/> {p.starting ? "Đang bắt đầu…" : `Xác nhận đăng công khai ${selected.length} bài`}</button></>}>
       <p>{selected.length} bài sẽ đăng công khai trên {mapped} máy. Nút xác nhận bên dưới cho phép bắt đầu lượt đăng này.</p>
       {p.starting && <p role="status" className="pw-start-status">Đang gửi yêu cầu… Giữ nguyên lượt đăng trong khi chờ xác nhận.</p>}
       {p.startError && <p role="alert" className="pw-error">{p.startError}</p>}
+      {!!p.reviewChanges?.length && !p.preflightLoading && <div className="pw-review-changed" role="status">
+        <strong>{p.reviewBlocked ? "Bản xem lại đã hết hiệu lực. Chưa gửi lệnh đăng nào." : "Đã kiểm tra lại vì có thay đổi sau lần xem trước. Chưa gửi lệnh đăng nào."}</strong>
+        <ul>{p.reviewChanges.map(change => <li key={change}>{change}</li>)}</ul>
+        <span>{p.reviewBlocked ? "Bấm Kiểm tra lại, đọc kết quả mới rồi mới xác nhận. Không tự thay máy hay tài khoản." : "Đọc kết quả mới bên dưới; chỉ bấm xác nhận nếu vẫn đúng ý. Không tự thay máy hay tài khoản."}</span>
+      </div>}
       {p.preflightLoading ? p.preflightProgress ?? <div className="pw-preflight-pending">
         <div className="pw-preflight-phase" role="status"><LoaderCircle size={18} aria-hidden="true"/><div><strong>{p.preflightStage === "preparing" ? "Đang chuẩn bị thiết bị…" : "Đang kiểm tra từng máy…"}</strong><span>{selected.length} bài · {mapped} máy đã ghép · Chưa đăng bài</span></div></div>
         <div className="pw-preflight-pending-list" role="region" aria-label="Máy đang chờ kết quả kiểm tra" tabIndex={0}>

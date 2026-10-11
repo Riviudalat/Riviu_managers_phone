@@ -402,6 +402,9 @@ export function NurturePopup({
   const [pos, setPos] = useState({ x: 0, y: 0 });
   const drag = useRef<{ ox: number; oy: number; sx: number; sy: number } | null>(null);
   const targets = targetUdids ?? targetsOf(selected, devices);
+  // What the confirmation is checked against once the operator answers it (PLAN §3).
+  const scopeLatest = useRef({ targets, devices });
+  scopeLatest.current = { targets, devices };
   const anyRunning = statuses.some((s) => s.running);
   const runningTargets = useMemo(
     () => [...new Set(statuses.filter((status) => status.running).map((status) => status.udid))],
@@ -756,6 +759,8 @@ export function NurturePopup({
     const runTargets = [...targets];
     const runSettings = settings;
     const runTargetRef = targetRef;
+    const statusOf = (udid: string) => scopeLatest.current.devices.find((device) => device.udid === udid)?.status;
+    const reviewedStatus = new Map(runTargets.map((udid) => [udid, statusOf(udid)]));
     setBusy(true);
     setStartReport(null);
     try {
@@ -772,7 +777,21 @@ export function NurturePopup({
           confirmLabel: `Bắt đầu ${runTargets.length} máy`,
           cancelLabel: "Sửa thiết lập",
         }))) return;
-        if (!mounted.current || settingsRef.current !== runSettings || targetRefLatest.current !== runTargetRef) return;
+        if (!mounted.current) return;
+        // The confirmation covered these phones and these settings. If either changed while it
+        // was open (a phone went busy or offline, the scope or a setting moved), it is void: say
+        // so and start nothing, never a substituted or silently smaller set.
+        const now = scopeLatest.current;
+        const lost = runTargets.filter((udid) => {
+          const status = statusOf(udid);
+          return status !== reviewedStatus.get(udid)
+            && (status === undefined || status === "disconnected" || status === "busy");
+        });
+        if (settingsRef.current !== runSettings || targetRefLatest.current !== runTargetRef
+          || now.targets.length !== runTargets.length || now.targets.some((udid, index) => udid !== runTargets[index]) || lost.length) {
+          setMsg(`Phạm vi hoặc thiết lập đã đổi trong lúc xác nhận${lost.length ? ` (${lost.length} máy vừa bận hoặc mất kết nối)` : ""}. Chưa bắt đầu máy nào; kiểm tra lại rồi bấm bắt đầu.`);
+          return;
+        }
       }
       // The run's phones never become the schedule's: the schedule's lists and switch are
       // saved as stored, so a manual start neither re-scopes an enabled schedule nor seeds a

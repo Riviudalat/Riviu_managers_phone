@@ -310,6 +310,19 @@ Lịch đăng bài là lịch một lần theo từng bài, mỗi dòng gắn m�
   điện thoại vẫn non-modal. Dòng được chọn chạy sau khi bảng đóng hẳn; đi tới trang thì focus
   chuyển sang mục sidebar của trang đó (hoặc tab Điều phối). Ctrl+K không mở khi đang có một dialog
   modal khác (ví dụ hộp xác nhận).
+- **Bản xem lại có hiệu lực theo phiên bản (PLAN §3).** Hộp **Xem lại và xác nhận đăng công
+  khai** gắn với một lần kiểm tra (`inputDigest` của backend: máy và roster, tài khoản từng máy,
+  file nội dung theo hash, caption, kiểu nhạc, đích Sheet, bản TikTok). Khi hộp đang mở mà một
+  máy đã xem lại mất kết nối, chuyển `busy` (ngoài các máy hộp đã nói sẽ nhả) hoặc đổi
+  @tài khoản, nút xác nhận tắt và hộp ghi **Bản xem lại đã hết hiệu lực. Chưa gửi lệnh đăng
+  nào.** cùng danh sách thay đổi; phải **Kiểm tra lại**. Bấm xác nhận thì app kiểm lại đúng
+  yêu cầu đó ngay trước khi gửi; khác máy, bài, bản TikTok, dung lượng, máy cần nhả, đích
+  Sheet, roster hoặc digest thì dừng, không gửi, giữ kết quả kiểm tra mới trên hộp kèm danh
+  sách đã đổi, và người vận hành xác nhận lại. Không tự thay máy hay tài khoản, không âm thầm
+  bớt phạm vi. Lượt đã gửi (có dấu chờ đối chiếu) không bị kiểm lại hay gửi lại.
+- Hộp xác nhận Nuôi và Tương tác cũng hết hiệu lực khi phạm vi, thiết lập hoặc trạng thái
+  roster của máy trong phạm vi đổi trong lúc hộp mở (máy vừa bận hoặc mất kết nối): không bắt
+  đầu máy nào và báo phải kiểm tra lại.
 - Không card lồng card, không hero marketing: tối đa hai tầng khung lồng nhau, viền chỉ ở ranh
   giới vùng. Bảng (`ResponsiveTable`) và thanh bước (`WorkflowStepper`) nằm trong panel nên chỉ kẻ
   đường trên/dưới, không tự vẽ khung; toolbar Thiết bị là một hàng trên nền làm việc với một

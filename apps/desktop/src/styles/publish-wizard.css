@@ -711,6 +711,20 @@
 .pw-error {
   color: var(--danger-strong);
 }
+/* What voided the previous review; amber, not red: nothing was sent. */
+.pw-review-changed {
+  display: grid;
+  gap: 4px;
+  margin: 0 0 8px;
+  padding: 8px 12px;
+  border: 1px solid var(--line-strong);
+  border-left: 3px solid var(--warn-strong);
+  border-radius: var(--radius-sm);
+  color: var(--text-1);
+  font-size: var(--text-sm);
+}
+.pw-review-changed ul { margin: 0; padding-left: 18px; }
+.pw-review-changed > span { color: var(--text-2); }
 .pw-quick-list {
   max-height: 35dvh;
   overflow: auto;

@@ -63,6 +63,7 @@ import {
   type PublishScanErrorView,
 } from "../publishScanErrors";
 import { targetsOf } from "../selectionTargets";
+import { liveReviewChanges, reviewChanges, reviewedAccounts } from "../components/publish/reviewValidity";
 import type { OperationSourceRef } from "../operationSource";
 import type {
   PublishAssignmentRecord,
@@ -669,6 +670,10 @@ export function PublishPage({
   const [preflightSnapshot, setPreflightSnapshot] = useState<{
     inputKey: string;
     report: PublishPreflightReport;
+    /** Each reviewed phone's account when this review was taken (PLAN §3 versioned review). */
+    accounts?: Record<string, string>;
+    /** What changed since the review this one replaced; shown until the operator confirms again. */
+    changes?: string[];
   } | null>(null);
   const [sourceCampaign, setSourceCampaign] =
     useState<PublishCampaignRecord | null>(null);
@@ -858,6 +863,13 @@ export function PublishPage({
   const selectionReady = selectionStatus.ready;
   const currentPreflight =
     preflightSnapshot?.inputKey === inputKey ? preflightSnapshot.report : null;
+  const reviewLabel = (udid: string) => deviceDisplayName(devices, metas, udid);
+  const reviewBundleName = (bundleId: string) => manifest?.bundles.find((bundle) => bundle.id === bundleId)?.name ?? bundleId;
+  // A reviewed phone that left, went busy or changed account voids the review on the spot.
+  const liveChanges = currentPreflight && preflightSnapshot?.accounts
+    ? liveReviewChanges(currentPreflight, preflightSnapshot.accounts, devices, metas, reviewLabel)
+    : [];
+  const reviewChangeList = liveChanges.length ? liveChanges : preflightSnapshot?.inputKey === inputKey ? preflightSnapshot.changes ?? [] : [];
   useEffect(() => {
     if (!restoredForm?.sourceRoot) return;
     const ticket = ++scanTicket.current;
@@ -1055,7 +1067,7 @@ export function PublishPage({
         latestInputKey.current !== requestKey
       )
         return;
-      setPreflightSnapshot({ inputKey: requestKey, report });
+      setPreflightSnapshot({ inputKey: requestKey, report, accounts: reviewedAccounts(report, metas) });
       setPreflightState("ready");
       setPreflightStage(null);
     } catch (error) {
@@ -1075,8 +1087,10 @@ export function PublishPage({
   const executeNewCampaign = async () => {
     const reason = publishInFlight.current || operationBusy ? "Một yêu cầu đang được xử lý; chờ kết quả của lượt hiện tại."
       : sheetBlocked ? "Kết nối Sheet chưa sẵn sàng. Kiểm tra lại kết nối trước khi đăng."
-      : !currentPreflight?.canExecute ? "Kết quả kiểm tra chưa đạt hoặc thiết lập đã đổi. Kiểm tra lại trước khi đăng." : null;
+      : !currentPreflight?.canExecute ? "Kết quả kiểm tra chưa đạt hoặc thiết lập đã đổi. Kiểm tra lại trước khi đăng."
+      : liveChanges.length ? "Bản xem lại đã hết hiệu lực; chưa gửi lệnh đăng nào. Bấm Kiểm tra lại rồi xác nhận theo kết quả mới." : null;
     if (reason || !currentPreflight) { setStartError(reason ?? "Chưa có kết quả kiểm tra."); return; }
+    const reviewedKey = inputKey;
     publishInFlight.current = true;
     setBusy(true);
     setStarting(true);
@@ -1085,12 +1099,13 @@ export function PublishPage({
     try {
       // The review dialog is the sole public-post confirmation boundary.
       const createKey = JSON.stringify(preflightRequest);
-      if (currentPreflight.expiresAt && Date.parse(currentPreflight.expiresAt) <= Date.now()) {
+      let approved = currentPreflight;
+      if (approved.expiresAt && Date.parse(approved.expiresAt) <= Date.now()) {
         // Drop the stale report so the setup shows Kiểm tra lại instead of a dead Start.
         invalidatePreflight();
         throw new Error("Kết quả kiểm tra đã hết hạn. Bấm Kiểm tra lại trước khi đăng.");
       }
-      if (currentPreflight.startBlock) throw new Error(currentPreflight.startBlock);
+      if (approved.startBlock) throw new Error(approved.startBlock);
       let pending = readPendingPublishStart();
       if (pending && pending.inputKey !== createKey) {
         const prior = await publishStartStatus(pending.requestId);
@@ -1105,6 +1120,24 @@ export function PublishPage({
       }
       const intendedId = intendedStart.current?.inputKey === createKey ? intendedStart.current.requestId : null;
       if (!pending && !intendedId) throw new Error("Thiết lập đã đổi sau khi kiểm tra. Kiểm tra lại trước khi đăng.");
+      if (!pending) {
+        // Nothing has been sent for this request yet, so check the review once more right
+        // before sending (PLAN §3): a phone that went busy, an account changed elsewhere, a
+        // replaced file or a new Sheet target voids it. Stop, show what changed and keep the
+        // fresh check on screen; the operator confirms again. Nothing is substituted or dropped.
+        const fresh = await publishPreflight(preflightRequest, intendedId!);
+        if (!mounted.current || latestInputKey.current !== reviewedKey) throw new Error("Thiết lập đã đổi sau khi kiểm tra. Kiểm tra lại trước khi đăng.");
+        // An account changed here already stopped the click above; one changed elsewhere moves
+        // the backend digest, which `reviewChanges` reports.
+        const changes = reviewChanges(approved, fresh, reviewLabel, reviewBundleName);
+        if (changes.length) {
+          setPreflightSnapshot({ inputKey: reviewedKey, report: fresh, accounts: reviewedAccounts(fresh, metas), changes });
+          throw new Error("Bản xem lại đã hết hiệu lực; chưa gửi lệnh đăng nào. Xem phần đã đổi và kết quả kiểm tra mới rồi xác nhận lại.");
+        }
+        // Same review: send with the fresh check's identity, which the backend can still reuse.
+        approved = fresh;
+        if (approved.startBlock) throw new Error(approved.startBlock);
+      }
       pending ??= { inputKey: createKey, requestId: intendedId!, requestedAt: new Date().toISOString() };
       // Storage must succeed before any public-effect IPC; an unknown ACK never retires this ID.
       savePendingPublishStart(pending);
@@ -1112,7 +1145,7 @@ export function PublishPage({
       let status = await publishStartStatus(pending.requestId);
       if (!status) {
         try {
-          status = await publishStart(preflightRequest, pending.requestId, currentPreflight.inputDigest, currentPreflight.preparationId);
+          status = await publishStart(preflightRequest, pending.requestId, approved.inputDigest, approved.preparationId);
         } catch (error) {
           status = await publishStartStatus(pending.requestId);
           if (!status) throw error;
@@ -1410,6 +1443,8 @@ export function PublishPage({
             name={udid => { const device = devices.find(d => d.udid === udid); return device ? tileName(device, metas.get(udid)) : udid; }} />}
           preflightStage={preflightStage}
           preflight={currentPreflight}
+          reviewChanges={reviewChangeList}
+          reviewBlocked={liveChanges.length > 0}
           preflightError={preflightError ?? (currentPreflight ? null : publishBlockingReason ?? null)}
           blockingReason={sheetBlockingReason}
           sound={currentSoundPolicy}

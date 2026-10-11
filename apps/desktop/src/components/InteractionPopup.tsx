@@ -612,6 +612,12 @@ export function InteractionPopup({
   }, [validTargets, effectiveActors, wanted, readViews]);
 
   const runRevision = JSON.stringify([draft, validTargets, effectiveActors, targetRef, savedHandles, handles, savingHandles, handleErrors, previewKey, previewFor, issues]);
+  // Each actor's roster status is part of what the confirmation approved (PLAN §3). Read at the
+  // confirmation boundary only: preparing the phones afterwards changes it on purpose.
+  const devicesLatest = useRef(devices);
+  devicesLatest.current = devices;
+  const actorStatuses = (actors: string[]) =>
+    actors.map((udid) => devicesLatest.current.find((device) => device.udid === udid)?.status ?? "missing").join("\u0000");
   const latestRunRevision = useRef<string | null>(runRevision);
   latestRunRevision.current = runRevision;
   useEffect(() => () => { latestRunRevision.current = null; }, []);
@@ -623,6 +629,7 @@ export function InteractionPopup({
     setRunError(null);
     try {
       if (pageSurface) {
+        const reviewedStatuses = actorStatuses(effectiveActors);
         const approved = await requestConfirm({
           title: "Xác nhận tương tác",
           message: `${validTargets.length} bài sẽ được mở trên ${effectiveActors.length} máy. Thực hiện: ${[draft.actions.like && "Tim", draft.actions.save && "Lưu", draft.actions.follow && "Theo dõi", draft.actions.comment && "Bình luận"].filter(Boolean).join(" → ")}. Khi kết quả chưa rõ, lượt đó dừng để kiểm tra và không tự gửi lại.`,
@@ -630,7 +637,7 @@ export function InteractionPopup({
           cancelLabel: "Quay lại",
         });
         if (!approved) return;
-        if (latestRunRevision.current !== runRevision) {
+        if (latestRunRevision.current !== runRevision || actorStatuses(effectiveActors) !== reviewedStatuses) {
           if (latestRunRevision.current !== null) setRunError("Thiết lập hoặc danh sách máy đã thay đổi. Kiểm tra lượt chạy rồi xác nhận lại.");
           return;
         }

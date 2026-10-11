@@ -1054,6 +1054,11 @@ fn evaluate_device_observation(
         "udid": udid,
         "number": meta.and_then(|meta| meta.number),
         "alias": meta.map(|meta| meta.alias.trim()).unwrap_or_default(),
+        // The approval binds each phone's account too: a handle changed elsewhere after the
+        // review makes Start refuse instead of posting to an account nobody reviewed.
+        "account": meta
+            .map(|meta| meta.handle.trim().trim_start_matches('@').to_lowercase())
+            .unwrap_or_default(),
         "packageName": package_name,
         "version": version,
         "locale": locale,

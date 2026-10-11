@@ -690,6 +690,21 @@ có versionCode tối thiểu 5 cho launcher; APK, manifest và NOTICE phải kh
 - `require_current_preflight_digest` không đổi. Readiness mới được kiểm sau khi nhả;
   invalidate cache không nới duyệt nội dung nguồn hay mapping đích.
 
+### Digest đã duyệt
+
+- `publish_preflight_digest` (SHA-256) bind: request (máy, bài, caption override,
+  `soundPolicy`, `sheetEnabled`, `deleteAfterPublish`, `runAt`, `targetRef`), toàn bộ
+  `PublishBundle` sau override (đường dẫn, cỡ và SHA-256 từng file, caption), snapshot
+  đích (số máy, alias, `rosterSha256` của cả fleet), và mỗi máy: số, alias, **tài khoản**
+  (`DeviceMeta.handle` đã chuẩn hóa, từ 10/2026), package/version/locale TikTok, ngưỡng và
+  kết luận dung lượng, cùng `sheetDelivery` (spreadsheet, gid, phiên bản). Không bind: số
+  byte trống, mtime, bài nhạc cụ thể (chọn lúc chạy theo `soundPolicy`), chủ giữ máy.
+- Start (`publish_create_campaign`) so digest sau khi nhả máy và chạy lại preflight, trước
+  staging, chuyển media và Post. Việc nhả máy đã liệt kê ở `needsRelease` nên xảy ra trước
+  so sánh này; UI kiểm lại digest và tập `needsRelease` ngay trước khi gửi Start để một bản
+  xem lại cũ dừng trước mọi hiệu lực. Tạo lịch so digest trước staging và trước khi ghi DB;
+  khi lịch chạy không so lại digest.
+
 ## Xác minh Publish và kết quả qua restart
 
 VerificationQueue giữ một observer mỗi máy, không dùng trần observer toàn máy chủ.
