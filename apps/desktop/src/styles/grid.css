@@ -29,7 +29,7 @@
   font-weight: 700;
   font-variant-numeric: tabular-nums;
   line-height: 1.2;
-}.dev-phone-ident,
+}
 .dev-phone-detail {
   min-width: 0;
   overflow: hidden;
@@ -52,9 +52,6 @@
 .dev-phone.selected .dev-phone-check {
   border-color: var(--rv-primary);
   background: var(--rv-primary);
-}
-.dev-phone-ident {
-  color: var(--rv-text-3);
 }
 .dev-phone-run {
   display: flex;
@@ -644,10 +641,6 @@ button.linkish,
   font-size: var(--rv-font-device-lg);
   line-height: 24px;
 }
-.window-canvas[data-mode="overview"] .dev-phone-ident {
-  font-size: var(--rv-font-body);
-  line-height: 20px;
-}
 /* Every tile is its own stacking context (`contain`), so the expanded @account only reads in
    full when its tile is raised above the following ones: focus above selection above the rest. */
 .window-canvas[data-mode="overview"] > .dev-phone.selected {
@@ -655,16 +648,6 @@ button.linkish,
 }
 .window-canvas[data-mode="overview"] > .dev-phone:is(:focus-visible, :focus-within) {
   z-index: 3;
-}
-.window-canvas[data-mode="overview"] .dev-phone:is(.selected, :focus-visible, :focus-within) .dev-phone-ident {
-  position: relative;
-  z-index: 5;
-  width: max-content;
-  max-width: none;
-  overflow: visible;
-  padding-right: 4px;
-  background: var(--rv-surface-panel);
-  color: var(--rv-text-1);
 }
 .window-canvas[data-mode="overview"] .dev-phone-run {
   flex-direction: row;
@@ -806,17 +789,6 @@ button.linkish,
   line-height: 1.1;
   font-weight: 700;
   color: var(--rv-text-inverse);
-  text-shadow: 0 1px 2px rgb(0 0 0 / 0.6);
-}
-.window-canvas[data-mode="window"] .dev-phone-ident {
-  max-width: 100%;
-  font-size: var(--text-tile-compact);
-  font-weight: 700;
-  line-height: 1.25;
-  color: var(--rv-text-inverse);
-  white-space: nowrap;
-  overflow: hidden;
-  text-overflow: ellipsis;
   text-shadow: 0 1px 2px rgb(0 0 0 / 0.6);
 }
 .window-canvas[data-mode="window"] .dev-phone-run {
@@ -977,6 +949,6 @@ button.linkish,
 }
 
 /* Owner request: the number stays as it is; the other caption lines are a little smaller. */
-.window-canvas[data-mode="window"] .dev-phone-line { font-size: 10.5px; line-height: 1.2; }
+.window-canvas[data-mode="window"] .dev-phone-line { font-size: var(--text-tile-line); line-height: 1.2; }
 .window-canvas[data-mode="window"] .dev-phone-status,
-.window-canvas[data-mode="window"] .dev-phone-detail { font-size: 11px; }
+.window-canvas[data-mode="window"] .dev-phone-detail { font-size: var(--text-tile-detail); }

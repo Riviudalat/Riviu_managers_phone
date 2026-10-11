@@ -271,7 +271,7 @@ stylesheet không được viết cứng màu sáng: `shell.css`, `workspace.css
 | Trạng thái | `--rv-status-{ready,unchecked,running,attention,error,offline,unknown}-{text,fill,line,solid}` | Sẵn sàng xanh lá · Chưa kiểm xanh xám · Đang chạy xanh dương · Cần xử lý hổ phách · Lỗi đỏ · Mất kết nối xám · Chưa rõ tím xám; chữ đạt AA trên trắng, trên nền của nó và trên nền làm việc; luôn kèm chữ và icon |
 | Khoảng cách | `--rv-space-1/2/3/4/6` = 4/8/12/16/24 px | |
 | Bo góc | `--rv-radius-control` 6 px, `--rv-radius-panel` 8 px, `--rv-radius-pill` | |
-| Chữ | `--rv-font-caption` 12 · `-secondary` 13 · `-body` 14 · `-label` 16 · `-device` 18 · `-device-lg` 20 · `-title` 20 px; `--rv-numeric` | |
+| Chữ | `--rv-font-caption` 12 · `-secondary` 13 · `-body` 14 · `-label` 16 · `-device` 18 · `-device-lg` 20 · `-title` 20 px; `--rv-numeric` | Ngoại lệ dưới 12 px chỉ qua token có tên: `--text-tile-compact` 11.5 px (dải Tổng quan), `--text-tile-line` 10.5 · `--text-tile-detail` 11 px (dòng phụ dưới Máy N ở chế độ cửa sổ, owner b06596b3) |
 | Chiều cao | `--rv-bar-height` 48 · `--rv-toolbar-height` 40 · `--rv-control-primary` 40 · `--rv-control` 36 · `--rv-control-dense` 32 px | |
 
 ## Nguồn và cách áp dụng

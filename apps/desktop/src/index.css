@@ -256,6 +256,9 @@
   /* Named exception to the 12 px floor (docs/ui-reference-matrix.md): only the
      Tổng quan tile strip, where 20 phones must fit a 1366×768 wall. */
   --text-tile-compact: 0.71875rem;
+  /* The window-mode tile caption lines under Máy N (owner, b06596b3): 10.5 px and 11 px. */
+  --text-tile-line: 0.65625rem;
+  --text-tile-detail: 0.6875rem;
 
   --leading-tight: 1.25;
   --leading-normal: 1.45;
