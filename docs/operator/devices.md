@@ -4,15 +4,20 @@
 
 ## Thiết bị
 
-Sidebar mặc định hiện tên mục. Bấm tiêu đề **Automation**, **Tài nguyên** hoặc
-**Hệ thống** để ẩn/hiện các mục trong nhóm; lựa chọn được giữ cho lần mở sau.
+Đầu sidebar là sáu lối tắt luôn thấy: **Trung tâm** (Trung tâm điều khiển), **Nuôi TikTok**,
+**Tương tác**, **Đăng bài**, **Lượt chạy** và **Trợ giúp**. Các trang còn lại nằm trong bốn nhóm
+**Dàn máy**, **Công việc**, **Nội dung**, **Hệ thống**; bấm tiêu đề nhóm để mở/gập, lựa chọn được
+giữ cho lần mở sau. Cửa sổ thấp hơn 900 px gập sẵn các nhóm, màn cao mở sẵn; tới một trang bằng
+Ctrl+K thì nhóm của trang đó tự mở. Thu gọn sidebar vẫn giữ tên ngắn dưới mỗi icon. Ctrl+K tìm
+được cả tên cũ (Control Center, My Apps, Automation, Runs, Tasks, Schedules, Inspector, Groups);
+bảng đối chiếu nằm ở **Trợ giúp › Từ GenFarmer sang Riviu**.
 **Nuôi TikTok**, **Tương tác**, **Đăng bài** trên sidebar mở ba trang vận hành cũ.
-Trong **My Apps**, tên ứng dụng và **Mở chức năng** cũng mở trang cũ;
-**Thêm Flow** mở trình kéo thả bổ sung của ứng dụng.
-Control Center chỉ chứa quản lý thiết bị. Sidebar bỏ Dữ liệu và Mạng & Router. Trang **Lượt chạy** hiển thị bảng;
+Trong **Ứng dụng › Quy trình ứng dụng** (trước là My Apps), tên ứng dụng và **Mở chức năng**
+cũng mở trang cũ; **Thêm Flow** mở trình kéo thả bổ sung của ứng dụng.
+Trung tâm điều khiển chỉ chứa quản lý thiết bị. Sidebar bỏ Dữ liệu và Mạng & Router. Trang **Lượt chạy** hiển thị bảng;
 chọn tên hoặc Chi tiết để mở ngăn kết quả. Monitor rỗng tự ẩn.
 
-Trong Control Center, bảng **Hiển thị** có thanh đổi kích thước ô xem trước và màn
+Trong Trung tâm điều khiển, bảng **Hiển thị** có thanh đổi kích thước ô xem trước và màn
 hình điều khiển; hình điện thoại phóng theo ô và giữ tỷ lệ. Ảnh xem trước Android
 tự mở khi máy kết nối, kể cả trong chế độ dev nghiệm thu thủ công; không cần mở
 từng máy. Việc tự mở ảnh không khởi chạy
@@ -347,7 +352,7 @@ quyền/transport khác trạng thái kết nối.
 Ba tab **Nuôi TikTok / Tương tác / Đăng bài** mở khung tác vụ cạnh lưới stream.
 Chọn máy rồi bấm **Dùng N máy đã chọn**, hoặc mở **Phạm vi thiết bị** để chọn nhóm.
 Phạm vi tác vụ không tự đổi khi bỏ chọn/lọc lưới. Khung có đủ Thiết lập và Theo dõi;
-nút **Mở trang tác vụ** mở rộng workspace; để trở lại cạnh lưới, mở **Thiết bị** rồi chọn tab tác vụ
+nút **Mở trang tác vụ** mở rộng workspace; để trở lại cạnh lưới, mở **Trung tâm điều khiển** rồi chọn tab tác vụ
 mà giữ bản nháp. Đóng/đổi tác vụ vẫn hỏi lưu nếu đã sửa.
 
 **Kết quả:** roster, trạng thái work owner, preview và tiến độ từng máy. Máy rời fleet
@@ -356,7 +361,7 @@ mà giữ bản nháp. Đóng/đổi tác vụ vẫn hỏi lưu nếu đã sửa
 
 ## Thư viện ứng dụng: cài, gỡ và cài lại
 
-Trang **Trung tâm ứng dụng** chỉ thao tác với gói đã thêm vào thư viện; mã ứng dụng lấy từ chính gói,
+Trang **Ứng dụng › Gói cài đặt** (trước là Trung tâm ứng dụng) chỉ thao tác với gói đã thêm vào thư viện; mã ứng dụng lấy từ chính gói,
 không nhập tay. Chọn phạm vi (máy cụ thể, nhóm hoặc toàn bộ) rồi bấm **Cài → N**,
 **Gỡ → N** hoặc **Cài lại → N**; chỉ máy cùng nền tảng với gói được tính.
 

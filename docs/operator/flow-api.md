@@ -4,10 +4,10 @@
 
 ## Flow
 
-**My Apps → Mở trình thiết kế** mở graph riêng của ứng dụng. Thư viện bước ở bên trái,
+**Ứng dụng › Quy trình ứng dụng → Mở trình thiết kế** mở graph riêng của ứng dụng. Thư viện bước ở bên trái,
 canvas ở giữa; chọn bước để chỉnh thông số bên phải. Kéo bước, nối cổng, xóa bước,
 hoàn tác/làm lại và lưu tạo revision. Tìm node bằng tên/ID rồi Enter để đưa vào vùng nhìn.
-Ở danh sách My Apps, tìm kiếm khớp tên quy trình hoặc loại ứng dụng; có thể sắp
+Ở danh sách Quy trình ứng dụng, tìm kiếm khớp tên quy trình hoặc loại ứng dụng; có thể sắp
 xếp quy trình đã lưu theo mới nhất, cũ nhất hoặc tên. Ba ứng dụng có sẵn vẫn giữ
 nguyên vị trí và thao tác mở riêng.
 **Cấu hình ứng dụng** nhận hồ sơ đã lưu hoặc nguồn/link/nội dung đầu vào. **Chạy** yêu
@@ -30,7 +30,8 @@ HTTP không xác thực trên Android; kết quả phải đọc lại khớp tr
 Biểu mẫu sửa tài khoản/tác vụ đặt cạnh danh sách trên màn rộng; màn hẹp mở ngăn bên
 phải có thể đóng bằng Escape, giữ thao tác Lưu trong vùng nhìn thấy. Đóng bản nháp
 tài khoản chưa lưu vẫn yêu cầu xác nhận bỏ thay đổi.
-Không có chợ ứng dụng trong giao diện hiện tại; My Apps quản lý các quy trình trong Riviu.
+Không có chợ ứng dụng trong giao diện hiện tại; Quy trình ứng dụng (trước là My Apps) quản lý các
+quy trình trong Riviu.
 
 **Đầu vào:** graph thiết bị hoặc điều phối fleet, cấu hình node, target và profile.
 **Thao tác:** chọn đúng chế độ; sửa graph; validate; lưu trước khi chạy; theo dõi execution
@@ -125,7 +126,7 @@ dung; chọn artifact và thiết bị; xác nhận batch; đọc tiến độ, 
 queued được hủy, running trở thành uncertain, terminal giữ nguyên. **Tiếp theo:** chỉ
 hủy item còn queued; đối chiếu uncertain trực tiếp, không retry tự động.
 
-## Trung tâm ứng dụng
+## Gói cài đặt ứng dụng
 
 **Đầu vào:** package/artifact và thiết bị đích được chọn rõ; không có máy chọn không
 có nghĩa toàn bộ fleet. **Thao tác:** review package, phiên bản,

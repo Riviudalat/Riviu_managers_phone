@@ -13,10 +13,10 @@ bị mất. Chỉ sử dụng trên thiết bị/tài khoản bạn được ph�
 
 | Nhu cầu | Chức năng |
 |---|---|
-| Quản lý thiết bị | Control Center, nhóm, trạng thái kết nối, preview, điều khiển, tệp, thư viện ứng dụng (cài/gỡ/cài lại) và chẩn đoán |
+| Quản lý thiết bị | Trung tâm điều khiển, nhóm, trạng thái kết nối, preview, điều khiển, tệp, gói cài đặt ứng dụng (Ứng dụng › Gói cài đặt: cài/gỡ/cài lại) và chẩn đoán |
 | TikTok | Nuôi, Tương tác và Đăng bài với capability/preflight theo từng thiết bị |
 | Đăng nội dung | Ảnh/video, caption, ghép bài–máy, nhạc, hẹn giờ, canonical link và báo cáo Sheet |
-| Workflow | Flow thiết bị, Macro, My Apps và Điều phối; revision/ledger riêng cho từng lượt |
+| Workflow | Flow thiết bị, Macro, Quy trình ứng dụng và Điều phối; revision/ledger riêng cho từng lượt |
 | Kết quả | Lượt chạy, tiến trình, nhật ký, artifact và thao tác phục hồi đúng phạm vi |
 | Tích hợp | Local API loopback, Riviu MCP/Inspector, Google Sheets và AI tùy chọn |
 
@@ -40,7 +40,7 @@ Nuôi và dọn công khai Bỏ thích/Bỏ lưu) chỉ chạy trên **TikTok Gl
 `com.zhiliaoapp.musically` 45.7.3, giao diện tiếng Anh**. Máy chạy bản khác, kể cả
 TikTok Trill (`com.ss.android.ugc.trill`), bản 46.x/47.x tự cập nhật hoặc 45.7.3 giao
 diện tiếng Việt, bị từ chối **trước mọi thao tác** với trạng thái **Bản TikTok không
-được phép** và hướng dẫn hạ về 45.7.3 trong Trung tâm ứng dụng. Riviu kiểm lúc lập kế
+được phép** và hướng dẫn hạ về 45.7.3 trong Ứng dụng › Gói cài đặt. Riviu kiểm lúc lập kế
 hoạch và kiểm lại khi phiên thao tác mở, vì TikTok có thể tự cập nhật ở giữa. Việc chỉ
 đọc vẫn chạy trên mọi bản: xác minh liên kết của bài đã gửi, đọc tài khoản và chẩn
 đoán. Danh sách được phép là hằng số trong mã, không có công tắc trong Cài đặt; đổi
@@ -57,7 +57,7 @@ may. Đọc [WDA safety](docs/agents/02-wda-doc-truoc-khi-sua.md) trước mọi
 2. Android: cài USB driver phù hợp nếu cần, bật USB debugging và chấp nhận hộp
    thoại trên điện thoại. iPhone: chuẩn bị Apple USB support trên Windows, Trust
    This Computer và agent/provisioning phù hợp.
-3. Mở **Control Center → Quét lại thiết bị**. Dùng **Chẩn đoán** để phân biệt mất
+3. Mở **Trung tâm điều khiển → Quét lại thiết bị**. Dùng **Chẩn đoán** để phân biệt mất
    kết nối, chưa cấp quyền, thiếu helper/session và stream lỗi.
 4. **Bảo trì → Sửa Riviu Agent** là thao tác riêng có xác nhận, không phải bước
    kiểm tra chỉ đọc. Không chạy hai controller trên cùng thiết bị.
@@ -65,7 +65,7 @@ may. Đọc [WDA safety](docs/agents/02-wda-doc-truoc-khi-sua.md) trước mọi
 
 ### Cài đặt máy (chuẩn hệ thống Android)
 
-**Thiết bị → Cài đặt máy** giữ một chuẩn cài đặt hệ thống cho cả đội máy Android và
+**Dàn máy → Cài đặt máy** giữ một chuẩn cài đặt hệ thống cho cả đội máy Android và
 áp dụng/kiểm tra theo một máy, một nhóm hoặc toàn bộ:
 
 | Cài đặt | Lệnh trên máy | Mặc định |

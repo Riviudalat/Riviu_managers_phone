@@ -7,7 +7,7 @@ khai đã thành công. Không gửi/đăng lại một lượt chưa rõ kết 
 ## Bắt đầu
 
 1. Xác nhận phiên bản app đang chạy; installer và source checkout có thể khác nhau.
-2. Kiểm kết nối/authorization trong **Control Center → Quét lại thiết bị** và **Chẩn đoán**.
+2. Kiểm kết nối/authorization trong **Trung tâm điều khiển → Quét lại thiết bị** và **Chẩn đoán**.
 3. Chọn đúng phạm vi từng workspace; lựa chọn ở lưới không tự thay target chiến dịch.
 4. Đọc preflight; sửa điều kiện bị chặn, không bỏ máy lỗi âm thầm hoặc vượt ownership.
 5. Xác nhận thao tác có effect, theo dõi đúng operation/campaign/device ID.
@@ -30,7 +30,7 @@ khai đã thành công. Không gửi/đăng lại một lượt chưa rõ kết 
 
 ## Thiết bị
 
-[Control Center, nhóm, đồng bộ, helper, tệp và Inspector](operator/devices.md).
+[Trung tâm điều khiển, nhóm, đồng bộ, helper, tệp và Inspector](operator/devices.md).
 
 **Sửa Riviu Agent** là lệnh có effect trong **Bảo trì**, không tự thực hiện chỉ vì
 health/preview tạm lỗi. Máy có hai TikTok cần chọn ứng dụng trong Chi tiết thiết bị.
@@ -83,7 +83,7 @@ Các mode có quyền khác nhau; headless không đồng nghĩa read-only.
 
 ## Flow
 
-[Flow thiết bị, My Apps, composition, connector và API](operator/flow-api.md#flow).
+[Flow thiết bị, Quy trình ứng dụng, composition, connector và API](operator/flow-api.md#flow).
 Flow Sheet **chưa dùng OAuth direct**: nó cần webhook/token Apps Script legacy.
 Không có cấu hình legacy hợp lệ thì node Sheet chưa dùng được dù Publish đã kết nối Google.
 
@@ -96,9 +96,9 @@ sử không dispatch. [Quy tắc đọc kết quả](operator/flow-api.md#tác-v
 
 [Import, chuyển nội dung và uncertain qua restart](operator/flow-api.md#kho-nội-dung).
 
-## Trung tâm ứng dụng
+## Ứng dụng › Gói cài đặt
 
-[Cài ứng dụng theo phạm vi và kiểm kết quả](operator/flow-api.md#trung-tâm-ứng-dụng).
+[Cài ứng dụng theo phạm vi và kiểm kết quả](operator/flow-api.md#gói-cài-đặt-ứng-dụng).
 
 ## Dữ liệu
 

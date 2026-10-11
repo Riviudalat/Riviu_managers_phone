@@ -11,13 +11,30 @@ tile/canvas, mật độ và cử chỉ thiết bị. Thông báo ngắn có th�
 hành động, monitor nguồn và ActivityCenter. Đây là tiêu chí triển khai, không tự xác nhận mọi
 màn hình đã vượt cổng screenshot/accessibility.
 
-Sidebar rộng 196 px (184 px từ 1100 px trở xuống), có nút thu gọn thành icon; khi mở,
-tên **Riviu Manager** hiện đủ cạnh logo và nút thu gọn, không bị cắt;
-dưới 960 px mặc định dùng thanh icon, vẫn mở rộng được bằng nút điều hướng;
-tiêu đề nhóm ẩn/hiện các mục bên trong. Mục đang chọn dùng nền cam đặc, chữ trắng; hàng logo
-cao bằng thanh hệ thống (48 px). Automation có ba trang Nuôi TikTok, Tương tác,
-Đăng bài cùng My Apps, Lượt chạy, Tác vụ đã lưu và Flow thiết bị. Đầu trang là **thanh hệ
+Sidebar rộng 196 px (184 px từ 1100 px trở xuống), có nút thu gọn; khi mở,
+tên **Riviu Manager** hiện đủ cạnh logo và nút thu gọn, không bị cắt. Mục đang chọn dùng nền
+cam đặc, chữ trắng; hàng logo cao bằng thanh hệ thống (48 px). Đầu trang là **thanh hệ
 thống** (mục riêng bên dưới); máy thực hiện của mỗi workspace là một phạm vi riêng.
+
+**Điều hướng** (`components/navigationMenu.ts` là nguồn duy nhất của sidebar, tiêu đề trang và
+Ctrl+K). Tên thuần Việt; tiêu đề trang trùng tên mục điều hướng.
+- **Vùng ghim** trên cùng: Trung tâm (Trung tâm điều khiển) · Nuôi TikTok · Tương tác · Đăng bài ·
+  Lượt chạy · Trợ giúp. Mỗi mục có chữ, cao 40 px, không cuộn, nên luôn thấy ở 1093×614 và 820×560.
+- Bốn nhóm cuộn riêng bên dưới: **Dàn máy** (Cài đặt máy) · **Công việc** (Lịch chạy · Tác vụ đã
+  lưu · Flow thiết bị) · **Nội dung** (Kho nội dung · Quản lý tài khoản · Ứng dụng) · **Hệ thống**
+  (Chẩn đoán · API · Cài đặt). Mỗi trang chỉ có một chỗ: trang đã ghim không lặp trong nhóm của nó
+  (nhóm gốc vẫn là Dàn máy/Công việc/Hệ thống, Ctrl+K ghi nhóm đó).
+- Cửa sổ thấp hơn 900 px gập mọi nhóm người vận hành chưa tự mở/gập; màn cao hơn mở sẵn; lựa chọn
+  mở/gập được nhớ trên máy. Tới một trang trong nhóm đang gập từ ngoài sidebar (Ctrl+K, Trợ giúp)
+  thì nhóm đó tự mở để thấy mục đang chọn; đổi trang không bao giờ gập nhóm. Nhóm đang gập chứa trang hiện tại
+  có tiêu đề cam.
+- Thanh thu gọn rộng 76 px giữ icon và tên ngắn dưới icon (Trung tâm, Tài khoản, …), không bao giờ
+  chỉ có icon; editor Quy trình ứng dụng tự dùng thanh này.
+- **Ứng dụng** là hai trang riêng, chuyển bằng hàng thẻ trên đầu: **Quy trình ứng dụng** (trước là
+  My Apps) và **Gói cài đặt** (trước là Trung tâm ứng dụng: cài/gỡ APK, IPA). Mục sidebar mở thẻ
+  đầu; bấm lại khi đang ở Gói cài đặt thì giữ nguyên thẻ.
+- Trợ giúp có bảng **Từ GenFarmer sang Riviu** (Control Center, My Apps, Automation, Runs, Tasks,
+  Schedules, Inspector, Groups, Settings/stream), ghi rõ giới hạn: Inspector chỉ máy Android.
 **Màu cam chỉ dùng cho hai việc:** một hành động chính của mỗi vùng, và mục đang chọn (máy
 đã chọn, mục điều hướng đang mở). Tab, nút phân đoạn và bộ lọc đang bật là trung tính (chữ
 đậm, gạch chân hoặc nền xám, không cam); hover trung tính; link và thao tác phụ trung tính;
@@ -32,7 +49,7 @@ máy, trả phiên cũ trước khi mở phiên mới. Menu/confirm vẫn ở tr
 Android chỉnh trực tiếp tại rail; hover bung bảng nổi, ghim giữ bảng cạnh lưới, nhóm
 bung/thu số máy bên trong. Dropdown dùng chung nền lớp nổi, viền trung tính, option
 hover/đang trỏ nền xám, dấu chọn và menu cuộn, chuyển động 180–200 ms.
-My Apps dùng bảng ứng dụng gọn. Mở ứng dụng vào trang vận hành cũ; Thêm Flow mở editor
+Quy trình ứng dụng dùng bảng ứng dụng gọn. Mở ứng dụng vào trang vận hành cũ; Thêm Flow mở editor
 riêng với thư viện hành động bên trái, canvas chính, cấu hình và thiết bị bên phải.
 Tên, model, tài khoản và trạng thái máy nằm trên nền sáng riêng phía trên preview;
 không che hình điện thoại. Preview trong lưới giữ tỉ lệ 1:2; thẻ có thêm phần thông tin
@@ -194,7 +211,7 @@ quyết định thiết kế Riviu, không phải tuyên bố parity toàn bộ 
 
 | Trang | Bố cục chính | Bộ lọc/đầu vào | Đầu ra và đường đi tiếp | Kiểm tra bắt buộc |
 |---|---|---|---|---|
-| Thiết bị | toolbar, group tabs, grid/table, drawer | nhóm, trạng thái, tìm kiếm, máy chọn | trạng thái máy; mở máy hoặc Chẩn đoán | tập lọc giống grid/table; tile/canvas không đổi; chưa có máy: bốn bước cắm USB → cho phép gỡ lỗi USB/Tin cậy → Làm mới → Chẩn đoán; trống vì lọc: nêu bộ lọc + Bỏ lọc |
+| Trung tâm điều khiển | toolbar, group tabs, grid/table, drawer | nhóm, trạng thái, tìm kiếm, máy chọn | trạng thái máy; mở máy hoặc Chẩn đoán | tập lọc giống grid/table; tile/canvas không đổi; chưa có máy: bốn bước cắm USB → cho phép gỡ lỗi USB/Tin cậy → Làm mới → Chẩn đoán; trống vì lọc: nêu bộ lọc + Bỏ lọc |
 | Cài đặt máy | chuẩn cài đặt (checkbox + tự áp dụng), phạm vi, bảng kết quả theo máy | danh mục cài đặt, máy/nhóm/toàn bộ | trạng thái đọc từng cài đặt; kết quả applied/alreadyOk/needsManual/refusedBusy/failed | đọc lỗi là “Chưa rõ”, máy bận bị từ chối không chiếm quyền, iOS “Chưa hỗ trợ” không gọi máy, áp dụng chỉ sau khi đã lưu |
 | Chẩn đoán | bảng điều kiện, detail bằng chứng | máy/phạm vi | readiness/lỗi; sửa đúng điều kiện | không tự repair từ health false-negative |
 | Nuôi | Thiết lập/Hẹn giờ/Theo dõi | scope, nhịp, effect, lịch | phiên/máy/effect; đọc bằng chứng | credential riêng, draft/readiness, target isolation |
@@ -202,18 +219,19 @@ quyết định thiết kế Riviu, không phải tuyên bố parity toàn bộ 
 | Đăng bài | ba khung chọn bài / bài↔máy / thiết bị; caption dialog | nguồn/caption/nhạc/Sheet/máy | preflight, Post/URL/Sheet/cleanup; retry phạm vi thiếu | không đăng lại Partial; active bị lọc ẩn, confirm stale, focus caption, target-bound digest |
 | Flow | editor mở, mode/device/fleet, execution detail | graph/node/target/revision | run/node history; mở lỗi | Save/Archive/import identity, guard, node effects |
 | Lượt chạy | bảng dense, filters, detail; **Nâng cao** chứa Chạy JSON nâng cao | source/status/time | total/page/source link | bài khác máy; active cũ; pagination; rỗng tách: lọc (Bỏ lọc) · khoảng thời gian (Xem toàn bộ lịch sử) · chưa có lượt (Mở Nuôi TikTok) |
-| My Apps | thư viện tích hợp + quy trình đã lưu | tìm, tạo/chỉnh; nhập JSON trong **Nâng cao** | mở chức năng hoặc editor | tải quy trình không giả thành rỗng; import bàn phím qua menu Nâng cao; rỗng có Tạo quy trình đầu tiên |
+| Ứng dụng › Quy trình ứng dụng | thư viện tích hợp + quy trình đã lưu | tìm, tạo/chỉnh; nhập JSON trong **Nâng cao** | mở chức năng hoặc editor | tải quy trình không giả thành rỗng; import bàn phím qua menu Nâng cao; rỗng có Tạo quy trình đầu tiên |
 | Tác vụ đã lưu | bảng và form cấu hình | ứng dụng, revision, scope | chạy/lịch có xác nhận | pending/error không báo 0; giữ revision và target; lập lịch duyệt đúng danh sách máy đã lưu, hộp xác nhận nêu máy và 5 lần chạy đầu; rỗng có Tạo tác vụ đầu tiên |
 | Quản lý tài khoản | bảng và form tài khoản; **Nâng cao** chứa nhập/xuất JSON | tên, handle, nền tảng, máy | bản ghi đã lưu/đối chiếu | response kind cũ không ghi đè; không coi handle nhập là login proof; rỗng gọi đúng tên nút Thêm tài khoản và có Thêm tài khoản đầu tiên |
 | Lịch chạy | bảng lịch và cấu hình (xếp chồng khi ≤1200 px, gồm 1093 px của laptop 125%) | thời gian local (nêu múi giờ), trạng thái, máy đã duyệt | 5 lần chạy tới; kết quả gần nhất bằng lời | **Lưu** và **Lưu & bật** tách riêng, không chạy ngay; giữ revision; giữ danh sách máy đã duyệt, phạm vi đổi thì hiện chênh lệch, không bật được và bị từ chối tới khi **Duyệt lại**; rỗng: chưa có cấu hình → Tạo cấu hình để hẹn giờ (mở Nuôi TikTok › Hẹn giờ), có cấu hình → Tạo lịch từ cấu hình |
 | Kho nội dung | bảng metadata, bulk toolbar | artifact và target | ledger từng máy | restore monitor, cancel queued, no uncertain retry; rỗng có Thêm nội dung đầu tiên; tìm không khớp có Xóa tìm kiếm |
-| Trung tâm ứng dụng | bảng package, contextual action | package/version/target | batch/item result; gỡ/cài lại theo máy | artifact snapshot, restart uncertainty; gỡ có confirm mất dữ liệu/tài khoản, máy bận bị từ chối, không tự gửi lại |
+| Ứng dụng › Gói cài đặt | bảng package, contextual action | package/version/target | batch/item result; gỡ/cài lại theo máy | artifact snapshot, restart uncertainty; gỡ có confirm mất dữ liệu/tài khoản, máy bận bị từ chối, không tự gửi lại |
 | Dữ liệu | năng lực, tác vụ 24 giờ, nhật ký gần nhất | tìm kiếm trong tối đa 200 log đã tải | số liệu theo phạm vi; tra cứu sâu tại Tác vụ | hiển thị giới hạn và phạm vi lọc/xuất |
 | API | listener status, config section | địa chỉ/credential | actual bind/restart | config khác listener; lỗi bind hiển thị |
 | Cài đặt | section rõ, lưu từng vùng | form/credential | persisted readback | stale response, draft guard, restart indication |
-| Trợ giúp | hướng dẫn theo nhiệm vụ | lối vào theo việc cần làm | điều hướng tới màn thật | không phát tác vụ khi bấm lối tắt |
+| Trợ giúp | hướng dẫn theo nhiệm vụ; bảng Từ GenFarmer sang Riviu | lối vào theo việc cần làm | điều hướng tới màn thật | không phát tác vụ khi bấm lối tắt; bảng tên cũ ghi rõ giới hạn (Inspector chỉ Android) |
 
-Sidebar theo danh sách MENU trong Sidebar.tsx; editor My Apps, Điều phối và Macro là subview. Dữ liệu và
+Sidebar theo `MENU` và `PINNED` trong `components/navigationMenu.ts`; editor Quy trình ứng dụng,
+Điều phối và Macro là subview. Dữ liệu và
 Mạng/Proxy còn nhánh render nhưng chưa có lối vào sidebar; không tự mở thêm menu.
 Danh sách phải tách initial loading, refresh, lỗi có retry, rỗng thật và không khớp
 bộ lọc. Refresh lỗi giữ dữ liệu cũ khi còn hợp lệ; response cũ không được đổi view mới.
@@ -257,7 +275,10 @@ Lịch đăng bài là lịch một lần theo từng bài, mỗi dòng gắn m�
 - **Bảng lệnh** (Ctrl+K, ⌘K trên macOS, hoặc nút **Tìm máy, trang…** trên thanh hệ thống; dưới
   1600 px, và ở mọi độ rộng khi cột theo dõi đang ghim, chỉ còn icon có tooltip ghi phím tắt) dùng primitive `components/ui/CommandPalette.tsx`: Base UI Dialog + Autocomplete inline, CSS
   thuần, cùng alias với menu. Lọc không phân biệt dấu ("may 3" khớp "Máy 3"). Giai đoạn 1 chỉ điều
-  hướng và chọn: đi tới trang (các trang của sidebar và Điều phối), đi tới **Máy N** (về Thiết bị,
+  hướng và chọn: đi tới trang (các trang của sidebar, hai thẻ của Ứng dụng và Điều phối; tên cũ
+  Control Center, My Apps, Automation, Runs, Tasks, Schedules, Trung tâm ứng dụng vẫn khớp), mở
+  danh sách máy Android của **Bắt thuộc tính (Inspector)**, mở bảng **Nhóm máy** (Groups, Box) ở
+  Trung tâm điều khiển, đi tới **Máy N** (về Trung tâm điều khiển,
   chỉ chọn máy đó, focus thẻ/dòng của nó; nếu bộ lọc đang ẩn máy thì bỏ lọc), và **Chọn N máy cần
   xử lý** (đúng tập của bộ đếm Cần xử lý trên header; khi bộ đếm đó chưa biết thì dòng này tắt, không
   chọn cả đội máy). **Chạy tác vụ đã lưu…** chỉ mở trang Tác vụ đã lưu; nút Chạy ở đó vẫn hỏi xác
@@ -279,7 +300,7 @@ Lịch đăng bài là lịch một lần theo từng bài, mỗi dòng gắn m�
   ghim, các mốc này lùi 180 px (icon 1360–1599, menu 1024–1359); nếu vẫn không đủ, phần lọc xuống hàng thứ
   hai chứ không co ô tìm. Nút chính giữ chữ. Toolbar không lặp số máy (đã ở thanh hệ thống). Dưới 1024 px
   phần lọc xuống hàng thứ hai; thông báo luôn chiếm một hàng riêng. Nút chính ≥ 40 px được giữ ở cả các
-  footer/toolbar riêng (Nuôi, Đăng bài, My Apps, Tác vụ đã lưu, Quản lý tài khoản).
+  footer/toolbar riêng (Nuôi, Đăng bài, Quy trình ứng dụng, Tác vụ đã lưu, Quản lý tài khoản).
 - Không resize control theo label/hover/loading. Chữ wrap có chủ đích; không tràn, đè hàng sau hoặc scale theo viewport.
 - Dùng khoảng cách/màu/icon nhất quán; disabled/loading/error/empty phải phân biệt và có hành động tiếp theo.
 - Desktop/laptop và viewport hẹp giữ nút chạy, filter, status đọc được; overflow thuộc bảng/canvas phù hợp.
