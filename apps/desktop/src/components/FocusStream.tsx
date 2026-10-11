@@ -1457,12 +1457,13 @@ export function FocusStream({
             ))}
           </nav>
         </aside>
-        <button type="button" className="device-window-resize" aria-label="Đổi kích thước cửa sổ máy" title="Kéo để đổi kích thước"
+        {/* A pinned phone is fixed in place (owner request): no resize grip; the size comes from Màn hình lớn. */}
+        {!docked && <button type="button" className="device-window-resize" aria-label="Đổi kích thước cửa sổ máy" title="Kéo để đổi kích thước"
           onPointerDown={event=>{if(event.button!==0)return;event.currentTarget.setPointerCapture(event.pointerId);resizeDrag.current={x:event.clientX,width:frameWidth};}}
           onPointerMove={event=>{const start=resizeDrag.current;if(start)setFrameWidth(Math.round(Math.max(FOCUS_ZOOM.min,Math.min(FOCUS_ZOOM.max,start.width+event.clientX-start.x))));}}
           onPointerUp={()=>{resizeDrag.current=null;}} onPointerCancel={()=>{resizeDrag.current=null;}}>
           <GripVertical size={12}/>
-        </button>
+        </button>}
       </div>
     </div>
   );

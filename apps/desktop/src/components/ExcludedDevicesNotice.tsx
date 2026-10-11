@@ -19,14 +19,28 @@ export function ExcludedDevicesNotice({ excluded, label, onDismiss, className }:
   if (!excluded.length) return null;
   return (
     <div className={["excluded-devices", className].filter(Boolean).join(" ")} role="status">
-      <span>
-        <strong>Bị loại ({excluded.length}):</strong>{" "}
-        {excluded.map((entry) => `${label(entry.udid)} – ${entry.reason}`).join("; ")}
-        . Không nhận lệnh; không tự chọn lại khi rảnh.
-      </span>
+      {/* One short line; the per-phone list opens on demand so 20 phones never fill the bar. */}
+      <details className="excluded-devices-list">
+        <summary>
+          <strong>Bị loại ({excluded.length})</strong>
+          {" · "}{summarizeReasons(excluded)} · không nhận lệnh, không tự chọn lại khi rảnh
+        </summary>
+        <span>{excluded.map((entry) => `${label(entry.udid)} – ${entry.reason}`).join("; ")}.</span>
+      </details>
       {onDismiss && (
         <button type="button" className="tb-btn" onClick={onDismiss}>Xóa danh sách bị loại</button>
       )}
     </div>
   );
+}
+
+/** "20 máy: Đang chạy: Tương tác" — the reasons grouped, most common first. */
+function summarizeReasons(excluded: readonly ExcludedDevice[]): string {
+  const counts = new Map<string, number>();
+  for (const entry of excluded) counts.set(entry.reason, (counts.get(entry.reason) ?? 0) + 1);
+  return [...counts.entries()]
+    .sort((a, b) => b[1] - a[1])
+    .slice(0, 2)
+    .map(([reason, count]) => `${count} máy: ${reason}`)
+    .join("; ") + (counts.size > 2 ? "; …" : "");
 }

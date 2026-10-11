@@ -74,8 +74,9 @@ describe("device tile, before any frame arrives", () => {
     expect(screen.getByRole("row").getAttribute("aria-label")).toMatch(/^Máy 1, Điện thoại gốc/);
     expect(screen.getAllByText("Điện thoại gốc").length).toBeGreaterThan(0);
     expect(screen.getByText("Đang chạy: Nuôi TikTok")).toBeVisible();
-    // The strip names the model too, because here it says something the alias does not.
-    expect(screen.getByText("SM-G955F")).toBeVisible();
+    // The tile keeps one fact per line (number, name, TikTok name, IP); a model that differs
+    // from the alias stays in the name line's tooltip and the strip title.
+    expect(screen.getByText("Điện thoại gốc", { selector: ".dev-phone-model" }).getAttribute("title")).toContain("SM-G955F");
     expect(screen.queryByText("device-1")).toBeNull();
     expect(screen.queryByText("ready")).toBeNull();
   });

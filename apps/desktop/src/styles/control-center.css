@@ -489,14 +489,22 @@ section.device-browser > .device-browser-toolbar > .device-toolrow {
   font-size: var(--text-tile-compact);
 }
 .cc-side-connections {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 4px;
   margin: 0;
   padding: 0;
 }
 .cc-side-connections button {
-  flex: 1 1 0;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 3px;
   min-width: 0;
-  padding: 2px 4px;
+  padding: 4px 2px;
   font-size: var(--text-tile-compact);
+  white-space: nowrap;
+  overflow: hidden;
 }
 .cc-side-groups-head {
   display: flex;

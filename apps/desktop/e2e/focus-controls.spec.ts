@@ -22,7 +22,9 @@ for (const viewport of [{ width: 1440, height: 900 }, { width: 820, height: 560 
       };
     });
     const first = page.getByTestId("device-tile").first();
-    await first.getByRole("button", { name: /Mở màn hình/ }).click();
+    // The zoom icon is hidden on the tile (owner request); keyboard users focus it and press Enter.
+    await first.getByRole("button", { name: /Mở màn hình/ }).focus();
+    await page.keyboard.press("Enter");
     const focus = page.locator(".focus-overlay");
     await expect(focus.getByRole("button", { name: "Home", exact: true })).toBeEnabled();
     await expect(focus.getByTestId("focus-control-status")).toHaveCount(0);

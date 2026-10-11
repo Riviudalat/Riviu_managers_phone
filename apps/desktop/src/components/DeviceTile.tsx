@@ -112,8 +112,8 @@ function DeviceTileInner({
 
   // GenFarmer's tile: the big number, then the name (the model the phone reports unless the
   // operator renamed it) with the @account or a model that differs, then the status.
-  const extra = username ? `@${username}` : shownModel;
-  const secondLine = [displayName, extra].filter(Boolean).join(" · ");
+  // The Wi‑Fi address the roster reads in the background; absent until read, or off Wi‑Fi.
+  const wifiIp = (device as DeviceInfo & { wifiIp?: string | null }).wifiIp?.trim() || undefined;
   const connectionLabel = device.connection === "wifi" ? "Wi‑Fi" : device.connection.toUpperCase();
 
   return (
@@ -164,7 +164,7 @@ function DeviceTileInner({
 
         <button
           type="button"
-          className="dev-phone-open"
+          className="dev-phone-open visually-hidden-focusable"
           aria-label={`Mở màn hình ${machineNumberLabel(index)}`}
           title="Mở màn hình"
           onClick={(event) => {
@@ -194,10 +194,10 @@ function DeviceTileInner({
           accessible name and the band's tooltip. */}
       <div className="dev-phone-strip" role="gridcell" title={stripTitle}>
         <span className="dev-phone-index" aria-hidden="true">{index > 0 ? index : "?"}</span>
-        <span className="dev-phone-ident" title={secondLine}>
-          <span>{displayName}</span>
-          {extra && <> · <span>{extra}</span></>}
-        </span>
+        {/* GenFarmer's four lines, one fact each: number, model, TikTok name, IP. */}
+        <span className="dev-phone-line dev-phone-model" title={[displayName, shownModel].filter(Boolean).join(" · ")}>{displayName}</span>
+        <span className="dev-phone-line dev-phone-handle" title={username ? `@${username}` : "Chưa có tên TikTok"}>{username ? `@${username}` : "—"}</span>
+        <span className="dev-phone-line dev-phone-ip" title={wifiIp ? `IP Wi‑Fi ${wifiIp}` : "Chưa có IP Wi‑Fi"}>{wifiIp ?? "—"}</span>
         <div className="dev-phone-run">
           <DeviceStatusLine view={operational} className="dev-phone-status" />
           {operational.helperRecovery && onHelperMaintenance ? (

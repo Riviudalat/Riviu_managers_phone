@@ -161,7 +161,8 @@ async function beginRecording(page: Page) {
 }
 
 async function openPhone(page: Page, index = 0) {
-  await page.getByTestId("device-tile").nth(index).getByRole("button", { name: /Mở màn hình/ }).click();
+  await page.getByTestId("device-tile").nth(index).getByRole("button", { name: /Mở màn hình/ }).focus();
+  await page.keyboard.press("Enter");
   await expect(page.locator(".focus-overlay").getByRole("button", { name: "Home", exact: true })).toBeEnabled();
 }
 

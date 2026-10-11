@@ -926,3 +926,32 @@ button.linkish,
 .window-canvas[data-mode="window"] {
   grid-template-columns: repeat(auto-fill, var(--device-tile-min-width, 100px));
 }
+
+/* GenFarmer tile caption: one fact per line (number, model, TikTok name, IP). */
+.window-canvas[data-mode="window"] .dev-phone-line {
+  display: block;
+  max-width: 100%;
+  font-size: var(--text-tile-compact);
+  line-height: 1.25;
+  color: var(--rv-text-inverse);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  text-shadow: 0 1px 2px rgb(0 0 0 / 0.6);
+}
+.window-canvas[data-mode="window"] .dev-phone-model { font-weight: 700; }
+.window-canvas[data-mode="window"] .dev-phone-ip { font-variant-numeric: tabular-nums; opacity: 0.92; }
+
+/* The owner asked for no zoom icon on the tile: double-click opens the phone. The button
+   stays in the tab order for keyboard users and only shows while it has keyboard focus. */
+.dev-phone-open.visually-hidden-focusable:not(:focus-visible) {
+  position: absolute !important;
+  width: 1px !important;
+  height: 1px !important;
+  padding: 0 !important;
+  margin: -1px !important;
+  overflow: hidden !important;
+  clip: rect(0 0 0 0) !important;
+  border: 0 !important;
+  opacity: 0 !important;
+}
