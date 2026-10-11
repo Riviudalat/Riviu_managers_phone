@@ -98,16 +98,13 @@
 
 /* Seven counters instead of four in the same bar. Below 1760 px Tổng carries the denominator for
    every count (each accessible name still says "N trên Tổng
-   máy"); below 1366 px the icons drop out and the words and numbers stay. */
+   máy"); below 1440 px the icons drop out and the words and numbers stay. */
 @media (max-width: 1759px) {
   .fleet-counter-of { display: none; }
 }
-@media (max-width: 1365px) {
-  .fleet-counter-icon { display: none; }
-}
-/* Beside the run pill the readout icons go from 1440 px, as they did beside the docked run column. */
+/* Below 1440 px the icons drop out (the Cần xử lý chip and the run-pill slot take the room). */
 @media (max-width: 1439px) {
-  .shell:has(.queue-run-pill) .fleet-counter-icon { display: none; }
+  .fleet-counter-icon { display: none; }
 }
 /* Seven readouts in the bar: tighter readouts below 1600 px; below 1280 px the scope line beside or
    above them ("Laptop này · N máy") is the total, so the Tổng readout steps aside there. */

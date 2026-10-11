@@ -97,7 +97,13 @@ export function OperationRunDevices({ run, labels, sessions, compact = false }: 
   const currentPage = Math.min(page, Math.max(0, Math.ceil(shown.length / 8) - 1));
   const selectedRow = shown.find((row) => row.udid === selected);
   const visibleSelectedId = selectedRow?.udid;
+  // The pane and selection focus was last placed for. Effects re-run when a hidden monitor is
+  // shown again; that is not a new selection and must not take focus from what opened it.
+  const focusedFor = useRef<{ pane: boolean; id: string | undefined } | null>(null);
   useEffect(() => {
+    const previous = focusedFor.current;
+    focusedFor.current = { pane: singlePane, id: visibleSelectedId };
+    if (previous?.pane === singlePane && previous.id === visibleSelectedId) return;
     // The row moves offscreen in narrow master/detail; keep keyboard focus visible.
     if (singlePane && visibleSelectedId !== undefined) backRef.current?.focus();
   }, [singlePane, visibleSelectedId]);

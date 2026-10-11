@@ -120,7 +120,7 @@ export function OperationProgressCenter({ deviceLabels, phones = EMPTY_PHONES, a
   const runs = allRuns.filter(run => activeRun(run) || run.id === watchId);
   const selectedRun = pendingStart ? null : runs.find((run) => run.id === selectedId) ?? runs.find(run => run.id === pinnedRun?.id) ?? runs[0] ?? null;
   const queue = useAttentionQueue({
-    runs: listedRuns, runsSettled: state.value !== null || state.error !== null, runsError: state.error,
+    runs: listedRuns, runsSettled: state.value !== null || state.error !== null, runsError: state.error, runsHasMore: state.value?.page.hasMore ?? false,
     phones, attention, attentionKnown, labels: deviceLabels, dismissed: dismissal.records,
   });
 
@@ -299,7 +299,8 @@ export function OperationProgressCenter({ deviceLabels, phones = EMPTY_PHONES, a
   // Lượt chạy is a page: the drawer closes so it does not cover what was asked for.
   const openRuns = onOpenRuns ? () => { close(); onOpenRuns(); } : undefined;
   const watch = (run: OperationRunSummary) => {
-    setWatchId(run.id); setSelectedId(run.id); setTab("running");
+    // Pinned, as from Lượt chạy: a run found only by the all-age reads is not in the 24 h list.
+    setPinnedRun(run); setWatchId(run.id); setSelectedId(run.id); setTab("running");
   };
   const dismiss = (run: OperationRunSummary) => {
     try {
@@ -358,9 +359,11 @@ export function OperationProgressCenter({ deviceLabels, phones = EMPTY_PHONES, a
   const fraction = !pendingStart && progress.length && progress.every((value) => value !== null)
     ? progress.reduce((sum, value) => sum + value!, 0) / progress.length : null;
   const runningCount = active.length + (pendingStart ? 1 : 0);
-  const showPill = !!pendingStart || !!startReadError || active.length > 0 || !!state.error;
+  // The pill is always there, idle or not: a run arriving or ending never changes the bar's
+  // layout, so it never moves the wall.
+  const idle = !pendingStart && !startReadError && !active.length && !state.error;
   const pillLabel = state.error ? "Chưa đọc được tiến trình" : pendingStart ? "Lượt đăng đang chuẩn bị"
-    : active.length ? `${active.length} tác vụ đang xử lý / chờ` : "Lượt đăng cần kiểm tra";
+    : active.length ? `${active.length} tác vụ đang xử lý / chờ` : startReadError ? "Lượt đăng cần kiểm tra" : "Không có lượt đang chạy";
   const pillAttention = !!startReadError || !!state.error;
   // "≥5": some source is unread, so the count is a floor and never claims there is nothing more.
   const countText = queue.unknown ? `≥${queue.total}` : String(queue.total);
@@ -407,18 +410,16 @@ export function OperationProgressCenter({ deviceLabels, phones = EMPTY_PHONES, a
       <span className="queue-chip-label">Cần xử lý</span>
       <strong className="queue-chip-count">{countText}</strong>
     </button>
-    {showPill && <span className={`queue-run-pill${pillAttention ? " has-attention" : ""}`}>
-      <button ref={pillRef} type="button" className="queue-run-toggle" aria-label="Tiến trình công việc" title={`${pillLabel} · ${state.error ? "?" : progressLabel(fraction)}`}
+    <span className={`queue-run-pill${pillAttention ? " has-attention" : ""}${idle ? " is-idle" : ""}`}>
+      <button ref={pillRef} type="button" className="queue-run-toggle" aria-label="Tiến trình công việc" title={`${pillLabel} · ${state.error ? "?" : idle ? "—" : progressLabel(fraction)}`}
         aria-expanded={open && tab === "running"} aria-controls={drawerId} onKeyDown={enterDrawer}
         onClick={(event) => open && tab === "running" ? close() : openQueue("running", event.currentTarget)}>
-        <Clock3 size={14} aria-hidden="true" />
+        {pillAttention ? <TriangleAlert className="run-attention" size={14} aria-label="Có kết quả cần kiểm tra" /> : <Clock3 size={14} aria-hidden="true" />}
         <strong className="queue-run-count">{state.error ? "?" : runningCount}</strong>
-        <span className="queue-run-label">{pendingStart && !active.length ? "đang chuẩn bị" : "đang chạy"}</span>
-        <span className="run-percent">{state.error ? "?" : progressLabel(fraction)}</span>
-        {pillAttention && <TriangleAlert className="run-attention" size={13} aria-label="Có kết quả cần kiểm tra" />}
+        <span className="run-percent">{state.error || (!idle && fraction === null) ? "?" : idle ? "—" : progressLabel(fraction)}</span>
       </button>
-      <ProgressBar fraction={state.error ? null : fraction} label="Tiến độ các lượt đang chạy" tone={active.length ? "run" : "idle"} className="queue-run-bar" />
-    </span>}
+      {!idle && <ProgressBar fraction={state.error ? null : fraction} label="Tiến độ các lượt đang chạy" tone={active.length ? "run" : "idle"} className="queue-run-bar" />}
+    </span>
   </span>;
 
   const drawer = <aside ref={drawerRef} id={drawerId} hidden={!open} style={{ top }}

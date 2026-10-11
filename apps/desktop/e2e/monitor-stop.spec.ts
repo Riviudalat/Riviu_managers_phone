@@ -1,7 +1,7 @@
 import {expect,test} from "@playwright/test";
 import {installTauriMock} from "./fixtures/tauriMock";
 
-for(const width of [1440,820]) test(`stop the chosen task and retain its history at ${width}`,async({page},info)=>{
+for(const width of [1440,1060,820]) test(`stop the chosen task and retain its history at ${width}`,async({page},info)=>{
  await page.setViewportSize({width,height:900});
  await installTauriMock(page,{androidRoster:true,fleetSize:2});
  await page.addInitScript(()=>{
@@ -18,7 +18,14 @@ for(const width of [1440,820]) test(`stop the chosen task and retain its history
   };
  });
  const errors:string[]=[];page.on("pageerror",e=>errors.push(e.message));
- await page.goto("/");await page.getByRole("button",{name:"Tiến trình công việc"}).click();
+ await page.goto("/");
+ // The wall's geometry while the run is active; it must be the same after the run ends.
+ const wall=async()=>page.evaluate(()=>{const header=document.querySelector(".shell > .main-col > .page-header")!.getBoundingClientRect();
+  const tile=document.querySelector("[data-testid='device-tile']")!.getBoundingClientRect();return [header.height,tile.x,tile.y,tile.width,tile.height];});
+ await expect(page.getByTestId("device-tile").first()).toBeVisible();
+ await expect(page.locator(".queue-run-pill")).not.toHaveClass(/is-idle/);
+ const running=await wall();
+ await page.getByRole("button",{name:"Tiến trình công việc"}).click();
  const monitor=page.getByRole("complementary",{name:"Hàng đợi Cần xử lý"});
  await expect(monitor.getByRole("button",{name:"Dừng tác vụ và về màn hình chính"})).toBeVisible();
  await page.screenshot({path:info.outputPath(`monitor-stop-${width}.png`)});
@@ -26,5 +33,8 @@ for(const width of [1440,820]) test(`stop the chosen task and retain its history
  await expect(monitor.getByText("Đã dừng · TikTok đã tắt trên 2 máy")).toBeVisible();
  expect(await page.evaluate(()=>(window as unknown as {__stopped:string[]}).__stopped)).toEqual(["publish:fixture-stop"]);
  await expect(monitor.getByRole("combobox",{name:"Chọn tác vụ theo dõi"})).toHaveValue("publish:fixture-stop");
+ // No run left: the pill goes idle in its reserved slot and nothing under it moves.
+ await expect(page.locator(".queue-run-pill")).toHaveClass(/is-idle/);
+ expect(await wall()).toEqual(running);
  expect(errors).toEqual([]);
 });

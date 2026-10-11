@@ -6,7 +6,6 @@ import type { AttentionGroup, AttentionItem, AttentionKind } from "./attentionQu
 import { MonitorReadError } from "./OperationRunDevices";
 import { PostOutcomeEvidence, PostOutcomeLayers, PostOutcomeLink } from "./PostOutcome";
 import { PublishRunOutcomeTotals } from "./PublishRunOutcome";
-import { UNRESOLVED_LOOKBACK_DAYS } from "./useAttentionQueue";
 import "../../styles/attention-queue.css";
 
 type Tone = "attention" | "unknown" | "error";
@@ -150,21 +149,23 @@ export function AttentionQueueList({ groups, total, unknown, omitted, runsError,
                   onClick={() => group.run && onDismiss(group.run)}>Đã xem</button>
               )}
             </header>
-            {group.run?.kind === "publish" && !group.error && <div className="queue-group-totals"><PublishRunOutcomeTotals campaignId={group.run.sourceId} /></div>}
+            {group.run?.kind === "publish" && (group.stale || !group.error) && <div className="queue-group-totals"><PublishRunOutcomeTotals campaignId={group.run.sourceId} /></div>}
             {!group.run && <p className="queue-group-note">Cùng tập với bộ đếm Cần xử lý trên thanh hệ thống.</p>}
-            {group.error
-              ? <p className="queue-note is-error" role="alert">Chưa đọc được các mục của lượt này: {group.error}</p>
-              : <ul className="queue-items">
-                {group.items.map(item => <QueueItem key={item.key} item={item} run={group.run} seenAt={seenAt} now={now}
-                  onWatch={onWatch} onDeviceDetails={onDeviceDetails} />)}
-              </ul>}
+            {group.error && <p className="queue-note is-error" role="alert">{group.stale
+              ? `Chưa đọc lại được lượt này: ${group.error}. Đang giữ các mục của lần đọc trước; chúng chưa có kết luận.`
+              : `Chưa đọc được các mục của lượt này: ${group.error}`}</p>}
+            {group.items.length > 0 && <ul className="queue-items">
+              {group.items.map(item => <QueueItem key={item.key} item={item} run={group.run} seenAt={seenAt} now={now}
+                onWatch={onWatch} onDeviceDetails={onDeviceDetails} />)}
+            </ul>}
           </section>
         );
       })}
       <footer className="queue-footer">
         <p>
-          {total > 0 ? `${unknown ? "Ít nhất " : ""}${total} mục. ` : ""}Bài Chưa rõ và lỗi Sheet trong {UNRESOLVED_LOOKBACK_DAYS} ngày gần nhất ở lại tới khi có kết luận.
-          {omitted > 0 ? ` Còn ${omitted} lượt khác chưa đọc ở đây.` : ""} Lượt đã xong nằm trong Lượt chạy.
+          {unknown ? `Ít nhất ${total} mục: còn nguồn chưa đọc, đọc lỗi hoặc còn trang chưa đọc. ` : total > 0 ? `${total} mục. ` : ""}
+          Bài Chưa rõ và lỗi Sheet ở lại tới khi Riviu ghi nhận kết luận, dù lượt cũ đến đâu.
+          {omitted > 0 ? ` Còn ít nhất ${omitted} lượt chưa đọc tới; đang đọc dần.` : ""} Lượt đã xong nằm trong Lượt chạy.
         </p>
         {onOpenRuns && <button type="button" className="ghost" onClick={onOpenRuns}>Mở Lượt chạy</button>}
       </footer>

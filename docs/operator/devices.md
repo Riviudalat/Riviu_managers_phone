@@ -318,8 +318,9 @@ Chưa rõ, lỗi ghi Sheet hoặc máy lỗi trong lượt chạy, chip tăng s�
 vài giây; hàng đợi **không bao giờ tự mở** và không làm hẹp lưới máy. Bấm chip (hoặc **Ctrl+Shift+X**)
 để mở ngăn phủ bên phải; bấm lại, **Đóng hàng đợi** hoặc Escape để đóng, lưới trở lại đủ ô, tập chọn và
 thứ tự máy không đổi. Tab **Cần xử lý** ghi cho từng mục: Máy N · box · lý do · từ lúc · việc đang giữ
-máy · bước tiếp. Bài **Chưa rõ** và **lỗi Sheet** ở lại tới khi Riviu có kết luận; chỉ có **Xem bằng
-chứng** và **Theo dõi**, không có nút đăng lại. Mục lỗi khác bấm **Đã xem** để bỏ khỏi hàng đợi trên máy
+máy · bước tiếp. Bài **Chưa rõ** và **lỗi Sheet** ở lại tới khi Riviu có kết luận, dù lượt cũ bao lâu
+và dù tạm thời đọc lỗi (khi đó mục cũ vẫn hiện, kèm thông báo lỗi); chỉ có **Xem bằng chứng** và
+**Theo dõi**, không có nút đăng lại. Mục lỗi khác bấm **Đã xem** để bỏ khỏi hàng đợi trên máy
 tính này (Lượt chạy vẫn giữ bản ghi; **Hoàn tác** được). Số "≥N" nghĩa là còn nguồn chưa đọc được.
 
 Khi có tác vụ đang chạy, pill **Tiến trình công việc** (icon · số lượt · %) cạnh chip mở tab **Đang

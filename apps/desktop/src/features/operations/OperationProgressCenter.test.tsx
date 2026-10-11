@@ -77,11 +77,15 @@ it("keeps an acknowledged stop pending when a later status read returns no recor
 
 it("offers pause for a legacy stopped publication that has not released its devices",async()=>{
  const stopped={...run,state:"cancelled" as const};
- vi.mocked(operationQueryRuns).mockResolvedValue({runs:[stopped],total:1,counts:{active:0,succeeded:0,attention:1},hasMore:false});
+ // Older than the 24 h list: only the all-age reads find it, and Theo dõi still opens exactly it.
+ vi.mocked(operationQueryRuns).mockImplementation(async query => query.since
+  ? {runs:[],total:0,counts:{active:0,succeeded:0,attention:0},hasMore:false}
+  : {runs:[stopped],total:1,counts:{active:0,succeeded:0,attention:1},hasMore:false});
  vi.mocked(operationStopStatus).mockResolvedValue({operationId:run.id,state:"closed",devices:[]});
  // A finished run leaves "Đang chạy"; its Chưa rõ post keeps it reachable from the queue.
  vi.mocked(publishGet).mockResolvedValue({ campaign: { createdAt: "2026-09-07T12:00:00Z" }, assignments: [{ id: "a", udid: "a", ordinal: 0, state: "uncertain", effectIntent: "post" }] } as never);
  await openDevices(false, stopped);
+ expect(screen.getByRole("combobox",{name:"Chọn tác vụ theo dõi"})).toHaveValue(run.id);
  expect(screen.getByRole("button",{name:"Dừng tác vụ và về màn hình chính"})).toHaveTextContent("Tạm dừng");
 });
 
@@ -114,6 +118,11 @@ it("counts a new item on the chip with a notice and never opens the queue on its
   expect(screen.getByText(/Cần xử lý: thêm 1 mục\. Máy 2 · Chưa rõ bài đã lên/)).toBeInTheDocument();
   expect(drawer()).not.toBeVisible();
   expect(chip()).toHaveAttribute("aria-expanded", "false");
+  // A source that stopped at its page size is never read as complete: the count becomes a floor.
+  vi.mocked(operationQueryRuns).mockResolvedValue({ runs: [run], total: 201, counts: { active: 1, succeeded: 0, attention: 0 }, hasMore: true });
+  await act(async () => { await readQueryClient.invalidateQueries(); });
+  await waitFor(() => expect(chip()).toHaveAccessibleName("Hàng đợi Cần xử lý: ít nhất 1 mục; một số nguồn chưa đọc được"));
+  expect(chip()).toHaveTextContent("≥1");
 });
 
 it("toggles with Ctrl+Shift+X without moving focus, and the Chưa rõ row offers only evidence and Theo dõi", async () => {
@@ -128,6 +137,12 @@ it("toggles with Ctrl+Shift+X without moving focus, and the Chưa rõ row offers
   expect(within(row).getByText("Ở lại tới khi có kết luận")).toBeVisible();
   expect(within(row).getAllByRole("button").map(button => button.textContent)).toEqual(["Theo dõi"]);
   expect(within(row).getByText("Xem bằng chứng")).toBeVisible();
+  // A failed refresh is not a conclusion: the row stays, beside the read error.
+  vi.mocked(publishGet).mockRejectedValue(new Error("đọc chiến dịch thất bại"));
+  await act(async () => { await readQueryClient.invalidateQueries(); });
+  expect(await screen.findByText(/Chưa đọc lại được lượt này: đọc chiến dịch thất bại/)).toBeVisible();
+  expect(screen.getByRole("listitem", { name: /^Máy 2 · Chưa thuộc box · Chưa rõ bài đã lên/ })).toBeVisible();
+  expect(chip()).toHaveAccessibleName("Hàng đợi Cần xử lý: ít nhất 1 mục; một số nguồn chưa đọc được");
   fireEvent.keyDown(window, { key: "X", ctrlKey: true, shiftKey: true });
   expect(drawer()).not.toBeVisible();
   expect(tile).toHaveFocus();
@@ -285,6 +300,18 @@ it("hides a finished run's failures once seen, persists and supports undo, while
   expect(await screen.findByRole("listitem", { name: /^Máy 5 · / })).toBeVisible();
   expect(screen.queryByRole("listitem", { name: /^Máy 2 · / })).toBeNull();
   expect(screen.queryByRole("button", { name: "Đã xem các mục lỗi của Nuôi TikTok" })).toBeNull();
+  // Days later no list returns the run (outside 24 h, beyond every page): the Chưa rõ row stays
+  // until a read of the run itself shows a conclusion, and only then leaves.
+  cleanup();
+  readQueryClient.clear();
+  vi.mocked(operationQueryRuns).mockResolvedValue({ runs: [], total: 0, counts: { active: 0, succeeded: 0, attention: 0 }, hasMore: false });
+  render(<OperationProgressCenter deviceLabels={labels} />);
+  fireEvent.click(chip());
+  expect(await screen.findByRole("listitem", { name: /^Máy 5 · .*Chưa rõ kết quả thao tác/ })).toBeVisible();
+  vi.mocked(operationGetRun).mockResolvedValue({ ...failedNurtureDetail, items: failedNurtureDetail.items.map(item => ({ ...item, state: "succeeded" as const })) });
+  await act(async () => { await readQueryClient.invalidateQueries(); });
+  await waitFor(() => expect(screen.queryByRole("listitem", { name: /^Máy 5 · / })).toBeNull());
+  await waitFor(() => expect(localStorage.getItem("riviu.queue.unresolved.v1")).toBe("[]"));
 });
 
 it("retains a finished run's failures if saving the dismissal fails", async () => {
@@ -329,7 +356,11 @@ it("keeps the selected device, timeline order and scroll through minimize", asyn
   scroller.scrollTop = 120;
   fireEvent.click(screen.getByRole("button", { name: "Đóng hàng đợi" }));
   expect(timeline).not.toBeVisible();
-  fireEvent.click(screen.getByRole("button", { name: "Tiến trình công việc" }));
+  const pill = screen.getByRole("button", { name: "Tiến trình công việc" });
+  pill.focus();
+  fireEvent.click(pill);
+  // Showing the kept phone detail again is not a new selection: focus stays on the opener.
+  expect(pill).toHaveFocus();
   expect(within(screen.getByLabelText("Chi tiết máy")).getByText(labels.get("b")!)).toBeVisible();
   expect(screen.getByRole("button", { name: "Cũ nhất trước" })).toBeVisible();
   expect(screen.getByLabelText("Nhật ký theo thời gian")).toBe(timeline);

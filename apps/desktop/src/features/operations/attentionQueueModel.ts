@@ -55,6 +55,8 @@ export interface AttentionGroup {
   items: AttentionItem[];
   /** Why the group's items could not be read; the count is then unknown. */
   error?: string;
+  /** The read failed after a success: the items are those of the last successful read. */
+  stale?: boolean;
 }
 
 export const UNASSIGNED_BOX = "Chưa thuộc box";

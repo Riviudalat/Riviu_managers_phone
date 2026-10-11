@@ -118,9 +118,12 @@ Chưa dùng TanStack Table/Virtual: 50 dòng không cần.
 **Hàng đợi Cần xử lý (PLAN §5) thay panel "Theo dõi tác vụ" (10/2026).** Không gì ngoài thao tác
 của người dùng được mở hàng đợi hay đổi diện tích lưới, ở mọi cỡ màn: không còn cột ghim từ 1500 px,
 không còn cửa sổ nổi kéo được, lượt đăng mới không tự mở. Thanh hệ thống có chip **Cần xử lý N**
-(hổ phách khi N > 0; **≥N** khi một nguồn chưa đọc được hoặc chưa trả lời, không bao giờ coi là
-không có) và, khi có lượt chạy, pill **Tiến trình công việc** (icon · số lượt · %, thanh tiến độ
-mảnh). Mục mới chỉ tăng chip và hiện một thông báo cạnh chip ~6 giây: lớp phủ không chiếm chỗ,
+(hổ phách khi N > 0; chỗ số đủ cho "≥999" nên số đổi không làm chip rộng ra; **≥N** khi một nguồn
+chưa đọc được, chưa trả lời, đọc lỗi, dừng ở cỡ trang hoặc còn lượt ngoài ngân sách đọc, không bao giờ
+coi là đủ) và pill **Tiến trình công việc** (icon · số lượt · %, thanh tiến độ mảnh khi có lượt chạy).
+Pill luôn có mặt với bề rộng cố định (88 px, dưới 1440 px 64 px), lúc rảnh là "0 · —" màu nhạt: lượt
+chạy đến hay hết không bao giờ đổi bố cục thanh, nên không bao giờ dịch lưới (đo 820–1920 px, từng
+10 px ở 1024–1100 px: chiều cao thanh và vị trí ô như nhau khi rảnh → chạy → rảnh). Mục mới chỉ tăng chip và hiện một thông báo cạnh chip ~6 giây: lớp phủ không chiếm chỗ,
 không bấm được, không lấy focus (trình đọc màn hình đọc qua vùng live). Hàng đợi mở bằng chip, pill
 hoặc **Ctrl+Shift+X**, là ngăn phủ bên phải dưới thanh hệ thống (460 px, **Phóng rộng** tới 1180 px),
 không bao giờ là cột: mở/đóng không đổi tập chọn, thứ tự ô hay focus (bấm chip giữ focus ở chip;
@@ -130,21 +133,28 @@ về nút đã mở). Đóng là trở lại đủ ô. Hai tab:
   thuộc box") · lý do · từ lúc (tương đối + giờ; máy cần xử lý ghi "Thấy từ" vì đó là lúc cửa sổ
   thấy) · việc đang giữ máy (trục Công việc hiện tại; chưa đọc được thì "Chưa rõ") · bước tiếp.
   Nguồn: các máy của bộ đếm Cần xử lý (cùng tập); bài đăng Chưa rõ và lỗi ghi Sheet từ mô hình kết
-  quả chung (§6) của các lượt trong 24 giờ và các lượt đăng `uncertain`/`partial` trong 30 ngày;
-  máy thất bại/chưa rõ của lượt Nuôi/Tương tác/Flow có lỗi trong 24 giờ. Mỗi lượt đăng có tổng ba
+  quả chung (§6); máy thất bại/chưa rõ của lượt Nuôi/Tương tác/Flow. Mục lỗi thường chỉ của lượt trong
+  24 giờ. Chưa rõ và lỗi Sheet **không có hạn**: mọi lượt đăng và mọi lượt `uncertain`/`partial` ở mọi
+  tuổi được đọc một lần mỗi phiên bản; lượt nào đang có Chưa rõ/lỗi Sheet vào sổ "chưa kết luận"
+  (nhớ trên máy, qua khởi động lại) và luôn được đọc, ngoài mọi ngân sách, tới khi một lần đọc thành
+  công không còn mục nào — chỉ lúc đó mới rời sổ. Tuổi, ngân sách hay lượt mới không bao giờ đẩy nó
+  ra. Đọc lỗi giữ các mục của lần đọc thành công trước, kèm thông báo lỗi, và số thành ≥N. **Theo
+  dõi** ghim đúng lượt đó (kể cả lượt chỉ tìm thấy qua đọc mọi tuổi) vào tab Đang chạy. Mỗi lượt đăng có tổng ba
   số riêng (`PublishRunOutcomeTotals`), nên chi tiết chiến dịch, hàng đợi và Lượt chạy cùng số.
   Dòng bài dùng `PostOutcomeLayers`; lỗi Sheet vẫn giữ link. **Chưa rõ và lỗi Sheet ở lại tới khi có
   kết luận** ("Ở lại tới khi có kết luận"), chỉ có **Xem bằng chứng** và **Theo dõi**; không có nút
   đăng/gửi lại hay nhận máy. Mục thất bại khác có **Đã xem** theo lượt (nhớ trên máy tính này, lượt
   cập nhật thì hiện lại, Hoàn tác được). Máy cần xử lý có **Chi tiết máy**. Thứ tự cố định theo số
-  máy. Ngân sách đọc hữu hạn: tối đa 30 lượt đăng và 20 lượt khác.
+  máy. Ngân sách đọc hữu hạn cho phần còn lại (30 lượt đăng và 20 lượt khác trong 24 giờ, 20 lượt cũ
+  chưa phân loại mỗi lần, một trang 200 cho mỗi nguồn mọi tuổi); phần chưa đọc làm số thành ≥N.
 - **Đang chạy**: các lượt đang chạy (từ hai lượt có danh sách tiến độ từng lượt), lượt đang chọn
   với tiến độ từng máy, nhật ký, bằng chứng và **Dừng/Tạm dừng**. Lượt đã xong rời tab này (vào
   **Lượt chạy**), trừ lượt đang được theo dõi (đang mở trên tab, chọn bằng Theo dõi, vừa bắt đầu
   hoặc vừa dừng) cho tới khi đóng ngăn. **Lượt chạy** có **Xem nhật ký từng máy** để mở lại một lượt
   bất kỳ ở tab này.
-Đổi trang vẫn giữ hàng đợi; tab Đang chạy giữ máy/tab/vị trí đọc khi đóng rồi mở lại. Toast không
-che lệnh: nằm trên thanh chọn máy.
+Đổi trang vẫn giữ hàng đợi; tab Đang chạy giữ máy/tab/vị trí đọc khi đóng rồi mở lại, và mở lại
+không lấy focus khỏi nút đã mở (nút "Về danh sách máy" chỉ nhận focus khi chọn máy hoặc đổi bố cục).
+Toast không che lệnh: nằm trên thanh chọn máy.
 Khi có máy được chọn, mọi lệnh trên các máy đó nằm ở một **thanh chọn máy** dính dưới lưới:
 Mở màn hình, Đồng bộ thao tác, Chạy Flow…, Công cụ nhóm…, Thêm vào nhóm, Bỏ chọn. Toolbar chỉ
 giữ lệnh toàn fleet (Mở toàn bộ và Công cụ khi chưa chọn máy, Nhóm, Bảo trì, quét lại).
@@ -245,15 +255,15 @@ sách máy được đọc gần nhất (`listDevices` hoặc sự kiện `devic
 đọc lần nào thì ghi **Cập nhật: Chưa rõ**. Đây là tuổi của danh sách, không phải tuổi hình hay kiểm
 trạng thái của từng máy.
 
-Một hàng 48 px từ 1090 px, kể cả khi có lượt chạy, chip Cần xử lý, 40 máy, bảy bộ đếm **Chưa rõ** và
-tên trang dài nhất; không lượt chạy thì từ 1024 px: từ 1920 px phạm vi/giờ cập nhật là một cột cạnh bộ
+Một hàng 48 px từ 1090 px, có hay không có lượt chạy (chỗ pill luôn giữ), với chip Cần xử lý, 40 máy,
+bảy bộ đếm **Chưa rõ** và tên trang dài nhất: từ 1920 px phạm vi/giờ cập nhật là một cột cạnh bộ
 đếm; từ 1024 đến 1919 px phạm vi và giờ cập nhật thành một dòng chú thích nằm trên bộ đếm trong cùng
 48 px, nhường chỗ cho tên trang, chip Cần xử lý, pill tiến trình, Ctrl+K, Inspector có chữ, chuông và
-nút quét lại. Chip và pill không co và không cắt chữ: chữ "đang chạy" của pill chỉ hiện từ 1920 px,
-dưới 1440 px pill chỉ còn icon và % (câu đầy đủ ở tooltip và tên truy cập). Dưới 1760 px mẫu số chỉ còn
-ở dòng phạm vi và **Tổng**; dưới 1366 px (dưới 1440 px khi có pill) bộ đếm bỏ icon, giữ chữ và số;
+nút quét lại. Chip và pill có bề rộng cố định, không co và không cắt chữ; dưới 1440 px pill chỉ còn
+icon và % (câu đầy đủ ở tooltip và tên truy cập); Ctrl+K chỉ còn icon dưới 2200 px. Dưới 1760 px mẫu số
+chỉ còn ở dòng phạm vi và **Tổng**; dưới 1440 px bộ đếm bỏ icon, giữ chữ và số;
 dưới 1280 px **Tổng** nhường chỗ vì dòng phạm vi ngay cạnh hoặc ngay trên ("Laptop này · N máy") đã là
-tổng. Tên trang tối đa hai dòng. Dưới 1024 px (và 1024–1089 px khi có pill) thanh xuống hai hàng (77 px):
+tổng. Tên trang tối đa hai dòng. Dưới 1090 px thanh luôn xuống hai hàng (77 px), không phụ thuộc lượt chạy:
 tên trang và các nút ở hàng trên, phạm vi, bộ đếm và giờ cập nhật ở hàng dưới. Không chồng chữ và
 không cuộn ngang ở 820–1920 px (đo trên Thiết bị và Trung tâm ứng dụng, có và không có lượt chạy).
 
@@ -363,7 +373,7 @@ Lịch đăng bài là lịch một lần theo từng bài, mỗi dòng gắn m�
   **Ngoại lệ có tên — focus guard của Base UI:** span `data-base-ui-focus-guard` (aria-hidden,
   tabindex 0) chỉ chuyển focus; kiểm axe menu loại trừ đúng selector này.
 - **Bảng lệnh** (Ctrl+K, ⌘K trên macOS, hoặc nút **Tìm máy, trang…** trên thanh hệ thống; dưới
-  1920 px, và ở mọi độ rộng khi có pill tiến trình, chỉ còn icon có tooltip ghi phím tắt) dùng primitive `components/ui/CommandPalette.tsx`: Base UI Dialog + Autocomplete inline, CSS
+  2200 px chỉ còn icon có tooltip ghi phím tắt) dùng primitive `components/ui/CommandPalette.tsx`: Base UI Dialog + Autocomplete inline, CSS
   thuần, cùng alias với menu. Lọc không phân biệt dấu ("may 3" khớp "Máy 3"). Giai đoạn 1 chỉ điều
   hướng và chọn: đi tới trang (các trang của sidebar, hai thẻ của Ứng dụng và Điều phối; tên cũ
   Control Center, My Apps, Automation, Runs, Tasks, Schedules, Trung tâm ứng dụng vẫn khớp), mở

@@ -428,17 +428,18 @@
   }
 }
 
-/* At 1024–1089 px the Cần xử lý chip and a run pill leave the longest page name ("Trung tâm ứng
-   dụng") a third line: the bar takes its two-row form instead. From 1090 px it fits in one row
-   (measured with a running run, the chip at "≥5", 40 phones and "Chưa rõ" counters). */
+/* At 1024–1089 px the Cần xử lý chip and the reserved run-pill slot leave the longest page name
+   ("Trung tâm ứng dụng") a third line: the bar always takes its two-row form here, never only
+   while something runs, so a run arriving never moves the page. From 1090 px it fits in one row
+   (measured with the chip at "≥5", 40 phones and "Chưa rõ" counters). */
 @media (min-width: 1024px) and (max-width: 1089px) {
-  .shell > .main-col > .page-header:has(.queue-run-pill) {
+  .shell > .main-col > .page-header {
     flex-wrap: wrap;
     row-gap: 0;
     padding-block: var(--rv-space-1);
   }
 
-  .shell > .main-col > .page-header:has(.queue-run-pill) .page-header-meta {
+  .shell > .main-col > .page-header .page-header-meta {
     display: flex;
     order: 2;
     flex: 1 0 100%;
@@ -447,7 +448,7 @@
     min-height: var(--rv-control);
   }
 
-  .shell > .main-col > .page-header:has(.queue-run-pill) .status-chip {
+  .shell > .main-col > .page-header .status-chip {
     overflow-wrap: anywhere;
   }
 }

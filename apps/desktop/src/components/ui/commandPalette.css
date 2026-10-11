@@ -146,8 +146,8 @@
   text-align: center;
 }
 
-/* The system bar entry. Collapses to its icon below 1920 px and beside the run pill, where the page
-   name, scope, the seven fleet counters, the Cần xử lý chip, the run pill and Inspector need the room; the name stays for assistive technology through `aria-label` and the shortcut in
+/* The system bar entry. Collapses to its icon below 2200 px, where the page name, scope, the seven
+   fleet counters, the Cần xử lý chip, the reserved run pill and Inspector need the room; the name stays for assistive technology through `aria-label` and the shortcut in
    the tooltip. */
 .ui-palette-launcher {
   display: inline-flex;
@@ -168,13 +168,9 @@
 .ui-palette-launcher:hover {
   color: var(--text-1);
 }
-@media (max-width: 1919px) {
+@media (max-width: 2199px) {
   .ui-palette-launcher-text,
   .ui-palette-launcher kbd {
     display: none;
   }
-}
-.page-header:has(.queue-run-pill) .ui-palette-launcher-text,
-.page-header:has(.queue-run-pill) .ui-palette-launcher kbd {
-  display: none;
 }
