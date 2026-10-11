@@ -7,7 +7,7 @@ select {
   cursor: pointer; text-overflow: ellipsis;
   transition: border-color var(--motion-ui), box-shadow var(--motion-ui), background-color var(--motion-ui);
 }
-select:hover:not(:disabled) { border-color: var(--primary); }
+select:hover:not(:disabled) { border-color: var(--rv-text-3); }
 select:focus-visible, select:open { outline: 2px solid var(--primary-200); outline-offset: 2px; border-color: var(--primary); }
 select:disabled { cursor: default; opacity: .55; }
 @supports (appearance: base-select) {
@@ -28,7 +28,7 @@ select:disabled { cursor: default; opacity: .55; }
   @starting-style { select:open::picker(select) { opacity: 0; transform: translateY(-5px); } }
   select option { min-height: 34px; padding: 8px 10px; gap: 10px; border: 0; border-radius: 5px; line-height: 1.35; white-space: normal; cursor: pointer; transition: background-color 120ms, color 120ms; }
   select option:checked { color: var(--primary); background: var(--primary-50); font-weight: 600; }
-  select option:hover, select option:focus { color: var(--primary); background: var(--primary-100); outline: 1px solid var(--primary-200); }
+  select option:hover, select option:focus { color: var(--rv-text-1); background: var(--rv-surface-sunken); outline: 1px solid var(--rv-border-strong); }
   select option:disabled { opacity: .45; cursor: default; }
   select option::checkmark { color: var(--primary); order: 1; margin-left: auto; }
   select optgroup { padding-top: 5px; font-size: var(--text-xs); color: var(--text-3); }
@@ -39,7 +39,7 @@ select:disabled { cursor: default; opacity: .55; }
 .control-center-rail.rail-hover { padding: 0; border: 0; background: transparent; overflow: visible; z-index: 5; }
 .rail-hover .rail-handle { display: flex; flex-direction: column; align-items: center; gap: 9px; width: 30px; min-height: 108px; padding: 10px 4px; border: 1px solid var(--line); border-radius: 6px; color: var(--text-2); background: var(--bg-elevated); }
 .rail-handle span { writing-mode: vertical-rl; font-size: var(--text-xs); }
-.rail-hover .rail-handle:hover { color: var(--primary); border-color: var(--primary-200); }
+.rail-hover .rail-handle:hover { color: var(--rv-text-1); border-color: var(--rv-border-strong); }
 .rail-hover .rail-panel { width: 240px; max-width: calc(100vw - 48px); padding: 12px; background: var(--bg-elevated); border: 1px solid var(--line); border-radius: 7px; max-height: calc(100dvh - 86px); overflow: auto; box-sizing: border-box; }
 .rail-hover.is-unpinned .rail-panel { position: absolute; left: 0; top: 0; box-shadow: 5px 8px 24px rgb(35 29 24 / 12%); opacity: 0; visibility: hidden; transform: translateX(-10px); transition: opacity 200ms var(--ease-ui), transform 200ms var(--ease-ui), visibility 200ms; }
 .rail-hover.is-unpinned.is-open .rail-panel { opacity: 1; visibility: visible; transform: translateX(0); }
@@ -101,7 +101,7 @@ select:disabled { cursor: default; opacity: .55; }
 .device-files .device-files-list li { display: grid; grid-template-columns: 18px minmax(0,1fr) 65px 112px; gap: 8px; min-height: 34px; padding: 3px 9px; }
 .device-files.mode-upload .device-files-list li { grid-template-columns: minmax(0,1fr) 65px 112px; }
 .device-files .device-files-name { justify-content: flex-start; width: 100%; min-height: 28px; padding: 0; font-size: var(--text-xs); color: var(--text-1); }
-.device-files button.device-files-name:hover { color: var(--primary); }
+.device-files button.device-files-name:hover { color: var(--rv-text-1); text-decoration: underline; }
 .device-files .device-files-size, .device-files .device-files-when { font-size: var(--text-xs); }
 .device-files .device-files-list input[type="checkbox"] { width: 14px; height: 14px; margin: 0; }
 .device-files .device-files-actions { padding-top: 10px; flex: none; }

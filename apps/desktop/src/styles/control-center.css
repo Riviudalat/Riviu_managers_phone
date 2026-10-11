@@ -10,28 +10,29 @@
 .device-browser-toolbar {
   grid-column: 2;
 }
-/* One 40 px toolbar row from 1024 px: fleet actions (primary first; the secondary ones drop to
-   named icons below 1280 px, controls.css), then search, status filter, select-all and the view
-   switch. The search is what gives way, down to 160 px; nothing wraps early. A notice raised
-   between the two halves takes a full row of its own. Below 1024 px the filters wrap under the
-   actions. The rule under the toolbar is the region boundary — neither half draws a frame. */
+/* One 40 px toolbar row from 1024 px: fleet actions (primary first), then search, status filter,
+   select-all and the view switch. The search input never drops below 176 px, so a typed query
+   stays readable; the room it needs comes from the secondary actions instead (controls.css: they
+   become named icons, then move behind "⋯"). If even that does not fit — the Hiển thị rail pinned
+   on a narrow window — the filters take a second row rather than squeezing the input. A notice
+   raised between the two halves takes a full row of its own. The rule under the toolbar is the
+   region boundary — neither half draws a frame. */
 .device-browser > .device-browser-toolbar {
-  flex-flow: row nowrap;
+  flex-flow: row wrap;
   align-items: center;
   gap: var(--rv-space-2) var(--rv-space-3);
   padding-bottom: var(--rv-space-2);
   border-bottom: 1px solid var(--rv-border);
 }
-.device-browser > .device-browser-toolbar:has(> :not(.profile-toolbar, .device-toolrow)) {
-  flex-wrap: wrap;
-}
 .device-browser-toolbar > .profile-toolbar {
   flex: 0 0 auto;
   flex-wrap: nowrap;
 }
+/* Basis 0 with a min-content floor: the row breaks only when the filters' minimum widths (input
+   176 px included) do not fit beside the actions, and otherwise grows into the rest of the row. */
 .device-browser-toolbar > .device-toolrow {
-  flex: 1 1 auto;
-  min-width: 0;
+  flex: 1 1 0%;
+  min-width: min-content;
   flex-wrap: nowrap;
   justify-content: flex-end;
   gap: var(--rv-space-2);
@@ -41,7 +42,10 @@
 }
 .device-browser-toolbar .device-filters {
   flex: 1 1 390px;
-  min-width: 160px;
+  min-width: min-content;
+}
+.device-browser-toolbar .device-filters input {
+  min-width: 176px;
 }
 .device-browser-toolbar > .device-toolrow {
   order: 1;
@@ -51,14 +55,18 @@
   flex: 1 0 100%;
 }
 @media (max-width: 1023px) {
-  .device-browser > .device-browser-toolbar {
-    flex-wrap: wrap;
-  }
   .device-browser-toolbar > .profile-toolbar {
+    flex: 1 1 100%;
     flex-wrap: wrap;
   }
   .device-browser-toolbar > .device-toolrow {
     flex: 1 1 100%;
+    flex-wrap: wrap;
+  }
+  /* A smaller basis so select-all and the view switch stay beside the filters whenever the
+     input's own 176 px still fits; they wrap under it only on the narrowest layouts. */
+  .device-browser-toolbar .device-filters {
+    flex-basis: 240px;
   }
 }
 .device-browser-content {

@@ -1,4 +1,5 @@
-import { ChevronDown, FolderKanban, SlidersHorizontal, Wrench } from "lucide-react";
+import { useEffect, useId, useRef, useState } from "react";
+import { ChevronDown, FolderKanban, MoreHorizontal, SlidersHorizontal, Wrench } from "lucide-react";
 
 import type { DeviceInfo } from "../types";
 import { toastError } from "../toastStore";
@@ -38,6 +39,30 @@ export function ProfileToolbar({
   const any = selected.length;
   const canBatch = deviceCount > 0;
   const scope = any ? `đã chọn (${any})` : `toàn bộ (${deviceCount})`;
+  // Below the width that fits every fleet action beside a usable search field, Nhóm, Công cụ,
+  // Bảo trì and Quét lại move behind "⋯" (controls.css decides when; this state only says
+  // whether that menu is open). The controls are the same elements either way.
+  const [moreOpen, setMoreOpen] = useState(false);
+  const moreId = useId();
+  const moreRef = useRef<HTMLDivElement>(null);
+  const moreToggle = useRef<HTMLButtonElement>(null);
+  useEffect(() => {
+    if (!moreOpen) return;
+    const onPointerDown = (event: PointerEvent) => {
+      if (!moreRef.current?.contains(event.target as Node)) setMoreOpen(false);
+    };
+    document.addEventListener("pointerdown", onPointerDown);
+    return () => document.removeEventListener("pointerdown", onPointerDown);
+  }, [moreOpen]);
+  /** Runs an action from the menu: closes it and parks focus on "⋯" first, so a dialog the action
+   *  opens returns focus to a control that is still on screen. A no-op when the menu is inline. */
+  const fromMore = (action: () => void) => {
+    if (moreOpen) {
+      setMoreOpen(false);
+      moreToggle.current?.focus();
+    }
+    action();
+  };
 
   return (
     <div className="profile-toolbar" role="group" aria-label="Thao tác thiết bị">
@@ -57,46 +82,62 @@ export function ProfileToolbar({
         <IconPhone size={16} />
         Mở {scope}
       </button>}
-      <button type="button" className={`tb-btn ${groupsOpen ? "active" : ""}`} aria-expanded={groupsOpen} onClick={onGroups} title="Chia fleet thành nhóm — mỗi máy thuộc đúng một nhóm">
-        <FolderKanban size={16} aria-hidden="true" /><span className="tb-label">Nhóm</span>
-      </button>
-      {!any && <button type="button" className={`tb-btn ${groupToolsOpen ? "active" : ""}`} aria-expanded={groupToolsOpen} data-group-tools onClick={onGroupTools} title="Công cụ nhóm: phân phối văn bản/tệp…">
-        <SlidersHorizontal size={16} aria-hidden="true" /><span className="tb-label">Công cụ</span>
-      </button>}
-      <div className="grow" />
-      <details className="toolbar-maintenance" onKeyDown={(event) => {
-        if (event.key !== "Escape") return;
+      <div ref={moreRef} className="toolbar-more" onKeyDown={(event) => {
+        if (event.key !== "Escape" || event.defaultPrevented || !moreOpen) return;
         event.preventDefault();
-        event.currentTarget.removeAttribute("open");
-        event.currentTarget.querySelector("summary")?.focus();
+        setMoreOpen(false);
+        moreToggle.current?.focus();
       }}>
-        <summary tabIndex={0} title="Bảo trì thiết bị"><Wrench size={15} aria-hidden="true" /><span className="tb-label">Bảo trì</span><ChevronDown size={14} aria-hidden="true" /></summary>
-        <div className="toolbar-maintenance-menu">
-          <strong>Bảo trì thiết bị</strong>
-          <span>{any ? `${any} máy đã chọn` : "Các máy đang kết nối"}</span>
-          <button type="button" className="tb-btn" disabled={!canBatch} onClick={async (event) => {
-            event.currentTarget.closest("details")?.removeAttribute("open");
-            try { await onInstall(); } catch (error) { toastError("Sửa agent thất bại", error); }
-          }} title={`Cài hoặc khôi phục Riviu Agent cho ${scope}`}>
-            <Wrench size={16} aria-hidden="true" />Sửa Riviu Agent
+        <button ref={moreToggle} type="button" className="tb-btn toolbar-more-toggle" aria-label="Thêm thao tác thiết bị"
+          title="Thêm thao tác: Nhóm, Công cụ, Bảo trì, Quét lại" aria-expanded={moreOpen} aria-controls={moreId}
+          onClick={() => setMoreOpen((open) => !open)}>
+          <MoreHorizontal size={18} aria-hidden="true" />
+        </button>
+        <div id={moreId} className="toolbar-secondary" data-open={moreOpen}>
+          <button type="button" className={`tb-btn ${groupsOpen ? "active" : ""}`} aria-expanded={groupsOpen} onClick={() => fromMore(onGroups)} title="Chia fleet thành nhóm — mỗi máy thuộc đúng một nhóm">
+            <FolderKanban size={16} aria-hidden="true" /><span className="tb-label">Nhóm</span>
           </button>
-          <button type="button" className="tb-btn" disabled={!canBatch || !onHelperMaintenance} onClick={async (event) => {
-            event.currentTarget.closest("details")?.removeAttribute("open");
-            try { await onHelperMaintenance?.(); } catch (error) { toastError("Khôi phục helper thất bại", error); }
-          }} title={any ? "Chuẩn bị và xác nhận khôi phục helper trên các máy Android đã chọn" : "Chuẩn bị và xác nhận khôi phục helper trên các máy Android đang báo cần khôi phục helper"}>
-            <Wrench size={16} aria-hidden="true" />Khôi phục helper
-          </button>
-          <button type="button" className="tb-btn" disabled={!canBatch || !onQuarantineMaintenance} onClick={async (event) => {
-            event.currentTarget.closest("details")?.removeAttribute("open");
-            try { await onQuarantineMaintenance?.(); } catch (error) { toastError("Khôi phục phiên điều khiển thất bại", error); }
-          }} title="Khôi phục phiên TikTok được giữ lại trên các máy Android đang kết nối trong phạm vi; kế hoạch đã gửi chỉ được tra cứu">
-            <Wrench size={16} aria-hidden="true" />Khôi phục phiên điều khiển
+          {!any && <button type="button" className={`tb-btn ${groupToolsOpen ? "active" : ""}`} aria-expanded={groupToolsOpen} data-group-tools onClick={() => fromMore(onGroupTools)} title="Công cụ nhóm: phân phối văn bản/tệp…">
+            <SlidersHorizontal size={16} aria-hidden="true" /><span className="tb-label">Công cụ</span>
+          </button>}
+          <details className="toolbar-maintenance" onKeyDown={(event) => {
+            if (event.key !== "Escape") return;
+            event.preventDefault();
+            event.currentTarget.removeAttribute("open");
+            event.currentTarget.querySelector("summary")?.focus();
+          }}>
+            <summary tabIndex={0} title="Bảo trì thiết bị"><Wrench size={15} aria-hidden="true" /><span className="tb-label">Bảo trì</span><ChevronDown size={14} aria-hidden="true" /></summary>
+            <div className="toolbar-maintenance-menu">
+              <strong>Bảo trì thiết bị</strong>
+              <span>{any ? `${any} máy đã chọn` : "Các máy đang kết nối"}</span>
+              <button type="button" className="tb-btn" disabled={!canBatch} onClick={async (event) => {
+                event.currentTarget.closest("details")?.removeAttribute("open");
+                if (moreOpen) { setMoreOpen(false); moreToggle.current?.focus(); }
+                try { await onInstall(); } catch (error) { toastError("Sửa agent thất bại", error); }
+              }} title={`Cài hoặc khôi phục Riviu Agent cho ${scope}`}>
+                <Wrench size={16} aria-hidden="true" />Sửa Riviu Agent
+              </button>
+              <button type="button" className="tb-btn" disabled={!canBatch || !onHelperMaintenance} onClick={async (event) => {
+                event.currentTarget.closest("details")?.removeAttribute("open");
+                if (moreOpen) { setMoreOpen(false); moreToggle.current?.focus(); }
+                try { await onHelperMaintenance?.(); } catch (error) { toastError("Khôi phục helper thất bại", error); }
+              }} title={any ? "Chuẩn bị và xác nhận khôi phục helper trên các máy Android đã chọn" : "Chuẩn bị và xác nhận khôi phục helper trên các máy Android đang báo cần khôi phục helper"}>
+                <Wrench size={16} aria-hidden="true" />Khôi phục helper
+              </button>
+              <button type="button" className="tb-btn" disabled={!canBatch || !onQuarantineMaintenance} onClick={async (event) => {
+                event.currentTarget.closest("details")?.removeAttribute("open");
+                if (moreOpen) { setMoreOpen(false); moreToggle.current?.focus(); }
+                try { await onQuarantineMaintenance?.(); } catch (error) { toastError("Khôi phục phiên điều khiển thất bại", error); }
+              }} title="Khôi phục phiên TikTok được giữ lại trên các máy Android đang kết nối trong phạm vi; kế hoạch đã gửi chỉ được tra cứu">
+                <Wrench size={16} aria-hidden="true" />Khôi phục phiên điều khiển
+              </button>
+            </div>
+          </details>
+          <button type="button" className="tb-btn refresh" onClick={() => fromMore(() => void onRefresh())} title="Quét lại thiết bị" aria-label="Quét lại thiết bị">
+            <IconRefresh size={15} aria-hidden="true" /><span className="tb-label toolbar-more-only">Quét lại thiết bị</span>
           </button>
         </div>
-      </details>
-      <button type="button" className="tb-btn refresh" onClick={() => void onRefresh()} title="Quét lại thiết bị" aria-label="Quét lại thiết bị">
-        <IconRefresh size={15} aria-hidden="true" />
-      </button>
+      </div>
     </div>
   );
 }

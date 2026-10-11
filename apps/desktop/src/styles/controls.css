@@ -323,11 +323,67 @@ button:disabled {
 .toolbar-maintenance-menu > span { color: var(--rv-text-3); font-size: var(--rv-font-secondary); }
 .toolbar-maintenance-menu > button { justify-content: flex-start; }
 
-/* From 1024 to 1279 px (and beside a pinned Hiển thị rail up to 1599 px) the secondary fleet
+/* The secondary fleet actions sit inline by default; "⋯" and the menu-only label exist only in the
+   overflow tiers below. */
+.toolbar-more,
+.toolbar-secondary {
+  display: contents;
+}
+.toolbar-more-toggle,
+.toolbar-more-only {
+  display: none;
+}
+
+/* Overflow tier: 1024–1179 px, and 1024–1359 px beside a pinned Hiển thị rail. Below that width the
+   actions and a readable search no longer fit in one row even as icons, so Nhóm, Công cụ, Bảo trì
+   and Quét lại move behind "⋯", labelled. The primary action stays outside. */
+@media (min-width: 1024px) and (max-width: 1179px) {
+  .device-browser .toolbar-more { display: block; position: relative; flex: none; }
+  .device-browser .toolbar-more-toggle { display: inline-flex; }
+  .device-browser .toolbar-secondary { display: none; }
+  .device-browser .toolbar-secondary[data-open="true"] { display: grid; }
+}
+@media (min-width: 1180px) and (max-width: 1359px) {
+  .device-browser:not(.rail-unpinned) .toolbar-more { display: block; position: relative; flex: none; }
+  .device-browser:not(.rail-unpinned) .toolbar-more-toggle { display: inline-flex; }
+  .device-browser:not(.rail-unpinned) .toolbar-secondary { display: none; }
+  .device-browser:not(.rail-unpinned) .toolbar-secondary[data-open="true"] { display: grid; }
+}
+.toolbar-secondary[data-open="true"] {
+  position: absolute;
+  top: calc(100% + var(--rv-space-1));
+  left: 0;
+  z-index: var(--z-menu);
+  gap: 0;
+  min-width: 232px;
+  padding: var(--rv-space-2);
+  border: 1px solid var(--rv-border);
+  border-radius: var(--rv-radius-panel);
+  background: var(--rv-surface-overlay);
+  box-shadow: var(--rv-shadow-overlay);
+}
+.toolbar-secondary[data-open="true"] > .tb-btn,
+.toolbar-secondary[data-open="true"] .toolbar-maintenance > summary {
+  justify-content: flex-start;
+  width: 100%;
+  min-height: var(--rv-control);
+}
+.toolbar-secondary[data-open="true"] .tb-label {
+  position: static;
+  width: auto;
+  height: auto;
+  overflow: visible;
+  clip-path: none;
+}
+.toolbar-secondary[data-open="true"] .toolbar-more-only {
+  display: inline;
+}
+
+/* Icon tier: 1180–1279 px, and 1360–1599 px beside a pinned Hiển thị rail. The secondary fleet
    actions — Nhóm, Công cụ, Bảo trì — keep their icon, tooltip and accessible name but drop the
-   visible word, so the actions and the filters stay one toolbar row. The primary action keeps its
-   label. Below 1024 px the filters take their own row, so the words come back. */
-@media (min-width: 1024px) and (max-width: 1279px) {
+   visible word, so the actions and a readable search stay one toolbar row. The primary action keeps
+   its label. Below 1024 px the filters take their own row, so the words come back. */
+@media (min-width: 1180px) and (max-width: 1279px) {
   .profile-toolbar .tb-label {
     position: absolute;
     width: 1px;
@@ -337,7 +393,7 @@ button:disabled {
     white-space: nowrap;
   }
 }
-@media (min-width: 1024px) and (max-width: 1599px) {
+@media (min-width: 1360px) and (max-width: 1599px) {
   .device-browser:not(.rail-unpinned) .profile-toolbar .tb-label {
     position: absolute;
     width: 1px;

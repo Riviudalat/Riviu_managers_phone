@@ -22,7 +22,7 @@
 .runs-table td:nth-child(5),.runs-table td:nth-child(6) {min-width:140px;}
 .runs-table tbody tr:hover {background:var(--primary-50);}
 .runs-title-link {padding:0;border:0;background:transparent;text-align:left;min-width:140px;color:var(--text);font-weight:500;}
-.runs-title-link:hover {color:var(--primary);}
+.runs-title-link:hover {color:var(--rv-text-1);text-decoration:underline;}
 .runs-table td small {white-space:nowrap;color:var(--danger-strong);}
 .runs-detail-backdrop {position:fixed;inset:0;z-index:var(--z-modal-backdrop);background:rgb(15 23 42 / 18%);display:flex;justify-content:flex-end;}
 .runs-detail-drawer.operations-monitor-detail {position:relative;width:min(640px,95vw);height:100%;padding:54px 22px 22px;overflow:auto;background:var(--bg-elevated);box-shadow:var(--shadow-lg);}

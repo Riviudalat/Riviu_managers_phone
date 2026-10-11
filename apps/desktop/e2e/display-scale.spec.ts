@@ -81,6 +81,9 @@ async function assertNoPageWideOverflow(page: Page): Promise<void> {
       mainScroll: main?.scrollWidth ?? 0,
       contentClient: content?.clientWidth ?? 0,
       contentScroll: content?.scrollWidth ?? 0,
+      // The Control Center search, when it is on screen: no overflow is not the same as usable.
+      deviceSearch: document.querySelector<HTMLElement>(".device-filters input[type='search']")
+        ?.getBoundingClientRect().width ?? null,
     };
   });
 
@@ -89,6 +92,9 @@ async function assertNoPageWideOverflow(page: Page): Promise<void> {
   expect(widths.mainScroll, JSON.stringify(widths)).toBeLessThanOrEqual(widths.mainClient);
   expect(widths.contentScroll, JSON.stringify(widths)).toBeLessThanOrEqual(widths.contentClient);
   expect(widths.htmlClient).toBe(widths.innerWidth);
+  if (widths.deviceSearch !== null) {
+    expect(widths.deviceSearch, JSON.stringify(widths)).toBeGreaterThanOrEqual(160);
+  }
 }
 
 async function assertPaintedPixels(page: Page, png: Buffer): Promise<void> {

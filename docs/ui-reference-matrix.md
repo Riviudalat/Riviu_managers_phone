@@ -237,10 +237,13 @@ Lịch đăng bài là lịch một lần theo từng bài, mỗi dòng gắn m�
   đường trên/dưới, không tự vẽ khung; toolbar Thiết bị là một hàng trên nền làm việc với một
   đường kẻ dưới, không phải thẻ. Toolbar/bảng/section có kích thước ổn định.
 - Toolbar: một hàng 40 px từ 1024 px (Thiết bị: Mở toàn bộ, Nhóm, Công cụ, Bảo trì, quét lại, rồi tìm,
-  lọc trạng thái, Chọn tất cả, chế độ xem). Ô tìm co trước (tối thiểu 160 px); dưới 1280 px (dưới
-  1600 px khi bảng Hiển thị đang ghim) Nhóm/Công cụ/Bảo trì chỉ còn icon, giữ tên đọc được và
-  tooltip, còn nút chính giữ chữ. Toolbar không lặp số máy (đã ở thanh hệ thống). Dưới 1024 px phần lọc
-  xuống hàng thứ hai; thông báo luôn chiếm một hàng riêng. Nút chính ≥ 40 px được giữ ở cả các
+  lọc trạng thái, Chọn tất cả, chế độ xem). Ô tìm không bao giờ hẹp hơn 176 px để đọc được từ đã gõ; chỗ
+  cho nó lấy từ thao tác phụ: từ 1280 px có chữ; 1180–1279 px Nhóm/Công cụ/Bảo trì chỉ còn icon (giữ tên
+  đọc được và tooltip); 1024–1179 px Nhóm, Công cụ, Bảo trì và Quét lại vào menu **⋯ Thêm thao tác thiết
+  bị** có chữ (Escape đóng và trả focus về ⋯; hộp thoại mở từ menu trả focus về ⋯). Khi bảng Hiển thị đang
+  ghim, các mốc này lùi 180 px (icon 1360–1599, menu 1024–1359); nếu vẫn không đủ, phần lọc xuống hàng thứ
+  hai chứ không co ô tìm. Nút chính giữ chữ. Toolbar không lặp số máy (đã ở thanh hệ thống). Dưới 1024 px
+  phần lọc xuống hàng thứ hai; thông báo luôn chiếm một hàng riêng. Nút chính ≥ 40 px được giữ ở cả các
   footer/toolbar riêng (Nuôi, Đăng bài, My Apps, Tác vụ đã lưu, Quản lý tài khoản).
 - Không resize control theo label/hover/loading. Chữ wrap có chủ đích; không tràn, đè hàng sau hoặc scale theo viewport.
 - Dùng khoảng cách/màu/icon nhất quán; disabled/loading/error/empty phải phân biệt và có hành động tiếp theo.
