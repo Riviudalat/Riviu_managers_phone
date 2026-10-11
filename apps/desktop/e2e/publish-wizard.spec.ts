@@ -23,6 +23,7 @@ for (const viewport of [
       };
       const invoke = w.__TAURI_INTERNALS__.invoke;
       w.__PUBLISH_CALLS__ = [];
+      let startStatus: Record<string, unknown> | null = null;
       w.__TAURI_INTERNALS__.invoke = async (command, args) => {
         if (command === "startup_error") return null;
         if (command === "android_tool_problems") return [];
@@ -106,6 +107,16 @@ for (const viewport of [
         ) {
           w.__PUBLISH_CALLS__.push({ command, args });
           throw new Error("No public action in layout gate");
+        }
+        // The confirm button is the public-post boundary. The fixture records the start and
+        // answers with a durable pre-accept rejection, so nothing is ever accepted or posted.
+        if (command === "publish_start_status") return startStatus;
+        if (command === "publish_start") {
+          w.__PUBLISH_CALLS__.push({ command, args });
+          startStatus = { requestId: String(args.requestId), operationId: "publish:fixture", campaignId: null, state: "failed",
+            stage: "rejected", error: { code: "fixture", message: "Fixture từ chối trước khi bắt đầu; chưa đăng bài." },
+            revision: 1, updatedAt: new Date().toISOString() };
+          return startStatus;
         }
         return invoke(command, args);
       };
@@ -211,19 +222,25 @@ for (const viewport of [
     }
     await page.getByRole("button", { name: "Kiểm tra & đăng", exact: true }).click();
     await expect(page.getByRole("button", { name: "Xác nhận đăng công khai 10 bài", exact: true })).toBeEnabled();
-    await expect(page.getByText("Nhạc được chọn sau khi mở TikTok.", { exact: false })).toBeVisible();
+    // The review states the public scope before confirmation; the sound-timing hint was
+    // removed from this dialog on purpose (578d3a8e) and must not come back.
+    const review = page.getByRole("dialog", { name: "Xem lại và xác nhận đăng công khai" });
+    await expect(review.getByText("10 bài sẽ đăng công khai trên 10 máy.", { exact: false })).toBeVisible();
+    await expect(review.getByText("Nhạc được chọn sau khi mở TikTok.", { exact: false })).toHaveCount(0);
     await page.screenshot({ path: test.info().outputPath(`preflight-${viewport.width}.png`) });
     const axe = await new AxeBuilder({ page }).include(".publish-dialog[open]").withTags(["wcag2a", "wcag2aa"]).analyze();
     expect(axe.violations).toEqual([]);
+    // The review dialog is the sole confirmation: one click sends one confirmed start for the
+    // reviewed digest, with no second prompt, and a rejection keeps the dialog and the draft.
     await page.getByRole("button", { name: "Xác nhận đăng công khai 10 bài", exact: true }).click();
-    const publicConfirm = page.getByRole("alertdialog", { name: "Xác nhận đăng công khai?" });
-    await expect(publicConfirm).toBeVisible();
-    await expect(publicConfirm.getByRole("button", { name: "Đăng bài", exact: true })).toBeFocused();
-    await publicConfirm.getByRole("button", { name: "Huỷ", exact: true }).click();
     const checkDialog = page.getByRole("dialog", { name: "Xem lại và xác nhận đăng công khai" });
+    await expect(checkDialog.getByRole("alert")).toContainText("Fixture từ chối trước khi bắt đầu; chưa đăng bài.");
+    await expect(page.getByRole("alertdialog")).toHaveCount(0);
     await expect(checkDialog).toBeVisible();
-    const calls = await page.evaluate(() => (window as unknown as { __PUBLISH_CALLS__: { command: string; args: { request?: { udids: string[]; bundleIds: string[]; deleteAfterPublish: boolean; sheetEnabled: boolean } } }[] }).__PUBLISH_CALLS__);
-    expect(calls).toHaveLength(1);
+    const calls = await page.evaluate(() => (window as unknown as { __PUBLISH_CALLS__: { command: string; args: { request?: { udids: string[]; bundleIds: string[]; deleteAfterPublish: boolean; sheetEnabled: boolean }; approvedInputDigest?: string; confirmed?: boolean } }[] }).__PUBLISH_CALLS__);
+    expect(calls.map(call => call.command)).toEqual(["publish_preflight", "publish_start"]);
+    expect(calls[1].args).toMatchObject({ approvedInputDigest: "digest", confirmed: true });
+    expect(calls[1].args.request?.udids).toHaveLength(10);
     expect(calls[0].args.request?.udids).toHaveLength(10);
     expect(calls[0].args.request?.bundleIds).toHaveLength(10);
     expect(calls[0].args.request?.deleteAfterPublish).toBe(true);

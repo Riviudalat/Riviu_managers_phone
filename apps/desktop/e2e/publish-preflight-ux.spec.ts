@@ -10,7 +10,8 @@ const sheetUrl = "https://docs.google.com/spreadsheets/d/FIXTURE/edit#gid=0";
 for (const viewport of [{ width: 1440, height: 900 }, { width: 820, height: 560 }]) {
   test(`publish preflight keeps Sheet and machine blockers actionable at ${viewport.width}px`, async ({ page }) => {
     await page.setViewportSize(viewport);
-    await installTauriMock(page, { androidRoster: true, fleetSize: 10 });
+    // publishSheetReady answers the automatic read-only verify for the same FIXTURE gid 0.
+    await installTauriMock(page, { androidRoster: true, fleetSize: 10, publishSheetReady: true });
     await page.addInitScript(({ sheetUrl }) => {
       const host = window as unknown as {
         __TAURI_INTERNALS__: { invoke: (command: string, args: Record<string, unknown>) => Promise<unknown> };
@@ -71,7 +72,8 @@ for (const viewport of [{ width: 1440, height: 900 }, { width: 820, height: 560 
     await page.getByRole("button", { name: "Quét", exact: true }).click();
     await page.getByRole("button", { name: "Chọn nhanh", exact: true }).click();
     await expect(page.locator(".pq-footer")).toContainText("10/10 bài có máy");
-    await expect(page.locator(".publish-sheet-result.is-linked")).toContainText("Đã liên kết Google Sheet");
+    // Verified read-only on load; preflight below still reports the lost write right.
+    await expect(page.locator(".publish-sheet-result.is-verified")).toContainText("Đã xác minh Sheet");
     await expect(page.locator(".pq-run-options")).toHaveText("Sheet bật · Dọn bản chuyển bật");
     await expect(page.getByRole("checkbox", { name: "Ghi kết quả lên Sheet" })).toHaveCount(0);
     await page.getByRole("button", { name: "Kiểm tra & đăng", exact: true }).click();

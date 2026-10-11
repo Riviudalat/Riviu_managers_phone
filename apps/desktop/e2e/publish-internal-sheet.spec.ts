@@ -38,6 +38,19 @@ for (const width of [1440, 820]) {
             message: reportingReady ? "Đã xác minh kết nối đúng Sheet." : "Đợt báo cáo chưa sẵn sàng nhận dữ liệu.",
           };
         }
+        // The automatic read-only proof reads the same reporting readiness as the explicit check.
+        if (command === "google_sheets_verify_readonly") {
+          const sheetGid = Number(new URL(String(args.sheetUrl)).hash.match(/gid=(\d+)/)?.[1] ?? "0");
+          const now = Date.now();
+          return {
+            readyRead: true, verifiedAt: now, expiresAt: now + 300_000, writePermission: "unknown",
+            result: { sheetUrl: args.sheetUrl, spreadsheetId: "SAVED", sheetGid, readable: true, connectionVerified: true,
+              reportingReady, layout: "internal", columns: [],
+              message: reportingReady ? "Đã xác minh kết nối đúng Sheet." : "Đợt báo cáo chưa sẵn sàng nhận dữ liệu." },
+            binding: { clientId: "fixture.apps.googleusercontent.com", accountId: "account-a", spreadsheetId: "SAVED", sheetGid,
+              writerId: "fixture-writer", reportingEpoch: null, authorizationGeneration: 0 },
+          };
+        }
         if (command === "publish_sheet_save_config" || command === "publish_sheet_prepare"
           || command === "publish_execute" || command.startsWith("publish_create")
           || command === "automation_profile_create" || command === "google_sheets_connect"
@@ -73,7 +86,7 @@ for (const width of [1440, 820]) {
     await expect(panel.locator(".publish-sheet-result.is-verified")).toHaveCount(0);
     await page.evaluate(() => (window as unknown as { setSheetReady: () => void }).setSheetReady());
     await check.click();
-    await expect(panel.locator(".publish-sheet-result.is-verified")).toContainText("Kết nối đã xác minh.");
+    await expect(panel.locator(".publish-sheet-result.is-verified")).toContainText("Đã xác minh kết nối đúng Sheet.");
     await link.fill("https://docs.google.com/spreadsheets/d/SAVED/edit#gid=7");
     await expect(panel.locator(".publish-sheet-result.is-verified")).toHaveCount(0);
     const calls = await page.evaluate(() => (window as unknown as { sheetCalls: { command: string }[] }).sheetCalls);

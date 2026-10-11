@@ -32,11 +32,15 @@ test("submitted posts show incomplete progress and processing evidence without a
   await page.goto("/");
   await page.getByRole("button", { name: "Mở rộng tiến trình", exact: true }).click();
   const panel = page.getByRole("dialog", { name: "Cửa sổ tiến trình" });
-  await expect(panel.getByRole("progressbar", { name: "Tiến độ công việc" })).toHaveAttribute("aria-valuenow", "50");
+  // A post awaiting proof makes the whole run indeterminate: no percentage until it is verified.
+  await expect(panel.getByRole("progressbar", { name: "Tiến độ công việc" })).not.toHaveAttribute("aria-valuenow");
   await expect(panel.getByLabel("Kết quả từng máy")).toContainText("1 hoàn tất");
   await expect(panel.getByLabel("Kết quả từng máy")).toContainText("1 đang chờ/chạy");
   await panel.getByRole("button", { name: /Máy 2 Chờ xác minh bài đăng/ }).click();
-  await expect(panel.getByRole("list", { name: "Nhật ký theo thời gian" })).toContainText("Đã bấm Đăng — chờ TikTok hoàn tất và xác minh liên kết bài");
+  // The runtime step text is shown as written, beside the coarse "do not post again" state.
+  const timeline = panel.getByRole("list", { name: "Nhật ký theo thời gian" });
+  await expect(timeline).toContainText("[12] Đã bấm Đăng; chờ TikTok xử lý");
+  await expect(timeline).toContainText("Đang kiểm tra kết quả thao tác Đăng đã có — không bấm Đăng lại");
   await expect(panel).not.toContainText("100%");
   await expect(panel).not.toContainText("Thành công");
   await panel.screenshot({ path: "../../target/stable-installer-20260909/frontend/publish-pending.png" });

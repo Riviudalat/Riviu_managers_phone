@@ -99,8 +99,9 @@ for (const viewport of [
     await page.getByRole("button", { name: "Quét", exact: true }).click();
     const source = page.getByRole("textbox", { name: "Thư mục nguồn" });
     await expect(source).toHaveValue("C:/Nội dung/thư mục rỗng");
+    // The page's own scan alert; the same title is also pushed as a header toast.
     await expect(
-      page.getByText("Chưa tìm thấy gói bài trong thư mục đã chọn", {
+      page.locator(".publish-page").getByRole("alert").getByText("Chưa tìm thấy gói bài trong thư mục đã chọn", {
         exact: true,
       }),
     ).toBeVisible();

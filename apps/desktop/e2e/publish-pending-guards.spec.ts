@@ -40,14 +40,16 @@ for (const width of [1440, 820]) {
     await expect(page.getByText("Máy còn bài chưa lấy được link", { exact: true })).toHaveCount(0);
     expect(await page.evaluate(() => (window as unknown as { publishCalls: string[] }).publishCalls)).toEqual([]);
     const sheetStatus = page.locator(".publish-sheet-result");
-    await expect(sheetStatus).toContainText("Đã liên kết Google Sheet");
+    // The saved binding is verified read-only on load, without a click.
+    await expect(sheetStatus).toHaveClass(/is-verified/);
+    await expect(sheetStatus).toContainText("Đã xác minh Sheet");
     if (width === 820) {
       await page.getByRole("button", { name: "Thiết lập Google Sheet", exact: true }).focus();
       await page.keyboard.press("Tab");
       await expect(sheetStatus).toBeFocused();
       await page.getByRole("button", { name: "Thiết lập Google Sheet", exact: true }).click();
       await expect(page.locator(".pq-settings.is-open")).toBeVisible();
-      await expect(sheetStatus).toContainText("Đã liên kết Google Sheet");
+      await expect(sheetStatus).toContainText("Đã xác minh Sheet");
       expect(await sheetStatus.evaluate(node => node.scrollWidth <= node.clientWidth)).toBe(true);
     }
     expect((await new AxeBuilder({ page }).include(".publish-page").analyze()).violations).toEqual([]);

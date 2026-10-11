@@ -73,6 +73,19 @@ async function installGoogleFixture(page: Page, connected = true, selectedFileId
         if (!status.active || checked.sheetUrl !== status.sheetUrl) throw Error("Check requires the exact active target");
         return checked;
       }
+      // The automatic read-only proof for whatever link is pasted; it never links a writer.
+      if (command === "google_sheets_verify_readonly") {
+        if (!status.connected || !status.accountId) throw Error("Đăng nhập Google trước khi kiểm tra kết nối.");
+        const url = new URL(String(args.sheetUrl));
+        const gid = Number(new URLSearchParams(url.hash.slice(1)).get("gid") ?? url.searchParams.get("gid") ?? "0");
+        const book = url.pathname.split("/")[3];
+        const now = Date.now();
+        return {
+          readyRead: true, result: result(book, gid), verifiedAt: now, expiresAt: now + 300_000, writePermission: "unknown",
+          binding: { clientId: status.clientId, accountId: status.accountId, spreadsheetId: book, sheetGid: gid,
+            writerId: status.writerId, reportingEpoch: null, authorizationGeneration: 0 },
+        };
+      }
       if (command.startsWith("publish_create") || command === "publish_execute" || command === "publish_sheet_prepare"
         || command === "publish_sheet_save_config" || command === "google_sheets_list_tabs") {
         throw Error("Unexpected publication/legacy/tab-selector command in compact Google UI test");
@@ -135,7 +148,9 @@ for (const viewport of [{ width: 1440, height: 900 }, { width: 820, height: 560 
   });
 }
 
-test("OAuth completion connects a pasted file directly with its original gid", async ({ page }) => {
+// OAuth completion only schedules the read-only proof of the pasted file; linking it as the
+// writer stays behind the explicit check button, with the original gid and no Picker.
+test("OAuth completion verifies a pasted file read-only and connects it only on the explicit check", async ({ page }) => {
   await installGoogleFixture(page, false);
   const panel = page.locator(".google-sheet-connection");
   const link = panel.getByRole("textbox", { name: "Link Google Sheet" });
@@ -144,6 +159,13 @@ test("OAuth completion connects a pasted file directly with its original gid", a
   await expect.poll(() => calls(page, "google_sheets_login")).toHaveLength(1);
   await page.evaluate(() => (window as unknown as GoogleFixture).completeGoogleBrowser());
   await expect(panel.getByRole("button", { name: "Đăng nhập Google", exact: true })).toBeEnabled();
+  await expect.poll(() => calls(page, "google_sheets_verify_readonly")).toEqual([
+    { command: "google_sheets_verify_readonly", args: { sheetUrl: "https://docs.google.com/spreadsheets/d/new-file/edit#gid=12" } },
+  ]);
+  await expect(panel.locator(".publish-sheet-result[role=status]")).not.toContainText("Đang kiểm tra");
+  expect(await calls(page, "google_sheets_connect")).toEqual([]);
+  await expect(panel.locator(".publish-sheet-result.is-verified")).toHaveCount(0);
+  await panel.getByRole("button", { name: "Kiểm tra kết nối", exact: true }).click();
   expect(await calls(page, "google_sheets_pick_file")).toEqual([]);
   await expect(panel.locator(".publish-sheet-result.is-verified")).toBeVisible();
   expect(await calls(page, "google_sheets_connect")).toEqual([
