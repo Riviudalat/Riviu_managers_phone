@@ -55,7 +55,8 @@ nhất 240 px (hai ô 96 px), cửa sổ nổi nhưng vẫn giữ trạng thái 
 Menu/confirm vẫn ở trên.
 **Bảng Cài đặt bên trái** (GF1, chép GenFarmer) nằm giữa sidebar và lưới, mở sẵn,
 thu/mở bằng «/» (nhớ theo người dùng; khi thu vẫn giữ trạng thái đang áp dụng): thanh trượt
-**Màn hình lớn**, **Màn hình nhỏ** (cỡ ô, cùng Ctrl + lăn chuột), chất lượng lưới, chất lượng
+**Màn hình lớn** (đổi ngay cửa sổ máy đang mở, ghim hay nổi, cùng giới hạn như cửa sổ mới),
+**Màn hình nhỏ** (cỡ ô, cùng Ctrl + lăn chuột), chất lượng lưới, chất lượng
 cửa sổ lớn, FPS (áp dụng cho mọi máy Android, kèm câu "sẽ khởi động lại luồng hình Android");
 nút **Cài đặt**, **Thiết bị** (Cài đặt máy), **Xoay** (máy Android đã chọn); lọc **Tất cả / USB /
 Wi‑Fi**; danh sách **Nhóm** với "(chọn / tổng)" và **+** mở quản lý nhóm. Chỉ ghi "Đã áp dụng" sau khi lệnh lưu trả kết quả. Dropdown dùng chung nền lớp nổi, viền trung tính, option

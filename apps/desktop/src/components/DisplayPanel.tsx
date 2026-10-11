@@ -1,7 +1,6 @@
 import { ChevronsLeft, ChevronsRight, Monitor, Plus, RotateCw, Settings, Smartphone, Usb, Wifi } from "lucide-react";
-import { FOCUS_ZOOM, TILE_ZOOM, loadZoom, storeZoom } from "../zoom";
+import { FOCUS_ZOOM, TILE_ZOOM } from "../zoom";
 import type { ConnectionKind } from "../types";
-import { useState } from "react";
 import { ControlStreamSettings } from "./ControlStreamSettings";
 
 interface Props {
@@ -10,6 +9,9 @@ interface Props {
   onCollapsed: (collapsed: boolean) => void;
   tileWidth: number;
   onTileWidth: (n: number) => void;
+  /** "Màn hình lớn": owned by the parent, which also sizes the open phone window with it. */
+  focusWidth: number;
+  onFocusWidth: (n: number) => void;
   connection: "all" | "usb" | "wifi";
   onConnection: (n: "all" | "usb" | "wifi") => void;
   /** The group tabs, with how many of each group's phones are selected. */
@@ -33,7 +35,6 @@ interface Props {
  * (`ControlStreamSettings`), never on release of a slider.
  */
 export function DisplayPanel(p: Props) {
-  const [focusWidth, setFocusWidth] = useState(() => loadZoom(FOCUS_ZOOM));
   const activeGroup = p.groups.find(group => group.id === p.group);
   const members = activeGroup?.udids
     ? p.machines.filter(machine => activeGroup.udids?.includes(machine.id))
@@ -61,19 +62,15 @@ export function DisplayPanel(p: Props) {
       </div>
       <section id="control-display-panel" className="cc-side-body" aria-label="Cài đặt hiển thị" hidden={p.collapsed} inert={p.collapsed}>
         <label className="cc-side-slider">
-          <span><Monitor size={14} aria-hidden="true" />Màn hình lớn <output>{focusWidth}px</output></span>
+          <span><Monitor size={14} aria-hidden="true" />Màn hình lớn <output>{p.focusWidth}px</output></span>
           <input
             aria-label="Kích thước màn hình điều khiển"
             type="range"
             min={FOCUS_ZOOM.min}
             max={FOCUS_ZOOM.max}
             step={10}
-            value={focusWidth}
-            onChange={(e) => {
-              const v = Number(e.target.value);
-              setFocusWidth(v);
-              storeZoom(FOCUS_ZOOM, v);
-            }}
+            value={p.focusWidth}
+            onChange={(e) => p.onFocusWidth(Number(e.target.value))}
           />
         </label>
         <label className="cc-side-slider">

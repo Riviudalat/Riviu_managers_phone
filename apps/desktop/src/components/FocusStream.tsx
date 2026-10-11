@@ -106,6 +106,12 @@ interface Props {
   dock?: HTMLElement | null;
   pinned?: boolean;
   onPinnedChange?: (pinned: boolean) => void;
+  /**
+   * "Màn hình lớn" when the parent owns it (the Control Center's panel slider), so a slider move
+   * resizes this open window live. Without it the window keeps its own size, as before.
+   */
+  frameWidth?: number;
+  onFrameWidth?: (next: number | ((width: number) => number)) => void;
 }
 
 /// Below this width the wall keeps no useful room beside a docked phone, so a pinned window floats.
@@ -175,6 +181,8 @@ export function FocusStream({
   dock = null,
   pinned = false,
   onPinnedChange,
+  frameWidth: sharedFrameWidth,
+  onFrameWidth,
 }: Props) {
   const { closing, close: onClose } = useClosingTransition(onClosed, 180, device.udid);
   const dialogRef = useRef<HTMLDivElement>(null);
@@ -201,7 +209,10 @@ export function FocusStream({
   const [showDevices, setShowDevices] = useState(false);
   const [showPhrases, setShowPhrases] = useState(false);
   const [showKeyboards, setShowKeyboards] = useState(false);
-  const [frameWidth, setFrameWidth] = useState(() => loadZoom(FOCUS_ZOOM));
+  const [ownFrameWidth, setOwnFrameWidth] = useState(() => loadZoom(FOCUS_ZOOM));
+  const frameWidth = sharedFrameWidth ?? ownFrameWidth;
+  // Either setter is a React state setter, so its identity is stable for the listeners below.
+  const setFrameWidth = onFrameWidth ?? setOwnFrameWidth;
   const resizeDrag = useRef<{ x: number; width: number } | null>(null);
   // The dock's width comes from the size setting and the window, never from the frame: a first
   // frame, a status change or a landscape frame must not reflow the wall beside it.
@@ -597,7 +608,7 @@ export function FocusStream({
       pendingTicks = 0;
       screen.removeEventListener("wheel", onWheel);
     };
-  }, [activeSync?.masterUdid, device.udid, docked, encodedH, encodedW, sessionReady, targetKey]);
+  }, [activeSync?.masterUdid, device.udid, docked, encodedH, encodedW, sessionReady, setFrameWidth, targetKey]);
 
   /// The most samples a single drag is allowed to carry.
   ///

@@ -118,7 +118,7 @@ import { HelpPage } from "./pages/HelpPage";
 import type { AgentStatus, DeviceInfo, DeviceLoadState, DeviceWorkOwner, DeviceWorkState, PageId, TargetRef } from "./types";
 import type { ActiveGroupSync, GroupSyncReadiness } from "./groupSync";
 import { MENU_ICONS } from "./components/menuIcons";
-import { loadZoom, stepZoom, storeZoom, TILE_ZOOM, wheelWantsZoom } from "./zoom";
+import { FOCUS_ZOOM, loadZoom, stepZoom, storeZoom, TILE_ZOOM, wheelWantsZoom } from "./zoom";
 import { operationSourcePage, type OperationSourceRef } from "./operationSource";
 import "./App.css";
 
@@ -231,6 +231,9 @@ function App() {
   }, []);
   const [settingsSection, setSettingsSection] = useState<"control" | "integration" | "maintenance" | undefined>();
   const [tileWidth, setTileWidth] = useState(() => loadZoom(TILE_ZOOM));
+  // "Màn hình lớn": one owner for the panel slider and the open phone window, so moving the
+  // slider resizes a window that is already open (pinned or floating), not only the next one.
+  const [focusWidth, setFocusWidth] = useState(() => loadZoom(FOCUS_ZOOM));
   // The left "Cài đặt" panel (GF1) is open by default; folding it is remembered per user.
   const [displayCollapsed, setDisplayCollapsedState] = useState(loadPanelCollapsed);
   const setDisplayCollapsed = useCallback((collapsed: boolean) => {
@@ -533,6 +536,9 @@ function App() {
   useEffect(() => {
     storeZoom(TILE_ZOOM, tileWidth);
   }, [tileWidth]);
+  useEffect(() => {
+    storeZoom(FOCUS_ZOOM, focusWidth);
+  }, [focusWidth]);
 
   const tabs = useMemo(() => groupTabs(devices, groups), [devices, groups]);
   const metaMap = useMemo(() => metaByUdid(metas), [metas]);
@@ -1617,7 +1623,7 @@ function App() {
               {/* Mounted while collapsed: the stream-settings controller inside owns an in-flight
                   apply, and unmounting it made a reopened panel say "Đã áp dụng" before the result. */}
               <DisplayPanel collapsed={displayCollapsed} onCollapsed={setDisplayCollapsed}
-                tileWidth={tileWidth} onTileWidth={setTileWidth} connection={connectionFilter} onConnection={setConnectionFilter}
+                tileWidth={tileWidth} onTileWidth={setTileWidth} focusWidth={focusWidth} onFocusWidth={setFocusWidth} connection={connectionFilter} onConnection={setConnectionFilter}
                 groups={tabs.map(tab => {
                   const udids = groups.find(group => group.id === tab.id)?.udids;
                   return { ...tab, udids, selected: udids ? selected.filter(udid => udids.includes(udid)).length : selected.length };
@@ -2029,6 +2035,8 @@ function App() {
           dock={deviceWindows.pinned ? dockSlot : null}
           pinned={deviceWindows.pinned}
           onPinnedChange={deviceWindows.setPinned}
+          frameWidth={focusWidth}
+          onFrameWidth={setFocusWidth}
           activeSync={activeSync?.masterUdid === udid ? activeSync : null}
           onReadinessChange={activeSync?.masterUdid === udid ? setSyncReadiness : undefined}
           onHelperMaintenance={targetUdid => void runHelperMaintenance([targetUdid])}
