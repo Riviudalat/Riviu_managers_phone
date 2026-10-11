@@ -704,8 +704,22 @@ describe("NurturePopup", () => {
     expect(session).toHaveFocus();
   });
 
-  it("opens page monitoring after a nurture run starts", async () => {
+  // A manual start saves the run settings, but never the schedule's scope: an enabled all-day
+  // schedule approved for another phone keeps that list and its windows, and a disabled one is
+  // not seeded with the run's phones. Only Hẹn giờ › Lưu changes them.
+  it.each([
+    {
+      name: "an enabled schedule approved for another phone",
+      stored: {
+        scheduleEnabled: true, scheduleUdids: ["approved-phone"],
+        scheduleWindows: [{ id: "w-approved", startMinute: 480, endMinute: 600, everyMinutes: 60,
+          durationMinutes: 20, udids: ["approved-phone"], behaviour: null }],
+      },
+    },
+    { name: "a disabled schedule", stored: { scheduleEnabled: false, scheduleUdids: [] as string[], scheduleWindows: [] } },
+  ])("opens page monitoring after a nurture run starts, keeping $name", async ({ stored }) => {
     const api = await import("../api");
+    vi.mocked(api.nurtureGetSettings).mockResolvedValueOnce({ ...settings, ...stored });
     saved.saveSettings.mockResolvedValueOnce(settings);
     render(
       <NurturePopup
@@ -721,6 +735,8 @@ describe("NurturePopup", () => {
     fireEvent.click(screen.getByRole("button", { name: /^(?:Kiểm tra & bắt đầu|Bắt đầu)$/ }));
 
     await waitFor(() => expect(api.nurtureStart).toHaveBeenCalledWith(["mock-1"], settings.scheduleDurationMinutes));
+    expect(api.nurtureSaveSettings).toHaveBeenCalledTimes(1);
+    expect(api.nurtureSaveSettings).toHaveBeenCalledWith(expect.objectContaining(stored));
     await waitFor(() => expect(monitor).toHaveAttribute("aria-selected", "true"));
     expect(screen.getByRole("tabpanel", { name: "Theo dõi" })).toBeVisible();
   });

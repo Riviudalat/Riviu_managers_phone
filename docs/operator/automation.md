@@ -288,8 +288,8 @@ thẳng Nuôi TikTok › Hẹn giờ.
   đúng các máy đang chọn ở Thiết lập thành danh sách đã duyệt — cho lịch cả ngày và cho mọi
   khung còn để "tất cả máy đang chọn" — và giữ trạng thái bật/tắt; **Lưu & bật** ghi rồi bật;
   **Tắt hẹn giờ** tắt và giữ danh sách. Trang hiện danh sách sẽ duyệt cho từng khung và 5 lần
-  chạy dự kiến kèm múi giờ. Lưu thiết lập hay **Kiểm tra & bắt đầu** không đổi danh sách của
-  lịch. Đến giờ, lịch chỉ chạy trên danh sách đã duyệt; máy cắm sau không bao giờ được thêm.
+  chạy dự kiến kèm múi giờ. Lưu thiết lập hay **Kiểm tra & bắt đầu** không đổi danh sách hay
+  công tắc bật/tắt của lịch: phiên chạy tay dùng máy của nó, lịch giữ máy đã duyệt. Đến giờ, lịch chỉ chạy trên danh sách đã duyệt; máy cắm sau không bao giờ được thêm.
   Danh sách rỗng (lịch cũ lưu khi chưa chọn máy, hoặc khung cũ để "tất cả") **không** còn nghĩa
   là mọi máy đang kết nối: lần đến hạn bị từ chối, ghi `nurture.schedule.refused` vào nhật ký,
   và trang hiện "Chưa duyệt danh sách máy" cho tới khi bấm **Lưu**.

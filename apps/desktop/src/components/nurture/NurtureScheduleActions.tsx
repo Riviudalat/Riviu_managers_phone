@@ -48,9 +48,11 @@ export function NurtureScheduleActions({
   const unapproved = windows.length
     ? windows.filter((window) => !window.udids.length).map(windowName)
     : settings.scheduleUdids.length ? [] : ["Lịch cả ngày"];
-  const approvals = windows.length
-    ? windows.map((window) => ({ name: windowName(window), udids: window.udids.length ? window.udids : targets }))
-    : [{ name: "Lịch cả ngày", udids: targets.length ? targets : settings.scheduleUdids }];
+  const sameList = (left: string[], right: string[]) =>
+    left.length === right.length && left.every((udid) => right.includes(udid));
+  // The all-day line states what is approved now and, only if the selection differs, what Lưu
+  // would change it to — a manual run on other phones leaves the approval as it was.
+  const allDayNext = targets.length ? targets : settings.scheduleUdids;
   const times = nurtureScheduleRuns(settings, now);
   return (
     <section className="nurture-schedule-review" aria-label="Lưu hẹn giờ Nuôi">
@@ -64,13 +66,26 @@ export function NurtureScheduleActions({
         </StatusNotice>
       )}
       <div className="schedule-scope-line">
-        {approvals.map((approval) => (
-          <p key={approval.name}>
-            {approval.name}: {approval.udids.length
-              ? `${approval.udids.length} máy · ${names(approval.udids)}`
-              : "chưa có máy nào — chọn máy ở Thiết lập"}
+        {windows.length ? windows.map((window) => (
+          <p key={window.id}>
+            {windowName(window)}: {window.udids.length
+              ? `${window.udids.length} máy · ${names(window.udids)}`
+              : targets.length
+                ? `${targets.length} máy · ${names(targets)} — tất cả máy đang chọn, ghi khi Lưu`
+                : "chưa có máy nào — chọn máy ở Thiết lập"}
           </p>
-        ))}
+        )) : (
+          <>
+            <p>
+              Lịch cả ngày: {settings.scheduleUdids.length
+                ? `đã duyệt ${settings.scheduleUdids.length} máy · ${names(settings.scheduleUdids)}`
+                : "chưa duyệt máy nào"}
+            </p>
+            {allDayNext.length > 0 && !sameList(allDayNext, settings.scheduleUdids) && (
+              <p>Bấm Lưu để đổi sang {allDayNext.length} máy đang chọn · {names(allDayNext)}</p>
+            )}
+          </>
+        )}
         <p>Lưu ghi đúng các máy trên; máy cắm sau không được thêm.</p>
       </div>
       <RunTimesPreview

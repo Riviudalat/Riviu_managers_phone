@@ -318,8 +318,9 @@ Lịch Nuôi (`nurture.settings`, `nurture_schedule::decide`) chỉ chạy trên
 đang kết nối; danh sách rỗng trả `Tick::Refuse` (`scope_not_approved`), dời mark và ghi
 `nurture.schedule.refused`, không bao giờ mở rộng ra cả fleet. `claim_nurture_schedule_mark`
 đọc lại settings trong cùng transaction và từ chối máy ngoài danh sách của đúng mark đó hoặc
-danh sách rỗng. Danh sách chỉ được ghi từ Hẹn giờ (Lưu / Lưu & bật); lưu thiết lập và bắt đầu
-thủ công giữ danh sách cũ.
+danh sách rỗng. Danh sách chỉ được ghi từ Hẹn giờ (Lưu / Lưu & bật); lưu thiết lập giữ danh
+sách cũ, và bắt đầu thủ công lưu thiết lập với công tắc và mọi danh sách của lịch đúng như bản
+đã lưu (khung mới trong bản nháp để rỗng), nên không thay hay tự gieo phạm vi lịch.
 
 `RIVIU_DEV_MANUAL_ACCEPTANCE=1` trong bản debug giữ mọi lịch tự chạy ở trạng thái
 chờ và không sửa lịch đã lưu. Chế độ này cũng không tự resume Flow/Điều phối,

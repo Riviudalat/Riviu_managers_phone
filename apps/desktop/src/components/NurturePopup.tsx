@@ -255,6 +255,22 @@ function statusVi(raw: string): string {
   return s;
 }
 
+/**
+ * The draft with the schedule exactly as stored: on/off, the all-day list and each window's
+ * list (by window id; a window the draft added stays empty, so unapproved). A manual start is
+ * not a schedule approval — only `applySchedule` (Hẹn giờ) changes these.
+ */
+function withStoredSchedule(draft: NurtureSettings, stored: NurtureSettings | null): NurtureSettings {
+  if (!stored) return draft;
+  const storedWindows = new Map((stored.scheduleWindows ?? []).map((window) => [window.id, window.udids]));
+  return {
+    ...draft,
+    scheduleEnabled: stored.scheduleEnabled,
+    scheduleUdids: [...stored.scheduleUdids],
+    scheduleWindows: (draft.scheduleWindows ?? []).map((window) => ({ ...window, udids: [...(storedWindows.get(window.id) ?? [])] })),
+  };
+}
+
 function deviceLabel(
   devices: DeviceInfo[],
   metas: Map<string, DeviceMeta>,
@@ -321,6 +337,8 @@ export function NurturePopup({
   scopeControl,
 }: Props) {
   const [settings, setSettings] = useState<NurtureSettings | null>(null);
+  // What the backend last returned: the schedule scope a manual start must keep.
+  const storedSettingsRef = useRef<NurtureSettings | null>(null);
   const [baseline, setBaseline] = useState<{settings: NurtureSettings; target?: TargetRef} | null>(null);
   const [credentialBaseline, setCredentialBaseline] = useState<string | null>(null);
   const [conflictingSettings, setConflictingSettings] = useState<NurtureSettings | null>(null);
@@ -516,6 +534,7 @@ export function NurturePopup({
         nurtureSessionLogSummary(),
       ]);
       if (!mounted.current || ticket !== reloadTicket.current) return;
+      storedSettingsRef.current = s;
       if (settingsRef.current === original) {
         const restored = original === null
           ? readFormDraft("nurture", value => nurtureSettingsFromProfile(value as Parameters<typeof nurtureSettingsFromProfile>[0], s)) : null;
@@ -626,6 +645,7 @@ export function NurturePopup({
     try {
       const credential = s.apiKey !== credentialBaseline ? await nurtureUpdateCredential(s.apiKey) : null;
       const stored = await nurtureSaveSettings(payload);
+      storedSettingsRef.current = stored;
       const saved = credential ? { ...stored, ...credential } : stored;
       if (!mounted.current) return false;
       if (settingsRef.current !== settings || targetRefLatest.current !== targetRef) {
@@ -642,7 +662,11 @@ export function NurturePopup({
       return true;
     } catch (error) {
       if (describeError(error).includes("NurtureSettingsConflict")) {
-        try { setConflictingSettings(await nurtureGetSettings()); } catch { /* Keep the save failure visible. */ }
+        try {
+          const latest = await nurtureGetSettings();
+          storedSettingsRef.current = latest;
+          setConflictingSettings(latest);
+        } catch { /* Keep the save failure visible. */ }
         setMsg("Thiết lập đã được thay đổi ở lượt khác. Bản nháp của bạn được giữ; nạp bản mới rồi kiểm tra trước khi lưu lại.");
         return false;
       }
@@ -750,7 +774,10 @@ export function NurturePopup({
         }))) return;
         if (!mounted.current || settingsRef.current !== runSettings || targetRefLatest.current !== runTargetRef) return;
       }
-      if (settings && !(await save({ ...settings, scheduleUdids: runTargets }))) return;
+      // The run's phones never become the schedule's: the schedule's lists and switch are
+      // saved as stored, so a manual start neither re-scopes an enabled schedule nor seeds a
+      // disabled one. Saved before the devices are prepared, so it must not carry scope.
+      if (settings && !(await save(withStoredSchedule(settings, storedSettingsRef.current)))) return;
       await operationPrepareDevices(runTargets);
       if (!mounted.current || targetRefLatest.current !== runTargetRef) return;
       // The manual command otherwise chooses its legacy 2–3 hour horizon. Send the
