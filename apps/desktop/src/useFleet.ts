@@ -1,4 +1,5 @@
 import { useCallback, useEffect, useRef, useState } from "react";
+import { isCancelledError } from "@tanstack/react-query";
 
 import {
   androidToolProblems,
@@ -28,7 +29,13 @@ import type { DeviceGroup, DeviceInfo, DeviceMeta, JobRecord } from "./types";
  * ever remounted — which is the shape that turns one toast into several.
  */
 const failureWatch = new NurtureFailureWatch();
-class SupersededMetadataRead extends Error {}
+/**
+ * A metadata read that a newer `refreshMetas` replaced. Not a failure: the newer read
+ * publishes the rows, so callers stay quiet about it instead of reporting an error.
+ */
+export class SupersededMetadataRead extends Error {
+  constructor() { super("Đã có lượt đọc metadata mới hơn; giữ dữ liệu hiện tại."); }
+}
 
 /**
  * The fleet as the shell sees it, and whether the backend came up at all.
@@ -87,11 +94,22 @@ export function useFleet(): Fleet {
     const revision = ++metadataEpoch.current.version;
     // Do not join a cached/in-flight read started before the acknowledging mutation.
     await readQueryClient.cancelQueries({ queryKey: ["deviceMetadata"] });
-    if (revision !== metadataEpoch.current.version || !metadataEpoch.current.mounted) throw new SupersededMetadataRead("Đã có lượt đọc metadata mới hơn; giữ dữ liệu hiện tại.");
+    if (revision !== metadataEpoch.current.version || !metadataEpoch.current.mounted) throw new SupersededMetadataRead();
     await readQueryClient.invalidateQueries({ queryKey: ["deviceMetadata"], refetchType: "none" });
     if (revision !== metadataEpoch.current.version || !metadataEpoch.current.mounted) throw new SupersededMetadataRead();
-    const rows = await listDeviceMetas();
-    if (!metadataEpoch.current.mounted || revision !== metadataEpoch.current.version) throw new SupersededMetadataRead("Đã có lượt đọc metadata mới hơn; giữ dữ liệu hiện tại.");
+    let rows: DeviceMeta[];
+    try {
+      rows = await listDeviceMetas();
+    } catch (error) {
+      // The cancelQueries above is the only thing that cancels this family, and it bumps the
+      // revision first, so a cancelled read was superseded and the newer refresh settles the
+      // rows. TanStack rejects with its own `CancelledError` when the read it cancels had no
+      // cached rows to revert to — the first read at startup — and that name reached the
+      // operator as "Chưa xác nhận gán số máy: CancelledError" on every start.
+      if (isCancelledError(error)) throw new SupersededMetadataRead();
+      throw error;
+    }
+    if (!metadataEpoch.current.mounted || revision !== metadataEpoch.current.version) throw new SupersededMetadataRead();
     setMetasState(rows);
     return rows;
   }, []);
@@ -156,7 +174,7 @@ export function useFleet(): Fleet {
       if (missing.length) await allocateNumbers(missing, () => metadataEpoch.current.mounted);
       if (metadataEpoch.current.mounted) setNumberAllocationError(null);
     } catch (error) {
-      if (metadataEpoch.current.mounted) setNumberAllocationError(`Chưa xác nhận gán số máy: ${describeError(error)}`);
+      if (metadataEpoch.current.mounted && !(error instanceof SupersededMetadataRead)) setNumberAllocationError(`Chưa xác nhận gán số máy: ${describeError(error)}`);
     } finally {
       numberRetry.current = false;
       if (metadataEpoch.current.mounted) setRetryingNumbers(false);

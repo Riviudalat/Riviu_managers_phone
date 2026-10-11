@@ -55,6 +55,20 @@ export function helperRecoveryMessage(cause: unknown): string | null {
     || message === HELPER_RECOVERY_MESSAGE ? HELPER_RECOVERY_MESSAGE : null;
 }
 
+/**
+ * A cancelled call has no cause worth naming. TanStack Query rejects a cancelled read with
+ * `CancelledError` as its whole message, and an aborted web API rejects with a DOMException
+ * named `AbortError` and an English sentence; both used to reach the operator verbatim, as in
+ * "Chưa xác nhận gán số máy: CancelledError".
+ */
+function isCancellation(cause: object): boolean {
+  const name = Reflect.get(cause, "name");
+  return name === "AbortError" || name === "CancelledError"
+    || (cause instanceof Error && cause.message === "CancelledError");
+}
+
+const CANCELLED_MESSAGE = "Lượt này đã bị hủy trước khi có kết quả (thường do một lượt mới hơn thay thế).";
+
 function readableMessage(message: string): string {
   const helper = helperRecoveryMessage(message);
   if (helper) return helper;
@@ -99,6 +113,7 @@ export function describeError(cause: unknown): string {
   if (helper) return helper;
   if (cause === null || cause === undefined) return "Lỗi không rõ nguyên nhân";
   if (typeof cause === "string") return readableMessage(cause);
+  if (typeof cause === "object" && isCancellation(cause)) return CANCELLED_MESSAGE;
   if (cause instanceof Error) return readableMessage(cause.message);
   if (typeof cause === "object") {
     const record = cause as Record<string, unknown>;

@@ -33,6 +33,7 @@ import {
   wakeScreen,
 } from "./api";
 import { describeError } from "./describeError";
+import { SupersededMetadataRead } from "./useFleet";
 import { requestConfirm, requestPrompt } from "./confirmStore";
 import { pushToast, toastError } from "./toastStore";
 import type { DeviceMenuNode } from "./deviceMenu";
@@ -139,7 +140,10 @@ export async function readAndAssignTikTokAccounts(targets: DeviceInfo[], deps: D
     ];
     try {
       await deps.refreshMetas();
-    } catch (error) { details.push(`Đã lưu nhưng chưa làm mới danh sách: ${describeError(error)}`); }
+    } catch (error) {
+      // A newer metadata read replaced this one and publishes the rows itself.
+      if (!(error instanceof SupersededMetadataRead)) details.push(`Đã lưu nhưng chưa làm mới danh sách: ${describeError(error)}`);
+    }
     report(`Đã cập nhật thành công ${confirmed.size}/${reserved.size}`, details.join("\n"), confirmed, plan.operationId);
   } catch (error) { toastError("Đọc/đối soát nick thất bại", error); }
   finally { reserved.forEach(id => accountReads.delete(id)); }
@@ -241,7 +245,7 @@ export function buildDeviceActions(
       await patchDeviceMeta(device.udid, change);
       pushToast("ok", done);
       try { await refreshMetas(); }
-      catch (error) { toastError("Đã lưu nhưng chưa làm mới danh sách", error); }
+      catch (error) { if (!(error instanceof SupersededMetadataRead)) toastError("Đã lưu nhưng chưa làm mới danh sách", error); }
     } catch (error) {
       toastError("Lưu không thành công", error);
     }
