@@ -211,6 +211,8 @@ Lịch đăng bài là lịch một lần theo từng bài, mỗi dòng gắn m�
 
 - Nút công cụ dùng icon quen thuộc, tooltip và accessible name. Lệnh nghiệp vụ dùng icon+kèm nhãn khi cần.
 - Chế độ dùng segmented control; binary dùng checkbox/toggle; số dùng input/stepper/slider; option dùng menu.
+- Thanh có `flex-wrap` xuống dòng theo flex-basis trước khi co, nên thanh dựa vào một phần tử co được (run pill `flex-shrink: 1000`) phải `nowrap` và đổi bố cục bằng breakpoint hoặc `:has()` (đo ở thanh hệ thống 1024–1099 px khi có lượt chạy).
+- Menu tràn "⋯" dựng từ chính các nút inline phải giữ style popup trong đúng mức media hiện menu, và đóng khi mức đổi bằng cách theo dõi nút mở (ResizeObserver), không theo bề rộng cửa sổ; nếu không, trạng thái mở cũ đổi style các nút inline.
 - Menu chức năng của máy (chuột phải trên thẻ hoặc trong cửa sổ điện thoại; Shift+F10 hay phím
   ContextMenu trên thẻ) dùng primitive `components/ui/Menu.tsx`: Base UI, CSS thuần, alias riêng
   `--ui-hover`/`--ui-border`/`--ui-ring`/`--primary-foreground`, không đổi `--accent`. Tên máy (cùng tên

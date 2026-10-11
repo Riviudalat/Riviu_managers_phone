@@ -85,6 +85,9 @@ UI thật; timeout khác lỗi assertion. Không tăng timeout hoặc bỏ asser
 - `toHaveScreenshot` với `maxDiffPixelRatio: 0.002` vẫn cho qua một nút viền phụ (~2,5k px
   ở 1440×900) so với baseline cũ. Sau khi đổi UI, re-bless trang bị ảnh hưởng bằng
   `--update-snapshots=all -g <trang>`, không chỉ `=changed` (đo 2026-10-11).
+- `getByText` của Testing Library chỉ khớp text node của chính phần tử; bọc nhãn trong span làm hỏng
+  `getByText(…, { selector })`. Ưu tiên truy vấn theo role/name hoặc `.closest()`. `getByTitle`/`getByText`
+  của Playwright khớp chuỗi con, nên tooltip trích tên nút khác làm selector mơ hồ.
 - Worktree Orca mới chưa có `sidecars/gui-service/.venv`, nên 2 test roundtrip của
   `gui_service` trong `riviu-managers-phone` báo `gui_service_missing`. Chạy
   `uv sync --project sidecars/gui-service` trong worktree, hoặc ghi đó là lỗi môi trường.
