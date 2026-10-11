@@ -428,8 +428,9 @@ describe("production publish wizard", () => {
       .mockImplementationOnce(async (request) => ({ ...(await implementation(request)), needsRelease: [hold("interaction", "Tương tác chiều", "operation:PHONE-A:interaction:run-2")] }));
     render(<PublishPage devices={devices} selected={[]} onSelectUdids={() => {}} />);
     await prepareOne();
-    await waitFor(() => expect(screen.getByRole("button", { name: "Kiểm tra & đăng" })).toBeEnabled());
-    await userEvent.click(screen.getByRole("button", { name: "Kiểm tra & đăng" }));
+    // V6 (bf5efef2) renamed the forward button "Kiểm tra & đăng" -> "Xem lại trước khi đăng".
+    await waitFor(() => expect(screen.getByRole("button", { name: "Xem lại trước khi đăng" })).toBeEnabled());
+    await userEvent.click(screen.getByRole("button", { name: "Xem lại trước khi đăng" }));
     const confirm = await screen.findByRole("button", { name: "Xác nhận đăng công khai 1 bài" });
     await waitFor(() => expect(confirm).toBeEnabled());
     await userEvent.click(confirm);

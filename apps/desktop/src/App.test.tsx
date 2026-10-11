@@ -23,6 +23,10 @@ vi.mock("./api", () => ({
   agentHelperMaintenancePending: vi.fn(async () => null),
   agentHelperMaintenancePrepare: vi.fn(),
   agentHelperMaintenanceExecute: vi.fn(),
+  // The Control Center checks idle unproved Android phones by itself (5daf7d97,
+  // useAutoControlCheck). Unmocked, the import is `undefined` and the effect threw on the
+  // first connected phone, which took most of this file down at once.
+  agentPreflight: vi.fn(async () => undefined),
   // Both fleet-health probes are mocked explicitly. `driverDegradedReason` was absent
   // and survived only because the call site wraps it in `.catch` — an unmocked export is
   // `undefined`, so calling it throws synchronously and would have surfaced as a boot

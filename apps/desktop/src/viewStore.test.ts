@@ -232,19 +232,19 @@ describe("forgetting devices that left the fleet", () => {
 
 describe("mounted canvas paint evidence lifecycle", () => {
   it("keeps a remaining surface but drops historical and queued beats after final detach", () => {
-    let target: { onmessage?: (event: { data: unknown }) => void };
+    const workers: { onmessage?: (event: { data: unknown }) => void }[] = [];
     class FakeWorker {
       onmessage?: (event: { data: unknown }) => void;
       postMessage() {}
       terminate() {}
-      constructor() { target = this; }
+      constructor() { workers.push(this); }
     }
     vi.stubGlobal("Worker", FakeWorker);
     try {
       const canvas = {} as OffscreenCanvas;
       attachViewCanvas("mounted", canvas, "tile");
       attachViewCanvas("mounted", canvas, "overlay");
-      const send = () => target.onmessage?.({ data: {
+      const send = () => workers.at(-1)?.onmessage?.({ data: {
         type: "paintBeat", udid: "mounted", generation: 7, received: 900, frames: 200,
       } });
       send();

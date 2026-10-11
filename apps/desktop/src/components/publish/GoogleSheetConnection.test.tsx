@@ -27,7 +27,9 @@ describe("compact Google Sheet connection", () => {
     await waitFor(() => expect(screen.getByRole("button", { name: "Kiểm tra kết nối" })).toBeEnabled());
     expect(publishSheetCheck).not.toHaveBeenCalled();
     expect(googleSheetsConnect).not.toHaveBeenCalled();
-    expect(ready.mock.calls.at(-1)?.[0]).toBe(false);
+    // Readiness is reported from a passive effect, which can run after the commit that
+    // enabled the button; read synchronously, a loaded run saw no report yet (`undefined`).
+    await waitFor(() => expect(ready.mock.calls.at(-1)?.[0]).toBe(false));
     fireEvent.click(screen.getByRole("button", { name: "Kiểm tra kết nối" }));
     await waitFor(() => expect(ready).toHaveBeenLastCalledWith(true, expect.any(String)));
   });

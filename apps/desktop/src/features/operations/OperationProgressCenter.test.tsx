@@ -30,17 +30,22 @@ beforeEach(() => {
 });
 
 it("shows a new pending start in the pill without opening and keeps a status error visible before ACK", async () => {
-  vi.mocked(publishStartStatus).mockRejectedValueOnce(new Error("Chưa đọc được trạng thái lượt đăng"));
-  render(<OperationProgressCenter deviceLabels={labels} />);
-  await act(async () => observePendingPublishStart({ requestId: "new-start", inputKey: "{}", requestedAt: new Date().toISOString() }));
-  // Never auto-open (PLAN §5): the start only shows in the bar until the operator opens it.
-  expect(drawer()).not.toBeVisible();
-  const pill = screen.getByRole("button", { name: "Tiến trình công việc" });
-  await waitFor(() => expect(pill).toHaveAttribute("title", expect.stringContaining("Lượt đăng đang chuẩn bị")));
-  fireEvent.click(pill);
-  expect(drawer()).toBeVisible();
-  expect(await screen.findByText("Chưa đọc được trạng thái lượt đăng")).toBeVisible();
-  expect(screen.getByText("Tác vụ: publish-start:new-start")).toBeVisible();
+  // The start status is re-read every second, and the next read (no record yet) rightly
+  // replaces this error with its own; a loaded run reached the assertion after that poll.
+  vi.useFakeTimers({ toFake: ["setInterval", "clearInterval"] });
+  try {
+    vi.mocked(publishStartStatus).mockRejectedValueOnce(new Error("Chưa đọc được trạng thái lượt đăng"));
+    render(<OperationProgressCenter deviceLabels={labels} />);
+    await act(async () => observePendingPublishStart({ requestId: "new-start", inputKey: "{}", requestedAt: new Date().toISOString() }));
+    // Never auto-open (PLAN §5): the start only shows in the bar until the operator opens it.
+    expect(drawer()).not.toBeVisible();
+    const pill = screen.getByRole("button", { name: "Tiến trình công việc" });
+    await waitFor(() => expect(pill).toHaveAttribute("title", expect.stringContaining("Lượt đăng đang chuẩn bị")));
+    fireEvent.click(pill);
+    expect(drawer()).toBeVisible();
+    expect(await screen.findByText("Chưa đọc được trạng thái lượt đăng")).toBeVisible();
+    expect(screen.getByText("Tác vụ: publish-start:new-start")).toBeVisible();
+  } finally { vi.useRealTimers(); }
 });
 
 it("stops only the selected operation and waits for a backend cleanup result",async()=>{
