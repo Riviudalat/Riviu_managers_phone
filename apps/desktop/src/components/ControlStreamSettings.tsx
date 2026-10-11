@@ -130,14 +130,11 @@ export function ControlStreamSettings() {
           onKeyUp={commit}
         />
       </label>
-      <p className="control-stream-hint">Đổi chất lượng hoặc FPS sẽ khởi động lại luồng hình Android; máy iPhone không đổi.</p>
-      <p className="control-stream-status" role="status">
-        {saving
-          ? "Đang áp dụng…"
-          : dirty
-            ? "Đang chờ áp dụng"
-            : "Android · Đã áp dụng"}
-      </p>
+      {/* The owner removed the standing notes; only an in-flight apply shows, and a failure
+          below. Nothing ever says "applied" before the result. */}
+      {(saving || dirty) && (
+        <p className="control-stream-status" role="status">{saving ? "Đang áp dụng…" : "Đang chờ áp dụng"}</p>
+      )}
       {error && (
         <p className="control-stream-error" role="alert">
           {error}{" "}
