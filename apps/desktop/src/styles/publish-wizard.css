@@ -686,6 +686,12 @@
   color: var(--text-2);
   line-height: var(--leading-normal);
 }
+.pw-preflight-expanded > summary {
+  cursor: pointer;
+  color: var(--text-2);
+  font-size: var(--text-sm);
+  padding-block: var(--space-2);
+}
 .pw-preflight-technical {
   margin-top: var(--space-2);
   color: var(--text-3);

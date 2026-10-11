@@ -66,6 +66,7 @@ for (const viewport of [{ width: 1440, height: 900 }, { width: 820, height: 560 
 
     await page.goto("/");
     await openOperatorPage(page, "Đăng bài");
+    await page.getByRole("tab", { name: "TikTok", exact: true }).click();
     await page.getByRole("combobox", { name: "Phạm vi thiết bị" }).selectOption("all");
     await page.getByRole("button", { name: "Chọn thư mục", exact: true }).click();
     await page.getByRole("button", { name: "Quét", exact: true }).click();
@@ -76,11 +77,11 @@ for (const viewport of [{ width: 1440, height: 900 }, { width: 820, height: 560 
     await page.getByRole("checkbox", { name: "Ghi kết quả lên Sheet" }).check();
     await page.getByRole("button", { name: "Kiểm tra & đăng", exact: true }).click();
 
-    const dialog = page.getByRole("dialog", { name: "Kiểm tra đợt đăng" });
+    const dialog = page.getByRole("dialog", { name: "Xem lại và xác nhận đăng công khai" });
     await expect(dialog.getByRole("region", { name: "Điều kiện chung chưa đạt" })).toContainText("Kết nối Sheet chưa được xác minh");
     await expect(dialog.getByRole("article", { name: /^Máy 10 ·/ })).toBeVisible();
     await expect(dialog.getByRole("article", { name: /^Máy 1 ·/ })).toHaveCount(0);
-    await expect(dialog.getByRole("button", { name: "Xác nhận đăng 10 bài" })).toBeDisabled();
+    await expect(dialog.getByRole("button", { name: "Xác nhận đăng công khai 10 bài" })).toBeDisabled();
 
     const geometry = await dialog.evaluate((node) => {
       const box = (element: Element) => { const r = element.getBoundingClientRect(); return { top: r.top, right: r.right, bottom: r.bottom, left: r.left }; };

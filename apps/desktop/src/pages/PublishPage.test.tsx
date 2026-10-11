@@ -349,7 +349,7 @@ describe("production publish wizard", () => {
     render(<PublishPage devices={devices} selected={[]} onSelectUdids={() => {}} />);
     await prepareOne();
     await userEvent.click(screen.getByRole("button", { name: "Kiểm tra & đăng" }));
-    const confirm = await screen.findByRole("button", { name: "Xác nhận đăng 1 bài" });
+    const confirm = await screen.findByRole("button", { name: "Xác nhận đăng công khai 1 bài" });
     await waitFor(() => expect(confirm).toBeEnabled());
     vi.mocked(publishDeviceGuards).mockImplementation(async ids => Object.fromEntries(ids.map(id => [id, {
       blocking: [{ assignmentId: "old-post", campaignId: "old-campaign", updatedAt: "2026-09-23T00:00:00Z", reason: "Đang lấy link bài cũ" }], linkReview: [],
@@ -403,7 +403,7 @@ describe("production publish wizard", () => {
     const view = render(<PublishPage devices={devices} selected={[]} onSelectUdids={() => {}} />);
     await prepareOne();
     await userEvent.click(screen.getByRole("button", { name: "Kiểm tra & đăng" }));
-    const confirm = await screen.findByRole("button", { name: "Xác nhận đăng 1 bài" });
+    const confirm = await screen.findByRole("button", { name: "Xác nhận đăng công khai 1 bài" });
     await waitFor(() => expect(confirm).toBeEnabled());
     await userEvent.click(confirm);
     await waitFor(() => expect(createCampaign).toHaveBeenCalledOnce());
@@ -417,7 +417,7 @@ describe("production publish wizard", () => {
     render(<PublishPage devices={devices} selected={[]} onSelectUdids={() => {}} />);
     await waitFor(() => expect(screen.getByRole("checkbox", { name: "Chọn bo1" })).toBeChecked());
     await userEvent.click(screen.getByRole("button", { name: "Kiểm tra & đăng" }));
-    const retry = await screen.findByRole("button", { name: "Xác nhận đăng 1 bài" });
+    const retry = await screen.findByRole("button", { name: "Xác nhận đăng công khai 1 bài" });
     await waitFor(() => expect(retry).toBeEnabled());
     await userEvent.click(retry);
     await waitFor(() => expect(createCampaign).toHaveBeenCalledTimes(2));
@@ -432,7 +432,7 @@ describe("production publish wizard", () => {
     render(<PublishPage devices={devices} selected={[]} onSelectUdids={() => {}} />);
     await prepareOne();
     await userEvent.click(screen.getByRole("button", { name: "Kiểm tra & đăng" }));
-    const confirm = await screen.findByRole("button", { name: "Xác nhận đăng 1 bài" });
+    const confirm = await screen.findByRole("button", { name: "Xác nhận đăng công khai 1 bài" });
     await waitFor(() => expect(confirm).toBeEnabled());
     fireEvent.click(confirm);
     fireEvent.click(confirm);
@@ -456,7 +456,7 @@ describe("production publish wizard", () => {
     await userEvent.click(screen.getByRole("tab", { name: "Thiết lập" }));
     await prepareOne();
     await userEvent.click(screen.getByRole("button", { name: "Kiểm tra & đăng" }));
-    const confirm = await screen.findByRole("button", { name: "Xác nhận đăng 1 bài" });
+    const confirm = await screen.findByRole("button", { name: "Xác nhận đăng công khai 1 bài" });
     await waitFor(() => expect(confirm).toBeEnabled());
     await userEvent.click(confirm);
     await waitFor(() => expect(document.querySelector(".publish-monitor-detail-head")).toHaveTextContent("Chiến dịch 2"));
@@ -470,7 +470,7 @@ describe("production publish wizard", () => {
     render(<PublishPage devices={devices} selected={[]} onSelectUdids={() => {}} />);
     await waitFor(() => expect(screen.getByRole("checkbox", { name: "Chọn bo1" })).toBeChecked());
     await userEvent.click(screen.getByRole("button", { name: "Kiểm tra & đăng" }));
-    const confirm = await screen.findByRole("button", { name: "Xác nhận đăng 1 bài" });
+    const confirm = await screen.findByRole("button", { name: "Xác nhận đăng công khai 1 bài" });
     await waitFor(() => expect(confirm).toBeEnabled());
     expect(preflightCampaign).toHaveBeenLastCalledWith(expect.objectContaining({ runAt: null }));
     await userEvent.click(confirm);
@@ -554,7 +554,7 @@ describe("production publish wizard", () => {
       screen.getByRole("button", { name: "Kiểm tra & đăng" }),
     );
     const confirm = await screen.findByRole("button", {
-      name: "Xác nhận đăng 1 bài",
+      name: "Xác nhận đăng công khai 1 bài",
     });
     await waitFor(() => expect(confirm).toBeEnabled());
     expect(createCampaign).not.toHaveBeenCalled();
@@ -620,7 +620,7 @@ describe("production publish wizard", () => {
     await userEvent.click(screen.getByRole("button", { name: "Kiểm tra & đăng" }));
     expect(await screen.findByText(/TikTok quốc tế · Phiên bản 45.7.3/)).toBeVisible();
     expect(screen.getByText("Chưa hỗ trợ luồng đăng trên bản TikTok này")).toBeVisible();
-    const confirm = screen.getByRole("button", { name: "Xác nhận đăng 1 bài" });
+    const confirm = screen.getByRole("button", { name: "Xác nhận đăng công khai 1 bài" });
     expect(confirm).toBeDisabled();
     await userEvent.click(confirm);
     expect(createCampaign).not.toHaveBeenCalled();
@@ -689,7 +689,7 @@ describe("production publish wizard", () => {
       screen.getByRole("button", { name: "Kiểm tra & đăng" }),
     );
     const confirm = await screen.findByRole("button", {
-      name: "Xác nhận đăng 1 bài",
+      name: "Xác nhận đăng công khai 1 bài",
     });
     await waitFor(() => expect(confirm).toBeEnabled());
     await userEvent.click(confirm);
@@ -728,7 +728,7 @@ describe("production publish wizard", () => {
       screen.getByRole("button", { name: "Kiểm tra & đăng" }),
     );
     const confirm = await screen.findByRole("button", {
-      name: "Xác nhận đăng 1 bài",
+      name: "Xác nhận đăng công khai 1 bài",
     });
     await waitFor(() => expect(confirm).toBeEnabled());
     await userEvent.click(confirm);
@@ -744,7 +744,7 @@ describe("production publish wizard", () => {
     );
     await waitFor(() =>
       expect(
-        screen.getByRole("button", { name: "Xác nhận đăng 1 bài" }),
+        screen.getByRole("button", { name: "Xác nhận đăng công khai 1 bài" }),
       ).toBeEnabled(),
     );
     await userEvent.click(screen.getByRole("button", { name: "Đóng" }));
@@ -1031,10 +1031,11 @@ describe("publish campaign monitoring", () => {
     vi.mocked(publishSheetCheck).mockResolvedValue({ sheetUrl: url, spreadsheetId: "fixture", sheetGid: 0,
       readable: true, connectionVerified: false, layout: "compact", columns: [], message: "Đọc được bảng; chưa xác minh kết nối ghi." });
     render(<PublishPage devices={devices} selected={[]} onSelectUdids={() => {}} />);
+    await userEvent.click(screen.getByRole("tab", { name: "TikTok" }));
     await waitFor(() => expect(screen.getByRole("button", { name: "Kiểm tra kết nối" })).toBeEnabled());
     fireEvent.change(screen.getByRole("textbox", { name: "Link Google Sheet" }), { target: { value: url } });
     fireEvent.click(screen.getByRole("button", { name: "Kiểm tra kết nối" }));
-    await waitFor(() => expect(publishSheetCheck).toHaveBeenCalledWith(url));
+    await waitFor(() => expect(publishSheetCheck).toHaveBeenCalledWith(url, "tiktok"));
     expect(await screen.findByText("Đọc được bảng; chưa xác minh kết nối ghi.")).toBeVisible();
     expect(createCampaign).not.toHaveBeenCalled();
     expect(executeCampaign).not.toHaveBeenCalled();
@@ -1060,6 +1061,7 @@ describe("publish campaign monitoring", () => {
     let answer!: (value: never) => void;
     vi.mocked(publishSheetCheck).mockImplementation(() => new Promise(resolve => { answer = resolve; }));
     render(<PublishPage devices={devices} selected={[]} onSelectUdids={() => {}} />);
+    await userEvent.click(screen.getByRole("tab", { name: "TikTok" }));
     const input = screen.getByRole("textbox", { name: "Link Google Sheet" });
     await waitFor(() => expect(screen.getByRole("button", { name: "Kiểm tra kết nối" })).toBeEnabled());
     fireEvent.click(screen.getByRole("button", { name: "Kiểm tra kết nối" }));
@@ -1094,11 +1096,11 @@ describe("publish campaign monitoring", () => {
     await userEvent.click(screen.getByRole("button", { name: "Kiểm tra kết nối" }));
     await waitFor(() => expect(publish).toBeEnabled());
     await userEvent.click(publish);
-    await waitFor(() => expect(screen.getByRole("button", { name: "Xác nhận đăng 1 bài" })).toBeEnabled());
+    await waitFor(() => expect(screen.getByRole("button", { name: "Xác nhận đăng công khai 1 bài" })).toBeEnabled());
     await userEvent.click(screen.getByRole("button", { name: "Đóng" }));
     fireEvent.change(input, { target: { value: "https://docs.google.com/spreadsheets/d/other/edit#gid=0" } });
     expect(publish).toBeDisabled();
-    expect(screen.queryByRole("button", { name: "Xác nhận đăng 1 bài" })).toBeNull();
+    expect(screen.queryByRole("button", { name: "Xác nhận đăng công khai 1 bài" })).toBeNull();
     expect(createCampaign).not.toHaveBeenCalled();
     expect(executeCampaign).not.toHaveBeenCalled();
   });

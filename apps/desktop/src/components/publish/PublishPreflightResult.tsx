@@ -105,6 +105,8 @@ export function PublishPreflightResult({
                 </span>
               </header>
               <p>{bundleName?.(row.bundleId) ?? `Bài ${row.ordinal + 1}`}</p>
+              <details className="pw-preflight-expanded" open={network !== "threads" ? true : undefined}>
+                <summary>Chi tiết kiểm tra</summary>
               <p className="pw-preflight-build">
                 {network === "threads" ? `Threads · ${row.version || "Chưa đọc được phiên bản"}` : publishTikTokBuildLabel(row)}
               </p>
@@ -132,6 +134,7 @@ export function PublishPreflightResult({
                   ))}
                 </dl>
               )}
+              </details>
               {row.issues.length > 0 ? (
                 <ul className="pw-preflight-problems">
                   {row.issues.map((issue, index) => (

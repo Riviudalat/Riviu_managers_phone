@@ -104,6 +104,8 @@ test("approved quick desk scans, selects, assigns and checks without public disp
 
   await page.goto("/");
   await openOperatorPage(page, 'Đăng bài');
+  await page.getByRole("tab", { name: "TikTok", exact: true }).click();
+  await page.getByRole("checkbox", { name: "Ghi kết quả lên Sheet" }).uncheck();
   await page.getByRole("combobox",{name:"Phạm vi thiết bị"}).selectOption("all");
   await page.getByRole("button",{name:"Chọn thư mục",exact:true}).click();
   await page.getByRole("button",{name:"Quét",exact:true}).click();
@@ -122,7 +124,7 @@ test("approved quick desk scans, selects, assigns and checks without public disp
     await expect(page.getByRole("textbox", {name:"Tìm số máy"})).toBeVisible();
   }
   await page.getByRole("button",{name:"Kiểm tra & đăng",exact:true}).click();
-  await expect(page.getByRole("button",{name:"Xác nhận đăng 10 bài",exact:true})).toBeEnabled();
-  await expect(page.getByRole("dialog", {name:"Kiểm tra đợt đăng"})).toContainText("Ghi Sheet đang tắt");
+  await expect(page.getByRole("button",{name:"Xác nhận đăng công khai 10 bài",exact:true})).toBeEnabled();
+  await expect(page.getByRole("dialog", {name:"Xem lại và xác nhận đăng công khai"})).toContainText("Ghi Sheet đang tắt");
   expect(await page.evaluate(() => (window as unknown as { __PUBLISH_CALLS__: { command: string }[] }).__PUBLISH_CALLS__.map(call => call.command))).toEqual(["publish_preflight"]);
 });

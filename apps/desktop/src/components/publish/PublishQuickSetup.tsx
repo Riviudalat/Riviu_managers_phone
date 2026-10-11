@@ -4,6 +4,7 @@ import { deviceThreadsAccount, launchDeviceApp, type ThreadsAccountInfo } from "
 import type { PublishWizardProps } from "./PublishWizard";
 import { PublishMedia } from "./PublishMedia";
 import { PublishDialog } from "./PublishDialog";
+import { PublishPreparationStatus } from "./PublishPreparationStatus";
 import { PublishPreflightResult } from "./PublishPreflightResult";
 import { MachineChoice } from "../MachineChoice";
 import { orderDevicesByNumber, tileName, tileNumber } from "../../deviceNaming";
@@ -121,6 +122,7 @@ export function PublishQuickSetup(p: QuickProps) {
   const locked = p.busy || p.scanning || p.preflightLoading;
   const complete = selection.ready;
   const checkReason = p.scanning ? "Đang quét và xác nhận nội dung…" : p.preflightLoading ? "Đang kiểm tra đợt đăng…" : p.busy ? "Đang xử lý tác vụ…" : selection.reason;
+  const showBlockingNotice = p.blockingReason && !pendingBlock && p.blockingReason !== checkReason;
   const mappingKey = JSON.stringify([p.selectedIds, p.selectedIds.map(id => p.assignments[id] ?? "")]);
   // Chỉ snapshot đã commit được phép cấp quyền cho handler/continuation sau await.
   const assignmentKey = JSON.stringify([p.network, p.sourceRoot, p.manifest, p.selectedIds, p.assignments, p.eligible,
@@ -306,8 +308,8 @@ export function PublishQuickSetup(p: QuickProps) {
           <div id="publish-google-settings" className="pq-settings-content">{p.settings}</div>
         </div>
       </div>
-      {(sourceWarnings.length > 0 || duplicateCaptions > 0 || p.blockingReason || error || p.notices) && <div className="pq-messages" tabIndex={0} aria-label="Thông báo thiết lập đăng bài">
-        {p.blockingReason && !pendingBlock && <p className="pq-blocking-reason" role="status">{p.blockingReason}</p>}
+      {(sourceWarnings.length > 0 || duplicateCaptions > 0 || showBlockingNotice || error || p.notices) && <div className="pq-messages" tabIndex={0} aria-label="Thông báo thiết lập đăng bài">
+        {showBlockingNotice && <p className="pq-blocking-reason" role="status">{p.blockingReason}</p>}
         {error && <div className="pq-error" role="alert">{error}<button type="button" aria-label="Đóng lỗi" onClick={() => setError("")}><X size={14}/></button></div>}
         {sourceWarnings.length > 0 && <details className="pq-hint"><summary>Cảnh báo nguồn ({sourceWarnings.length})</summary>
           <ul>{sourceWarnings.map((warning, index) => <li key={`${warning.path}:${index}`}><span>{warning.message}</span><br/><small>{warning.path}</small></li>)}</ul>
@@ -399,13 +401,9 @@ export function PublishQuickSetup(p: QuickProps) {
         {duplicateCaptions > 0 && <p className="pq-hint">{duplicateCaptions} bài đã chọn có caption trùng; nội dung giữ nguyên, không tự sửa.</p>}
       </div></div>
     </PublishDialog>}
-    {dialog === "check" && <PublishDialog title="Kiểm tra đợt đăng" wide onClose={() => setDialog(null)} actions={<><button type="button" onClick={() => setDialog(null)}>Quay lại</button>{(p.preflightError || (p.preflight && !p.preflight.canExecute)) && !p.preflightLoading && <button type="button" disabled={locked} onClick={() => { setReportPage(0); void p.onPreflight(); }}>Kiểm tra lại</button>}<button type="button" className="primary" disabled={locked || !p.preflight?.canExecute || !complete} onClick={() => void p.onExecute()}><Check size={16}/> Xác nhận đăng {selected.length} bài</button></>}>
-      {p.preflightLoading ? <div className="pw-preflight-pending">
-        <div className="pw-preflight-phase" role="status"><LoaderCircle size={18} aria-hidden="true"/><div><strong>{p.preflightStage === "preparing" ? "Đang chuẩn bị thiết bị…" : "Đang kiểm tra từng máy…"}</strong><span>{selected.length} bài · {mapped} máy đã ghép · Chưa đăng bài</span></div></div>
-        <div className="pw-preflight-pending-list" role="region" aria-label="Máy đang chờ kết quả kiểm tra" tabIndex={0}>
-          {selected.map(bundle => { const udid = p.assignments[bundle.id]; return <div key={bundle.id}><strong>{udid ? label(udid) : "Chưa ghép máy"}</strong><span>{bundle.name}</span><small>Chờ kết quả</small></div>; })}
-        </div>
-      </div> : p.preflightError ? <p role="alert">{p.preflightError}</p> : p.preflight ? <PublishPreflightResult network={p.network} report={p.preflight} machineName={label} bundleName={id => bundles.find(bundle => bundle.id === id)?.name ?? id} page={reportPage} onPage={setReportPage} onRetry={() => void p.onPreflight()} busy={locked} hideRetry/> : <p>Chưa có kết quả kiểm tra.</p>}
+    {dialog === "check" && <PublishDialog title="Xem lại và xác nhận đăng công khai" wide onClose={() => setDialog(null)} actions={<><button type="button" onClick={() => setDialog(null)}>Quay lại</button>{(p.preflightError || (p.preflight && !p.preflight.canExecute)) && !p.preflightLoading && <button type="button" disabled={locked} onClick={() => { setReportPage(0); void p.onPreflight(); }}>Kiểm tra lại</button>}<button type="button" className="primary" disabled={locked || !p.preflight?.canExecute || !complete} onClick={() => void p.onExecute()}><Check size={16}/> Xác nhận đăng công khai {selected.length} bài</button></>}>
+      <p>{selected.length} bài sẽ đăng công khai trên {mapped} máy trong {appName}. Chỉ bắt đầu khi bạn xác nhận bên dưới.</p>
+      {p.preflightLoading ? <PublishPreparationStatus stage={p.preflightStage} rows={selected.map(bundle => ({ id: bundle.id, name: bundle.name, machine: p.assignments[bundle.id] ? label(p.assignments[bundle.id]) : "Chưa ghép máy" }))}/> : p.preflightError ? <p role="alert">{p.preflightError}</p> : p.preflight ? <PublishPreflightResult network={p.network} report={p.preflight} machineName={label} bundleName={id => bundles.find(bundle => bundle.id === id)?.name ?? id} page={reportPage} onPage={setReportPage} onRetry={() => void p.onPreflight()} busy={locked} hideRetry/> : <p>Chưa có kết quả kiểm tra.</p>}
       <p className="pq-hint">{p.network === "threads" ? "Nội dung được chuẩn bị trong Threads sau khi preflight hỗ trợ thiết bị này." : `Nhạc được chọn sau khi mở ${appName}.`} {p.sheet ? "Ghi Sheet đang bật; link được ghi sau khi xác nhận bài đăng thành công." : "Ghi Sheet đang tắt; kết quả chỉ lưu trong ứng dụng."}</p>
     </PublishDialog>}
   </div>;
