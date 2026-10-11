@@ -32,6 +32,10 @@ Các script có `--help`; đối số cụ thể theo invocation trong workflow 
    `target/tauri-android-package-tools.conf.json`. Kiểm digest/provenance.
 4. `scripts/build_desktop_sidecar.py`: runtime iOS + signer + manifest; tạo
    `target/tauri-sidecar.conf.json`, chạy frozen self-tests.
+   Runtime này ghi hash byte của `requirements-lock.txt` lúc build. Worktree check out
+   file đó với CRLF, còn checkout chính có LF, nên runtime build trong worktree không
+   qua `verify_runtime` khi checkout chính tái dùng. Hãy build lại runtime ngay trong
+   checkout sẽ build app (khoảng 2,5 phút cộng pip install, đo ngày 12/10/2026).
 5. `scripts/build_gui_service.py`, rồi `scripts/test_gui_service_package.py`:
    GUI runtime, OCR models và overlay `target/tauri-gui-service.conf.json`.
 6. Build `riviu-deployment-checker` với target/version/config Google tương ứng;
@@ -112,6 +116,7 @@ controller, điện thoại hoặc agent khác cùng chạy. Số đo cho biết
 | `npm run build` (tsc -b + Vite) | 28–41 s | 11/10/2026 |
 | Checker release (`riviu-deployment-checker`) | 48 s | bản 0.2.81, 08/10/2026 |
 | `tauri build --no-bundle` (frontend + Rust release; đổi android-driver và app) | 495 s (Cargo 7 phút 55) | bản 0.2.81 |
+| `tauri build --no-bundle` (đổi `riviu-core`, android-driver và app) | 1138 s | bản 0.2.82, 12/10/2026 |
 | `riviu-core` release, CGU=1, chỉ crate này | 272 s | 11/10/2026, `--timings` |
 | `bundle_windows_installers.py` (NSIS rồi MSI) | 129 s | bản 0.2.81 |
 | Giải nén và kiểm hai bộ cài | 195 s | bản 0.2.81 |
