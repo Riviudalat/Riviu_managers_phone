@@ -55,7 +55,7 @@ import { DeviceFilesPopup } from "./components/DeviceFilesPopup";
 import type { DeviceMenuNode } from "./deviceMenu";
 import { buildDeviceActions } from "./deviceActions";
 import { useFleet } from "./useFleet";
-import { useBoxSelection, type RefusedDevice } from "./useBoxSelection";
+import { useBoxSelection, usePointerHold, type RefusedDevice } from "./useBoxSelection";
 import { newWorkBlock } from "./selectionEligibility";
 import { metaByUdid, orderDevicesByNumber, tileName, tileNumber } from "./deviceNaming";
 import { AdbConsole } from "./components/AdbConsole";
@@ -629,49 +629,22 @@ function App() {
     onRefused: refuseSelection,
   });
   // While a pointer is down on the wall or the list, the tiles under it stay where they were:
-  // which phones show, and in what order, is applied on release (PLAN §3). Statuses inside the
+  // which phones show, in what order, and the notices above them are applied only once the
+  // pointer itself ends the press, however long it is held (PLAN §3). Statuses inside the
   // tiles still update; tile strips have a fixed height, so text never moves the grid.
-  const [wallHeld, setWallHeld] = useState(false);
-  const [heldWall, setHeldWall] = useState<{ devices: DeviceInfo[]; notices: boolean[] } | null>(null);
-  const wallNotices = [
-    cachedAgents.roster === agentRosterKey && Boolean(cachedAgents.error),
-    deviceWorkOwners.state === "error",
-  ];
-  const holdWall = () => {
-    if (wallHeld) return;
-    setHeldWall({ devices: visibleDevices, notices: wallNotices });
-    setWallHeld(true);
-  };
-  useEffect(() => {
-    if (!wallHeld) return;
-    let timer = 0;
-    // Released after the click that ends the press has landed on the tile that was pressed.
-    const release = () => {
-      window.clearTimeout(timer);
-      timer = window.setTimeout(() => {
-        setWallHeld(false);
-        setHeldWall(null);
-      }, 0);
-    };
-    window.addEventListener("pointerup", release, true);
-    window.addEventListener("pointercancel", release, true);
-    window.addEventListener("blur", release);
-    // A release the window never hears (button let go outside it) must not freeze the wall.
-    const cap = window.setTimeout(release, 10_000);
-    return () => {
-      window.clearTimeout(cap);
-      window.clearTimeout(timer);
-      window.removeEventListener("pointerup", release, true);
-      window.removeEventListener("pointercancel", release, true);
-      window.removeEventListener("blur", release);
-    };
-  }, [wallHeld]);
+  const { shown: heldWall, held: wallHeld, onPointerDownCapture: holdWall } = usePointerHold({
+    devices: visibleDevices,
+    notices: [
+      cachedAgents.roster === agentRosterKey && Boolean(cachedAgents.error),
+      deviceWorkOwners.state === "error",
+    ],
+  });
   const wallDevices = useMemo(() => {
-    if (!heldWall) return visibleDevices;
+    if (!wallHeld) return visibleDevices;
     // Same phones in the same places, each drawn from the live roster when it is still there.
     return heldWall.devices.map((device) => deviceByUdid.get(device.udid) ?? device);
-  }, [deviceByUdid, heldWall, visibleDevices]);
-  const [shownAgentNotice, shownOwnerNotice] = heldWall?.notices ?? wallNotices;
+  }, [deviceByUdid, heldWall, wallHeld, visibleDevices]);
+  const [shownAgentNotice, shownOwnerNotice] = heldWall.notices;
   const selectableVisible = visibleDevices.filter((device) => selected.includes(device.udid) || !selectionBlock(device.udid));
   // Selected phones the filters keep off screen: commands still reach them, so the bar names them.
   const hiddenSelected = useMemo(() => {

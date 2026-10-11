@@ -6,6 +6,7 @@ import {
   useRef,
   useState,
   type MouseEvent as ReactMouseEvent,
+  type PointerEvent as ReactPointerEvent,
 } from "react";
 
 import { applyBoxSelection, isDragMeaningful, normalizeBox, tilesInBox } from "./boxSelect";
@@ -241,4 +242,63 @@ export function useBoxSelection(
     onCanvasMouseDown,
     band,
   };
+}
+
+/**
+ * Keeps a layout snapshot for as long as a pointer button stays down (PLAN §3).
+ *
+ * Pass what decides the layout (which phones show, in what order, and the notices above them);
+ * while held, `shown` is the value from the moment of the press. Only the pointer ends a hold:
+ * its own release (applied after the click that release produces, so the click lands on the
+ * pressed tile), a cancel, the window losing focus mid-gesture, or, for a release the window
+ * never heard, the next pointer event proving no button is down. Elapsed time never does: a
+ * press held for a minute keeps its layout for that minute.
+ */
+export function usePointerHold<T>(live: T): {
+  shown: T;
+  held: boolean;
+  onPointerDownCapture: (event: ReactPointerEvent<HTMLElement>) => void;
+} {
+  const [hold, setHold] = useState<{ pointerId: number; snapshot: T } | null>(null);
+  const latestLive = useRef(live);
+  latestLive.current = live;
+  const onPointerDownCapture = useCallback((event: ReactPointerEvent<HTMLElement>) => {
+    const { pointerId } = event;
+    setHold((current) => current ?? { pointerId, snapshot: latestLive.current });
+  }, []);
+  useEffect(() => {
+    if (!hold) return;
+    const { pointerId } = hold;
+    let afterClick = 0;
+    const end = () => setHold(null);
+    // The click a release produces is dispatched in the same input task as the release;
+    // ending on the next task orders the end after that click. The release is the authority.
+    const released = (event: PointerEvent) => {
+      if (event.pointerId !== pointerId) return;
+      window.clearTimeout(afterClick);
+      afterClick = window.setTimeout(end, 0);
+    };
+    const cancelled = (event: PointerEvent) => {
+      if (event.pointerId === pointerId) end();
+    };
+    // A release outside the window that was never delivered: a later pointer event with no
+    // button down proves the press is over. One with the button still down keeps the hold.
+    const proved = (event: PointerEvent) => {
+      if (event.buttons === 0) end();
+    };
+    window.addEventListener("pointerup", released, true);
+    window.addEventListener("pointercancel", cancelled, true);
+    window.addEventListener("pointermove", proved, true);
+    window.addEventListener("pointerover", proved, true);
+    window.addEventListener("blur", end);
+    return () => {
+      window.clearTimeout(afterClick);
+      window.removeEventListener("pointerup", released, true);
+      window.removeEventListener("pointercancel", cancelled, true);
+      window.removeEventListener("pointermove", proved, true);
+      window.removeEventListener("pointerover", proved, true);
+      window.removeEventListener("blur", end);
+    };
+  }, [hold]);
+  return { shown: hold ? hold.snapshot : live, held: hold !== null, onPointerDownCapture };
 }

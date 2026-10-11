@@ -1,8 +1,8 @@
 import { act, renderHook } from "@testing-library/react";
-import { describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 
 import type { DeviceInfo } from "./types";
-import { useBoxSelection } from "./useBoxSelection";
+import { useBoxSelection, usePointerHold } from "./useBoxSelection";
 
 /**
  * The stateful half of grid selection.
@@ -174,5 +174,57 @@ describe("useBoxSelection", () => {
       } as unknown as React.MouseEvent<HTMLDivElement>);
     });
     expect(result.current.band).not.toBeNull();
+  });
+});
+
+describe("usePointerHold", () => {
+  afterEach(() => {
+    vi.useRealTimers();
+  });
+
+  // jsdom has no PointerEvent constructor; the hook reads only pointerId and buttons.
+  const pointer = (type: string, pointerId: number, buttons = 0) => {
+    const event = new MouseEvent(type, { bubbles: true, buttons });
+    Object.defineProperty(event, "pointerId", { value: pointerId });
+    return event;
+  };
+  const press = (pointerId = 1) => ({ pointerId }) as unknown as React.PointerEvent<HTMLElement>;
+
+  it("keeps the pressed layout past ten seconds and ends only on that pointer's release", () => {
+    // PLAN §3 / review F3: elapsed time is never proof of release. A ten-second cap once let
+    // Máy 9 slide under a button still held on Máy 8.
+    vi.useFakeTimers();
+    const { result, rerender } = renderHook(({ live }) => usePointerHold(live), { initialProps: { live: "wall-1" } });
+    act(() => result.current.onPointerDownCapture(press(1)));
+    rerender({ live: "wall-2" });
+    act(() => vi.advanceTimersByTime(60_000));
+    rerender({ live: "wall-3" });
+    expect(result.current).toMatchObject({ shown: "wall-1", held: true });
+    act(() => {
+      window.dispatchEvent(pointer("pointerup", 2));
+      vi.advanceTimersByTime(0);
+    });
+    expect(result.current.shown).toBe("wall-1");
+    act(() => {
+      window.dispatchEvent(pointer("pointerup", 1));
+    });
+    // The click that release produces lands before the layout changes.
+    expect(result.current.shown).toBe("wall-1");
+    act(() => vi.advanceTimersByTime(0));
+    expect(result.current).toMatchObject({ shown: "wall-3", held: false });
+  });
+
+  it("ends a press released outside the window only when a pointer event proves no button is down", () => {
+    const { result, rerender } = renderHook(({ live }) => usePointerHold(live), { initialProps: { live: 1 } });
+    act(() => result.current.onPointerDownCapture(press(1)));
+    rerender({ live: 2 });
+    act(() => {
+      window.dispatchEvent(pointer("pointermove", 1, 1));
+    });
+    expect(result.current.shown).toBe(1);
+    act(() => {
+      window.dispatchEvent(pointer("pointerover", 1, 0));
+    });
+    expect(result.current).toMatchObject({ shown: 2, held: false });
   });
 });
