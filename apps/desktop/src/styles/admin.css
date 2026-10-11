@@ -450,6 +450,12 @@
   font-size: var(--text-xs);
 }
 
+/* The library gets 520–580 px at 820–1093 px wide, under the shared 640 px table floor: the
+   install buttons wrap inside their cell instead of scrolling sideways out of view. */
+.apps-workspace .responsive-table {
+  min-width: 0;
+}
+
 .api-reference-list {
   display: grid;
   gap: 0;

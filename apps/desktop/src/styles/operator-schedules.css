@@ -26,6 +26,12 @@
 .operator-schedule-detail > label { display: grid; gap: 6px; font-size: var(--text-sm); color: var(--text-2); }
 .operator-schedule-detail > label select { width: 100%; min-width: 0; }
 .operator-schedule-detail .automation-schedule-control { min-width: 0; }
+/* The detail column is ~400 px at 1366: the save buttons take their own row under the fields
+   instead of stacking in a 100 px column, and "Đang bật" stays on one line. */
+.operator-schedule-detail .automation-schedule-create { grid-template-columns: minmax(0, 1fr) minmax(90px, .45fr); }
+.operator-schedule-detail .automation-schedule-create > .schedule-save-actions { grid-column: 1 / -1; justify-content: flex-end; }
+.operator-schedule-detail .automation-schedule-row-main { grid-template-columns: minmax(0, 1fr) minmax(90px, .45fr) auto auto auto; }
+.operator-schedule-detail .automation-schedule-state { white-space: nowrap; }
 /* 1093 px is a 1366 laptop at Windows 125%: the side-by-side editor is too narrow there. */
 @media (max-width: 1200px) {
   .operator-schedule-layout { grid-template-columns: minmax(0, 1fr); min-height: 0; }

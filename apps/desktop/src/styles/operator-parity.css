@@ -147,6 +147,7 @@
 .operator-toolbar input,
 .app-workflow-editor input,
 .app-workflow-editor select,
+.operator-schedules input:not([type="checkbox"]),
 .operator-schedules select {
   height: 36px;
   padding: 6px 9px;

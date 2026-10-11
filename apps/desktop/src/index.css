@@ -569,7 +569,9 @@ button {
   display: none;
 }
 
-@media (max-width: 1024px) {
+/* Up to 1279 px the settings menu column leaves the table under its 830 px: 1093 px (a 1366 laptop
+   at Windows 125%) put Kiểm tra/Khôi phục off-screen in a sideways scroller. */
+@media (max-width: 1279px) {
   .agent-status-table {
     overflow-x: visible;
   }
