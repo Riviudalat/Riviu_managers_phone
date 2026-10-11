@@ -15,11 +15,10 @@ export function BusyScopeNotice({ targets, runTargets, excluded, label, onlyWhen
   return <div className="busy-scope" aria-label="Phạm vi thực hiện">
     <p className="busy-scope-line" role="status">
       {targets.length} trong phạm vi · {runTargets.length} thực hiện · {excluded.length} bị loại
-      {excluded.length > 0 && ` (${excluded.map(entry => `${label(entry.udid)} – ${entry.reason}`).join(", ")})`}
     </p>
-    {excluded.length > 0 && <>
-      <ExcludedDevicesNotice excluded={excluded} label={label}/>
-      <p className="busy-scope-hint">Chưa thể giành máy bận từ trang này. Dừng việc cũ trong Lượt chạy, rồi bỏ máy khỏi phạm vi và chọn lại.</p>
-    </>}
+    {/* The per-phone list and the way out open on demand: on a 560 px window three lines of
+        repeated reasons left the Tương tác step 10 px (UIX, 820x560 mock). */}
+    <ExcludedDevicesNotice excluded={excluded} label={label}
+      hint="Chưa thể giành máy bận từ trang này. Dừng việc cũ trong Lượt chạy, rồi bỏ máy khỏi phạm vi và chọn lại."/>
   </div>;
 }

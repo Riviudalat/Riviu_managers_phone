@@ -6,6 +6,8 @@ interface Props {
   /** How the operator names a phone, normally "Máy N". */
   label: (udid: string) => string;
   onDismiss?: () => void;
+  /** What the operator can do about it, shown with the per-phone list. */
+  hint?: string;
   className?: string;
 }
 
@@ -15,7 +17,7 @@ interface Props {
  * It says the two things the operator must not have to guess: these phones get no command,
  * and they do not come back by themselves when they free up. Only an explicit choice does.
  */
-export function ExcludedDevicesNotice({ excluded, label, onDismiss, className }: Props) {
+export function ExcludedDevicesNotice({ excluded, label, onDismiss, hint, className }: Props) {
   if (!excluded.length) return null;
   return (
     <div className={["excluded-devices", className].filter(Boolean).join(" ")} role="status">
@@ -26,6 +28,7 @@ export function ExcludedDevicesNotice({ excluded, label, onDismiss, className }:
           {" · "}{summarizeReasons(excluded)} · không nhận lệnh, không tự chọn lại khi rảnh
         </summary>
         <span>{excluded.map((entry) => `${label(entry.udid)} – ${entry.reason}`).join("; ")}.</span>
+        {hint && <p className="excluded-devices-hint">{hint}</p>}
       </details>
       {onDismiss && (
         <button type="button" className="tb-btn" onClick={onDismiss}>Xóa danh sách bị loại</button>
