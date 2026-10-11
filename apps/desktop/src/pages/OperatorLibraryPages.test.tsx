@@ -51,11 +51,12 @@ const schedule: AutomationSchedule = {
   id: "schedule-1", revision: 5, name: "Lịch kiểm thử", definitionId: profile.id,
   definitionRevision: 2, enabled: true,
   schedule: { schemaVersion: 1, kind: "interval", everyMinutes: 60 },
-  nextDueAt: date, lastErrorCode: "Uncertain", createdAt: date, updatedAt: date,
+  nextDueAt: date, lastErrorCode: "Uncertain", approvedUdids: null, createdAt: date, updatedAt: date,
 };
-const readonlyCommands = ["app_workflow_list", "operator_list", "automation_list", "automation_schedule_list", "flow_connector_info"];
+const readonlyCommands = ["app_workflow_list", "operator_list", "automation_list", "automation_schedule_list", "automation_get", "flow_connector_info"];
 function defaultRead(command: string) {
   if (command === "app_workflow_list") return [workflow];
+  if (command === "automation_get") return null;
   if (command === "automation_list") return [profile];
   if (command === "flow_connector_info") return { credentialNames: [], root: "C:/fixture/flow-data", sheetConfigured: false };
   if (readonlyCommands.includes(command)) return [];
@@ -218,17 +219,22 @@ it.each([
 });
 
 it.each([
-  { name: "My Apps", render: pages[0].render, button: "Nhập ứng dụng từ JSON" },
-  { name: "Bản ghi", render: pages[2].render, button: "Nhập bản ghi từ JSON" },
-])("$name cho phép dùng Tab, Enter và Space để mở input JSON", async (page) => {
+  { name: "My Apps", render: pages[0].render, item: "Nhập ứng dụng từ JSON" },
+  { name: "Bản ghi", render: pages[2].render, item: "Nhập bản ghi từ JSON" },
+])("$name cho phép dùng Tab, Enter và Space để mở input JSON từ menu Nâng cao", async (page) => {
   const user = userEvent.setup();
   const { container } = render(page.render());
-  const button = screen.getByRole("button", { name: page.button });
+  const button = screen.getByRole("button", { name: "Nâng cao" });
   const input = container.querySelector<HTMLInputElement>('input[type="file"]')!;
   const click = vi.spyOn(input, "click").mockImplementation(() => undefined);
   for (let i = 0; i < 12 && document.activeElement !== button; i++) await user.tab();
   expect(button).toHaveFocus();
   await user.keyboard("{Enter}");
+  await waitFor(() => expect(screen.getByRole("menuitem", { name: page.item })).toHaveFocus());
+  await user.keyboard("{Enter}");
+  await waitFor(() => expect(button).toHaveFocus());
+  await user.keyboard(" ");
+  await waitFor(() => expect(screen.getByRole("menuitem", { name: page.item })).toHaveFocus());
   await user.keyboard(" ");
   expect(click).toHaveBeenCalledTimes(2);
   expect(input.accept).toBe(".json");
@@ -377,6 +383,7 @@ it("tác vụ vẫn xác nhận trước Chạy/Lập lịch/Lưu trữ và dùn
   await userEvent.click(makeSchedule);
   expect(invoke).toHaveBeenCalledWith("app_workflow_schedule", {
     id: "app-1", revision: 3, target: { type: "explicit", udids: ["phone-test"] }, name: task.name, everyMinutes: 60,
+    approvedUdids: ["phone-test"],
   });
   await userEvent.click(archive);
   expect(invoke).toHaveBeenCalledWith("operator_archive", { id: "task-1", expectedRevision: 4 });
@@ -419,6 +426,7 @@ it("bật/tắt lịch giữ revision, chu kỳ và kết quả gần nhất tha
   await waitFor(() => expect(invoke).toHaveBeenCalledWith("automation_schedule_update", {
     scheduleId: "schedule-1", expectedRevision: 5, name: schedule.name, definitionId: "profile-1",
     definitionRevision: 2, enabled: false, schedule: { schemaVersion: 1, kind: "interval", everyMinutes: 60 },
+    approvedUdids: null,
   }));
   expect(confirm).not.toHaveBeenCalled();
 });

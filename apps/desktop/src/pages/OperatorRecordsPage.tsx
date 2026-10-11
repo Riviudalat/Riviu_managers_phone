@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useRef, useState } from "react";
-import { Download, Plus, RefreshCw, Save, Trash2, X } from "lucide-react";
+import { Download, FileJson, Plus, RefreshCw, Save, Trash2, Upload, X } from "lucide-react";
 import {
   operatorArchive,
   operatorList,
@@ -16,6 +16,7 @@ import type { DeviceInfo, JsonObject } from "../types";
 import { useWorkspaceDraft } from "../workspaceDraft";
 import { flowConnectorInfo, interactionReadAccount } from "../api";
 import { EmptyState, LoadingState, StatusNotice } from "../components/States";
+import { ButtonMenu, MenuItem } from "../components/ui/Menu";
 import { useAsyncList } from "../useAsyncList";
 import { useMediaQuery } from "../useMediaQuery";
 import { useModalFocus } from "../components/useModalFocus";
@@ -172,13 +173,19 @@ export function OperatorRecordsPage({
         <button type="button" aria-label="Làm mới bản ghi" title="Làm mới bản ghi" disabled={loading} onClick={() => void load()}>
           <RefreshCw size={16} aria-hidden="true" />
         </button>
-        <button type="button" disabled={data === undefined} onClick={exportRows}>
-          <Download size={16} />
-          Xuất
+        <button className="primary" type="button" onClick={() => edit()}>
+          <Plus size={16} />
+          Thêm {kind === "account" ? "tài khoản" : "kết nối"}
         </button>
-        <button type="button" aria-label="Nhập bản ghi từ JSON" disabled={busy} onClick={() => importInput.current?.click()}>
-          Nhập JSON
-        </button>
+        {/* Raw JSON moves files between machines; it stays out of the everyday row. */}
+        <ButtonMenu label="Nâng cao" icon={FileJson}>
+          <MenuItem icon={Upload} disabled={busy} onSelect={() => importInput.current?.click()}>
+            Nhập bản ghi từ JSON
+          </MenuItem>
+          <MenuItem icon={Download} disabled={data === undefined} onSelect={exportRows}>
+            Xuất bản ghi ra JSON
+          </MenuItem>
+        </ButtonMenu>
         <input
           ref={importInput}
           type="file"
@@ -210,10 +217,6 @@ export function OperatorRecordsPage({
             }
           }}
         />
-        <button className="primary" type="button" onClick={() => edit()}>
-          <Plus size={16} />
-          Thêm {kind === "account" ? "tài khoản" : "kết nối"}
-        </button>
       </div>
       {error && <StatusNotice tone="error">{error}</StatusNotice>}
       {result && <StatusNotice tone="info">{result}</StatusNotice>}
@@ -377,7 +380,12 @@ export function OperatorRecordsPage({
         </tbody>
       </table>}
       {!loading && !loadError && data !== undefined && records.length === 0 && (
-        <EmptyState compact title="Chưa có bản ghi" hint="Bấm Thêm để tạo và gắn thiết bị." />
+        <EmptyState compact title="Chưa có bản ghi"
+          hint={`Bấm Thêm ${kind === "account" ? "tài khoản" : "kết nối"} để tạo bản ghi đầu tiên và gắn máy cho nó.`}
+          action={<button type="button" onClick={() => edit()}>
+            <Plus size={16} />
+            Thêm {kind === "account" ? "tài khoản" : "kết nối"} đầu tiên
+          </button>} />
       )}
       {records.length > 0 && visible.length === 0 && (
         <EmptyState compact title="Không có bản ghi khớp tìm kiếm" action={<button type="button" onClick={() => setSearch("")}>Xóa tìm kiếm</button>} />

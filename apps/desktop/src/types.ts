@@ -1694,6 +1694,8 @@ export interface AutomationSchedule {
   schedule: JsonValue;
   nextDueAt: string | null;
   lastErrorCode: string | null;
+  /** Phones the operator approved; `null` until a group/"all" schedule saved before approval is approved. */
+  approvedUdids: string[] | null;
   createdAt: string;
   updatedAt: string;
 }

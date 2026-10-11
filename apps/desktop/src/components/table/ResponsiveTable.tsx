@@ -51,7 +51,9 @@ function ScopedTable<Row>({
         <span className="table-result-count" role="status">{displayed.length}/{rows.length}</span>
         <TableColumnChooser label={label} columns={columns} view={view} onChange={update} />
       </div>}
-      {!displayed.length ? <div className="table-empty" role="status">{rows.length ? "Không có kết quả phù hợp" : empty === undefined ? "Chưa có dữ liệu" : empty}</div> :
+      {!displayed.length ? <div className="table-empty" role="status">{rows.length
+        ? <><span>Không có kết quả phù hợp</span> <button type="button" onClick={() => setQuery("")}>Xóa tìm kiếm</button></>
+        : empty === undefined ? "Chưa có dữ liệu" : empty}</div> :
         <div className="responsive-table-wrap" tabIndex={0} role="region" aria-label={label}>
           <table id={tableId} className="responsive-table" aria-label={label}>
             <thead><tr>{visible.map((column) => <th key={column.id} scope="col" className={column.className}

@@ -85,6 +85,7 @@ import { SettingsPanel } from "./components/SettingsPanel";
 import { MyAppsPage } from "./pages/MyAppsPage";
 import { OperatorRecordsPage } from "./pages/OperatorRecordsPage";
 import { OperatorSchedulesPage } from "./pages/OperatorSchedulesPage";
+import { clearAutomationMode, requestAutomationMode } from "./automationModeRequest";
 import { SavedTasksPage } from "./pages/SavedTasksPage";
 import { ControlCenterRail } from "./components/ControlCenterRail";
 import { Sidebar } from "./components/Sidebar";
@@ -933,15 +934,23 @@ function App() {
   // Going to a phone selects it alone and focuses its tile or row. A phone the filters hide is
   // shown by clearing them: going to a phone nobody can see would select it out of sight.
   const [revealUdid, setRevealUdid] = useState<string | null>(null);
+  const clearWallFilters = () => {
+    setGroupTab(ALL_DEVICES_TAB);
+    setDeviceSearch("");
+    setDeviceStatusFilter("all");
+    setConnectionFilter("all");
+  };
+  // What hides phones from the wall, named for the "trống vì bộ lọc" state.
+  const wallFilters = [
+    groupTab !== ALL_DEVICES_TAB && `nhóm ${tabs.find((tab) => tab.id === groupTab)?.label ?? "đã chọn"}`,
+    deviceSearch.trim() && `từ khóa “${deviceSearch.trim()}”`,
+    deviceStatusFilter !== "all" && "trạng thái đã chọn",
+    connectionFilter !== "all" && `kết nối ${connectionFilter === "usb" ? "USB" : "Wi-Fi"}`,
+  ].filter((value): value is string => Boolean(value));
   const goToDevice = (udid: string) => {
     void requestPage("control", true).then((activated) => {
       if (!activated) return;
-      if (!visibleDevices.some((device) => device.udid === udid)) {
-        setGroupTab(ALL_DEVICES_TAB);
-        setDeviceSearch("");
-        setDeviceStatusFilter("all");
-        setConnectionFilter("all");
-      }
+      if (!visibleDevices.some((device) => device.udid === udid)) clearWallFilters();
       setSelected([udid]);
       setRevealUdid(udid);
     });
@@ -1563,7 +1572,8 @@ function App() {
                 <EmptyState
                   icon={<IconPhone size={20} />}
                   title="Không có thiết bị phù hợp"
-                  hint="Đổi nhóm, từ khóa hoặc trạng thái để xem thiết bị khác."
+                  hint={`Trống vì bộ lọc${wallFilters.length ? `: ${wallFilters.join(" · ")}` : ""}. Danh sách vẫn có ${devices.length} máy.`}
+                  action={<button type="button" onClick={clearWallFilters}>Bỏ lọc</button>}
                 />
               )}
 
@@ -1599,7 +1609,13 @@ function App() {
                 <EmptyState
                   icon={<IconPhone size={20} />}
                   title="Chưa có điện thoại nào"
-                  hint="Cắm máy qua USB, bấm Tin cậy (Trust) trên iPhone nếu được hỏi, rồi làm mới danh sách."
+                  steps={[
+                    "Cắm điện thoại vào máy tính bằng cáp USB.",
+                    "Trên điện thoại, cho phép gỡ lỗi USB (Android) hoặc bấm Tin cậy (iPhone) khi được hỏi.",
+                    "Bấm Làm mới.",
+                    <>Vẫn chưa thấy máy: mở{" "}
+                      <button type="button" className="link" onClick={() => void requestPage("diagnostics")}>Chẩn đoán</button>.</>,
+                  ]}
                   action={
                     <button
                       type="button"
@@ -1772,6 +1788,7 @@ function App() {
               onSelectUdids={setSelected}
               initialScript={null}
               deviceLabels={automationDeviceLabels}
+              onStartWork={() => void requestPage("nurture")}
             />
           )}
           <section key="automation-workspace" hidden={!activeAutomation} className="automation-host">
@@ -1786,8 +1803,11 @@ function App() {
           {page === "diagnostics" && <FleetDiagnosticsPage devices={devices} metas={metas} />}
           {page === "accounts" && <OperatorRecordsPage kind="account" devices={devices} />}
           {page === "networks" && <OperatorRecordsPage kind="network" devices={devices} />}
-          {page === "schedules" && <OperatorSchedulesPage />}
-          {page === "savedTasks" && <SavedTasksPage devices={devices} />}
+          {page === "schedules" && <OperatorSchedulesPage devices={devices} metas={metaMap} onCreateConfiguration={() => {
+            requestAutomationMode("nurture", "schedule");
+            void requestPage("nurture").then((opened) => { if (!opened) clearAutomationMode("nurture"); });
+          }} />}
+          {page === "savedTasks" && <SavedTasksPage devices={devices} metas={metaMap} />}
           {page === "help" && <HelpPage onOpenPage={(destination) => void requestPage(destination)} />}
           {page === "data" && <DataPage />}
           {page === "deviceSettings" && <DeviceSettingsPage devices={devices} />}

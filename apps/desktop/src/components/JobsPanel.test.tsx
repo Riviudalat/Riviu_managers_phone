@@ -195,7 +195,8 @@ describe("JobsPanel operations monitor", () => {
     const advanced = screen.getByText("Chạy JSON nâng cao").closest("details");
     expect(advanced).not.toHaveAttribute("open");
 
-    await userEvent.click(screen.getByRole("button",{name:"JSON nâng cao"}));
+    await userEvent.click(screen.getByRole("button",{name:"Nâng cao"}));
+    await userEvent.click(await screen.findByRole("menuitem",{name:"Chạy JSON nâng cao"}));
     expect(advanced).toHaveAttribute("open");
     expect(screen.getByPlaceholderText("Dán kịch bản JSON đã kiểm tra")).toHaveValue("");
     expect(screen.queryByRole("button", { name: "Nạp ví dụ" })).toBeNull();

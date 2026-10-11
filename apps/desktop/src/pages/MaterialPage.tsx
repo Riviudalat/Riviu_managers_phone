@@ -263,7 +263,9 @@ export function MaterialPage({ devices, selected, operationSource, deviceNumbers
         )}
         {loading && !items.length && <LoadingState label="Đang tải kho nội dung…" />}
         <ResponsiveTable label="Nội dung đã lưu" viewKey="material" searchText={(material) => `${material.name} ${material.kind}`} rows={items} keyForRow={(material) => material.id}
-          empty={!loading && !loadError ? <EmptyState compact icon={<ImagePlus size={17} />} title="Chưa có nội dung" /> : null} columns={[
+          empty={!loading && !loadError ? <EmptyState compact icon={<ImagePlus size={17} />} title="Chưa có nội dung"
+            hint="Thêm ảnh hoặc video vào kho, rồi chọn phạm vi máy để chuyển."
+            action={<button type="button" onClick={() => setImportOpen(true)}><ImagePlus size={16} /> Thêm nội dung đầu tiên</button>} /> : null} columns={[
           { id:"name",label:"Tên file",sortValue:(material) => material.name,render:(material) => <strong>{material.name}</strong> },
           { id:"kind",label:"Loại",sortValue:(material) => material.kind,render:(material) => <StatusChip>{material.kind === "video" ? "Video" : material.kind === "image" ? "Ảnh" : "File"}</StatusChip> },
           { id:"size",label:"Dung lượng",sortValue:(material) => material.size,render:(material) => formatBytes(material.size) },

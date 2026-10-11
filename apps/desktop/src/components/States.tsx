@@ -11,6 +11,7 @@ export function EmptyState({
   title,
   hint,
   action,
+  steps,
   compact = false,
 }: {
   icon?: ReactNode;
@@ -18,6 +19,8 @@ export function EmptyState({
   /** How to get out of the empty state. Skip only when it is truly obvious. */
   hint?: ReactNode;
   action?: ReactNode;
+  /** Ordered steps when getting out takes more than one move (plug in, allow, refresh…). */
+  steps?: ReactNode[];
   compact?: boolean;
 }) {
   return (
@@ -26,6 +29,11 @@ export function EmptyState({
       <div className="empty-state-copy">
         <strong>{title}</strong>
         {hint && <p>{hint}</p>}
+        {steps && steps.length > 0 && (
+          <ol className="empty-state-steps">
+            {steps.map((step, index) => <li key={index}>{step}</li>)}
+          </ol>
+        )}
       </div>
       {action && <div className="empty-state-action">{action}</div>}
     </div>

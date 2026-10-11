@@ -6,11 +6,13 @@ import {
   saveSchedule,
 } from "../api";
 import { SelectionStrip } from "../components/SelectionStrip";
+import { NextRunsPreview } from "../components/ScheduleReview";
 import { EmptyState, LoadingState, StatusNotice } from "../components/States";
 import { IconClock } from "../components/Icons";
 import { describeError } from "../describeError";
 import { flash, flashError } from "../farmToast";
 import { targetsOf } from "../selectionTargets";
+import { scheduleDeviceLabel } from "../scheduleScope";
 import type { ScheduleItem } from "../types";
 import type { SelProps } from "./pageProps";
 
@@ -30,6 +32,24 @@ export function ScheduleBlock({
   const [loadError, setLoadError] = useState<string | null>(null);
   const loadTicket = useRef(0);
   const targets = targetsOf(selected, devices);
+  const label = (udid: string) => scheduleDeviceLabel(udid, devices);
+  const save = async (enabled: boolean) => {
+    try {
+      // The schedule stores exactly these phones: that list is its approval and never widens.
+      await saveSchedule({
+        id: "",
+        name,
+        scriptName,
+        udids: targets,
+        everyMinutes: mins,
+        enabled,
+      });
+      await reload();
+      flash(`${enabled ? "Đã lưu và bật" : "Đã lưu, đang tắt"} lịch «${name}» mỗi ${mins} phút · ${targets.length} máy`);
+    } catch (e) {
+      flashError(e);
+    }
+  };
 
   const reload = async () => {
     const ticket = ++loadTicket.current;
@@ -114,29 +134,18 @@ export function ScheduleBlock({
           onChange={(e) => setMins(Number(e.target.value) || 60)}
         />
       </label>
-      <button
-        type="button"
-        className="primary"
-        disabled={!scriptName || !targets.length}
-        onClick={async () => {
-          try {
-            await saveSchedule({
-              id: "",
-              name,
-              scriptName,
-              udids: targets,
-              everyMinutes: mins,
-              enabled: true,
-            });
-            await reload();
-            flash(`Schedule «${name}» mỗi ${mins} phút · ${targets.length} máy`);
-          } catch (e) {
-            flashError(e);
-          }
-        }}
-      >
-        Lưu lịch ({targets.length})
-      </button>
+      <div className="schedule-save-actions">
+        <button type="button" disabled={!scriptName || !targets.length} onClick={() => void save(false)}>
+          Lưu ({targets.length})
+        </button>
+        <button type="button" className="primary" disabled={!scriptName || !targets.length} onClick={() => void save(true)}>
+          Lưu & bật ({targets.length})
+        </button>
+      </div>
+      {targets.length > 0 && (
+        <p className="schedule-scope-line">Lưu sẽ duyệt {targets.length} máy: {targets.map(label).join(", ")}.</p>
+      )}
+      <NextRunsPreview nextDueAt={null} everyMinutes={mins} enabled={false} />
       <div className="job-list" style={{ marginTop: 8 }}>
         {!items.length && (
           <EmptyState
@@ -165,6 +174,25 @@ export function ScheduleBlock({
                 Lần chạy gần nhất không thực hiện được: {s.lastError}
               </p>
             )}
+            <details className="schedule-scope-line">
+              <summary>Đã duyệt {s.udids.length} máy</summary>
+              <p>{s.udids.map(label).join(", ")}</p>
+            </details>
+            <NextRunsPreview nextDueAt={s.nextRunAt ?? null} everyMinutes={s.everyMinutes} enabled={s.enabled} compact />
+            <button
+              type="button"
+              className="ghost"
+              onClick={async () => {
+                try {
+                  await saveSchedule({ ...s, enabled: !s.enabled });
+                  await reload();
+                } catch (error) {
+                  setLoadError(describeError(error));
+                }
+              }}
+            >
+              {s.enabled ? "Tắt lịch" : "Bật lịch"}
+            </button>
             <button
               type="button"
               className="ghost"

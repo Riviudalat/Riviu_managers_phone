@@ -229,3 +229,42 @@ export function MenuGroup({ label, children }: { label: string; children: ReactN
     </Menu.Group>
   );
 }
+
+interface ButtonMenuProps {
+  /** The trigger's visible text, which is also the menu's accessible name. */
+  label: string;
+  icon?: MenuIcon;
+  className?: string;
+  disabled?: boolean;
+  children: ReactNode;
+}
+
+/**
+ * A toolbar button that opens a short list of rarely used actions — the "Nâng cao" menu that
+ * keeps raw-JSON import/export out of the everyday toolbar. Same rows, focus return and
+ * non-modal behaviour as `ContextMenu`, anchored to a visible button instead of a point.
+ */
+export function ButtonMenu({ label, icon: Icon, className, disabled, children }: ButtonMenuProps) {
+  return (
+    <Menu.Root modal={false}>
+      <Menu.Trigger className={className} disabled={disabled}>
+        {Icon && <Icon size={16} />}
+        {label}
+        <span className="ui-menu-chev" aria-hidden="true">▾</span>
+      </Menu.Trigger>
+      <Menu.Portal>
+        <Menu.Positioner
+          className="ui-menu-positioner"
+          side="bottom"
+          align="end"
+          sideOffset={4}
+          collisionPadding={8}
+        >
+          <Menu.Popup className="ui-menu ui-menu-list" aria-label={label}>
+            {children}
+          </Menu.Popup>
+        </Menu.Positioner>
+      </Menu.Portal>
+    </Menu.Root>
+  );
+}

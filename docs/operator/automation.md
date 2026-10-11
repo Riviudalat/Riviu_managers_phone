@@ -75,9 +75,9 @@ Trần video là giới hạn trên, không phải mục tiêu bắt buộc.
 **Kết quả:** phiên, số card quan sát, effect/bằng chứng và kết thúc từng máy. **Tiếp theo:**
 đọc lý do partial/uncertain trước khi tạo phiên mới; không bù số lượng bằng cách lặp
 comment. Dừng phiên không chứng minh các effect đã gửi được hoàn tác.
-Từ0.2.21, **Lưu thiết lập** lưu trực tiếp; **Lưu lịch từ thiết lập** chụp cấu hình và
-phạm vi cho lịch mới. Lịch cũ vẫn bật/tắt, đổi tên và chu kỳ được; sửa thiết lập
-hiện tại không đổi cấu hình của lịch đã lưu.
+Từ0.2.21, **Lưu thiết lập** lưu trực tiếp; trong **Hẹn giờ**, **Lưu** hoặc **Lưu & bật**
+chụp cấu hình và phạm vi cho lịch mới (xem [Lịch chạy](#lịch-chạy)). Lịch cũ vẫn bật/tắt,
+đổi tên và chu kỳ được; sửa thiết lập hiện tại không đổi cấu hình của lịch đã lưu.
 
 Kết thúc Nuôi TikTok chỉ tắt ứng dụng trên các máy đã được nhận vào phiên.
 Nếu báo `16/20 máy đã bắt đầu`, bốn máy còn lại chưa được xử lý và không bị tự tắt.
@@ -251,3 +251,36 @@ bằng nút này; giữ bằng chứng đã gửi và không tự retry vì thi�
 **Kết quả:** campaign, assignment, prepared content và trạng thái effect. Đổi URL rồi
 parse lỗi không được dùng target cũ. **Tiếp theo:** mở bằng chứng cho uncertain; retry chỉ
 phần được hệ thống xác định còn hợp lệ, không gửi lại một comment chỉ vì nhận ACK không rõ.
+
+## Lịch chạy
+
+Lịch lặp chạy một cấu hình đã lưu theo chu kỳ 15–1.440 phút. Tạo ở **Hẹn giờ** của Nuôi
+TikTok/Tương tác, ở **Lịch chạy** (chọn cấu hình) hoặc bằng nút lịch mỗi giờ của **Tác vụ
+đã lưu**. Lịch chưa có cấu hình nào thì **Lịch chạy** có nút **Tạo cấu hình để hẹn giờ**, mở
+thẳng Nuôi TikTok › Hẹn giờ.
+
+- **Lưu** ghi lịch ở trạng thái tắt; **Lưu & bật** ghi và bật ngay. Không nút nào chạy ngay:
+  lần đầu là một chu kỳ sau lúc bật.
+- Trình sửa hiện **5 lần chạy tới** theo giờ máy tính, ghi rõ múi giờ (ví dụ
+  `Asia/Ho_Chi_Minh (UTC+07:00)`). Lịch đang tắt hiện 5 lần đầu nếu bật lúc này. Lần đến hạn
+  khi Riviu đang tắt chạy ở lần quét kế tiếp; các lần bỏ lỡ không chạy bù.
+- **Danh sách máy đã duyệt.** Lưu lịch ghi đúng các máy phạm vi đang chỉ tới (nhóm thì gồm cả
+  thành viên đang mất kết nối). Đến giờ, Riviu so phạm vi lúc đó với danh sách này:
+  - nhóm thêm máy, hoặc lịch **Toàn bộ** gặp máy mới cắm → lần chạy bị **từ chối** trước khi gửi
+    lệnh, ghi "Phạm vi khác danh sách đã duyệt";
+  - nhóm bớt máy đã duyệt → cũng bị từ chối, không âm thầm chạy ít máy hơn;
+  - máy đã duyệt chỉ đang mất kết nối → lần chạy vẫn đi trên các máy còn lại; với nhóm hoặc
+    danh sách máy, máy bị bỏ qua được ghi vào lần chạy đó.
+
+  Lịch hiện chênh lệch từng máy (thêm/bớt) và nút **Duyệt lại N máy**; hộp xác nhận liệt kê đủ
+  máy. Khi phạm vi chưa khớp, lịch đang tắt không bật được. Lịch không bao giờ tự mở rộng
+  phạm vi.
+- **Nâng cấp lên bản có danh sách duyệt:** lịch cũ có phạm vi là danh sách máy cụ thể được
+  coi là đã duyệt đúng danh sách đó. Lịch cũ theo nhóm hoặc **Toàn bộ** hiện "Chưa duyệt
+  danh sách máy"; mỗi lần đến hạn bị từ chối trước khi gửi lệnh với lý do "Chưa duyệt danh
+  sách máy" cho tới khi bấm **Duyệt N máy** một lần.
+- Đổi tên, đổi chu kỳ, bật/tắt hay chuyển sang bản hồ sơ mới không thay danh sách đã duyệt.
+  Bản hồ sơ mới có phạm vi khác thì lịch hiện chênh lệch và chờ duyệt lại.
+- Giữ máy tính và Riviu mở để lịch chạy. Lần chạy thật hiện trong **Lượt chạy**. Lần bị từ
+  chối không tạo lượt chạy và không gửi lệnh nào tới điện thoại; lý do nằm ở cột **Kết quả gần
+  nhất** của **Lịch chạy**.

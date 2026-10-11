@@ -1,5 +1,5 @@
 import { invoke } from "@tauri-apps/api/core";
-export const appWorkflowSchedule=(id:string,revision:number,target:import('./types').TargetRef,name:string,everyMinutes:number)=>invoke<import('./types').AutomationSchedule>("app_workflow_schedule",{id,revision,target,name,everyMinutes});
+export const appWorkflowSchedule=(id:string,revision:number,target:import('./types').TargetRef,name:string,everyMinutes:number,approvedUdids:string[])=>invoke<import('./types').AutomationSchedule>("app_workflow_schedule",{id,revision,target,name,everyMinutes,approvedUdids});
 import type { AutomationKind, FlowViewport, JsonObject, JsonValue, TargetRef, OrchestrationRunDetail } from "./types";
 export interface AppWorkflowNode { id:string; action:string; position:{x:number;y:number}; config:JsonObject }
 export interface AppWorkflowEdge { id:string; source:string; port:string; target:string }

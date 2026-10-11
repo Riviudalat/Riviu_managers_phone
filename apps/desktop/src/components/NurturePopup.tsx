@@ -40,6 +40,7 @@ import { NurtureWindows } from "./nurture/NurtureWindows";
 import { NurtureMachinePicker, NurtureSessionSetup, NurtureSetupSummary } from "./nurture/NurtureSessionSetup";
 import { AutomationSettingsSchedule } from "./AutomationSettingsSchedule";
 import { AutomationTabs } from "./AutomationTabs";
+import { clearAutomationMode, peekAutomationMode } from "../automationModeRequest";
 import "../styles/nurture-workspace.css";
 import { IconClose, IconHeart, IconRefresh } from "./Icons";
 import { LoadingState, StatusNotice } from "./States";
@@ -356,7 +357,8 @@ export function NurturePopup({
   // and opening two at once pushed the live log off the bottom, which is the one thing the
   // panel is open to watch. One group at a time, full width, with the log in the same tab row.
   const [tab, setTab] = useState<"session" | "behaviour" | "ai" | "comments" | "log">(surface === "page" ? "session" : "behaviour");
-  const [pageMode, setPageMode] = useState<"setup" | "schedule" | "monitor">("setup");
+  const [pageMode, setPageMode] = useState<"setup" | "schedule" | "monitor">(() => peekAutomationMode("nurture") ?? "setup");
+  useEffect(() => clearAutomationMode("nurture"), []);
   const [monitorView,setMonitorView]=useState<"progress"|"comments">("progress");
   useEffect(() => {
     if (operationSource?.kind === "nurture") setPageMode("monitor");
@@ -1034,7 +1036,7 @@ export function NurturePopup({
                   }} aria-describedby={scheduleBlockers.length ? `${blockerId}-schedule-0` : undefined}>Áp dụng hẹn giờ</button><span>Lịch dùng các máy đã chọn ở Thiết lập. Giữ Riviu và máy tính đang mở.</span>
                     {/* The fix links live in the footer right under this panel; one set is enough. */}
                     <BlockedReason id={`${blockerId}-schedule`} blockers={scheduleBlockers.slice(0, 1)} /></div>
-                  {targetRef && profileConfig && <AutomationSettingsSchedule kind="nurture" target={targetRef} config={profileConfig} disabled={Boolean(settingsIssue) || !targets.length} />}
+                  {targetRef && profileConfig && <AutomationSettingsSchedule kind="nurture" target={targetRef} config={profileConfig} disabled={Boolean(settingsIssue) || !targets.length} devices={devices} metas={metas} />}
                 </div>
               </div>}
               {pageSurface && pageMode !== "monitor" && (

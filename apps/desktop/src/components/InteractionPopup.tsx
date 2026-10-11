@@ -852,7 +852,7 @@ export function InteractionPopup({
         </div>
         {pageSurface && <div className="interaction-schedule-panel" role="tabpanel" id="interaction-panel-schedule" aria-labelledby="interaction-tab-schedule" hidden={tab !== "schedule"}>
           <header className="iw-heading"><div><span className="automation-section-kicker">Lịch thực hiện</span><h2>Hẹn giờ Tương tác</h2></div><span className="machine-select-count">{effectiveActors.length} máy được chọn</span></header>
-          <AutomationSettingsSchedule kind="interaction" target={interactionProfileTarget(targetRef ?? { type: "explicit", udids: effectiveActors }, inScope.map(d => d.udid), effectiveActors)} config={profileConfig} disabled={issues.length > 0} />
+          <AutomationSettingsSchedule kind="interaction" target={interactionProfileTarget(targetRef ?? { type: "explicit", udids: effectiveActors }, inScope.map(d => d.udid), effectiveActors)} config={profileConfig} disabled={issues.length > 0} devices={devices} metas={metas} />
         </div>}
       </section>
     </div>

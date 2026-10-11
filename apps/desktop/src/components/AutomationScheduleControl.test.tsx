@@ -4,13 +4,15 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import * as api from "../api";
 import { requestConfirm } from "../confirmStore";
-import type { AutomationDefinition, AutomationSchedule } from "../types";
+import type { AutomationDefinition, AutomationSchedule, DeviceInfo } from "../types";
 import { AutomationScheduleControl } from "./AutomationScheduleControl";
 
 vi.mock("../api", () => ({
+  automationGet: vi.fn(),
   automationScheduleCreate: vi.fn(),
   automationScheduleList: vi.fn(),
   automationScheduleUpdate: vi.fn(),
+  listGroups: vi.fn(),
 }));
 
 vi.mock("../confirmStore", () => ({ requestConfirm: vi.fn() }));
@@ -35,8 +37,14 @@ const pinnedSchedule: AutomationSchedule = {
   schedule: { schemaVersion: 1, kind: "interval", everyMinutes: 60 },
   nextDueAt: "2026-09-04T01:00:00Z",
   lastErrorCode: null,
+  approvedUdids: ["phone-1"],
   createdAt: "2026-09-04T00:00:00Z",
   updatedAt: "2026-09-04T00:00:00Z",
+};
+
+const phone: DeviceInfo = {
+  udid: "phone-1", name: "Máy thử", model: "Fixture", platform: "android",
+  osVersion: "15", connection: "mock", status: "ready", wdaReady: false,
 };
 
 const secondProfile: AutomationDefinition = {
@@ -60,6 +68,17 @@ describe("AutomationScheduleControl", () => {
   beforeEach(() => {
     vi.resetAllMocks();
     vi.mocked(api.automationScheduleList).mockResolvedValue([]);
+    vi.mocked(api.listGroups).mockResolvedValue([]);
+    vi.mocked(api.automationGet).mockImplementation(async (definitionId, revision) => ({
+      definition: { ...profile, id: definitionId },
+      revision: {
+        definitionId,
+        revision,
+        targetRef: { type: "explicit", udids: ["phone-1"] },
+        config: {},
+        createdAt: profile.createdAt,
+      },
+    }));
     vi.mocked(api.automationScheduleCreate).mockResolvedValue({
       ...pinnedSchedule,
       id: "schedule-created",
@@ -133,8 +152,9 @@ describe("AutomationScheduleControl", () => {
   });
 
   it("creates a typed interval schedule pinned to the selected profile revision", async () => {
-    render(<AutomationScheduleControl profile={profile} />);
+    render(<AutomationScheduleControl profile={profile} devices={[phone]} />);
     await screen.findByText("Chưa có lịch cho hồ sơ này");
+    expect(await screen.findByText(/Lưu sẽ duyệt 1 máy: Máy thử/)).toBeVisible();
 
     fireEvent.change(screen.getByLabelText("Tên lịch mới"), {
       target: { value: "Lịch buổi sáng" },
@@ -142,7 +162,7 @@ describe("AutomationScheduleControl", () => {
     fireEvent.change(screen.getByLabelText("Chu kỳ lịch mới (phút)"), {
       target: { value: "30" },
     });
-    fireEvent.click(screen.getByRole("button", { name: "Tạo lịch" }));
+    fireEvent.click(screen.getByRole("button", { name: "Lưu & bật lịch" }));
 
     await waitFor(() =>
       expect(api.automationScheduleCreate).toHaveBeenCalledWith(
@@ -151,9 +171,10 @@ describe("AutomationScheduleControl", () => {
         3,
         true,
         { schemaVersion: 1, kind: "interval", everyMinutes: 30 },
+        ["phone-1"],
       ),
     );
-    expect(await screen.findByText("Đã tạo lịch ở bản hồ sơ 3.")).toBeVisible();
+    expect(await screen.findByText("Đã lưu và bật lịch ở bản hồ sơ 3 · duyệt 1 máy.")).toBeVisible();
   });
 
   it("rejects cadence outside 15 through 1440 minutes before calling the API", async () => {
@@ -163,7 +184,7 @@ describe("AutomationScheduleControl", () => {
     fireEvent.change(screen.getByLabelText("Chu kỳ lịch mới (phút)"), {
       target: { value: "14" },
     });
-    fireEvent.click(screen.getByRole("button", { name: "Tạo lịch" }));
+    fireEvent.click(screen.getByRole("button", { name: "Lưu lịch, chưa bật" }));
 
     expect(await screen.findByRole("alert")).toHaveTextContent("từ 15 đến 1.440 phút");
     expect(api.automationScheduleCreate).not.toHaveBeenCalled();
@@ -191,6 +212,7 @@ describe("AutomationScheduleControl", () => {
         2,
         true,
         { schemaVersion: 1, kind: "interval", everyMinutes: 120 },
+        null,
       ),
     );
   });
@@ -220,6 +242,7 @@ describe("AutomationScheduleControl", () => {
         3,
         true,
         pinnedSchedule.schedule,
+        null,
       ),
     );
 
@@ -249,6 +272,7 @@ describe("AutomationScheduleControl", () => {
         2,
         false,
         pinnedSchedule.schedule,
+        null,
       ),
     );
     expect(await screen.findByText("Đang tắt")).toBeVisible();

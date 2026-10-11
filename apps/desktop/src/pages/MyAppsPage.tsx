@@ -11,6 +11,7 @@ import {
   Send,
   Upload,
   Trash2,
+  FileJson,
 } from "lucide-react";
 import {
   appWorkflowGet,
@@ -26,6 +27,7 @@ import type { AutomationKind, DeviceInfo } from "../types";
 import { describeError } from "../describeError";
 import { requestConfirm } from "../confirmStore";
 import { EmptyState, LoadingState, StatusNotice } from "../components/States";
+import { ButtonMenu, MenuItem } from "../components/ui/Menu";
 import { useAsyncList } from "../useAsyncList";
 const APPS = [
   { kind: "nurture", name: "Nuôi TikTok", Icon: Sprout },
@@ -153,10 +155,6 @@ export function MyAppsPage({
       </header>
       {error && <StatusNotice tone="error">{error}</StatusNotice>}
       <div className="operator-toolbar">
-        <button type="button" aria-label="Nhập ứng dụng từ JSON" onClick={() => importInput.current?.click()}>
-          <Upload size={15} aria-hidden="true" />
-          Nhập ứng dụng
-        </button>
         <input
           ref={importInput}
           type="file"
@@ -187,6 +185,12 @@ export function MyAppsPage({
           <option value="oldest">Cập nhật cũ nhất</option>
           <option value="name">Tên A–Z</option>
         </select>
+        {/* Raw JSON import is for moving a workflow between machines; it stays out of the everyday row. */}
+        <ButtonMenu label="Nâng cao" icon={FileJson}>
+          <MenuItem icon={Upload} onSelect={() => importInput.current?.click()}>
+            Nhập ứng dụng từ JSON
+          </MenuItem>
+        </ButtonMenu>
       </div>
       <table className="builtin-app-list">
         <thead>
@@ -240,7 +244,12 @@ export function MyAppsPage({
         </StatusNotice>
       )}
       {!loading && !loadError && data !== undefined && rows.length === 0 && (
-        <EmptyState compact title="Chưa có quy trình đã lưu" hint="Tạo ứng dụng mới hoặc nhập JSON để thêm quy trình. Ba ứng dụng có sẵn vẫn sử dụng được." />
+        <EmptyState compact title="Chưa có quy trình đã lưu"
+          hint="Ba ứng dụng có sẵn vẫn sử dụng được. Tạo quy trình đầu tiên từ loại ứng dụng đang chọn; nhập từ JSON nằm trong Nâng cao."
+          action={<button type="button" disabled={busy} onClick={() => void open(newKind)}>
+            <Plus size={16} />
+            Tạo quy trình đầu tiên
+          </button>} />
       )}
       {data !== undefined && search !== "" && visible.length === 0 && (rows.length > 0 || visibleApps.length === 0) && (
         <EmptyState compact title={visibleApps.length > 0 ? "Không có quy trình đã lưu khớp tìm kiếm" : "Không có ứng dụng khớp tìm kiếm"} action={<button type="button" onClick={() => setSearch("")}>Xóa tìm kiếm</button>} />

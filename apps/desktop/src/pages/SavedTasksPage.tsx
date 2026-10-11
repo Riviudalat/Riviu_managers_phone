@@ -18,7 +18,7 @@ import {
   operatorArchive,
   type OperatorRecord,
 } from "../operatorRecords";
-import type { DeviceInfo } from "../types";
+import type { DeviceInfo, DeviceMeta } from "../types";
 import { describeError } from "../describeError";
 import { requestConfirm } from "../confirmStore";
 import { invoke } from "@tauri-apps/api/core";
@@ -26,13 +26,14 @@ import { EmptyState, LoadingState, StatusNotice } from "../components/States";
 import { useAsyncList } from "../useAsyncList";
 import { useMediaQuery } from "../useMediaQuery";
 import { useModalFocus } from "../components/useModalFocus";
+import { formatScheduleTime, localTimeZoneLabel, runsIfEnabledAt, scheduleDeviceLabel } from "../scheduleScope";
 
 async function readSavedTasks() {
   const [rows, apps] = await Promise.all([operatorList("savedTask"), appWorkflowList()]);
   return { rows, apps };
 }
 
-export function SavedTasksPage({ devices }: { devices: DeviceInfo[] }) {
+export function SavedTasksPage({ devices, metas }: { devices: DeviceInfo[]; metas?: Map<string, DeviceMeta> }) {
   const nameInput = useRef<HTMLInputElement>(null);
   const compactEditor = useMediaQuery("(max-width: 1120px)");
   const [search, setSearch] = useState(""),
@@ -56,6 +57,13 @@ export function SavedTasksPage({ devices }: { devices: DeviceInfo[] }) {
     `${record.name} ${appNames.get(String(record.data.appId)) ?? String(record.data.appId)}`
       .toLowerCase().includes(query),
   );
+  const openNew = () => {
+    setEditing(null);
+    setName("");
+    setAppId("");
+    setUdids([]);
+    setForm(true);
+  };
   const run = async (record: OperatorRecord) => {
     if (
       !(await requestConfirm({
@@ -94,17 +102,7 @@ export function SavedTasksPage({ devices }: { devices: DeviceInfo[] }) {
         <button type="button" aria-label="Làm mới tác vụ đã lưu" title="Làm mới tác vụ đã lưu" disabled={loading} onClick={() => void load()}>
           <RefreshCw size={16} aria-hidden="true" />
         </button>
-        <button
-          type="button"
-          className="primary"
-          onClick={() => {
-            setEditing(null);
-            setName("");
-            setAppId("");
-            setUdids([]);
-            setForm(true);
-          }}
-        >
+        <button type="button" className="primary" onClick={openNew}>
           <Plus size={16} />
           Tác vụ mới
         </button>
@@ -164,11 +162,18 @@ export function SavedTasksPage({ devices }: { devices: DeviceInfo[] }) {
                   title="Lập lịch mỗi giờ"
                   disabled={busy}
                   onClick={async () => {
+                    // A saved task names its phones explicitly; that list is what the schedule approves.
+                    const approved = [...new Set((record.data.target as { udids?: string[] }).udids ?? [])];
+                    if (!approved.length) {
+                      setError("Tác vụ chưa có máy nào; chỉnh sửa và chọn máy trước khi lập lịch.");
+                      return;
+                    }
+                    const runs = runsIfEnabledAt(Date.now(), 60).map(formatScheduleTime).join("; ");
                     if (
                       !(await requestConfirm({
                         title: "Tạo lịch chạy mỗi giờ?",
-                        message: `${record.name} · dùng phiên bản và máy đã lưu.`,
-                        confirmLabel: "Tạo lịch",
+                        message: `${record.name} · dùng phiên bản và máy đã lưu. Duyệt ${approved.length} máy: ${approved.map((udid) => scheduleDeviceLabel(udid, devices, metas)).join(", ")}. 5 lần chạy đầu (${localTimeZoneLabel()}): ${runs}.`,
+                        confirmLabel: "Tạo và bật lịch",
                       }))
                     )
                       return;
@@ -180,6 +185,7 @@ export function SavedTasksPage({ devices }: { devices: DeviceInfo[] }) {
                         target: record.data.target,
                         name: record.name,
                         everyMinutes: 60,
+                        approvedUdids: approved,
                       });
                       setMessage(
                         "Đã tạo lịch 60 phút. Mở Lịch chạy để quản lý.",
@@ -221,7 +227,8 @@ export function SavedTasksPage({ devices }: { devices: DeviceInfo[] }) {
         </tbody>
       </table>}
       {!loading && !loadError && data !== undefined && rows.length === 0 && (
-        <EmptyState compact title="Chưa có tác vụ đã lưu" hint="Lưu tác vụ để giữ ứng dụng, phiên bản và phạm vi thiết bị cho lần chạy sau." />
+        <EmptyState compact title="Chưa có tác vụ đã lưu" hint="Lưu tác vụ để giữ ứng dụng, phiên bản và phạm vi thiết bị cho lần chạy sau."
+          action={<button type="button" onClick={openNew}><Plus size={16} />Tạo tác vụ đầu tiên</button>} />
       )}
       {rows.length > 0 && visible.length === 0 && (
         <EmptyState compact title="Không có tác vụ khớp tìm kiếm" action={<button type="button" onClick={() => setSearch("")}>Xóa tìm kiếm</button>} />

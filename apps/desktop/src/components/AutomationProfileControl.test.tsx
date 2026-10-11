@@ -17,6 +17,7 @@ vi.mock("../api", () => ({
   automationScheduleCreate: vi.fn(),
   automationScheduleList: vi.fn(),
   automationScheduleUpdate: vi.fn(),
+  listGroups: vi.fn(async () => []),
 }));
 
 vi.mock("../confirmStore", () => ({

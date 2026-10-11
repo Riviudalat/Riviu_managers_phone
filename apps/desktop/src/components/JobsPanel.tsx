@@ -43,6 +43,7 @@ import type {
 } from "../types";
 import { SelectionStrip } from "./SelectionStrip";
 import { EmptyState, LoadingState, StatusNotice } from "./States";
+import { ButtonMenu, MenuItem } from "./ui/Menu";
 import "../styles/operations.css";
 
 interface Props {
@@ -52,6 +53,8 @@ interface Props {
   initialScript?: string | null;
   deviceLabels: ReadonlyMap<string, string>;
   onOpenSource?: (source: OperationSourceRef) => void;
+  /** Where a first run starts, for the empty list's next step. */
+  onStartWork?: () => void;
 }
 
 const RUN_LABEL: Record<OperationRunState, string> = {
@@ -75,6 +78,13 @@ const KIND_LABEL: Record<OperationRunKind, string> = {
   appInstall: "Cài ứng dụng",
   materialTransfer: "Chuyển nội dung",
 };
+
+const PERIOD_LABEL: Record<string, string> = {
+  "24": "24 giờ qua",
+  "168": "7 ngày qua",
+  all: "Toàn bộ lịch sử",
+};
+const DEFAULT_PERIOD = "24";
 
 const RETRY_SCOPE_LABEL: Record<PublishRetryScope, string> = {
   fullPipeline: "Chạy lại từ trước khi đăng",
@@ -135,6 +145,7 @@ export function JobsPanel({
   initialScript,
   deviceLabels,
   onOpenSource,
+  onStartWork,
 }: Props) {
   const [runs, setRuns] = useState<OperationRunSummary[]>([]);
   const [loading, setLoading] = useState(true);
@@ -149,7 +160,7 @@ export function JobsPanel({
   const [query, setQuery] = useState("");
   const [status, setStatus] = useState<OperationRunState | "all">("all");
   const [kind, setKind] = useState<OperationRunKind | "all">("all");
-  const [period, setPeriod] = useState("24");
+  const [period, setPeriod] = useState(DEFAULT_PERIOD);
   const [offset, setOffset] = useState(0);
   const [page, setPage] = useState<OperationRunPage | null>(null);
   const [advanced, setAdvanced] = useState(false);
@@ -275,6 +286,12 @@ export function JobsPanel({
   }, [loadDetail, selectedRunId]);
 
   const filtered = runs;
+  // Filters the operator chose; the time window has its own way back in the empty state.
+  const activeFilters = [
+    query.trim() && `từ khóa “${query.trim()}”`,
+    status !== "all" && RUN_LABEL[status],
+    kind !== "all" && KIND_LABEL[kind],
+  ].filter((value): value is string => Boolean(value));
   const selectedRun = filtered.find((run) => run.id === selectedRunId) ?? null;
   const visibleDetail = detail?.summary.id === selectedRun?.id ? detail : null;
   const shownSummary = visibleDetail?.summary ?? selectedRun;
@@ -376,15 +393,11 @@ export function JobsPanel({
               <RefreshCw size={15} />
               Làm mới
             </button>
-            <button
-              type="button"
-              className="ghost"
-              aria-expanded={advanced}
-              onClick={() => setAdvanced((value) => !value)}
-            >
-              <Braces size={15} />
-              JSON nâng cao
-            </button>
+            <ButtonMenu label="Nâng cao" icon={Braces} className="ghost">
+              <MenuItem icon={Braces} onSelect={() => setAdvanced((value) => !value)}>
+                {advanced ? "Ẩn JSON nâng cao" : "Chạy JSON nâng cao"}
+              </MenuItem>
+            </ButtonMenu>
           </div>
           {page && (
             <div
@@ -475,17 +488,45 @@ export function JobsPanel({
             </table>
           </div>
           {loading && !runs.length && <LoadingState label="Đang tải tác vụ…" />}
-          {!loading && !loadError && filtered.length === 0 && (
+          {!loading && !loadError && filtered.length === 0 && (activeFilters.length > 0 ? (
             <EmptyState
               compact
-              title={runs.length ? "Không có tác vụ phù hợp" : "Chưa có tác vụ"}
-              hint={
-                runs.length
-                  ? "Đổi từ khóa hoặc bộ lọc trạng thái."
-                  : "Các lần chạy Nuôi, Tương tác, Đăng bài và Flow sẽ xuất hiện tại đây."
+              title="Không có tác vụ phù hợp"
+              hint={`Đang lọc: ${activeFilters.join(" · ")}.`}
+              action={
+                <button type="button" onClick={() => {
+                  setQuery("");
+                  setStatus("all");
+                  setKind("all");
+                  setOffset(0);
+                }}>
+                  Bỏ lọc
+                </button>
               }
             />
-          )}
+          ) : period !== "all" ? (
+            <EmptyState
+              compact
+              title="Chưa có tác vụ"
+              hint={`Không có lượt chạy nào trong ${PERIOD_LABEL[period] ?? period}. Lượt cũ hơn, nếu có, nằm trong toàn bộ lịch sử.`}
+              action={
+                <button type="button" onClick={() => { setPeriod("all"); setOffset(0); }}>
+                  Xem toàn bộ lịch sử
+                </button>
+              }
+            />
+          ) : (
+            <EmptyState
+              compact
+              title="Chưa có tác vụ"
+              hint="Các lần chạy Nuôi, Tương tác, Đăng bài và Flow sẽ xuất hiện tại đây."
+              action={onStartWork && (
+                <button type="button" className="primary" onClick={onStartWork}>
+                  Mở Nuôi TikTok
+                </button>
+              )}
+            />
+          ))}
         </div>
 
         {selectedRun && (

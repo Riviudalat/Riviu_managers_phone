@@ -113,19 +113,19 @@ quyết định thiết kế Riviu, không phải tuyên bố parity toàn bộ 
 
 | Trang | Bố cục chính | Bộ lọc/đầu vào | Đầu ra và đường đi tiếp | Kiểm tra bắt buộc |
 |---|---|---|---|---|
-| Thiết bị | toolbar, group tabs, grid/table, drawer | nhóm, trạng thái, tìm kiếm, máy chọn | trạng thái máy; mở máy hoặc Chẩn đoán | tập lọc giống grid/table; tile/canvas không đổi |
+| Thiết bị | toolbar, group tabs, grid/table, drawer | nhóm, trạng thái, tìm kiếm, máy chọn | trạng thái máy; mở máy hoặc Chẩn đoán | tập lọc giống grid/table; tile/canvas không đổi; chưa có máy: bốn bước cắm USB → cho phép gỡ lỗi USB/Tin cậy → Làm mới → Chẩn đoán; trống vì lọc: nêu bộ lọc + Bỏ lọc |
 | Cài đặt máy | chuẩn cài đặt (checkbox + tự áp dụng), phạm vi, bảng kết quả theo máy | danh mục cài đặt, máy/nhóm/toàn bộ | trạng thái đọc từng cài đặt; kết quả applied/alreadyOk/needsManual/refusedBusy/failed | đọc lỗi là “Chưa rõ”, máy bận bị từ chối không chiếm quyền, iOS “Chưa hỗ trợ” không gọi máy, áp dụng chỉ sau khi đã lưu |
 | Chẩn đoán | bảng điều kiện, detail bằng chứng | máy/phạm vi | readiness/lỗi; sửa đúng điều kiện | không tự repair từ health false-negative |
 | Nuôi | Thiết lập/Hẹn giờ/Theo dõi | scope, nhịp, effect, lịch | phiên/máy/effect; đọc bằng chứng | credential riêng, draft/readiness, target isolation |
 | Tương tác | Thiết lập/Theo dõi, assignment | URL hiện tại, actors, nội dung | campaign/outcome; source retry | URL parse stale, profile identity, uncertain |
 | Đăng bài | ba khung chọn bài / bài↔máy / thiết bị; caption dialog | nguồn/caption/nhạc/Sheet/máy | preflight, Post/URL/Sheet/cleanup; retry phạm vi thiếu | không đăng lại Partial; active bị lọc ẩn, confirm stale, focus caption, target-bound digest |
 | Flow | editor mở, mode/device/fleet, execution detail | graph/node/target/revision | run/node history; mở lỗi | Save/Archive/import identity, guard, node effects |
-| Lượt chạy | bảng dense, filters, detail | source/status/time | total/page/source link | bài khác máy; active cũ; pagination |
-| My Apps | thư viện tích hợp + quy trình đã lưu | tìm, nhập JSON, tạo/chỉnh | mở chức năng hoặc editor | tải quy trình không giả thành rỗng; import bàn phím |
-| Tác vụ đã lưu | bảng và form cấu hình | ứng dụng, revision, scope | chạy/lịch có xác nhận | pending/error không báo 0; giữ revision và target |
-| Quản lý tài khoản | bảng và form tài khoản | tên, handle, nền tảng, máy | bản ghi đã lưu/đối chiếu | response kind cũ không ghi đè; không coi handle nhập là login proof |
-| Lịch chạy | bảng lịch và cấu hình | thời gian local, trạng thái | lần chạy kế tiếp/kết quả | lưu/bật lịch không chạy ngay; giữ revision |
-| Kho nội dung | bảng metadata, bulk toolbar | artifact và target | ledger từng máy | restore monitor, cancel queued, no uncertain retry |
+| Lượt chạy | bảng dense, filters, detail; **Nâng cao** chứa Chạy JSON nâng cao | source/status/time | total/page/source link | bài khác máy; active cũ; pagination; rỗng tách: lọc (Bỏ lọc) · khoảng thời gian (Xem toàn bộ lịch sử) · chưa có lượt (Mở Nuôi TikTok) |
+| My Apps | thư viện tích hợp + quy trình đã lưu | tìm, tạo/chỉnh; nhập JSON trong **Nâng cao** | mở chức năng hoặc editor | tải quy trình không giả thành rỗng; import bàn phím qua menu Nâng cao; rỗng có Tạo quy trình đầu tiên |
+| Tác vụ đã lưu | bảng và form cấu hình | ứng dụng, revision, scope | chạy/lịch có xác nhận | pending/error không báo 0; giữ revision và target; lập lịch duyệt đúng danh sách máy đã lưu, hộp xác nhận nêu máy và 5 lần chạy đầu; rỗng có Tạo tác vụ đầu tiên |
+| Quản lý tài khoản | bảng và form tài khoản; **Nâng cao** chứa nhập/xuất JSON | tên, handle, nền tảng, máy | bản ghi đã lưu/đối chiếu | response kind cũ không ghi đè; không coi handle nhập là login proof; rỗng gọi đúng tên nút Thêm tài khoản và có Thêm tài khoản đầu tiên |
+| Lịch chạy | bảng lịch và cấu hình (xếp chồng khi ≤1200 px, gồm 1093 px của laptop 125%) | thời gian local (nêu múi giờ), trạng thái, máy đã duyệt | 5 lần chạy tới; kết quả gần nhất bằng lời | **Lưu** và **Lưu & bật** tách riêng, không chạy ngay; giữ revision; giữ danh sách máy đã duyệt, phạm vi đổi thì hiện chênh lệch, không bật được và bị từ chối tới khi **Duyệt lại**; rỗng: chưa có cấu hình → Tạo cấu hình để hẹn giờ (mở Nuôi TikTok › Hẹn giờ), có cấu hình → Tạo lịch từ cấu hình |
+| Kho nội dung | bảng metadata, bulk toolbar | artifact và target | ledger từng máy | restore monitor, cancel queued, no uncertain retry; rỗng có Thêm nội dung đầu tiên; tìm không khớp có Xóa tìm kiếm |
 | Trung tâm ứng dụng | bảng package, contextual action | package/version/target | batch/item result; gỡ/cài lại theo máy | artifact snapshot, restart uncertainty; gỡ có confirm mất dữ liệu/tài khoản, máy bận bị từ chối, không tự gửi lại |
 | Dữ liệu | năng lực, tác vụ 24 giờ, nhật ký gần nhất | tìm kiếm trong tối đa 200 log đã tải | số liệu theo phạm vi; tra cứu sâu tại Tác vụ | hiển thị giới hạn và phạm vi lọc/xuất |
 | API | listener status, config section | địa chỉ/credential | actual bind/restart | config khác listener; lỗi bind hiển thị |
@@ -136,6 +136,24 @@ Sidebar theo danh sách MENU trong Sidebar.tsx; editor My Apps, Điều phối v
 Mạng/Proxy còn nhánh render nhưng chưa có lối vào sidebar; không tự mở thêm menu.
 Danh sách phải tách initial loading, refresh, lỗi có retry, rỗng thật và không khớp
 bộ lọc. Refresh lỗi giữ dữ liệu cũ khi còn hợp lệ; response cũ không được đổi view mới.
+
+**Trạng thái rỗng** dùng `EmptyState` trong `components/States.tsx` và luôn có đúng một nút
+bước tiếp. "Trống vì bộ lọc" nêu bộ lọc đang bật và có **Bỏ lọc**/**Xóa tìm kiếm**; "chưa có dữ
+liệu" có nút tạo dữ liệu đầu tiên. Khi cần nhiều bước (cắm máy), dùng `steps` của `EmptyState`.
+Lời gợi ý gọi đúng tên nút đang hiện trên trang.
+
+**Nâng cao.** Thao tác JSON thô (Nhập/Xuất JSON bản ghi, Nhập ứng dụng từ JSON, Chạy JSON nâng
+cao) nằm trong menu **Nâng cao** (`ButtonMenu` của `components/ui/Menu.tsx`) ở cuối thanh công
+cụ; nút dùng hằng ngày đứng trước. Mở bằng Enter/Space, chọn dòng bằng Enter/Space, đóng trả
+focus về nút.
+
+**Lịch.** Mọi trình sửa lịch lặp (Lịch chạy, Hẹn giờ của Nuôi/Tương tác, lịch mỗi giờ của Tác vụ
+đã lưu) hiện 5 lần chạy tới kèm múi giờ máy tính, tách **Lưu** (lưu, đang tắt) với **Lưu & bật**,
+và ghi danh sách máy được duyệt lúc lưu. Phạm vi sau đó khác danh sách đã duyệt (nhóm thêm/bớt
+máy, máy mới cắm vào lịch "Toàn bộ") thì lịch hiện chênh lệch từng máy, không bật được và lần
+chạy đến hạn bị từ chối trước khi gửi lệnh tới khi người vận hành **Duyệt lại**; lịch không tự mở
+rộng phạm vi. Máy đã duyệt nhưng đang mất kết nối chỉ bị bỏ qua ở lần chạy đó và được ghi lại.
+Lịch đăng bài là lịch một lần theo từng bài, mỗi dòng gắn một máy và qua hộp xem lại riêng.
 
 ## Quy tắc thành phần
 

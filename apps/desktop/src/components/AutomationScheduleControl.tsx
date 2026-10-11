@@ -1,5 +1,5 @@
-import { useCallback, useEffect, useRef, useState } from "react";
-import { CalendarClock, Plus, Power, RefreshCw, Save } from "lucide-react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { CalendarClock, Power, RefreshCw, Save } from "lucide-react";
 
 import {
   automationScheduleCreate,
@@ -8,12 +8,17 @@ import {
 } from "../api";
 import { requestConfirm } from "../confirmStore";
 import { describeError } from "../describeError";
+import { scheduleDeviceLabel, scheduleErrorLabel, scheduleScope, type ScheduleScope } from "../scheduleScope";
 import type {
   AutomationDefinition,
   AutomationSchedule,
   AutomationScheduleV1,
+  DeviceInfo,
+  DeviceMeta,
   JsonValue,
 } from "../types";
+import { NextRunsPreview, ScheduleScopeNotice } from "./ScheduleReview";
+import { confirmScheduleApproval, needsGroups, useDeviceGroups, useScheduleTargets } from "../useScheduleScope";
 import { EmptyState, LoadingState, StatusNotice } from "./States";
 
 type IntervalScheduleV1 = {
@@ -54,10 +59,22 @@ function validInterval(minutes: number) {
 
 type Props = {
   profile: AutomationDefinition | null;
+  /** The roster the approved device list is resolved against. */
+  devices?: DeviceInfo[];
+  metas?: Map<string, DeviceMeta>;
+};
+
+type ScheduleValues = {
+  name: string;
+  definitionRevision: number;
+  enabled: boolean;
+  schedule: AutomationScheduleV1;
+  /** A newly approved device list; `null` keeps the stored approval. */
+  approvedUdids: string[] | null;
 };
 
 /** Operator controls for recurring runs pinned to one immutable automation revision. */
-export function AutomationScheduleControl({ profile }: Props) {
+export function AutomationScheduleControl({ profile, devices = [], metas }: Props) {
   const [schedules, setSchedules] = useState<AutomationSchedule[]>([]);
   const [loading, setLoading] = useState(false);
   const [busyId, setBusyId] = useState<string | null>(null);
@@ -67,6 +84,20 @@ export function AutomationScheduleControl({ profile }: Props) {
   const [newMinutes, setNewMinutes] = useState(60);
   const loadGeneration = useRef(0);
   const profileId = profile?.id ?? null;
+  const targetKeys = useMemo(
+    () => [
+      ...(profile ? [{ definitionId: profile.id, definitionRevision: profile.latestRevision }] : []),
+      ...schedules,
+    ],
+    [profile, schedules],
+  );
+  const targets = useScheduleTargets(targetKeys);
+  const groups = useDeviceGroups(needsGroups(targets.values()));
+  const label = useCallback((udid: string) => scheduleDeviceLabel(udid, devices, metas), [devices, metas]);
+  const scopeOf = (definitionId: string, revision: number, approved: string[] | null) =>
+    scheduleScope(approved, targets.get(`${definitionId}:${revision}`), devices, groups);
+  // What saving now would approve: the phones the profile's latest revision names.
+  const newScope = profile ? scopeOf(profile.id, profile.latestRevision, null) : null;
 
   const load = useCallback(async () => {
     const generation = ++loadGeneration.current;
@@ -96,7 +127,7 @@ export function AutomationScheduleControl({ profile }: Props) {
     void load();
   }, [load]);
 
-  const create = useCallback(async () => {
+  const create = useCallback(async (enabled: boolean) => {
     if (!profile) return;
     const name = newName.trim();
     if (!name) {
@@ -107,6 +138,15 @@ export function AutomationScheduleControl({ profile }: Props) {
       setError("Chu kỳ phải là số phút nguyên từ 15 đến 1.440 phút.");
       return;
     }
+    if (!newScope || newScope.kind === "unknown") {
+      setError("Chưa đọc được phạm vi máy của cấu hình. Tải lại rồi lưu lịch.");
+      return;
+    }
+    if (newScope.kind === "missingGroup" || newScope.designated.length === 0) {
+      setError("Phạm vi của cấu hình không có máy nào để duyệt.");
+      return;
+    }
+    const approvedUdids = newScope.designated;
     setBusyId("new");
     setError(null);
     setNotice(null);
@@ -115,30 +155,25 @@ export function AutomationScheduleControl({ profile }: Props) {
         name,
         profile.id,
         profile.latestRevision,
-        true,
+        enabled,
         intervalSchedule(newMinutes),
+        approvedUdids,
       );
       setSchedules((current) => [...current, created]);
       setNewName("");
       setNewMinutes(60);
-      setNotice(`Đã tạo lịch ở bản hồ sơ ${profile.latestRevision}.`);
+      setNotice(
+        `${enabled ? "Đã lưu và bật lịch" : "Đã lưu lịch, đang tắt"} ở bản hồ sơ ${profile.latestRevision} · duyệt ${approvedUdids.length} máy.`,
+      );
     } catch (cause) {
       setError(describeError(cause));
     } finally {
       setBusyId(null);
     }
-  }, [newMinutes, newName, profile]);
+  }, [newMinutes, newName, newScope, profile]);
 
   const update = useCallback(
-    async (
-      record: AutomationSchedule,
-      values: {
-        name: string;
-        definitionRevision: number;
-        enabled: boolean;
-        schedule: AutomationScheduleV1;
-      },
-    ) => {
+    async (record: AutomationSchedule, values: ScheduleValues) => {
       setBusyId(record.id);
       setError(null);
       setNotice(null);
@@ -151,6 +186,7 @@ export function AutomationScheduleControl({ profile }: Props) {
           values.definitionRevision,
           values.enabled,
           values.schedule,
+          values.approvedUdids,
         );
         setSchedules((current) =>
           current.map((candidate) => (candidate.id === updated.id ? updated : candidate)),
@@ -198,7 +234,7 @@ export function AutomationScheduleControl({ profile }: Props) {
       ) : (
         <>
           {schedules.length === 0 ? (
-            <EmptyState title="Chưa có lịch cho hồ sơ này" compact />
+            <EmptyState title="Chưa có lịch cho hồ sơ này" hint="Đặt tên và chu kỳ bên dưới, rồi bấm Lưu hoặc Lưu & bật." compact />
           ) : (
             <div className="automation-schedule-list">
               {schedules.map((record) => (
@@ -207,13 +243,15 @@ export function AutomationScheduleControl({ profile }: Props) {
                   record={record}
                   currentProfileRevision={profile.latestRevision}
                   busy={busyId === record.id}
+                  scope={scopeOf(record.definitionId, record.definitionRevision, record.approvedUdids)}
+                  label={label}
                   onUpdate={update}
                 />
               ))}
             </div>
           )}
 
-          <div className="automation-schedule-create" aria-label="Tạo lịch mới">
+          <div className="automation-schedule-create" role="group" aria-label="Tạo lịch mới">
             <label>
               <span>Tên lịch</span>
               <input
@@ -237,10 +275,25 @@ export function AutomationScheduleControl({ profile }: Props) {
                 onChange={(event) => setNewMinutes(Number(event.currentTarget.value))}
               />
             </label>
-            <button type="button" disabled={busyId !== null} onClick={() => void create()}>
-              <Plus size={15} /> Tạo lịch
-            </button>
+            <div className="schedule-save-actions">
+              <button type="button" aria-label="Lưu lịch, chưa bật" disabled={busyId !== null} onClick={() => void create(false)}>
+                <Save size={15} /> Lưu
+              </button>
+              <button type="button" className="primary" aria-label="Lưu & bật lịch" disabled={busyId !== null} onClick={() => void create(true)}>
+                <Power size={15} /> Lưu & bật
+              </button>
+            </div>
           </div>
+          {newScope && newScope.kind !== "unknown" && newScope.kind !== "missingGroup" && (
+            <p className="schedule-scope-line">
+              Lưu sẽ duyệt {newScope.designated.length} máy: {newScope.designated.map(label).join(", ") || "không có máy nào"}.
+              Nhóm đổi sau đó sẽ dừng lịch tới khi duyệt lại.
+            </p>
+          )}
+          {newScope?.kind === "missingGroup" && (
+            <StatusNotice tone="error">Nhóm máy của cấu hình không còn; chọn phạm vi khác rồi lưu bản hồ sơ mới.</StatusNotice>
+          )}
+          <NextRunsPreview nextDueAt={null} everyMinutes={newMinutes} enabled={false} />
 
           {error && (
             <StatusNotice
@@ -265,25 +318,24 @@ function ScheduleRow({
   record,
   currentProfileRevision,
   busy,
+  scope,
+  label,
   onUpdate,
 }: {
   record: AutomationSchedule;
   currentProfileRevision: number;
   busy: boolean;
-  onUpdate: (
-    record: AutomationSchedule,
-    values: {
-      name: string;
-      definitionRevision: number;
-      enabled: boolean;
-      schedule: AutomationScheduleV1;
-    },
-  ) => Promise<boolean>;
+  scope: ScheduleScope;
+  label: (udid: string) => string;
+  onUpdate: (record: AutomationSchedule, values: ScheduleValues) => Promise<boolean>;
 }) {
   const parsedMinutes = readIntervalMinutes(record.schedule);
   const [name, setName] = useState(record.name);
   const [minutes, setMinutes] = useState(parsedMinutes ?? 60);
   const canRetarget = record.definitionRevision !== currentProfileRevision;
+  // Switching on needs a scope that matches what was approved; switching off never waits.
+  const enableBlocked = !record.enabled && scope.kind !== "approved";
+  const lastError = scheduleErrorLabel(record.lastErrorCode);
 
   const save = async () => {
     const trimmedName = name.trim();
@@ -293,6 +345,7 @@ function ScheduleRow({
       definitionRevision: record.definitionRevision,
       enabled: record.enabled,
       schedule: intervalSchedule(minutes),
+      approvedUdids: null,
     });
   };
 
@@ -309,6 +362,18 @@ function ScheduleRow({
       definitionRevision: currentProfileRevision,
       enabled: record.enabled,
       schedule: intervalSchedule(parsedMinutes!),
+      approvedUdids: null,
+    });
+  };
+
+  const approve = async (udids: string[]) => {
+    if (parsedMinutes === null || !(await confirmScheduleApproval(record.name, udids, label))) return;
+    await onUpdate(record, {
+      name: record.name,
+      definitionRevision: record.definitionRevision,
+      enabled: record.enabled,
+      schedule: intervalSchedule(parsedMinutes),
+      approvedUdids: udids,
     });
   };
 
@@ -354,14 +419,15 @@ function ScheduleRow({
           type="button"
           className="icon-btn"
           aria-label={`${record.enabled ? "Tắt" : "Bật"} lịch ${record.name}`}
-          title={record.enabled ? "Tắt lịch" : "Bật lịch"}
-          disabled={busy || parsedMinutes === null}
+          title={record.enabled ? "Tắt lịch" : enableBlocked ? "Duyệt danh sách máy trước khi bật" : "Bật lịch"}
+          disabled={busy || parsedMinutes === null || enableBlocked}
           onClick={() =>
             void onUpdate(record, {
               name: record.name,
               definitionRevision: record.definitionRevision,
               enabled: !record.enabled,
               schedule: intervalSchedule(parsedMinutes!),
+              approvedUdids: null,
             })
           }
         >
@@ -371,6 +437,17 @@ function ScheduleRow({
 
       {parsedMinutes === null && (
         <StatusNotice tone="warning">Định dạng lịch này chưa được hỗ trợ.</StatusNotice>
+      )}
+      <ScheduleScopeNotice
+        scope={scope}
+        approved={record.approvedUdids}
+        label={label}
+        busy={busy || parsedMinutes === null}
+        onApprove={(udids) => void approve(udids)}
+      />
+      {lastError && <p className="hint">Lần gần nhất: {lastError}</p>}
+      {parsedMinutes !== null && (
+        <NextRunsPreview nextDueAt={record.nextDueAt} everyMinutes={parsedMinutes} enabled={record.enabled} compact />
       )}
       <div className="automation-schedule-row-meta">
         <span>Ghim bản hồ sơ {record.definitionRevision}</span>

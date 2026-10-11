@@ -1785,6 +1785,7 @@ export async function automationScheduleCreate(
   definitionRevision: number,
   enabled: boolean,
   schedule: AutomationScheduleV1,
+  approvedUdids: string[],
 ) {
   const result = await invoke<AutomationSchedule>("automation_schedule_create", {
     name,
@@ -1792,13 +1793,14 @@ export async function automationScheduleCreate(
     definitionRevision,
     enabled,
     schedule,
+    approvedUdids,
   });
   await invalidateReadScope(["schedules", "automation"]);
   return result;
 }
 
-export async function automationScheduleFromSettings(name: string, kind: AutomationKind, target: TargetRef, config: JsonValue, schedule: AutomationScheduleV1): Promise<AutomationSchedule> {
-  const result = await invoke<AutomationSchedule>("automation_schedule_from_settings", { name, kind, target, config, schedule });
+export async function automationScheduleFromSettings(name: string, kind: AutomationKind, target: TargetRef, config: JsonValue, schedule: AutomationScheduleV1, enabled: boolean, approvedUdids: string[]): Promise<AutomationSchedule> {
+  const result = await invoke<AutomationSchedule>("automation_schedule_from_settings", { name, kind, target, config, schedule, enabled, approvedUdids });
   await invalidateReadScope(["schedules", "automation"]);
   return result;
 }
@@ -1811,6 +1813,8 @@ export async function automationScheduleUpdate(
   definitionRevision: number,
   enabled: boolean,
   schedule: AutomationScheduleV1,
+  /** A new approved device list; `null` keeps the stored one, so pausing or renaming approves nothing. */
+  approvedUdids: string[] | null = null,
 ) {
   const result = await invoke<AutomationSchedule>("automation_schedule_update", {
     scheduleId,
@@ -1820,6 +1824,7 @@ export async function automationScheduleUpdate(
     definitionRevision,
     enabled,
     schedule,
+    approvedUdids,
   });
   await invalidateReadScope(["schedules", "automation"]);
   return result;

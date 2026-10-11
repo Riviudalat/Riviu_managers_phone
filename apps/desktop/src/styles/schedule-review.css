@@ -1,0 +1,23 @@
+/* Schedule preview and approved-device notice (`components/ScheduleReview.tsx`). */
+.schedule-runs {
+  display: grid;
+  gap: 4px;
+  min-width: 0;
+  font-size: var(--text-sm);
+  color: var(--text-2);
+}
+.schedule-runs > strong,
+.schedule-runs > summary { color: var(--text-1); font-weight: 600; }
+.schedule-runs > summary { cursor: pointer; }
+.schedule-runs-zone { margin: 0; color: var(--text-3); }
+.schedule-runs-list {
+  margin: 0;
+  padding-left: 1.4em;
+  display: grid;
+  gap: 2px;
+  font-variant-numeric: tabular-nums;
+}
+.schedule-scope-line { margin: 0; min-width: 0; font-size: var(--text-sm); color: var(--text-2); }
+.schedule-scope-line > summary { cursor: pointer; color: var(--text-1); }
+.schedule-scope-line > p { margin: 4px 0 0; overflow-wrap: anywhere; }
+.schedule-save-actions { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; }

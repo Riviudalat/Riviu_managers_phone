@@ -25,10 +25,10 @@ for (const viewport of [{ width: 1440, height: 900 }, { width: 820, height: 560 
     const detailBounds = await detail.boundingBox();
     expect(listBounds).not.toBeNull();
     expect(detailBounds).not.toBeNull();
-    if (viewport.width > 1050) expect(listBounds!.x + listBounds!.width).toBeLessThanOrEqual(detailBounds!.x + 1);
+    if (viewport.width > 1200) expect(listBounds!.x + listBounds!.width).toBeLessThanOrEqual(detailBounds!.x + 1);
     else expect(listBounds!.y + listBounds!.height).toBeLessThanOrEqual(detailBounds!.y + 1);
     expect(detailBounds!.x + detailBounds!.width).toBeLessThanOrEqual(viewport.width);
-    if (viewport.width <= 1050) {
+    if (viewport.width <= 1200) {
       const name = await list.getByText("Lịch buổi sáng").first().boundingBox();
       expect(name).not.toBeNull();
       expect(name!.x).toBeGreaterThanOrEqual(listBounds!.x);
