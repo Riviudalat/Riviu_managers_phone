@@ -2,7 +2,6 @@ import { machineNumberLabel, operatorName } from "./deviceNaming";
 import { useNumberWallpaperSync } from "./wallpaperSync";
 import { deviceNumbersByUdid } from "./deviceNaming";
 import {
-  Fragment,
   lazy,
   Suspense,
   useCallback,
@@ -49,8 +48,7 @@ import { OperationProgressCenter } from "./features/operations/OperationProgress
 import { queueHolder, UNASSIGNED_BOX, type DeviceAttention, type QueuePhone } from "./features/operations/attentionQueueModel";
 import { DeviceTile } from "./components/DeviceTile";
 import { FilterToolbar } from "./components/FilterToolbar";
-import { loadViewMode, storeViewMode, type ViewMode } from "./viewMode";
-import { GroupTabs } from "./components/GroupTabs";
+import { loadPanelCollapsed, loadViewMode, storePanelCollapsed, storeViewMode, type ViewMode } from "./viewMode";
 import { DeviceListTable } from "./components/DeviceListTable";
 import { deviceEvidence } from "./deviceEvidence";
 import { FleetCounters } from "./components/FleetCounters";
@@ -119,7 +117,7 @@ import { HelpPage } from "./pages/HelpPage";
 import type { AgentStatus, DeviceInfo, DeviceLoadState, DeviceWorkOwner, DeviceWorkState, PageId, TargetRef } from "./types";
 import type { ActiveGroupSync, GroupSyncReadiness } from "./groupSync";
 import { MENU_ICONS } from "./components/menuIcons";
-import { loadZoom, stepZoom, storeZoom, tileDensity, TILE_ZOOM, wheelWantsZoom } from "./zoom";
+import { loadZoom, stepZoom, storeZoom, TILE_ZOOM, wheelWantsZoom } from "./zoom";
 import { operationSourcePage, type OperationSourceRef } from "./operationSource";
 import "./App.css";
 
@@ -232,8 +230,12 @@ function App() {
   }, []);
   const [settingsSection, setSettingsSection] = useState<"control" | "integration" | "maintenance" | undefined>();
   const [tileWidth, setTileWidth] = useState(() => loadZoom(TILE_ZOOM));
-  // The "Hiển thị" panel opens from its toolbar button only, and takes no room until then.
-  const [displayOpen, setDisplayOpen] = useState(false);
+  // The left "Cài đặt" panel (GF1) is open by default; folding it is remembered per user.
+  const [displayCollapsed, setDisplayCollapsedState] = useState(loadPanelCollapsed);
+  const setDisplayCollapsed = useCallback((collapsed: boolean) => {
+    setDisplayCollapsedState(collapsed);
+    storePanelCollapsed(collapsed);
+  }, []);
   const [groupToolsView, setGroupToolsView] = useState<"closed" | "dialog" | "recording">("closed");
   const [macroSession, setMacroSession] = useState<{ udids: string[] } | null>(null);
   const closeGroupTools = useCallback(() => {
@@ -1585,8 +1587,7 @@ function App() {
                     Chọn tất cả ({selectableVisible.length})
                   </button>
                 </div>
-                <FilterToolbar viewMode={viewMode} onViewMode={setViewMode}
-                  displayOpen={displayOpen} onDisplay={() => setDisplayOpen((open) => !open)} />
+                <FilterToolbar viewMode={viewMode} onViewMode={setViewMode} />
               </div>
               {activeFilters.length > 0 && (
                 <div className="device-filter-summary">
@@ -1597,25 +1598,24 @@ function App() {
                   <button type="button" className="ghost" onClick={clearWallFilters}>Bỏ lọc</button>
                 </div>
               )}
-              {/* Box chips (PLAN §2): a box is a saved device list, never a Máy N range. A chip
-                  filters the wall to that box and says so; "Tất cả" shows every box section. */}
-              <div className="box-chips">
-                <GroupTabs tabs={tabs} active={groupTab} onSelect={setGroupTab} />
-                <button type="button" className="ghost box-create" aria-label="Tạo nhóm thiết bị" title="Tạo box (nhóm thiết bị)" onClick={() => setGroupsOpen(true)}>+ Box</button>
-              </div>
-              {/* Mounted while hidden: the stream-settings controller inside owns an in-flight apply,
-                  and unmounting it on close made a reopened panel say "Đã áp dụng" before the result. */}
-              {(
-                <DisplayPanel hidden={!displayOpen} tileWidth={tileWidth} onTileWidth={setTileWidth} connection={connectionFilter} onConnection={setConnectionFilter}
-                  groups={tabs.map(tab => ({ ...tab, udids: groups.find(group => group.id === tab.id)?.udids }))} group={groupTab}
-                  machines={devices.map(d => ({ id: d.udid, connection: d.connection }))}
-                  onSettings={() => { setSettingsSection("control"); void requestPage("settings"); }}
-                  onRotate={()=>void(async()=>{const targets=selectedDevices.filter(device=>device.platform==="android");if(!targets.length){pushToast("info","Chọn máy Android để xoay");return;}const results=await Promise.allSettled(targets.map(device=>setScreenRotation(device.udid,1)));const confirmed=results.filter(result=>result.status==="fulfilled"&&result.value===1).length;pushToast(confirmed===targets.length?"ok":"warn",`Đã xác nhận xoay ${confirmed}/${targets.length} máy`);})()} />
-              )}
               </div>
 
-              {/* GF2: the pinned device window docks here, left of the wall (GF1 owns the final row). */}
-              <div className="cc-wall-row"><div data-cc-dock-slot ref={setDockSlot} />
+              {/* GF1: GenFarmer's wall row, [left panel][dock slot][grid]. The pinned device window
+                  (GF2) is portaled into the dock slot; it takes no room while empty. */}
+              <div className="cc-wall-row">
+              {/* Mounted while collapsed: the stream-settings controller inside owns an in-flight
+                  apply, and unmounting it made a reopened panel say "Đã áp dụng" before the result. */}
+              <DisplayPanel collapsed={displayCollapsed} onCollapsed={setDisplayCollapsed}
+                tileWidth={tileWidth} onTileWidth={setTileWidth} connection={connectionFilter} onConnection={setConnectionFilter}
+                groups={tabs.map(tab => {
+                  const udids = groups.find(group => group.id === tab.id)?.udids;
+                  return { ...tab, udids, selected: udids ? selected.filter(udid => udids.includes(udid)).length : selected.length };
+                })} group={groupTab} onGroup={setGroupTab} onCreateGroup={() => setGroupsOpen(true)}
+                machines={devices.map(d => ({ id: d.udid, connection: d.connection }))}
+                onSettings={() => { setSettingsSection("control"); void requestPage("settings"); }}
+                onDeviceSettings={() => void requestPage("deviceSettings")}
+                onRotate={()=>void(async()=>{const targets=selectedDevices.filter(device=>device.platform==="android");if(!targets.length){pushToast("info","Chọn máy Android để xoay");return;}const results=await Promise.allSettled(targets.map(device=>setScreenRotation(device.udid,1)));const confirmed=results.filter(result=>result.status==="fulfilled"&&result.value===1).length;pushToast(confirmed===targets.length?"ok":"warn",`Đã xác nhận xoay ${confirmed}/${targets.length} máy`);})()} />
+              <div data-cc-dock-slot ref={setDockSlot} />
               <div className="device-browser-content" onPointerDownCapture={holdWall}>
 
               {wallDevices.length > 0 && viewMode === "list" && (
@@ -1653,9 +1653,8 @@ function App() {
               {wallDevices.length > 0 && viewMode !== "list" && (
                 <div
                   className="window-canvas"
-                  style={viewMode === "window" ? { "--device-tile-min-width": `${tileWidth}px` } as CSSProperties : undefined}
+                  style={{ "--device-tile-min-width": `${tileWidth}px` } as CSSProperties}
                   data-mode={viewMode}
-                  data-density={viewMode === "window" ? tileDensity(tileWidth) : undefined}
                   ref={canvasRef}
                   role="grid"
                   aria-label="Lưới thiết bị"
@@ -1673,21 +1672,9 @@ function App() {
                       }}
                     />
                   )}
-                  {boxSections.map((section) => (
-                    <Fragment key={section.id}>
-                      <div className="box-section-head" role="row">
-                        <div role="rowheader" aria-label={`${section.label}: ${section.total} máy, ${section.ready} sẵn sàng, ${section.busy} đang chạy, ${section.warning} cần xử lý${section.devices.length < section.total ? `, đang thấy ${section.devices.length}/${section.total}` : ""}`}>
-                          <strong>{section.label}</strong>
-                          <span>Laptop này</span>
-                          <span className="box-section-counts">
-                            {section.total} máy · {section.ready} sẵn sàng · {section.busy} đang chạy · {section.warning} cần xử lý
-                          </span>
-                          {section.devices.length < section.total && (
-                            <span className="box-section-shown">đang lọc: thấy {section.devices.length}/{section.total}</span>
-                          )}
-                        </div>
-                      </div>
-                  {section.devices.map((device) => (
+                  {/* GenFarmer has no section headers: one flat wall, in the same stable order
+                      the box sections kept (V3). Box membership is the left panel's Nhóm list. */}
+                  {boxSections.flatMap((section) => section.devices).map((device) => (
                     <DeviceTile
                       key={device.udid}
                       device={device}
@@ -1715,8 +1702,6 @@ function App() {
                           .catch((error) => toastError(`Không mở lại được ${device.name}`, error));
                       }}
                     />
-                  ))}
-                    </Fragment>
                   ))}
                 </div>
               )}

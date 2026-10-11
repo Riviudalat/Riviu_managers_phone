@@ -94,34 +94,6 @@
   color: var(--rv-selected-text);
   border-color: var(--rv-border-strong);
 }
-/* Tile-size presets: one segmented row under the slider they set. */
-.control-tile-presets {
-  display: grid;
-  grid-template-columns: repeat(3, minmax(0, 1fr));
-  margin: -4px 0 14px;
-  border: 1px solid var(--rv-border);
-  border-radius: 6px;
-  overflow: hidden;
-}
-.control-tile-presets button {
-  min-width: 0;
-  min-height: var(--rv-control-dense);
-  padding: 4px 2px;
-  border: 0;
-  border-radius: 0;
-  background: var(--rv-surface-panel);
-  color: var(--rv-text-2);
-  font-size: var(--rv-font-caption);
-  white-space: nowrap;
-}
-.control-tile-presets button + button {
-  border-left: 1px solid var(--rv-border);
-}
-.control-tile-presets button[aria-pressed="true"] {
-  background: var(--rv-selected-fill);
-  color: var(--rv-selected-text);
-  font-weight: 600;
-}
 .device-filterbar .group-tabs {
   display: none;
 }
@@ -407,128 +379,15 @@ section.device-browser > .device-browser-toolbar,
 section.device-browser > .device-browser-content {
   grid-column: 1;
 }
-.box-chips {
-  display: flex;
-  flex-wrap: wrap;
-  align-items: center;
-  gap: var(--rv-space-2);
-  min-width: 0;
-}
-.box-chips .group-tabs {
-  margin: 0;
-  border: 0;
-  padding: 0;
-}
-.box-chips .box-create {
-  min-height: var(--rv-control-dense);
-}
 .filter-toolbar .view-seg button {
   white-space: nowrap;
   display: inline-flex;
   align-items: center;
   gap: 4px;
   font-size: var(--rv-font-body);
-}
-.filter-toolbar .display-toggle {
-  white-space: nowrap;
-  display: inline-flex;
-  align-items: center;
-  gap: 6px;
-  margin-left: var(--rv-space-2);
-}
-.control-display-panel[hidden] {
-  display: none;
-}
-.control-display-panel {
-  display: flex;
-  flex-wrap: wrap;
-  align-items: flex-start;
-  gap: var(--rv-space-3) var(--rv-space-6, 24px);
-  padding: var(--rv-space-3);
-  border: 1px solid var(--rv-border);
-  border-radius: var(--rv-radius-panel);
-  background: var(--rv-surface-panel);
-}
-.control-display-panel .display-group {
-  display: flex;
-  flex-wrap: wrap;
-  align-items: flex-end;
-  gap: var(--rv-space-2) var(--rv-space-3);
-  min-width: 0;
-  margin: 0;
-  padding: 0;
-  border: 0;
-}
-.control-display-panel legend {
-  display: flex;
-  align-items: center;
-  gap: 6px;
-  margin-bottom: var(--rv-space-2);
-  font-size: var(--rv-font-body);
-  font-weight: 600;
-  color: var(--rv-text-1);
-}
-.control-display-panel label {
-  display: grid;
-  gap: 4px;
-  min-width: 150px;
-  font-size: var(--rv-font-body);
-  color: var(--rv-text-2);
-}
-.control-display-panel label > span {
-  display: flex;
-  align-items: center;
-  gap: 6px;
-}
-.control-display-panel output {
-  margin-left: auto;
-  font-variant-numeric: tabular-nums;
-  color: var(--rv-text-3);
-}
-.control-display-panel input[type="range"] {
-  width: 100%;
-  accent-color: var(--rv-primary);
-}
-.control-display-panel .control-connections {
-  display: flex;
-  gap: 4px;
-  margin: 0;
-  padding: 0;
-}
-.control-display-panel .control-shortcuts {
-  display: flex;
-  flex-wrap: wrap;
-  gap: 6px;
-}
-.control-display-panel .control-stream-hint,
-.control-display-panel .control-stream-status {
-  flex-basis: 100%;
-  margin: 0;
-  font-size: var(--rv-font-secondary);
-  color: var(--rv-text-2);
-}
-
-/* Box section header: one row across the wall, inside the same grid so selection, the rubber
-   band and Ctrl + wheel keep working across sections. */
-.window-canvas > .box-section-head {
+}/* Box section header: one row across the wall, inside the same grid so selection {
   grid-column: 1 / -1;
   min-width: 0;
-}
-.box-section-head > [role="rowheader"] {
-  display: flex;
-  flex-wrap: wrap;
-  align-items: baseline;
-  gap: 4px var(--rv-space-3);
-  padding: 2px 2px 0;
-  font-size: var(--rv-font-body);
-  color: var(--rv-text-2);
-}
-.box-section-head strong {
-  font-size: var(--rv-font-label);
-  color: var(--rv-text-1);
-}
-.box-section-counts {
-  font-variant-numeric: tabular-nums;
 }
 /* The filter row always takes its own row. Sharing one with the fleet actions made the toolbar
    one row tall or two depending on the selection (the actions' labels change with it), so the
@@ -536,4 +395,157 @@ section.device-browser > .device-browser-content {
    (PLAN §3: nothing but the operator's own action changes the wall's area). */
 section.device-browser > .device-browser-toolbar > .device-toolrow {
   flex: 1 1 100%;
+}
+
+/* GF1: the left "Cài đặt" panel, between the sidebar and the wall, as on GenFarmer. */
+.cc-side-panel {
+  flex: none;
+  align-self: flex-start;
+  position: sticky;
+  top: 0;
+  display: flex;
+  flex-direction: column;
+  width: 196px;
+  max-height: calc(100vh - 120px);
+  overflow: auto;
+  border: 1px solid var(--rv-border);
+  border-radius: 8px;
+  background: var(--rv-surface-panel);
+}
+.cc-side-panel[data-collapsed="true"] {
+  width: 30px;
+}
+.cc-side-head {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  padding: 4px 4px 4px 8px;
+  border-bottom: 1px solid var(--rv-border);
+}
+.cc-side-panel[data-collapsed="true"] .cc-side-head {
+  padding: 4px 2px;
+  border-bottom: 0;
+}
+.cc-side-tab {
+  flex: 1 1 auto;
+  font-weight: 700;
+  font-size: var(--rv-font-secondary);
+  color: var(--rv-primary);
+}
+.cc-side-toggle {
+  min-height: 22px;
+  width: 22px;
+  padding: 0;
+  display: grid;
+  place-items: center;
+}
+.cc-side-body {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  padding: 8px;
+  font-size: var(--rv-font-secondary);
+}
+.cc-side-body[hidden] {
+  display: none;
+}
+.cc-side-slider,
+.cc-side-stream label {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+.cc-side-slider > span,
+.cc-side-stream label > span {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+}
+.cc-side-slider output {
+  margin-left: auto;
+  color: var(--rv-text-3);
+}
+.cc-side-stream {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+.cc-side-stream input[type="range"],
+.cc-side-slider input[type="range"] {
+  width: 100%;
+}
+.cc-side-shortcuts {
+  display: grid;
+  grid-template-columns: 1fr 1fr 1fr;
+  gap: 4px;
+}
+.cc-side-shortcuts button {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 2px;
+  min-height: 0;
+  padding: 4px 2px;
+  font-size: var(--text-tile-compact);
+}
+.cc-side-connections {
+  margin: 0;
+  padding: 0;
+}
+.cc-side-connections button {
+  flex: 1 1 0;
+  min-width: 0;
+  padding: 2px 4px;
+  font-size: var(--text-tile-compact);
+}
+.cc-side-groups-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  font-weight: 700;
+}
+.cc-side-add {
+  min-height: 22px;
+  width: 22px;
+  padding: 0;
+  display: grid;
+  place-items: center;
+}
+.cc-side-group-list {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  margin-top: 4px;
+}
+.cc-side-group-list button {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  min-height: 24px;
+  padding: 2px 6px;
+  border: 1px solid transparent;
+  border-radius: 4px;
+  background: none;
+  text-align: left;
+  font-size: var(--text-2xs);
+}
+.cc-side-group-list button.active {
+  border-color: var(--rv-primary);
+  background: var(--rv-surface-panel);
+  color: var(--rv-primary);
+  font-weight: 700;
+}
+.cc-side-group-list button.active .cc-side-group-count {
+  color: var(--rv-primary);
+}
+.cc-side-group-name {
+  flex: 1 1 auto;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.cc-side-group-count {
+  flex: none;
+  color: var(--rv-text-3);
 }

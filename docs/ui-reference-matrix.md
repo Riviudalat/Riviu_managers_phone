@@ -50,55 +50,39 @@ máy, trả phiên cũ trước khi mở phiên mới. Như GenFarmer, cửa s�
 cỡ "Màn hình lớn" và danh sách chức năng nằm cố định bên trái lưới trong Trung tâm (lưới dàn lại
 bên phải); nút ghim/bỏ ghim trên đầu danh sách chức năng chuyển sang cửa sổ nổi kéo được, lựa chọn
 nhớ theo người dùng. Bề rộng ô ghim chỉ theo cỡ màn hình lớn và cửa sổ, không theo trạng thái máy;
-ở trang khác hoặc cửa sổ hẹp hơn 900 px cửa sổ nổi. Menu/confirm vẫn ở trên. Không còn rail dọc:
-nút **Hiển thị** trên thanh công cụ mở/đóng một bảng ngang dưới thanh (chỉ khi bấm, không theo
-hover): cỡ ô (Nhỏ/Vừa/Lớn + thanh trượt), cỡ màn hình lớn, chất lượng lưới, chất lượng cửa sổ
-lớn, FPS (áp dụng cho mọi máy Android, kèm câu "sẽ khởi động lại luồng hình Android"), lọc kết
-nối, Xoay máy đã chọn, Cài đặt. Chỉ ghi "Đã áp dụng" sau khi lệnh lưu trả kết quả. Dropdown dùng chung nền lớp nổi, viền trung tính, option
+ở trang khác hoặc cửa sổ hẹp hơn 900 px cửa sổ nổi. Menu/confirm vẫn ở trên.
+**Bảng Cài đặt bên trái** (GF1, chép GenFarmer) nằm giữa sidebar và lưới, mở sẵn,
+thu/mở bằng «/» (nhớ theo người dùng; khi thu vẫn giữ trạng thái đang áp dụng): thanh trượt
+**Màn hình lớn**, **Màn hình nhỏ** (cỡ ô, cùng Ctrl + lăn chuột), chất lượng lưới, chất lượng
+cửa sổ lớn, FPS (áp dụng cho mọi máy Android, kèm câu "sẽ khởi động lại luồng hình Android");
+nút **Cài đặt**, **Thiết bị** (Cài đặt máy), **Xoay** (máy Android đã chọn); lọc **Tất cả / USB /
+Wi‑Fi**; danh sách **Nhóm** với "(chọn / tổng)" và **+** mở quản lý nhóm. Chỉ ghi "Đã áp dụng" sau khi lệnh lưu trả kết quả. Dropdown dùng chung nền lớp nổi, viền trung tính, option
 hover/đang trỏ nền xám, dấu chọn và menu cuộn, chuyển động 180–200 ms.
 Quy trình ứng dụng dùng bảng ứng dụng gọn. Mở ứng dụng vào trang vận hành cũ; Thêm Flow mở editor
 riêng với thư viện hành động bên trái, canvas chính, cấu hình và thiết bị bên phải.
-Tên, model, tài khoản và trạng thái máy nằm trên nền sáng riêng phía trên preview;
-không che hình điện thoại. Preview trong lưới giữ tỉ lệ 1:2; thẻ có thêm phần thông tin
-cao 88 px. Dấu chọn trên thẻ và bộ đếm dưới thanh lọc dùng cùng selection hiện có.
-Dải thông tin gồm số máy/tên, @nick · model, dòng trạng thái gộp (`DeviceStatusLine`: biểu
-tượng + "Nhãn: việc/lý do" + màu trạng thái) và bước đang chạy hoặc lý do cần xử lý; chữ dài
-bị cắt nhưng vẫn đọc đủ qua tên truy cập và tooltip.
-Máy cần xử lý có viền hổ phách; máy đã chọn có viền cam và dấu tích.
+**Một lưới kiểu GenFarmer** (GF1): ô dọc 1:2, hình trực tiếp phủ kín ô; dải trên cùng nền
+gradient tối (chữ trắng đọc được trên mọi hình nền) gồm số máy lớn "N" 20 px đậm (tên truy cập
+vẫn là "Máy N, …"), dòng @tài khoản hoặc model, một dòng trạng thái (`DeviceStatusLine`: biểu
+tượng + chữ) và bước/lý do; chữ dài bị cắt nhưng đọc đủ qua tên truy cập và tooltip. Góc trái
+trên là nhãn kết nối (USB/Wi‑Fi/MOCK), góc phải trên là ô chọn. Máy không có hình là ô tối có
+biểu tượng và chữ trạng thái, xám hoặc đỏ khi mất kết nối, không bao giờ xanh. Máy đã chọn có
+viền 2 px màu thương hiệu; máy cần xử lý viền hổ phách; máy đang mở cửa sổ điều khiển phủ
+"Đang điều khiển". Cỡ ô mặc định 96 px, khe 4 px: ≥ 13 cột ở 1920×1080 (đo 14) và 9 cột ở
+1366×768 khi bảng Cài đặt mở (mock trình duyệt, `fleetSize: 40`).
 
-**Ba chế độ xem** (nút có chữ trên thanh công cụ, nhớ theo người dùng, tập chọn giữ nguyên khi
-đổi): **Tổng quan** (mặc định cho người mới), **Màn hình** (preview lớn như cũ) và **Danh sách**.
-Ô **Tổng quan** là ô ngắn ~82 px: chữ bên trái, preview 40 px (36 px khi cửa sổ thấp hơn
-700 px) bên phải để định vị máy; Máy N 20 px đậm không bao giờ bị cắt; @tài khoản 14 px rút
-gọn trên ô và hiện đủ khi ô được chọn hoặc có focus (kể cả bàn phím); một dòng trạng thái 14 px
-có lý do/bước. Nút mở màn hình hiện khi hover/focus/chọn; nhấp đúp vẫn mở. Màn hình giữ thanh
-trượt và Ctrl + lăn chuột với ba cỡ **Nhỏ** (100 px), **Vừa** (140 px), **Lớn** (190 px); kiểu
-dải theo dải độ rộng hiện tại. Ở cỡ Nhỏ, dải cao khoảng 64 px với chữ phụ 11,5 px
-(`--text-tile-compact`, ngoại lệ có tên); Vừa và Lớn dùng dải 88 px với chữ ≥ 12 px.
+**Hai chế độ xem** (nhớ theo người dùng, tập chọn giữ nguyên khi đổi): **Màn hình** (lưới trên,
+mặc định; lựa chọn "Tổng quan" đã lưu mở lưới này) và **Danh sách**. Hàng lưới là
+`[bảng Cài đặt][khe dock][lưới]`; khe `data-cc-dock-slot` để cửa sổ điều khiển ghim (GF2) gắn
+vào, rỗng thì không chiếm chỗ.
 
-| Cỡ cửa sổ (CSS px) | Tổng quan, trọn vẹn ở đầu trang | Máy N / trạng thái | Cuộn ngang |
-|---|---|---|---|
-| 1920×1080 | 40/40 ô | 20 / 14 px | không |
-| 1366×768 | 34 ô (≥ 20) | 20 / 14 px | không |
-| 1093×614 (Windows 125%) | 20 ô | 20 / 14 px | không |
-| 820×560 | 6 ô | 20 / 14 px | không |
-
-Đo bằng mock trình duyệt, `fleetSize: 40`, hai box 20 + 19 máy không theo dải số, sidebar mở.
-
-**Box là danh sách máy được gán**, không suy từ Máy N: mỗi nhóm đã lưu là một box. Lưới Tổng
-quan và Màn hình chia theo box, mỗi phần có tiêu đề "tên · Laptop này · tổng · sẵn sàng · đang
-chạy · cần xử lý"; máy không thuộc nhóm nào nằm ở phần **Chưa thuộc box** cuối lưới; máy thuộc
-hai nhóm hiện một lần ở nhóm đầu. Số trên tiêu đề box đếm **toàn bộ máy đã gán** (đang có mặt);
-tìm kiếm và lọc trạng thái/kết nối chỉ đổi ô được vẽ và ghi riêng "đang lọc: thấy N/T", không bao
-giờ thay mẫu số. Chip box dưới thanh công cụ lọc lưới về một box, nhãn lọc chung "Đang lọc: … ·
-Bỏ lọc"; **+ Box** mở quản lý nhóm. Thứ tự trong box là thứ tự số máy, không đổi khi trạng thái
-đổi. Ô có focus nằm trên ô bên cạnh để @tài khoản đầy đủ không bị che; trên ô ngắn, tuổi hình
-hiện dạng gọn "65 giây" cạnh Máy N (đủ câu trong tooltip và tên truy cập). Bảng Hiển thị khi đóng
-vẫn giữ trạng thái đang áp dụng (ẩn, không gỡ khỏi trang).
+**Box là danh sách máy được gán**, không suy từ Máy N: mỗi nhóm đã lưu là một box. Lưới không
+có tiêu đề box (như GenFarmer); chọn box ở danh sách Nhóm của bảng Cài đặt. Thứ tự ô giữ như
+trước (theo box, máy chưa thuộc box cuối lưới, máy thuộc hai nhóm hiện một lần ở nhóm đầu; trong
+box theo số máy), không đổi khi trạng thái đổi. Tìm kiếm và lọc trạng thái/kết nối chỉ đổi ô
+được vẽ, nhãn lọc chung "Đang lọc: … · Bỏ lọc".
 
 **Hoãn sang đợt sau (V4, đã ghi nhận):** cột **Chủ giữ** và **Cập nhật** của Danh sách; ngăn Nhóm
-mở theo yêu cầu và ghim được ở ≥ 1600 px (hiện vẫn là hộp quản lý nhóm); cỡ ô trong Hiển thị chỉ
-có tác dụng ở chế độ Màn hình (cần ghi rõ hoặc khóa ở Tổng quan); đoạn mô tả cột Danh sách cũ ngay
+mở theo yêu cầu và ghim được ở ≥ 1600 px (hiện vẫn là hộp quản lý nhóm); đoạn mô tả cột Danh sách cũ ngay
 dưới đây còn tên cột trước V4 (Trạng thái, Cần xử lý) và sẽ được thay bằng một hợp đồng cột duy nhất.
 
 **Độ mới hình**: ô ghi "hình N giây trước" khi khung hình gần nhất cũ hơn 20 giây và phủ

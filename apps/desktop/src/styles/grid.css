@@ -18,12 +18,6 @@
   line-height: 1.3;
   overflow: hidden;
 }
-.dev-phone-strip-head {
-  display: flex;
-  align-items: baseline;
-  gap: 5px;
-  min-width: 0;
-}
 .dev-phone-index {
   flex: 0 1 auto;
   min-width: 0;
@@ -35,19 +29,12 @@
   font-weight: 700;
   font-variant-numeric: tabular-nums;
   line-height: 1.2;
-}
-.dev-phone-name,
-.dev-phone-ident,
+}.dev-phone-ident,
 .dev-phone-detail {
   min-width: 0;
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
-}
-.dev-phone-name {
-  flex: 1 1 0;
-  font-weight: 600;
-  color: var(--rv-text-2);
 }
 /* The check is a picture of `aria-selected`, not a second control. */
 .dev-phone-check {
@@ -128,11 +115,9 @@ button.dev-phone-detail {
 }
 .window-canvas[data-density="overview"] .dev-phone-detail {
   flex: 1 1 0;
-}
-/* At 100 px the alias and the running step only ever showed as a letter and an ellipsis. Both
+}/* At 100 px the alias and the running step only ever showed as a letter and an ellipsis. Both
    stay in the strip's tooltip and the tile's accessible name; the attention reason is the one
-   detail that keeps its place, because it is what the operator has to act on. */
-.window-canvas[data-density="overview"] .dev-phone-name,
+   detail that keeps its place,
 .window-canvas[data-density="overview"] .dev-phone:not(.attention) .dev-phone-detail {
   display: none;
 }
@@ -653,9 +638,6 @@ button.linkish,
   overflow: visible;
   font-size: var(--rv-font-body);
 }
-.window-canvas[data-mode="overview"] .dev-phone-strip-head {
-  align-items: center;
-}
 .window-canvas[data-mode="overview"] .dev-phone-index {
   flex: none;
   overflow: visible;
@@ -665,9 +647,6 @@ button.linkish,
 .window-canvas[data-mode="overview"] .dev-phone-ident {
   font-size: var(--rv-font-body);
   line-height: 20px;
-}
-.window-canvas[data-mode="overview"] .dev-phone-model {
-  display: none;
 }
 /* Every tile is its own stacking context (`contain`), so the expanded @account only reads in
    full when its tile is raised above the following ones: focus above selection above the rest. */
@@ -700,10 +679,7 @@ button.linkish,
 }
 .window-canvas[data-mode="overview"] .dev-phone-detail {
   flex: 1 1 0;
-}
-/* The run step stays on the status line after the chip, truncated; the alias and the cable
-   badge leave the short tile (both stay in the tooltip and accessible name). */
-.window-canvas[data-mode="overview"] .dev-phone-name,
+}/* The run step stays on the status line after the chip,
 .window-canvas[data-mode="overview"] .dev-phone-conn {
   display: none;
 }
@@ -772,4 +748,181 @@ button.linkish,
 }
 .window-canvas[data-mode="overview"] .dev-phone-age-short {
   display: inline;
+}
+
+/* ——— GF1: GenFarmer's wall (owner request 2026-10-11) ———
+   The live screen fills the whole portrait tile; the caption is a band over the top of it on a
+   dark gradient, so the white text stays readable on any wallpaper. Small equal tiles, small
+   gaps, no box section headers. */
+.window-canvas[data-mode="window"] {
+  gap: 4px;
+  padding: 2px 0 12px;
+}
+.window-canvas[data-mode="window"] > .dev-phone {
+  border-radius: 6px;
+  border: 2px solid var(--rv-stage-line, #3a3f46);
+  background: #1d2127;
+  overflow: hidden;
+  contain-intrinsic-size: 100px 200px;
+}
+.window-canvas[data-mode="window"] > .dev-phone.selected,
+.window-canvas[data-mode="window"] > .dev-phone.focused {
+  border-color: var(--rv-primary);
+  box-shadow: none;
+}
+.window-canvas[data-mode="window"] > .dev-phone.attention {
+  border-color: var(--rv-status-attention-solid);
+  box-shadow: none;
+}
+.window-canvas[data-mode="window"] > .dev-phone.attention.selected {
+  border-color: var(--rv-primary);
+  box-shadow: 0 0 0 2px var(--rv-status-attention-solid);
+}
+.window-canvas[data-mode="window"] .dev-phone-screen {
+  border-radius: 0;
+  background: #1d2127;
+}
+.window-canvas[data-mode="window"] .dev-phone-strip {
+  position: absolute;
+  inset: 0 0 auto 0;
+  z-index: 3;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 0;
+  padding: 4px 4px 14px;
+  border: 0;
+  border-radius: 0;
+  background: linear-gradient(to bottom, rgb(0 0 0 / 0.72) 0%, rgb(0 0 0 / 0.5) 62%, rgb(0 0 0 / 0) 100%);
+  color: var(--rv-text-inverse);
+  text-align: center;
+  pointer-events: none;
+}
+.window-canvas[data-mode="window"] .dev-phone-strip :is(button, a) {
+  pointer-events: auto;
+}
+.window-canvas[data-mode="window"] .dev-phone-index {
+  font-size: clamp(16px, 20cqw, 26px);
+  line-height: 1.1;
+  font-weight: 700;
+  color: var(--rv-text-inverse);
+  text-shadow: 0 1px 2px rgb(0 0 0 / 0.6);
+}
+.window-canvas[data-mode="window"] .dev-phone-ident {
+  max-width: 100%;
+  font-size: var(--text-tile-compact);
+  font-weight: 700;
+  line-height: 1.25;
+  color: var(--rv-text-inverse);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  text-shadow: 0 1px 2px rgb(0 0 0 / 0.6);
+}
+.window-canvas[data-mode="window"] .dev-phone-run {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  max-width: 100%;
+  min-width: 0;
+  gap: 0;
+  margin-top: 1px;
+}
+.window-canvas[data-mode="window"] .dev-phone-status {
+  max-width: 100%;
+  min-height: 0;
+  padding: 0;
+  font-size: clamp(9px, 10.5cqw, 11.5px);
+  line-height: 1.3;
+  background: none;
+  border: 0;
+  color: #e6e8eb;
+}
+.window-canvas[data-mode="window"] .dev-phone-status :is(span, svg) {
+  color: inherit;
+}
+.window-canvas[data-mode="window"] .dev-phone[data-op-kind="offline"] .dev-phone-status {
+  color: #ff9b94;
+}
+.window-canvas[data-mode="window"] .dev-phone[data-op-kind="warning"] .dev-phone-status {
+  color: #ffc46b;
+}
+.window-canvas[data-mode="window"] .dev-phone-detail {
+  max-width: 100%;
+  font-size: clamp(9px, 10.5cqw, 11.5px);
+  color: #ffd79a;
+}
+.window-canvas[data-mode="window"] .dev-phone-age {
+  margin-top: 1px;
+  font-size: clamp(8px, 9cqw, 11px);
+}
+.window-canvas[data-mode="window"] .dev-phone-age-long {
+  display: none;
+}
+.window-canvas[data-mode="window"] .dev-phone-age-short {
+  display: inline;
+}
+.window-canvas[data-mode="window"] .dev-phone-conn {
+  position: absolute;
+  top: 2px;
+  left: 2px;
+  bottom: auto;
+  right: auto;
+  z-index: 4;
+  padding: 0 3px;
+  border-radius: 3px;
+  background: #5b5bd6;
+  color: var(--rv-text-inverse);
+  font-size: clamp(8px, 8cqw, 11px);
+  font-weight: 700;
+  line-height: 12px;
+  letter-spacing: 0;
+}
+.window-canvas[data-mode="window"] .dev-phone-check {
+  position: absolute;
+  top: 3px;
+  right: 3px;
+  z-index: 4;
+  width: 13px;
+  height: 13px;
+  border: 1.5px solid rgb(255 255 255 / 0.85);
+  border-radius: 3px;
+  background: rgb(0 0 0 / 0.35);
+  color: var(--rv-text-inverse);
+}
+.window-canvas[data-mode="window"] .dev-phone.selected .dev-phone-check {
+  background: var(--rv-primary);
+  border-color: var(--rv-primary);
+}
+/* Nothing to draw: a dark tile with the placeholder's icon and text. Gray, never green — a
+   disconnected phone must not look healthy. */
+.window-canvas[data-mode="window"] .dev-phone-empty {
+  padding-top: 52px;
+  color: #aeb4bc;
+  font-size: clamp(9px, 10.5cqw, 11.5px);
+}
+.window-canvas[data-mode="window"] .dev-phone[data-op-kind="offline"] .dev-phone-empty {
+  color: #ff9b94;
+}
+.window-canvas[data-mode="window"] .dev-phone-focused-message {
+  position: absolute;
+  inset: 0;
+  z-index: 2;
+  display: grid;
+  place-items: center;
+  padding: 52px 4px 0;
+  background: rgb(10 14 20 / 0.72);
+  color: var(--rv-text-inverse);
+  font-size: var(--text-tile-compact);
+  font-weight: 700;
+  text-align: center;
+}
+.window-canvas[data-mode="window"] .dev-phone-center {
+  top: auto;
+  bottom: 4px;
+  left: 4px;
+}
+
+.window-canvas[data-mode="window"] {
+  grid-template-columns: repeat(auto-fill, var(--device-tile-min-width, 100px));
 }

@@ -21,7 +21,7 @@ function rail(group: string, onConnection = vi.fn()) {
   return <DisplayPanel
     tileWidth={180} onTileWidth={vi.fn()} connection="all" onConnection={onConnection}
     groups={groups} group={group} machines={machines}
-    onSettings={vi.fn()}
+    onSettings={vi.fn()} collapsed={false} onCollapsed={vi.fn()} onGroup={vi.fn()} onCreateGroup={vi.fn()} onDeviceSettings={vi.fn()}
   />;
 }
 
@@ -47,7 +47,7 @@ it("shows zero for an empty group without changing the selected connection", () 
     tileWidth={180} onTileWidth={vi.fn()} connection="wifi" onConnection={vi.fn()}
     groups={[...groups, { id: "empty", label: "Trống", count: 0, udids: [] }]}
     group="empty" machines={machines}
-    onSettings={vi.fn()}
+    onSettings={vi.fn()} collapsed={false} onCollapsed={vi.fn()} onGroup={vi.fn()} onCreateGroup={vi.fn()} onDeviceSettings={vi.fn()}
   />);
   const filters = within(screen.getByRole("group", { name: "Lọc kết nối" }));
   expect(filters.getByRole("button", { name: "Tất cả · 0 máy" })).toBeTruthy();

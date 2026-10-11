@@ -1,7 +1,7 @@
 import { test, expect } from "@playwright/test";
 import { installTauriMock } from "./fixtures/tauriMock";
 
-for (const width of [1440, 820]) test(`display panel opens from the toolbar, native dropdown and compact transfers at ${width}`, async ({ page }) => {
+for (const width of [1440, 820]) test(`settings panel folds beside the wall, native dropdown and compact transfers at ${width}`, async ({ page }) => {
   await page.setViewportSize({width, height: 900});
   await installTauriMock(page, {androidRoster: true, fleetSize: 4});
   await page.addInitScript(() => {
@@ -19,20 +19,23 @@ for (const width of [1440, 820]) test(`display panel opens from the toolbar, nat
     };
   });
   await page.goto('/');
-  // The vertical rail is gone (PLAN §2): "Hiển thị" is a toolbar button that opens a horizontal
-  // panel and closes it again; neither moves the wall sideways.
-  const toggle=page.getByRole('button',{name:'Hiện bảng Hiển thị',exact:true});
-  const panel=page.getByRole('region',{name:'Hiển thị',exact:true});
-  await expect(panel).toHaveCount(0);
-  const before=await page.getByTestId('device-tile').first().boundingBox();
-  await toggle.click();
+  // GF1: the left "Cài đặt" panel is open beside the wall by default, as on GenFarmer, and
+  // folds to a «/» rail that gives its width back to the wall. The fold is remembered.
+  const toggle=page.getByRole('button',{name:'Bảng Cài đặt',exact:true});
+  const panel=page.getByRole('region',{name:'Cài đặt hiển thị',exact:true});
   await expect(toggle).toHaveAttribute('aria-expanded','true');
   await expect(panel).toBeVisible();
-  const after=await page.getByTestId('device-tile').first().boundingBox();
-  expect(after!.x).toBe(before!.x);
+  const before=await page.getByTestId('device-tile').first().boundingBox();
   await page.screenshot({path:test.info().outputPath('display-panel.png')});
   await toggle.click();
+  await expect(toggle).toHaveAttribute('aria-expanded','false');
   await expect(panel).toHaveCount(0);
+  const after=await page.getByTestId('device-tile').first().boundingBox();
+  expect(after!.x).toBeLessThan(before!.x);
+  await page.reload();
+  await expect(toggle).toHaveAttribute('aria-expanded','false');
+  await toggle.click();
+  await expect(panel).toBeVisible();
   await page.getByTestId('device-tile').first().dblclick();
   const focus=page.locator('.device-floating-window');
   await focus.getByRole('button',{name:'PC → Điện thoại',exact:true}).click();

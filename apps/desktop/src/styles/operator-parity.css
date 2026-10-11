@@ -103,22 +103,6 @@
   color: var(--danger);
   font-size: var(--text-xs);
 }
-.control-shortcuts {
-  display: grid;
-  grid-template-columns: 1fr 1fr;
-  gap: 6px;
-  padding-bottom: 12px;
-}
-.control-shortcuts button {
-  min-height: 32px;
-  display: flex;
-  gap: 5px;
-  justify-content: center;
-  align-items: center;
-  background: var(--rv-surface-sunken);
-  color: var(--rv-text-2);
-  border: 0;
-}
 .content-myApps {
   padding: 0;
 }

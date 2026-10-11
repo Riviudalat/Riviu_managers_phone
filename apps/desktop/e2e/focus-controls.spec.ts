@@ -26,7 +26,7 @@ for (const viewport of [{ width: 1440, height: 900 }, { width: 820, height: 560 
     const focus = page.locator(".focus-overlay");
     await expect(focus.getByRole("button", { name: "Home", exact: true })).toBeEnabled();
     await expect(focus.getByTestId("focus-control-status")).toHaveCount(0);
-    await expect(first.getByText("Đang mở phóng to")).toBeVisible();
+    await expect(first.getByText("Đang điều khiển")).toBeVisible();
     for (const name of ["Home", "Back", "Recents", "Giảm âm lượng", "Tăng âm lượng", "Nút nguồn"]) {
       await focus.getByRole("button", { name, exact: true }).click();
     }
@@ -36,7 +36,7 @@ for (const viewport of [{ width: 1440, height: 900 }, { width: 820, height: 560 
     expect(bounds!.y + bounds!.height).toBeLessThanOrEqual(viewport.height);
     await page.screenshot({ path: info.outputPath("focus-controls.png") });
     await focus.getByRole("button", { name: "Đóng", exact: true }).click();
-    await expect(first.getByText("Đang mở phóng to")).toHaveCount(0);
+    await expect(first.getByText("Đang điều khiển")).toHaveCount(0);
     expect(errors).toEqual([]);
   });
 }

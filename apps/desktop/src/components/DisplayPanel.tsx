@@ -1,27 +1,33 @@
-import { Grid2X2, Monitor, RotateCw, SlidersHorizontal, Usb, Wifi } from "lucide-react";
-import { FOCUS_ZOOM, TILE_PRESETS, TILE_ZOOM, loadZoom, storeZoom, tileDensity } from "../zoom";
+import { ChevronsLeft, ChevronsRight, Monitor, Plus, RotateCw, Settings, Smartphone, Usb, Wifi } from "lucide-react";
+import { FOCUS_ZOOM, TILE_ZOOM, loadZoom, storeZoom } from "../zoom";
 import type { ConnectionKind } from "../types";
 import { useState } from "react";
 import { ControlStreamSettings } from "./ControlStreamSettings";
 
 interface Props {
-  /** Closed: kept mounted (and its pending apply alive) but hidden and inert. */
-  hidden?: boolean;
+  /** Folded to its «/» rail: kept mounted (and its pending apply alive) but hidden and inert. */
+  collapsed: boolean;
+  onCollapsed: (collapsed: boolean) => void;
   tileWidth: number;
   onTileWidth: (n: number) => void;
   connection: "all" | "usb" | "wifi";
   onConnection: (n: "all" | "usb" | "wifi") => void;
-  groups: { id: string; label: string; count: number; udids?: string[] }[];
+  /** The group tabs, with how many of each group's phones are selected. */
+  groups: { id: string; label: string; count: number; selected?: number; color?: string | null; udids?: string[] }[];
   group: string;
+  onGroup: (id: string) => void;
+  onCreateGroup: () => void;
   machines: { id: string; connection: ConnectionKind }[];
   onSettings: () => void;
+  onDeviceSettings: () => void;
   onRotate?: () => void;
 }
 
 /**
- * The "Hiển thị" panel (PLAN §2): one horizontal band under the toolbar, opened by the toolbar
- * button and never on hover. It replaced the vertical rail, which took 208 px from every
- * laptop wall. Box choice lives in the toolbar's box chips now, not here.
+ * The left "Cài đặt" panel of the Control Center (GF1), copied from GenFarmer's: wall and large
+ * view sizes, stream quality and FPS, shortcuts, the connection filter and the group list with
+ * "(chọn / tổng)" counts. It sits between the sidebar and the wall and folds to a narrow rail;
+ * the fold is remembered.
  *
  * Stream settings say "Đã áp dụng" only once `set_stream_settings` has answered
  * (`ControlStreamSettings`), never on release of a slider.
@@ -38,35 +44,23 @@ export function DisplayPanel(p: Props) {
     wifi: members.filter(machine => machine.connection === "wifi").length,
   };
   return (
-    <section id="control-display-panel" className="control-display-panel" aria-label="Hiển thị" hidden={p.hidden} inert={p.hidden}>
-      <fieldset className="display-group">
-        <legend><Grid2X2 size={15} aria-hidden="true" />Ô màn hình</legend>
-        <div className="control-tile-presets" role="group" aria-label="Cỡ ô xem trước">
-          {TILE_PRESETS.map((preset) => (
-            <button
-              type="button"
-              key={preset.density}
-              aria-pressed={tileDensity(p.tileWidth) === preset.density}
-              title={`${preset.label} · ${preset.width}px`}
-              onClick={() => p.onTileWidth(preset.width)}
-            >
-              {preset.label}
-            </button>
-          ))}
-        </div>
-        <label>
-          <span>Cỡ ô <output>{p.tileWidth}px</output></span>
-          <input
-            aria-label="Kích thước ô xem trước"
-            type="range"
-            min={TILE_ZOOM.min}
-            max={TILE_ZOOM.max}
-            step={10}
-            value={p.tileWidth}
-            onChange={(e) => p.onTileWidth(Number(e.target.value))}
-          />
-        </label>
-        <label>
+    <aside className="cc-side-panel" data-collapsed={p.collapsed ? "true" : "false"}>
+      <div className="cc-side-head">
+        {!p.collapsed && <span className="cc-side-tab">Cài đặt</span>}
+        <button
+          type="button"
+          className="ghost cc-side-toggle"
+          aria-label="Bảng Cài đặt"
+          title={p.collapsed ? "Mở bảng Cài đặt" : "Thu gọn bảng Cài đặt"}
+          aria-expanded={!p.collapsed}
+          aria-controls="control-display-panel"
+          onClick={() => p.onCollapsed(!p.collapsed)}
+        >
+          {p.collapsed ? <ChevronsRight size={15} aria-hidden="true" /> : <ChevronsLeft size={15} aria-hidden="true" />}
+        </button>
+      </div>
+      <section id="control-display-panel" className="cc-side-body" aria-label="Cài đặt hiển thị" hidden={p.collapsed} inert={p.collapsed}>
+        <label className="cc-side-slider">
           <span><Monitor size={14} aria-hidden="true" />Màn hình lớn <output>{focusWidth}px</output></span>
           <input
             aria-label="Kích thước màn hình điều khiển"
@@ -82,14 +76,27 @@ export function DisplayPanel(p: Props) {
             }}
           />
         </label>
-      </fieldset>
-      <fieldset className="display-group display-stream">
-        <legend><SlidersHorizontal size={15} aria-hidden="true" />Luồng hình · áp dụng cho mọi máy Android</legend>
-        <ControlStreamSettings />
-      </fieldset>
-      <fieldset className="display-group">
-        <legend>Kết nối</legend>
-        <div className="control-connections" role="group" aria-label="Lọc kết nối">
+        <label className="cc-side-slider">
+          <span><Smartphone size={14} aria-hidden="true" />Màn hình nhỏ <output>{p.tileWidth}px</output></span>
+          <input
+            aria-label="Kích thước ô xem trước"
+            type="range"
+            min={TILE_ZOOM.min}
+            max={TILE_ZOOM.max}
+            step={2}
+            value={p.tileWidth}
+            onChange={(e) => p.onTileWidth(Number(e.target.value))}
+          />
+        </label>
+        <div className="cc-side-stream" role="group" aria-label="Luồng hình · áp dụng cho mọi máy Android">
+          <ControlStreamSettings />
+        </div>
+        <div className="cc-side-shortcuts">
+          <button type="button" onClick={p.onSettings}><Settings size={14} aria-hidden="true" />Cài đặt</button>
+          <button type="button" onClick={p.onDeviceSettings}><Smartphone size={14} aria-hidden="true" />Thiết bị</button>
+          <button type="button" onClick={p.onRotate} title="Xoay máy Android đã chọn"><RotateCw size={14} aria-hidden="true" />Xoay</button>
+        </div>
+        <div className="control-connections cc-side-connections" role="group" aria-label="Lọc kết nối">
           {(["all", "usb", "wifi"] as const).map((c) => (
             <button
               type="button"
@@ -98,17 +105,37 @@ export function DisplayPanel(p: Props) {
               aria-pressed={p.connection === c}
               onClick={() => p.onConnection(c)}
             >
-              {c === "usb" ? <Usb size={14} /> : c === "wifi" ? <Wifi size={14} /> : null}
-              {c === "all" ? "Tất cả" : c.toUpperCase()}
+              {c === "usb" ? <Usb size={13} aria-hidden="true" /> : c === "wifi" ? <Wifi size={13} aria-hidden="true" /> : null}
+              {c === "all" ? "Tất cả" : c === "usb" ? "USB" : "Wi‑Fi"}
               <small className="connection-count" aria-hidden="true">{connectionCounts[c]}</small>
             </button>
           ))}
         </div>
-        <div className="control-shortcuts">
-          <button type="button" onClick={p.onRotate}><RotateCw size={15} aria-hidden="true" />Xoay máy đã chọn</button>
-          <button type="button" onClick={p.onSettings}><SlidersHorizontal size={15} aria-hidden="true" />Cài đặt</button>
+        <div className="cc-side-groups">
+          <div className="cc-side-groups-head">
+            <span>Nhóm</span>
+            <button type="button" className="ghost cc-side-add" aria-label="Tạo nhóm thiết bị" title="Tạo nhóm (box) thiết bị" onClick={p.onCreateGroup}>
+              <Plus size={14} aria-hidden="true" />
+            </button>
+          </div>
+          <div className="cc-side-group-list" role="tablist" aria-label="Nhóm thiết bị" aria-orientation="vertical">
+            {p.groups.map((group) => (
+              <button
+                type="button"
+                key={group.id}
+                role="tab"
+                aria-selected={group.id === p.group}
+                className={group.id === p.group ? "active" : ""}
+                onClick={() => p.onGroup(group.id)}
+              >
+                {group.color && <span className="group-tabs-dot" style={{ background: group.color }} aria-hidden="true" />}
+                <span className="cc-side-group-name">{group.label}</span>
+                <span className="cc-side-group-count" aria-label={`${group.selected ?? 0} đã chọn trên ${group.count} máy`}>({group.selected ?? 0} / {group.count})</span>
+              </button>
+            ))}
+          </div>
         </div>
-      </fieldset>
-    </section>
+      </section>
+    </aside>
   );
 }

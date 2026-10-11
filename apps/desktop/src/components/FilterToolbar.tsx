@@ -1,10 +1,9 @@
-import { LayoutGrid, List, Monitor, SlidersHorizontal } from "lucide-react";
+import { List, Monitor } from "lucide-react";
 import type { ViewMode } from "../viewMode";
 
 export type { ViewMode };
 
 const MODES: readonly { mode: ViewMode; label: string; icon: typeof List }[] = [
-  { mode: "overview", label: "Tổng quan", icon: LayoutGrid },
   { mode: "window", label: "Màn hình", icon: Monitor },
   { mode: "list", label: "Danh sách", icon: List },
 ];
@@ -12,19 +11,16 @@ const MODES: readonly { mode: ViewMode; label: string; icon: typeof List }[] = [
 interface Props {
   viewMode: ViewMode;
   onViewMode: (v: ViewMode) => void;
-  /** The horizontal "Hiển thị" panel; omitted by callers that have none. */
-  displayOpen?: boolean;
-  onDisplay?: () => void;
 }
 
 /**
- * View controls above the grid: the three named views and the "Hiển thị" panel toggle.
+ * View controls above the grid: the wall and the table.
  *
- * The tile-size slider used to live here, added because the wheel gesture needs Ctrl held and
- * so nothing on screen said the size could change at all. It lives in the "Hiển thị" panel now
- * with the other display settings; Ctrl + wheel over the grid is unchanged.
+ * Display settings (tile size, stream quality, connection and group filters) live in the left
+ * "Cài đặt" panel beside the wall (GF1), as on GenFarmer; Ctrl + wheel over the grid is
+ * unchanged.
  */
-export function FilterToolbar({ viewMode, onViewMode, displayOpen, onDisplay }: Props) {
+export function FilterToolbar({ viewMode, onViewMode }: Props) {
   return (
     <div className="filter-toolbar">
       <div className="grow" />
@@ -43,19 +39,6 @@ export function FilterToolbar({ viewMode, onViewMode, displayOpen, onDisplay }: 
           </button>
         ))}
       </div>
-      {onDisplay && (
-        <button
-          type="button"
-          className="display-toggle"
-          aria-label="Hiện bảng Hiển thị"
-          aria-expanded={Boolean(displayOpen)}
-          aria-controls="control-display-panel"
-          onClick={onDisplay}
-        >
-          <SlidersHorizontal size={15} aria-hidden="true" />
-          <span>Hiển thị</span>
-        </button>
-      )}
     </div>
   );
 }

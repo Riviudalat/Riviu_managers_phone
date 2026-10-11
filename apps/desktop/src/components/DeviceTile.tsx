@@ -110,11 +110,16 @@ function DeviceTileInner({
   const frameAgeShort = freshness.state === "aging" || freshness.state === "stale" ? freshness.shortText : undefined;
   const frameLabel = [accessibleName, frameAge].filter(Boolean).join(", ");
 
+  // GenFarmer's tile: the big number, then the account (or the model), then the status.
+  const secondLine = username ? `@${username}` : shownModel ?? displayName;
+  const connectionLabel = device.connection === "wifi" ? "Wi‑Fi" : device.connection.toUpperCase();
+
   return (
     <article
       className={`dev-phone ${selected ? "selected" : ""} ${focused ? "focused" : ""} ${attention ? "attention" : ""}`}
       data-testid="device-tile"
       data-udid={device.udid}
+      data-op-kind={operational.kind}
       role="row"
       aria-selected={selected}
       tabIndex={0}
@@ -142,44 +147,12 @@ function DeviceTileInner({
       }}
       onDoubleClick={() => onOpen(device.udid)}
     >
-      {/* The caption lives on its own light strip above the picture, never over it: white
-          text over a stream disappeared on every bright screen, and anything drawn on the
-          phone image hides the one thing the operator is watching. Every line truncates; the
-          full text stays in the row's accessible name and each line's tooltip. */}
-      <div className="dev-phone-strip" role="gridcell" title={stripTitle}>
-        <div className="dev-phone-strip-head">
-          <span className="dev-phone-index">{machineNumberLabel(index)}</span>
-          <span className="dev-phone-name" title={displayName}>{displayName}</span>
-          {frameAge && <span className="dev-phone-age" data-state={freshness.state} title={`${frameAge}. Tuổi hình: lúc màn hình gửi khung hình mới gần nhất. Không phải lần kiểm trạng thái, không phải kết nối.`}><span className="dev-phone-age-long">{frameAge}</span><span className="dev-phone-age-short" aria-hidden="true">{frameAgeShort}</span></span>}
-          <span className="dev-phone-check" aria-hidden="true">{selected && <Check size={10} strokeWidth={3.5} />}</span>
-        </div>
-        {identity && (
-          <span className="dev-phone-ident" title={identity}>
-            {username && <span className="dev-phone-handle">@{username}</span>}
-            {username && shownModel && " · "}
-            {shownModel && <span className="dev-phone-model">{shownModel}</span>}
-          </span>
-        )}
-        <div className="dev-phone-run">
-          <DeviceStatusLine view={operational} className="dev-phone-status" />
-          {operational.helperRecovery && onHelperMaintenance ? (
-            <button type="button" className="link dev-phone-detail" title={operational.reason}
-              onDoubleClick={event => event.stopPropagation()}
-              onClick={event => { event.stopPropagation(); onHelperMaintenance(device.udid); }}>
-              Khôi phục helper
-            </button>
-          ) : detail && <span className="dev-phone-detail" title={detail}>{detail}</span>}
-        </div>
-      </div>
-
-      {/* Every tile keeps the same phone-shaped frame regardless of stream
-          state or the stream's own aspect, so the grid never reflows when a
-          frame arrives — the "fixed frame" the operator asked for. The canvas is
-          always the first child here and never behind a condition, so a status change
-          re-renders the strip without remounting the decoder surface. */}
+      {/* The live screen fills the whole tile, as on GenFarmer's wall. The canvas is always the
+          first child here and never behind a condition, so a status change re-renders the
+          caption without remounting the decoder surface. */}
       <div className="dev-phone-screen" role="gridcell">
         <PhoneCanvas udid={device.udid} surfaceId="tile" />
-        {focused && <div className="dev-phone-focused-message" role="status">Đang mở phóng to</div>}
+        {focused && <div className="dev-phone-focused-message" role="status">Đang điều khiển</div>}
         {freshness.state === "stale" && <div className="dev-phone-stale" aria-hidden="true">Hình cũ</div>}
         {!focused && <StreamPlaceholder
           view={view}
@@ -201,8 +174,6 @@ function DeviceTileInner({
           <Maximize2 size={14} aria-hidden="true" />
         </button>
 
-        <span className="dev-phone-conn">{device.connection.toUpperCase()}</span>
-
         {/* Named on the tile, because a designation nobody can see is a designation
             nobody trusts -- which is what the old implicit "first in the selection"
             master was. */}
@@ -216,9 +187,26 @@ function DeviceTileInner({
         )}
       </div>
 
-      {/* Selection stays on the tile itself. The small open action is intentionally separate:
-          double-click remains efficient for pointer users, while keyboard and touch users get
-          one unambiguous, named control for opening the focused stream. */}
+      {/* The caption band over the top of the picture. Its dark gradient keeps the white text
+          readable on any wallpaper; every line truncates and the full text stays in the row's
+          accessible name and the band's tooltip. */}
+      <div className="dev-phone-strip" role="gridcell" title={stripTitle}>
+        <span className="dev-phone-index" aria-hidden="true">{index > 0 ? index : "?"}</span>
+        <span className="dev-phone-ident" title={secondLine}>{secondLine}</span>
+        <div className="dev-phone-run">
+          <DeviceStatusLine view={operational} className="dev-phone-status" />
+          {operational.helperRecovery && onHelperMaintenance ? (
+            <button type="button" className="link dev-phone-detail" title={operational.reason}
+              onDoubleClick={event => event.stopPropagation()}
+              onClick={event => { event.stopPropagation(); onHelperMaintenance(device.udid); }}>
+              Khôi phục helper
+            </button>
+          ) : detail && <span className="dev-phone-detail" title={detail}>{detail}</span>}
+        </div>
+        {frameAge && <span className="dev-phone-age" data-state={freshness.state} title={`${frameAge}. Tuổi hình: lúc màn hình gửi khung hình mới gần nhất. Không phải lần kiểm trạng thái, không phải kết nối.`}><span className="dev-phone-age-long">{frameAge}</span><span className="dev-phone-age-short" aria-hidden="true">{frameAgeShort}</span></span>}
+      </div>
+      <span className="dev-phone-conn">{connectionLabel}</span>
+      <span className="dev-phone-check" aria-hidden="true">{selected && <Check size={10} strokeWidth={3.5} />}</span>
     </article>
   );
 }

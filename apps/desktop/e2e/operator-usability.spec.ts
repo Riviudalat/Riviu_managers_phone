@@ -8,9 +8,9 @@ test("preview scales, display panel closes, and group creation stays reachable",
   await page.goto("/");
   const tiles = page.getByTestId("device-tile");
   await expect(tiles).toHaveCount(4);
-  // Màn hình is the large-preview view; Tổng quan (the default) keeps a fixed small preview.
+  // GF1: Màn hình is the one wall (the default); the left "Cài đặt" panel is open beside it.
   await page.getByRole("group", { name: "Chế độ hiển thị" }).getByRole("button", { name: "Màn hình" }).click();
-  await page.getByRole("button", { name: "Hiện bảng Hiển thị", exact: true }).click();
+  await expect(page.getByRole("button", { name: "Bảng Cài đặt", exact: true })).toHaveAttribute("aria-expanded", "true");
   // Match the real stream's small encoded frame. The CSS must enlarge it with its tile.
   await page.evaluate(() => {
     for (const host of document.querySelectorAll(".dev-phone-screen .phone-canvas-host")) {
@@ -28,9 +28,9 @@ test("preview scales, display panel closes, and group creation stays reachable",
   expect(image!.width).toBeGreaterThan(300);
   expect(Math.abs(image!.width - bounds!.width)).toBeLessThan(2);
   expect(Math.abs(image!.height - bounds!.height)).toBeLessThan(2);
-  await page.getByRole("button", { name: "Hiện bảng Hiển thị", exact: true }).click();
+  await page.getByRole("button", { name: "Bảng Cài đặt", exact: true }).click();
   await expect(page.getByRole("slider", { name: "Kích thước ô xem trước", exact: true })).toBeHidden();
-  await page.getByRole("button", { name: "Hiện bảng Hiển thị", exact: true }).click();
+  await page.getByRole("button", { name: "Bảng Cài đặt", exact: true }).click();
   await expect(page.getByRole("slider", { name: "Kích thước ô xem trước", exact: true })).toHaveValue("350");
   await page.getByRole("button", { name: "Tạo nhóm thiết bị", exact: true }).click();
   await expect(page.getByRole("button", { name: /Tạo Nhóm/ })).toBeVisible();

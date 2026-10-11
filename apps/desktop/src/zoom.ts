@@ -12,10 +12,12 @@ export interface ZoomRange {
   key: string;
 }
 
+// GF1: GenFarmer-dense by default. 96 px gives 13 columns at 1920×1080 and 9 at 1366×768 with
+// the left panel open (mock browser, 2026-10-11).
 export const TILE_ZOOM: ZoomRange = {
-  min: 100,
+  min: 72,
   max: 420,
-  fallback: 180,
+  fallback: 96,
   key: "riviu.tile.width",
 };
 
