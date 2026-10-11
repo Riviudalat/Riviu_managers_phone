@@ -622,3 +622,10 @@ section.device-browser > .device-browser-content {
 .box-section-counts {
   font-variant-numeric: tabular-nums;
 }
+/* The filter row always takes its own row. Sharing one with the fleet actions made the toolbar
+   one row tall or two depending on the selection (the actions' labels change with it), so the
+   first click of a double-click moved the short tiles 48 px up and the second click missed
+   (PLAN §3: nothing but the operator's own action changes the wall's area). */
+section.device-browser > .device-browser-toolbar > .device-toolrow {
+  flex: 1 1 100%;
+}
