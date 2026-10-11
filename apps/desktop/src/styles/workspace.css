@@ -361,12 +361,12 @@
   }
 }
 
-/* 1024–1279 px: the scope and the roster time share one caption line above the counters, inside
+/* 1024–1599 px: the scope and the roster time share one caption line above the counters, inside
    the same 48 px. That frees the width of the scope column (≈140 px), so the page name (at most two
-   lines), a run pill, Ctrl+K, Inspector with its label, notifications and rescan still share one
-   row. Measured with a running publish run, 40 phones and the "Chưa rõ" counters of a page that
-   does not read the owner cache. */
-@media (min-width: 1024px) and (max-width: 1279px) {
+   lines), the seven counters, a run pill, Ctrl+K, Inspector with its label, notifications and
+   rescan still share one row. Measured with a running publish run, 40 phones and the "Chưa rõ"
+   counters of a page that does not read the owner cache. */
+@media (min-width: 1024px) and (max-width: 1599px) {
   .shell > .main-col > .page-header .page-header-meta {
     display: grid;
     grid-template-rows: auto auto;

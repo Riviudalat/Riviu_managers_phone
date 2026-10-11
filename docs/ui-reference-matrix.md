@@ -138,10 +138,15 @@ sách máy được đọc gần nhất (`listDevices` hoặc sự kiện `devic
 đọc lần nào thì ghi **Cập nhật: Chưa rõ**. Đây là tuổi của danh sách, không phải tuổi hình hay kiểm
 trạng thái của từng máy.
 
-Một hàng 48 px từ 1040 px, kể cả khi có lượt chạy, 40 máy và bộ đếm **Chưa rõ**: từ 1280 px phạm vi/giờ
-cập nhật là một cột cạnh bộ đếm; từ 1024 đến 1279 px phạm vi và giờ cập nhật thành một dòng chú thích
-nằm trên bộ đếm trong cùng 48 px, nhường chỗ cho tên trang, pill theo dõi, Ctrl+K, Inspector có chữ,
-chuông và nút quét lại. Tên trang tối đa hai dòng; pill theo dõi co tới 120 px và cắt chữ, câu đầy đủ ở
+Một hàng 48 px từ 1040 px, kể cả khi có lượt chạy, 40 máy và bảy bộ đếm **Chưa rõ**: từ 1600 px phạm
+vi/giờ cập nhật là một cột cạnh bộ đếm; từ 1024 đến 1599 px phạm vi và giờ cập nhật thành một dòng chú
+thích nằm trên bộ đếm trong cùng 48 px, nhường chỗ cho tên trang, pill theo dõi, Ctrl+K, Inspector có
+chữ, chuông và nút quét lại. Khi cột theo dõi đang ghim (lấy ~320 px), dòng phạm vi cũng xếp trên bộ
+đếm từ 1600 px và bộ đếm bỏ icon ở mọi độ rộng. Dưới 1760 px (và khi cột ghim) mẫu số chỉ còn ở dòng
+phạm vi và **Tổng**; dưới 1366 px bộ đếm bỏ icon, giữ chữ và số; dưới 1280 px **Tổng** nhường chỗ
+vì dòng phạm vi ngay cạnh hoặc ngay trên ("Laptop này · N máy") đã là tổng. Chiều cao thanh với bảy bộ
+đếm bằng đúng thanh bốn bộ đếm cũ ở mọi độ rộng đã đo (820–1920 px, có lượt chạy, 40 máy). Tên trang
+tối đa hai dòng; pill theo dõi co tới 120 px và cắt chữ, câu đầy đủ ở
 tooltip. Dưới 1024 px (và 1024–1039 px khi có pill) thanh xuống hai hàng: tên trang và các nút ở hàng
 trên, phạm vi, bộ đếm và giờ cập nhật ở hàng dưới. Không cuộn ngang ở 820 px.
 
