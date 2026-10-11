@@ -1,7 +1,7 @@
 [package]
 name = "riviu-managers-phone"
 version = "0.2.81"
-description = "Riviu Manager â€” iPhone and Android device farm"
+description = "Riviu Manager — iPhone and Android device farm"
 authors = ["Riviu"]
 edition = "2021"
 # Not 1.77.2, which this claimed. `riviu-core` is a path dependency of this crate and

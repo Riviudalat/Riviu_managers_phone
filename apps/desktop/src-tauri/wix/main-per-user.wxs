@@ -13,11 +13,17 @@
   The stock template is per-machine. This variant deliberately uses a per-user package,
   LocalAppDataFolder, HKCU protocol registration, and impersonated WebView2 actions so an
   unattended clean-host check never relies on administrator elevation.
+
+  The operator-visible name (Apps entry, shortcuts, Start-menu folder) is "Riviu Manager".
+  product_name stays the installer identity: it seeds Tauri's default UpgradeCode and keys
+  INSTALLDIR and the HKCU registry, so changing it would install beside the previous version.
+  The stock RemoveShortcuts condition keeps an upgraded product's shortcuts, so the
+  product_name-named shortcuts of older versions are removed explicitly on install.
 -->
 <Wix xmlns="http://schemas.microsoft.com/wix/2006/wi">
     <Product
             Id="*"
-            Name="{{product_name}}"
+            Name="Riviu Manager"
             UpgradeCode="{{upgrade_code}}"
             Language="!(loc.TauriLanguage)"
             Manufacturer="{{manufacturer}}"
@@ -93,7 +99,8 @@
         <Directory Id="TARGETDIR" Name="SourceDir">
             <Directory Id="DesktopFolder" Name="Desktop">
                 <Component Id="ApplicationShortcutDesktop" Guid="*">
-                    <Shortcut Id="ApplicationDesktopShortcut" Name="{{product_name}}" Description="Runs {{product_name}}" Target="[!Path]" WorkingDirectory="INSTALLDIR" />
+                    <Shortcut Id="ApplicationDesktopShortcut" Name="Riviu Manager" Description="Runs Riviu Manager" Target="[!Path]" WorkingDirectory="INSTALLDIR" />
+                    <RemoveFile Id="LegacyDesktopShortcut" Name="{{product_name}}.lnk" On="install" />
                     <RemoveFolder Id="DesktopFolder" On="uninstall" />
                     <RegistryValue Root="HKCU" Key="Software\\{{manufacturer}}\\{{product_name}}" Name="Desktop Shortcut" Type="integer" Value="1" KeyPath="yes" />
                 </Component>
@@ -102,7 +109,8 @@
                 <Directory Id="INSTALLDIR" Name="{{product_name}}"/>
             </Directory>
             <Directory Id="ProgramMenuFolder">
-                <Directory Id="ApplicationProgramsFolder" Name="{{product_name}}"/>
+                <Directory Id="ApplicationProgramsFolder" Name="Riviu Manager"/>
+                <Directory Id="LegacyProgramsFolder" Name="{{product_name}}"/>
             </Directory>
         </Directory>
 
@@ -157,10 +165,11 @@
             {{resources}}
             <Component Id="CMP_UninstallShortcut" Guid="*">
                 <Shortcut Id="UninstallShortcut"
-                          Name="Uninstall {{product_name}}"
-                          Description="Uninstalls {{product_name}}"
+                          Name="Uninstall Riviu Manager"
+                          Description="Uninstalls Riviu Manager"
                           Target="[System64Folder]msiexec.exe"
                           Arguments="/x [ProductCode]" />
+                <RemoveFile Id="LegacyUninstallShortcut" Name="Uninstall {{product_name}}.lnk" On="install" />
                 <RemoveFolder Id="INSTALLDIR" On="uninstall" />
                 <RegistryValue Root="HKCU"
                                Key="Software\\{{manufacturer}}\\{{product_name}}"
@@ -174,14 +183,16 @@
         <DirectoryRef Id="ApplicationProgramsFolder">
             <Component Id="ApplicationShortcut" Guid="*">
                 <Shortcut Id="ApplicationStartMenuShortcut"
-                    Name="{{product_name}}"
-                    Description="Runs {{product_name}}"
+                    Name="Riviu Manager"
+                    Description="Runs Riviu Manager"
                     Target="[!Path]"
                     Icon="ProductIcon"
                     WorkingDirectory="INSTALLDIR">
                     <ShortcutProperty Key="System.AppUserModel.ID" Value="{{bundle_id}}"/>
                 </Shortcut>
                 <RemoveFolder Id="ApplicationProgramsFolder" On="uninstall"/>
+                <RemoveFile Id="LegacyStartMenuShortcut" Directory="LegacyProgramsFolder" Name="{{product_name}}.lnk" On="install"/>
+                <RemoveFolder Id="LegacyProgramsFolder" Directory="LegacyProgramsFolder" On="install"/>
                 <RegistryValue Root="HKCU" Key="Software\\{{manufacturer}}\\{{product_name}}" Name="Start Menu Shortcut" Type="integer" Value="1" KeyPath="yes"/>
            </Component>
         </DirectoryRef>

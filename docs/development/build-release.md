@@ -58,6 +58,39 @@ checkout khác để vượt bước này. Kiểm tra chỉ đọc biên nhận,
 devUrl và cargo check không nhúng frontend không cần dist. Biên nhận này chứng minh
 nguồn và asset khớp nhau, không thay kiểm tra giao diện/native hay thiết bị thật.
 
+## Tên hiển thị và danh tính bộ cài
+
+Operator thấy tên **Riviu Manager** ở tiêu đề cửa sổ, mục Apps & Features, lối tắt
+Start menu/desktop, thư mục Start menu của MSI và tên file bộ cài phát hành. Bản Full
+vẫn giữ `productName` "Riviu Manager Full" và `identifier` `com.riviu.manager.full`;
+đừng đổi hai giá trị này để "đồng bộ tên":
+
+- Template NSIS của Tauri (tauri-cli 2.11.4) lấy `productName` làm khóa gỡ cài
+  `…\Uninstall\<productName>`, thư mục cài mặc định `%LOCALAPPDATA%\<productName>`,
+  khóa `Software\riviu\<productName>` dùng để tìm bản cài trước và tên lối tắt.
+  UpgradeCode mặc định của MSI sinh từ `<productName>.exe.app.x64`; template WiX
+  per-user cũng dùng nó cho `INSTALLDIR` và các khóa HKCU. Đổi `productName` sẽ cài
+  bản mới song song với bản cũ (hai mục trong Apps), và trùng khóa/thư mục với
+  biến thể cơ sở `com.riviu.manager` vốn đã tên "Riviu Manager".
+- `identifier` quyết định thư mục WebView `%LOCALAPPDATA%\<identifier>`. DB,
+  credential và log nằm ở `%APPDATA%\riviu-managers-phone` (`state.rs`), không theo
+  hai giá trị trên.
+
+Phần hiển thị được đổi bằng các đường Tauri hỗ trợ:
+
+- `app.windows[0].title` cho cửa sổ.
+- `scripts/windows-installer-hooks.nsh` cho NSIS: ghi `DisplayName`, đổi tên lối tắt
+  `<productName>.lnk` thành `Riviu Manager.lnk` sau cài/cập nhật và khi đóng wizard,
+  xóa chúng khi gỡ cài (không xóa khi cập nhật).
+- `wix/main-per-user.wxs` cho MSI: đặt tên hiển thị/lối tắt và xóa các lối tắt tên
+  cũ còn lại sau major upgrade.
+- `published_asset_name` trong collector đổi tên file phát hành.
+
+Thư mục cài vẫn là `%LOCALAPPDATA%\Riviu Manager Full`. Nếu cài cả hai biến thể trên
+một máy, chúng trùng tên hiển thị nhưng không trùng dữ liệu. Biến thể cơ sở không
+được CI đóng gói. Trên macOS, bundle vẫn là `Riviu Manager Full.app`; chỉ
+tiêu đề cửa sổ và tên file phát hành được đổi.
+
 ## macOS và phạm vi hỗ trợ
 
 CI có arm64/x64, runtime Python native theo kiến trúc và mapping resource bảo toàn

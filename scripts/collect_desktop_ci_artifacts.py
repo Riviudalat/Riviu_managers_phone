@@ -620,7 +620,7 @@ def release_asset_name(name: str) -> str:
     """The name GitHub will serve this asset under, decided here instead of guessed later.
 
     GitHub rewrites characters it dislikes in release asset filenames — a space
-    becomes a period — so `Riviu Manager Full_0.1.0_x64-setup.exe` is uploaded
+    becomes a period — so `Riviu Manager_0.1.0_x64-setup.exe` is uploaded
     under one name and served from a URL carrying another. `latest.json` has to
     contain that URL exactly, and a wrong one fails for an operator months later
     with nothing on this side to notice it.
@@ -634,6 +634,29 @@ def release_asset_name(name: str) -> str:
     if sanitized.startswith(".") or sanitized.endswith("."):
         raise ArtifactError(f"release asset name is not URL-stable: {name!r}")
     return sanitized
+
+
+# The name operators see. The Full build keeps productName "Riviu Manager Full"
+# because the installers key their upgrade identity on it, so the bundler names
+# every artifact after it; the published copies drop the suffix instead.
+OPERATOR_PRODUCT_NAME = "Riviu Manager"
+
+
+def published_asset_name(label: str, source: Path) -> str:
+    """The release asset name for a bundle file, under the operator product name.
+
+    Only the published copy is renamed. An updater archive and its `.sig` go
+    through here too, so `latest.json` and the checksums name the same file.
+    """
+    name = source.name
+    product = load_json(TAURI_FULL_CONFIG).get("productName")
+    if (
+        isinstance(product, str)
+        and product != OPERATOR_PRODUCT_NAME
+        and name.startswith(product)
+    ):
+        name = OPERATOR_PRODUCT_NAME + name[len(product):]
+    return release_asset_name(f"{label}--{name}")
 
 
 def read_updater_signature(path: Path) -> str:
@@ -2344,7 +2367,7 @@ def collect_command(args: argparse.Namespace) -> dict[str, Any]:
             copy_release_file(
                 installer,
                 output_dir,
-                release_asset_name(f"{args.label}--{installer.name}"),
+                published_asset_name(args.label, installer),
             )
         )
 
@@ -2356,7 +2379,7 @@ def collect_command(args: argparse.Namespace) -> dict[str, Any]:
     }
 
     def copy_once(source: Path) -> dict[str, Any]:
-        asset = release_asset_name(f"{args.label}--{source.name}")
+        asset = published_asset_name(args.label, source)
         record = copied_by_name.get(asset)
         if record is None:
             record = copy_release_file(source, output_dir, asset)

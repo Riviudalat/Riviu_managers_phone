@@ -340,7 +340,10 @@ pub fn run() {
                 window
             } else {
                 let builder = WebviewWindowBuilder::new(app, "main", WebviewUrl::App("index.html".into()))
-                    .title(app.config().product_name.as_deref().unwrap_or("Riviu Manager"))
+                    // The configured window title, not productName: the Full variant keeps
+                    // productName "Riviu Manager Full" as its installer identity, but the
+                    // operator sees "Riviu Manager".
+                    .title(app.config().app.windows.first().map_or("Riviu Manager", |window| window.title.as_str()))
                     .inner_size(1440.0, 900.0)
                     .min_inner_size(820.0, 560.0)
                     .resizable(true)
