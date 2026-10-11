@@ -1477,8 +1477,8 @@ export function FocusStream({
           {showAdb && (
             <AdbConsole device={device} onClose={() => setShowAdb(false)} />
           )}
-          {showInspector && <DeviceInspector key={device.udid} udid={device.udid} onClose={()=>setShowInspector(false)}/>}
-          {showFiles && <DeviceFilesPopup key={device.udid} device={device} mode={showFiles.mode} uploadPaths={showFiles.paths} onClose={() => setShowFiles(null)}/>}
+          {showInspector && <DeviceInspector key={`inspector-${device.udid}`} udid={device.udid} onClose={()=>setShowInspector(false)}/>}
+          {showFiles && <DeviceFilesPopup key={`files-${device.udid}`} device={device} mode={showFiles.mode} uploadPaths={showFiles.paths} onClose={() => setShowFiles(null)}/>}
           <nav className="focus-navbar" aria-label="Phím điều hướng">
             {navKeys.map(({ key, title, Icon }) => (
               <button
