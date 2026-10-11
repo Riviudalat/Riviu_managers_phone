@@ -28,7 +28,7 @@ for (const width of [1440, 820]) {
         if (command === "publish_get") return { campaign, bundles: [], events: [], assignments: [{
           id: "delivery-assignment", campaignId: campaign.id, bundleId: "delivery-bundle", ordinal: 0,
           udid: "MOCK-IPHONE-01", state: "succeeded", revision: 3, createdAt: at, updatedAt: at,
-          evidenceJson: JSON.stringify({ post: { publicationVerified: true,
+          evidenceJson: JSON.stringify({ post: { publicationVerified: true, expectedAccount: "fixture",
             postUrl: "https://www.tiktok.com/@fixture/video/1234567890123" }, cleanup: { state: "kept" } }),
           sheetDelivery: { state: sent() ? "sent" : "failed", attempts: sent() ? 3 : 2,
             lastError: sent() ? null : "Google tạm thời gián đoạn",

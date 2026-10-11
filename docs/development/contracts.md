@@ -535,8 +535,9 @@ nhận diện; metadata công khai vẫn phải khớp toàn bộ nội dung. ID
 phiên: TikTok có thể cấp ID trước nút Đăng; mốc dưới lấy từ sự kiện `opening_app`
 đã lưu của đúng campaign/máy, tối đa 30 phút trước `submittedAt`. Thiếu mốc ấy thì
 chỉ dùng `submittedAt`, không tự nới khoảng thời gian. Caption, tác giả và content ID
-phải cùng khớp; lỗi mạng giữ trạng thái chờ xác minh. Riêng timestamp suy ra từ ID
-không đủ chứng minh xuất bản.
+phải cùng khớp; lỗi mạng giữ trạng thái chờ xác minh. Timestamp suy ra từ ID chỉ là
+thời điểm cấp ID; riêng nó không đủ, và kể cả khi đủ điều kiện (xem định nghĩa id-allocation-time
+ở phần Xác minh Publish) nó không phải giờ xuất bản.
 Cửa sổ đọc clipboard và thông báo xử lý bắt đầu sau ACK của thao tác Copy;
 độ trễ tìm nút/dispatch không được ăn mất thời gian quan sát. Global 45.7.3/en
 ở 1080×2220 có vùng OCR thông báo riêng để tránh ghép chữ thanh tìm kiếm.
@@ -715,9 +716,21 @@ cho một lần đọc bổ sung/phase trong ngân sách và xóa snapshot cũ t
 
 `Submitted` chỉ chứng minh thao tác Đăng đã qua biên hiệu lực và TikTok trở lại feed.
 `Verifying` giữ media và nhịp xác minh (Android chỉ restart TikTok khi upload đã được chứng minh xong); `Succeeded` đòi canonical link, đúng tài khoản
-đã đọc trước Post, caption và khoảng thời gian xuất bản sau intent. `effect_intent`
+đã đọc trước Post, caption và bằng chứng thời gian theo định nghĩa id-allocation-time dưới đây. `effect_intent`
 giữ `expectedAccount`/`submittedAt` để phép xác minh sau restart không dựa đồng hồ lúc
 retry. Thiếu bằng chứng không được cold-start hoặc bấm Post lại.
+
+**Bằng chứng thời gian của Đã xác minh (id-allocation-time evidence).** Thời điểm mà sản phẩm
+đòi cho một bài là: content ID chuẩn của bài được TikTok cấp **trong cửa sổ của lượt này** (sau
+`prepared_at` của lượt: mốc `opening_app` đã lưu của đúng campaign/máy, tối đa 30 phút trước
+`submittedAt`; thiếu mốc ấy thì từ `submittedAt`), **trên đúng tài khoản dự kiến** đã ghi trước Post
+và **với caption khớp** toàn bộ. Đây là bằng chứng thời điểm cấp mã bài, không phải dấu thời gian
+xuất bản: UI, Sheet và tài liệu không được trình bày nó như giờ TikTok công bố bài. Route hồ sơ
+(`ownProfileCaptionAndCanonicalLink`) còn đọc nhãn thời gian tương đối sau `submittedAt`; các route
+metadata công khai dựa vào thời điểm cấp ID cùng tác giả, caption và content ID. Bài thỏa định nghĩa
+này là Đã xác minh; UI không hạ các bài ấy. Ngược lại, bản ghi tự mâu thuẫn (cờ đã xác minh nhưng
+`captionMatched=false`, `submissionTimeMatched=false`, thiếu tài khoản đã ghi trước Post, hoặc tác
+giả trong link khác tài khoản đó) không được hiện là Đã xác minh.
 
 Lượt mới ghi `verificationContractVersion: 1` và `verificationBuilds` từ preflight.
 `PublishSubmissionProof` bắt buộc tại transaction claim: tài khoản, submittedAt,

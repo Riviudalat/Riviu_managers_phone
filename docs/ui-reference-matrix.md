@@ -94,9 +94,17 @@ tiến trình (dòng máy, `PublishDeviceRecovery`, ô "Kết quả từng máy"
 Đã ghi Sheet**, mỗi lớp có biểu tượng và chữ, cùng **Đang xác minh** và **Chưa rõ** là trạng thái
 riêng. **Đã xác minh** chỉ khi bản ghi là trạng thái đã xác minh của backend: `succeeded` +
 `post.publicationVerified === true` + link TikTok chuẩn; backend chỉ đặt cờ đó sau khi bước lấy link
-chứng minh link, tài khoản, caption và thời điểm của lượt. Có link mà thiếu cờ, hoặc capability
-`alreadyVerified` (chỉ kiểm hình dạng link) thì không tính là đã xác minh: dòng hiện Đang xác minh
-hoặc Chưa rõ và nêu bằng chứng còn thiếu. **Đã ghi Sheet** cần `sheetDelivery.state === "sent"`;
+chứng minh link, tài khoản, caption và thời điểm của lượt. Thời điểm là **id-allocation-time
+evidence**: content ID chuẩn được cấp trong cửa sổ của lượt (sau `prepared_at`) trên đúng tài khoản
+dự kiến với caption khớp — không phải giờ xuất bản (định nghĩa đầy đủ: `docs/development/contracts.md`,
+Xác minh Publish); UI không hạ bài thỏa định nghĩa này và không gọi nó là giờ đăng. Cờ không thắng
+bằng chứng mâu thuẫn trong chính bản ghi: `captionMatched=false`, `submissionTimeMatched=false`,
+thiếu tài khoản đã ghi trước Post (evidence hoặc effect intent) hoặc tác giả trong link khác tài
+khoản đó thì dòng là Chưa rõ kèm lý do. Có link mà thiếu cờ, hoặc capability `alreadyVerified`
+(chỉ kiểm hình dạng link) cũng không tính là đã xác minh. Header chiến dịch và nhãn chiến dịch dùng
+cùng mô hình: chỉ "Đã hoàn tất"/"Hoàn tất" khi mọi bài đã xác minh, chỉ "Đã ghi Sheet" khi mọi dòng
+cần ghi đã được Sheet xác nhận; snapshot chỉ giữ phạm vi thử lại. Dòng nhật ký `succeeded` thô chỉ
+nói lượt đăng đã kết thúc, không tự nhận đã xác minh. **Đã ghi Sheet** cần `sheetDelivery.state === "sent"`;
 lỗi Sheet không hạ bài đã xác minh và vẫn giữ link. Tổng hợp luôn là số riêng ("20 đã gửi · 18 đã
 xác minh · 17 đã ghi Sheet · 2 chưa rõ", thêm "N đang xác minh" khi có), không cộng đã gửi thành
 thành công. Dòng Chưa rõ chỉ có **Xem bằng chứng** (cách xác minh, tài khoản, giờ bấm Đăng, khớp
@@ -281,10 +289,8 @@ bằng chứng. Thiếu dữ liệu không bao giờ tự thành Sẵn sàng hay
 | **Công việc** | Rảnh · Đang chạy (+ việc) · Cần xử lý (+ lý do) · Chưa rõ | Đang chạy = có chủ sở hữu hiện tại hoặc roster `busy` (không nhận việc mới); Cần xử lý = điều khiển Không đạt, roster `error` hoặc máy quá tải; chưa đọc được chủ sở hữu = Chưa rõ |
 
 **Chọn được** (Nuôi, Tương tác) / **có thể gán** (Đăng bài) là quy tắc riêng của từng workspace,
-không phải một giá trị trạng thái: máy được phép đưa vào phạm vi, danh sách máy thực hiện hoặc phân
-công khi roster `ready`, `busy` hoặc `connected`; lịch Đăng bài còn đòi roster `ready` và không
-vướng bài đang chờ. Máy bận vẫn chọn được, vì tác vụ cũ dừng khi lượt mới bắt đầu. Đây không phải
-lời khẳng định đã sẵn sàng.
+không phải một giá trị trạng thái; dòng trạng thái không cấp quyền chọn và không phải lời khẳng định
+đã sẵn sàng. Máy Đang chạy không nhận việc mới; quy tắc chọn máy (gồm loại máy bận) thuộc §3.
 
 Ô máy, dòng danh sách, thẻ chọn máy, chi tiết máy và Ctrl+K dùng một dòng gộp
 (`deviceOperationalView` → `DeviceStatusLine`): Mất kết nối → Đang chạy → Cần xử lý → Chưa rõ →
@@ -293,8 +299,9 @@ Màu: Sẵn sàng xanh lá, Chưa kiểm xanh xám, Đang chạy xanh dương, C
 xám + icon rút cáp, Chưa rõ tím xám. Chi tiết máy hiện riêng ba trục và lời giải thích thường trực;
 trang Trợ giúp có cùng lời giải thích. Không dùng "sẵn sàng" cho tập rộng hơn dòng gộp Sẵn sàng.
 Thẻ chọn máy chỉ có dòng roster (không có chủ sở hữu, không có bằng chứng helper), nên máy Android
-rảnh hiện **Chưa rõ: đã chuẩn bị** (hoặc chưa chuẩn bị; tooltip nói rõ đã kết nối), không bao giờ Sẵn sàng; quy
-tắc chọn máy của từng workspace không đổi.
+rảnh hiện **Chưa rõ: đã chuẩn bị** (hoặc chưa chuẩn bị; tooltip nói rõ đã kết nối), không bao giờ Sẵn sàng;
+iPhone dùng chính bằng chứng WDA của dòng roster (`platform` + `wdaReady` truyền vào thẻ chọn), không
+bị đọc như Android thiếu helper.
 
 Thanh hệ thống luôn có bộ đếm **Tổng · Sẵn sàng · Chưa kiểm · Đang chạy · Cần xử lý · Mất kết nối ·
 Chưa rõ**, mỗi số kèm mẫu số Tổng. Mỗi máy được đếm đúng một lần theo dòng gộp (các trục chồng

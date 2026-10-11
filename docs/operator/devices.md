@@ -135,7 +135,8 @@ lưới; lưới ghi **Đang lọc: …** kèm **Bỏ lọc**; bấm lại số 
 
 Thẻ chọn máy trong Nuôi, Tương tác và Đăng bài chỉ có dòng danh sách máy, không đọc bằng
 chứng helper, nên máy Android rảnh hiện **Chưa rõ: đã chuẩn bị** (hoặc
-**chưa chuẩn bị**); điều khiển được kiểm khi bắt đầu chạy.
+**chưa chuẩn bị**); điều khiển được kiểm khi bắt đầu chạy. iPhone đọc bằng chứng WDA của chính
+dòng đó, nên iPhone sẵn sàng hiện **Sẵn sàng**.
 
 ### Riviu Helper trên Android
 

@@ -112,7 +112,7 @@ export function PublishDeviceRecovery({campaignId,udid}:{campaignId:string;udid:
     <ProgressBar label={`Tiến độ đăng trên máy ${udid} · bài ${a.ordinal+1}`} fraction={log.error&&!progress.done?null:progress.fraction}
       tone={progress.done?"done":progress.stopped?"failed":"run"}/>
     <small>{progress.stage} · {progress.completed}/{progress.total} bước đã xác nhận · {progressLabel(log.error&&!progress.done?null:progress.fraction)}</small>
-    {outcome.post!=="notSent"&&<PostOutcomeLayers outcome={outcome} reason={!outcome.verified&&a.effectIntent?verification.text:undefined}/>}
+    {outcome.post!=="notSent"&&<PostOutcomeLayers outcome={outcome} reason={!outcome.verified&&a.effectIntent&&a.state!=="succeeded"?verification.text:undefined}/>}
     {outcome.verified&&c?.sheetRequired===undefined&&!a.sheetDelivery&&<small>Chưa đọc được yêu cầu Sheet; chưa thể xác nhận hoàn tất.</small>}
     {(outcome.post==="notSent"||(!outcome.verified&&!a.effectIntent))&&<small>{step?logMessage(step):stepLabel[r?.step??""]??"Chờ mốc tiến trình"}</small>}
     {!outcome.verified&&a.effectIntent&&verification.budget&&<small>{verification.budget}</small>}

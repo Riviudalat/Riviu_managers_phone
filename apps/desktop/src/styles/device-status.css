@@ -113,9 +113,10 @@
   .fleet-counter-of { display: none; }
 }
 
-/* 981-1279 px (Windows 125% on a 1366 px laptop is ~1093 px): the seven counters keep one
-   header row by dropping their icons; the words and numbers stay. */
-@media (min-width: 981px) and (max-width: 1279px) {
+/* Up to 1279 px (Windows 125% on a 1366 px laptop is ~1093 px; below 981 px the counters get a
+   line of their own): the seven counters keep one line by dropping their icons; the words and
+   numbers stay. */
+@media (max-width: 1279px) {
   .fleet-counter-icon { display: none; }
 }
 
@@ -138,7 +139,7 @@
 @media (max-width: 1599px) {
   .fleet-counters .fleet-counter { padding: 0 6px; }
 }
-@media (min-width: 981px) and (max-width: 1279px) {
+@media (max-width: 1279px) {
   .fleet-counters { gap: 3px; }
   .fleet-counters .fleet-counter { gap: 3px; padding: 0 5px; }
 }
@@ -146,3 +147,8 @@
 /* A docked run column takes ~320 px from the header at any width; count it as a narrow header. */
 .shell:has(.run-monitor.is-docked:not(.is-maximized)) .fleet-counter-of { display: none; }
 .shell:has(.run-monitor.is-docked:not(.is-maximized)) .fleet-counters .fleet-counter { padding: 0 6px; }
+/* Below 981 px the scope label and the seven counters share the header's second line. */
+@media (max-width: 980px) {
+  .fleet-counters { gap: 2px; }
+  .fleet-counters .fleet-counter { gap: 2px; padding: 0 4px; }
+}

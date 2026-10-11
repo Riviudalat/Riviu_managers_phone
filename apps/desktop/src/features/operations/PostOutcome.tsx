@@ -114,8 +114,9 @@ export function PostOutcomeEvidence({ outcome, raw = true }: { outcome: PostOutc
     proof.method && ["Cách xác minh", proof.method],
     proof.account && ["Tài khoản của lượt", proof.account],
     time(proof.submittedAt) && ["Bấm Đăng lúc", time(proof.submittedAt)],
-    !outcome.verified && proof.captionMatched !== null && ["Caption", match(proof.captionMatched)],
-    !outcome.verified && proof.timeMatched !== null && ["Thời điểm", match(proof.timeMatched)],
+    // Shown for every outcome: a recorded mismatch is the reason a row is not verified.
+    proof.captionMatched !== null && ["Caption", match(proof.captionMatched)],
+    proof.timeMatched !== null && ["Thời điểm cấp mã bài", match(proof.timeMatched)],
     !outcome.verified && proof.candidateUrl && ["Link ứng viên (chưa xác minh)", proof.candidateUrl],
     time(proof.checkedAt) && ["Kiểm tra gần nhất", time(proof.checkedAt)],
   ].filter((row): row is [string, string] => Array.isArray(row));
@@ -140,7 +141,7 @@ export function PostOutcomeLegend() {
     <p>Mỗi bài đăng có ba lớp riêng, và <strong>Chưa rõ</strong> là một trạng thái riêng:</p>
     <ul>
       <li><strong>Đã gửi</strong>: Riviu đã bấm Đăng. Gửi lệnh chưa phải là thành công.</li>
-      <li><strong>Đã xác minh</strong>: chỉ khi bằng chứng của đúng lượt này chứng minh link bài, đúng tài khoản, đúng caption và thời điểm. Thiếu hoặc mâu thuẫn bằng chứng thì là Đang xác minh hoặc Chưa rõ kèm lý do.</li>
+      <li><strong>Đã xác minh</strong>: chỉ khi bằng chứng của đúng lượt này chứng minh link bài chuẩn, đúng tài khoản, đúng caption và thời điểm: mã bài được cấp trong khoảng thời gian của lượt (sau lúc chuẩn bị), không phải giờ TikTok công bố bài. Thiếu hoặc mâu thuẫn bằng chứng thì là Đang xác minh hoặc Chưa rõ kèm lý do.</li>
       <li><strong>Đã ghi Sheet</strong>: Google Sheet đã xác nhận dòng của bài đã xác minh. Lỗi Sheet không hạ bài đã xác minh và vẫn giữ link.</li>
     </ul>
     <p>Tổng hợp luôn là các số riêng, ví dụ "20 đã gửi · 18 đã xác minh · 17 đã ghi Sheet · 2 chưa rõ". Bài Chưa rõ chỉ có Xem bằng chứng và Theo dõi (kiểm tra liên kết); không bao giờ có nút đăng lại.</p>

@@ -223,8 +223,13 @@ function campaignView(
     campaign.state === "succeeded" && proposedScope === "fullPipeline"
       ? "none"
       : proposedScope;
-  if (state === "succeeded")
+  if (state === "succeeded") {
+    // Loaded rows outrank the snapshot: "Hoàn tất" needs every row verified by the shared model.
+    const rows = detail && postOutcomeTotals(detail.assignments.map(assignment =>
+      postOutcome(assignment, { sheetRequired: newestSnapshot ? snapshotSheetEnabled(newestSnapshot) : undefined })));
+    if (rows && rows.verified < rows.total) return { label: "Chưa rõ", tone: "warning", retryScope: "none" };
     return { label: "Hoàn tất", tone: "success", retryScope: "none" };
+  }
   if (state === "uncertain")
     return { label: "Chưa rõ", tone: "warning", retryScope: "none" };
   if (state === "partial")
@@ -1718,6 +1723,17 @@ function CampaignDetail({
   const sheetRequired = snapshot ? snapshotSheetEnabled(snapshot) : undefined;
   const outcomes = new Map((detail?.assignments ?? []).map(assignment => [assignment.id, postOutcome(assignment, { sheetRequired })]));
   const outcomeOf = (assignment: PublishAssignmentRecord) => outcomes.get(assignment.id) ?? postOutcome(assignment, { sheetRequired });
+  // The header speaks for the same rows as the table below it: a row the shared model does not
+  // verify keeps the campaign open whatever the reconcile snapshot says, and the Sheet is written
+  // only when every required row's write is confirmed. The snapshot keeps the retry scope.
+  const outcomeTotals = postOutcomeTotals([...outcomes.values()]);
+  const unprovenPost = !reviewPost && outcomeTotals.uncertain > 0;
+  const awaitingProof = pendingPost || outcomeTotals.verifying > 0;
+  const allVerified = outcomeTotals.total > 0 && outcomeTotals.verified === outcomeTotals.total;
+  const complete = snapshot?.status === "complete" && allVerified;
+  const sheetRows = [...outcomes.values()].filter(outcome => outcome.sheet !== "off" && outcome.sheet !== "superseded");
+  const sheetUnknown = sheetRows.some(outcome => outcome.sheet === "unknown");
+  const sheetWritten = sheetRows.every(outcome => outcome.sheetDelivered);
   return (
     <section
       className="publish-campaign-detail"
@@ -1745,29 +1761,35 @@ function CampaignDetail({
             <div className="publish-reconcile-summary">
               <StatusChip
                 tone={
-                  reviewPost || supersededSheet ? "warning" : pendingPost ? "info" : snapshot.status === "complete"
+                  reviewPost || unprovenPost || supersededSheet ? "warning" : awaitingProof ? "info" : complete
                     ? "success"
                     : snapshot.status === "uncertain"
                       ? "warning"
                       : "info"
                 }
               >
-                {reviewPost ? "Cần kiểm tra bài đăng" : pendingPost ? "Đang chờ xác minh bài đăng" : supersededSheet ? "Đợt báo cáo đã đóng" : snapshot.status === "complete"
-                  ? "Đã hoàn tất"
-                  : snapshot.status === "uncertain"
-                    ? "Kết quả chưa chắc chắn"
-                    : "Còn bước cần hoàn tất"}
+                {reviewPost ? "Cần kiểm tra bài đăng"
+                  : unprovenPost ? `Chưa rõ: ${outcomeTotals.uncertain} bài chưa đủ bằng chứng xác minh`
+                  : awaitingProof ? "Đang chờ xác minh bài đăng"
+                  : supersededSheet ? "Đợt báo cáo đã đóng"
+                  : complete ? "Đã hoàn tất"
+                  : snapshot.status === "uncertain" ? "Kết quả chưa rõ"
+                  : "Còn bước cần hoàn tất"}
               </StatusChip>
-              <span>{reviewPost ? "Đã dừng kiểm tra tự động; mở TikTok kiểm tra bài đăng hoặc bản nháp" : pendingPost ? "Bài đang chờ xác minh sẽ không được đăng lại" : retryScopeLabel(snapshot.retryScope, snapshotSheetEnabled(snapshot))}</span>
+              <span>{reviewPost ? "Đã dừng kiểm tra tự động; mở TikTok kiểm tra bài đăng hoặc bản nháp"
+                : unprovenPost ? "Chỉ theo dõi và xem bằng chứng; không đăng lại"
+                : awaitingProof ? "Bài đang chờ xác minh sẽ không được đăng lại"
+                : retryScopeLabel(snapshot.retryScope, snapshotSheetEnabled(snapshot))}</span>
               <span>
                 {supersededSheet ? "Nghĩa vụ ghi Sheet cũ đã đóng; kết quả giữ trong app"
                   : !snapshotSheetEnabled(snapshot)
                   ? "Không ghi Sheet"
-                  : reviewPost || pendingPost ? "Sheet chờ liên kết đã xác minh" : snapshot.status === "complete"
-                    ? "Đã ghi Sheet"
-                    : snapshot.retryScope === "sheetOnly"
-                      ? "Sheet chưa hoàn tất"
-                      : "Sheet chưa xác nhận hoàn tất"}
+                  : reviewPost || unprovenPost || awaitingProof ? "Sheet chờ liên kết đã xác minh"
+                  : complete && sheetWritten ? "Đã ghi Sheet"
+                  : complete && sheetUnknown ? "Chưa rõ Sheet của một số bài"
+                  : snapshot.retryScope === "sheetOnly"
+                    ? "Sheet chưa hoàn tất"
+                    : "Sheet chưa xác nhận hoàn tất"}
               </span>
             </div>
           )}
@@ -1780,7 +1802,7 @@ function CampaignDetail({
             <span>{detail.assignments.filter(a => a.state === "verifying").length} máy chờ liên kết</span>
             <span>{detail.assignments.filter(a => ["uncertain", "failedBeforeDispatch", "missed"].includes(a.state)).length} máy cần xử lý</span>
           </div>
-          <PostOutcomeTotals totals={postOutcomeTotals([...outcomes.values()])} />
+          <PostOutcomeTotals totals={outcomeTotals} />
           <ResponsiveTable
             label="Kết quả theo máy"
             rows={detail.assignments}

@@ -250,7 +250,7 @@ function WorkspaceActors({ setup: p, effectiveActors, account, setAccount }: { s
         const name = p.deviceLabel.get(device.udid) ?? device.name;
         const tagged = !p.draft.actors.includes(device.udid) && effectiveActors.includes(device.udid);
         const checked = effectiveActors.includes(device.udid);
-        return <MachineChoice key={device.udid} number={p.deviceNumber.get(device.udid) ?? 0} name={name} status={device.status} reason={device.lastError}
+        return <MachineChoice key={device.udid} number={p.deviceNumber.get(device.udid) ?? 0} name={name} status={device.status} platform={device.platform} wdaReady={device.wdaReady} reason={device.lastError}
           label={name} checked={checked} disabled={tagged || (device.status !== "ready" && device.status !== "busy" && device.status !== "connected" && !checked)}
           title={tagged ? "Được thêm bởi tag tài khoản; sửa tag trong tuỳ chỉnh nâng cao" : undefined}
           onChange={() => p.patch("actors", (previous) => previous.includes(device.udid) ? previous.filter((id) => id !== device.udid) : [...previous, device.udid])}

@@ -8,11 +8,13 @@ import { machineStatusView } from "./machineChoiceState";
 import "../styles/machine-choice.css";
 
 /** Shared two-column phone presentation; each workspace owns its selection rules. */
-export function MachineChoice({ number, name, status, platform, checked, disabled, label, title, reason, onChange, detail }: {
+export function MachineChoice({ number, name, status, platform, wdaReady, checked, disabled, label, title, reason, onChange, detail }: {
   number: number;
   name: string;
   status: string;
   platform?: DevicePlatform;
+  /** iPhone WDA proof from the roster row; ignored for Android, whose proof is the helper. */
+  wdaReady?: boolean;
   checked: boolean;
   disabled?: boolean;
   label: string;
@@ -22,7 +24,7 @@ export function MachineChoice({ number, name, status, platform, checked, disable
   detail?: ReactNode;
 }) {
   const ready = status === "ready";
-  const view = machineStatusView(status, reason, platform);
+  const view = machineStatusView(status, reason, platform, wdaReady);
   const state = deviceStatusText(view);
   return <article className={`machine-choice${checked ? " is-selected" : ""}${!ready ? " is-unavailable" : ""}`}>
     <label className="machine-choice-pick" title={title ?? `${machineNumberLabel(number)} · ${name} · ${state}`}>

@@ -135,7 +135,8 @@ export function logMessage(row: OperationDeviceLogEntry): string {
       imported: "Đã tải ảnh/video vào thư viện điện thoại",
       posting: "Đang gửi: bấm Đăng và chờ xác nhận",
       verifying: "Đã gửi — đang xác minh bài đăng; không bấm Đăng lại",
-      succeeded: "Đã xác minh bài đăng — link, tài khoản, caption và thời điểm",
+      // A coarse state event carries no receipt: only the shared post outcome may say verified.
+      succeeded: "Lượt đăng đã kết thúc — xem bằng chứng để xác minh kết quả",
       failed_before_dispatch: "Dừng trước khi đăng — xem chi tiết lỗi",
       uncertain: "Chưa rõ bài đã lên — chỉ theo dõi và xem bằng chứng, không đăng lại",
       cancelled: "Đã dừng lượt đăng bài",

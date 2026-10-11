@@ -7,11 +7,14 @@ afterEach(cleanup);
 describe("machine selection status", () => {
   it("shows readiness as visible text while preserving the checkbox name", () => {
     const change = vi.fn();
-    render(<MachineChoice number={4} name="Pixel" status="ready" checked={false} label="Chọn Máy 4" onChange={change} />);
+    const { rerender } = render(<MachineChoice number={4} name="Pixel" status="ready" checked={false} label="Chọn Máy 4" onChange={change} />);
     // A picker has no helper proof, so a prepared Android row is never "Sẵn sàng".
     expect(screen.getByText("Chưa rõ: đã chuẩn bị")).toBeVisible();
     fireEvent.click(screen.getByRole("checkbox", { name: "Chọn Máy 4" }));
     expect(change).toHaveBeenCalledWith(true);
+    rerender(<MachineChoice number={4} name="iPhone" status="ready" platform="ios" wdaReady checked={false} label="Chọn Máy 4" onChange={change} />);
+    expect(screen.getByText("Sẵn sàng")).toBeVisible();
+    expect(screen.queryByText(/helper/)).toBeNull();
   });
 
   it("shows the unavailable reason and allows removing an already selected machine", () => {

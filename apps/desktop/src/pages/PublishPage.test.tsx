@@ -1420,6 +1420,10 @@ describe("publish campaign monitoring", () => {
     expect(await screen.findByText("Đợt báo cáo đã đóng · giữ lịch sử trong app")).toBeVisible();
     expect(screen.getByText("Nghĩa vụ ghi Sheet cũ đã đóng; kết quả giữ trong app")).toBeVisible();
     expect(screen.queryByText("Đã ghi Sheet")).toBeNull();
+    // The row has no verified proof, so the complete snapshot does not make the header "done".
+    expect(screen.queryByText("Đã hoàn tất", { exact: true })).toBeNull();
+    expect(screen.getByText("Chưa rõ: 1 bài chưa đủ bằng chứng xác minh")).toBeVisible();
+    expect(screen.getByRole("status", { name: "Kết quả bài đăng" })).toHaveTextContent("1 đã gửi · 0 đã xác minh");
     expect(screen.queryByRole("button", { name: "Ghi lại Sheet" })).toBeNull();
   });
 
@@ -1463,6 +1467,7 @@ describe("publish campaign monitoring", () => {
           evidenceJson: JSON.stringify({
             post: {
               publicationVerified: true,
+              expectedAccount: "fixture",
               postUrl: "https://www.tiktok.com/@fixture/video/123",
               soundSelection: {
                 title: "Bài nhạc trên tài khoản",
@@ -1617,7 +1622,7 @@ describe("publish campaign monitoring", () => {
     };
     const detail = (state: string) => ({ campaign, bundles: [], events: [], assignments: [{
       id: "a-live", campaignId: campaign.id, bundleId: "b1", ordinal: 0, udid: "PHONE-A", state, errorCode: null,
-      evidenceJson: state === "succeeded" ? JSON.stringify({ post: { publicationVerified: true, postUrl: "https://www.tiktok.com/@fixture/video/9" } }) : null,
+      evidenceJson: state === "succeeded" ? JSON.stringify({ post: { publicationVerified: true, postUrl: "https://www.tiktok.com/@fixture/video/9", expectedAccount: "fixture" } }) : null,
     }] });
     vi.mocked(publishList).mockResolvedValue([campaign] as never);
     vi.mocked(publishGet).mockReset().mockResolvedValueOnce(detail("posting") as never);

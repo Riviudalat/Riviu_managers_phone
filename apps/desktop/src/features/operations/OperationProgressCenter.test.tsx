@@ -156,7 +156,7 @@ it.each(["running", "partial"] as const)("does not display complete progress for
   }] });
   // The campaign behind the run: one post the backend verified, one still awaiting proof.
   vi.mocked(publishGet).mockResolvedValue({ campaign: { createdAt: "2026-09-07T12:00:00Z" }, assignments: [
-    { id: "a", udid: "a", ordinal: 0, state: "succeeded", effectIntent: "post", evidenceJson: JSON.stringify({ post: { publicationVerified: true, postUrl: "https://www.tiktok.com/@fixture/video/1" } }) },
+    { id: "a", udid: "a", ordinal: 0, state: "succeeded", effectIntent: "post", evidenceJson: JSON.stringify({ post: { publicationVerified: true, postUrl: "https://www.tiktok.com/@fixture/video/1", expectedAccount: "fixture" } }) },
     { id: "b", udid: "b", ordinal: 1, state: "verifying", effectIntent: "post", errorCode: "post_verification_pending" },
   ] } as never);
   await openDevices();

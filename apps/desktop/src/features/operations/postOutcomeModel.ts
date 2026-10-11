@@ -81,8 +81,8 @@ export function canonicalPostUrl(value: unknown): string | null {
 
 const METHOD_LABELS: Record<string, string> = {
   ownProfileCaptionAndCanonicalLink: "Hồ sơ đúng tài khoản, caption khớp và giờ đăng sau lúc bấm Đăng",
-  videoCanonicalPublicMetadata: "Metadata công khai của TikTok: tác giả, caption và thời điểm trong mã bài",
-  expandedPhotoCaptionCanonicalPublicMetadata: "Caption đầy đủ và metadata công khai của TikTok: tác giả, caption, thời điểm",
+  videoCanonicalPublicMetadata: "Metadata công khai của TikTok: tác giả, caption và thời điểm cấp mã bài trong lượt",
+  expandedPhotoCaptionCanonicalPublicMetadata: "Caption đầy đủ và metadata công khai của TikTok: tác giả, caption, thời điểm cấp mã bài trong lượt",
   candidateCanonicalPublicMetadata: "Đối chiếu lại link đã chép qua metadata công khai của TikTok",
   canonical_link_from_caption_identified_own_post: "Link chép từ bài của đúng tài khoản, nhận diện bằng caption ngay sau khi Đăng",
 };
@@ -96,17 +96,24 @@ function postOf(evidence: Record<string, unknown>): Record<string, unknown> {
   return evidence.post && typeof evidence.post === "object" && !Array.isArray(evidence.post) ? object(evidence.post) : evidence;
 }
 
-function proofOf(evidence: Record<string, unknown>, raw: string | null | undefined): PostProof {
+/** The account frozen before Post: the post evidence carries it, the effect intent is its source. */
+function expectedAccountOf(input: PostOutcomeInput, evidence: Record<string, unknown>): string | null {
+  const recorded = text(postOf(evidence).expectedAccount, 64) ?? text(readPublishEvidence(input.effectIntent).expectedAccount, 64);
+  const account = recorded?.replace(/^@+/, "").trim();
+  return account ? account : null;
+}
+
+function proofOf(input: PostOutcomeInput, evidence: Record<string, unknown>, raw: string | null | undefined): PostProof {
   const post = postOf(evidence);
   const status = object(evidence.verificationStatus);
   const diagnostic = object(evidence.verificationDiagnostic);
   const publication = object(diagnostic.publicationEvidence);
   const budget = object(evidence.verificationBudget);
   const methodKey = text(post.verificationMethod) ?? text(post.postConfirmedBy);
-  const account = text(post.expectedAccount, 64);
+  const account = expectedAccountOf(input, evidence);
   return {
     method: methodKey ? METHOD_LABELS[methodKey] ?? "Phương thức xác minh chưa nhận diện" : null,
-    account: account ? `@${account.replace(/^@+/, "")}` : null,
+    account: account ? `@${account}` : null,
     submittedAt: text(post.submittedAt, 64),
     checkedAt: text(status.checkedAt, 64),
     captionMatched: boolOrNull(publication.captionMatched),
@@ -116,12 +123,27 @@ function proofOf(evidence: Record<string, unknown>, raw: string | null | undefin
   };
 }
 
-/** The backend's verified state, read from the same three facts it writes together. */
-function verifiedLink(input: PostOutcomeInput, evidence: Record<string, unknown>): string | null {
+/**
+ * The backend's verified state, read from the same facts it writes together, and refused when
+ * the row itself contradicts it: a true flag never outranks a recorded caption or time mismatch,
+ * a missing account frozen before Post, or a link whose author is another account. The time proof
+ * is id-allocation-time evidence (the canonical content id was allocated inside this run's window,
+ * after its prepared_at), not a publication timestamp; docs/development/contracts.md.
+ */
+function verificationGate(input: PostOutcomeInput, evidence: Record<string, unknown>, proof: PostProof)
+  : { url: string } | { url: null; contradiction?: string } {
   const post = postOf(evidence);
-  const verifiedFlag = post.publicationVerified === true;
   const url = canonicalPostUrl(post.postUrl);
-  return input.state === "succeeded" && verifiedFlag && url ? url : null;
+  if (input.state !== "succeeded" || post.publicationVerified !== true || !url) return { url: null };
+  if (proof.captionMatched === false) return { url: null, contradiction: "Caption trên TikTok khác caption của lượt này; không tính là đã xác minh." };
+  if (proof.timeMatched === false) return { url: null, contradiction: "Mã bài không được cấp trong khoảng thời gian của lượt này; không tính là đã xác minh." };
+  const account = expectedAccountOf(input, evidence);
+  if (!account) return { url: null, contradiction: "Thiếu tài khoản đã ghi trước khi Đăng; chưa xác nhận link thuộc đúng tài khoản." };
+  const author = /^\/@([^/]+)\//.exec(new URL(url).pathname)?.[1];
+  if (!author || author.toLocaleLowerCase("en") !== account.toLocaleLowerCase("en")) {
+    return { url: null, contradiction: `Link thuộc @${author ?? "?"}, khác tài khoản của lượt @${account}; không tính là đã xác minh.` };
+  }
+  return { url };
 }
 
 /** Why a submitted post is not verified yet, naming the proof that is missing. */
@@ -176,8 +198,9 @@ function sheetOf(verified: boolean, delivery: PublishSheetDeliveryProgress | nul
 
 export function postOutcome(input: PostOutcomeInput, options: { sheetRequired?: boolean } = {}): PostOutcome {
   const evidence = readPublishEvidence(input.evidenceJson);
-  const proof = proofOf(evidence, input.evidenceJson);
-  const url = verifiedLink(input, evidence);
+  const proof = proofOf(input, evidence, input.evidenceJson);
+  const gate = verificationGate(input, evidence, proof);
+  const url = gate.url;
   const verified = url !== null;
   const sheet = sheetOf(verified, input.sheetDelivery, options.sheetRequired);
   const base = { url, proof, ...sheet };
@@ -193,8 +216,9 @@ export function postOutcome(input: PostOutcomeInput, options: { sheetRequired?: 
     return { ...base, post: "uncertain", postLabel: "Chưa rõ", postReason: reason, sent: true, verified: false, uncertain: true };
   }
   if (input.state === "succeeded") {
-    // The backend calls it done, but the proof the UI requires is not in the row: say which.
-    return { ...base, post: "uncertain", postLabel: "Chưa rõ", postReason: missingProof(input, evidence, proof), sent: true, verified: false, uncertain: true };
+    // The backend calls it done, but the row lacks or contradicts the proof: say which.
+    const reason = ("contradiction" in gate && gate.contradiction) || missingProof(input, evidence, proof);
+    return { ...base, post: "uncertain", postLabel: "Chưa rõ", postReason: reason, sent: true, verified: false, uncertain: true };
   }
   if (input.state === "verifying") {
     return { ...base, post: "verifying", postLabel: "Đang xác minh", postReason: missingProof(input, evidence, proof), sent: true, verified: false, uncertain: false };

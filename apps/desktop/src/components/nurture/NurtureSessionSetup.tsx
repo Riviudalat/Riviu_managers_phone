@@ -92,7 +92,7 @@ export function NurtureMachinePicker({ devices, metas, targets, onTargetRefChang
       {filtered.map(({ device, number, name }) => {
         const ready = device.status === "ready" || device.status === "busy" || device.status === "connected";
         const checked = selected.has(device.udid);
-        return <MachineChoice key={device.udid} number={number} name={name} status={device.status} reason={device.lastError} checked={checked}
+        return <MachineChoice key={device.udid} number={number} name={name} status={device.status} platform={device.platform} wdaReady={device.wdaReady} reason={device.lastError} checked={checked}
           label={`Chọn ${machineNumberLabel(number)} · ${name}`} disabled={!onTargetRefChange || (!ready && !checked)}
           onChange={(selected) => setTargets(selected ? [...targets, device.udid] : targets.filter(id => id !== device.udid))}
           detail={metas.get(device.udid)?.handle ? <span>@{metas.get(device.udid)?.handle?.replace(/^@+/, "")}</span> : undefined} />;

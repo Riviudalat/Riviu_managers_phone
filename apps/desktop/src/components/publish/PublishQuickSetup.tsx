@@ -285,7 +285,7 @@ export function PublishQuickSetup(p: QuickProps) {
             const action = current ? "Đã gán" : assigned ? active && validOldMachine(p, active.id) ? "Đổi chỗ" : "Thay bài" : "Gán";
             const assignable = !!active && activeVisible && p.selectedIds.includes(active.id) && canReceive(p, d.udid);
             return <div className="pq-device-row" key={d.udid}>
-              <MachineChoice number={tileNumber(i + 1, p.metas.get(d.udid))} name={tileName(d, p.metas.get(d.udid))} status={d.status} reason={d.lastError} label={`Chọn ${label(d.udid)}`} checked={checked} disabled={locked || confirming || (!checked && !canReceive(p, d.udid))} onChange={value => {
+              <MachineChoice number={tileNumber(i + 1, p.metas.get(d.udid))} name={tileName(d, p.metas.get(d.udid))} status={d.status} platform={d.platform} wdaReady={d.wdaReady} reason={d.lastError} label={`Chọn ${label(d.udid)}`} checked={checked} disabled={locked || confirming || (!checked && !canReceive(p, d.udid))} onChange={value => {
                 if (locked || confirming || (value && !canReceive(p, d.udid))) return;
                 setPicked(value ? [...new Set([...picked, d.udid])] : picked.filter(id => id !== d.udid)); if (!value) clearDevice(d.udid);
               }} detail={<>

@@ -401,7 +401,7 @@ từ chung ở chi tiết chiến dịch, cửa sổ tiến trình và Lượt c
 |---|---|
 | **Đã gửi** | Riviu đã bấm Đăng. Gửi lệnh chưa phải là thành công. |
 | **Đang xác minh** | Đã gửi, đang chờ bằng chứng; dòng kết quả nêu bằng chứng còn thiếu. |
-| **Đã xác minh** | Chỉ khi backend xác nhận bài của đúng lượt: link bài chuẩn, đúng tài khoản, đúng caption và thời điểm sau lúc gửi. Có link mà thiếu xác nhận này thì vẫn là **Chưa rõ** kèm lý do. |
+| **Đã xác minh** | Chỉ khi backend xác nhận bài của đúng lượt: link bài chuẩn, đúng tài khoản, đúng caption, và mã bài được TikTok cấp trong khoảng thời gian của lượt (sau lúc chuẩn bị đăng). Đó là thời điểm cấp mã bài, không phải giờ TikTok công bố bài. Có link mà thiếu xác nhận, hoặc bản ghi tự mâu thuẫn (caption không khớp, thiếu tài khoản, link thuộc tài khoản khác), thì là **Chưa rõ** kèm lý do. |
 | **Đã ghi Sheet** | Google Sheet đã xác nhận dòng của bài đã xác minh. |
 | **Chưa rõ** | Trạng thái riêng: có thể đã gửi nhưng chưa có kết luận. Chỉ có **Xem bằng chứng** và theo dõi (**Kiểm tra liên kết**, **Tiếp tục xác minh bài đã gửi**); không bao giờ có nút đăng lại. |
 

@@ -18,7 +18,7 @@ describe("operation progress", () => {
     expect(logMessage(failed)).toBe(failed.text);
     expect(timelineEntries([step, failed])).toEqual([step, failed]);
     const legacy = { ...step, action: "publish", state: "succeeded", text: null };
-    expect(logMessage(legacy)).toBe("Đã xác minh bài đăng — link, tài khoản, caption và thời điểm");
+    expect(logMessage(legacy)).toBe("Lượt đăng đã kết thúc — xem bằng chứng để xác minh kết quả");
     expect(timelineEntries([legacy])).toEqual([legacy]);
   });
   it("keeps old history and terminal fallback while removing duplicate coarse publish transitions", () => {

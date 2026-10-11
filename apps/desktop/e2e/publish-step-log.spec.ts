@@ -66,7 +66,7 @@ for (const viewport of [{ width: 1440, height: 900 }, { width: 820, height: 560 
       const entries = messages.map((message, index) => ({ id: String(index + 1), at: `2026-09-08T07:03:${String(index).padStart(2, "0")}`, action: "publishStep", state: index === messages.length - 1 ? "finished" : "working", text: `[${index + 1}] ${message}`, detail: null }));
       w.__TAURI_INTERNALS__.invoke = async (command, args) => {
         if (command === "operation_query_runs") return { runs: [summary], total: 1, counts: { active: 0, succeeded: 1, attention: 0 }, hasMore: false };
-        if (command === "operation_get_run") return { summary, items: [{ id: "assignment", kind: "assignment", label: "Máy 2", state: "succeeded", udid: "snapshot-phone-2", errorCode: null, detail: null, evidence: JSON.stringify({ post: { publicationVerified: true, postUrl: "https://www.tiktok.com/@fixture/video/2" } }), retryable: false }], batch: null };
+        if (command === "operation_get_run") return { summary, items: [{ id: "assignment", kind: "assignment", label: "Máy 2", state: "succeeded", udid: "snapshot-phone-2", errorCode: null, detail: null, evidence: JSON.stringify({ post: { publicationVerified: true, postUrl: "https://www.tiktok.com/@fixture/video/2", expectedAccount: "fixture" } }), retryable: false }], batch: null };
         if (command === "operation_device_log") return { entries, truncated: false };
         return original(command, args);
       };
