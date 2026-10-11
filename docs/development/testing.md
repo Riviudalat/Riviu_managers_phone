@@ -82,6 +82,15 @@ UI thật; timeout khác lỗi assertion. Không tăng timeout hoặc bỏ asser
   Mỗi worktree chạy song song đặt cổng riêng, ví dụ `$env:RIVIU_E2E_PORT = '1431'` rồi
   `npm run test:e2e`. Không đặt thì vẫn là 1421 như CI. Vite chạy với `--strictPort`,
   nên khi cổng bị chiếm nó báo lỗi luôn, không lặng lẽ chuyển sang cổng khác.
+- `toHaveScreenshot` với `maxDiffPixelRatio: 0.002` vẫn cho qua một nút viền phụ (~2,5k px
+  ở 1440×900) so với baseline cũ. Sau khi đổi UI, re-bless trang bị ảnh hưởng bằng
+  `--update-snapshots=all -g <trang>`, không chỉ `=changed` (đo 2026-10-11).
+- Worktree Orca mới chưa có `sidecars/gui-service/.venv`, nên 2 test roundtrip của
+  `gui_service` trong `riviu-managers-phone` báo `gui_service_missing`. Chạy
+  `uv sync --project sidecars/gui-service` trong worktree, hoặc ghi đó là lỗi môi trường.
+- `scripts/dev_compile_cache.ps1` đặt `$ErrorActionPreference='Stop'`; trên PowerShell 5.1,
+  chuyển hướng output bên trong PowerShell (`*>`) biến stderr tiến độ của cargo thành lỗi dừng.
+  Gọi script từ Bash và chuyển hướng bên ngoài PowerShell (`powershell … ; exit $LASTEXITCODE > log 2>&1`).
 - Fixture e2e nào ghi đè `google_sheets_status` cũng phải trả lời
   `google_sheets_verify_readonly`. Nếu không, bước tự kiểm tra read-only biến panel
   Sheet thành cảnh báo.
