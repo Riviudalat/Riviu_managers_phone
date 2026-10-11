@@ -19,6 +19,14 @@ export default defineConfig({
      * suite, and specs that pass alone were failing in the full run, a different one each time.
      */
     testTimeout: 20_000,
+    /**
+     * Half the cores, not one worker per core. The first case of each heavy jsdom file
+     * (`css: true`) pays the file's cold start, and with 19 workers on this 20-thread host it
+     * reached 20.4 s (PublishPage) and 18.1 s (App) and timed out in a full run. Measured
+     * 12/10/2026 on the idle host: 233 s wall at the default, 225 s at 50% with those cases
+     * at 7.6 s and 14 s and no failure.
+     */
+    maxWorkers: "50%",
     exclude: [...configDefaults.exclude, "e2e/**"],
   },
 });
