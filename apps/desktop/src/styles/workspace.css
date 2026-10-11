@@ -373,6 +373,44 @@
   }
 }
 
+/* 1024–1279 px: the scope and the roster time share one caption line above the counters, inside
+   the same 48 px. That frees the width of the scope column (≈140 px), so the page name (at most two
+   lines), a run pill, Ctrl+K, Inspector with its label, notifications and rescan still share one
+   row. Measured with a running publish run, 40 phones and the "Chưa rõ" counters of a page that
+   does not read the owner cache. */
+@media (min-width: 1024px) and (max-width: 1279px) {
+  .shell > .main-col > .page-header .page-header-meta {
+    display: grid;
+    grid-template-rows: auto auto;
+    justify-content: start;
+    align-content: center;
+    column-gap: var(--rv-space-2);
+    row-gap: 0;
+  }
+
+  .shell > .main-col > .page-header .page-header-meta > * {
+    grid-row: 2;
+  }
+
+  .shell > .main-col > .page-header .page-header-meta > .system-bar-scope {
+    display: flex;
+    grid-row: 1;
+    grid-column: 1;
+    align-items: baseline;
+    gap: var(--rv-space-2);
+    padding: 0 0 0 var(--rv-space-1);
+    border-right: 0;
+  }
+
+  .shell > .main-col > .page-header .fleet-status-label {
+    font-size: var(--rv-font-caption);
+  }
+
+  .shell > .main-col > .page-header .fleet-counter {
+    min-height: 24px;
+  }
+}
+
 /* 1024–1199 px keeps one row by tightening every gap; the wrap only starts below 1024 px. */
 @media (max-width: 1199px) {
   .shell > .main-col > .page-header {
@@ -396,6 +434,15 @@
     padding-block: var(--rv-space-1);
   }
 
+  /* A wrapping row breaks lines on each item's basis before anything shrinks, so the run pill
+     starts from its 120 px floor and grows into whatever the first row leaves (up to 280 px)
+     instead of pushing the last control onto a line of its own. */
+  .shell > .main-col > .page-header .run-monitor.is-pill {
+    flex: 1 1 120px;
+    width: auto;
+    max-width: 280px;
+  }
+
   .shell > .main-col > .page-header .page-header-meta {
     order: 2;
     flex: 1 0 100%;
@@ -409,9 +456,10 @@
   }
 }
 
-/* Below 1100 px a run pill does not fit beside the page name and the counters: the bar takes its
-   two-row form instead of overflowing. */
-@media (min-width: 1024px) and (max-width: 1099px) {
+/* At 1024–1039 px a run pill leaves the longest page name ("Trung tâm ứng dụng") a third line:
+   the bar takes its two-row form instead. From 1040 px it fits in one row (measured with a running
+   publish run, 40 phones and "Chưa rõ" counters). */
+@media (min-width: 1024px) and (max-width: 1039px) {
   .shell > .main-col > .page-header:has(.run-monitor.is-pill) {
     flex-wrap: wrap;
     row-gap: 0;
@@ -419,6 +467,7 @@
   }
 
   .shell > .main-col > .page-header:has(.run-monitor.is-pill) .page-header-meta {
+    display: flex;
     order: 2;
     flex: 1 0 100%;
     flex-wrap: wrap;
@@ -428,6 +477,12 @@
 
   .shell > .main-col > .page-header:has(.run-monitor.is-pill) .status-chip {
     overflow-wrap: anywhere;
+  }
+
+  .shell > .main-col > .page-header .run-monitor.is-pill {
+    flex: 1 1 120px;
+    width: auto;
+    max-width: 280px;
   }
 }
 

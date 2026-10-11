@@ -26,9 +26,9 @@
 .control-rail-content > label > input[type="range"] {margin:0;}
 .control-rail-content > label output {display:block;margin:3px 0 0;font-size:var(--text-xs);opacity:.8;}
 .control-center-rail > header {margin-bottom:24px;}
-.control-group-list {border:1px solid var(--primary-200);border-radius:4px;padding:6px;}
+.control-group-list {border:1px solid var(--rv-border);border-radius:4px;padding:6px;}
 .control-rail-content[hidden] {display:none;}
-.control-center-rail .rail-toggle,.control-center-rail .rail-create-group {display:grid;place-items:center;width:28px;height:28px;min-height:28px;padding:0;flex-shrink:0;color:var(--primary);border:0;background:transparent;margin-left:auto;}
+.control-center-rail .rail-toggle,.control-center-rail .rail-create-group {display:grid;place-items:center;width:var(--rv-control-dense);height:var(--rv-control-dense);min-height:var(--rv-control-dense);padding:0;flex-shrink:0;color:var(--rv-text-2);border:0;background:transparent;margin-left:auto;}
 .sidebar-group-toggle {display:flex;align-items:center;justify-content:space-between;width:100%;padding:0;border:0;background:transparent;color:inherit;font:inherit;text-align:left;min-height:28px;}
 .sidebar-group-toggle[aria-expanded="false"] svg {transform:rotate(-90deg);}
 .sidebar-group-toggle:hover {color:var(--primary);}
@@ -59,8 +59,8 @@
   height: 18px;
   min-height: 0;
   border: 0;
-  background: var(--primary-100);
-  color: var(--primary);
+  background: var(--rv-surface-sunken);
+  color: var(--rv-text-2);
   border-radius: 0 0 10px 0;
   padding: 0;
   cursor: nwse-resize;
@@ -75,7 +75,7 @@
 .device-floating-window .focus-menu-head {
   min-height: 46px;
   padding: 7px 9px;
-  background: var(--primary-100);
+  background: var(--rv-surface-subtle);
 }
 .device-floating-window .focus-menu-battery {
   display: none;
@@ -91,7 +91,7 @@
 }
 .device-floating-window .focus-machine-number {
   background: transparent;
-  color: var(--primary);
+  color: var(--rv-text-1);
   font-size: var(--text-xl);
   width: 22px;
 }
@@ -121,7 +121,7 @@
   border-color: var(--line-strong);
 }
 .device-floating-window .focus-navbar {
-  background: var(--primary-50);
+  background: var(--rv-surface-subtle);
 }
 .control-stream-status {
   display: flex;
@@ -147,8 +147,8 @@
   gap: 5px;
   justify-content: center;
   align-items: center;
-  background: var(--primary-100);
-  color: var(--primary-deep);
+  background: var(--rv-surface-sunken);
+  color: var(--rv-text-2);
   border: 0;
 }
 .content-myApps {
@@ -214,13 +214,13 @@
 .builtin-app-list td:first-child > svg {
   vertical-align: middle;
   margin-right: 8px;
-  color: var(--primary);
+  color: var(--rv-text-2);
 }
 .operator-import {
   border: 1px solid var(--line);
   padding: 8px 12px;
   cursor: pointer;
-  color: var(--primary);
+  color: var(--rv-text-1);
   font-size: var(--text-sm);
 }
 .operator-import input {
@@ -259,6 +259,7 @@
   min-width: min(180px, 100%);
 }
 .operator-toolbar > button { flex: 0 0 auto; }
+.operator-toolbar button.primary { min-height: var(--rv-control-primary); }
 .operator-toolbar .grow { min-width: 0; }
 .my-app-library th,
 .operator-records th,
@@ -270,7 +271,7 @@
 }
 .my-app-library tbody tr:hover,
 .operator-records tbody tr:hover,
-.operator-schedules tbody tr:hover { background: var(--primary-50); }
+.operator-schedules tbody tr:hover { background: var(--rv-surface-subtle); }
 .my-app-library td > button + button,
 .operator-records td > button + button,
 .operator-schedules td > button + button { margin-inline-start: var(--space-1); }
@@ -537,7 +538,7 @@
   color: var(--text-inverse);
 }
 .app-step-port {
-  background: var(--primary);
+  background: var(--rv-text-3);
   width: 7px;
   height: 7px;
   border-color: var(--bg-elevated);

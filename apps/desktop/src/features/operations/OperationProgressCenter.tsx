@@ -260,6 +260,7 @@ export function OperationProgressCenter({ deviceLabels, dockHost = null, pillHos
   if (!pendingStart && !startReadError && !runs.length && !state.error && !dismissal.error && (!expanded || !undoKeys.length)) return null;
   const minimize = () => { open(false); focusToggle.current = true; };
   const host = placement === "docked" && dockHost ? dockHost : placement === "pill" && pillHost ? pillHost : document.body;
+  const toggleLabel = expanded ? "Theo dõi tác vụ" : state.error ? "Chưa đọc được tiến trình" : pendingStart ? "Lượt đăng đang chuẩn bị" : active.length ? `${active.length} tác vụ đang xử lý / chờ` : runs.length ? `${runs.length} tác vụ đã kết thúc` : "Không còn bản ghi";
   return createPortal(<section ref={floating.ref} style={placement === "floating" ? floating.style : undefined}
     className={`run-monitor is-${placement}${expanded ? " is-expanded" : " is-minimized"}${expanded && maximized ? " is-maximized" : " is-compact"}`}
     role={dialog ? "dialog" : "region"} aria-modal={dialog ? false : undefined} aria-label="Cửa sổ tiến trình"
@@ -272,8 +273,8 @@ export function OperationProgressCenter({ deviceLabels, dockHost = null, pillHos
     }}>
     <header className="run-monitor-titlebar" {...(placement === "floating" ? floating.handle : {})}>
       <button ref={toggleRef} type="button" className="run-monitor-toggle" aria-label="Tiến trình công việc"
-        aria-expanded={expanded} aria-controls={bodyId} onClick={() => expanded ? minimize() : open(true)}>
-        <Clock3 size={16} aria-hidden="true" /><strong>{expanded ? "Theo dõi tác vụ" : state.error ? "Chưa đọc được tiến trình" : pendingStart ? "Lượt đăng đang chuẩn bị" : active.length ? `${active.length} tác vụ đang xử lý / chờ` : runs.length ? `${runs.length} tác vụ đã kết thúc` : "Không còn bản ghi"}</strong>
+        aria-expanded={expanded} aria-controls={bodyId} title={expanded ? undefined : toggleLabel} onClick={() => expanded ? minimize() : open(true)}>
+        <Clock3 size={16} aria-hidden="true" /><strong>{toggleLabel}</strong>
       </button>
       {expanded && <span className="run-monitor-total">{runs.length} bản ghi</span>}
       {!expanded && <span className="run-percent">{!runs.length && !state.error ? "—" : state.error ? "?" : progressLabel(fraction)}</span>}

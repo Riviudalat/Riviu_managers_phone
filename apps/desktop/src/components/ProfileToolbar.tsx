@@ -58,12 +58,11 @@ export function ProfileToolbar({
         Mở {scope}
       </button>}
       <button type="button" className={`tb-btn ${groupsOpen ? "active" : ""}`} aria-expanded={groupsOpen} onClick={onGroups} title="Chia fleet thành nhóm — mỗi máy thuộc đúng một nhóm">
-        <FolderKanban size={16} aria-hidden="true" />Nhóm
+        <FolderKanban size={16} aria-hidden="true" /><span className="tb-label">Nhóm</span>
       </button>
       {!any && <button type="button" className={`tb-btn ${groupToolsOpen ? "active" : ""}`} aria-expanded={groupToolsOpen} data-group-tools onClick={onGroupTools} title="Công cụ nhóm: phân phối văn bản/tệp…">
-        <SlidersHorizontal size={16} aria-hidden="true" />Công cụ
+        <SlidersHorizontal size={16} aria-hidden="true" /><span className="tb-label">Công cụ</span>
       </button>}
-      <span className="toolbar-scope">{any ? `${any} máy đã chọn · thao tác ở thanh dưới` : `${deviceCount} máy trong hệ thống`}</span>
       <div className="grow" />
       <details className="toolbar-maintenance" onKeyDown={(event) => {
         if (event.key !== "Escape") return;
@@ -71,7 +70,7 @@ export function ProfileToolbar({
         event.currentTarget.removeAttribute("open");
         event.currentTarget.querySelector("summary")?.focus();
       }}>
-        <summary tabIndex={0}><Wrench size={15} aria-hidden="true" />Bảo trì<ChevronDown size={14} aria-hidden="true" /></summary>
+        <summary tabIndex={0} title="Bảo trì thiết bị"><Wrench size={15} aria-hidden="true" /><span className="tb-label">Bảo trì</span><ChevronDown size={14} aria-hidden="true" /></summary>
         <div className="toolbar-maintenance-menu">
           <strong>Bảo trì thiết bị</strong>
           <span>{any ? `${any} máy đã chọn` : "Các máy đang kết nối"}</span>

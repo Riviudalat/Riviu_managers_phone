@@ -285,12 +285,6 @@ button:disabled {
   background: var(--rv-selected-fill);
   color: var(--rv-selected-text);
 }
-.toolbar-scope {
-  padding-left: var(--rv-space-2);
-  color: var(--rv-text-3);
-  font-size: var(--rv-font-caption);
-  font-variant-numeric: tabular-nums;
-}
 .toolbar-maintenance {
   position: relative;
   flex-shrink: 0;
@@ -322,15 +316,36 @@ button:disabled {
   padding: var(--rv-space-4);
   border: 1px solid var(--rv-border);
   border-radius: var(--rv-radius-panel);
-  background: var(--rv-surface-panel);
+  background: var(--rv-surface-overlay);
   box-shadow: var(--rv-shadow-overlay);
 }
 .toolbar-maintenance-menu > strong { font-size: var(--rv-font-body); }
 .toolbar-maintenance-menu > span { color: var(--rv-text-3); font-size: var(--rv-font-secondary); }
 .toolbar-maintenance-menu > button { justify-content: flex-start; }
 
-@media (max-width: 1200px) {
-  .toolbar-scope { display: none; }
+/* From 1024 to 1279 px (and beside a pinned Hiển thị rail up to 1599 px) the secondary fleet
+   actions — Nhóm, Công cụ, Bảo trì — keep their icon, tooltip and accessible name but drop the
+   visible word, so the actions and the filters stay one toolbar row. The primary action keeps its
+   label. Below 1024 px the filters take their own row, so the words come back. */
+@media (min-width: 1024px) and (max-width: 1279px) {
+  .profile-toolbar .tb-label {
+    position: absolute;
+    width: 1px;
+    height: 1px;
+    overflow: hidden;
+    clip-path: inset(50%);
+    white-space: nowrap;
+  }
+}
+@media (min-width: 1024px) and (max-width: 1599px) {
+  .device-browser:not(.rail-unpinned) .profile-toolbar .tb-label {
+    position: absolute;
+    width: 1px;
+    height: 1px;
+    overflow: hidden;
+    clip-path: inset(50%);
+    white-space: nowrap;
+  }
 }
 
 /* ——— FilterToolbar ——— */

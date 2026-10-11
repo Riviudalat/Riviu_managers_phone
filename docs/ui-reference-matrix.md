@@ -111,9 +111,12 @@ sách máy được đọc gần nhất (`listDevices` hoặc sự kiện `devic
 đọc lần nào thì ghi **Cập nhật: Chưa rõ**. Đây là tuổi của danh sách, không phải tuổi hình hay kiểm
 trạng thái của từng máy.
 
-Một hàng từ 1100 px (và ở 1093×614); tên trang dài xuống dòng giữa hai từ trong 48 px trước khi hàng
-tràn; pill theo dõi co tới 120 px. Dưới 1024 px thanh xuống hai hàng: tên trang và các nút ở hàng trên,
-phạm vi, bộ đếm và giờ cập nhật ở hàng dưới. Không cuộn ngang ở 820 px.
+Một hàng 48 px từ 1040 px, kể cả khi có lượt chạy, 40 máy và bộ đếm **Chưa rõ**: từ 1280 px phạm vi/giờ
+cập nhật là một cột cạnh bộ đếm; từ 1024 đến 1279 px phạm vi và giờ cập nhật thành một dòng chú thích
+nằm trên bộ đếm trong cùng 48 px, nhường chỗ cho tên trang, pill theo dõi, Ctrl+K, Inspector có chữ,
+chuông và nút quét lại. Tên trang tối đa hai dòng; pill theo dõi co tới 120 px và cắt chữ, câu đầy đủ ở
+tooltip. Dưới 1024 px (và 1024–1039 px khi có pill) thanh xuống hai hàng: tên trang và các nút ở hàng
+trên, phạm vi, bộ đếm và giờ cập nhật ở hàng dưới. Không cuộn ngang ở 820 px.
 
 ## Token
 
@@ -233,8 +236,12 @@ Lịch đăng bài là lịch một lần theo từng bài, mỗi dòng gắn m�
   giới vùng. Bảng (`ResponsiveTable`) và thanh bước (`WorkflowStepper`) nằm trong panel nên chỉ kẻ
   đường trên/dưới, không tự vẽ khung; toolbar Thiết bị là một hàng trên nền làm việc với một
   đường kẻ dưới, không phải thẻ. Toolbar/bảng/section có kích thước ổn định.
-- Toolbar: một hàng 40 px ở màn rộng (Thiết bị: lệnh fleet rồi tìm, lọc trạng thái, Chọn tất cả,
-  chế độ xem); khi không đủ chỗ phần lọc xuống hàng thứ hai, thông báo luôn chiếm một hàng riêng.
+- Toolbar: một hàng 40 px từ 1024 px (Thiết bị: Mở toàn bộ, Nhóm, Công cụ, Bảo trì, quét lại, rồi tìm,
+  lọc trạng thái, Chọn tất cả, chế độ xem). Ô tìm co trước (tối thiểu 160 px); dưới 1280 px (dưới
+  1600 px khi bảng Hiển thị đang ghim) Nhóm/Công cụ/Bảo trì chỉ còn icon, giữ tên đọc được và
+  tooltip, còn nút chính giữ chữ. Toolbar không lặp số máy (đã ở thanh hệ thống). Dưới 1024 px phần lọc
+  xuống hàng thứ hai; thông báo luôn chiếm một hàng riêng. Nút chính ≥ 40 px được giữ ở cả các
+  footer/toolbar riêng (Nuôi, Đăng bài, My Apps, Tác vụ đã lưu, Quản lý tài khoản).
 - Không resize control theo label/hover/loading. Chữ wrap có chủ đích; không tràn, đè hàng sau hoặc scale theo viewport.
 - Dùng khoảng cách/màu/icon nhất quán; disabled/loading/error/empty phải phân biệt và có hành động tiếp theo.
 - Desktop/laptop và viewport hẹp giữ nút chạy, filter, status đọc được; overflow thuộc bảng/canvas phù hợp.

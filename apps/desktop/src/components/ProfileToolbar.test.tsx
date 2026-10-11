@@ -31,7 +31,7 @@ describe("device toolbar", () => {
     const props = baseProps();
     render(<ProfileToolbar {...props} selected={[]} />);
     expect(screen.getByRole("button", { name: "Sửa Riviu Agent" })).not.toBeVisible();
-    await userEvent.click(screen.getByText("Bảo trì", { selector: "summary" }));
+    await userEvent.click(screen.getByText("Bảo trì").closest("summary")!);
     expect(props.onInstall).not.toHaveBeenCalled();
     expect(screen.getByText("Các máy đang kết nối")).toBeVisible();
     await userEvent.click(screen.getByRole("button", { name: "Sửa Riviu Agent" }));
@@ -41,7 +41,7 @@ describe("device toolbar", () => {
   it("closes maintenance with Escape and keeps refresh separate", async () => {
     const props = baseProps();
     render(<ProfileToolbar {...props} selected={[]} />);
-    const menu = screen.getByText("Bảo trì", { selector: "summary" });
+    const menu = screen.getByText("Bảo trì").closest("summary")!;
     await userEvent.click(menu);
     screen.getByRole("button", { name: "Sửa Riviu Agent" }).focus();
     await userEvent.keyboard("{Escape}");

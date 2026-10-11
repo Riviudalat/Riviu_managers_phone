@@ -93,6 +93,7 @@
 .nurture-workspace .nurture-session-footer .workspace-command-bar { margin: 0; }
 .nurture-workspace .nurture-session-footer .nurture-float-actions { padding: 0; border: 0; margin: 0; }
 .nurture-workspace .nurture-session-footer .nurture-float-actions button { flex: none; min-height: 36px; white-space: nowrap; }
+.nurture-workspace .nurture-session-footer .nurture-float-actions button.primary { min-height: var(--rv-control-primary); }
 .nurture-workspace .nurture-session-footer .nurture-float-actions .danger:disabled { display: none; }
 .nurture-workspace .nurture-float-err { flex: none; max-height: 64px; overflow: auto; margin: 0; }
 /* Monitoring retains its independent device history and evidence views. */

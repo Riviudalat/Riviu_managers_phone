@@ -400,7 +400,7 @@ describe("device operational identity", () => {
     try {
       render(<App />);
       await screen.findByText("Máy từ xa");
-      await userEvent.click(screen.getByText("Bảo trì", { selector: "summary" }));
+      await userEvent.click(screen.getByText("Bảo trì").closest("summary")!);
       await userEvent.click(screen.getByRole("button", { name: "Sửa Riviu Agent" }));
       await clickConfirmation("Sửa agent");
       expect(await screen.findByText("Sửa agent: 0 máy đã sửa, 1 máy lỗi")).toBeVisible();
@@ -496,7 +496,7 @@ describe("device operational identity", () => {
       render(<App />);
       const tile = (await screen.findAllByTestId("device-tile")).find(item => within(item).queryByText("Redmi"));
       expect(await within(tile!).findByText("Cần khôi phục helper")).toBeVisible();
-      const maintenance = screen.getByText("Bảo trì", { selector: "summary" });
+      const maintenance = screen.getByText("Bảo trì").closest("summary")!;
       await userEvent.click(maintenance);
       await userEvent.click(within(maintenance.closest("details")!).getByRole("button", { name: "Khôi phục helper" }));
       await waitFor(() => expect(api.agentHelperMaintenancePrepare).toHaveBeenCalledExactlyOnceWith(androidPhone.udid));
