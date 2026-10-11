@@ -1,0 +1,27 @@
+{
+  "_comment": "run-nurture.mjs --config. settings are overrides on top of nurture_get_settings (camelCase NurtureSettings); a key the controller does not have is refused. apiKey/hasApiKey/revision are never sent from here.",
+  "settings": {
+    "feedSource": "forYou",
+    "numVideos": 15,
+    "numRounds": 1,
+    "likeEnabled": true,
+    "likeProb": 20,
+    "saveEnabled": true,
+    "saveProb": 5,
+    "commentEnabled": false,
+    "commentProb": 0,
+    "followEnabled": false,
+    "followProb": 0,
+    "frenzyEnabled": false,
+    "frenzyProb": 0,
+    "watchMin": 4,
+    "watchMax": 12,
+    "scheduleEnabled": false,
+    "staggerDelayMin": 0,
+    "staggerDelayMax": 0
+  },
+  "udids": ["SERIAL_C", "SERIAL_D"],
+  "durationMinutes": 20,
+  "pollSeconds": 30,
+  "maxWatchMinutes": 25
+}

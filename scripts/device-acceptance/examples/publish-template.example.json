@@ -1,0 +1,21 @@
+{
+  "_comment": "run-publish.py / inspect-source.mjs --template. common is passed verbatim to scripts/publish_acceptance.mjs; --udids and --bundle-ids must equal mapping in order, --cdp must match --port, --dev-scope must be the scope launch.py used. Inspect output goes to <report-dir>-inspect, runner logs to <report-dir>-runs. Keep the real file (Sheet id, handles) under target/.",
+  "runner": null,
+  "common": [
+    "--protocol", "start",
+    "--report-dir", "C:/path/to/target/device-acceptance/r1/publish",
+    "--udids", "SERIAL_A,SERIAL_B",
+    "--source", "C:/path/to/publish-source",
+    "--bundle-ids", "BUNDLE_ID_A,BUNDLE_ID_B",
+    "--sheet-id", "SHEET_ID",
+    "--sheet-gid", "0",
+    "--dev-scope", "C:/path/to/target/device-acceptance/r1/scope-publish.json",
+    "--real-android", "true",
+    "--cdp", "http://127.0.0.1:47182"
+  ],
+  "contentSnapshot": null,
+  "mapping": [
+    {"number": 31, "udid": "SERIAL_A", "bundleId": "BUNDLE_ID_A"},
+    {"number": 32, "udid": "SERIAL_B", "bundleId": "BUNDLE_ID_B"}
+  ]
+}

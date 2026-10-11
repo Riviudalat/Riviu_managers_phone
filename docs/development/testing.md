@@ -112,6 +112,11 @@ phạm vi mạng nếu cần, không ghi “an toàn” chỉ vì chưa chạy a
 | Device canary | Đúng thiết bị/action/tuple được phép | Toàn fleet/phiên bản khác |
 | Installer | Đúng artifact/runtime và clean-host behavior đã đo | Mọi phone hay tài khoản Google |
 
+Nghiệm thu trên máy thật (build native, một controller, preflight từng máy, chạy và theo dõi
+Nuôi/Tương tác/Đăng bài, chụp UI thật) dùng
+[bộ script nghiệm thu](../../scripts/device-acceptance/README.md); trình tự nằm ở skill
+[riviu-device-acceptance](../../.claude/skills/riviu-device-acceptance/SKILL.md).
+
 Khi một lượt chạy trên máy dừng hoặc kẹt, chụp màn hình và hierarchy **trước** khi phiên
 đóng app. Ảnh chụp sau đó không còn nguyên nhân (popup, bảng, overlay đã biến mất).
 

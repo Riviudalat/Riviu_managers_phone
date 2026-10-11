@@ -1,0 +1,12 @@
+{
+  "_comment": "Copy to local.config.json (git-ignored) and edit. Every key is optional. Never put serials of a real fleet, handles, Sheet ids or credentials in the tracked example.",
+  "cdpPort": 47182,
+  "outRoot": "target/device-acceptance",
+  "dbPath": "%APPDATA%/riviu-managers-phone/riviu.db",
+  "adb": "adb",
+  "expectFocus": "com\\.(ss\\.android\\.ugc\\.trill|zhiliaoapp\\.musically|ss\\.android\\.ugc\\.aweme)|[Ll]auncher",
+  "numbers": {
+    "SERIAL_A": 31,
+    "SERIAL_B": 32
+  }
+}

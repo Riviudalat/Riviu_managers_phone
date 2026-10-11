@@ -1,0 +1,16 @@
+{
+  "_comment": "run-interaction.mjs --config. ThreadCampaignRequest fields (crates/core/src/interaction.rs, camelCase). Standalone: each actor leaves its own top-level comment. messageCount = number of actors. manualComments must be distinct, at least one per actor, without #, @ or links, and at most maxWords words.",
+  "actorUdids": ["SERIAL_E", "SERIAL_F"],
+  "actions": {"like": true, "comment": true, "follow": true, "save": false, "share": false},
+  "mode": "standalone",
+  "shape": "star",
+  "maxWords": 12,
+  "maxTargets": 7,
+  "postDwellSeconds": 8,
+  "manualComments": [
+    "Ảnh đẹp quá, nhìn là muốn đi ngay",
+    "Góc chụp xinh ghê, lưu lại để đi thử"
+  ],
+  "pollSeconds": 30,
+  "maxWatchMinutes": 150
+}
