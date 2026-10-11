@@ -486,7 +486,7 @@ section.device-browser > .device-browser-toolbar > .device-toolrow {
   gap: 2px;
   min-height: 0;
   padding: 4px 2px;
-  font-size: var(--text-tile-compact);
+  font-size: var(--text-2xs);
 }
 .cc-side-connections {
   display: grid;
@@ -502,7 +502,7 @@ section.device-browser > .device-browser-toolbar > .device-toolrow {
   gap: 3px;
   min-width: 0;
   padding: 4px 2px;
-  font-size: var(--text-tile-compact);
+  font-size: var(--text-2xs);
   white-space: nowrap;
   overflow: hidden;
 }
