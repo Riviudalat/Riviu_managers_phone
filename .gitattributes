@@ -41,3 +41,4 @@ crates/core/fixtures/tiktok-publish/musically-45.7.3-en/current-song-machine22-l
 crates/core/fixtures/tiktok-publish/native-final-caption-global45.7.3-en.xml -text
 crates/core/fixtures/tiktok-publish/trill-38.3.2-en/actual-failure-tree-3.xml -text
 crates/core/fixtures/tiktok-publish/trill-38.3.2-en/sound3-postback-editor.xml -text
+scripts/device-acceptance/*.sh text eol=lf

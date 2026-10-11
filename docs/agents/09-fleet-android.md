@@ -18,6 +18,9 @@ sở hữu inventory/hash; không nhân bản danh sách pin.
 - Retry ADB opt-in theo idempotency, không phát lại input/install/launch mất ACK.
 - Không kill adb-server. Discovery/route5037/5038 theo serial; scan lỗi không là roster
   rỗng đáng tin. Một backend lỗi không được xóa thiết bị của backend kia.
+- Script ngoài controller (`scripts/device-acceptance/`) phải gọi đúng adb mà controller
+  dùng (`RIVIU_ADB_PATH`, rồi PATH). Gọi adb client khác version sẽ restart adb-server
+  dưới controller.
 - Các engine đi qua control plane. IdleSweep thấp ưu tiên, không tranh foreground.
   Không dùng direct probe khi desktop giữ cùng USB.
 

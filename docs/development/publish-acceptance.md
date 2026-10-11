@@ -65,7 +65,8 @@ giây chỉ đọc metadata, **không đổi nhịp verifier 300 giây**. Observ
 UDID của toàn campaign; thiếu/dư assignment là scope mismatch, không báo pass.
 
 Lượt mới mặc định dùng giao thức Start; `--protocol legacy` không cho preflight/submit
-qua CLI. Scope dev ban đầu phải có đúng danh sách máy và `campaignIds: []`. Harness
+qua CLI. Scope dev ban đầu phải có đúng danh sách máy và `campaignIds: []`. Bộ đọc scope
+đặt `deny_unknown_fields`, nên file scope có khóa lạ thì controller từ chối nạp. Harness
 ghi độc quyền `preflight-request.json` với UUID; kích hoạt scope chứa đúng UUID ấy
 trước khi gọi preflight. Scope đã kích hoạt là một chiều trong process này; nếu
 preflight lỗi, không đổi campaign ID/capability để thử lại, cần lượt nghiệm thu mới
