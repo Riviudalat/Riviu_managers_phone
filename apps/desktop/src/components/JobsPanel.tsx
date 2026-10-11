@@ -50,6 +50,8 @@ import "../styles/operations.css";
 interface Props {
   devices: DeviceInfo[];
   selectedUdids: string[];
+  /** Selected phones that left for "Bị loại"; with nothing left selected the scope is empty, not all. */
+  excludedCount?: number;
   onSelectUdids: (udids: string[]) => void;
   initialScript?: string | null;
   deviceLabels: ReadonlyMap<string, string>;
@@ -142,6 +144,7 @@ function RunDetails({
 export function JobsPanel({
   devices,
   selectedUdids,
+  excludedCount = 0,
   onSelectUdids,
   initialScript,
   deviceLabels,
@@ -167,7 +170,7 @@ export function JobsPanel({
   const [advanced, setAdvanced] = useState(false);
   const listTicket = useRef(0);
   const detailTicket = useRef(0);
-  const targets = targetsOf(selectedUdids, devices);
+  const targets = targetsOf(selectedUdids, devices, excludedCount);
   const deviceNames = deviceLabels;
   const selectedRunIdRef = useRef<string | null>(null);
 
@@ -708,6 +711,7 @@ export function JobsPanel({
           <SelectionStrip
             devices={devices}
             selected={selectedUdids}
+            excludedCount={excludedCount}
             onSelectAll={() =>
               onSelectUdids(devices.map((device) => device.udid))
             }

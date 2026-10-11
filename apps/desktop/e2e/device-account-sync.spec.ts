@@ -26,6 +26,8 @@ for (const width of [1440, 820]) {
       w.__TAURI_INTERNALS__.invoke = async (cmd, args = {}) => {
         if (cmd === "startup_error") return null;
         if (cmd === "list_device_metas") return structuredClone(metas);
+        // All three phones are free: a phone running Nuôi cannot join a new Sync selection.
+        if (cmd === "list_device_work_states") return metas.map(meta => ({ udid: meta.udid, currentOwner: null }));
         // Reconciliation is a read-only preview, then an apply of that exact operation.
         if (cmd === "preview_account_reconciliation") {
           w.__MENU_CALLS__.push({ cmd, args });

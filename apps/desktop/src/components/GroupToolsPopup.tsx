@@ -18,6 +18,8 @@ import { TextDistributionTool } from "./groupTools/TextDistributionTool";
 interface Props {
   devices: DeviceInfo[];
   selected: string[];
+  /** Selected phones that left for "Bị loại"; with nothing left selected the scope is empty, not all. */
+  excludedCount?: number;
   onClose: () => void;
   visible?: boolean;
   macroTargets?: string[];
@@ -39,7 +41,7 @@ const TOOLS: { id: Tool; label: string; description: string }[] = [
   { id: "peripherals", label: "Ngoại vi", description: "Cấu hình bàn phím, chuột và thiết bị ngoại vi." },
 ];
 
-export function GroupToolsPopup({ devices, selected, onClose, visible = true, macroTargets, macroOnly = false, onBeginMacro, restoreFocus }: Props) {
+export function GroupToolsPopup({ devices, selected, excludedCount = 0, onClose, visible = true, macroTargets, macroOnly = false, onBeginMacro, restoreFocus }: Props) {
   const panelId = useId();
   const macroNameId = useId();
   const dialogRef = useModalFocus<HTMLDivElement>(onClose, visible, {
@@ -50,7 +52,8 @@ export function GroupToolsPopup({ devices, selected, onClose, visible = true, ma
   const [tool, setTool] = useState<Tool>("text");
   const activeId = macroOnly ? "macro" : tool;
   const isMacroSession = activeId === "macro" && macroTargets !== undefined;
-  const currentTargets = useMemo(() => targetsOf(selected, devices), [selected, devices]);
+  const currentTargets = useMemo(() => targetsOf(selected, devices, excludedCount), [selected, devices, excludedCount]);
+  const scopeEmptied = !selected.length && excludedCount > 0;
   // An explicitly empty recording scope must remain empty after roster changes.
   const targets = isMacroSession ? macroTargets : currentTargets;
   const targetDevices = useMemo(
@@ -61,7 +64,7 @@ export function GroupToolsPopup({ devices, selected, onClose, visible = true, ma
     [targets, devices],
   );
   const scopeLabel = isMacroSession ? `${targets.length} máy trong phiên ghi`
-    : selected.length ? `${targets.length} máy đã chọn` : `Tất cả ${targets.length} máy`;
+    : selected.length || scopeEmptied ? `${targets.length} máy đã chọn` : `Tất cả ${targets.length} máy`;
   const activeTool = TOOLS.find((item) => item.id === activeId)!;
 
   return (
@@ -78,7 +81,7 @@ export function GroupToolsPopup({ devices, selected, onClose, visible = true, ma
         <div className="nurture-float-body">
           <div className="group-tools-scope">
             <Users size={18} aria-hidden="true" />
-            <div><strong>{scopeLabel}</strong><span>{isMacroSession ? "Phạm vi đã chốt khi bắt đầu ghi; đổi lựa chọn không thay máy đích." : selected.length ? "Thao tác áp dụng cho lựa chọn hiện tại." : "Chưa chọn riêng máy nào; thao tác áp dụng cho toàn bộ danh sách."}</span>
+            <div><strong>{scopeLabel}</strong><span>{isMacroSession ? "Phạm vi đã chốt khi bắt đầu ghi; đổi lựa chọn không thay máy đích." : selected.length ? "Thao tác áp dụng cho lựa chọn hiện tại." : scopeEmptied ? `${excludedCount} máy đã chọn bị loại vì bận hoặc mất kết nối; không có máy nhận thao tác. Chọn lại máy trên lưới.` : "Chưa chọn riêng máy nào; thao tác áp dụng cho toàn bộ danh sách."}</span>
               {isMacroSession && <span>{targets.length ? targets.map(udid => devices.find(device => device.udid === udid)?.name ?? udid).join(", ") : "Chưa có máy đích; lưu Macro để dùng sau."}</span>}
             </div>
           </div>

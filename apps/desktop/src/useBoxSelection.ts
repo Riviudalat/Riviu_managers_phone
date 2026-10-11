@@ -1,5 +1,7 @@
 import {
+  useCallback,
   useEffect,
+  useLayoutEffect,
   useMemo,
   useRef,
   useState,
@@ -9,6 +11,11 @@ import {
 import { applyBoxSelection, isDragMeaningful, normalizeBox, tilesInBox } from "./boxSelect";
 import type { Rect, TileRect } from "./boxSelect";
 import type { DeviceInfo } from "./types";
+import { excludeBlocked, type ExcludedDevice, type SelectionBlock } from "./selectionEligibility";
+
+export type { ExcludedDevice, SelectionBlock };
+/** A phone an explicit action tried to add and could not, and why. */
+export interface RefusedDevice { udid: string; reason: string }
 
 /**
  * Selecting phones on the grid: click, shift-click, marquee, and Ctrl/Cmd+A.
@@ -17,10 +24,27 @@ import type { DeviceInfo } from "./types";
  * in `App.tsx` was the state and the two window-level listeners around it. Those are the
  * parts that were unreachable from a test, and they are the parts that carry the rules —
  * which selector finds a tile, when a drag counts, and what Ctrl+A must not steal.
+ *
+ * The selection is the set of phones the next command reaches, keyed by udid, so it never
+ * follows a grid position. Two rules guard it (PLAN §3): a phone that cannot take new work
+ * (busy, disconnected, gone) is never *added*, because every path that adds goes through one
+ * check; and a selected phone that becomes so *leaves* the selection for `excluded`, with its
+ * reason. Nothing puts it back when it frees up: only the operator selects it again.
  */
+export interface BoxSelectionOptions {
+  blockedReason?: SelectionBlock;
+  /// Called with the phones an explicit action tried to add and could not.
+  onRefused?: (refused: RefusedDevice[]) => void;
+}
+
 export interface BoxSelection {
   selected: string[];
-  setSelected: React.Dispatch<React.SetStateAction<string[]>>;
+  /// Replaces the selection; phones that cannot take new work are refused, not added.
+  setSelected: (next: string[]) => void;
+  /// Empties the selection and the "Bị loại" list together.
+  clearSelection: () => void;
+  excluded: ExcludedDevice[];
+  dismissExcluded: () => void;
   selectedDevices: DeviceInfo[];
   /// Click a tile: plain click replaces the selection, modified click toggles.
   onSelect: (udid: string, additive: boolean) => void;
@@ -36,8 +60,46 @@ export function useBoxSelection(
   visibleDevices: DeviceInfo[],
   /// Ctrl/Cmd+A only applies while the grid is actually on screen.
   gridIsUp: boolean,
+  options: BoxSelectionOptions = {},
 ): BoxSelection {
-  const [selected, setSelected] = useState<string[]>([]);
+  const [selected, setRawSelected] = useState<string[]>([]);
+  const [excluded, setExcluded] = useState<ExcludedDevice[]>([]);
+  const { blockedReason } = options;
+  // Handlers read the latest render's selection and rules; a stale closure would test a phone
+  // against the busy set of a render from before it went busy. A layout effect, so no input
+  // event can land between a commit and this update.
+  const latest = useRef({ selected, options });
+  useLayoutEffect(() => {
+    latest.current = { selected, options };
+  });
+  // Splits the phones an action would add into those that may take new work and those refused.
+  // Phones already selected pass: taking them out is the exclusion effect's job, not this one's.
+  const admit = useCallback((udids: string[]) => {
+    const { selected: current, options: { blockedReason: block } } = latest.current;
+    const allowed: string[] = [];
+    const refused: RefusedDevice[] = [];
+    for (const udid of new Set(udids)) {
+      const reason = current.includes(udid) ? null : block?.(udid) ?? null;
+      if (reason) refused.push({ udid, reason });
+      else allowed.push(udid);
+    }
+    return { allowed, refused };
+  }, []);
+  // Selecting an excluded phone again is the operator's decision, so it leaves "Bị loại".
+  const forgive = useCallback((udids: string[]) => {
+    if (!udids.length) return;
+    setExcluded((prev) => prev.some((entry) => udids.includes(entry.udid))
+      ? prev.filter((entry) => !udids.includes(entry.udid))
+      : prev);
+  }, []);
+  const setSelected = useCallback((next: string[]) => {
+    const { allowed, refused } = admit(next);
+    if (refused.length) latest.current.options.onRefused?.(refused);
+    // An action whose every new phone was refused changes nothing; it never empties the set.
+    if (next.length && !allowed.length) return;
+    forgive(allowed);
+    setRawSelected(allowed);
+  }, [admit, forgive]);
   const canvasRef = useRef<HTMLDivElement | null>(null);
   // Rubber-band (box) selection over the window grid (A7). `bandOrigin` holds the mousedown
   // point and modifier; `band` is the live rectangle in client coords, non-null only while
@@ -95,8 +157,12 @@ export function useBoxSelection(
           rect: { left: r.left, top: r.top, right: r.right, bottom: r.bottom },
         };
       });
-      const hits = tilesInBox(box, tiles);
-      setSelected((prev) => applyBoxSelection(prev, hits, origin.additive));
+      const { allowed, refused } = admit(tilesInBox(box, tiles));
+      if (refused.length) latest.current.options.onRefused?.(refused);
+      // A box over nothing but busy phones leaves the selection as it was.
+      if (refused.length && !allowed.length) return;
+      forgive(allowed);
+      setRawSelected((prev) => applyBoxSelection(prev, allowed, origin.additive));
     };
     window.addEventListener("mousemove", onMove);
     window.addEventListener("mouseup", onUp);
@@ -104,7 +170,7 @@ export function useBoxSelection(
       window.removeEventListener("mousemove", onMove);
       window.removeEventListener("mouseup", onUp);
     };
-  }, [dragging]);
+  }, [dragging, admit, forgive]);
 
   // Ctrl/Cmd+A selects every phone in the current tab while the grid is up — the farm
   // shortcut from xiaowei. Ignored while typing in a field so it never steals the browser's
@@ -122,7 +188,7 @@ export function useBoxSelection(
     };
     window.addEventListener("keydown", onKey);
     return () => window.removeEventListener("keydown", onKey);
-  }, [gridIsUp, visibleDevices]);
+  }, [gridIsUp, visibleDevices, setSelected]);
 
   // Memoised as it was in `App.tsx`: this is handed to children as a prop, so a fresh
   // array every render would be a re-render of the grid on every keystroke elsewhere.
@@ -131,14 +197,48 @@ export function useBoxSelection(
     [devices, selected],
   );
 
+  // A selected phone that can no longer take new work leaves the receiving set and says why.
+  useEffect(() => {
+    if (!blockedReason || !selected.length) return;
+    const { excluded: leaving } = excludeBlocked(selected, blockedReason);
+    if (!leaving.length) return;
+    const gone = new Set(leaving.map((entry) => entry.udid));
+    setRawSelected((prev) => prev.filter((udid) => !gone.has(udid)));
+    setExcluded((prev) => [...prev.filter((entry) => !gone.has(entry.udid)), ...leaving]);
+  }, [blockedReason, selected]);
+
   const onSelect = (udid: string, additive: boolean) => {
-    setSelected((prev) => {
-      if (additive) {
-        return prev.includes(udid) ? prev.filter((x) => x !== udid) : [...prev, udid];
-      }
-      return prev.includes(udid) && prev.length === 1 ? [] : [udid];
-    });
+    const prev = latest.current.selected;
+    if (prev.includes(udid)) {
+      if (additive) setRawSelected(prev.filter((x) => x !== udid));
+      else setRawSelected(prev.length === 1 ? [] : [udid]);
+      return;
+    }
+    const { refused } = admit([udid]);
+    if (refused.length) {
+      latest.current.options.onRefused?.(refused);
+      return;
+    }
+    forgive([udid]);
+    setRawSelected(additive ? [...prev, udid] : [udid]);
   };
 
-  return { selected, setSelected, selectedDevices, onSelect, canvasRef, onCanvasMouseDown, band };
+  const clearSelection = useCallback(() => {
+    setRawSelected([]);
+    setExcluded([]);
+  }, []);
+  const dismissExcluded = useCallback(() => setExcluded([]), []);
+
+  return {
+    selected,
+    setSelected,
+    clearSelection,
+    excluded,
+    dismissExcluded,
+    selectedDevices,
+    onSelect,
+    canvasRef,
+    onCanvasMouseDown,
+    band,
+  };
 }

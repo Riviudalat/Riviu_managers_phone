@@ -55,7 +55,8 @@ import { DeviceFilesPopup } from "./components/DeviceFilesPopup";
 import type { DeviceMenuNode } from "./deviceMenu";
 import { buildDeviceActions } from "./deviceActions";
 import { useFleet } from "./useFleet";
-import { useBoxSelection } from "./useBoxSelection";
+import { useBoxSelection, type RefusedDevice } from "./useBoxSelection";
+import { newWorkBlock } from "./selectionEligibility";
 import { metaByUdid, orderDevicesByNumber, tileName, tileNumber } from "./deviceNaming";
 import { AdbConsole } from "./components/AdbConsole";
 import { DeviceSyslogPopup } from "./components/DeviceSyslogPopup";
@@ -144,6 +145,17 @@ const PAGE_TITLE: Partial<Record<PageId, string>> = {
   api: "API",
   settings: "Cài đặt",
   deviceSettings: "Cài đặt máy",
+};
+
+/** The status filter's names as its select shows them, for the "Đang lọc" line. */
+const STATUS_FILTER_LABEL: Record<DeviceOperationalFilter, string> = {
+  all: "Mọi trạng thái",
+  idle: "Rảnh",
+  ready: "Sẵn sàng",
+  connected: "Đã kết nối",
+  busy: "Bận",
+  warning: "Cần xem",
+  offline: "Ngoại tuyến",
 };
 
 type DeviceWorkOwnerProjection =
@@ -580,15 +592,99 @@ function App() {
     ],
   );
 
+  // Busy and disconnected phones are never added for new work, and leave the selection when they
+  // become so. Owners are read only on this page; elsewhere the last read is stale, so only the
+  // roster's own status counts there.
+  const deviceByUdid = useMemo(() => new Map(devices.map((device) => [device.udid, device])), [devices]);
+  const selectionBlock = useCallback((udid: string) => {
+    const device = deviceByUdid.get(udid);
+    // An empty roster is boot or a failed scan, not every phone leaving at once.
+    if (!device && deviceByUdid.size === 0) return null;
+    return newWorkBlock(device, page === "control" ? currentDeviceWorkOwner(udid) : null);
+  }, [currentDeviceWorkOwner, deviceByUdid, page]);
+  const refuseSelection = useCallback((refused: RefusedDevice[]) => {
+    const label = (udid: string) => machineNumberLabel(fleetNumberByUdid.get(udid) ?? metaMap.get(udid)?.number);
+    const named = refused.map(({ udid, reason }) => `${label(udid)} – ${reason}`);
+    pushToast(
+      "warn",
+      refused.length === 1 ? `Không chọn ${label(refused[0].udid)}` : `Bỏ qua ${refused.length} máy không nhận việc mới`,
+      `${named.slice(0, 4).join("; ")}${refused.length > 4 ? `; và ${refused.length - 4} máy khác` : ""}. Máy đang chạy việc hoặc mất kết nối không được chọn cho việc mới.`,
+      undefined,
+      { cause: "selection_refused", udids: refused.map((entry) => entry.udid) },
+    );
+  }, [fleetNumberByUdid, metaMap]);
   const {
     selected,
     setSelected,
+    clearSelection,
+    excluded: excludedSelection,
+    dismissExcluded,
     selectedDevices,
     onSelect,
     canvasRef,
     onCanvasMouseDown,
     band,
-  } = useBoxSelection(devices, visibleDevices, page === "control" && viewMode === "window");
+  } = useBoxSelection(devices, visibleDevices, page === "control" && viewMode === "window", {
+    blockedReason: selectionBlock,
+    onRefused: refuseSelection,
+  });
+  // While a pointer is down on the wall or the list, the tiles under it stay where they were:
+  // which phones show, and in what order, is applied on release (PLAN §3). Statuses inside the
+  // tiles still update; tile strips have a fixed height, so text never moves the grid.
+  const [wallHeld, setWallHeld] = useState(false);
+  const [heldWall, setHeldWall] = useState<{ devices: DeviceInfo[]; notices: boolean[] } | null>(null);
+  const wallNotices = [
+    cachedAgents.roster === agentRosterKey && Boolean(cachedAgents.error),
+    deviceWorkOwners.state === "error",
+  ];
+  const holdWall = () => {
+    if (wallHeld) return;
+    setHeldWall({ devices: visibleDevices, notices: wallNotices });
+    setWallHeld(true);
+  };
+  useEffect(() => {
+    if (!wallHeld) return;
+    let timer = 0;
+    // Released after the click that ends the press has landed on the tile that was pressed.
+    const release = () => {
+      window.clearTimeout(timer);
+      timer = window.setTimeout(() => {
+        setWallHeld(false);
+        setHeldWall(null);
+      }, 0);
+    };
+    window.addEventListener("pointerup", release, true);
+    window.addEventListener("pointercancel", release, true);
+    window.addEventListener("blur", release);
+    // A release the window never hears (button let go outside it) must not freeze the wall.
+    const cap = window.setTimeout(release, 10_000);
+    return () => {
+      window.clearTimeout(cap);
+      window.clearTimeout(timer);
+      window.removeEventListener("pointerup", release, true);
+      window.removeEventListener("pointercancel", release, true);
+      window.removeEventListener("blur", release);
+    };
+  }, [wallHeld]);
+  const wallDevices = useMemo(() => {
+    if (!heldWall) return visibleDevices;
+    // Same phones in the same places, each drawn from the live roster when it is still there.
+    return heldWall.devices.map((device) => deviceByUdid.get(device.udid) ?? device);
+  }, [deviceByUdid, heldWall, visibleDevices]);
+  const [shownAgentNotice, shownOwnerNotice] = heldWall?.notices ?? wallNotices;
+  const selectableVisible = visibleDevices.filter((device) => selected.includes(device.udid) || !selectionBlock(device.udid));
+  // Selected phones the filters keep off screen: commands still reach them, so the bar names them.
+  const hiddenSelected = useMemo(() => {
+    const shown = new Set(visibleDevices.map((device) => device.udid));
+    return new Set(selectedDevices.filter((device) => !shown.has(device.udid)).map((device) => device.udid));
+  }, [selectedDevices, visibleDevices]);
+  const groupNamesByUdid = useMemo(() => {
+    const names = new Map<string, string[]>();
+    for (const group of groups) {
+      for (const udid of group.udids) names.set(udid, [...(names.get(udid) ?? []), group.name]);
+    }
+    return names;
+  }, [groups]);
   // The list's "Bằng chứng gần nhất" ages on a clock of its own: a phone nobody observes gets
   // no new record, and it must still turn stale without waiting for an unrelated re-render.
   const [listNowMs, setListNowMs] = useState(() => Date.now());
@@ -939,6 +1035,15 @@ function App() {
     deviceStatusFilter !== "all" && "trạng thái đã chọn",
     connectionFilter !== "all" && `kết nối ${connectionFilter === "usb" ? "USB" : "Wi-Fi"}`,
   ].filter((value): value is string => Boolean(value));
+  // Every filter the operator set, named, so a filtered wall never passes for the whole fleet.
+  // A tab whose group is gone shows everything (`devicesInTab`), so it is not a filter.
+  const activeTab = groupTab === ALL_DEVICES_TAB ? undefined : tabs.find((tab) => tab.id === groupTab);
+  const activeFilters = [
+    activeTab && `nhóm ${activeTab.label}`,
+    deviceStatusFilter !== "all" && `trạng thái ${STATUS_FILTER_LABEL[deviceStatusFilter]}`,
+    deviceSearch.trim() && `tìm “${deviceSearch.trim()}”`,
+    connectionFilter !== "all" && `kết nối ${connectionFilter === "usb" ? "USB" : "Wi-Fi"}`,
+  ].filter((part): part is string => Boolean(part));
   const goToDevice = (udid: string) => {
     void requestPage("control", true).then((activated) => {
       if (!activated) return;
@@ -1406,13 +1511,14 @@ function App() {
               />
 
 
-              {cachedAgents.roster === agentRosterKey && cachedAgents.error && (
+              {/* Both notices sit above the wall, so they appear or go only between presses. */}
+              {shownAgentNotice && (
                 <Banner tone="warn" action={<button type="button" onClick={() => setDeviceWorkOwnerRetry(value => value + 1)}>Thử lại trạng thái điều khiển</button>}>
                   <strong>Chưa đọc được trạng thái điều khiển; các máy chưa được xác nhận sẵn sàng.</strong>
                   <span>{cachedAgents.error}</span>
                 </Banner>
               )}
-              {deviceWorkOwners.state === "error" && (
+              {shownOwnerNotice && (
                 <Banner
                   tone="error"
                   action={
@@ -1425,7 +1531,7 @@ function App() {
                   }
                 >
                   <strong>Không đọc được tác vụ đang chạy trên thiết bị</strong>
-                  <span>{deviceWorkOwners.message}</span>
+                  <span>{deviceWorkOwners.state === "error" ? deviceWorkOwners.message : null}</span>
                 </Banner>
               )}
 
@@ -1466,26 +1572,40 @@ function App() {
                     when the operator meant twenty, and with Sync on, the next thing they
                     press reaches every one of them. */}
                 <div className="device-selectall">
+                  {/* The count is what it will select: busy and disconnected phones on
+                      screen take no new work, so they are left out and the title says so. */}
                   <button
                     type="button"
                     className="ghost"
-                    disabled={!visibleDevices.length}
+                    disabled={!selectableVisible.length}
+                    title={selectableVisible.length < visibleDevices.length
+                      ? `${visibleDevices.length - selectableVisible.length} máy đang chạy việc hoặc mất kết nối không được chọn`
+                      : undefined}
                     onClick={() =>
-                      setSelected(visibleDevices.map((device) => device.udid))
+                      setSelected(selectableVisible.map((device) => device.udid))
                     }
                   >
-                    Chọn tất cả ({visibleDevices.length})
+                    Chọn tất cả ({selectableVisible.length})
                   </button>
                 </div>
                 <FilterToolbar viewMode={viewMode} onViewMode={setViewMode} />
               </div>
+              {activeFilters.length > 0 && (
+                <div className="device-filter-summary">
+                  <span>
+                    <strong>Đang lọc:</strong> {activeFilters.join(" · ")}
+                    <span className="device-filter-summary-count"> · đang thấy {visibleDevices.length}/{devices.length} máy</span>
+                  </span>
+                  <button type="button" className="ghost" onClick={clearWallFilters}>Bỏ lọc</button>
+                </div>
+              )}
               </div>
 
-              <div className="device-browser-content">
+              <div className="device-browser-content" onPointerDownCapture={holdWall}>
 
-              {visibleDevices.length > 0 && viewMode === "list" && (
+              {wallDevices.length > 0 && viewMode === "list" && (
                 <DeviceListTable
-                  rows={visibleDevices.map((device) => {
+                  rows={wallDevices.map((device) => {
                     const meta = metaMap.get(device.udid);
                     const work = currentDeviceWorkState(device.udid);
                     return {
@@ -1514,7 +1634,7 @@ function App() {
                 />
               )}
 
-              {visibleDevices.length > 0 && viewMode === "window" && (
+              {wallDevices.length > 0 && viewMode === "window" && (
                 <div
                   className="window-canvas"
                   style={{ "--device-tile-min-width": `${tileWidth}px` } as CSSProperties}
@@ -1536,7 +1656,7 @@ function App() {
                       }}
                     />
                   )}
-                  {visibleDevices.map((device) => (
+                  {wallDevices.map((device) => (
                     <DeviceTile
                       key={device.udid}
                       device={device}
@@ -1575,7 +1695,7 @@ function App() {
                 </div>
               )}
 
-              {devices.length > 0 && visibleDevices.length === 0 && (
+              {devices.length > 0 && wallDevices.length === 0 && (
                 <EmptyState
                   icon={<IconPhone size={20} />}
                   title="Không có thiết bị phù hợp"
@@ -1641,10 +1761,14 @@ function App() {
                   }
                 />
               )}
-              {selectedDevices.length > 0 && (
+              {(selectedDevices.length > 0 || excludedSelection.length > 0) && (
                 <SelectionBar
                   selected={selectedDevices}
-                  hiddenCount={selectedDevices.filter(device => !visibleDevices.some(shown => shown.udid === device.udid)).length}
+                  hiddenCount={hiddenSelected.size}
+                  hiddenUdids={hiddenSelected}
+                  groupNames={groupNamesByUdid}
+                  excluded={excludedSelection}
+                  onDismissExcluded={dismissExcluded}
                   groups={groups}
                   activeSync={activeSync}
                   readiness={syncReadiness}
@@ -1675,7 +1799,7 @@ function App() {
                       toastError("Thêm vào nhóm thất bại", error);
                     }
                   }}
-                  onClear={() => setSelected([])}
+                  onClear={clearSelection}
                 />
               )}
               </div>
@@ -1793,6 +1917,7 @@ function App() {
               onOpenSource={(source) => void openOperationSource(source)}
               devices={devices}
               selectedUdids={selected}
+              excludedCount={excludedSelection.length}
               onSelectUdids={setSelected}
               initialScript={null}
               deviceLabels={automationDeviceLabels}
@@ -1908,6 +2033,7 @@ function App() {
         <GroupToolsPopup
           devices={devices}
           selected={selected}
+          excludedCount={excludedSelection.length}
           onClose={closeGroupTools}
           visible={groupToolsView === "dialog"}
           macroTargets={macroSession?.udids}

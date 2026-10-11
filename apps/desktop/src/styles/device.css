@@ -423,6 +423,22 @@
   flex: 0 0 auto;
   padding: 0.38rem 1.7rem 0.38rem 0.5rem;
 }
+/* "Đang lọc: …" names every filter the operator set, with one way back to the whole fleet.
+   It only appears or goes on the operator's own filter change, never on a status update. */
+.device-filter-summary {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: space-between;
+  gap: 4px 0.75rem;
+  padding: 4px 8px;
+  border-bottom: 1px solid var(--line);
+  color: var(--text-2);
+  font-size: var(--text-sm);
+  font-variant-numeric: tabular-nums;
+}
+.device-filter-summary strong { color: var(--warn-strong); }
+.device-filter-summary-count { color: var(--text-3); }
 @media (max-width: 1100px) {
   .device-toolrow {
     flex-wrap: wrap;

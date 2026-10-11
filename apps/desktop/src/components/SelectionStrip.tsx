@@ -12,9 +12,12 @@ export function SelectionStrip({
   onSelectAll,
   onClear,
   onSelectUdids,
+  excludedCount = 0,
 }: {
   devices: DeviceInfo[];
   selected: string[];
+  /** Selected phones that left for "Bị loại": an emptied selection is then no phones, not all. */
+  excludedCount?: number;
   onSelectAll: () => void;
   onClear: () => void;
   /** When provided, a "pick a group" dropdown loads it into the selection. */
@@ -55,12 +58,17 @@ export function SelectionStrip({
     };
   }, [loadGroups, onSelectUdids]);
 
-  const n = selected.length || devices.length;
-  const usingAll = selected.length === 0 && devices.length > 0;
+  const emptied = selected.length === 0 && excludedCount > 0;
+  const n = selected.length || (emptied ? 0 : devices.length);
+  const usingAll = selected.length === 0 && devices.length > 0 && !emptied;
   return (
     <div className="selection-strip">
       <span>
-        {usingAll ? (
+        {emptied ? (
+          <>
+            <strong>0</strong> máy đã chọn · {excludedCount} bị loại vì bận hoặc mất kết nối → không có máy nhận lệnh
+          </>
+        ) : usingAll ? (
           <>
             Chưa chọn → sẽ dùng <strong>tất cả {devices.length}</strong> máy
           </>

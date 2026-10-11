@@ -83,8 +83,30 @@ nhớ trên máy. Cột ghim và nút header không kéo được nữa; chỉ c
 che lệnh: nằm trên thanh chọn máy và bên trái cột monitor.
 Khi có máy được chọn, mọi lệnh trên các máy đó nằm ở một **thanh chọn máy** dính dưới lưới:
 Mở màn hình, Đồng bộ thao tác, Chạy Flow…, Công cụ nhóm…, Thêm vào nhóm, Bỏ chọn. Toolbar chỉ
-giữ lệnh toàn fleet (Mở toàn bộ và Công cụ khi chưa chọn máy, Nhóm, Bảo trì, quét lại). Khi bộ
-lọc đang ẩn máy đã chọn, thanh ghi rõ "N máy đã chọn đang bị bộ lọc ẩn", vì lệnh vẫn đến các máy đó.
+giữ lệnh toàn fleet (Mở toàn bộ và Công cụ khi chưa chọn máy, Nhóm, Bảo trì, quét lại).
+**Ổn định khi chọn (10/2026, PLAN §3):**
+- Thứ tự thẻ và dòng cố định theo số máy trong nhóm; trạng thái đổi không bao giờ sắp xếp lại.
+  Trong lúc nút chuột đang nhấn trên lưới hoặc bảng, tập máy hiện, thứ tự và hai banner phía trên
+  lưới giữ nguyên tới khi thả (sau cú click của lần nhấn đó); chữ trạng thái trong thẻ vẫn cập nhật
+  vì dải thông tin cao cố định.
+- Mọi bộ lọc người vận hành đặt (nhóm, trạng thái, tìm, kết nối) hiện thành một dòng
+  **Đang lọc: …** kèm "đang thấy V/T máy" và nút **Bỏ lọc**; dòng này chỉ xuất hiện hay mất
+  khi người vận hành đổi lọc. Đổi lọc không bao giờ thêm máy vào lựa chọn; phạm vi lệnh là
+  lựa chọn, không suy từ bộ lọc.
+- Lựa chọn bám udid. Thanh chọn máy luôn ghi **"N đã chọn · V đang thấy · H ẩn do lọc"**
+  (thêm "· K bị loại" khi có); bấm vào đó hoặc **Ctrl+Shift+L** mở danh sách đủ: Máy N,
+  nhóm, @tài khoản, đánh dấu máy ẩn do lọc, và danh sách bị loại.
+- Máy đang chạy việc (chủ Nuôi, Tương tác hoặc Tác vụ tự động, hoặc roster `busy`), mất kết
+  nối hoặc rời danh sách không thêm được vào lựa chọn: click, khung kéo, Ctrl+A, **Chọn tất
+  cả (N)** (N chỉ đếm máy chọn được), bảng lệnh và chọn theo nhóm đều bỏ qua và báo tên máy
+  cùng lý do. Máy đã chọn rồi chuyển sang trạng thái đó rời tập nhận lệnh, vào dòng **Bị
+  loại (K): Máy N – lý do** trên thanh, và không tự được chọn lại khi rảnh; chỉ người vận
+  hành chọn lại. Chủ giữ chốc lát hoặc thay chính người vận hành (điều khiển trực tiếp, Đồng
+  bộ, Sửa chữa, dọn nền) không làm máy bị loại. Chủ tác vụ chỉ được đọc ở trang này; ở trang
+  khác chỉ roster đếm.
+- Khi mọi máy đã chọn bị loại, lựa chọn rỗng là **không máy nào**, không phải toàn bộ: lệnh
+  của thanh tắt, Công cụ nhóm và Chạy JSON nâng cao ghi 0 máy, cho tới khi người vận hành chọn
+  lại hoặc **Xóa danh sách bị loại** / **Bỏ chọn**.
 Tab Thiết lập/Hẹn giờ/Theo dõi, tab con (Phiên nuôi/Hành vi/AI), bước Tương tác và Đăng bài dùng
 chung kiểu chọn trung tính: chữ đậm màu chữ chính và gạch chân cùng màu. Bảng có cuộn riêng;
 thanh hành động và nút chạy nằm trong viewport ở kích thước laptop. Chuyển màu nhẹ
