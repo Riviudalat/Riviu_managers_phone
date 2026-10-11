@@ -532,6 +532,8 @@ export function PublishPage({
   const [sheetConnectionReady, setSheetConnectionReady] = useState(false);
   const [sheetConnectionRevision, setSheetConnectionRevision] = useState(0);
   const sheetIdentityRef = useRef<string | null>(null);
+  const [sheetLink, setSheetLink] = useState("");
+  const [stepSlot, setStepSlot] = useState<HTMLDivElement | null>(null);
   const updateSheetConnection = useCallback((ready: boolean, identityKey: string | null = null) => {
     setSheetConnectionReady(ready);
     if (sheetIdentityRef.current !== identityKey) {
@@ -1384,7 +1386,11 @@ export function PublishPage({
   return (
     <main className="panel publish-page">
       <AutomationTabs id="publish" label="Chế độ Đăng bài" value={workspaceTab} onChange={setWorkspaceTab} />
-      <PublishHostLimits onSaved={() => setLimitsRevision(revision => revision + 1)} />
+      {/* The step bar (PLAN §7) sits on the limits row so it costs the board no height. */}
+      <div className="publish-limits-row">
+        <PublishHostLimits onSaved={() => setLimitsRevision(revision => revision + 1)} />
+        {workspaceTab !== "schedule" && <div className="publish-steps-slot" ref={setStepSlot} />}
+      </div>
       {guardsFailed && <div className="publish-global-notice"><StatusNotice tone="warning">{UNKNOWN_PUBLISH_GUARD}. <button type="button" onClick={() => void refreshDeviceGuards()}>Kiểm tra lại trạng thái bài</button></StatusNotice></div>}
       {notice && (
         <div className="publish-global-notice">
@@ -1450,6 +1456,8 @@ export function PublishPage({
           reviewBlocked={liveChanges.length > 0}
           preflightError={preflightError ?? (currentPreflight ? null : publishBlockingReason ?? null)}
           blockingReason={sheetBlockingReason}
+          sheetTarget={sheetConnectionReady ? sheetLink : undefined}
+          stepSlot={stepSlot} monitorActive={workspaceTab === "monitor"}
           sound={currentSoundPolicy}
           runAt=""
           onSource={(path) => {
@@ -1482,7 +1490,7 @@ export function PublishPage({
           onPreflight={runPreflight}
           onExecute={executeNewCampaign}
           onHistory={() => setWorkspaceTab("monitor")}
-          settings={<PublishSheetConnection onReadyChange={updateSheetConnection} />}
+          settings={<PublishSheetConnection onReadyChange={updateSheetConnection} onLinkChange={setSheetLink} />}
         />
       </div>
 

@@ -16,9 +16,13 @@ từng máy), số máy trong phạm vi và nút **Chọn máy**, nơi duy nhấ
 của Nuôi. Nút này mở bảng chọn hai cột có tìm kiếm và cuộn riêng; mở rồi đóng không đổi
 phạm vi, còn sửa danh sách chuyển phạm vi Toàn bộ hoặc Nhóm thành từng máy;
 **Xong** hoặc Escape đóng bảng nhưng giữ lựa chọn. **Chọn tất cả đang kết nối** gồm
-cả máy ngoài kết quả tìm kiếm; **Bỏ chọn** xóa lựa chọn. Có thể chọn máy đang bận
-hoặc chưa chuẩn bị; khi bắt đầu, app dừng tác vụ cũ liên quan, chờ nhả máy rồi kiểm tra
-sẵn sàng. Máy mất kết nối không được chọn thêm. Tìm kiếm không đổi phạm vi của lượt.
+cả máy ngoài kết quả tìm kiếm; **Bỏ chọn** xóa lựa chọn. Máy đang bận vẫn
+nằm trong phạm vi nhưng mặc định **Bị loại**: dòng phạm vi ghi "N trong phạm vi · M thực hiện
+· K bị loại (Máy 4 – Đang chạy tác vụ, …)" và máy đó không nhận lệnh. Muốn dùng máy bận, bấm
+**Dừng việc cũ và dùng máy này** của đúng máy; hộp xác nhận nêu tên việc sẽ bị dừng. Chỉ máy
+đã xác nhận như vậy mới bị dừng việc cũ khi bắt đầu; app chờ nhả máy rồi kiểm tra sẵn sàng.
+Tương tác không bắt đầu khi danh sách máy thực hiện còn máy bị loại. Máy chưa chuẩn bị vẫn
+chọn được. Máy mất kết nối không được chọn thêm. Tìm kiếm không đổi phạm vi của lượt.
 Cấu hình và tóm tắt phiên đọc từ thiết lập hiện tại; thanh tab và nút bắt đầu
 nằm ngoài vùng cuộn. Phạm vi Nuôi không thay lựa chọn của Tương tác hoặc Đăng bài.
 
@@ -33,7 +37,15 @@ Khi kiểm tra khả năng chạy, Nuôi và Tương tác chờ tác vụ chuẩ
 dọn nền nhả máy trong tối đa 9 giây. Nếu vẫn bận, app giữ lý do thật; không
 giành quyền của tác vụ đang chạy.
 
-Nuôi đang chờ quyền điều khiển vẫn nhận lệnh **Dừng**; thời lượng phiên có tính
+Tóm tắt **Phiên sắp chạy** cạnh nút bắt đầu luôn ghi **Hành động công khai** sẽ chạy (tim,
+lưu, bình luận do AI viết, theo dõi) kèm tỷ lệ, kể cả khi tab Hành vi/AI đang gập. Nhãn tỷ lệ
+là **Tỷ lệ hành động (%)**; nhịp xem là **Thời gian xem ngắn nhất/dài nhất**.
+
+Nút **Yêu cầu dừng** của Nuôi gửi yêu cầu, rồi hiện **Đang dừng · a/n máy đã xác nhận** và kết
+quả từng máy. Chỉ khi mọi máy báo không còn chạy mới ghi **Đã dừng**; máy chưa có trạng thái
+ghi "Chưa rõ: chưa có xác nhận từ máy". Dừng không thu hồi tim, lưu, bình luận hay theo dõi đã gửi.
+
+Nuôi đang chờ quyền điều khiển vẫn nhận lệnh **Yêu cầu dừng**; thời lượng phiên có tính
 thời gian chờ này. Thao tác đã gửi được chờ kết thúc trước khi nhả máy. Bấm chạy
 trùng một máy không thay trạng thái và số video của phiên đang chạy; lượt bị từ
 chối vẫn có trong lịch sử.

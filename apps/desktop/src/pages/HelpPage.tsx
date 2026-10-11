@@ -7,7 +7,7 @@ import type { PageId } from "../types";
 const TOPICS = [
   { page: "diagnostics", title: "Kết nối và kiểm tra máy", description: "Xem trạng thái kết nối, điều khiển và luồng hình trước khi chạy tác vụ.", label: "Kiểm tra thiết bị", Icon: Cable },
   { page: "myApps", title: "Thiết lập quy trình", description: "Mở Nuôi TikTok, Tương tác hoặc Đăng bài; chọn phạm vi riêng cho từng chức năng.", label: "Mở Quy trình ứng dụng", Icon: ClipboardList },
-  { page: "publish", title: "Ghép bài và thiết bị", description: "Chọn nguồn, ghép mỗi bài với một máy rồi kiểm tra. Chọn nhanh không tự đăng bài.", label: "Thiết lập Đăng bài", Icon: FolderOpen },
+  { page: "publish", title: "Ghép bài và thiết bị", description: "Chọn nguồn, ghép mỗi bài với một máy rồi xem lại. Ghép tự động không đăng bài; chỉ hộp xác nhận mới đăng.", label: "Thiết lập Đăng bài", Icon: FolderOpen },
   { page: "jobs", title: "Đọc kết quả và xử lý phần còn thiếu", description: "Xem đúng lượt chạy và bằng chứng từng máy; phân biệt thành công, còn thiếu và chưa rõ.", label: "Xem lượt chạy", Icon: HelpCircle },
 ] satisfies { page: PageId; title: string; description: string; label: string; Icon: typeof Cable }[];
 

@@ -45,6 +45,8 @@ import { clearAutomationMode, peekAutomationMode } from "../automationModeReques
 import "../styles/nurture-workspace.css";
 import { IconClose, IconHeart, IconRefresh } from "./Icons";
 import { LoadingState, StatusNotice } from "./States";
+import { BusyScopeNotice } from "./BusyScopeNotice";
+import { useBusyScope } from "../useBusyScope";
 import { BlockedReason, CommandBar, StatusChip } from "./WorkspacePrimitives";
 import { blockerDescribedBy, focusBlockingField, type Blocker } from "./blockers";
 import type {
@@ -357,6 +359,12 @@ export function NurturePopup({
   const latestStatusEvents = useRef(new Map<string, { sequence: number; status: NurtureSessionStatus }>());
   const [startedTargets, setStartedTargets] = useState<string[]>([]);
   const [startReport, setStartReport] = useState<{ requested: string[]; started: string[] } | null>(null);
+  /**
+   * The stop the operator asked for (PLAN §8 ★). A sent stop is only a request: each phone
+   * counts as stopped once its own status row reports it is no longer running, and a phone
+   * with no row stays unconfirmed, never "Đã dừng".
+   */
+  const [stopRequest, setStopRequest] = useState<{ targets: string[]; sent: boolean } | null>(null);
   const [msg, setMsg] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
   const issueId = useId();
@@ -405,6 +413,7 @@ export function NurturePopup({
   // What the confirmation is checked against once the operator answers it (PLAN §3).
   const scopeLatest = useRef({ targets, devices });
   scopeLatest.current = { targets, devices };
+  const busyScope = useBusyScope(devices, targets);
   const anyRunning = statuses.some((s) => s.running);
   const runningTargets = useMemo(
     () => [...new Set(statuses.filter((status) => status.running).map((status) => status.udid))],
@@ -756,7 +765,12 @@ export function NurturePopup({
       setMsg("Chọn máy trên lưới trước");
       return;
     }
-    const runTargets = [...targets];
+    // Busy phones stay out unless the operator took each one back explicitly (PLAN §8).
+    const runTargets = [...busyScope.runTargets];
+    if (!runTargets.length) {
+      setMsg("Mọi máy trong phạm vi đang bận. Chọn máy rảnh hoặc dùng \"Dừng việc cũ và dùng máy này\" cho từng máy.");
+      return;
+    }
     const runSettings = settings;
     const runTargetRef = targetRef;
     const statusOf = (udid: string) => scopeLatest.current.devices.find((device) => device.udid === udid)?.status;
@@ -817,17 +831,30 @@ export function NurturePopup({
   };
 
   const stop = async () => {
+    const requested = [...stopTargets];
     setBusy(true);
+    setStopRequest({ targets: requested, sent: false });
     try {
-      await nurtureStop(stopTargets);
+      await nurtureStop(requested);
+      setStopRequest({ targets: requested, sent: true });
       setStartedTargets([]);
       await reload();
     } catch (e) {
+      setStopRequest(null);
       setMsg(describeError(e));
     } finally {
       setBusy(false);
     }
   };
+  const stopRows = stopRequest?.targets.map((udid) => {
+    const status = statuses.find((row) => row.udid === udid);
+    const confirmed = stopRequest.sent && !!status && !status.running;
+    return { udid, confirmed, text: !stopRequest.sent ? "Đang gửi yêu cầu dừng" : !status ? "Chưa rõ: chưa có xác nhận từ máy"
+      : status.running ? "Đang dừng" : status.outcome === "stopped" ? "Đã dừng (máy xác nhận)"
+        : status.outcome === "failed" ? "Đã ngừng · cần kiểm tra" : "Đã ngừng (máy xác nhận)" };
+  }) ?? [];
+  const stopConfirmed = stopRows.filter((row) => row.confirmed).length;
+  const stopping = !!stopRequest && stopConfirmed < stopRows.length;
 
   const onTitleDown = (e: React.PointerEvent<HTMLDivElement>) => {
     if ((e.target as HTMLElement).closest("button")) return;
@@ -965,11 +992,11 @@ export function NurturePopup({
 
   const actionControls = (
     <div className="nurture-float-actions">
-      <button type="button" className="primary" disabled={busy || !targets.length || !settings || Boolean(settingsIssue)} aria-describedby={blockerDescribedBy(blockerId, startBlockers)} onClick={start}>
+      <button type="button" className="primary" disabled={busy || !busyScope.runTargets.length || !settings || Boolean(settingsIssue)} aria-describedby={blockerDescribedBy(blockerId, startBlockers)} onClick={start}>
         {pageSurface ? "Kiểm tra & bắt đầu" : "Bắt đầu"}
       </button>
       <button type="button" className="danger" disabled={busy || !stopTargets.length} onClick={stop}>
-        Dừng
+        {stopping ? "Yêu cầu dừng lại" : "Yêu cầu dừng"}
       </button>
       {(!pageSurface || pageMode === "setup") && <button
         type="button"
@@ -1056,6 +1083,19 @@ export function NurturePopup({
                 />
               )}
 
+              {stopRequest && stopRows.length > 0 && (
+                <StatusNotice tone={stopping ? "warning" : "info"}>
+                  <strong role="status">{stopping
+                    ? `Đang dừng · ${stopConfirmed}/${stopRows.length} máy đã xác nhận`
+                    : `Đã dừng · ${stopRows.length}/${stopRows.length} máy đã xác nhận`}</strong>
+                  <ul className="nurture-stop-rows" aria-label="Kết quả dừng từng máy">
+                    {stopRows.map((row) => <li key={row.udid}><strong>{deviceLabel(devices, metas, row.udid)}</strong> · {row.text}</li>)}
+                  </ul>
+                  <p>Dừng không thu hồi hành động đã gửi trước đó (tim, lưu, bình luận, theo dõi).</p>
+                  {!stopping && <button type="button" className="ghost" onClick={() => setStopRequest(null)}>Đóng kết quả dừng</button>}
+                </StatusNotice>
+              )}
+
               {startReport && (
                 <StatusNotice tone={startReport.started.length === startReport.requested.length ? "info" : "warning"}>
                   <strong>{startReport.started.length}/{startReport.requested.length} máy đã bắt đầu</strong>
@@ -1074,6 +1114,8 @@ export function NurturePopup({
                   hidden={pageMode !== "setup"}
                 >
                   <NurtureMachinePicker devices={devices} metas={metas} targets={targets} onTargetRefChange={onTargetRefChange} scopeControl={scopeControl} />
+                  <BusyScopeNotice targets={targets} runTargets={busyScope.runTargets} excluded={busyScope.excluded}
+                    label={(udid) => deviceLabel(devices, metas, udid)} disabled={busy} onTake={(udid, label) => void busyScope.take(udid, label)} />
                   <div className="nurture-session-layout">
                     <div className="nurture-setup-fields">
                     <section className="nurture-config-body nurture-settings-tabs" aria-label="Thiết lập Nuôi TikTok">
@@ -1245,7 +1287,7 @@ export function NurturePopup({
                           </span>
                         </button>
                         {pageSurface && row.status && <div className="nurture-monitor-row-status">
-                          <span className={`nurture-machine-state${row.status.outcome === "done" ? " is-ready" : ""}`}>{row.running ? "Đang chạy" : row.status.outcome === "failed" ? "Cần kiểm tra" : row.status.outcome === "done" ? "Hoàn tất" : row.status.outcome === "stopped" ? "Đã dừng" : row.status.outcome === "partial" ? "Hoàn tất một phần" : "Chờ xử lý"}</span>
+                          <span className={`nurture-machine-state${row.status.outcome === "done" ? " is-ready" : ""}`}>{row.running ? stopRequest?.sent && stopRequest.targets.includes(row.udid) ? "Đang dừng" : "Đang chạy" : row.status.outcome === "failed" ? "Cần kiểm tra" : row.status.outcome === "done" ? "Hoàn tất" : row.status.outcome === "stopped" ? "Đã dừng" : row.status.outcome === "partial" ? "Hoàn tất một phần" : "Chờ xử lý"}</span>
                           <span>{row.status.videosDone}/{row.status.videoTarget} bài đã xem</span>
                           {row.status.updatedAt && <time dateTime={row.status.updatedAt}>{new Date(row.status.updatedAt).toLocaleTimeString("vi-VN", { hour12: false })}</time>}
                         </div>}

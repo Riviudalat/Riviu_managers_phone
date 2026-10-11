@@ -752,7 +752,7 @@ describe("NurturePopup", () => {
     expect(screen.getByText(/Không bắt đầu: Máy 2/)).toHaveTextContent("Second phone");
     expect(screen.getByText(/không thuộc phiên và không được tự tắt TikTok/)).toBeVisible();
     expect(api.nurtureStart).toHaveBeenCalledWith(["mock-1", "mock-2"], settings.scheduleDurationMinutes);
-    fireEvent.click(screen.getByRole("button", { name: /^Dừng$/ }));
+    fireEvent.click(screen.getByRole("button", { name: /^Yêu cầu dừng$/ }));
     await waitFor(() => expect(api.nurtureStop).toHaveBeenCalledWith(["mock-1"]));
   });
 
@@ -792,7 +792,7 @@ describe("NurturePopup", () => {
     expect(api.nurtureSaveSettings).not.toHaveBeenCalled();
 
     fireEvent.click(screen.getByRole("button", { name: "Sửa thiết lập" }));
-    const input = screen.getByLabelText(/Xem max/, { selector: "input" });
+    const input = screen.getByLabelText(/Thời gian xem dài nhất/, { selector: "input" });
     expect(input).toHaveFocus();
     expect(input).toHaveAttribute("aria-invalid", "true");
     expect(input).toHaveAccessibleDescription(/Thời gian xem tối đa/);
@@ -872,7 +872,7 @@ describe("NurturePopup", () => {
         surface="page"
       />,
     );
-    fireEvent.click(screen.getByRole("button", { name: "Dừng" }));
+    fireEvent.click(screen.getByRole("button", { name: "Yêu cầu dừng" }));
 
     await waitFor(() => expect(api.nurtureStop).toHaveBeenCalledTimes(1));
     expect(api.nurtureStop).toHaveBeenCalledWith(["mock-1"]);
@@ -893,10 +893,10 @@ describe("NurturePopup", () => {
     );
 
     const start = await screen.findByRole("button", { name: /^(?:Kiểm tra & bắt đầu|Bắt đầu)$/ });
-    expect(screen.queryByRole("button", { name: "Dừng" })).toBeNull();
+    expect(screen.queryByRole("button", { name: "Yêu cầu dừng" })).toBeNull();
     fireEvent.click(start);
     await waitFor(() => expect(api.nurtureStart).toHaveBeenCalledWith(["mock-1"], settings.scheduleDurationMinutes));
-    const stop = screen.getByRole("button", { name: "Dừng" });
+    const stop = screen.getByRole("button", { name: "Yêu cầu dừng" });
     expect(stop).toBeEnabled();
     fireEvent.click(stop);
     await waitFor(() => expect(api.nurtureStop).toHaveBeenCalledWith(["mock-1"]));
@@ -1051,8 +1051,8 @@ describe("NurturePopup", () => {
       "Bình luận",
       "Theo dõi",
       "Vuốt nhanh",
-      "Xem min",
-      "Xem max",
+      "Thời gian xem ngắn nhất",
+      "Thời gian xem dài nhất",
       "Mỏi dần",
       "Theo giờ trong ngày",
       "Ngập ngừng khi vuốt",

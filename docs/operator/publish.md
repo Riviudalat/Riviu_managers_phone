@@ -69,10 +69,13 @@ giao thức; kết quả model phải được đối chiếu với màn hình t
 phát lại. **Nhập gói tương thích** yêu cầu fixture đúng và thiếu/mơ hồ cho từng
 target; **Khôi phục gói tương thích trước** áp dụng cho các phiên mới.
 
-Các tab chính là **Thiết lập · Hẹn giờ · Theo dõi**. Thiết lập mở **Bàn đăng nhanh**
+Các tab chính là **Thiết lập · Hẹn giờ · Theo dõi**. Đầu Thiết lập luôn có thanh bước
+**1 Nội dung · 2 Ghép máy–tài khoản · 3 Xem lại & xác nhận · 4 Theo dõi**; nút **Từng bước**
+hiện từng bước một thay cho ba khung (lựa chọn được nhớ trên máy tính này, đổi cỡ cửa sổ giữ
+bước, cặp ghép và nội dung đang nhập). Thiết lập mở **Bàn đăng nhanh**
 với ba khung nhìn đồng thời: **Chọn bài đăng → Bài ↔ máy → Thiết bị**. Tìm bài ở
 khung trái, kiểm/đổi từng cặp ở khung giữa và chọn/gán thiết bị ở khung phải.
-Danh sách trong mỗi khung cuộn riêng; thanh **Kiểm tra & đăng** có hàng riêng ở cuối,
+Danh sách trong mỗi khung cuộn riêng; thanh **Xem lại trước khi đăng** có hàng riêng ở cuối,
 không che trường nhập. Nút **Xem ảnh và sửa caption** hoặc **Sửa caption** mở ảnh,
 nội dung, đối tác và thông tin nhạc của đúng bài. Escape/Đóng giữ bản nháp, trả focus
 về nút đã mở; đổi nguồn không được chuyển nội dung đang sửa sang bài khác.
@@ -139,8 +142,8 @@ danh sách bài–máy chỉ ghi **Chờ kết quả**, chưa coi máy là đạ
 Lượt cũ chưa có đích đã chốt giữ nguyên lịch sử để kiểm tra, không tự gửi sang
 kết nối mới.
 
-Khung **Máy thực hiện** có nhóm **Phân công** với **Chọn nhanh** và **Hoàn tác**.
-Chọn nhanh là phân công bài, không đổi phạm vi máy: lấy bài trong nguồn (tối đa 100) và
+Khung **Máy thực hiện** có nhóm **Phân công** với **Ghép tự động (chưa đăng)** và **Hoàn tác**.
+Ghép tự động là phân công bài, không đăng và không đổi phạm vi máy: lấy bài trong nguồn (tối đa 100) và
 mọi máy có thể gán trong phạm vi; mỗi máy một bài. Khi đã chọn phạm vi máy, khung
 mặc định chỉ hiện máy trong phạm vi và máy đã ghép cần sửa; mở **Bộ lọc thiết bị →
 Hiện máy ngoài phạm vi** để xem toàn dàn. Cặp đã ghép hợp lệ được giữ. Nếu đợt
@@ -374,8 +377,10 @@ Cách chạy một lượt trong Bàn đăng nhanh:
 3. Chọn máy và bấm **Ghép bài với máy đã chọn**. Dòng cuối phải đủ `N/N bài có máy`.
    Chọn 10 bài chỉ cần 10 máy dù đang kết nối 20 máy. Nếu chọn riêng ít hơn số bài,
    thêm máy hoặc giảm số bài rồi ghép lại.
-4. Kiểm tra đúng link/tab Google Sheet đã xác minh, rồi bấm **Kiểm tra & đăng**.
-   Đọc kết quả từng máy, bấm **Xác nhận đăng công khai N bài** (xác nhận cuối, không có popup thứ hai). Nhạc được
+4. Kiểm tra đúng link/tab Google Sheet đã xác minh, rồi bấm **Xem lại trước khi đăng**.
+   Hộp **Xem lại và xác nhận đăng công khai** là cửa xác nhận duy nhất: bảng đọc đủ từng
+   Máy N, @tài khoản, phiên bản nội dung (tên file, thời lượng, mã bản), caption, nhạc và
+   link Sheet, không cắt "…". Đọc kết quả từng máy, bấm **Xác nhận đăng công khai N bài** (xác nhận cuối, không có popup thứ hai). Nhạc được
    chọn và đọc lại trong TikTok sau khi mở máy; kiểm tra đầu vào chưa có nghĩa đã chọn
    nhạc. Các máy có thể dùng trùng nhạc. Bài chưa xác minh giữ media đã chuyển trên
    điện thoại; sau khi xác minh liên kết, app dọn bản chuyển và hiển thị kết quả dọn

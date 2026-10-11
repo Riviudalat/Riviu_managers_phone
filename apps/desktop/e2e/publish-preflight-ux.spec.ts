@@ -70,13 +70,13 @@ for (const viewport of [{ width: 1440, height: 900 }, { width: 820, height: 560 
     await page.getByRole("combobox", { name: "Phạm vi thiết bị" }).selectOption("all");
     await page.getByRole("button", { name: "Chọn thư mục", exact: true }).click();
     await page.getByRole("button", { name: "Quét", exact: true }).click();
-    await page.getByRole("button", { name: "Chọn nhanh", exact: true }).click();
+    await page.getByRole("button", { name: "Ghép tự động (chưa đăng)", exact: true }).click();
     await expect(page.locator(".pq-footer")).toContainText("10/10 bài có máy");
     // Verified read-only on load; preflight below still reports the lost write right.
     await expect(page.locator(".publish-sheet-result.is-verified")).toContainText("Đã xác minh Sheet");
     await expect(page.locator(".pq-run-options")).toHaveText("Sheet bật · Dọn bản chuyển bật");
     await expect(page.getByRole("checkbox", { name: "Ghi kết quả lên Sheet" })).toHaveCount(0);
-    await page.getByRole("button", { name: "Kiểm tra & đăng", exact: true }).click();
+    await page.getByRole("button", { name: "Xem lại trước khi đăng", exact: true }).click();
 
     const dialog = page.getByRole("dialog", { name: "Xem lại và xác nhận đăng công khai" });
     await expect(dialog.getByRole("region", { name: "Điều kiện chung chưa đạt" })).toContainText("Kết nối Sheet chưa được xác minh");

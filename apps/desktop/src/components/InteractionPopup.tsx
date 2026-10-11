@@ -52,6 +52,8 @@ import { InteractionWorkspaceSetup } from "./interaction/InteractionWorkspaceSet
 import { AutomationTabs, type AutomationMode } from "./AutomationTabs";
 import { AutomationSettingsSchedule } from "./AutomationSettingsSchedule";
 import { CommandBar } from "./WorkspacePrimitives";
+import { BusyScopeNotice } from "./BusyScopeNotice";
+import { useBusyScope } from "../useBusyScope";
 
 type Props = {
   operationSource?: OperationSourceRef;
@@ -321,6 +323,10 @@ export function InteractionPopup({
     () => unionActors(draft.actors, mentionActors),
     [draft.actors, mentionActors],
   );
+  // A busy actor is "Bị loại": Start never stops its job silently and never drops it from the
+  // reviewed cohorts by itself, so it blocks until the operator removes it or takes it back.
+  const busyScope = useBusyScope(devices, effectiveActors);
+  const busyActorLabel = (udid: string) => deviceLabel.get(udid) ?? udid;
 
   /// Seed the default **once**, and never again.
   ///
@@ -622,8 +628,13 @@ export function InteractionPopup({
   latestRunRevision.current = runRevision;
   useEffect(() => () => { latestRunRevision.current = null; }, []);
   const starting = useRef(false);
+  const busyBlocked = busyScope.excluded.length > 0;
   const run = useCallback(async () => {
     if (issues.length || starting.current) return;
+    if (busyBlocked) {
+      setRunError("Có máy đang bận trong danh sách máy tương tác. Bỏ máy đó khỏi danh sách, hoặc bấm \"Dừng việc cũ và dùng máy này\" cho từng máy.");
+      return;
+    }
     starting.current = true;
     setRunBusy(true);
     setRunError(null);
@@ -664,7 +675,7 @@ export function InteractionPopup({
       starting.current = false;
       setRunBusy(false);
     }
-  }, [draft, effectiveActors, issues.length, largestCohort, mentions, validTargets, pageSurface, runRevision]);
+  }, [draft, effectiveActors, issues.length, largestCohort, mentions, validTargets, pageSurface, runRevision, busyBlocked]);
 
   const onTitleDown = (event: React.PointerEvent<HTMLElement>) => {
     if ((event.target as HTMLElement).closest("button")) return;
@@ -818,7 +829,7 @@ export function InteractionPopup({
               <button
                 type="button"
                 className="primary"
-                disabled={runBusy || issues.length > 0}
+                disabled={runBusy || issues.length > 0 || busyBlocked}
                 onClick={() => void run()}
               >
                 {runBusy ? "Đang bắt đầu…" : pageSurface ? "Bắt đầu tương tác" : "Chạy ngay"}
@@ -834,6 +845,8 @@ export function InteractionPopup({
           aria-labelledby="interaction-tab-setup"
           hidden={tab !== "setup"}
         >
+          <BusyScopeNotice targets={effectiveActors} runTargets={busyScope.runTargets} excluded={busyScope.excluded}
+            label={busyActorLabel} disabled={runBusy} onlyWhenExcluded onTake={(udid, label) => void busyScope.take(udid, label)} />
           {pageSurface ? <InteractionWorkspaceSetup setup={setupProps} profiles={null} scopeControl={scopeControl}
             effectiveActors={effectiveActors} busy={runBusy} onRun={() => void run()}
             onReparse={() => setParseRevision((value) => value + 1)} /> : <InteractionSetupTab {...setupProps} />}

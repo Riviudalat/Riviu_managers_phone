@@ -12,7 +12,8 @@ import { getSheetPreflightBinding, getSheetVerificationSession, invalidateSheetV
 type Target = GoogleSheetTarget;
 type Action = "loading" | "login" | "check" | "picking" | "cancel" | "configure" | null;
 export type SheetReadyChange = (ready: boolean, identityKey: string | null) => void;
-type Props = { onReadyChange?: SheetReadyChange };
+/** `onLinkChange` reports the typed Sheet link, so the publish review can name the target. */
+type Props = { onReadyChange?: SheetReadyChange; onLinkChange?: (link: string) => void };
 const sameTarget = (a: Target | null, b: Target | null) => !!a && !!b && a.spreadsheetId === b.spreadsheetId && a.sheetId === b.sheetId;
 const accountKey = sheetAccountKey;
 
@@ -24,7 +25,7 @@ function boundedRead<T>(promise: Promise<T>, milliseconds = 15_000): Promise<T> 
 }
 const readGoogleStatus = () => boundedRead(googleSheetsStatus());
 
-export function GoogleSheetConnection({ onReadyChange }: Props) {
+export function GoogleSheetConnection({ onReadyChange, onLinkChange }: Props) {
   const [url, setUrl] = useState("");
   const [status, setStatus] = useState<GoogleSheetsStatus | null>(null);
   const [action, setAction] = useState<Action>("loading");
@@ -261,6 +262,7 @@ export function GoogleSheetConnection({ onReadyChange }: Props) {
     if (action === "loading") return;
     onReadyChange?.(canPreflight, identityKey);
   }, [canPreflight, identityKey, action, onReadyChange]);
+  useEffect(() => { onLinkChange?.(url); }, [url, onLinkChange]);
   const canCancel = action === "login" || action === "picking";
   const message = error || (action === "picking" ? "Chọn đúng bảng trong cửa sổ Google để cấp quyền." : action === "login" ? "Hoàn tất đăng nhập trong trình duyệt Google."
     : action === "loading" ? "Đang đọc kết nối Google…" : action || autoChecking ? "Đang kiểm tra kết nối…" : verified ? result.message

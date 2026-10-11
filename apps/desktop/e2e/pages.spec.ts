@@ -70,7 +70,7 @@ async function open(page: Page, name: string): Promise<void> {
   }
   if (name === "Đăng bài") {
     await expect(
-      page.getByRole("button", { name: "Kiểm tra & đăng", exact: true }),
+      page.getByRole("button", { name: "Xem lại trước khi đăng", exact: true }),
     ).toBeDisabled();
   }
   if (name === "Flow") {
@@ -348,7 +348,7 @@ test("publish workflow stays inside the viewport at supported widths", async ({
     for (const name of ["Nội dung đăng", "Liên kết bài và máy", "Máy thực hiện"]) {
       await expect(page.getByRole("region", { name, exact: true })).toBeVisible();
     }
-    await expect(page.getByRole("button", { name: "Kiểm tra & đăng", exact: true })).toBeDisabled();
+    await expect(page.getByRole("button", { name: "Xem lại trước khi đăng", exact: true })).toBeDisabled();
     const overflow = await page.evaluate(() => ({
       viewport: document.documentElement.clientWidth,
       document: document.documentElement.scrollWidth,

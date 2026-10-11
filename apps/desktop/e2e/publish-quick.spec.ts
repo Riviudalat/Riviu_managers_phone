@@ -107,13 +107,13 @@ test("approved quick desk scans, selects, assigns and checks without public disp
   await page.getByRole("combobox",{name:"Phạm vi thiết bị"}).selectOption("all");
   await page.getByRole("button",{name:"Chọn thư mục",exact:true}).click();
   await page.getByRole("button",{name:"Quét",exact:true}).click();
-  await page.getByRole("button",{name:"Chọn nhanh",exact:true}).click();
+  await page.getByRole("button",{name: "Ghép tự động (chưa đăng)",exact:true}).click();
   await expect(page.locator(".pq-footer")).toContainText("10/10 bài có máy");
   await page.getByRole("button", {name:"Hoàn tác gán nhanh"}).click();
   await expect(page.locator(".pq-footer")).toContainText("0 bài đã chọn");
-  await page.getByRole("button",{name:"Chọn nhanh",exact:true}).click();
-  await page.getByRole("button",{name:"Chọn nhanh",exact:true}).click();
-  await expect(page.getByRole("button",{name:"Kiểm tra & đăng",exact:true})).toBeEnabled();
+  await page.getByRole("button",{name: "Ghép tự động (chưa đăng)",exact:true}).click();
+  await page.getByRole("button",{name: "Ghép tự động (chưa đăng)",exact:true}).click();
+  await expect(page.getByRole("button",{name: "Xem lại trước khi đăng",exact:true})).toBeEnabled();
   for(const size of [{width:1440,height:900},{width:1024,height:768},{width:820,height:560}]){
     await page.setViewportSize(size);
     await page.screenshot({path:test.info().outputPath(`quick-${size.width}.png`)});
@@ -121,7 +121,7 @@ test("approved quick desk scans, selects, assigns and checks without public disp
     await expect(page.getByRole("region", {name:"Liên kết bài và máy"})).toBeVisible();
     await expect(page.getByRole("textbox", {name:"Tìm số máy"})).toBeVisible();
   }
-  await page.getByRole("button",{name:"Kiểm tra & đăng",exact:true}).click();
+  await page.getByRole("button",{name: "Xem lại trước khi đăng",exact:true}).click();
   await expect(page.getByRole("button",{name:"Xác nhận đăng công khai 10 bài",exact:true})).toBeEnabled();
   await expect(page.locator(".pq-run-options")).toHaveText("Sheet bật · Dọn bản chuyển bật");
   await expect(page.getByRole("dialog", {name: "Xem lại và xác nhận đăng công khai"})).not.toContainText("Ghi Sheet đang tắt");

@@ -159,7 +159,7 @@ caption/thời điểm, link ứng viên, dữ liệu gốc) và các lệnh the
 
 **Lý do bị khóa nằm cạnh nút.** Nút chính bị tắt luôn có lý do ngay bên cạnh (`BlockedReason`,
 `aria-describedby` trỏ vào lý do) và nút sửa đưa focus tới đúng trường: Nuôi (phạm vi, thiết lập),
-Tương tác (link, Chọn máy, trường bước 2), Đăng bài (thư mục, Chọn nhanh, máy nhận, caption),
+Tương tác (link, Chọn máy, trường bước 2), Đăng bài (thư mục, Ghép tự động, máy nhận, caption),
 Flow (Lưu bản, Xem lỗi), Điều phối (tên, thêm bước), Công cụ nhóm (văn bản, regex, tệp). Lý do
 quy trình không gom vào banner và không ẩn. Dòng chức năng bị tắt trong cửa sổ điện thoại nêu lý
 do ở tooltip. **Thông báo hệ thống** cấp app (backend, số máy, nhánh iOS/Android, bộ công cụ) gộp
@@ -240,9 +240,9 @@ quyết định thiết kế Riviu, không phải tuyên bố parity toàn bộ 
 | Trung tâm điều khiển | toolbar, group tabs, grid/table, drawer | nhóm, trạng thái, tìm kiếm, máy chọn | trạng thái máy; mở máy hoặc Chẩn đoán | tập lọc giống grid/table; tile/canvas không đổi; chưa có máy: bốn bước cắm USB → cho phép gỡ lỗi USB/Tin cậy → Làm mới → Chẩn đoán; trống vì lọc: nêu bộ lọc + Bỏ lọc |
 | Cài đặt máy | chuẩn cài đặt (checkbox + tự áp dụng), phạm vi, bảng kết quả theo máy | danh mục cài đặt, máy/nhóm/toàn bộ | trạng thái đọc từng cài đặt; kết quả applied/alreadyOk/needsManual/refusedBusy/failed | đọc lỗi là “Chưa rõ”, máy bận bị từ chối không chiếm quyền, iOS “Chưa hỗ trợ” không gọi máy, áp dụng chỉ sau khi đã lưu |
 | Chẩn đoán | bảng điều kiện, detail bằng chứng | máy/phạm vi | readiness/lỗi; sửa đúng điều kiện | không tự repair từ health false-negative |
-| Nuôi | Thiết lập/Hẹn giờ/Theo dõi | scope, nhịp, effect, lịch | phiên/máy/effect; đọc bằng chứng | credential riêng, draft/readiness, target isolation |
-| Tương tác | Thiết lập/Theo dõi, assignment | URL hiện tại, actors, nội dung | campaign/outcome; source retry | URL parse stale, profile identity, uncertain |
-| Đăng bài | ba khung chọn bài / bài↔máy / thiết bị; caption dialog | nguồn/caption/nhạc/Sheet/máy | preflight, Post/URL/Sheet/cleanup; retry phạm vi thiếu | không đăng lại Partial; active bị lọc ẩn, confirm stale, focus caption, target-bound digest |
+| Nuôi | Thiết lập/Hẹn giờ/Theo dõi; tóm tắt cạnh nút bắt đầu luôn liệt kê mọi hành động công khai sẽ chạy (tim, lưu, bình luận, theo dõi); nhãn "Tỷ lệ hành động (%)", "Thời gian xem ngắn nhất/dài nhất" | scope, nhịp, effect, lịch | phiên/máy/effect; dừng: "Yêu cầu dừng" → "Đang dừng · a/n máy đã xác nhận" → kết quả từng máy; "Đã dừng" chỉ khi mọi máy báo không còn chạy | credential riêng, draft/readiness, target isolation; máy không có dòng trạng thái = Chưa rõ, không phải đã dừng; không hứa thu hồi hành động đã gửi |
+| Tương tác | Thiết lập/Theo dõi, assignment | URL hiện tại, actors, nội dung | campaign/outcome; source retry | URL parse stale, profile identity, uncertain; máy thực hiện đang bận chặn Bắt đầu tới khi bỏ máy hoặc "Dừng việc cũ và dùng máy này" |
+| Đăng bài | thanh bước 1 Nội dung · 2 Ghép máy–tài khoản · 3 Xem lại & xác nhận · 4 Theo dõi; ba khung chọn bài / bài↔máy / thiết bị hoặc **Từng bước** (nhớ theo máy người dùng); caption dialog | nguồn/caption/nhạc/Sheet/máy | **Ghép tự động (chưa đăng)** chỉ sửa bản nháp; **Xem lại trước khi đăng** mở hộp "Xem lại và xác nhận đăng công khai", cửa xác nhận duy nhất, đọc đủ Máy N · @ · phiên bản nội dung (tên file, thời lượng, mã bản) · caption · nhạc · link Sheet; preflight, Post/URL/Sheet/cleanup; retry phạm vi thiếu | không đăng lại Partial; active bị lọc ẩn, confirm stale, focus caption, target-bound digest; bản xem lại không bao giờ cắt "…" |
 | Flow | editor mở, mode/device/fleet, execution detail | graph/node/target/revision | run/node history; mở lỗi | Save/Archive/import identity, guard, node effects |
 | Lượt chạy | bảng dense, filters, detail; **Nâng cao** chứa Chạy JSON nâng cao | source/status/time | total/page/source link | bài khác máy; active cũ; pagination; rỗng tách: lọc (Bỏ lọc) · khoảng thời gian (Xem toàn bộ lịch sử) · chưa có lượt (Mở Nuôi TikTok) |
 | Ứng dụng › Quy trình ứng dụng | thư viện tích hợp + quy trình đã lưu | tìm, tạo/chỉnh; nhập JSON trong **Nâng cao** | mở chức năng hoặc editor | tải quy trình không giả thành rỗng; import bàn phím qua menu Nâng cao; rỗng có Tạo quy trình đầu tiên |
@@ -363,6 +363,12 @@ bằng chứng. Thiếu dữ liệu không bao giờ tự thành Sẵn sàng hay
 **Chọn được** (Nuôi, Tương tác) / **có thể gán** (Đăng bài) là quy tắc riêng của từng workspace,
 không phải một giá trị trạng thái; dòng trạng thái không cấp quyền chọn và không phải lời khẳng định
 đã sẵn sàng. Máy Đang chạy không nhận việc mới; quy tắc chọn máy (gồm loại máy bận) thuộc §3.
+Trong phạm vi Nuôi/Tương tác, máy roster `busy` mặc định **Bị loại** và không nhận lệnh; dòng phạm vi
+ghi "N trong phạm vi · M thực hiện · K bị loại (Máy 4 – Đang chạy tác vụ, …)". Bắt đầu không bao
+giờ âm thầm dừng việc cũ: chỉ nút từng máy **Dừng việc cũ và dùng máy này**, sau hộp xác nhận nêu
+tên việc đang chạy (đọc mới từ chủ sở hữu; không đọc được thì ghi "tác vụ chưa đọc được tên"),
+mới đưa máy đó trở lại và cho phép dừng việc cũ khi bắt đầu. Nuôi chạy trên các máy còn lại;
+Tương tác chặn Bắt đầu tới khi xử lý từng máy bị loại, vì bỏ một máy sẽ đổi cách chia bài.
 
 Ô máy, dòng danh sách, thẻ chọn máy, chi tiết máy và Ctrl+K dùng một dòng gộp
 (`deviceOperationalView` → `DeviceStatusLine`): Mất kết nối → Đang chạy → Cần xử lý → Chưa rõ →
@@ -398,7 +404,7 @@ Phạm vi, máy thực hiện và phân công là ba số khác nhau, mỗi số
 |---|---|---|
 | **Phạm vi máy** | Toàn bộ, Nhóm hoặc Máy cụ thể; giới hạn máy nào được dùng | "N máy trong phạm vi" (Nuôi, Tương tác), "N trong phạm vi" (Đăng bài) |
 | **Máy thực hiện** | Máy sẽ chạy lượt Tương tác: máy chọn trong phạm vi cộng máy được thêm bởi tag tài khoản | "N máy · K từ tag", "N máy thực hiện" |
-| **Phân công** | Đăng bài ghép từng bài với một máy có thể gán; **Chọn nhanh** và **Hoàn tác** nằm trong nhóm "Phân công", không đổi phạm vi | "N/M bài đã gán" |
+| **Phân công** | Đăng bài ghép từng bài với một máy có thể gán; **Ghép tự động (chưa đăng)** và **Hoàn tác** nằm trong nhóm "Phân công", không đổi phạm vi và không đăng | "N/M bài đã gán" |
 
 Nuôi chỉ có một trình sửa phạm vi: select **Phạm vi thiết bị** chọn kiểu, drawer **Chọn máy**
 sửa danh sách; Nuôi không có drawer **Chọn thiết bị** thứ hai. Tương tác và Đăng bài giữ

@@ -1,5 +1,6 @@
 import { machineNumberLabel } from "../../deviceNaming";
 import { useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
+import { createPortal } from "react-dom";
 import { ArrowLeft, ArrowRight, Check, FolderOpen, ListFilter, LoaderCircle, Music2, Pencil, Search, Undo2, Zap, X } from "lucide-react";
 import type { PublishWizardProps } from "./PublishWizard";
 import { PublishMedia } from "./PublishMedia";
@@ -16,7 +17,8 @@ import { allocateQuickPosts } from "./publishQuickAllocation";
 import { publishSelectionStatus } from "./publishSelectionStatus";
 import { deviceGuardBlock, deviceGuardPending } from "./publishDeviceGuardState";
 import { focusBlockingField } from "../blockers";
-import type { PublishDeviceGuards } from "../../types";
+import type { PublishBundle, PublishDeviceGuards } from "../../types";
+import { PublishSteps } from "./PublishSteps";
 
 type QuickProps = PublishWizardProps & {
   blockingReason?: string;
@@ -28,9 +30,31 @@ type QuickProps = PublishWizardProps & {
   reviewChanges?: string[];
   /** The change is already visible here, so confirming waits for Kiểm tra lại. */
   reviewBlocked?: boolean;
+  /** The verified Sheet link the results go to; absent while the Sheet is not verified. */
+  sheetTarget?: string;
+  /** Where the page wants the step bar; inline when absent. */
+  stepSlot?: HTMLElement | null;
+  /** The page shows Theo dõi, so the bar reads step 4. */
+  monitorActive?: boolean;
 };
 type CaptionContext = { id: string; source: string; origin: HTMLButtonElement };
 type AssignmentSnapshot = { props: QuickProps; activeId?: string; activeVisible: boolean; locked: boolean; key: string };
+
+const STEP_LAYOUT_KEY = "riviu.publish.stepLayout";
+function readStepLayout() {
+  try { return window.localStorage.getItem(STEP_LAYOUT_KEY) === "1"; } catch { return false; }
+}
+function writeStepLayout(on: boolean) {
+  try { window.localStorage.setItem(STEP_LAYOUT_KEY, on ? "1" : "0"); } catch { /* per-viewer convenience only */ }
+}
+/** The content version the review names: file, duration and digest, never a thumbnail alone. */
+function contentVersion(bundle: PublishBundle) {
+  if (bundle.mediaKind === "video" && bundle.video) {
+    return `${bundle.video.fileName} · ${(bundle.video.durationMs / 1000).toFixed(1)} giây · bản ${bundle.video.sha256.slice(0, 8)}`;
+  }
+  const images = [...bundle.images].sort((a, b) => a.order - b.order);
+  return `${images.length} ảnh: ${images.map(image => image.fileName).join(", ")}`;
+}
 
 function canReceive(p: QuickProps, udid: string) {
   return p.eligible.includes(udid) && p.devices.some(d => d.udid === udid && (d.status === "ready" || d.status === "busy" || d.status === "connected"))
@@ -64,6 +88,9 @@ export function PublishQuickSetup(p: QuickProps) {
   const [notice, setNotice] = useState("");
   const [undo, setUndo] = useState<{ source: string; ids: string[]; assignments: Record<string, string>; picked: string[]; after: string } | null>(null);
   const [confirming, setConfirming] = useState(false);
+  // "Từng bước" (PLAN §7) is remembered per viewer; the step lives here, so resizing keeps it.
+  const [stepLayout, setStepLayout] = useState(readStepLayout);
+  const [layoutStep, setLayoutStep] = useState<1 | 2>(1);
   const latest = useRef<AssignmentSnapshot | null>(null);
   const pendingAssignment = useRef(false);
   const rootRef = useRef<HTMLDivElement>(null);
@@ -220,7 +247,19 @@ export function PublishQuickSetup(p: QuickProps) {
   const filteredDevices = devices.filter(d => (!p.scopeControl || showOutOfScope || p.eligible.includes(d.udid) || assignedByDevice.has(d.udid))
     && `${label(d.udid)} ${p.metas.get(d.udid)?.handle ?? ""}`.toLocaleLowerCase().includes(deviceQuery.toLocaleLowerCase())
     && (!onlyFree || (canReceive(p, d.udid) && !assignedByDevice.has(d.udid))));
-  return <div ref={rootRef} className="publish-quick" hidden={p.active === false}>
+  const currentStep = p.monitorActive ? 4 : dialog === "check" ? 3 : stepLayout ? layoutStep : selected.length ? 2 : 1;
+  const toggleStepLayout = () => { const next = !stepLayout; setStepLayout(next); writeStepLayout(next); };
+  const setupVisible = p.active !== false;
+  const stepBar = (setupVisible || p.monitorActive) && <div className="publish-steps-bar">
+    <PublishSteps current={currentStep}/>
+    {setupVisible && <div className="publish-steps-actions">
+      {stepLayout && layoutStep === 2 && <button type="button" className="ghost" aria-label="Quay lại: Nội dung" onClick={() => setLayoutStep(1)}><ArrowLeft size={15} aria-hidden="true"/>Quay lại</button>}
+      {stepLayout && layoutStep === 1 && <button type="button" aria-label="Tiếp: Ghép máy–tài khoản" onClick={() => setLayoutStep(2)}>Tiếp<ArrowRight size={15} aria-hidden="true"/></button>}
+      <button type="button" className="ghost" aria-pressed={stepLayout} title="Hiện từng bước một thay cho bàn ghép ba cột; lựa chọn được nhớ" onClick={toggleStepLayout}>Từng bước</button>
+    </div>}
+  </div>;
+  return <div ref={rootRef} className={`publish-quick${stepLayout ? " is-steps" : ""}`} data-step={stepLayout ? layoutStep : undefined} hidden={p.active === false}>
+    {p.stepSlot ? stepBar && createPortal(stepBar, p.stepSlot) : stepBar}
     <div className="pq-setup-scroll">
       <div className="pq-setup-tools">
         <div className="pq-source"><label htmlFor="publish-source-folder">Thư mục bài đăng</label><div className="pq-source-controls"><input id="publish-source-folder" aria-label="Thư mục nguồn" value={p.sourceRoot} onChange={e => { if (!p.busy) p.onSource(e.target.value); }} disabled={p.busy} placeholder="Đường dẫn thư mục chứa bài đăng"/><button type="button" disabled={p.busy} onClick={() => void chooseFolder()}><FolderOpen size={16}/>Chọn thư mục</button><button type="button" disabled={locked || !p.sourceRoot} onClick={() => { if (!locked && p.sourceRoot) void p.onScan(p.sourceRoot); }}>{p.scanning ? "Đang quét…" : "Quét"}</button></div></div>
@@ -266,19 +305,19 @@ export function PublishQuickSetup(p: QuickProps) {
               <div className="pq-link-detail"><span>{b.mediaKind === "video" ? "Video MP4" : `${b.images.length} ảnh`}</span><button type="button" className="ghost" aria-label={`Sửa caption · ${b.name}`} onClick={e => openCaption(b.id, e.currentTarget)}>Sửa caption</button></div>
               <div className="pq-link-account"><span title={handle || (udid ? label(udid) : "Cần chọn máy")}>{handle || (udid ? valid ? "Đã ghép máy" : "Máy chưa hợp lệ" : "Cần chọn máy")}</span><button type="button" className="pq-unlink ghost" aria-label={`Bỏ ghép bài ${b.name}`} title="Bỏ ghép bài này" disabled={locked || confirming || !udid} onClick={() => void assign(b.id, "")}><X size={14}/></button></div>
             </article>;
-          })}{!selected.length && <div className="pq-list-empty"><strong>Chưa chọn bài nào</strong><p>Tick bài bên trái hoặc dùng Chọn nhanh để ghép với máy có thể gán.</p></div>}</div>
+          })}{!selected.length && <div className="pq-list-empty"><strong>Chưa chọn bài nào</strong><p>Tick bài bên trái hoặc dùng Ghép tự động để ghép với máy có thể gán. Ghép không đăng bài.</p></div>}</div>
         </section>
         <section className="pq-devices pq-panel" aria-label="Máy thực hiện">
           <header className="pq-devices-header"><div><h2>Thiết bị{p.scopeControl && <small className="pq-scope-count">{p.eligible.length} trong phạm vi</small>}</h2><div className={`pq-active-post${active && !activeVisible ? " is-hidden" : ""}`} role="status">{active && !activeVisible ? <><span>Bài đang gán bị lọc ẩn.</span><button type="button" className="ghost" onClick={() => { revealAfterCommit.current = active.id; setQuery(""); }}>Hiện bài</button></> : <span title={`Gán: ${active?.name ?? "Chưa chọn bài"}${active && !p.selectedIds.includes(active.id) ? " · Tick bài trước" : ""}`}>Gán: <strong>{active?.name ?? "Chưa chọn bài"}</strong>{active && !p.selectedIds.includes(active.id) ? " · Tick bài trước" : ""}</span>}</div></div>{p.scopeControl ?? <span>{ready.length} có thể gán</span>}</header>
           <div className="pq-panel-tools pq-device-tools">
-            <div className="pq-quick-actions" role="group" aria-label="Phân công bài cho máy"><span className="pq-quick-label" aria-hidden="true"><span className="pq-quick-label-full">Phân công</span><span className="pq-quick-label-short">Gán</span></span><button type="button" className="pq-quick-button" title="Ghép bài đã tick với máy có thể gán trong phạm vi, mỗi máy một bài. Không đổi phạm vi máy." disabled={locked || confirming || !bundles.length} onClick={autoAssign}><Zap size={15} aria-hidden="true"/>Chọn nhanh</button><button type="button" aria-label="Hoàn tác gán nhanh" disabled={locked || confirming || !undo || undo.source !== p.sourceRoot || undo.after !== mappingKey} onClick={undoAssignment}><Undo2 size={15} aria-hidden="true"/>Hoàn tác</button></div>
+            <div className="pq-quick-actions" role="group" aria-label="Phân công bài cho máy"><span className="pq-quick-label" aria-hidden="true"><span className="pq-quick-label-full">Phân công</span><span className="pq-quick-label-short">Gán</span></span><button type="button" className="pq-quick-button" title="Ghép bài đã tick với máy có thể gán trong phạm vi, mỗi máy một bài. Không đổi phạm vi máy." disabled={locked || confirming || !bundles.length} onClick={autoAssign}><Zap size={15} aria-hidden="true"/>Ghép tự động (chưa đăng)</button><button type="button" aria-label="Hoàn tác gán nhanh" disabled={locked || confirming || !undo || undo.source !== p.sourceRoot || undo.after !== mappingKey} onClick={undoAssignment}><Undo2 size={15} aria-hidden="true"/>Hoàn tác</button></div>
             <div className="pq-device-searchbar"><label className="pq-search"><Search size={15}/><input aria-label="Tìm số máy" value={deviceQuery} onChange={e => setDeviceQuery(e.target.value)} placeholder="Tìm máy / tài khoản"/></label>
             <details className="pq-device-filters" onKeyDown={e => { if (e.key === "Escape") { e.currentTarget.open = false; e.currentTarget.querySelector("summary")?.focus(); } }}><summary aria-label="Bộ lọc thiết bị" title="Bộ lọc thiết bị"><ListFilter size={15}/><span>Bộ lọc thiết bị</span></summary><div>
               <label><input type="checkbox" checked={onlyFree} onChange={e => setOnlyFree(e.target.checked)}/>Chỉ hiện máy có thể gán chưa có bài</label>
               {p.scopeControl && <label><input type="checkbox" checked={showOutOfScope} onChange={e => setShowOutOfScope(e.target.checked)}/>Hiện máy ngoài phạm vi</label>}
               <button type="button" className="ghost" title="Chọn mọi máy có thể gán trong phạm vi (đã kết nối, kể cả đang bận), kể cả ngoài kết quả tìm kiếm" disabled={locked || confirming || !ready.length} onClick={() => { if (!locked && !confirming) setPicked(ready.map(d => d.udid)); }}>Chọn tất cả máy có thể gán</button>
               <button type="button" className="ghost" disabled={locked || confirming || (!picked.length && !selected.some(b => p.assignments[b.id]))} onClick={() => { if (!locked && !confirming) { setPicked([]); p.onAssign({}); } }}>Bỏ chọn toàn bộ máy</button>
-              <small>{mapped} bài đã ghép · {ready.length} máy có thể gán / {devices.length} tổng. Bộ lọc chỉ đổi danh sách đang xem, không đổi Chọn nhanh.</small>
+              <small>{mapped} bài đã ghép · {ready.length} máy có thể gán / {devices.length} tổng. Bộ lọc chỉ đổi danh sách đang xem, không đổi Ghép tự động.</small>
             </div></details></div>
           </div>
           {!p.eligible.length && <p className="pq-scope-hint">Chọn Toàn bộ máy hoặc một nhóm để ghép bài.</p>}
@@ -305,7 +344,7 @@ export function PublishQuickSetup(p: QuickProps) {
       </div>
     </div>
     <footer className="pq-footer"><div><strong>{selected.length} bài đã chọn</strong><span>{mapped}/{selected.length} bài có máy · mỗi máy một bài</span><span className="pq-run-options">Sheet bật · Dọn bản chuyển bật</span>{notice && <details className="pq-assignment-notice"><summary title={notice}><span role="status">{notice}</span></summary><p>{notice}</p></details>}{selectedPending && p.onPendingPublication && <button type="button" className="pq-pending-action" disabled={locked} onClick={() => { if (!locked) p.onPendingPublication?.(selectedPending.campaignId); }}>Xem bài đang chờ</button>}</div>
-      <div className="pq-check">{checkReason && <p className="pq-check-reason" role="status"><small id="publish-check-reason" title={checkReasonText}>{checkReasonText}</small>{checkFix && <button type="button" className="blocked-reason-fix" onClick={() => focusBlockingField(rootRef.current, checkFix.selector)}>{checkFix.label}</button>}</p>}<button type="button" className="primary" aria-describedby={checkReason ? "publish-check-reason" : undefined} disabled={locked || !complete} onClick={() => { if (!locked && complete) { setDialog("check"); void p.onPreflight(); } }}>{p.preflightLoading ? "Đang kiểm tra…" : "Kiểm tra & đăng"}<ArrowRight size={16}/></button></div></footer>
+      <div className="pq-check">{checkReason && <p className="pq-check-reason" role="status"><small id="publish-check-reason" title={checkReasonText}>{checkReasonText}</small>{checkFix && <button type="button" className="blocked-reason-fix" onClick={() => focusBlockingField(rootRef.current, checkFix.selector)}>{checkFix.label}</button>}</p>}<button type="button" className="primary" aria-describedby={checkReason ? "publish-check-reason" : undefined} disabled={locked || !complete} onClick={() => { if (!locked && complete) { setDialog("check"); void p.onPreflight(); } }}>{p.preflightLoading ? "Đang kiểm tra…" : "Xem lại trước khi đăng"}<ArrowRight size={16}/></button></div></footer>
     {captionContext && captionBundle && <PublishDialog title={`Ảnh & caption · ${captionBundle.name}`} wide returnFocus={captionReturnTarget} fallbackFocus={() => linksRef.current} onClose={() => setCaptionContext(null)} actions={<button type="button" onClick={() => setCaptionContext(null)}>Đóng · giữ bản nháp</button>}>
       <div className="pq-caption-editor"><div className="pq-caption-media"><div className="pq-large-preview"><PublishMedia bundle={captionBundle} index={Math.min(photo, Math.max(0, captionBundle.images.length - 1))} expanded/></div>
         {captionBundle.mediaKind === "image" && captionBundle.images.length > 0 && <div className="pq-photo-nav"><button type="button" aria-label="Ảnh trước" disabled={photo === 0} onClick={() => setPhoto(n => n - 1)}><ArrowLeft size={16}/></button><span>{Math.min(photo + 1, captionBundle.images.length)} / {captionBundle.images.length}</span><button type="button" aria-label="Ảnh tiếp" disabled={photo + 1 >= captionBundle.images.length} onClick={() => setPhoto(n => n + 1)}><ArrowRight size={16}/></button></div>}
@@ -320,7 +359,26 @@ export function PublishQuickSetup(p: QuickProps) {
       </div></div>
     </PublishDialog>}
     {dialog === "check" && <PublishDialog title="Xem lại và xác nhận đăng công khai" wide onClose={() => { if (!p.starting) setDialog(null); }} actions={<><button type="button" disabled={p.starting} onClick={() => setDialog(null)}>Quay lại</button>{(p.preflightError || !p.preflight || !p.preflight.canExecute || p.reviewBlocked) && !p.preflightLoading && <button type="button" disabled={locked} onClick={() => { void p.onPreflight(); }}>Kiểm tra lại</button>}<button type="button" className="primary" disabled={locked || !p.preflight?.canExecute || !complete || p.reviewBlocked} onClick={() => void p.onExecute()}><Check size={16}/> {p.starting ? "Đang bắt đầu…" : `Xác nhận đăng công khai ${selected.length} bài`}</button></>}>
+      <div className="pq-review-flow">
       <p>{selected.length} bài sẽ đăng công khai trên {mapped} máy. Nút xác nhận bên dưới cho phép bắt đầu lượt đăng này.</p>
+      {/* PLAN §7: everything the confirmation approves reads in full here, never "…". While
+          the check still blocks, its blockers come first and the review follows them. */}
+      <div className="pq-review" style={{ order: p.preflight?.canExecute ? undefined : 1 }} role="region" aria-label="Bản xem lại từng máy" tabIndex={0}>
+        <table>
+          <thead><tr><th scope="col">Máy</th><th scope="col">Tài khoản</th><th scope="col">Phiên bản nội dung</th><th scope="col">Caption</th></tr></thead>
+          <tbody>{selected.map(bundle => { const udid = p.assignments[bundle.id], handle = udid ? p.metas.get(udid)?.handle : undefined; return <tr key={bundle.id}>
+            <th scope="row">{udid ? label(udid) : "Chưa ghép máy"}</th>
+            <td>{handle ? `@${handle}` : "Chưa đọc được tài khoản"}</td>
+            <td><strong>{bundle.name}</strong><br/>{contentVersion(bundle)}</td>
+            <td className="pq-review-caption">{(p.captions[bundle.id] ?? bundle.caption).trim() || "Trống"}</td>
+          </tr>; })}</tbody>
+        </table>
+        <dl>
+          <div><dt>Nhạc</dt><dd>{p.sound.kind === "trendingAny" ? `Nhạc thịnh hành: chọn 1 trong ${p.sound.poolSize} bài đầu danh sách TikTok, xác nhận khi đăng` : "Không chọn nhạc; giữ âm thanh mặc định của bài"}</dd></div>
+          <div><dt>Ghi kết quả vào Sheet</dt><dd>{p.sheetTarget || "Sheet chưa xác minh"}</dd></div>
+        </dl>
+        <p className="pq-hint">Mọi thay đổi máy, tài khoản, nội dung, caption, nhạc hoặc Sheet sau khi kiểm tra làm bản xem lại này hết hiệu lực và phải kiểm tra lại.</p>
+      </div>
       {p.starting && <p role="status" className="pw-start-status">Đang gửi yêu cầu… Giữ nguyên lượt đăng trong khi chờ xác nhận.</p>}
       {p.startError && <p role="alert" className="pw-error">{p.startError}</p>}
       {!!p.reviewChanges?.length && !p.preflightLoading && <div className="pw-review-changed" role="status">
@@ -334,6 +392,7 @@ export function PublishQuickSetup(p: QuickProps) {
           {selected.map(bundle => { const udid = p.assignments[bundle.id]; return <div key={bundle.id}><strong>{udid ? label(udid) : "Chưa ghép máy"}</strong><span>{bundle.name}</span><small>Chờ kết quả</small></div>; })}
         </div>
       </div> : p.preflightError ? <p role="alert">{p.preflightError}</p> : p.preflight ? <PublishPreflightResult onExclude={p.onExclude} report={p.preflight} machineName={label} bundleName={id => bundles.find(bundle => bundle.id === id)?.name ?? id} onRetry={() => void p.onPreflight()} busy={locked} hideRetry/> : <p>Chưa có kết quả kiểm tra.</p>}
+      </div>
     </PublishDialog>}
   </div>;
 }

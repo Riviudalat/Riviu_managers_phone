@@ -179,7 +179,7 @@ for (const viewport of [
     await machines.locator(".pq-device-filters > summary").click();
     await machines.getByRole("button", { name: "Chọn tất cả máy có thể gán", exact: true }).click();
     await page.getByRole("button", { name: "Chọn tất cả bài", exact: true }).click();
-    await page.getByRole("button", { name: "Chọn nhanh", exact: true }).click();
+    await page.getByRole("button", { name: "Ghép tự động (chưa đăng)", exact: true }).click();
     await expect(page.locator(".pq-footer")).toContainText("10/10 bài có máy");
     await checkLayout("board");
     // Swapping the active post keeps the other post assigned to the displaced phone.
@@ -194,12 +194,12 @@ for (const viewport of [
     await machines.locator(".pq-device-filters > summary").click();
     await machines.getByRole("checkbox", { name: /Chọn Máy 20 ·/ }).check();
     await expect(machineList.getByRole("checkbox", { checked: true })).toHaveCount(1);
-    await page.getByRole("button", { name: "Chọn nhanh", exact: true }).click();
+    await page.getByRole("button", { name: "Ghép tự động (chưa đăng)", exact: true }).click();
     // Quick allocation uses ready machines in the workspace scope, regardless of checked capacity.
     await expect(page.locator(".pq-footer").getByRole("status").filter({ hasText: /^Đã gán/ })).toContainText("Đã gán 10 bài cho 10 máy");
     await expect(page.locator(".pq-footer")).toContainText("10/10 bài có máy");
     await page.getByRole("combobox", { name: "Phạm vi thiết bị" }).selectOption("group:publish-one");
-    await page.getByRole("button", { name: "Chọn nhanh", exact: true }).click();
+    await page.getByRole("button", { name: "Ghép tự động (chưa đăng)", exact: true }).click();
     await expect(page.locator(".pq-footer").getByRole("status").filter({ hasText: /^Đã gán/ })).toContainText("Đã gán 1 bài cho 1 máy");
     await expect(machineList.getByRole("checkbox", { checked: true })).toHaveCount(1);
     await expect(machines.getByRole("checkbox", { name: /Chọn Máy 20 ·/ })).toBeChecked();
@@ -210,7 +210,7 @@ for (const viewport of [
     await machines.locator(".pq-device-filters > summary").click();
     await machines.getByRole("button", { name: "Chọn tất cả máy có thể gán", exact: true }).click();
     await machines.locator(".pq-device-filters > summary").click();
-    await page.getByRole("button", { name: "Chọn nhanh", exact: true }).click();
+    await page.getByRole("button", { name: "Ghép tự động (chưa đăng)", exact: true }).click();
     await expect(page.locator(".pq-footer")).toContainText("10/10 bài có máy");
     await page.getByRole("tab", { name: "Hẹn giờ", exact: true }).click();
     await expect(page.getByRole("tabpanel", { name: "Hẹn giờ", exact: true })).toBeVisible();
@@ -220,7 +220,7 @@ for (const viewport of [
     for (const label of ["Ghi kết quả lên Sheet", "Xóa bản chuyển sau khi đăng thành công"]) {
       await expect(page.getByRole("checkbox", { name: label })).toHaveCount(0);
     }
-    await page.getByRole("button", { name: "Kiểm tra & đăng", exact: true }).click();
+    await page.getByRole("button", { name: "Xem lại trước khi đăng", exact: true }).click();
     await expect(page.getByRole("button", { name: "Xác nhận đăng công khai 10 bài", exact: true })).toBeEnabled();
     // The review states the public scope before confirmation; the sound-timing hint was
     // removed from this dialog on purpose (578d3a8e) and must not come back.

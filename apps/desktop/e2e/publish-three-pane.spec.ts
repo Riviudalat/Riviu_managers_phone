@@ -90,7 +90,7 @@ for (const viewport of [{ width: 1440, height: 900 }, { width: 820, height: 560 
 for (const viewport of [{ width: 1440, height: 900 }, { width: 1024, height: 768 }, { width: 820, height: 560 }]) {
   test(`ba khung và Google thật giữ vùng danh sách tại ${viewport.width}`, async ({ page }) => {
     await page.setViewportSize(viewport); await openBoard(page);
-    await page.getByRole("button", { name: "Chọn nhanh", exact: true }).click();
+    await page.getByRole("button", { name: "Ghép tự động (chưa đăng)", exact: true }).click();
     await expect(page.locator(".pq-links .pq-link")).toHaveCount(10);
     const geometry = await measureBoard(page);
     await test.info().attach("Hình học ba khung", { body: JSON.stringify(geometry, null, 2), contentType: "application/json" });
@@ -118,7 +118,7 @@ for (const viewport of [{ width: 1440, height: 900 }, { width: 1024, height: 768
 
 test("gán bị khóa khi active ẩn, dropdown tường minh vẫn đổi chỗ; thay bài phải xác nhận", async ({ page }) => {
   await page.setViewportSize({ width: 1440, height: 900 }); await openBoard(page);
-  await page.getByRole("button", { name: "Chọn nhanh", exact: true }).click();
+  await page.getByRole("button", { name: "Ghép tự động (chưa đăng)", exact: true }).click();
   const one = page.getByRole("combobox", { name: "Máy nhận bài Bài 1", exact: true });
   const two = page.getByRole("combobox", { name: "Máy nhận bài Bài 2", exact: true });
   const first = await one.inputValue(), second = await two.inputValue();
@@ -140,7 +140,7 @@ test("gán bị khóa khi active ẩn, dropdown tường minh vẫn đổi chỗ
 });
 
 test("caption bàn phím trả đúng origin trái/giữa, đủ slide và giữ bản nháp Google", async ({ page }) => {
-  await openBoard(page); await page.getByRole("button", { name: "Chọn nhanh", exact: true }).click();
+  await openBoard(page); await page.getByRole("button", { name: "Ghép tự động (chưa đăng)", exact: true }).click();
   const google = page.getByRole("textbox", { name: "Link Google Sheet" });
   await google.fill("https://docs.google.com/spreadsheets/d/unsaved/edit#gid=7");
   for (const label of ["Xem ảnh và sửa caption · Bài 1", "Sửa caption · Bài 1"]) {
@@ -160,7 +160,7 @@ test("caption bàn phím trả đúng origin trái/giữa, đủ slide và giữ
 test("100 máy, tên dài và lỗi Google vẫn cuộn nội bộ; reduced motion không đổi mapping", async ({ page }) => {
   await page.setViewportSize({ width: 820, height: 560 }); await page.emulateMedia({ reducedMotion: "reduce" });
   await openBoard(page, { fleet: 100, posts: 105, longNames: true, googleError: true });
-  await page.getByRole("button", { name: "Chọn nhanh", exact: true }).click();
+  await page.getByRole("button", { name: "Ghép tự động (chưa đăng)", exact: true }).click();
   await expect(page.locator(".pq-links .pq-link")).toHaveCount(100);
   await expect(page.locator(".google-sheet-connection")).toContainText("Không đọc được trạng thái Google");
   expect((await measureBoard(page)).overflow).toBe(false);

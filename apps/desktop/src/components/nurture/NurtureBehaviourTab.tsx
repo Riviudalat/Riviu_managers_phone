@@ -119,10 +119,10 @@ export function NurtureBehaviourTab({
         <div className="nu-grid">
           <label className="nu-field">
             <span className="nu-label">
-              Xem min
+              Thời gian xem ngắn nhất (giây)
               <Info
-                of="Xem min"
-                what="Số giây ít nhất dừng lại ở mỗi post. Nhịp phiên còn nhân thêm hệ số theo tâm trạng, nên số 'xem' trong log có thể ra ngoài khoảng min–max."
+                of="Thời gian xem ngắn nhất"
+                what="Số giây ít nhất dừng lại ở mỗi post. Nhịp phiên còn nhân thêm hệ số theo tâm trạng, nên số 'xem' trong log có thể ra ngoài khoảng ngắn nhất–dài nhất."
               />
             </span>
             <input
@@ -137,10 +137,10 @@ export function NurtureBehaviourTab({
           </label>
           <label className="nu-field">
             <span className="nu-label">
-              Xem max
+              Thời gian xem dài nhất (giây)
               <Info
-                of="Xem max"
-                what="Số giây nhiều nhất dừng lại ở mỗi post, trước khi nhân hệ số nhịp. Đặt sát min thì phiên đều đặn hơn nhưng cũng máy móc hơn."
+                of="Thời gian xem dài nhất"
+                what="Số giây nhiều nhất dừng lại ở mỗi post, trước khi nhân hệ số nhịp. Đặt sát thời gian ngắn nhất thì phiên đều đặn hơn nhưng cũng máy móc hơn."
               />
             </span>
             <input

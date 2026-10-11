@@ -118,7 +118,7 @@ it.each(["busy", "scanning", "preflightLoading"] as const)("%s khóa thao tác n
   const p = props(); p[field] = true; mount(p);
   const assign = screen.getByRole("button", { name: "Gán one · Máy 1 · a" });
   assign.removeAttribute("disabled"); fireEvent.click(assign);
-  const quick = screen.getByRole("button", { name: "Chọn nhanh" });
+  const quick = screen.getByRole("button", { name: "Ghép tự động (chưa đăng)" });
   quick.removeAttribute("disabled"); fireEvent.click(quick);
   fireEvent.change(machineSelect("one"), { target: { value: "a" } });
   expect(p.onAssign).not.toHaveBeenCalled(); expect(p.onSelect).not.toHaveBeenCalled();
@@ -156,7 +156,7 @@ it("vẫn hiện máy đã gán nếu máy đó rời phạm vi để người d
   p.scopeControl = <button type="button">Chọn thiết bị</button>;
   mount(p);
   expect(screen.getByRole("checkbox", { name: "Chọn Máy 2 · b" })).toBeVisible();
-  expect(screen.getByRole("button", { name: "Kiểm tra & đăng" })).toBeDisabled();
+  expect(screen.getByRole("button", { name: "Xem lại trước khi đăng" })).toBeDisabled();
 });
 
 it.each(["left", "middle"])("dialog caption ghim bundle và trả focus đúng trigger %s", async origin => {
@@ -211,7 +211,7 @@ it("giữ settings mounted qua dialog, tab ẩn và chỉnh filter", () => {
 it("giữ mapping offline/ra scope, bỏ tick máy mới gỡ cặp", () => {
   const p = props(); p.devices[1].status = "disconnected"; p.eligible = ["a"]; mount(p);
   expect(machineSelect("two")).toHaveValue("b");
-  expect(screen.getByRole("button", { name: "Kiểm tra & đăng" })).toBeDisabled();
+  expect(screen.getByRole("button", { name: "Xem lại trước khi đăng" })).toBeDisabled();
   expect(p.onAssign).not.toHaveBeenCalled();
   fireEvent.click(screen.getByRole("checkbox", { name: "Chọn Máy 2 · b" }));
   expect(p.onAssign).toHaveBeenCalledExactlyOnceWith({});

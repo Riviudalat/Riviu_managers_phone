@@ -32,7 +32,7 @@ export function NurtureSessionSetup({ settings, onChange, issue, issueId }: {
         {...nurtureFieldValidation("searchKeyword",issue,issueId)} onChange={event=>patch({searchKeyword:event.target.value})}/></label>}
       {settings.feedSource === "search" && <p className="nurture-setup-note">Mở tìm kiếm TikTok, nhập từ khóa và lướt video trong kết quả. Hiện hỗ trợ Android.</p>}
     </div>
-    <div className="nurture-action-heading"><div><strong>Phân bổ 100 video</strong><small>Mỗi video chọn một hành động; phần còn lại chỉ xem.</small></div><span className="nurture-total-rate">100%</span></div>
+    <div className="nurture-action-heading"><div><strong>Tỷ lệ hành động (%)</strong><small>Trên mỗi 100 video, mỗi video chọn tối đa một hành động; phần còn lại chỉ xem.</small></div><span className="nurture-total-rate">100%</span></div>
     <div className="nurture-distribution" role="img" aria-label={`Chỉ xem ${distribution.watch}%, ${distribution.actions.map(a=>`${a.label} ${a.value}%`).join(", ")}`}>
       <span className="is-watch" style={{flexGrow:distribution.watch}} />
       {distribution.actions.filter(a=>a.value>0).map(a=><span key={a.key} style={{flexGrow:a.value,background:a.color}} />)}
@@ -107,14 +107,20 @@ export function NurtureMachinePicker({ devices, metas, targets, onTargetRefChang
 /** A review of the current draft, never a prediction of device outcomes. */
 export function NurtureSetupSummary({ settings, targetCount }: { settings: NurtureSettings; targetCount: number }) {
   const distribution = distributionOf(settings);
+  const publicActions = distribution.actions.filter(action => action.value > 0);
   return <aside className="nurture-setup-summary" aria-label="Tóm tắt phiên nuôi" tabIndex={0}>
     <h2>Phiên sắp chạy</h2>
     <dl>
       <div><dt>Máy thực hiện</dt><dd>{targetCount} máy</dd></div>
       <div><dt>Giới hạn mỗi máy</dt><dd>{settings.numVideos * settings.numRounds} video · {settings.scheduleDurationMinutes} phút</dd></div>
       <div><dt>Nguồn video</dt><dd>{settings.feedSource === "search" ? settings.searchKeyword || "Chưa nhập từ khóa" : "Đề xuất (For You)"}</dd></div>
-      <div><dt>Nhịp xem</dt><dd>{settings.watchMin}–{settings.watchMax} giây</dd></div>
-      <div><dt>Phân bổ hành động</dt><dd>{distribution.actions.filter(action => action.value > 0).map(action => `${action.label} ${action.value}%`).join(" · ") || "Chỉ xem"}</dd></div>
+      <div><dt>Thời gian xem</dt><dd>{settings.watchMin}–{settings.watchMax} giây mỗi video</dd></div>
+      {/* PLAN §8 ★: every public action that will run is named here before start, even
+          while the Hành vi/AI tabs stay folded. An enabled action at 0% never runs, so it
+          is not listed as one. */}
+      <div className="nurture-summary-public"><dt>Hành động công khai</dt><dd>{publicActions.length
+        ? publicActions.map(action => `${action.label} ${action.value}%${action.key === "comment" ? " (AI viết, đăng công khai)" : ""}`).join(" · ")
+        : "Không có — chỉ xem"}</dd></div>
       <div><dt>Chỉ xem</dt><dd>{distribution.watch}%</dd></div>
     </dl>
     <p>Phiên dừng khi chạm giới hạn đầu tiên. Kết quả và bằng chứng được ghi riêng cho từng máy.</p>

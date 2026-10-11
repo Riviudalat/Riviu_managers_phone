@@ -270,3 +270,59 @@
   .pq-check-reason { max-width:100%; text-align:right; }
   .pq-footer .pq-check-reason small { display:block; min-width:0; white-space:nowrap; text-overflow:ellipsis; }
 }
+/* PLAN §7: the four publish steps stay visible; "Từng bước" shows one step at a time. */
+.publish-steps-bar { display:flex; align-items:center; justify-content:space-between; gap:8px; flex-wrap:wrap; flex:none; min-width:0; }
+.publish-steps { display:flex; flex-wrap:wrap; gap:4px 14px; margin:0; padding:0; list-style:none; font-size:var(--text-sm); color:var(--text-3); }
+.publish-steps>li { display:inline-flex; align-items:center; gap:6px; white-space:nowrap; }
+.publish-step-index { display:inline-flex; align-items:center; justify-content:center; width:22px; height:22px; border-radius:50%; border:1px solid var(--line); font-variant-numeric:tabular-nums; font-weight:600; }
+.publish-steps>li.is-done { color:var(--text-2); }
+.publish-steps>li.is-current { color:var(--text-1); font-weight:600; }
+.publish-steps>li.is-current .publish-step-index { border-color:var(--rv-primary); background:var(--rv-primary); color:var(--rv-on-primary); }
+.publish-steps-actions { display:flex; align-items:center; gap:6px; flex-wrap:nowrap; flex:none; }
+.publish-steps-actions>button { min-height:32px; }
+.publish-steps-actions>button[aria-pressed="true"] { border-color:var(--rv-primary); color:var(--text-1); }
+.publish-quick.is-steps .pq-columns { grid-template-columns:minmax(0,1fr); }
+.publish-quick.is-steps[data-step="1"] .pq-mapping,.publish-quick.is-steps[data-step="1"] .pq-devices { display:none; }
+.publish-quick.is-steps[data-step="2"] .pq-library { display:none; }
+.publish-quick.is-steps[data-step="2"] .pq-columns { grid-template-columns:minmax(0,1fr) minmax(0,1fr); }
+.publish-quick.is-steps .pq-link-account>span { max-width:none; overflow-wrap:anywhere; }
+@media (max-width:760px) { .publish-quick.is-steps[data-step="2"] .pq-columns { grid-template-columns:minmax(0,1fr); } }
+/* The review names every approved field in full: wrap, never ellipsis. */
+.pq-review { max-height:min(46vh,420px); overflow:auto; margin:8px 0; border:1px solid var(--line); border-radius:6px; }
+.pq-review table { width:100%; border-collapse:collapse; font-size:var(--text-sm); }
+.pq-review th,.pq-review td { padding:6px 8px; text-align:left; vertical-align:top; border-bottom:1px solid var(--line); overflow-wrap:anywhere; white-space:normal; }
+.pq-review thead th { position:sticky; top:0; background:var(--bg-elevated); font-weight:600; }
+.pq-review tbody th { white-space:nowrap; font-weight:600; }
+.pq-review-caption { white-space:pre-wrap!important; min-width:180px; }
+.pq-review dl { display:grid; gap:4px; margin:0; padding:8px; font-size:var(--text-sm); }
+.pq-review dl>div { display:grid; grid-template-columns:150px minmax(0,1fr); gap:8px; }
+.pq-review dt { font-weight:600; color:var(--text-2); }
+.pq-review dd { margin:0; overflow-wrap:anywhere; }
+.pq-review>.pq-hint { margin:0; padding:0 8px 8px; }
+/* "Ghép tự động (chưa đăng)" is read in full: under 1000 px the group label yields and the
+   button wraps to two lines instead of clipping the "chưa đăng" promise. */
+@media (max-width:1000px) {
+  .pq-quick-actions>.pq-quick-label { display:none; }
+  .pq-quick-actions>.pq-quick-button { flex:1 1 auto; white-space:nowrap; }
+  /* Hoàn tác keeps its accessible name ("Hoàn tác gán nhanh") and shows only its icon. */
+  .pq-quick-actions>button:not(.pq-quick-button) { flex:none; width:32px; padding:0 7px; overflow:hidden; justify-content:flex-start; gap:12px; white-space:nowrap; }
+  .pq-quick-actions>button:not(.pq-quick-button)>svg { display:inline; }
+}
+/* One row under 1000 px: the other steps keep their number (and accessible name), only the
+   current step spells its label, so the bar never takes a second row from the lists. */
+.publish-steps-bar { flex-wrap:nowrap; }
+.publish-steps { flex-wrap:nowrap; min-width:0; overflow:hidden; }
+@media (max-width:1400px) {
+  .publish-steps { gap:6px; }
+  .publish-steps>li:not(.is-current)>span:last-child { position:absolute; width:1px; height:1px; overflow:hidden; clip-path:inset(50%); white-space:nowrap; }
+  .publish-step-index { width:20px; height:20px; font-size:var(--text-xs); }
+  .publish-steps-actions>button { min-height:28px; padding:3px 8px; font-size:var(--text-xs); }
+}
+@media (max-height:650px) { .publish-steps-actions>button { min-height:28px; padding-block:2px; } .publish-step-index { width:20px; height:20px; } }
+.pq-review-flow { display:flex; flex-direction:column; min-width:0; }
+.pq-review-flow>* { flex:none; }
+.publish-limits-row { display:flex; align-items:flex-start; justify-content:space-between; gap:8px; flex:none; min-width:0; }
+/* Its inline 45% height cap would resolve against this row; cap it by the viewport instead. */
+.publish-limits-row>.publish-workspace-section { flex:1 1 auto!important; max-height:45vh!important; }
+.publish-steps-slot { flex:0 1 auto; min-width:0; padding:3px 12px 0 0; }
+.publish-steps-slot:empty { display:none; }

@@ -12,12 +12,12 @@ export function publishSelectionStatus(input: {
   const mapped = selected.filter(bundle => bundle && input.assignments[bundle.id]).length;
   let reason = "";
   const used = new Set<string>();
-  if (!selected.length) reason = "Chọn bài và máy, hoặc bấm Chọn nhanh để ghép vừa đủ.";
+  if (!selected.length) reason = "Chọn bài và máy, hoặc bấm Ghép tự động để ghép vừa đủ (chưa đăng).";
   for (const bundle of selected) {
     if (reason) break;
     if (!bundle) { reason = "Bài đã chọn không còn trong nguồn. Quét lại thư mục."; break; }
     const udid = input.assignments[bundle.id];
-    if (!udid) reason = `${bundle.name}: chưa ghép máy. Bấm Chọn nhanh hoặc chọn máy nhận bài.`;
+    if (!udid) reason = `${bundle.name}: chưa ghép máy. Bấm Ghép tự động hoặc chọn máy nhận bài.`;
     else if (!input.eligible.includes(udid)) reason = `${bundle.name}: máy đã gán không còn trong phạm vi hoặc đang mất kết nối.`;
     else if (!input.ready.includes(udid)) reason = `${bundle.name}: máy đã gán hiện chưa thể gán (mất kết nối, đang chuẩn bị hoặc lỗi). Cặp gán vẫn được giữ.`;
     else if (used.has(udid)) reason = `${bundle.name}: máy đang nhận nhiều hơn một bài.`;

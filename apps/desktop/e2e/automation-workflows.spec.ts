@@ -200,7 +200,7 @@ test("publish mandatory Sheet status fits both workspace sizes and blocks unconn
   await expect(toggle).toHaveCount(0);
   const status = page.locator(".pq-run-options");
   await expect(status).toHaveText("Sheet bật · Dọn bản chuyển bật");
-  await expect(page.getByRole("button", { name: "Kiểm tra & đăng", exact: true })).toBeDisabled();
+  await expect(page.getByRole("button", { name: "Xem lại trước khi đăng", exact: true })).toBeDisabled();
   for (const viewport of [{ width: 1440, height: 900 }, { width: 820, height: 560 }]) {
     await page.setViewportSize(viewport);
     await status.scrollIntoViewIfNeeded();

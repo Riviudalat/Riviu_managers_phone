@@ -146,7 +146,7 @@ for (const viewport of [
       page.getByRole("checkbox", { name: "Chọn Bài riêng", exact: true }),
     ).not.toBeChecked();
     await expect(
-      page.getByRole("button", { name: "Kiểm tra & đăng", exact: true }),
+      page.getByRole("button", { name: "Xem lại trước khi đăng", exact: true }),
     ).toBeDisabled();
 
     await source.fill("C:/Nội dung/21 bài");
@@ -161,7 +161,7 @@ for (const viewport of [
     await boxes.last().scrollIntoViewIfNeeded();
     await expect(boxes.last()).toBeVisible();
     await expect(
-      page.getByRole("button", { name: "Kiểm tra & đăng", exact: true }),
+      page.getByRole("button", { name: "Xem lại trước khi đăng", exact: true }),
     ).toBeDisabled();
     expect(
       await page.evaluate(

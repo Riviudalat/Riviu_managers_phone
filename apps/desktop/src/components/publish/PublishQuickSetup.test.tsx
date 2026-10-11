@@ -21,8 +21,8 @@ it("renders a shared blocker once beside the disabled publish command without an
   const reason = "Kiểm tra và xác minh link Sheet trước khi ghi kết quả.";
   render(<PublishQuickSetup {...props()} blockingReason={reason} />);
   expect(screen.getAllByText(reason)).toHaveLength(1);
-  expect(screen.getByRole("button", { name: "Kiểm tra & đăng" })).toBeDisabled();
-  expect(screen.getByRole("button", { name: "Kiểm tra & đăng" })).toHaveAttribute("aria-describedby", "publish-check-reason");
+  expect(screen.getByRole("button", { name: "Xem lại trước khi đăng" })).toBeDisabled();
+  expect(screen.getByRole("button", { name: "Xem lại trước khi đăng" })).toHaveAttribute("aria-describedby", "publish-check-reason");
   expect(screen.queryByLabelText("Thông báo thiết lập đăng bài")).toBeNull();
 });
 beforeEach(() => {
@@ -39,7 +39,7 @@ it("shows source partner warnings without blocking valid publishing or changing 
   fireEvent.click(screen.getByText("Cảnh báo nguồn (1)"));
   expect(screen.getByText("File đối tác rỗng; bài vẫn có thể đăng")).toBeVisible();
   expect(screen.getByText("fixture/one/partners.xlsx")).toBeVisible();
-  expect(screen.getByRole("button", { name: "Kiểm tra & đăng" })).toBeEnabled();
+  expect(screen.getByRole("button", { name: "Xem lại trước khi đăng" })).toBeEnabled();
   expect(p.onCaption).not.toHaveBeenCalled();
   expect(p.onExecute).not.toHaveBeenCalled();
 });
@@ -47,7 +47,7 @@ it("warns about duplicate selected captions using edits without changing the man
   const p = props();
   const view = render(<PublishQuickSetup {...p} selectedIds={["one", "two"]} assignments={{ one: "a", two: "b" }} />);
   expect(screen.getByText(/2 bài đã chọn có caption trùng/)).toBeVisible();
-  expect(screen.getByRole("button", { name: "Kiểm tra & đăng" })).toBeEnabled();
+  expect(screen.getByRole("button", { name: "Xem lại trước khi đăng" })).toBeEnabled();
   view.rerender(<PublishQuickSetup {...p} selectedIds={["one", "two"]} assignments={{ one: "a", two: "b" }} captions={{ two: "Caption khác" }} />);
   expect(screen.queryByText(/caption trùng/)).toBeNull();
   expect(p.manifest!.bundles[1].caption).toBe("Caption");
@@ -58,26 +58,26 @@ it("immediately names the blocked machine, disables posting and opens its exact 
   const card = screen.getByRole("checkbox", { name: "Chọn Máy 1 · a" }).closest("article")!;
   expect(within(card).getByText("Máy còn bài chưa lấy được link")).toBeVisible();
   expect(within(card).getByText(row.reason)).toBeVisible();
-  expect(screen.getByRole("button", { name: "Kiểm tra & đăng" })).toBeEnabled();
+  expect(screen.getByRole("button", { name: "Xem lại trước khi đăng" })).toBeEnabled();
   fireEvent.click(within(card).getByRole("button", { name: /Xem bài đang chờ/ })); expect(open).toHaveBeenCalledExactlyOnceWith("campaign-a");
   view.rerender(<PublishQuickSetup {...p} deviceGuards={{ ...guards, a: { blocking: [], linkReview: [] } }} />);
-  expect(screen.getByRole("button", { name: "Kiểm tra & đăng" })).toBeEnabled();
+  expect(screen.getByRole("button", { name: "Xem lại trước khi đăng" })).toBeEnabled();
 });
 it("quick assignment retains pending machines for explicit stop-before-preflight", () => {
   const p = props(), assign = vi.fn(); const view = render(<PublishQuickSetup {...p} selectedIds={[]} assignments={{}} deviceGuards={guards} onAssignmentChange={assign} />);
-  fireEvent.click(screen.getByRole("button", { name: "Chọn nhanh" })); expect(assign).toHaveBeenCalledWith(["one", "two"], { one: "a", two: "b" });
+  fireEvent.click(screen.getByRole("button", { name: "Ghép tự động (chưa đăng)" })); expect(assign).toHaveBeenCalledWith(["one", "two"], { one: "a", two: "b" });
   view.rerender(<PublishQuickSetup {...p} deviceGuards={{ ...guards, a: { blocking: [], linkReview: [row] } }} />);
-  expect(screen.getByText("Bài cũ còn cần kiểm tra link")).toBeVisible(); expect(screen.getByRole("button", { name: "Kiểm tra & đăng" })).toBeEnabled();
+  expect(screen.getByText("Bài cũ còn cần kiểm tra link")).toBeVisible(); expect(screen.getByRole("button", { name: "Xem lại trước khi đăng" })).toBeEnabled();
 });
 it("unknown guard data keeps the existing assignment and prevents new posting", () => {
   const p = props(); render(<PublishQuickSetup {...p} deviceGuards={{}} />);
   expect(screen.getByRole("combobox", { name: "Máy nhận bài one" })).toHaveValue("a");
-  expect(screen.getByRole("button", { name: "Kiểm tra & đăng" })).toBeDisabled(); expect(screen.getAllByText("Chưa kiểm tra được bài đang chờ").length).toBeGreaterThan(0);
+  expect(screen.getByRole("button", { name: "Xem lại trước khi đăng" })).toBeDisabled(); expect(screen.getAllByText("Chưa kiểm tra được bài đang chờ").length).toBeGreaterThan(0);
 });
 it("lists assigned machines as awaiting a result while preflight is running without implying posting started", () => {
   const p = props();
   const view = render(<PublishQuickSetup {...p} selectedIds={["one", "two"]} assignments={{ one: "a", two: "b" }} />);
-  fireEvent.click(screen.getByRole("button", { name: "Kiểm tra & đăng" }));
+  fireEvent.click(screen.getByRole("button", { name: "Xem lại trước khi đăng" }));
   view.rerender(<PublishQuickSetup {...p} selectedIds={["one", "two"]} assignments={{ one: "a", two: "b" }} preflightLoading />);
   const pending = screen.getByRole("region", { name: "Máy đang chờ kết quả kiểm tra" });
   expect(within(pending).getByText("Máy 1 · a")).toBeVisible();
