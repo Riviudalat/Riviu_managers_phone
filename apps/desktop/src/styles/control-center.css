@@ -73,46 +73,6 @@
   grid-column: 2;
   min-width: 0;
 }
-.control-center-rail {
-  grid-row: 1 / 3;
-  grid-column: 1;
-  border: 1px solid var(--rv-border);
-  background: var(--rv-surface-panel);
-  border-radius: var(--rv-radius-panel);
-  padding: 14px;
-  position: sticky;
-  top: 0;
-  min-width: 0;
-}
-.control-center-rail header {
-  display: flex;
-  align-items: center;
-  gap: 8px;
-  margin: 0 0 18px;
-  color: var(--rv-text-1);
-}
-.control-center-rail label {
-  display: block;
-  margin: 0 0 20px;
-}
-.control-center-rail label > span {
-  display: flex;
-  flex-wrap: wrap;
-  align-items: center;
-  gap: 6px;
-  font-size: var(--rv-font-secondary);
-  color: var(--rv-text-2);
-}
-.control-center-rail output {
-  margin-left: auto;
-  font-size: var(--rv-font-caption);
-  color: var(--rv-text-3);
-}
-.control-center-rail input[type="range"] {
-  width: 100%;
-  margin-top: 10px;
-  accent-color: var(--rv-primary);
-}
 .control-connections {
   display: flex;
   gap: 3px;
@@ -161,47 +121,6 @@
   background: var(--rv-selected-fill);
   color: var(--rv-selected-text);
   font-weight: 600;
-}
-.control-group-list {
-  display: grid;
-  gap: 4px;
-}
-.control-group-list button {
-  display: flex;
-  justify-content: space-between;
-  text-align: left;
-  gap: 8px;
-  padding: 8px;
-  border-color: transparent;
-  background: transparent;
-}
-.control-group-list button span {
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-}
-.control-group-list button[aria-pressed="true"] {
-  background: var(--rv-surface-sunken);
-  border-color: var(--rv-border);
-}
-.control-machine-grid {
-  display: grid;
-  grid-template-columns: repeat(5, minmax(0, 1fr));
-  gap: 5px;
-  margin-top: 14px;
-  max-height: 260px;
-  overflow: auto;
-}
-.control-machine-grid button {
-  padding: 0;
-  min-height: var(--rv-control-dense);
-  font-size: var(--rv-font-caption);
-  color: var(--rv-text-2);
-}
-.control-machine-grid button[aria-pressed="true"] {
-  color: var(--rv-text-inverse);
-  background: var(--rv-primary);
-  border-color: var(--rv-primary);
 }
 .device-filterbar .group-tabs {
   display: none;
@@ -421,9 +340,6 @@
     grid-template-columns: 170px minmax(0, 1fr);
     gap: 8px;
   }
-  .control-center-rail {
-    padding: 10px;
-  }
   .control-connections button {
     padding: 4px;
     font-size: var(--rv-font-caption);
@@ -443,19 +359,8 @@
   .device-browser {
     grid-template-columns: 160px minmax(0, 1fr);
   }
-  .control-center-rail {
-    position: sticky;
-    grid-column: 1;
-    grid-row: 1 / 3;
-  }
-  .control-center-rail label > span {
-    font-size: var(--rv-font-caption);
-  }
   .control-connections {
     flex-wrap: wrap;
-  }
-  .control-machine-grid {
-    grid-template-columns: repeat(4, minmax(0, 1fr));
   }
   .device-browser-toolbar,
   .device-browser-content {

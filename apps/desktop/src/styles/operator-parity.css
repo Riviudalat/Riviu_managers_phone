@@ -3,42 +3,10 @@
   grid-template-columns: 226px minmax(0, 1fr);
   gap: 10px;
 }
-.control-center-rail {
-  border: 0;
-  border-right: 1px solid var(--line);
-  border-radius: 0;
-  background: var(--bg-elevated);
-  padding: 12px;
-}
-.control-rail-content > label {
-  display:grid;
-  grid-template-columns:100px minmax(0,1fr);
-  gap:8px;
-  align-items:center;
-  margin-bottom: 18px;
-}
-.control-center-rail label > span {
-  flex-wrap: nowrap;
-  font-size: var(--text-sm);
-  position:relative;
-  display:block;
-}
-.control-rail-content > label > input[type="range"] {margin:0;}
-.control-rail-content > label output {display:block;margin:3px 0 0;font-size:var(--text-xs);opacity:.8;}
-.control-center-rail > header {margin-bottom:24px;}
-.control-group-list {border:1px solid var(--rv-border);border-radius:4px;padding:6px;}
-.control-rail-content[hidden] {display:none;}
-.control-center-rail .rail-toggle,.control-center-rail .rail-create-group {display:grid;place-items:center;width:var(--rv-control-dense);height:var(--rv-control-dense);min-height:var(--rv-control-dense);padding:0;flex-shrink:0;color:var(--rv-text-2);border:0;background:transparent;margin-left:auto;}
 .sidebar-group-toggle {display:flex;align-items:center;justify-content:space-between;width:100%;padding:0;border:0;background:transparent;color:inherit;font:inherit;text-align:left;min-height:var(--rv-control-dense);}
 .sidebar-group-toggle[aria-expanded="false"] svg {transform:rotate(-90deg);}
 .sidebar-group-toggle:hover {color:var(--primary);}
 .menu-group > div[hidden] {display:none;}
-.control-center-rail label > span svg {
-  display: none;
-}
-.control-center-rail output {
-  font-size: var(--text-xs);
-}
 .device-floating-window {
   pointer-events: none;
   background: transparent;
@@ -645,17 +613,9 @@
   .device-browser {
     grid-template-columns: 180px minmax(0, 1fr);
   }
-  .control-rail-content > label {grid-template-columns:80px minmax(0,1fr);}
 }
 @media (max-width: 900px) {
   .device-browser {
     grid-template-columns: 160px minmax(0, 1fr);
   }
-  .control-center-rail {
-    padding: 8px;
-  }
-  .control-center-rail label > span {
-    font-size: var(--text-xs);
-  }
-  .control-rail-content > label {grid-template-columns:70px minmax(0,1fr);}
 }
