@@ -1580,8 +1580,10 @@ function App() {
                 <GroupTabs tabs={tabs} active={groupTab} onSelect={setGroupTab} />
                 <button type="button" className="ghost box-create" aria-label="Tạo nhóm thiết bị" title="Tạo box (nhóm thiết bị)" onClick={() => setGroupsOpen(true)}>+ Box</button>
               </div>
-              {displayOpen && (
-                <DisplayPanel tileWidth={tileWidth} onTileWidth={setTileWidth} connection={connectionFilter} onConnection={setConnectionFilter}
+              {/* Mounted while hidden: the stream-settings controller inside owns an in-flight apply,
+                  and unmounting it on close made a reopened panel say "Đã áp dụng" before the result. */}
+              {(
+                <DisplayPanel hidden={!displayOpen} tileWidth={tileWidth} onTileWidth={setTileWidth} connection={connectionFilter} onConnection={setConnectionFilter}
                   groups={tabs.map(tab => ({ ...tab, udids: groups.find(group => group.id === tab.id)?.udids }))} group={groupTab}
                   machines={devices.map(d => ({ id: d.udid, connection: d.connection }))}
                   onSettings={() => { setSettingsSection("control"); void requestPage("settings"); }}

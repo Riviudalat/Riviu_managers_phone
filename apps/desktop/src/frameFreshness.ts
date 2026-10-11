@@ -17,15 +17,16 @@ const FRAME_AGE_TICK_MS = 5_000;
 
 export type FrameFreshness =
   | { state: "fresh" | "unknown" }
-  | { state: "aging" | "stale"; ageText: string };
+  | { state: "aging" | "stale"; ageText: string; shortText: string };
 
 export function frameFreshness(lastFrameAt: number | undefined, nowMs: number): FrameFreshness {
   if (lastFrameAt === undefined) return { state: "unknown" };
   const age = Math.max(0, nowMs - lastFrameAt);
   if (age < FRAME_AGE_SHOWN_MS) return { state: "fresh" };
   const seconds = Math.floor(age / 1000);
-  const ageText = seconds < 120 ? `hình ${seconds} giây trước` : `hình ${Math.floor(seconds / 60)} phút trước`;
-  return { state: age >= FRAME_STALE_MS ? "stale" : "aging", ageText };
+  const shortText = seconds < 120 ? `${seconds} giây` : `${Math.floor(seconds / 60)} phút`;
+  // The short form fits the Tổng quan header beside Máy N; the full one is its tooltip and name.
+  return { state: age >= FRAME_STALE_MS ? "stale" : "aging", ageText: `hình ${shortText} trước`, shortText };
 }
 
 /** The tile's own frame-age clock; idle while the tile has no live picture. */

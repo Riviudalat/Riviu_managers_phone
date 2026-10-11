@@ -5,6 +5,8 @@ import { useState } from "react";
 import { ControlStreamSettings } from "./ControlStreamSettings";
 
 interface Props {
+  /** Closed: kept mounted (and its pending apply alive) but hidden and inert. */
+  hidden?: boolean;
   tileWidth: number;
   onTileWidth: (n: number) => void;
   connection: "all" | "usb" | "wifi";
@@ -36,7 +38,7 @@ export function DisplayPanel(p: Props) {
     wifi: members.filter(machine => machine.connection === "wifi").length,
   };
   return (
-    <section id="control-display-panel" className="control-display-panel" aria-label="Hiển thị">
+    <section id="control-display-panel" className="control-display-panel" aria-label="Hiển thị" hidden={p.hidden} inert={p.hidden}>
       <fieldset className="display-group">
         <legend><Grid2X2 size={15} aria-hidden="true" />Ô màn hình</legend>
         <div className="control-tile-presets" role="group" aria-label="Cỡ ô xem trước">

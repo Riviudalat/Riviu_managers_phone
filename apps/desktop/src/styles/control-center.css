@@ -436,6 +436,9 @@ section.device-browser > .device-browser-content {
   gap: 6px;
   margin-left: var(--rv-space-2);
 }
+.control-display-panel[hidden] {
+  display: none;
+}
 .control-display-panel {
   display: flex;
   flex-wrap: wrap;

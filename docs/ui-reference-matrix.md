@@ -84,9 +84,18 @@ dải theo dải độ rộng hiện tại. Ở cỡ Nhỏ, dải cao khoảng 6
 **Box là danh sách máy được gán**, không suy từ Máy N: mỗi nhóm đã lưu là một box. Lưới Tổng
 quan và Màn hình chia theo box, mỗi phần có tiêu đề "tên · Laptop này · tổng · sẵn sàng · đang
 chạy · cần xử lý"; máy không thuộc nhóm nào nằm ở phần **Chưa thuộc box** cuối lưới; máy thuộc
-hai nhóm hiện một lần ở nhóm đầu. Chip box dưới thanh công cụ lọc lưới về một box và ghi
-"Đang lọc: … · Bỏ lọc box"; **+ Box** mở quản lý nhóm. Thứ tự trong box là thứ tự số máy, không
-đổi khi trạng thái đổi.
+hai nhóm hiện một lần ở nhóm đầu. Số trên tiêu đề box đếm **toàn bộ máy đã gán** (đang có mặt);
+tìm kiếm và lọc trạng thái/kết nối chỉ đổi ô được vẽ và ghi riêng "đang lọc: thấy N/T", không bao
+giờ thay mẫu số. Chip box dưới thanh công cụ lọc lưới về một box, nhãn lọc chung "Đang lọc: … ·
+Bỏ lọc"; **+ Box** mở quản lý nhóm. Thứ tự trong box là thứ tự số máy, không đổi khi trạng thái
+đổi. Ô có focus nằm trên ô bên cạnh để @tài khoản đầy đủ không bị che; trên ô ngắn, tuổi hình
+hiện dạng gọn "65 giây" cạnh Máy N (đủ câu trong tooltip và tên truy cập). Bảng Hiển thị khi đóng
+vẫn giữ trạng thái đang áp dụng (ẩn, không gỡ khỏi trang).
+
+**Hoãn sang đợt sau (V4, đã ghi nhận):** cột **Chủ giữ** và **Cập nhật** của Danh sách; ngăn Nhóm
+mở theo yêu cầu và ghim được ở ≥ 1600 px (hiện vẫn là hộp quản lý nhóm); cỡ ô trong Hiển thị chỉ
+có tác dụng ở chế độ Màn hình (cần ghi rõ hoặc khóa ở Tổng quan); đoạn mô tả cột Danh sách cũ ngay
+dưới đây còn tên cột trước V4 (Trạng thái, Cần xử lý) và sẽ được thay bằng một hợp đồng cột duy nhất.
 
 **Độ mới hình**: ô ghi "hình N giây trước" khi khung hình gần nhất cũ hơn 20 giây và phủ
 **Hình cũ** lên preview khi quá 60 giây (`frameFreshness.ts`). Đây là tuổi hình, không phải

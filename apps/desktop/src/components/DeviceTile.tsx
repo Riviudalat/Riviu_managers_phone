@@ -107,6 +107,7 @@ function DeviceTileInner({
   // Frame age, not status-check age and not the connection (frameFreshness.ts).
   const freshness = useFrameFreshness(device.udid, hasView && !focused);
   const frameAge = freshness.state === "aging" || freshness.state === "stale" ? freshness.ageText : undefined;
+  const frameAgeShort = freshness.state === "aging" || freshness.state === "stale" ? freshness.shortText : undefined;
   const frameLabel = [accessibleName, frameAge].filter(Boolean).join(", ");
 
   return (
@@ -149,7 +150,7 @@ function DeviceTileInner({
         <div className="dev-phone-strip-head">
           <span className="dev-phone-index">{machineNumberLabel(index)}</span>
           <span className="dev-phone-name" title={displayName}>{displayName}</span>
-          {frameAge && <span className="dev-phone-age" data-state={freshness.state} title="Tuổi hình: lúc màn hình gửi khung hình mới gần nhất. Không phải lần kiểm trạng thái, không phải kết nối.">{frameAge}</span>}
+          {frameAge && <span className="dev-phone-age" data-state={freshness.state} title={`${frameAge}. Tuổi hình: lúc màn hình gửi khung hình mới gần nhất. Không phải lần kiểm trạng thái, không phải kết nối.`}><span className="dev-phone-age-long">{frameAge}</span><span className="dev-phone-age-short" aria-hidden="true">{frameAgeShort}</span></span>}
           <span className="dev-phone-check" aria-hidden="true">{selected && <Check size={10} strokeWidth={3.5} />}</span>
         </div>
         {identity && (

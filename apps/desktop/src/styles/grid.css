@@ -218,11 +218,15 @@ button.dev-phone-detail {
 .device-table tbody tr:last-child td { border-bottom: 0; }
 .device-table .device-table-check { width: 36px; padding: 0 0 0 0.6rem; }
 .device-table .device-table-check input { display: block; width: 16px; height: 16px; min-height: 16px; margin: 0; }
-.device-table .device-table-machine { width: 18%; }
-.device-table .device-table-account { width: 14%; }
-.device-table .device-table-work { width: 25%; }
-.device-table .device-table-attention { width: 20%; }
-.device-table .device-table-evidence { width: 14%; font-variant-numeric: tabular-nums; }
+/* Percentages of what the fixed columns leave, summing to 100 so every column gets real width:
+   Máy 15 · Box 11 · Tài khoản 13 · Công việc 18 · Điều khiển 14 · Lý do 16 · Bằng chứng 13. */
+.device-table .device-table-machine { width: 15%; }
+.device-table .device-table-box { width: 11%; }
+.device-table .device-table-account { width: 13%; }
+.device-table .device-table-work { width: 18%; }
+.device-table .device-table-control { width: 14%; }
+.device-table .device-table-attention { width: 16%; }
+.device-table .device-table-evidence { width: 13%; font-variant-numeric: tabular-nums; }
 .device-table .device-table-connection { width: 64px; }
 .device-table .device-table-actions { width: 112px; padding-right: 0.4rem; text-overflow: clip; }
 .device-table th.device-table-actions { text-align: right; }
@@ -665,6 +669,14 @@ button.linkish,
 .window-canvas[data-mode="overview"] .dev-phone-model {
   display: none;
 }
+/* Every tile is its own stacking context (`contain`), so the expanded @account only reads in
+   full when its tile is raised above the following ones: focus above selection above the rest. */
+.window-canvas[data-mode="overview"] > .dev-phone.selected {
+  z-index: 2;
+}
+.window-canvas[data-mode="overview"] > .dev-phone:is(:focus-visible, :focus-within) {
+  z-index: 3;
+}
 .window-canvas[data-mode="overview"] .dev-phone:is(.selected, :focus-visible, :focus-within) .dev-phone-ident {
   position: relative;
   z-index: 5;
@@ -748,4 +760,16 @@ button.linkish,
   font-weight: 700;
   text-align: center;
   pointer-events: none;
+}
+
+/* Frame age: the full words on the large tile, the short "65 giây" beside Máy N on the short
+   tile (the full text stays in its tooltip and the tile's accessible name). */
+.dev-phone-age-short {
+  display: none;
+}
+.window-canvas[data-mode="overview"] .dev-phone-age-long {
+  display: none;
+}
+.window-canvas[data-mode="overview"] .dev-phone-age-short {
+  display: inline;
 }
