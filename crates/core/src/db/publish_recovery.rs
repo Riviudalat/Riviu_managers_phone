@@ -788,7 +788,8 @@ mod tests {
         );
 
         // Review R3-F1: Start's acceptance locks every receiving phone in its own transaction,
-        // before Start reads any account to compare with the approval.
+        // before Start reads any account to compare with the approval, under an owner that was
+        // registered first (review R4-F1).
         let (st, _, seed, _) = fixture();
         st.conn()
             .unwrap()
@@ -799,10 +800,18 @@ mod tests {
             .unwrap();
         let start = Uuid::new_v4().to_string();
         let phones = vec!["s1".to_owned()];
+        let owner = crate::db::PublishPreparationOwner::register();
         assert!(
-            st.accept_publish_start(&start, &"0".repeat(64), &"1".repeat(64), &start, &phones)
-                .unwrap()
-                .1
+            st.accept_publish_start(
+                &start,
+                &"0".repeat(64),
+                &"1".repeat(64),
+                &start,
+                owner.generation(),
+                &phones
+            )
+            .unwrap()
+            .1
         );
         let edit = st
             .set_device_handle("s1", "start.account", "other.account")
@@ -813,7 +822,8 @@ mod tests {
             "{edit:#}"
         );
         assert_eq!(
-            st.publish_account_lock_drift(&start, &phones).unwrap(),
+            st.publish_account_lock_drift(owner.generation(), &phones)
+                .unwrap(),
             None
         );
         // A write that bypassed the writers refuses before the handoff's first exclusion or
@@ -826,7 +836,7 @@ mod tests {
         };
         bypass("other.account");
         let drift = st
-            .publish_account_lock_drift(&start, &phones)
+            .publish_account_lock_drift(owner.generation(), &phones)
             .unwrap()
             .unwrap();
         assert!(
@@ -836,6 +846,7 @@ mod tests {
         assert!(st
             .advance_publish_start(&start, "accepted", "preparing", "preparingDevices", None)
             .unwrap());
+        assert!(!st.publish_start_orphaned(&start).unwrap());
         let mut request = st.publish_campaign_request(&seed).unwrap().unwrap();
         let mut bundle = st
             .get_publish_campaign(&seed)
@@ -881,31 +892,128 @@ mod tests {
             )
             .unwrap();
         assert!(st
-            .publish_account_lock_drift(&start, &phones)
+            .publish_account_lock_drift(owner.generation(), &phones)
             .unwrap()
             .unwrap()
             .contains("s1: khóa tài khoản của lượt này không còn"));
+        let held = format!("lượt đăng {} (bài", &created.id[..8]);
         let edit = st
             .set_device_handle("s1", "start.account", "other.account")
             .unwrap_err();
-        assert!(
-            edit.to_string()
-                .contains(&format!("lượt đăng {} (bài", &created.id[..8])),
-            "{edit:#}"
-        );
+        assert!(edit.to_string().contains(&held), "{edit:#}");
+        // Review R4-F1: the Start's task ends without its terminal write landing (every attempt
+        // failed). With its owner gone the status read settles the receipt as a restart would,
+        // `uncertain`; the campaign lock still protects the unsent work, and nothing is claimed.
+        drop(owner);
+        assert!(st.publish_start_orphaned(&start).unwrap());
+        st.reconcile_orphaned_publish_starts().unwrap();
+        let receipt = st.publish_start_status(&start).unwrap().unwrap();
+        assert_eq!(receipt.state, "uncertain");
+        assert_eq!(receipt.error.unwrap().code, "PublishStartInterrupted");
+        assert!(!st.publish_start_orphaned(&start).unwrap());
+        let edit = st
+            .set_device_handle("s1", "start.account", "other.account")
+            .unwrap_err();
+        assert!(edit.to_string().contains(&held), "{edit:#}");
+        assert!(st.claim_publish_pipeline(&created.id).unwrap().is_none());
         st.cancel_publish_campaign(&created.id).unwrap();
         st.set_device_handle("s1", "start.account", "other.account")
             .unwrap();
         // A Start that settles without a campaign releases its lock too.
         let failed = Uuid::new_v4().to_string();
         let others = vec!["s2".to_owned()];
-        st.accept_publish_start(&failed, &"0".repeat(64), &"2".repeat(64), &failed, &others)
-            .unwrap();
-        assert!(st.set_device_handle("s2", "", "free.account").is_err());
+        let failing = crate::db::PublishPreparationOwner::register();
+        st.accept_publish_start(
+            &failed,
+            &"0".repeat(64),
+            &"2".repeat(64),
+            &failed,
+            failing.generation(),
+            &others,
+        )
+        .unwrap();
+        assert!(st
+            .set_device_handle("s2", "", "free.account")
+            .unwrap_err()
+            .to_string()
+            .contains("đang bắt đầu"));
         assert!(st
             .advance_publish_start(&failed, "accepted", "failed", "failed", None)
             .unwrap());
         st.set_device_handle("s2", "", "free.account").unwrap();
+        drop(failing);
+        // One whose settlement never landed still protects the phone while its owner is alive,
+        // and is settled by the next account write once the owner is gone.
+        let lost = Uuid::new_v4().to_string();
+        let lost_phones = vec!["s3".to_owned()];
+        let losing = crate::db::PublishPreparationOwner::register();
+        st.accept_publish_start(
+            &lost,
+            &"0".repeat(64),
+            &"3".repeat(64),
+            &lost,
+            losing.generation(),
+            &lost_phones,
+        )
+        .unwrap();
+        assert!(st
+            .advance_publish_start(&lost, "accepted", "preparing", "preparingDevices", None)
+            .unwrap());
+        let starting = |udid: &str, account: &str| {
+            st.set_device_handle(udid, "", account)
+                .unwrap_err()
+                .to_string()
+                .contains("đang bắt đầu")
+        };
+        assert!(starting("s3", "lost.account"));
+        drop(losing);
+        st.set_device_handle("s3", "", "lost.account").unwrap();
+        assert_eq!(
+            st.publish_start_status(&lost).unwrap().unwrap().state,
+            "uncertain"
+        );
+
+        // Direct creation: each call owns one generation of the lock (review R4-F1).
+        let direct = Uuid::new_v4().to_string();
+        let direct_phones = vec!["s4".to_owned()];
+        // Cancelled before its lock write ran: the write refuses and nothing is locked.
+        let cancelled = crate::db::PublishPreparationOwner::register();
+        let generation = cancelled.generation().to_owned();
+        drop(cancelled);
+        assert!(st
+            .lock_publish_preparation_accounts(&generation, &direct, &direct_phones)
+            .is_err());
+        // Two overlapping calls with the same request: one exits and releases only its own.
+        let first = crate::db::PublishPreparationOwner::register();
+        let second = crate::db::PublishPreparationOwner::register();
+        for owner in [&first, &second] {
+            st.lock_publish_preparation_accounts(owner.generation(), &direct, &direct_phones)
+                .unwrap();
+        }
+        st.release_publish_preparation_accounts(first.generation())
+            .unwrap();
+        drop(first);
+        assert!(starting("s4", "direct.account"));
+        assert_eq!(
+            st.publish_account_lock_drift(second.generation(), &direct_phones)
+                .unwrap(),
+            None
+        );
+        // The other ends after its lock committed but without deleting it (its await was
+        // cancelled after the commit, or the delete failed): no owner, so no lock, and the
+        // next account write reclaims the row.
+        drop(second);
+        st.set_device_handle("s4", "", "direct.account").unwrap();
+        let left: i64 = st
+            .conn()
+            .unwrap()
+            .query_row(
+                "SELECT COUNT(*) FROM settings WHERE key LIKE 'publish.account-lock.preparing.%.s4'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(left, 0);
     }
     #[test]
     fn retries_rotate_attempt_identity_and_old_worker_cannot_settle_new_attempt() {

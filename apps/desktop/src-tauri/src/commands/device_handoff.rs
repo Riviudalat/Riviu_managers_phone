@@ -645,12 +645,12 @@ pub(crate) async fn prepare_publish_devices(
         return Err(CommandError::operation(refusal));
     }
     // Review R3-F1: a publish Start's phones have been account-locked since its acceptance.
-    // The lock and the accounts it recorded are compared again before the first exclusion or
-    // stop, so a stale approval refuses with no old owner changed.
-    if let Some(request) = account_lock {
+    // This creation's own lock generation and the accounts it recorded are compared again
+    // before the first exclusion or stop, so a stale approval refuses with no old owner changed.
+    if let Some(generation) = account_lock {
         if let Some(refusal) = state
             .db
-            .publish_account_lock_drift(request, &devices)
+            .publish_account_lock_drift(generation, &devices)
             .map_err(CommandError::operation)?
         {
             return Err(CommandError::operation(refusal));

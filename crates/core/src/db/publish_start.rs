@@ -183,13 +183,15 @@ impl Database {
 
     /// Only the insert winner owns preparation. No phone, scan, handoff or network precedes it.
     /// The same transaction account-locks every receiving phone (review R3), before Start reads
-    /// any account to compare with the approval.
+    /// any account to compare with the approval, under the caller's already registered
+    /// preparation `generation`, and records that generation as the Start's owner (review R4-F1).
     pub fn accept_publish_start(
         &self,
         request: &str,
         digest: &str,
         fingerprint: &str,
         preparation: &str,
+        generation: &str,
         udids: &[String],
     ) -> anyhow::Result<(PublishStartReceipt, bool)> {
         Uuid::parse_str(request)?;
@@ -233,7 +235,8 @@ impl Database {
             VALUES(?1,?2,?3,?4,?5,?6,?7,?8)", params![request,digest,fingerprint,preparation,campaign,
                 if is_new {"accepted"} else {"uncertain"}, if is_new {"accepted"} else {"existingCampaign"},Utc::now().to_rfc3339()])?;
         if is_new {
-            super::publish_pipeline::lock_preparing_accounts(&tx, request, udids)?;
+            super::publish_pipeline::lock_preparing_accounts(&tx, generation, request, udids)?;
+            super::publish_pipeline::record_start_owner(&tx, request, generation)?;
         }
         let receipt = start_on(&tx, request)?.context("start receipt missing")?;
         tx.commit()?;
@@ -310,10 +313,11 @@ impl Database {
                 Utc::now().to_rfc3339()
             ],
         )? == 1;
-        // A Start that settles without a campaign ends its preparation's account lock; a
-        // campaign has already replaced it with its own.
-        if changed && matches!(state, "failed" | "uncertain") {
-            super::publish_pipeline::release_preparing_accounts(&tx, request)?;
+        // Leaving preparation settles the Start: its owner record goes, and its preparation
+        // locks, which no longer bind, are deleted; a campaign's own lock still binds and stays.
+        if changed && !matches!(state, "accepted" | "preparing") {
+            super::publish_pipeline::forget_start_owner(&tx, request)?;
+            super::publish_pipeline::release_settled_account_locks(&tx, Some(request), None)?;
         }
         tx.commit()?;
         Ok(changed)

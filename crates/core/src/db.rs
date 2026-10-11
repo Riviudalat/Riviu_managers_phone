@@ -71,7 +71,7 @@ pub use google_connection::{
     SHEET_PROVIDER_SETTING,
 };
 pub use publish_dispatch::{PublishDispatchJob, PublishLimits, PublishWorkPermit};
-pub use publish_pipeline::PublishPipelineRun;
+pub use publish_pipeline::{PublishPipelineRun, PublishPreparationOwner};
 mod publish_cleanup;
 mod publish_create;
 mod publish_start;

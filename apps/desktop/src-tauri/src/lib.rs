@@ -1470,7 +1470,7 @@ mod tests {
         ("agent_quarantine_prepare", "cleanup maintenance: holds ensure_cleanup_maintenance, which stays open during shutdown"),
         ("agent_quarantine_execute", "cleanup maintenance: holds ensure_cleanup_maintenance, which stays open during shutdown"),
         ("agent_quarantine_receipt", "read-only receipt lookup that remains available after work admission closes"),
-        ("publish_start_status", "reads durable start receipt; no device or execution changes"),
+        ("publish_start_status", "reads durable start receipt and settles one whose preparation owner already ended as uncertain; no device or execution changes"),
         ("gui_service_status", "reads perception configuration and process status; no device or configuration changes"),
         // Reads. They answer from the DB, from memory, or from a frame already captured, and
         // touch no device — so refusing them during shutdown drain would blank the UI for no

@@ -9,12 +9,36 @@ pub async fn publish_start_status(
     state: State<'_, AppState>,
     request_id: String,
 ) -> Result<Option<PublishStartReceipt>, CommandError> {
+    let id = request_id.clone();
+    let (receipt, orphaned) = state
+        .db
+        .storage_read(move |db| {
+            Ok((
+                db.publish_start_status(&id)?,
+                db.publish_start_orphaned(&id)?,
+            ))
+        })
+        .await
+        .map_err(preflight::err)?;
+    if !orphaned {
+        return Ok(receipt);
+    }
+    // Review R4-F1: the preparation that owned this Start ended without settling it. Settle it
+    // as a restart would (uncertain, never posted again) and release its account locks.
     state
         .db
-        .storage_read(move |db| db.publish_start_status(&request_id))
+        .storage_write(move |db| {
+            db.reconcile_orphaned_publish_starts()?;
+            db.publish_start_status(&request_id)
+        })
         .await
         .map_err(preflight::err)
 }
+
+/// Finite budget for writing a Start's terminal state (review R4-F1): about 45 seconds of
+/// retries through storage. If every attempt fails, the owner's drop leaves the receipt to
+/// the status read, the next account write and startup, which settle it as `uncertain`.
+const START_SETTLEMENT_ATTEMPTS: u32 = 8;
 
 #[tauri::command]
 pub async fn publish_cancel_unaccepted_start(
@@ -99,11 +123,22 @@ pub async fn publish_start(
         preparation_id,
         request.udids.clone(),
     );
-    // Acceptance account-locks the receiving phones in the same transaction (review R3).
+    // Acceptance account-locks the receiving phones in the same transaction (review R3), under
+    // an owner registered first (review R4-F1): if this future is dropped while the write runs,
+    // the owner drops with it and the committed lock no longer binds.
+    let owner = riviu_core::db::PublishPreparationOwner::register();
+    let generation = owner.generation().to_owned();
     let (receipt, inserted) = state
         .db
         .storage_write(move |db| {
-            db.accept_publish_start(&id, &digest, &fingerprint, &preparation, &udids)
+            db.accept_publish_start(
+                &id,
+                &digest,
+                &fingerprint,
+                &preparation,
+                &generation,
+                &udids,
+            )
         })
         .await
         .map_err(preflight::err)?;
@@ -111,10 +146,12 @@ pub async fn publish_start(
         return Ok(receipt);
     }
     // The owned task survives a lost IPC reply. App admission remains held until preparation
-    // ends; all device work is still admitted and owned by the existing dispatcher.
+    // ends; all device work is still admitted and owned by the existing dispatcher. The owner
+    // lives until the Start's terminal state is written or its retry budget is spent.
     let progress_preparation = receipt.preparation_id.clone();
     tauri::async_runtime::spawn(async move {
         let _admission = admission;
+        let _owner = owner;
         let state = app.state::<AppState>();
         let context = preparation::PreparationContext::new(
             state.events.clone(),
@@ -180,30 +217,44 @@ pub async fn publish_start(
             }),
         };
         if let Some(error) = failure {
-            let settled = state
-                .db
-                .storage_write(move |db| {
-                    let receipt = db
-                        .publish_start_status(&request_id)?
-                        .context("start receipt missing")?;
-                    let next = if receipt.campaign_id.is_some()
-                        || error.code == "PublishStartInterrupted"
-                    {
-                        "uncertain"
-                    } else {
-                        "failed"
-                    };
-                    db.advance_publish_start(
-                        &request_id,
-                        &receipt.state,
-                        next,
-                        "failed",
-                        Some(&error),
-                    )
-                })
-                .await;
-            if let Err(error) = settled {
-                log::error!("publish start settlement: {error:#}");
+            // Review R4-F1: a failed terminal write is retried through storage, not abandoned.
+            let mut delay = Duration::from_millis(500);
+            for attempt in 1..=START_SETTLEMENT_ATTEMPTS {
+                let (request_id, error) = (request_id.clone(), error.clone());
+                let settled = state
+                    .db
+                    .storage_write(move |db| {
+                        let receipt = db
+                            .publish_start_status(&request_id)?
+                            .context("start receipt missing")?;
+                        let next = if receipt.campaign_id.is_some()
+                            || error.code == "PublishStartInterrupted"
+                        {
+                            "uncertain"
+                        } else {
+                            "failed"
+                        };
+                        db.advance_publish_start(
+                            &request_id,
+                            &receipt.state,
+                            next,
+                            "failed",
+                            Some(&error),
+                        )
+                    })
+                    .await;
+                let Err(error) = settled else {
+                    break;
+                };
+                if attempt == START_SETTLEMENT_ATTEMPTS {
+                    log::error!(
+                        "publish start settlement gave up after {attempt} attempts: {error:#}"
+                    );
+                    break;
+                }
+                log::warn!("publish start settlement attempt {attempt}: {error:#}");
+                tokio::time::sleep(delay).await;
+                delay = (delay * 2).min(Duration::from_secs(15));
             }
         }
     });

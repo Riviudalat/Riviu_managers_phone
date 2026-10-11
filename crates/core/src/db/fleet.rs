@@ -614,6 +614,9 @@ pub(crate) fn ensure_account_edit_allowed(
     {
         return Ok(());
     }
+    // Review R4-F1: a Start whose owner is gone is settled first, so a lock without a live
+    // owner never blocks this write, while one that still protects unsent work does.
+    super::publish_pipeline::reconcile_orphaned_publish_starts(conn)?;
     super::publish_pipeline::release_settled_account_locks(conn, None, Some(udid))?;
     if let Some(label) = super::publish_pipeline::live_account_lock(conn, udid)? {
         anyhow::bail!(

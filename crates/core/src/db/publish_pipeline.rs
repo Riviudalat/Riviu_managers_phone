@@ -414,17 +414,20 @@ fn pipeline_event(tx: &rusqlite::Transaction<'_>, campaign: &str, now: &str) -> 
 /// refuses a change (`fleet::ensure_account_edit_allowed`). The approval validators
 /// (`publish_approval_refusal`, `admit_publish_effect`) keep comparing as the backstop.
 ///
-/// Rows live in `settings` under `publish.account-lock.{kind}.{owner}.{udid}`, valued
-/// `{udid, owner, kind, account, label, session}`:
-/// - `preparing`, owner = request ID: taken in Start's acceptance transaction, or when creation
-///   begins without a Start, before the approval is compared with the phones. It binds while the
-///   process that took it runs and the Start has not settled without a campaign; the campaign
-///   insert replaces it in the same transaction, and creation releases it on every other exit.
-/// - `campaign`, owner = campaign ID: taken in the transaction that inserts a campaign carrying an
-///   approval, and again whenever fresh work re-enters the set (claim, assignment retry, recovery
-///   requeue). It binds while the campaign is not cancelled or missed and one of its rows can
-///   still start fresh work (no effect intent, and an active state or an open dispatch job); a
-///   row with an effect intent only reconciles under the approval.
+/// Rows live in `settings` under `publish.account-lock.{kind}.{key}.{udid}`, valued
+/// `{udid, owner, kind, account, label}` plus `generation` for a preparation:
+/// - `preparing`, keyed by the preparation's generation, owner = request ID: taken in Start's
+///   acceptance transaction, or when creation begins without a Start, before the approval is
+///   compared with the phones. It binds only while its [`PublishPreparationOwner`] is alive in
+///   this process (review R4-F1) and the Start, if any, has neither settled nor created its
+///   campaign. The owner exists before the lock can be written and its drop ends the lock, so a
+///   cancelled await, a failed release or a failed Start settlement leaves no binding row; each
+///   preparation releases only its own generation.
+/// - `campaign`, keyed by the campaign ID: taken in the transaction that inserts a campaign
+///   carrying an approval, and again whenever fresh work re-enters the set (claim, assignment
+///   retry, recovery requeue). It binds while the campaign is not cancelled or missed and one of
+///   its rows can still start fresh work (no effect intent, and an active state or an open
+///   dispatch job); a row with an effect intent only reconciles under the approval.
 ///
 /// A row that no longer binds is ignored, and deleted by the next writer check, at pipeline
 /// finish, cancel and Start settlement, and by the startup sweep.
@@ -434,7 +437,8 @@ const ACCOUNT_LOCK_PREFIX: &str = "publish.account-lock.";
 /// query reads `l.value` only behind this test, inside a `CASE`.
 const LOCK_ROW: &str = "substr(l.key,1,length(?2))=?2 AND json_valid(l.value)";
 
-/// Whether the lock in settings row `l` still binds; `?1` is this process's session.
+/// Whether the lock in settings row `l` still binds; `?1` is the JSON array of the
+/// preparation generations alive in this process ([`active_preparations`]).
 const LIVE_ACCOUNT_LOCK: &str = "COALESCE(CASE json_extract(l.value,'$.kind')
     WHEN 'campaign' THEN EXISTS(SELECT 1 FROM publish_assignments a JOIN publish_campaigns c ON c.id=a.campaign_id
         WHERE c.id=json_extract(l.value,'$.owner') AND c.state NOT IN ('cancelled','missed')
@@ -442,18 +446,69 @@ const LIVE_ACCOUNT_LOCK: &str = "COALESCE(CASE json_extract(l.value,'$.kind')
         AND (a.state IN ('queued','scheduled','preparing','ready','transferring','imported','posting')
             OR EXISTS(SELECT 1 FROM publish_dispatch_jobs j WHERE j.assignment_id=a.id
                 AND j.state IN ('queued','running','paused'))))
-    ELSE json_extract(l.value,'$.session')=?1 AND NOT EXISTS(SELECT 1 FROM publish_start_requests s
+    ELSE json_extract(l.value,'$.generation') IN (SELECT value FROM json_each(?1))
+        AND NOT EXISTS(SELECT 1 FROM publish_start_requests s
         WHERE s.request_id=json_extract(l.value,'$.owner')
         AND (s.campaign_id IS NOT NULL OR s.state NOT IN ('accepted','preparing')))
     END,0)";
 
-/// A preparation lock binds only inside the process that took it: preparation is not
-/// replayable after a restart, which settles an interrupted Start as uncertain.
-static ACCOUNT_LOCK_SESSION: std::sync::LazyLock<String> =
-    std::sync::LazyLock::new(|| Uuid::new_v4().to_string());
+/// Settings key of the generation that owns an accepted Start's preparation.
+const START_OWNER_PREFIX: &str = "publish.start-owner.";
 
-fn account_lock_key(kind: &str, owner: &str, udid: &str) -> String {
-    format!("{ACCOUNT_LOCK_PREFIX}{kind}.{owner}.{udid}")
+/// The preparation generations alive in this process. A fresh process has none, so every
+/// earlier process's preparation lock and Start owner is inactive after a restart.
+static ACTIVE_PREPARATIONS: std::sync::LazyLock<
+    parking_lot::Mutex<std::collections::HashSet<String>>,
+> = std::sync::LazyLock::new(Default::default);
+
+/// The owner of one preparation's account lock (review R4-F1). Register it before the lock is
+/// written and keep it for exactly as long as the preparation (or its Start's settlement) runs:
+/// its drop, on any exit including a cancelled future or an unwinding task, is what ends the
+/// lock, whether or not the rows could be deleted.
+#[derive(Debug)]
+pub struct PublishPreparationOwner {
+    generation: String,
+}
+
+impl PublishPreparationOwner {
+    pub fn register() -> Self {
+        let generation = Uuid::new_v4().to_string();
+        ACTIVE_PREPARATIONS.lock().insert(generation.clone());
+        Self { generation }
+    }
+
+    pub fn generation(&self) -> &str {
+        &self.generation
+    }
+}
+
+impl Drop for PublishPreparationOwner {
+    fn drop(&mut self) {
+        ACTIVE_PREPARATIONS.lock().remove(&self.generation);
+    }
+}
+
+fn preparation_active(generation: &str) -> bool {
+    ACTIVE_PREPARATIONS.lock().contains(generation)
+}
+
+/// `?1` of [`LIVE_ACCOUNT_LOCK`]: a snapshot taken inside the caller's transaction. An owner
+/// registers before its lock is written, so a lock the transaction can see has its owner in the
+/// snapshot until that owner drops.
+fn active_preparations() -> String {
+    serde_json::Value::Array(
+        ACTIVE_PREPARATIONS
+            .lock()
+            .iter()
+            .cloned()
+            .map(serde_json::Value::String)
+            .collect(),
+    )
+    .to_string()
+}
+
+fn account_lock_key(kind: &str, key: &str, udid: &str) -> String {
+    format!("{ACCOUNT_LOCK_PREFIX}{kind}.{key}.{udid}")
 }
 
 fn current_account(conn: &Connection, udid: &str) -> anyhow::Result<String> {
@@ -465,13 +520,20 @@ fn current_account(conn: &Connection, udid: &str) -> anyhow::Result<String> {
     Ok(crate::publish::normalize_publish_account(&handle))
 }
 
-/// Lock `udids` for a preparation that has no campaign yet, recording each current account for
-/// the backstop before the first owner effect. A lock this request already holds is kept.
+/// Lock `udids` for the preparation `generation` of `request`, which has no campaign yet,
+/// recording each current account for the backstop before the first owner effect. Refused when
+/// the owner already dropped (its caller was cancelled before this write ran), so no lock is
+/// ever written without a live owner.
 pub(super) fn lock_preparing_accounts(
     conn: &Connection,
+    generation: &str,
     request: &str,
     udids: &[String],
 ) -> anyhow::Result<()> {
+    anyhow::ensure!(
+        preparation_active(generation),
+        "Lượt chuẩn bị đã dừng trước khi khóa tài khoản; chưa khóa máy nào"
+    );
     let label = format!(
         "lượt đăng {} đang bắt đầu",
         request.get(..8).unwrap_or(request)
@@ -479,12 +541,12 @@ pub(super) fn lock_preparing_accounts(
     for udid in udids {
         let value = serde_json::json!({
             "udid": udid, "owner": request, "kind": "preparing", "label": label,
-            "account": current_account(conn, udid)?, "session": *ACCOUNT_LOCK_SESSION,
+            "account": current_account(conn, udid)?, "generation": generation,
         });
         conn.execute(
             "INSERT OR IGNORE INTO settings(key,value) VALUES(?1,?2)",
             params![
-                account_lock_key("preparing", request, udid),
+                account_lock_key("preparing", generation, udid),
                 value.to_string()
             ],
         )?;
@@ -492,10 +554,57 @@ pub(super) fn lock_preparing_accounts(
     Ok(())
 }
 
-pub(super) fn release_preparing_accounts(conn: &Connection, request: &str) -> anyhow::Result<()> {
+/// Record which generation owns the accepted Start `request` (same transaction as acceptance).
+pub(super) fn record_start_owner(
+    conn: &Connection,
+    request: &str,
+    generation: &str,
+) -> anyhow::Result<()> {
     conn.execute(
-        "DELETE FROM settings WHERE substr(key,1,length(?1))=?1",
-        [format!("{ACCOUNT_LOCK_PREFIX}preparing.{request}.")],
+        "INSERT INTO settings(key,value) VALUES(?1,?2)
+         ON CONFLICT(key) DO UPDATE SET value=excluded.value",
+        params![
+            format!("{START_OWNER_PREFIX}{request}"),
+            serde_json::json!({ "generation": generation }).to_string()
+        ],
+    )?;
+    Ok(())
+}
+
+pub(super) fn forget_start_owner(conn: &Connection, request: &str) -> anyhow::Result<()> {
+    conn.execute(
+        "DELETE FROM settings WHERE key=?1",
+        [format!("{START_OWNER_PREFIX}{request}")],
+    )?;
+    Ok(())
+}
+
+/// A Start still `accepted`/`preparing` whose owner is no longer alive will never be settled by
+/// it: its task ended, or its terminal write failed every retry (review R4-F1). Settle it the way
+/// a restart does, `uncertain`, which needs a person and is never claimed or posted again, and
+/// drop the owner records that no longer name a live generation. Its preparation locks are then
+/// inactive and released with the other settled locks.
+pub(super) fn reconcile_orphaned_publish_starts(conn: &Connection) -> anyhow::Result<()> {
+    let active = active_preparations();
+    let error = serde_json::json!({
+        "code": "PublishStartInterrupted",
+        "message": "Lượt chuẩn bị đã dừng mà chưa ghi được kết quả; kiểm tra lượt cũ, không tự đăng lại",
+    })
+    .to_string();
+    let orphan = "substr(o.key,1,length(?2))=?2 AND CASE WHEN json_valid(o.value)
+        THEN COALESCE(json_extract(o.value,'$.generation') NOT IN (SELECT value FROM json_each(?1)),1)
+        ELSE 1 END";
+    conn.execute(
+        &format!(
+            "UPDATE publish_start_requests SET state='uncertain',stage='interrupted',error_json=?3,
+             revision=revision+1,updated_at=?4 WHERE state IN ('accepted','preparing')
+             AND request_id IN (SELECT substr(o.key,length(?2)+1) FROM settings o WHERE {orphan})"
+        ),
+        params![active, START_OWNER_PREFIX, error, Utc::now().to_rfc3339()],
+    )?;
+    conn.execute(
+        &format!("DELETE FROM settings WHERE key IN (SELECT o.key FROM settings o WHERE {orphan})"),
+        params![active, START_OWNER_PREFIX],
     )?;
     Ok(())
 }
@@ -568,7 +677,7 @@ pub(super) fn release_settled_account_locks(
                  AND NOT {LIVE_ACCOUNT_LOCK}
              ELSE 0 END)"
         ),
-        params![*ACCOUNT_LOCK_SESSION, ACCOUNT_LOCK_PREFIX, owner, udid],
+        params![active_preparations(), ACCOUNT_LOCK_PREFIX, owner, udid],
     )?;
     Ok(())
 }
@@ -583,38 +692,71 @@ pub(super) fn live_account_lock(conn: &Connection, udid: &str) -> anyhow::Result
                      json_extract(l.value,'$.udid')=?3 AND {LIVE_ACCOUNT_LOCK}
                  ELSE 0 END ORDER BY l.key LIMIT 1"
             ),
-            params![*ACCOUNT_LOCK_SESSION, ACCOUNT_LOCK_PREFIX, udid],
+            params![active_preparations(), ACCOUNT_LOCK_PREFIX, udid],
             |row| row.get(0),
         )
         .optional()?)
 }
 
 impl Database {
-    /// Creation without a Start locks its phones before it reads their accounts; a Start's lock
-    /// from its acceptance is kept as it is.
+    /// A creation locks its phones under its own `generation` before it reads their accounts.
+    /// Its owner must already be registered; a Start's lock from its acceptance is separate.
     pub fn lock_publish_preparation_accounts(
         &self,
+        generation: &str,
         request: &str,
         udids: &[String],
     ) -> anyhow::Result<()> {
         let mut conn = self.conn()?;
         let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
-        lock_preparing_accounts(&tx, request, udids)?;
+        lock_preparing_accounts(&tx, generation, request, udids)?;
         tx.commit()?;
         Ok(())
     }
 
-    /// Scoped release when creation ends; a created campaign has already replaced the lock.
-    pub fn release_publish_preparation_accounts(&self, request: &str) -> anyhow::Result<()> {
-        release_preparing_accounts(&self.conn()?, request)
+    /// Delete exactly this generation's preparation rows. Another call with the same request ID
+    /// keeps its own; if this delete fails, the owner's drop still ends the lock.
+    pub fn release_publish_preparation_accounts(&self, generation: &str) -> anyhow::Result<()> {
+        self.conn()?.execute(
+            "DELETE FROM settings WHERE substr(key,1,length(?1))=?1",
+            [format!("{ACCOUNT_LOCK_PREFIX}preparing.{generation}.")],
+        )?;
+        Ok(())
+    }
+
+    /// Whether this accepted Start still waits for an owner that is gone (review R4-F1).
+    pub fn publish_start_orphaned(&self, request: &str) -> anyhow::Result<bool> {
+        let generation: Option<String> = self
+            .conn()?
+            .query_row(
+                "SELECT json_extract(o.value,'$.generation') FROM settings o
+                 JOIN publish_start_requests s ON s.request_id=?2
+                 WHERE o.key=?1 || ?2 AND json_valid(o.value) AND s.state IN ('accepted','preparing')",
+                params![START_OWNER_PREFIX, request],
+                |row| row.get(0),
+            )
+            .optional()?
+            .flatten();
+        Ok(generation.is_some_and(|generation| !preparation_active(&generation)))
+    }
+
+    /// Settle every Start whose owner is gone and release the locks that no longer bind.
+    pub fn reconcile_orphaned_publish_starts(&self) -> anyhow::Result<()> {
+        let mut conn = self.conn()?;
+        let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
+        reconcile_orphaned_publish_starts(&tx)?;
+        release_settled_account_locks(&tx, None, None)?;
+        tx.commit()?;
+        Ok(())
     }
 
     /// Backstop before Start's first owner effect (review R3-F1): each selected phone must still
-    /// hold this request's binding lock with the account recorded when it was taken. The writers
-    /// already refuse while the lock binds; this catches anything that bypassed them.
+    /// hold this preparation generation's binding lock with the account recorded when it was
+    /// taken. The writers already refuse while the lock binds; this catches anything that
+    /// bypassed them.
     pub fn publish_account_lock_drift(
         &self,
-        request: &str,
+        generation: &str,
         udids: &[String],
     ) -> anyhow::Result<Option<String>> {
         let conn = self.conn()?;
@@ -634,8 +776,8 @@ impl Database {
                          FROM settings l WHERE l.key=?2"
                     ),
                     params![
-                        *ACCOUNT_LOCK_SESSION,
-                        account_lock_key("preparing", request, udid)
+                        active_preparations(),
+                        account_lock_key("preparing", generation, udid)
                     ],
                     |row| Ok((row.get(0)?, row.get(1)?)),
                 )

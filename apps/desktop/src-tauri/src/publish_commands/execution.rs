@@ -342,18 +342,25 @@ pub async fn publish_create_campaign(
     )
     .map_err(err)?;
     // Review R3-F1: the receiving phones are account-locked before any account is read for the
-    // approval, until the campaign insert replaces the lock or this creation ends (a Start
-    // already took it when it was accepted). The handoff re-checks it before its first stop.
-    let (lock_request, lock_udids) = (request_id.clone(), udids.clone());
+    // approval, until this creation ends (a Start also locked them when it was accepted). The
+    // handoff re-checks the lock before its first stop. Review R4-F1: the guard and its owner
+    // exist before the lock write, so a cancelled await cannot leave a binding lock behind.
+    let account_lock = PreparationAccountLock {
+        db: Arc::clone(&state.db),
+        owner: riviu_core::db::PublishPreparationOwner::register(),
+    };
+    let (generation, lock_request, lock_udids) = (
+        account_lock.owner.generation().to_owned(),
+        request_id.clone(),
+        udids.clone(),
+    );
     state
         .db
-        .storage_write(move |db| db.lock_publish_preparation_accounts(&lock_request, &lock_udids))
+        .storage_write(move |db| {
+            db.lock_publish_preparation_accounts(&generation, &lock_request, &lock_udids)
+        })
         .await
         .map_err(err)?;
-    let _account_lock = PreparationAccountLock {
-        db: Arc::clone(&state.db),
-        request: request_id.clone(),
-    };
     let handoff_deadline = tokio::time::Instant::now() + Duration::from_secs(125);
     let releasing = confirmed && run_at.is_none();
     let handoff = if releasing {
@@ -415,7 +422,7 @@ pub async fn publish_create_campaign(
             &state,
             udids.clone(),
             &approved_release,
-            Some(&request_id),
+            Some(account_lock.owner.generation()),
             handoff,
             handoff_deadline,
         )
@@ -535,19 +542,19 @@ pub async fn publish_create_campaign(
     }
 }
 
-/// Scoped end of a creation's preparation account lock, on every exit. A created campaign has
-/// already replaced it in its insert transaction, so success releases nothing.
+/// Scoped end of one creation's preparation account lock, on every exit including a dropped
+/// future (review R4-F1). It deletes only its own generation's rows; if that delete fails, the
+/// owner dropping right after still ends the lock, and the rows are reclaimed by the next
+/// account write or startup. A created campaign holds its own lock.
 struct PreparationAccountLock {
     db: Arc<Database>,
-    request: String,
+    owner: riviu_core::db::PublishPreparationOwner,
 }
 impl Drop for PreparationAccountLock {
     fn drop(&mut self) {
-        if let Err(error) = self.db.release_publish_preparation_accounts(&self.request) {
-            log::warn!(
-                "Chưa nhả được khóa tài khoản của lượt {}: {error}",
-                self.request
-            );
+        let generation = self.owner.generation();
+        if let Err(error) = self.db.release_publish_preparation_accounts(generation) {
+            log::warn!("Chưa xóa được khóa tài khoản của lượt chuẩn bị {generation}: {error}");
         }
     }
 }

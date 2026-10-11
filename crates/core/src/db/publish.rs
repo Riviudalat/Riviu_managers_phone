@@ -437,8 +437,9 @@ impl Database {
         )?;
         if request.approval.is_some() {
             // Review R3: the approval and its account locks commit together. Every approved
-            // phone must still carry the approved account now; the creation's own preparation
-            // lock is replaced by the campaign's, which binds until the set settles.
+            // phone must still carry the approved account now. The campaign lock binds until
+            // the set settles; a Start's preparation locks stop binding once its receipt links
+            // this campaign, and a direct creation's when its owner ends (review R4-F1).
             for udid in &request.udids {
                 let current: String = transaction.query_row(
                     "SELECT COALESCE((SELECT handle FROM device_meta WHERE udid=?1),'')",
@@ -451,7 +452,6 @@ impl Database {
                     anyhow::bail!(refusal);
                 }
             }
-            super::publish_pipeline::release_preparing_accounts(transaction, &request.request_id)?;
             super::publish_pipeline::lock_campaign_accounts(transaction, campaign_id)?;
         }
         if let Some((input_digest, status, retry_scope, report_json)) = prepared_snapshot {
@@ -929,7 +929,9 @@ impl Database {
           WHERE finished_at_ms IS NULL AND attempt_id IN(SELECT attempt_id FROM publish_dispatch_jobs WHERE state IN ('missed','finished','cancelled'))",[Utc::now().timestamp_millis()])?;
         // Account locks after the reconciliation above: interrupted preparations and settled
         // sets release theirs, and every approved set that can still start fresh work holds one
-        // (including campaigns created before the locks existed).
+        // (including campaigns created before the locks existed). No preparation owner of an
+        // earlier process is alive, so its Start owner records go too.
+        super::publish_pipeline::reconcile_orphaned_publish_starts(&transaction)?;
         super::publish_pipeline::release_settled_account_locks(&transaction, None, None)?;
         let unsettled: Vec<String> = transaction
             .prepare(

@@ -2690,6 +2690,8 @@ fn new_publications_require_sheet_and_verified_import_cleanup() {
     let order = [
         "replay_publish_create(",
         "preflight::require_new_publish_delivery(",
+        // Review R4-F1: the cleanup owner exists before the lock write it releases.
+        "PublishPreparationOwner::register()",
         "lock_publish_preparation_accounts(",
         "wait_manual_handoff_until(",
         "require_approval_before_effects(",
@@ -2734,7 +2736,7 @@ fn new_publications_require_sheet_and_verified_import_cleanup() {
         "fence_new_work(&devices)",
         "observe_release_plan(state, &devices)",
         "unapproved_release(&plan.needs, approved_release)",
-        "publish_account_lock_drift(request, &devices)",
+        "publish_account_lock_drift(generation, &devices)",
         "request_publish_handoff_exclusion(assignment, *revision",
         "stop_run(udid, *run)",
         "operation_stop(app",
@@ -2768,6 +2770,14 @@ fn new_publications_require_sheet_and_verified_import_cleanup() {
     );
     assert!(at("admit_publish_effect(&a.id)") < at("ensure_load_admissible("));
     assert!(at("admit_publish_effect(&a.id)") < at("stage_publish_media("));
+    // Review R4-F1: the Start's owner exists before acceptance locks, and the owned task keeps it.
+    let start = include_str!("start.rs");
+    let start = &start[start.find("pub async fn publish_start(").unwrap()..];
+    assert!(
+        start.find("PublishPreparationOwner::register()") < start.find("accept_publish_start(")
+            && start.find("accept_publish_start(") < start.find("let _owner = owner;"),
+        "the Start owner exists before acceptance locks and lives in the owned task"
+    );
     let schedule = code_of("async fn prepare_schedule(").join("\n");
     assert!(schedule.contains("preflight::require_new_publish_delivery(request.sheet_enabled, request.delete_after_publish)"));
     let schedule_create = code_of("pub async fn publish_schedule_create(").join("\n");

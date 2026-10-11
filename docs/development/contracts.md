@@ -717,7 +717,7 @@ có versionCode tối thiểu 5 cho launcher; APK, manifest và NOTICE phải kh
   `fence_new_work` chặn mọi việc mới hoặc lấy lại lease trên các máy đó qua bộ điều phối chủ
   sở hữu (chỉ ManualControl của chính lượt nhả được lấy máy), một lần quan sát dưới hàng rào
   thành **kế hoạch nhả bất biến**, so với phong bì, `publish_account_lock_drift` xác nhận khóa
-  tài khoản của request còn hiệu lực và tài khoản vẫn đúng như lúc khóa, rồi chỉ kế hoạch đó
+  tài khoản của chính thế hệ chuẩn bị này còn hiệu lực và tài khoản vẫn đúng như lúc khóa, rồi chỉ kế hoạch đó
   được thực hiện: loại
   assignment theo đúng revision đã duyệt (CAS), dừng Nuôi bằng `stop_run` so mã lượt dưới khóa
   của runtime (lượt Nuôi khác thì từ chối, không dừng), dừng thao tác theo id; không có lần liệt
@@ -752,14 +752,24 @@ có versionCode tối thiểu 5 cho launcher; APK, manifest và NOTICE phải kh
   tên lượt: "tài khoản đang được giữ cho lượt đăng … đã duyệt và chưa xong; hủy lượt đó hoặc chờ
   nó xong rồi mới đổi tài khoản". Ghi lại đúng tài khoản cũ (khác cách viết) không phải thay đổi.
   Máy đang chạy một bước đăng (job `running` hoặc work claim) vẫn giữ tài khoản tới khi bước xong.
-- Khóa là dòng bền trong `settings`, khóa `publish.account-lock.{loại}.{chủ}.{máy}`, giá trị JSON
+- Khóa là dòng bền trong `settings`, khóa `publish.account-lock.{loại}.{khóa}.{máy}`, giá trị JSON
   gồm máy, chủ, loại, tài khoản lúc khóa và tên hiển thị:
-  - `preparing` (chủ là request ID): tạo trong cùng transaction tiếp nhận Start
-    (`accept_publish_start`), hoặc khi tạo lượt không qua Start bắt đầu
-    (`lock_publish_preparation_accounts`), luôn trước khi đọc tài khoản để so bản duyệt. Chỉ có
-    hiệu lực trong tiến trình đã tạo nó và khi Start chưa kết thúc mà chưa có lượt. Insert lượt
-    thay nó trong cùng transaction; các lối ra khác của việc tạo nhả nó, và Start chuyển
-    `failed`/`uncertain` cũng nhả.
+  - `preparing` (khóa theo **thế hệ** của một lượt chuẩn bị, chủ là request ID): tạo trong cùng
+    transaction tiếp nhận Start (`accept_publish_start`), hoặc khi tạo lượt không qua Start bắt
+    đầu (`lock_publish_preparation_accounts`), luôn trước khi đọc tài khoản để so bản duyệt. Mỗi
+    thế hệ có một chủ trong tiến trình (`PublishPreparationOwner`), được đăng ký **trước** lần ghi
+    khóa; ghi khóa từ chối nếu chủ đã mất. Khóa chỉ có hiệu lực khi chủ đó còn sống và Start (nếu
+    có) chưa kết thúc và chưa nối lượt. Chủ mất ở mọi lối ra (lỗi, future bị hủy kể cả khi lệnh ghi
+    đã commit, xóa dòng thất bại, Start không ghi được kết quả), nên khóa không bao giờ còn hiệu lực
+    mà không có chủ đang chạy; dòng còn sót được thu lại ở lần ghi tài khoản kế tiếp hoặc lúc mở
+    app. Mỗi lượt chỉ xóa đúng thế hệ của mình, nên hai lần gọi cùng request ID không xóa khóa của
+    nhau. Lượt tạo không thay khóa này; khóa `campaign` giữ máy từ lúc insert.
+  - Start ghi thế hệ chủ của mình (`publish.start-owner.{request}`) cùng transaction tiếp nhận;
+    chủ sống tới khi trạng thái kết thúc được ghi (thử lại qua storage tối đa 8 lần, khoảng 45
+    giây). Start còn `accepted`/`preparing` mà chủ đã mất được chuyển `uncertain`
+    (`PublishStartInterrupted`), như khi khởi động lại, ở lần đọc trạng thái Start, lần ghi tài
+    khoản kế tiếp hoặc lúc mở app; trạng thái đó cần người kiểm, không bao giờ được claim hay đăng
+    lại.
   - `campaign` (chủ là lượt): tạo trong transaction insert lượt có `approval`; transaction đó so
     tài khoản hiện tại của từng máy với bản duyệt và từ chối tạo lượt nếu lệch. Khóa lại khi việc
     mới quay về tập (claim, thử lại assignment, recovery xếp lại). Còn hiệu lực khi lượt chưa hủy
