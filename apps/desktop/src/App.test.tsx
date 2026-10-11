@@ -624,7 +624,8 @@ describe("device operational identity", () => {
 
     await userEvent.type(screen.getByRole("searchbox", { name: "Tìm thiết bị" }), "ke cuoi");
     expect(screen.getAllByTestId("device-tile")).toHaveLength(1);
-    expect(screen.getByText("Máy 3")).toBeVisible();
+    // GF1: the tile shows the bare number; its row is still named "Máy 3".
+    expect(screen.getByRole("row", { name: /^Máy 3,/ })).toBeVisible();
     expect(screen.getAllByText("Kệ cuối").length).toBeGreaterThan(0);
 
     await userEvent.click(screen.getByTitle("Danh sách"));
@@ -639,7 +640,7 @@ describe("device operational identity", () => {
     await userEvent.click(screen.getByTitle("Màn hình"));
     const [visibleTile] = screen.getAllByTestId("device-tile");
     expect(screen.getAllByTestId("device-tile")).toHaveLength(1);
-    expect(screen.getByText("Máy 2")).toBeVisible();
+    expect(screen.getByRole("row", { name: /^Máy 2,/ })).toBeVisible();
     expect(within(visibleTile).getByText("Cần xử lý: Máy báo lỗi")).toBeVisible();
   });
 });

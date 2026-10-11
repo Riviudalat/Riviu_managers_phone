@@ -110,8 +110,10 @@ function DeviceTileInner({
   const frameAgeShort = freshness.state === "aging" || freshness.state === "stale" ? freshness.shortText : undefined;
   const frameLabel = [accessibleName, frameAge].filter(Boolean).join(", ");
 
-  // GenFarmer's tile: the big number, then the account (or the model), then the status.
-  const secondLine = username ? `@${username}` : shownModel ?? displayName;
+  // GenFarmer's tile: the big number, then the name (the model the phone reports unless the
+  // operator renamed it) with the @account or a model that differs, then the status.
+  const extra = username ? `@${username}` : shownModel;
+  const secondLine = [displayName, extra].filter(Boolean).join(" · ");
   const connectionLabel = device.connection === "wifi" ? "Wi‑Fi" : device.connection.toUpperCase();
 
   return (
@@ -192,7 +194,10 @@ function DeviceTileInner({
           accessible name and the band's tooltip. */}
       <div className="dev-phone-strip" role="gridcell" title={stripTitle}>
         <span className="dev-phone-index" aria-hidden="true">{index > 0 ? index : "?"}</span>
-        <span className="dev-phone-ident" title={secondLine}>{secondLine}</span>
+        <span className="dev-phone-ident" title={secondLine}>
+          <span>{displayName}</span>
+          {extra && <> · <span>{extra}</span></>}
+        </span>
         <div className="dev-phone-run">
           <DeviceStatusLine view={operational} className="dev-phone-status" />
           {operational.helperRecovery && onHelperMaintenance ? (
