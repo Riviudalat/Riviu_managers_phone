@@ -926,3 +926,10 @@ fn explicit_resume_marker_cannot_move_to_another_assignment_or_changed_post_inte
     altered.effect_intent=Some("{\"effectIntent\":\"post\",\"expectedAccount\":\"changed.account\",\"submittedAt\":\"2026-09-09T11:49:12Z\"}".into());
     assert!(!explicitly_resumed_verification(&altered));
 }
+#[test]
+fn threads_verification_interval_is_two_minutes() {
+    let intent = serde_json::json!({"package": crate::threads_publish::ANDROID_PACKAGE}).to_string();
+    assert_eq!(super::publish_verification::verification_check_seconds(Some(&intent)), 120);
+    let tiktok = serde_json::json!({"package":"com.zhiliaoapp.musically"}).to_string();
+    assert_eq!(super::publish_verification::verification_check_seconds(Some(&tiktok)), 300);
+}

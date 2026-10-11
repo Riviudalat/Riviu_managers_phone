@@ -1,23 +1,64 @@
 import { act, cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { googleSheetsCancel, googleSheetsConfigure, googleSheetsConnect, googleSheetsLogin, googleSheetsPickFile, googleSheetsStatus, publishSheetCheck, publishSheetGetConfig } from "../../api";
+import { googleSheetsRecoverLock, googleSheetsCancel, googleSheetsConfigure, googleSheetsConnect, googleSheetsListTabs, googleSheetsLogin, googleSheetsPickFile, googleSheetsStatus, publishSheetCheck, publishSheetGetConfig } from "../../api";
 import type { GoogleSheetsStatus, PublishSheetCheckResult } from "../../types";
 import { GoogleSheetConnection } from "./GoogleSheetConnection";
 import { clearSheetVerificationSession } from "./sheetVerificationSession";
 import { parseGoogleSheetUrl } from "./googleSheetUrl";
 import { requestConfirm } from "../../confirmStore";
 vi.mock("../../confirmStore", () => ({ requestConfirm: vi.fn(async () => false) }));
-vi.mock("../../api", () => ({ googleSheetsCancel: vi.fn(), googleSheetsConfigure: vi.fn(), googleSheetsConnect: vi.fn(), googleSheetsLogin: vi.fn(), googleSheetsPickFile: vi.fn(), googleSheetsStatus: vi.fn(), publishSheetCheck: vi.fn(), publishSheetGetConfig: vi.fn() }));
+vi.mock("../../api", () => ({ googleSheetsRecoverLock: vi.fn(), googleSheetsCancel: vi.fn(), googleSheetsConfigure: vi.fn(), googleSheetsConnect: vi.fn(), googleSheetsListTabs: vi.fn(), googleSheetsLogin: vi.fn(), googleSheetsPickFile: vi.fn(), googleSheetsStatus: vi.fn(), publishSheetCheck: vi.fn(), publishSheetGetConfig: vi.fn() }));
 const url = "https://docs.google.com/spreadsheets/d/file-a/edit#gid=7";
 const status = (patch: Partial<GoogleSheetsStatus> = {}): GoogleSheetsStatus => ({ configured: true, connected: true, active: false, accountId: "account-a", email: "operator@example.test", clientId: "id", pickerConfigured: true, phase: "idle", ...patch });
 const active = (patch: Partial<GoogleSheetsStatus> = {}) => status({ active: true, selectedFileId: "file-a", writerId: "writer-a", sheetUrl: url, ...patch });
 const checked = (patch: Partial<PublishSheetCheckResult> = {}): PublishSheetCheckResult => ({ sheetUrl: url, spreadsheetId: "file-a", sheetGid: 7, readable: true, connectionVerified: true, reportingReady: true, layout: "internal", columns: [], message: "Đã xác minh", ...patch });
 function deferred<T>() { let resolve!: (value: T) => void; const promise = new Promise<T>(yes => { resolve = yes; }); return { promise, resolve }; }
-beforeEach(() => { clearSheetVerificationSession(); vi.resetAllMocks(); vi.mocked(googleSheetsStatus).mockResolvedValue(status()); vi.mocked(publishSheetGetConfig).mockResolvedValue({ webhookUrl: "", hasToken: false }); vi.mocked(publishSheetCheck).mockResolvedValue(checked()); vi.mocked(googleSheetsConnect).mockResolvedValue(checked()); vi.mocked(googleSheetsLogin).mockResolvedValue(status()); vi.mocked(googleSheetsCancel).mockResolvedValue(status()); vi.mocked(googleSheetsPickFile).mockResolvedValue(status({ selectedFileId: "file-a" })); });
+beforeEach(() => { clearSheetVerificationSession(); vi.resetAllMocks(); vi.mocked(googleSheetsStatus).mockResolvedValue(status()); vi.mocked(publishSheetGetConfig).mockResolvedValue({ webhookUrl: "", hasToken: false }); vi.mocked(publishSheetCheck).mockResolvedValue(checked()); vi.mocked(googleSheetsConnect).mockResolvedValue(checked()); vi.mocked(googleSheetsListTabs).mockResolvedValue([]); vi.mocked(googleSheetsLogin).mockResolvedValue(status()); vi.mocked(googleSheetsCancel).mockResolvedValue(status()); vi.mocked(googleSheetsPickFile).mockResolvedValue(status({ selectedFileId: "file-a" })); });
 afterEach(() => { cleanup(); vi.useRealTimers(); });
 async function editUrl(value = url) { await waitFor(() => expect(screen.getByRole("button", { name: "Đăng nhập Google" })).toBeEnabled()); fireEvent.change(screen.getByRole("textbox", { name: "Link Google Sheet" }), { target: { value } }); }
 
 describe("compact Google Sheet connection", () => {
+  it("requires stopped-writer confirmation before recovering the exact selected tab", async () => {
+    vi.mocked(googleSheetsStatus).mockResolvedValue(active({ error: "Sheet busy" }));
+    vi.mocked(googleSheetsRecoverLock).mockResolvedValue();
+    render(<GoogleSheetConnection />);
+    const button = await screen.findByRole("button", { name: "Khôi phục khóa Sheet" });
+    await waitFor(() => expect(button).toBeEnabled());
+    vi.mocked(requestConfirm).mockResolvedValueOnce(false);
+    fireEvent.click(button);
+    await waitFor(() => expect(button).toBeEnabled());
+    expect(googleSheetsRecoverLock).not.toHaveBeenCalled();
+    vi.mocked(requestConfirm).mockResolvedValueOnce(true);
+    fireEvent.click(button);
+    await waitFor(() => expect(googleSheetsRecoverLock).toHaveBeenCalledExactlyOnceWith("file-a", 7, true));
+    await screen.findByText(/Đã khôi phục trạng thái khóa/);
+    expect(publishSheetCheck).not.toHaveBeenCalled();
+  });
+  it("connects the saved Threads target with its network while TikTok is the active binding", async () => {
+    const threadsUrl = "https://docs.google.com/spreadsheets/d/file-a/edit#gid=42";
+    vi.mocked(googleSheetsStatus).mockResolvedValue(active());
+    vi.mocked(publishSheetGetConfig).mockResolvedValue({ webhookUrl: "", hasToken: false, sheetUrl: threadsUrl });
+    vi.mocked(googleSheetsConnect).mockResolvedValue(checked({ sheetUrl: threadsUrl, sheetGid: 42 }));
+    const ready = vi.fn(); render(<GoogleSheetConnection network="threads" onReadyChange={ready} />);
+    await waitFor(() => expect(screen.getByRole("button", { name: "Kiểm tra kết nối" })).toBeEnabled());
+    expect(ready).toHaveBeenLastCalledWith(false);
+    vi.mocked(googleSheetsStatus).mockResolvedValueOnce(active()).mockResolvedValue(active({ sheetUrl: threadsUrl }));
+    fireEvent.click(screen.getByRole("button", { name: "Kiểm tra kết nối" }));
+    await waitFor(() => expect(ready).toHaveBeenLastCalledWith(true));
+    expect(googleSheetsConnect).toHaveBeenCalledExactlyOnceWith("file-a", 42, true, false, "threads");
+    expect(googleSheetsListTabs).not.toHaveBeenCalled();
+  });
+  it("finds the Threads tab in the current workbook without treating discovery as a verified connection", async () => {
+    vi.mocked(googleSheetsStatus).mockResolvedValue(active());
+    vi.mocked(publishSheetGetConfig).mockResolvedValue({ webhookUrl: "", hasToken: false, sheetUrl: "" });
+    vi.mocked(googleSheetsListTabs).mockResolvedValue([{ title: "Threads", sheetId: 42 }, { title: "TikTok", sheetId: 7 }]);
+    const ready = vi.fn(); render(<GoogleSheetConnection network="threads" onReadyChange={ready} />);
+    await waitFor(() => expect(screen.getByRole("textbox", { name: "Link Google Sheet" })).toHaveValue("https://docs.google.com/spreadsheets/d/file-a/edit#gid=42"));
+    expect(publishSheetGetConfig).toHaveBeenCalledWith("threads");
+    expect(googleSheetsListTabs).toHaveBeenCalledWith("file-a");
+    expect(googleSheetsConnect).not.toHaveBeenCalled();
+    expect(ready).toHaveBeenLastCalledWith(false);
+  });
   it("loads the saved account without automatically preparing the shared Sheet", async () => {
     vi.mocked(googleSheetsStatus).mockResolvedValue(active());
     const ready = vi.fn(); render(<GoogleSheetConnection onReadyChange={ready} />);

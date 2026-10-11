@@ -1,7 +1,7 @@
 import { useEffect, useRef, useState } from "react";
 import { LoaderCircle } from "lucide-react";
-import { googleSheetsCancel, googleSheetsConfigure, googleSheetsConnect, googleSheetsLogin,
-  googleSheetsStatus, publishSheetCheck, publishSheetGetConfig } from "../../api";
+import { googleSheetsCancel, googleSheetsConfigure, googleSheetsConnect, googleSheetsListTabs, googleSheetsLogin,
+  googleSheetsStatus, googleSheetsRecoverLock, publishSheetCheck, publishSheetGetConfig } from "../../api";
 import { describeError } from "../../describeError";
 import { parseGoogleSheetUrl, type GoogleSheetTarget } from "./googleSheetUrl";
 import type { GoogleSheetsConfiguration, GoogleSheetsStatus, PublishSheetCheckResult } from "../../types";
@@ -11,7 +11,7 @@ import { getSheetVerificationSession, invalidateSheetVerificationSession, isShee
 
 type Target = GoogleSheetTarget;
 type Action = "loading" | "login" | "check" | "picking" | "cancel" | "configure" | null;
-type Props = { onReadyChange?: (ready: boolean) => void };
+type Props = { network?: "threads" | "tiktok"; onReadyChange?: (ready: boolean) => void };
 const sameTarget = (a: Target | null, b: Target | null) => !!a && !!b && a.spreadsheetId === b.spreadsheetId && a.sheetId === b.sheetId;
 const accountKey = (s: GoogleSheetsStatus) => JSON.stringify([s.clientId, s.accountId, s.connected, s.active, s.writerId, s.hasSheetsScope,
   s.active ? parseGoogleSheetUrl(s.sheetUrl || "")?.url ?? s.sheetUrl : null]);
@@ -24,7 +24,7 @@ function boundedRead<T>(promise: Promise<T>, milliseconds = 15_000): Promise<T> 
 }
 const readGoogleStatus = () => boundedRead(googleSheetsStatus());
 
-export function GoogleSheetConnection({ onReadyChange }: Props) {
+export function GoogleSheetConnection({ network, onReadyChange }: Props) {
   const [url, setUrl] = useState("");
   const [status, setStatus] = useState<GoogleSheetsStatus | null>(null);
   const [action, setAction] = useState<Action>("loading");
@@ -74,12 +74,29 @@ export function GoogleSheetConnection({ onReadyChange }: Props) {
   useEffect(() => {
     mounted.current = true; const ticket = ++generation.current; flight.current = ticket;
     void (async () => {
-      const [google, config] = await Promise.allSettled([readGoogleStatus(), boundedRead(publishSheetGetConfig())]);
+      const [google, config] = await Promise.allSettled([readGoogleStatus(), boundedRead(network ? publishSheetGetConfig(network) : publishSheetGetConfig())]);
       if (!valid(ticket)) return;
       if (google.status === "rejected") throw google.reason;
       const next = google.value; applyStatus(next);
-      const initial = next.sheetUrl || (config.status === "fulfilled" ? config.value.sheetUrl : "") || "";
+      const saved = config.status === "fulfilled" ? config.value.sheetUrl : "";
+      const initial = network === "threads" ? saved || "" : saved || next.sheetUrl || "";
       if (!edited.current) { urlRef.current = initial; setUrl(initial); }
+      if (network === "threads" && !initial && next.connected) {
+        const current = parseGoogleSheetUrl(next.sheetUrl || "");
+        if (current) {
+          const tabs = await boundedRead(googleSheetsListTabs(current.spreadsheetId));
+          if (!valid(ticket) || edited.current) return;
+          const matches = tabs.filter(tab => ["thread", "threads"].includes(tab.title.trim().toLowerCase()));
+          if (matches.length === 1) {
+            const discovered = `https://docs.google.com/spreadsheets/d/${current.spreadsheetId}/edit#gid=${matches[0].sheetId}`;
+            urlRef.current = discovered; setUrl(discovered);
+          } else if (!matches.length) {
+            setError("Không tìm thấy tab Threads trong Google Sheet hiện tại.");
+          } else {
+            setError("Có nhiều tab Thread/Threads; dán link đúng tab cần ghi.");
+          }
+        }
+      }
       if (next.error) setError(next.error);
       const target = parseGoogleSheetUrl(initial);
       const verifiedSession = getSheetVerificationSession();
@@ -106,7 +123,10 @@ export function GoogleSheetConnection({ onReadyChange }: Props) {
     if (!valid(ticket) || urlRevision.current !== revision) return;
     setAction("check");
     let checked: PublishSheetCheckResult;
-    try { checked = await googleSheetsConnect(target.spreadsheetId, target.sheetId, true, false); }
+    const connect = (legacyStopped: boolean) => network
+      ? googleSheetsConnect(target.spreadsheetId, target.sheetId, true, legacyStopped, network)
+      : googleSheetsConnect(target.spreadsheetId, target.sheetId, true, legacyStopped);
+    try { checked = await connect(false); }
     catch (cause) {
       if (!valid(ticket) || urlRevision.current !== revision) return;
       const code = cause && typeof cause === "object" && "code" in cause ? cause.code : null;
@@ -123,7 +143,7 @@ export function GoogleSheetConnection({ onReadyChange }: Props) {
         applyStatus(previous);
         throw Error("Chưa nâng cấp tab. Dừng ghi từ bản app cũ rồi kiểm tra lại kết nối; dữ liệu giữ nguyên.");
       }
-      checked = await googleSheetsConnect(target.spreadsheetId, target.sheetId, true, true);
+      checked = await connect(true);
     }
     if (!valid(ticket) || urlRevision.current !== revision) return;
     const connected = await readGoogleStatus();
@@ -185,7 +205,7 @@ export function GoogleSheetConnection({ onReadyChange }: Props) {
       if (current.phase !== "idle") throw Error("Hoàn tất hoặc hủy cửa sổ Google đang mở rồi kiểm tra lại.");
       if (current.active && sameTarget(target, parseGoogleSheetUrl(current.sheetUrl || ""))) {
         try {
-          const checked = await boundedRead(publishSheetCheck(target.url), 120_000);
+          const checked = await boundedRead(network ? publishSheetCheck(target.url, network) : publishSheetCheck(target.url), 120_000);
           if (!valid(ticket) || urlRevision.current !== revision) return;
           verifiedResult(checked, target, current, ticket, revision); return;
         } catch (cause) {
@@ -193,6 +213,23 @@ export function GoogleSheetConnection({ onReadyChange }: Props) {
         }
       }
       await connectTarget(target, ticket, revision);
+    } catch (e) { if (valid(ticket)) setError(describeError(e)); }
+    finally { finish(ticket); }
+  };
+  const recoverLock = async () => {
+    if (flight.current !== null) return;
+    const target = parseGoogleSheetUrl(urlRef.current);
+    if (!target) return;
+    const ticket = ++generation.current; flight.current = ticket; setAction("check");
+    try {
+      const confirmed = await requestConfirm({ title: "Khôi phục khóa ghi Sheet?",
+        message: "Dừng ghi Sheet trên tất cả máy và chờ lượt gửi hiện tại kết thúc trước khi tiếp tục. App giữ hàng chờ, lưu bản sao trạng thái lượt ghi và mở lại khóa bị treo. Không đăng lại bài Threads.",
+        confirmLabel: "Đã dừng tất cả máy · Khôi phục", cancelLabel: "Hủy", danger: true });
+      if (!confirmed || !valid(ticket)) return;
+      await googleSheetsRecoverLock(target.spreadsheetId, target.sheetId, true);
+      if (!valid(ticket)) return;
+      invalidateSheetVerificationSession(); setResult(null);
+      setError("Đã khôi phục trạng thái khóa. Bấm Kiểm tra kết nối rồi Ghi lại Sheet cho các bài đang chờ.");
     } catch (e) { if (valid(ticket)) setError(describeError(e)); }
     finally { finish(ticket); }
   };
@@ -217,6 +254,7 @@ export function GoogleSheetConnection({ onReadyChange }: Props) {
         onKeyDown={event => { if (event.key === "Enter") { event.preventDefault(); void check(); } }} />
       <button type="button" disabled={!canCancel && action !== null} title={status?.email || "Đăng nhập Google"} onClick={() => void (canCancel ? cancel() : login())}>{canCancel ? "Hủy đăng nhập" : "Đăng nhập Google"}</button>
       <button type="button" disabled={action !== null || !url.trim()} onClick={() => void check()}>{(action === "check" || action === "picking") && <LoaderCircle className="publish-check-spinner" size={14} aria-hidden="true" />}Kiểm tra kết nối</button>
+      {error && status?.connected && <button type="button" disabled={action !== null || !target} onClick={() => void recoverLock()}>Khôi phục khóa Sheet</button>}
     </div>
     <p tabIndex={0} role={error ? "alert" : "status"} className={`publish-sheet-result ${verified ? "is-verified" : savedBinding && result === null && !isSheetVerificationInvalidated() ? "is-linked" : "needs-attention"}`}>{status?.email ? `${status.email} · ` : ""}{message}</p>
     {status && !status.configured && <GoogleAppSetup key={status.clientId} clientId={status.clientId}

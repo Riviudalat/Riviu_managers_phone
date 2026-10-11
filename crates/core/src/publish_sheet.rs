@@ -875,6 +875,8 @@ fn validate_internal_ack(body: &str, assignment_id: &str, revision: i64) -> anyh
 
 /// The user-facing Google Sheet address, independent of the Apps Script endpoint.
 pub const SHEET_URL_SETTING: &str = "publish_sheet_url";
+pub const THREADS_SHEET_URL_SETTING: &str = "publish_sheet_url.threads";
+pub const TIKTOK_SHEET_URL_SETTING: &str = "publish_sheet_url.tiktok";
 // Authenticated check measured 30.17s on the deployed script during reset recovery.
 const CHECK_TIMEOUT: Duration = Duration::from_secs(60);
 const CHECK_BODY_LIMIT: usize = 2 * 1024 * 1024;

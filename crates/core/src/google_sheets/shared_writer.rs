@@ -92,7 +92,7 @@ fn protect_pending_error<T>(
 fn digest(value: &[u8]) -> String {
     format!("{:x}", Sha256::digest(value))
 }
-fn lock_id(gid: u64) -> i32 {
+pub(super) fn lock_id(gid: u64) -> i32 {
     let hash = Sha256::digest(format!("{LOCK_KEY}:{gid}").as_bytes());
     let id = (i32::from_be_bytes([hash[0], hash[1], hash[2], hash[3]]) & 0x7fff_ffff).max(1);
     if id == writer_metadata_id(gid) {
@@ -105,7 +105,7 @@ fn lock_id(gid: u64) -> i32 {
         id
     }
 }
-fn journal_key(target: &SheetDeliveryTarget) -> String {
+pub(super) fn journal_key(target: &SheetDeliveryTarget) -> String {
     format!(
         "google.sheets.shared-journal.v2.{}",
         digest(format!("{}:{}", target.spreadsheet_id, target.sheet_gid).as_bytes())
@@ -146,6 +146,53 @@ impl Operation {
 }
 
 impl DirectSheetsClient {
+    /// Operator recovery after every writer has stopped and drained its requests.
+    /// Preserve the journal for diagnosis; queued publications are not deleted.
+    pub async fn recover_stopped_shared_target(
+        &self,
+        target: &SheetDeliveryTarget,
+        writer: &str,
+        writers_stopped: bool,
+        db: &Database,
+    ) -> Result<()> {
+        if !writers_stopped {
+            return Err(DirectSheetsError::invalid("Stop all Sheet writers before recovery"));
+        }
+        let gate = db.google_shared_operation_gate(&journal_key(target)).map_err(|_| journal_error())?;
+        let _guard = gate.lock().await;
+        let key = journal_key(target);
+        let raw = db.google_shared_journal_read(&key).map_err(|_| journal_error())?;
+        let probe = if let Some(raw) = &raw {
+            serde_json::from_str::<Operation>(raw).map_err(|_| journal_error())?
+        } else {
+            // Prepared operations have not dispatched any mutation.
+            self.begin_shared(target, None, writer, false, db).await?
+        };
+        if let Some(remote) = self.remote_lock(&probe).await? {
+            let value: Value = serde_json::from_str(&remote).map_err(|_| journal_error())?;
+            if value["spreadsheetId"] != target.spreadsheet_id
+                || value["sheetGid"].as_u64() != Some(target.sheet_gid)
+                || value["phase"] != "acquired"
+                || value["schemaVersion"].as_u64() != Some(2)
+                || value["operationToken"].as_str().is_none_or(|s| uuid::Uuid::parse_str(s).is_err())
+            {
+                return Err(busy("Committed or unfamiliar Sheet operation requires receipt reconciliation"));
+            }
+            db.set_setting(&format!("{key}.remote-recovery-backup.{}", uuid::Uuid::new_v4()), &remote).map_err(|_| journal_error())?;
+            // Exact value prevents deleting a new writer's replacement lock.
+            self.batch(&target.spreadsheet_id, vec![json!({"deleteDeveloperMetadata":{"dataFilter":{"developerMetadataLookup":{"metadataId":lock_id(target.sheet_gid),"metadataKey":LOCK_KEY,"metadataValue":remote,"metadataLocation":{"sheetId":target.sheet_gid},"visibility":"DOCUMENT"}}}})]).await?;
+        }
+        if self.remote_lock(&probe).await?.is_some() {
+            return Err(busy("A Sheet writer is still active; recovery did not finish"));
+        }
+        let prior = db.google_shared_journal_read(&key).map_err(|_| journal_error())?.ok_or_else(journal_error)?;
+        db.set_setting(&format!("{key}.recovery-backup.{}", uuid::Uuid::new_v4()), &prior).map_err(|_| journal_error())?;
+        let mut recovered: Operation = serde_json::from_str(&prior).map_err(|_| journal_error())?;
+        recovered.phase = Phase::Released;
+        recovered.receipt = None;
+        recovered.save_changes(db, &prior)
+    }
+
     async fn scan_shared(
         &self,
         op: &mut Operation,

@@ -44,6 +44,7 @@ sidecars/riviu-android-agent/local.properties
 *.xml
 # Sanitized Threads accessibility fixtures; raw captures stay under target/.
 !crates/core/fixtures/threads_446/*.xml
+!crates/core/fixtures/threads_449/*.xml
 !apps/desktop/**/*.xml
 !sidecars/**/*.xml
 # Sanitized, measured bookmark fixtures only; raw device dumps remain ignored.

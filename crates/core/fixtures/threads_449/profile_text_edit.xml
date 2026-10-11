@@ -1,0 +1,8 @@
+<hierarchy>
+  <android.view.View package="com.instagram.barcelona" resource-id="tabs_screen" bounds="[0,0][1080,2220]">
+    <android.view.View package="com.instagram.barcelona" resource-id="tabs_bottom_bar" bounds="[0,1947][1080,2094]">
+      <android.view.View package="com.instagram.barcelona" resource-id="barcelona_tab_profile" enabled="true" bounds="[839,1947][1038,2094]" />
+    </android.view.View>
+    <android.view.View package="com.instagram.barcelona" text="Chỉnh sửa trang cá nhân" enabled="true" bounds="[84,500][500,600]" />
+  </android.view.View>
+</hierarchy>

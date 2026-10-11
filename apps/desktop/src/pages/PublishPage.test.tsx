@@ -21,6 +21,7 @@ import {
   publishCancel,
   publishReconcile,
   publishRetryAssignment,
+  publishRetrySheetAssignment,
   publishCheckLinks,
   publishRecoveryCapabilities,
   publishResumeVerification,
@@ -185,7 +186,7 @@ vi.mock("../api", () => ({
   // the effect's cleanup honest without the test caring about events.
   listenRiviuEvents: vi.fn(async () => () => undefined),
   publishImagePreview: vi.fn(async () => "data:image/jpeg;base64,AA=="),
-  deviceThreadsAccount: vi.fn(async (udid: string) => ({ packageName: "com.instagram.barcelona", version: "446.0.0.32.78", locale: "en", account: `account.${udid.toLowerCase()}` })),
+  deviceThreadsAccount: vi.fn(async (udid: string) => ({ packageName: "com.instagram.barcelona", version: "446.0.0.32.78", locale: "en", account: `account.${udid.toLowerCase()}`, publishSupported: true })),
   publishAutoAssign: vi.fn(async () => ({ plan: [] })),
   listAppsLibrary: vi.fn(async () => []),
   listGroups: vi.fn(async () => []),
@@ -205,6 +206,7 @@ vi.mock("../api", () => ({
     preflightCampaign(...(args as [PublishPreflightRequest])),
   publishReadiness: vi.fn(async () => []),
   publishRetryAssignment: vi.fn(async () => undefined),
+  publishRetrySheetAssignment: vi.fn(async () => undefined),
   publishCheckLinks: vi.fn(async (campaignId: string) => ({ campaignId, state: "pending", reason: null,
     outcomes: [{ assignmentId: "assignment", udid: "PHONE-A", verified: false, error: null, status: "pending" }] })),
   publishRecoveryCapabilities: vi.fn(async () => []),
@@ -248,7 +250,9 @@ function androidPhone(udid: string): DeviceInfo {
 const devices = [androidPhone("PHONE-A"), androidPhone("PHONE-B"), androidPhone("PHONE-C")];
 
 beforeEach(() => {
-  vi.mocked(deviceThreadsAccount).mockReset().mockImplementation(async udid => ({ packageName: "com.instagram.barcelona", version: "446.0.0.32.78", locale: "en", account: `account.${udid.toLowerCase()}` }));
+  writeFormDraft("publish", { sourceRoot: "", bundleIds: [], assignments: {}, captionDrafts: {}, runAt: "",
+    soundPolicyOverride: null, sheetEnabled: false, deleteAfterPublish: false });
+  vi.mocked(deviceThreadsAccount).mockReset().mockImplementation(async udid => ({ packageName: "com.instagram.barcelona", version: "446.0.0.32.78", locale: "en", account: `account.${udid.toLowerCase()}`, publishSupported: true }));
   vi.mocked(publishList).mockReset().mockResolvedValue([]);
   vi.mocked(publishGet).mockReset().mockResolvedValue(null);
   HTMLDialogElement.prototype.showModal = function () {
@@ -261,6 +265,7 @@ beforeEach(() => {
   createCampaign.mockClear();
   vi.mocked(publishDeviceGuards).mockReset().mockImplementation(async udids => Object.fromEntries(udids.map(id => [id, { blocking: [], linkReview: [] }])));
   vi.mocked(publishRetryAssignment).mockReset().mockResolvedValue(undefined);
+  vi.mocked(publishRetrySheetAssignment).mockReset().mockResolvedValue(undefined);
   vi.mocked(publishGetLimits).mockReset().mockResolvedValue({ transfer: 4, compose: 4, verify: 4, deviceTotal: 8 });
   vi.mocked(publishSetLimits).mockReset().mockResolvedValue(undefined);
   executeCampaign.mockClear();
@@ -305,6 +310,17 @@ async function prepareOne() {
 }
 
 describe("production publish wizard", () => {
+  it("requires Sheet verification for a fresh draft and leaves a visible opt-out", async () => {
+    localStorage.removeItem("riviu.form-draft.v1.publish");
+    render(<PublishPage devices={devices} selected={[]} onSelectUdids={() => {}} />);
+    const sheet = screen.getByRole("checkbox", { name: "Ghi kết quả lên Sheet" });
+    expect(sheet).toBeVisible();
+    expect(sheet).toBeChecked();
+    await prepareOne();
+    expect(screen.getByRole("button", { name: "Kiểm tra & đăng" })).toBeDisabled();
+    await userEvent.click(sheet);
+    expect(screen.getByRole("button", { name: "Kiểm tra & đăng" })).toBeEnabled();
+  });
   it("shows preparation and device-check phases without claiming a device passed early", async () => {
     let finishPreparation!: (value: { operationId: string; state: "closed"; devices: []; stopMarker: null }) => void;
     let finishCheck!: (value: PublishPreflightReport) => void;
@@ -465,7 +481,7 @@ describe("production publish wizard", () => {
   it("autosaves mapping and caption, rescans on remount and requires fresh preflight", async () => {
     const view = render(<PublishPage devices={devices} selected={[]} onSelectUdids={() => {}} />);
     await prepareOne();
-    await userEvent.click(screen.getByText(/^Tùy chọn · Sheet/));
+    await userEvent.click(screen.getByText(/^Tùy chọn ·/));
     await userEvent.click(screen.getByRole("checkbox", { name: "Xóa bản chuyển sau khi đăng thành công" }));
     await act(async () => { expect(await requestWorkspaceLeave()).toBe(true); });
     expect(requestConfirm).not.toHaveBeenCalled();
@@ -475,7 +491,7 @@ describe("production publish wizard", () => {
     await waitFor(() => expect(screen.getByRole("checkbox", { name: "Chọn bo1" })).toBeChecked());
     expect(publishScanFolder).toHaveBeenCalledTimes(2);
     expect(screen.getByRole("combobox", { name: "Máy nhận bài bo1" })).toHaveValue("PHONE-A");
-    await userEvent.click(screen.getByText(/^Tùy chọn · Sheet/));
+    await userEvent.click(screen.getByText(/^Tùy chọn ·/));
     expect(screen.getByRole("checkbox", { name: "Xóa bản chuyển sau khi đăng thành công" })).toBeChecked();
     expect(preflightCampaign).not.toHaveBeenCalled();
     expect(executeCampaign).not.toHaveBeenCalled();
@@ -530,7 +546,7 @@ describe("production publish wizard", () => {
     );
     await userEvent.click(screen.getByRole("tab", { name: "TikTok" }));
     await prepareOne();
-    await userEvent.click(screen.getByText(/^Tùy chọn · Sheet/));
+    await userEvent.click(screen.getByText(/^Tùy chọn ·/));
     await userEvent.click(
       screen.getByRole("checkbox", { name: "Xóa bản chuyển sau khi đăng thành công" }),
     );
@@ -788,6 +804,23 @@ describe("production publish wizard", () => {
 });
 
 describe("publish campaign monitoring", () => {
+  it("shows a verified Threads permalink from assignment evidence", async () => {
+    const campaign = { id: "threads-linked", requestId: "r", sourceRoot: "C:/fixture", state: "succeeded", assignments: [],
+      createdAt: "2026-09-10T00:00:00Z", updatedAt: "2026-09-10T00:00:00Z" };
+    const link = "https://www.threads.com/@fixture.account/post/Fixture123";
+    vi.mocked(publishList).mockResolvedValue([campaign] as never);
+    vi.mocked(publishGet).mockResolvedValue({ campaign, bundles: [], assignments: [{
+      id: "assignment", campaignId: campaign.id, udid: "PHONE-A", state: "succeeded",
+      evidenceJson: JSON.stringify({ postUrl: link, publicationVerified: true }),
+    }], events: [{ revision: 1, kind: "created", payloadJson: JSON.stringify({ network: "threads", sheetEnabled: false }), createdAt: campaign.createdAt }] } as never);
+    render(<PublishPage devices={devices} selected={[]} onSelectUdids={() => {}} />);
+    fireEvent.click(screen.getByRole("tab", { name: "Theo dõi" }));
+    fireEvent.click(await screen.findByRole("button", { name: "Chi tiết máy" }));
+    expect(await screen.findByRole("link", { name: "Mở bài đã xác nhận" })).toHaveAttribute("href", link);
+    expect(screen.queryByText("Chưa có liên kết xác nhận")).toBeNull();
+    expect(screen.getByText("Không ghi Sheet")).toBeVisible();
+  });
+
   it("labels a queued Threads compose phase as Threads", async () => {
     const campaign = { id: "threads-queued", requestId: "r", sourceRoot: "C:/fixture", state: "posting", assignments: [],
       createdAt: "2026-09-10T00:00:00Z", updatedAt: "2026-09-10T00:00:00Z" };
@@ -1130,7 +1163,7 @@ describe("publish campaign monitoring", () => {
       campaign, bundles: [], events: [], assignments: [{
         id: "assignment", campaignId: campaign.id, bundleId: "bundle", ordinal: 0,
         udid: "PHONE-A", state: "verifying", errorCode: "post_verification_pending",
-        evidenceJson: JSON.stringify({ post: { state: "submitted" }, verificationStatus: { state: "pending", reason: "TikTok đang xử lý", checkedAt: "2026-09-09T00:40:00Z", nextCheckAt: "2026-09-09T00:45:00Z", reviewAfterMinutes: null, checkIntervalSeconds: 300 }, cleanup: { state: "kept", appCleanup: { state: "leftRunning" } } }),
+        evidenceJson: JSON.stringify({ post: { state: "submitted" }, verificationStatus: { state: "pending", reason: "TikTok đang xử lý", checkedAt: "2026-09-09T00:40:00Z", nextCheckAt: "2026-09-09T00:45:00Z", reviewAfterMinutes: null, checkIntervalSeconds: 120 }, cleanup: { state: "kept", appCleanup: { state: "leftRunning" } } }),
       }],
     } as never);
     vi.mocked(publishReconcile).mockResolvedValueOnce({
@@ -1151,7 +1184,7 @@ describe("publish campaign monitoring", () => {
     expect(screen.queryByRole("button", { name: "Chạy lại từ đầu" })).toBeNull();
     expect(within(panel).getByText(/TikTok đang xử lý/)).toBeVisible();
     expect(within(panel).getByText(/Kiểm tra tiếp:/)).toBeVisible();
-    expect(within(panel).getByText(/Tự kiểm tra mỗi 5 phút đến khi có link/)).toBeVisible();
+    expect(within(panel).getByText(/Tự kiểm tra mỗi 2 phút đến khi có link/)).toBeVisible();
     expect(within(panel).queryByText(/Ngân sách tự kiểm:/)).toBeNull();
     expect(executeCampaign).not.toHaveBeenCalled();
   });
@@ -1530,6 +1563,57 @@ describe("publish campaign monitoring", () => {
     fireEvent.click(screen.getByText("Đã xác nhận nhạc"));
     expect(screen.getByText("sound-digest")).toBeVisible();
     expect(screen.getByText("Đề xuất", { exact: true })).toBeVisible();
+  });
+
+  it("retries a failed Threads Sheet row without executing the campaign", async () => {
+    const campaign = {
+      id: "threads-sheet-retry", requestId: "request", sourceRoot: "C:/fixture",
+      state: "succeeded", visibility: "public", cleanupPolicy: "keepImportedAssets",
+      assignments: [], createdAt: "2026-10-04T00:00:00Z", updatedAt: "2026-10-04T00:00:00Z",
+    };
+    vi.mocked(publishList).mockResolvedValueOnce([campaign] as never);
+    vi.mocked(publishGet).mockResolvedValue({
+      campaign, bundles: [], events: [{ kind: "created", payloadJson: JSON.stringify({ network: "threads", sheetEnabled: true }) }],
+      assignments: [{ id: "assignment", campaignId: campaign.id, bundleId: "bundle", ordinal: 0,
+        udid: "PHONE-A", state: "succeeded", effectIntent: "{}",
+        evidenceJson: JSON.stringify({ postUrl: "https://www.threads.com/@fixture/post/DeEp_dCE0BJ", publicationVerified: true }),
+        sheetDelivery: { state: "failed", attempts: 0, lastError: "verified internal Sheet metadata unavailable",
+          nextAttemptAtMs: null, updatedAt: campaign.updatedAt },
+      }],
+    } as never);
+    render(<PublishPage devices={devices} selected={[]} onSelectUdids={() => {}} />);
+    fireEvent.click(screen.getByRole("tab", { name: "Theo dõi" }));
+    fireEvent.click(await screen.findByRole("button", { name: "Chi tiết máy" }));
+    expect(await screen.findByText("verified internal Sheet metadata unavailable")).toBeVisible();
+    expect(screen.getByRole("link", { name: "Mở bài đã xác nhận" })).toBeVisible();
+    expect(screen.getByRole("button", { name: "Ghi lại Sheet (1)" })).toBeEnabled();
+    const button = await screen.findByRole("button", { name: /^Ghi lại Sheet ·/ });
+    await waitFor(() => expect(button).toBeEnabled());
+    fireEvent.click(button);
+    await waitFor(() => expect(publishRetrySheetAssignment).toHaveBeenCalledWith("assignment", 1));
+    expect(executeCampaign).not.toHaveBeenCalled();
+  });
+
+  it("does not show retry history under a confirmed Sheet row", async () => {
+    const campaign = {
+      id: "sheet-sent", requestId: "request", sourceRoot: "C:/fixture",
+      state: "succeeded", visibility: "public", cleanupPolicy: "keepImportedAssets",
+      assignments: [], createdAt: "2026-10-04T00:00:00Z", updatedAt: "2026-10-04T00:00:00Z",
+    };
+    vi.mocked(publishList).mockResolvedValueOnce([campaign] as never);
+    vi.mocked(publishGet).mockResolvedValue({ campaign, bundles: [], events: [], assignments: [{
+      id: "assignment", campaignId: campaign.id, bundleId: "bundle", ordinal: 0,
+      udid: "PHONE-A", state: "succeeded",
+      evidenceJson: JSON.stringify({ postUrl: "https://www.tiktok.com/@fixture/video/123", publicationVerified: true }),
+      sheetDelivery: { state: "sent", attempts: 13, lastError: null,
+        nextAttemptAtMs: Date.parse("2026-10-04T01:00:00Z"), updatedAt: campaign.updatedAt },
+    }] } as never);
+    render(<PublishPage devices={devices} selected={[]} onSelectUdids={() => {}} />);
+    fireEvent.click(screen.getByRole("tab", { name: "Theo dõi" }));
+    fireEvent.click(await screen.findByRole("button", { name: "Chi tiết máy" }));
+    expect(await screen.findByText("Sheet đã xác nhận")).toBeVisible();
+    expect(screen.queryByText(/Đã thử 13 lần/)).toBeNull();
+    expect(screen.queryByText(/Thử tiếp:/)).toBeNull();
   });
 
   it("distinguishes loading, load failure with retry, and a genuinely empty monitor", async () => {

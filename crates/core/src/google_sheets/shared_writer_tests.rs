@@ -9,6 +9,49 @@ const WRITER: &str = "550e8400-e29b-41d4-a716-446655440000";
 const OTHER: &str = "550e8400-e29b-41d4-a716-446655440001";
 
 #[tokio::test]
+async fn operator_recovery_clears_absent_lock_uncertainty_and_preserves_rows() {
+    let server = Server::start(2).await;
+    let db = database();
+    let payload = tests::payload("recovery", 1, "");
+    server.client().deliver_shared(&target(), &payload, WRITER, &db).await.unwrap();
+    let key = shared_writer::journal_key(&target());
+    let raw = db.google_shared_journal_read(&key).unwrap().unwrap();
+    let mut journal: Value = serde_json::from_str(&raw).unwrap();
+    journal["phase"] = json!("acquirePending");
+    db.google_shared_journal_cas(&key, Some(&raw), &journal.to_string()).unwrap();
+    let before = server.state.lock().rows.clone();
+    assert!(server.client().recover_stopped_shared_target(&target(), WRITER, false, &db).await.is_err());
+    server.client().recover_stopped_shared_target(&target(), WRITER, true, &db).await.unwrap();
+    let receipt = server.client().deliver_shared(&target(), &payload, WRITER, &db).await.unwrap();
+    assert_eq!(receipt.row, 2);
+    assert_eq!(server.state.lock().rows.len(), before.len());
+}
+
+#[tokio::test]
+async fn operator_recovery_releases_only_stopped_acquired_lock_not_committed_lock() {
+    let server = Server::start(2).await;
+    let db = database();
+    let payload = tests::payload("foreign", 1, "");
+    server.client().deliver_shared(&target(), &payload, OTHER, &db).await.unwrap();
+    let raw = db.google_shared_journal_read(&shared_writer::journal_key(&target())).unwrap().unwrap();
+    let op: Value = serde_json::from_str(&raw).unwrap();
+    let lock = json!({"schemaVersion":2,"operationToken":op["token"],"writerId":OTHER,"spreadsheetId":"fixture-book","sheetGid":0,"phase":"committed"});
+    let md = json!({"metadataId":shared_writer::lock_id(0),"metadataKey":shared_writer::LOCK_KEY,"metadataValue":lock.to_string(),"location":{"sheetId":0},"visibility":"DOCUMENT"});
+    server.state.lock().metadata.push(md);
+    assert!(server.client().recover_stopped_shared_target(&target(), OTHER, true, &db).await.is_err());
+    {
+        let mut state = server.state.lock();
+        let md = state.metadata.last_mut().unwrap();
+        let mut value: Value = serde_json::from_str(md["metadataValue"].as_str().unwrap()).unwrap();
+        value["phase"] = json!("acquired");
+        md["metadataValue"] = json!(value.to_string());
+    }
+    server.client().recover_stopped_shared_target(&target(), OTHER, true, &db).await.unwrap();
+    assert!(server.state.lock().metadata.iter().all(|md| md["metadataKey"] != shared_writer::LOCK_KEY));
+    assert_eq!(server.state.lock().rows.len(), 2);
+}
+
+#[tokio::test]
 async fn same_database_writers_wait_without_abandoning_the_live_operation() {
     let server = Server::start(2).await;
     server.hold_scan.store(true, Ordering::SeqCst);

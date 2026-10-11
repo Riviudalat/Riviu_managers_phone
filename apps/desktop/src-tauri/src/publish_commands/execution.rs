@@ -3350,24 +3350,19 @@ impl Drop for SingleBundleRoot {
 
 /// Build the one-bundle tree this assignment will be staged from.
 ///
-/// The `.transfer` parent is dot-prefixed on purpose: both the iOS manifest walker and the
-/// Android stage skip dot entries, so a scratch directory sitting beside the real bundles can
-/// never be mistaken for one.
+/// Keep the transfer tree under the OS temp directory. The managed campaign root may already
+/// be deep enough that adding an attempt directory makes `adb push` fail at MAX_PATH on Windows.
 pub(super) fn stage_one_bundle(
     bundle: &riviu_core::PublishBundle,
     ordinal: u32,
 ) -> anyhow::Result<SingleBundleRoot> {
     let bundle_dir = PathBuf::from(&bundle.source_path);
-    let campaign_root = bundle_dir
-        .parent()
-        .ok_or_else(|| anyhow::anyhow!("managed bundle {} has no parent", bundle.id))?;
     let name = bundle_dir
         .file_name()
         .ok_or_else(|| anyhow::anyhow!("managed bundle {} has no directory name", bundle.id))?;
-    // Scheduled siblings share a managed parent and each campaign's ordinal is zero.
-    // A unique attempt directory prevents one concurrent copy/drop from deleting another.
-    let root = campaign_root
-        .join(".transfer")
+    // A unique attempt directory keeps concurrent assignments and retries isolated.
+    let root = std::env::temp_dir()
+        .join("riviu-publish-transfer")
         .join(format!("{ordinal}-{}", Uuid::new_v4()));
     let guard = SingleBundleRoot(root);
     // Reuse the copier the campaign was built with: it verifies every image SHA-256 and the

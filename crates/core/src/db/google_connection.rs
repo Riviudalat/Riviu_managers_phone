@@ -104,6 +104,27 @@ impl Database {
             .unwrap_or_default();
         Ok(map.into_iter().find(|c| c.target == *target))
     }
+    pub fn google_connection_for_sheet(
+        &self,
+        spreadsheet_id: &str,
+        sheet_gid: u64,
+    ) -> anyhow::Result<Option<GoogleSheetConnection>> {
+        if let Some(current) = self.google_sheet_connection()? {
+            if current.target.spreadsheet_id == spreadsheet_id
+                && current.target.sheet_gid == sheet_gid
+            {
+                return Ok(Some(current));
+            }
+        }
+        let map = self
+            .get_setting("google.sheets.connections.v1")?
+            .map(|s| serde_json::from_str::<Vec<GoogleSheetConnection>>(&s))
+            .transpose()?
+            .unwrap_or_default();
+        Ok(map.into_iter().rev().find(|c| {
+            c.target.spreadsheet_id == spreadsheet_id && c.target.sheet_gid == sheet_gid
+        }))
+    }
     pub fn sheet_uses_google_direct(&self) -> anyhow::Result<bool> {
         Ok(self.get_setting(SHEET_PROVIDER_SETTING)?.as_deref() == Some("googleDirect"))
     }
@@ -511,6 +532,8 @@ mod tests {
             db.finish_google_sheet_migration(connection, &id).unwrap();
         }
         assert_eq!(db.google_sheet_connection().unwrap(), Some(second.clone()));
+        assert_eq!(db.google_connection_for_sheet("first-book", 0).unwrap(), Some(first.clone()));
+        assert_eq!(db.google_connection_for_sheet("second-book", 0).unwrap(), Some(second.clone()));
         assert_eq!(
             db.google_connection_for_target(&first.target).unwrap(),
             Some(first.clone())

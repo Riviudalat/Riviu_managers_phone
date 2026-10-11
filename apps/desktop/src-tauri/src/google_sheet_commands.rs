@@ -538,15 +538,10 @@ pub(crate) async fn check_current(db: &Database, url: &str) -> anyhow::Result<Sh
         return riviu_core::publish_sheet::check_sheet(url, &db.publish_sheet_delivery_settings()?)
             .await;
     }
-    let connection = db
-        .google_sheet_connection()?
-        .context("Chọn và kết nối Google Sheet")?;
     let parsed = riviu_core::publish_sheet::parse_sheet_url(url)?;
-    anyhow::ensure!(
-        parsed.spreadsheet_id == connection.target.spreadsheet_id
-            && parsed.sheet_gid == connection.target.sheet_gid,
-        "Chọn đúng bảng và tab đã liên kết Google"
-    );
+    let connection = db
+        .google_connection_for_sheet(&parsed.spreadsheet_id, parsed.sheet_gid)?
+        .context("Chọn và kết nối đúng bảng/tab Google Sheet")?;
     let tokens = access_tokens(db).await?;
     anyhow::ensure!(
         tokens.account_id == connection.account_id,
@@ -580,9 +575,19 @@ pub async fn google_sheets_connect(
     sheet_id: u64,
     confirmed: bool,
     legacy_writers_stopped: Option<bool>,
+    network: Option<riviu_core::SocialNetwork>,
 ) -> Result<SheetCheckResult, CommandError> {
     let _a = state.ensure_accepting_work()?;
     let _guard = CONNECTION_LOCK.lock().await;
+    if network == Some(riviu_core::SocialNetwork::Threads)
+        && state.db.get_setting(riviu_core::publish_sheet::TIKTOK_SHEET_URL_SETTING).map_err(err)?.is_none()
+    {
+        if let Some(previous) = state.db.get_setting(riviu_core::publish_sheet::SHEET_URL_SETTING).map_err(err)?
+            .filter(|url| !url.trim().is_empty())
+        {
+            state.db.set_setting(riviu_core::publish_sheet::TIKTOK_SHEET_URL_SETTING, &previous).map_err(err)?;
+        }
+    }
     let result = connect(
         &state.db,
         &spreadsheet_id,
@@ -591,7 +596,32 @@ pub async fn google_sheets_connect(
         legacy_writers_stopped.unwrap_or(false),
     )
     .await;
-    result.map_err(connection_error)
+    let result = result.map_err(connection_error)?;
+    let setting = if network == Some(riviu_core::SocialNetwork::Threads) {
+        riviu_core::publish_sheet::THREADS_SHEET_URL_SETTING
+    } else {
+        riviu_core::publish_sheet::TIKTOK_SHEET_URL_SETTING
+    };
+    state.db.set_setting(setting, &result.sheet_url).map_err(err)?;
+    Ok(result)
+}
+#[tauri::command]
+pub async fn google_sheets_recover_lock(
+    state: State<'_, AppState>,
+    spreadsheet_id: String,
+    sheet_id: u64,
+    writers_stopped: bool,
+) -> Result<(), CommandError> {
+    let _a = state.ensure_accepting_work()?;
+    let _guard = CONNECTION_LOCK.lock().await;
+    let connection = state.db.google_connection_for_sheet(&spreadsheet_id, sheet_id)
+        .map_err(err)?.ok_or_else(|| err("Kiểm tra kết nối đúng tab đã lưu trước khi khôi phục"))?;
+    let tokens = access_tokens(&state.db).await.map_err(err)?;
+    DirectSheetsClient::new(tokens.access_token).map_err(err)?
+        .recover_stopped_shared_target(&connection.target, &connection.writer_id, writers_stopped, &state.db)
+        .await.map_err(|e| connection_error(e.into()))?;
+    sessions().lock().await.error = None;
+    Ok(())
 }
 fn needs_legacy_retirement(configured: bool, remote_schema: Option<u32>) -> bool {
     // Schema 1/2 đã thuộc đường direct; PC mới không được retire lại Apps Script

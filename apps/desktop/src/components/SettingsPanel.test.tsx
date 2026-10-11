@@ -3,7 +3,10 @@ import userEvent from "@testing-library/user-event";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { SettingsPanel } from "./SettingsPanel";
 import { updateCheck, updateInstall } from "../api";
+import { getVersion } from "@tauri-apps/api/app";
 import type { LocalApiConfig } from "../api";
+
+vi.mock("@tauri-apps/api/app", () => ({ getVersion: vi.fn(async () => "0.2.82") }));
 
 vi.mock("../api", () => ({
   guiServiceStatus: vi.fn(async()=>({config:{enabled:true,baseUrl:"",model:"",maxRequests:20},running:false,providerReady:false,protocolVersion:1})),
@@ -68,6 +71,8 @@ describe("SettingsPanel update section", () => {
     // wiring half of that promise; the backend never checks on its own either.
     render(<SettingsPanel devices={[]} />);
     await waitFor(() => expect(screen.getByText("Chưa kiểm bản mới")).toBeTruthy());
+    expect(screen.getByText("Phiên bản đang chạy: 0.2.82")).toBeVisible();
+    expect(getVersion).toHaveBeenCalled();
 
     expect(screen.queryByRole("heading", { name: "Cài đặt" })).toBeNull();
     expect(checkMock).not.toHaveBeenCalled();

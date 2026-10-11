@@ -33,6 +33,7 @@ import {
   operationPrepareDevices,
   publishReconcile,
   publishRetryAssignment,
+  publishRetrySheetAssignment,
   publishScanFolder,
   publishSetLimits,
   type PublishLimits,
@@ -144,8 +145,8 @@ function verificationDetail(evidenceJson?: string | null): string | null {
       && !/tự kiểm tra đã dừng/i.test(reason)
       ? "Tự kiểm tra đã dừng · chọn Kiểm tra liên kết"
       : null;
-    const budget = status?.checkIntervalSeconds === 300
-      ? "Tự kiểm tra mỗi 5 phút đến khi có link"
+    const budget = typeof status?.checkIntervalSeconds === "number" && status.checkIntervalSeconds > 0
+      ? `Tự kiểm tra mỗi ${status.checkIntervalSeconds / 60} phút đến khi có link`
       : typeof status?.reviewAfterMinutes === "number"
       ? `Ngân sách tự kiểm: ${status.reviewAfterMinutes} phút`
       : null;
@@ -405,7 +406,7 @@ function cleanupEvidence(
   }
 }
 
-function postEvidence(evidenceJson?: string | null): {
+function postEvidence(evidenceJson: string | null | undefined, appName: "Threads" | "TikTok"): {
   url: string | null;
   sound: {
     title: string;
@@ -429,7 +430,13 @@ function postEvidence(evidenceJson?: string | null): {
     let url: string | null = null;
     if (typeof post.postUrl === "string") {
       const parsed = new URL(post.postUrl);
-      if (
+      if (appName === "Threads" &&
+        parsed.protocol === "https:" &&
+        parsed.hostname === "www.threads.com" &&
+        !parsed.username && !parsed.password &&
+        /^\/@[A-Za-z0-9._]+\/post\/[A-Za-z0-9_-]{8,32}\/?$/.test(parsed.pathname)
+      ) url = parsed.origin + parsed.pathname;
+      if (appName === "TikTok" &&
         parsed.protocol === "https:" &&
         ["www.tiktok.com", "tiktok.com"].includes(parsed.hostname) &&
         /^\/@[^/]+\/(?:video|photo)\/\d+\/?$/.test(parsed.pathname)
@@ -542,7 +549,7 @@ export function PublishPage({
   const [createdCampaignId, setCreatedCampaignId] = useState<string>();
   const [soundPolicyOverride, setSoundPolicyOverride] =
     useState<PublishSoundPolicy | null>(restoredForm?.soundPolicyOverride ?? null);
-  const [sheetEnabled, setSheetEnabled] = useState(restoredForm?.sheetEnabled ?? false);
+  const [sheetEnabled, setSheetEnabled] = useState(restoredForm?.sheetEnabled ?? true);
   const [deleteAfterPublish, setDeleteAfterPublish] = useState(restoredForm?.deleteAfterPublish ?? false);
   const [campaigns, setCampaigns] = useState<PublishCampaignRecord[]>([]);
   const [campaignLoadState, setCampaignLoadState] = useState<
@@ -1034,7 +1041,7 @@ export function PublishPage({
       const approvedDraftKey = latestDraftKey.current;
       const confirmed = await requestConfirm({
         title: "Xác nhận đăng công khai?",
-        message: `${selectedBundles.length} bài sẽ được đăng công khai trên ${targets.length} máy. Nội dung sẽ được chuẩn bị trong ${publishNetwork === "threads" ? "Threads" : "TikTok"} và xác nhận lại trước Đăng.`,
+        message: `${selectedBundles.length} bài sẽ được đăng công khai trên ${targets.length} máy. Nội dung sẽ được chuẩn bị trong ${publishNetwork === "threads" ? "Threads" : "TikTok"} và xác nhận lại trước Đăng. ${sheetEnabled ? "Link đã xác minh sẽ được ghi lên Google Sheet." : "Ghi Google Sheet đang tắt; link chỉ lưu trong Riviu."}`,
         confirmLabel: "Đăng bài",
         cancelLabel: "Huỷ",
         danger: true,
@@ -1245,6 +1252,33 @@ export function PublishPage({
     }
   };
 
+  const retrySheetAssignments = async (rows: { assignment: PublishAssignmentRecord; capability: PublishRecoveryCapability }[]) => {
+    if (publishInFlight.current || operationBusy || !rows.length) return;
+    publishInFlight.current = true;
+    setBusy(true);
+    setNotice(null);
+    try {
+      const failures: string[] = [];
+      let accepted = 0;
+      for (const { assignment, capability } of rows) {
+        try {
+          await publishRetrySheetAssignment(assignment.id, capability.revision);
+          accepted++;
+        } catch (error) {
+          failures.push(`${deviceDisplayName(devices, metas, assignment.udid)}: ${describeError(error)}`);
+        }
+      }
+      await loadCampaignDetail(rows[0].assignment.campaignId, false);
+      setNotice({ tone: failures.length ? "warning" : "info",
+        text: [`Đã xếp ${accepted} link đã xác minh để ghi Sheet.`, ...failures].join(" ") });
+    } catch (error) {
+      setNotice({ tone: "error", text: describeError(error) });
+    } finally {
+      publishInFlight.current = false;
+      setBusy(false);
+    }
+  };
+
   const resumeVerification = async (assignment: PublishAssignmentRecord, capability: PublishRecoveryCapability) => {
     if (publishInFlight.current || operationBusy || !capability.resumeVerification.allowed) return;
     publishInFlight.current = true;
@@ -1252,7 +1286,7 @@ export function PublishPage({
     try {
       const confirmed = await requestConfirm({
         title: "Tiếp tục xác minh bài đã gửi?",
-        message: "Chỉ kiểm tra bài cũ trên máy này và thử lại mỗi 5 phút khi chưa có link. Không đăng lại, không tiếp tục các bài chưa gửi. Quyền đăng bài mới chỉ mở khi có đủ bằng chứng máy đã an toàn.",
+        message: "Chỉ kiểm tra bài cũ trên máy này và thử lại theo chu kỳ của bài khi chưa có link. Không đăng lại, không tiếp tục các bài chưa gửi. Quyền đăng bài mới chỉ mở khi có đủ bằng chứng máy đã an toàn.",
         confirmLabel: "Tiếp tục xác minh", cancelLabel: "Huỷ",
       });
       if (!confirmed) return;
@@ -1264,7 +1298,7 @@ export function PublishPage({
       setNotice({ tone: refused ? "warning" : "info", text: recoveryReason(result.reason) || (refused
         ? "Trạng thái bài đã thay đổi hoặc chưa đủ điều kiện xác minh; không khởi động lại Post."
         : result.state === "alreadyVerified" ? "Bài đã được xác minh; không thực hiện lại Post."
-          : "Đã nhận yêu cầu xác minh bài đã gửi. Khi chưa có link, hệ thống thử lại mỗi 5 phút; không đăng lại.") });
+          : "Đã nhận yêu cầu xác minh bài đã gửi. Khi chưa có link, hệ thống thử lại theo chu kỳ của bài; không đăng lại.") });
     } catch (error) { setNotice({ tone: "error", text: describeError(error) }); }
     finally { publishInFlight.current = false; setBusy(false); }
   };
@@ -1429,7 +1463,7 @@ export function PublishPage({
           onPreflight={runPreflight}
           onExecute={executeNewCampaign}
           onHistory={() => setWorkspaceTab("monitor")}
-          settings={<PublishSheetConnection onReadyChange={updateSheetConnection} />}
+          settings={<PublishSheetConnection network={publishNetwork} onReadyChange={updateSheetConnection} />}
         />
       </div>
 
@@ -1528,6 +1562,7 @@ export function PublishPage({
             metas={metas}
             retryCampaign={retryCampaign}
             retryAssignment={retryAssignment}
+            retrySheetAssignments={retrySheetAssignments}
             recoveryCapabilities={recoveryCapabilities}
             recoveryErrors={recoveryErrors}
             resumeVerification={resumeVerification}
@@ -1565,6 +1600,7 @@ function CampaignMonitor({
   metas,
   retryCampaign,
   retryAssignment,
+  retrySheetAssignments,
   recoveryCapabilities,
   recoveryErrors,
   resumeVerification,
@@ -1585,6 +1621,7 @@ function CampaignMonitor({
   metas: Map<string, import("../types").DeviceMeta>;
   retryCampaign: (campaign: PublishCampaignRecord) => Promise<void>;
   retryAssignment: (assignment: PublishAssignmentRecord, campaign: PublishCampaignRecord) => Promise<void>;
+  retrySheetAssignments: (rows: { assignment: PublishAssignmentRecord; capability: PublishRecoveryCapability }[]) => Promise<void>;
   recoveryCapabilities: Record<string, PublishRecoveryCapability[]>;
   recoveryErrors: Record<string, string>;
   resumeVerification: (assignment: PublishAssignmentRecord, capability: PublishRecoveryCapability) => Promise<void>;
@@ -1611,6 +1648,13 @@ function CampaignMonitor({
     : filtered.find(campaign => campaign.id === selectedId);
   const selectedView = selected ? campaignView(selected, operations[selected.id], executionSnapshots[selected.id], details[selected.id]) : null;
   const selectedRecovery = selected ? recoveryCapabilities[selected.id] : undefined;
+  const sheetRetryRows = selected ? (details[selected.id]?.assignments ?? []).flatMap(assignment => {
+    const capability = selectedRecovery?.find(item => item.assignmentId === assignment.id);
+    return capability && assignment.state === "succeeded" && assignment.sheetDelivery?.state === "failed"
+      && assignment.sheetDelivery.nextAttemptAtMs == null
+      && postEvidence(assignment.evidenceJson, campaignApp(details[selected.id])).url
+      ? [{ assignment, capability }] : [];
+  }) : [];
   const checkingLinks = selected && selectedView && (selected.state === "verifying" || needsPublicationReview(selected) || selectedView.retryScope === "linkAndSheet");
   const linkAllowed = selectedRecovery?.some(item => item.checkLink.allowed) === true;
   const linkBlockedReason = recoveryReason(selectedRecovery?.find(item => item.checkLink.reason)?.checkLink.reason)
@@ -1650,6 +1694,8 @@ function CampaignMonitor({
           <div className="publish-monitor-detail-head"><div><h3>Chiến dịch {campaigns.indexOf(selected) + 1}</h3><p>{selected.assignments.length} bài · {name(selected)}</p></div>
             <div className="publish-row-actions">
               {selectedView.retryScope !== "none" && <button type="button" className="primary" disabled={busy || detailLoading[selected.id] || (!!checkingLinks && !linkAllowed)} title={checkingLinks && !linkAllowed ? linkBlockedReason : undefined} onClick={() => void retryCampaign(selected)}>{selected.state === "verifying" || needsPublicationReview(selected) ? "Kiểm tra liên kết" : retryActionLabel(selectedView.retryScope, snapshotSheetEnabled(executionSnapshots[selected.id]))}</button>}
+              {sheetRetryRows.length > 0 && <button type="button" className="ghost" disabled={busy || detailLoading[selected.id]}
+                onClick={() => void retrySheetAssignments(sheetRetryRows)}><RefreshCw size={14} aria-hidden="true"/>Ghi lại Sheet ({sheetRetryRows.length})</button>}
               {recoveryCapabilities[selected.id]?.some(capability => capability.verificationResumed) && <button type="button" className="ghost" disabled={busy} onClick={() => void stopVerification(selected)}>Dừng kiểm tra lại</button>}
               <PublishScheduleRetime key={selected.id} campaign={selected} onSaved={onScheduleChanged}/>
               {CANCELLABLE_STATES.includes(selected.state) && <button type="button" className="ghost" onClick={() => void cancel(selected)}>Huỷ</button>}
@@ -1660,6 +1706,7 @@ function CampaignMonitor({
           <CampaignDetail detail={details[selected.id]} error={detailErrors[selected.id]} loading={detailLoading[selected.id] === true}
             snapshot={executionSnapshots[selected.id]} devices={devices} metas={metas} retry={() => void toggleDetail(selected)}
             busy={busy} retryAssignment={assignment => void retryAssignment(assignment, selected)}
+            retrySheetAssignment={(assignment, capability) => void retrySheetAssignments([{ assignment, capability }])}
             recoveryCapabilities={recoveryCapabilities[selected.id]} recoveryError={recoveryErrors[selected.id]}
             resumeVerification={(assignment, capability) => void resumeVerification(assignment, capability)}/>
         </> : <div className="publish-monitor-placeholder"><ListChecks size={30}/><strong>Chọn một chiến dịch để theo dõi</strong><span>Kết quả từng máy, link và ghi chú sẽ hiện tại đây.</span></div>}
@@ -1693,6 +1740,7 @@ function CampaignDetail({
   retry,
   busy,
   retryAssignment,
+  retrySheetAssignment,
   recoveryCapabilities,
   recoveryError,
   resumeVerification,
@@ -1706,6 +1754,7 @@ function CampaignDetail({
   retry: () => void;
   busy: boolean;
   retryAssignment: (assignment: PublishAssignmentRecord) => void;
+  retrySheetAssignment: (assignment: PublishAssignmentRecord, capability: PublishRecoveryCapability) => void;
   recoveryCapabilities?: PublishRecoveryCapability[];
   recoveryError?: string;
   resumeVerification: (assignment: PublishAssignmentRecord, capability: PublishRecoveryCapability) => void;
@@ -1729,7 +1778,7 @@ function CampaignDetail({
     setCheckingUdid(udid);
     try {
       const info = await deviceThreadsAccount(udid);
-      setDeviceChecks(current => ({ ...current, [udid]: `@${info.account} · ${info.version} · ${info.locale}` }));
+      setDeviceChecks(current => ({ ...current, [udid]: `@${info.account} · ${info.version} · ${info.locale}${info.publishSupported ? "" : " · chưa hỗ trợ đăng tự động"}` }));
     } catch (cause) {
       setDeviceChecks(current => ({ ...current, [udid]: describeError(cause) }));
     } finally {
@@ -1859,7 +1908,7 @@ function CampaignDetail({
                 id: "link",
                 label: "Bài đã đăng",
                 render: (assignment: PublishAssignmentRecord) => {
-                  const evidence = postEvidence(assignment.evidenceJson);
+                  const evidence = postEvidence(assignment.evidenceJson, appName);
                   return evidence.url ? (
                     <a href={evidence.url} target="_blank" rel="noreferrer" aria-label="Mở bài đã xác nhận">
                       Đã xác minh link · Mở bài
@@ -1874,7 +1923,13 @@ function CampaignDetail({
                 label: "Ghi Sheet",
                 render: (assignment: PublishAssignmentRecord) => {
                   const delivery = assignment.sheetDelivery;
-                  if (!delivery) return snapshot && !snapshotSheetEnabled(snapshot)
+                  const capability = recoveryCapabilities?.find(item => item.assignmentId === assignment.id);
+                  const created = detail.events.find(event => event.kind === "created");
+                  let sheetDisabled = snapshot ? !snapshotSheetEnabled(snapshot) : false;
+                  try {
+                    sheetDisabled ||= JSON.parse(created?.payloadJson ?? "null")?.sheetEnabled === false;
+                  } catch { /* An older event may not have structured payload. */ }
+                  if (!delivery) return sheetDisabled
                     ? "Không ghi Sheet" : "Chờ liên kết đã xác minh";
                   if (delivery.state === "superseded") return "Đợt báo cáo đã đóng · giữ lịch sử trong app";
                   const next = delivery.nextAttemptAtMs == null ? null
@@ -1883,9 +1938,15 @@ function CampaignDetail({
                     {delivery.state === "sent" ? "Sheet đã xác nhận"
                       : delivery.nextAttemptAtMs == null ? "Cần xử lý ghi Sheet" : "Đang chờ ghi Sheet"}
                     {delivery.state !== "sent" && delivery.lastError && <p>{delivery.lastError}</p>}
-                    {delivery.attempts > 0 && <p>Đã thử {delivery.attempts} lần · Gần nhất: {new Date(delivery.updatedAt).toLocaleTimeString("vi-VN")}</p>}
+                    {delivery.state !== "sent" && delivery.attempts > 0 && <p>Đã thử {delivery.attempts} lần · Gần nhất: {new Date(delivery.updatedAt).toLocaleTimeString("vi-VN")}</p>}
                     {delivery.state !== "sent" && next && <p>Thử tiếp: {next}</p>}
                     {delivery.state !== "sent" && delivery.nextAttemptAtMs == null && <p>Sửa nguyên nhân rồi chọn Ghi lại Sheet</p>}
+                    {assignment.state === "succeeded" && delivery.state === "failed" && delivery.nextAttemptAtMs == null
+                      && postEvidence(assignment.evidenceJson, appName).url &&
+                      <button type="button" disabled={busy || loading || !capability} onClick={() => capability && retrySheetAssignment(assignment, capability)}
+                        aria-label={`Ghi lại Sheet · ${deviceDisplayName(devices, metas, assignment.udid)}`}>
+                        <RefreshCw size={14} aria-hidden="true"/>Ghi lại Sheet
+                      </button>}
                   </span>;
                 },
               },
@@ -1893,7 +1954,7 @@ function CampaignDetail({
                 id: "sound",
                 label: "Nhạc đã chọn",
                 render: (assignment: PublishAssignmentRecord) => {
-                  const sound = postEvidence(assignment.evidenceJson).sound;
+                  const sound = postEvidence(assignment.evidenceJson, appName).sound;
                   return sound ? (
                     <span>
                       {sound.title} · {sound.artist}

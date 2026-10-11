@@ -1808,6 +1808,18 @@ fn a_staged_root_holds_exactly_one_bundle_and_is_removed_afterwards() {
     {
         let staged = super::stage_one_bundle(&bundle, 0).expect("stage one bundle");
         root_path = staged.path().to_path_buf();
+        assert!(root_path.starts_with(std::env::temp_dir().join("riviu-publish-transfer")));
+        #[cfg(windows)]
+        assert!(
+            root_path
+                .join("set2-20-spotlightv4-1105db8d5a43")
+                .join("11-camping-va-san-may-cau-dat.png")
+                .to_string_lossy()
+                .encode_utf16()
+                .count()
+                < 260,
+            "adb must be able to open staged images under Windows MAX_PATH"
+        );
         let children: Vec<_> = fs::read_dir(staged.path())
             .expect("read the staged root")
             .map(|entry| entry.expect("entry"))

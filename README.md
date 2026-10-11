@@ -15,6 +15,13 @@ Báo cáo có ngày ở [archive](docs/archive/README.md) không phải trạng 
 
 ## Cài bản dựng
 
+Trên Windows, mở `EXPORT-THREAD-EXE.cmd` ở thư mục dự án để tự build bản Full có
+Threads, kiểm tra khởi động bằng dữ liệu thử, đóng gói bộ cài EXE và xuất vào
+Downloads kèm SHA-256. Cần Node/npm, Rust/MSVC và thư viện frontend đã cài.
+Script dùng cấu hình Google OAuth hiện có hoặc biến `RIVIU_GOOGLE_OAUTH_CONFIG_JSON`.
+Nếu Downloads đã có bộ cài cùng phiên bản, file mới được thêm thời gian vào tên.
+Lệnh chỉ xuất bộ cài; chạy file vừa xuất để cài bản mới.
+
 Workflow **Desktop CI/CD** đang tạm dừng chạy tự động khi push/PR/tag. Khi cần,
 chạy thủ công bằng **Run workflow** trên GitHub Actions để tạo ba artifact:
 
@@ -115,6 +122,9 @@ có thể lâu và tốn vài GB. Không đóng cửa sổ terminal trong lúc d
 Nếu trình cài yêu cầu khởi động lại Windows, làm theo rồi mở lại cùng file. Nếu
 cài thất bại, bộ khởi động dừng và giữ thông báo lỗi, không báo đã sẵn sàng.
 Đóng các phiên Riviu khác trước khi chạy để tránh tranh thiết bị/dữ liệu.
+Nếu cổng dev `5173` đang được dùng, launcher dừng trước `npm ci`. Đóng phiên
+Riviu/Vite cũ rồi chạy lại `START-RIVIU.cmd`; không chạy `npm ci` khi Vite còn mở
+vì Windows khóa file native trong `node_modules`.
 
 Trong CMD tại gốc source, có thể dùng:
 

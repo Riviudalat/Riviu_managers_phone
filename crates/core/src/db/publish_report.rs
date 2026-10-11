@@ -40,16 +40,15 @@ fn project(f: Facts) -> anyhow::Result<InternalSheetReportRow> {
     let manifest: crate::PublishBundle = serde_json::from_str(&f.manifest)?;
     let verified_url = post["postUrl"].as_str().filter(|url| {
         post["publicationVerified"].as_bool() == Some(true)
-            && url::Url::parse(url).is_ok_and(|parsed| {
-                parsed.scheme() == "https"
-                    && parsed.username().is_empty()
-                    && parsed.password().is_none()
-                    && parsed.port_or_known_default() == Some(443)
-            })
-            && crate::interaction::parse_tiktok_links(url)
-                .first()
-                .and_then(|target| target.target.as_ref())
-                .is_some_and(|target| target.normalized_url == *url)
+            && crate::publish_submission::canonical_publication_author(url)
+                .is_ok_and(|(network, author)| {
+                    network == request.network
+                        && (network != crate::SocialNetwork::Threads
+                            || intent["expectedAccount"].as_str().is_some_and(|expected| {
+                                crate::threads_publish::normalize_threads_account(expected)
+                                    .is_ok_and(|expected| expected == author)
+                            }))
+                })
     });
     let verified = f.state == "succeeded" && verified_url.is_some();
     let sent = matches!(
@@ -413,6 +412,36 @@ mod tests {
         drop(db);
         let db = Database::open(&path).unwrap();
         assert_eq!(db.internal_publish_report(&id).unwrap().unwrap(), proved);
+        drop(db);
+        std::fs::remove_file(path).unwrap();
+    }
+
+    #[test]
+    fn internal_report_accepts_verified_threads_post_from_expected_account() {
+        let (db, path, campaign, id) = fixture(true);
+        let mut request = db.publish_campaign_request(&campaign).unwrap().unwrap();
+        request.network = crate::SocialNetwork::Threads;
+        db.conn().unwrap().execute(
+            "UPDATE publish_campaigns SET request_json=?1 WHERE id=?2",
+            params![serde_json::to_string(&request).unwrap(), campaign],
+        ).unwrap();
+        let url = "https://www.threads.com/@fixture.account/post/DeEp_dCE0BJ";
+        let intent = serde_json::json!({"effectIntent":"post","expectedAccount":"fixture.account","submittedAt":"2026-10-04T12:40:19Z"}).to_string();
+        db.conn().unwrap().execute(
+            "UPDATE publish_assignments SET state='succeeded',effect_intent=?1,evidence_json=?2 WHERE id=?3",
+            params![intent, serde_json::json!({"postUrl":url,"publicationVerified":true}).to_string(), id],
+        ).unwrap();
+        let report = db.internal_publish_report(&id).unwrap().unwrap();
+        assert_eq!(report.metadata.status, "Đã xác minh");
+        assert_eq!(report.post_url, url);
+
+        db.conn().unwrap().execute(
+            "UPDATE publish_assignments SET effect_intent=json_set(effect_intent,'$.expectedAccount','other.account') WHERE id=?1",
+            [&id],
+        ).unwrap();
+        let wrong_account = db.internal_publish_report(&id).unwrap().unwrap();
+        assert_eq!(wrong_account.metadata.status, "Cần kiểm tra");
+        assert!(wrong_account.post_url.is_empty());
         drop(db);
         std::fs::remove_file(path).unwrap();
     }

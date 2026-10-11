@@ -142,7 +142,7 @@ pub(super) async fn capture(
         let authorize = || super::verification_restart::authorize(db, assignment, observer);
         let guarded = super::verification_session::VerificationSession::new(session.as_ref(), &authorize);
         guarded.check()?;
-        let url = mobile::verify(&guarded, &bundle.caption, &proof.expected_account, &proof.submitted_at).await?;
+        let url = mobile::verify_after_refresh(&guarded, &bundle.caption, &proof.expected_account, &proof.submitted_at).await?;
         guarded.check()?;
         Ok(ConfirmedAssignmentLink { url, diagnostic: serde_json::json!({"stage":"threadsOwnProfileCaptionAuthorTimeAndCanonicalLink","package":proof.package}) })
     }.await;

@@ -68,6 +68,7 @@ pub struct ThreadsAccountInfo {
     pub version: String,
     pub locale: String,
     pub account: String,
+    pub publish_supported: bool,
 }
 
 /// Checks the measured build and reads the logged-in account through Riviu's device lease.
@@ -87,30 +88,65 @@ pub async fn device_threads_account(
         return Err(err("Kiểm tra Threads chỉ hỗ trợ Android"));
     }
     let (package_name, version, locale) = state.control.threads_build(&udid).await?;
-    if !riviu_core::threads_publish::measured_mobile_build(&package_name, &version, &locale) {
-        return Err(err("Threads chưa cài hoặc build/ngôn ngữ chưa được đo"));
-    }
-    let context = state
-        .control
-        .open_manual_session(&udid, DeviceWorkOwner::ManualControl)
-        .await?;
+    let publish_supported =
+        riviu_core::threads_publish::measured_mobile_build(&package_name, &version, &locale);
+    let context = {
+        let deadline = tokio::time::Instant::now() + tokio::time::Duration::from_secs(8);
+        loop {
+            match state
+                .control
+                .open_manual_session(&udid, DeviceWorkOwner::ManualControl)
+                .await
+            {
+                Ok(context) => break context,
+                Err(riviu_core::DeviceControlError::Busy(busy))
+                    if busy.current_owner == DeviceWorkOwner::IdleSweep
+                        && tokio::time::Instant::now() < deadline =>
+                {
+                    tokio::time::sleep(tokio::time::Duration::from_millis(400)).await;
+                }
+                Err(error) => return Err(error.into()),
+            }
+        }
+    };
     let result = async {
-        state
-            .control
-            .foreground_session_app(&context, &package_name)
-            .await?;
         let session = state.control.session(&context)?;
-        riviu_core::threads_publish::mobile::observed_profile_account(session.as_ref()).await
+        if publish_supported {
+            state
+                .control
+                .foreground_session_app(&context, &package_name)
+                .await?;
+            riviu_core::threads_publish::mobile::observed_profile_account(session.as_ref()).await
+        } else if package_name == riviu_core::threads_publish::ANDROID_PACKAGE
+            && version == riviu_core::threads_publish::mobile::PROFILE_PROBE_VERSION
+        {
+            state
+                .control
+                .foreground_session_app(&context, &package_name)
+                .await?;
+            riviu_core::threads_publish::mobile::observed_449_profile_account(session.as_ref()).await
+        } else {
+            riviu_core::threads_publish::mobile::visible_profile_account(session.as_ref()).await
+        }
     }
     .await;
     let cleanup = state.control.close_manual_session(context);
-    let account = result.map_err(CommandError::operation)?;
+    let account = result.map_err(|error| {
+        if publish_supported {
+            CommandError::operation(error)
+        } else {
+            CommandError::operation(format!(
+                "Threads {version} ({locale}) chưa hỗ trợ đăng tự động; không đọc được profile đang mở: {error:#}"
+            ))
+        }
+    })?;
     cleanup.map_err(CommandError::from)?;
     Ok(ThreadsAccountInfo {
         package_name,
         version,
         locale,
         account,
+        publish_supported,
     })
 }
 

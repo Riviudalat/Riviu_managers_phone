@@ -17,12 +17,12 @@ pub async fn publish_retry_sheet_assignment(
             .db
             .publication_campaign_id(&assignment_id)?
             .context("Không tìm thấy bài")?;
-        state
+        let network = state
             .db
             .publish_campaign_request(&campaign)?
             .context("Thiếu cấu hình bài")?
-            .network
-            .ensure_publish_implemented()?;
+            .network;
+        network.ensure_publish_implemented()?;
         let detail = state
             .db
             .get_publish_assignment_detail(&campaign, &assignment_id)?
@@ -31,11 +31,21 @@ pub async fn publish_retry_sheet_assignment(
         let e: serde_json::Value =
             serde_json::from_str(row.evidence_json.as_deref().unwrap_or("{}"))?;
         let post = e.get("post").unwrap_or(&e);
+        let intent: serde_json::Value =
+            serde_json::from_str(row.effect_intent.as_deref().unwrap_or("{}"))?;
+        let valid_url = post["postUrl"].as_str().is_some_and(|url| {
+            riviu_core::publish_submission::canonical_publication_author(url)
+                .is_ok_and(|(url_network, author)| {
+                    url_network == network
+                        && (network != riviu_core::SocialNetwork::Threads
+                            || intent["expectedAccount"].as_str().is_some_and(|expected| {
+                                riviu_core::threads_publish::normalize_threads_account(expected)
+                                    .is_ok_and(|expected| expected == author)
+                            }))
+                })
+        });
         anyhow::ensure!(
-            post["publicationVerified"] == true
-                && post["postUrl"]
-                    .as_str()
-                    .is_some_and(riviu_core::tiktok_share::looks_like_a_post_link),
+            post["publicationVerified"] == true && valid_url,
             "Chưa có URL bài được xác minh; chưa ghi lại Sheet"
         );
         anyhow::ensure!(

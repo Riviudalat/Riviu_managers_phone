@@ -171,6 +171,14 @@ fn may_verify(state: &str, intent: Option<&str>, evidence: Option<&str>) -> bool
 const UPLOAD_IDLE_AFTER_MINUTES: i64 = 240;
 const SCHEDULED_FIRST_CHECK_SECONDS: i64 = 120;
 const VERIFICATION_CHECK_SECONDS: i64 = 300;
+pub(super) fn verification_check_seconds(intent: Option<&str>) -> i64 {
+    if intent.and_then(|raw| serde_json::from_str::<serde_json::Value>(raw).ok())
+        .is_some_and(|value| value["package"] == crate::threads_publish::ANDROID_PACKAGE) {
+        120
+    } else {
+        VERIFICATION_CHECK_SECONDS
+    }
+}
 
 pub(super) fn needs_review(evidence: Option<&str>) -> bool {
     evidence
@@ -509,7 +517,7 @@ impl Database {
         let attempts = evidence["verificationStatus"]["attempts"]
             .as_u64()
             .unwrap_or(0);
-        evidence["verificationStatus"] = serde_json::json!({"state":"pending","cause":"operatorResumed","reasonCode":"operatorResumed","reason":"Tiếp tục xác minh bài đã gửi; không đăng lại","attempts":attempts,"checkIntervalSeconds":VERIFICATION_CHECK_SECONDS,"nextCheckAt":now,"deadlineAt":null});
+        evidence["verificationStatus"] = serde_json::json!({"state":"pending","cause":"operatorResumed","reasonCode":"operatorResumed","reason":"Tiếp tục xác minh bài đã gửi; không đăng lại","attempts":attempts,"checkIntervalSeconds":verification_check_seconds(candidate.effect_intent.as_deref()),"nextCheckAt":now,"deadlineAt":null});
         tx.execute("UPDATE publish_assignments SET state='verifying',error_code='post_verification_pending',evidence_json=?2,revision=revision+1,updated_at=?3 WHERE id=?1 AND revision=?4",params![assignment_id,evidence.to_string(),now,expected_revision])?;
         tx.execute(
             "DELETE FROM settings WHERE key=?1",
@@ -824,9 +832,9 @@ impl Database {
         let mut evidence: serde_json::Value = serde_json::from_str(evidence_json)?;
         evidence["verificationStatus"] = serde_json::json!({
             "state":"pending",
-            "reason":"Đã gửi bài hẹn giờ; Android mở lại TikTok để lấy link, nếu chưa được sẽ thử lại sau 5 phút",
+            "reason":format!("Đã gửi bài hẹn giờ; mở lại ứng dụng để lấy link, nếu chưa được sẽ thử lại sau {} phút", verification_check_seconds(intent.as_deref()) / 60),
             "cause":"deferredScheduledLink", "attempts":0, "readFailures":0,
-            "checkIntervalSeconds":VERIFICATION_CHECK_SECONDS, "reviewAfterMinutes":null, "deadlineAt":null, "nextCheckAt":first_scheduled_check(intent.as_deref()).map(|at|at.to_rfc3339()),
+            "checkIntervalSeconds":verification_check_seconds(intent.as_deref()), "reviewAfterMinutes":null, "deadlineAt":null, "nextCheckAt":first_scheduled_check(intent.as_deref()).map(|at|at.to_rfc3339()),
         });
         Ok(evidence.to_string())
     }
@@ -1286,7 +1294,7 @@ impl Database {
         // Each observation is bounded by the driver deadline; between attempts the
         // phone is released. Persist this cadence, including read failures and restart.
         let next_check = (!review).then(|| {
-            (checked + chrono::Duration::seconds(VERIFICATION_CHECK_SECONDS)).to_rfc3339()
+            (checked + chrono::Duration::seconds(verification_check_seconds(intent.as_deref()))).to_rfc3339()
         });
         let cause = if identity_missing {
             "submissionIdentityMissing"
@@ -1301,7 +1309,7 @@ impl Database {
         evidence["verificationStatus"] = serde_json::json!({
             "state":if review {"needsReview"} else {"pending"},
             "reason":reason,"checkedAt":now,"submittedAt":submitted,
-            "reviewAfterMinutes":null,"checkIntervalSeconds":VERIFICATION_CHECK_SECONDS,
+            "reviewAfterMinutes":null,"checkIntervalSeconds":verification_check_seconds(intent.as_deref()),
             "cause":cause,
             "observationReason":observation_reason,"reasonCode":reason_code,
             "attempts":attempts,"readFailures":read_failures,"nextCheckAt":next_check,

@@ -389,7 +389,7 @@ impl HelperClient {
     }
 
     async fn post_json(&self, path: &str, body: Value) -> anyhow::Result<Value> {
-        let response = self
+        let mut response = self
             .http
             .post(format!("{}{path}", self.base))
             .header(TOKEN_HEADER, helper_token(&self.serial))
@@ -397,6 +397,50 @@ impl HelperClient {
             .send()
             .await
             .with_context(|| format!("POST {}{path}", self.base))?;
+        if response.status() == reqwest::StatusCode::UNAUTHORIZED {
+            // A different desktop process may have replaced the service token.
+            // 401 rejected the request before its effect: rebind once, then retry.
+            start_service(&self.adb, &self.serial).await?;
+            // /status deliberately bypasses authentication, so it cannot prove
+            // that Android has delivered the new token Intent yet. Retry only
+            // definite 401 rejections: they occur before any endpoint effect.
+            // Never replay a successful/ambiguous mutation or other HTTP error.
+            for attempt in 0..8 {
+                tokio::time::sleep(Duration::from_millis(250)).await;
+                response = self.http.post(format!("{}{path}", self.base))
+                    .header(TOKEN_HEADER, helper_token(&self.serial))
+                    .json(&body).send().await
+                    .with_context(|| format!("POST helper {path} after token rebind"))?;
+                if !retry_auth_rebind(response.status(), attempt) {
+                    break;
+                }
+            }
+            if response.status() == reqwest::StatusCode::UNAUTHORIZED {
+                // Measured on Galaxy S8+, helper 0.7.0: a token replacement is
+                // refused with "existing session requires reconciliation" even
+                // after the prior desktop exited. This caller already holds the
+                // device's work lease. Reset only the helper, never the social app;
+                // the 401 proves this request has not performed its effect.
+                let restore_helper_ime = current_ime(&self.adb, &self.serial).await? == IME_ID;
+                tracing::warn!(serial = %self.serial, "Helper từ chối token mới; khởi động lại helper một lần để khôi phục phiên");
+                self.adb.shell(&self.serial, &format!("am force-stop {PACKAGE}")).await
+                    .context("restart helper with stale authentication session")?;
+                start_service(&self.adb, &self.serial).await?;
+                await_helper_ready(|| self.require_status()).await?;
+                if restore_helper_ime {
+                    enable_ime(&self.adb, &self.serial).await?;
+                    set_ime(&self.adb, &self.serial, IME_ID).await?;
+                }
+                for attempt in 0..8 {
+                    tokio::time::sleep(Duration::from_millis(250)).await;
+                    response = self.http.post(format!("{}{path}", self.base))
+                        .header(TOKEN_HEADER, helper_token(&self.serial))
+                        .json(&body).send().await
+                        .with_context(|| format!("POST helper {path} after stale-session restart"))?;
+                    if !retry_auth_rebind(response.status(), attempt) { break; }
+                }
+            }
+        }
         let status = response.status();
         let text = read_capped(response, path).await?;
         let value: Value = serde_json::from_str(&text)
@@ -427,6 +471,10 @@ impl HelperClient {
         let restore = set_ime(&self.adb, &self.serial, &previous).await;
         combine_ime_guard(outcome, restore)
     }
+}
+
+fn retry_auth_rebind(status: reqwest::StatusCode, attempt: usize) -> bool {
+    status == reqwest::StatusCode::UNAUTHORIZED && attempt < 7
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -849,6 +897,16 @@ struct StatusWire {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn auth_rebind_only_retries_definite_rejection_with_finite_budget() {
+        assert!(retry_auth_rebind(reqwest::StatusCode::UNAUTHORIZED, 0));
+        assert!(!retry_auth_rebind(reqwest::StatusCode::UNAUTHORIZED, 7));
+        for status in [reqwest::StatusCode::OK, reqwest::StatusCode::BAD_REQUEST,
+            reqwest::StatusCode::FORBIDDEN, reqwest::StatusCode::INTERNAL_SERVER_ERROR] {
+            assert!(!retry_auth_rebind(status, 0));
+        }
+    }
 
     #[tokio::test]
     async fn helper_startup_can_finish_after_the_service_start_command_returns() {

@@ -1,0 +1,8 @@
+<hierarchy>
+  <android.view.View package="com.instagram.barcelona" resource-id="tabs_screen" bounds="[0,0][1080,2220]">
+    <android.view.View package="com.instagram.barcelona" resource-id="profile_screen_edit_profile_button" enabled="true" bounds="[84,500][500,600]" />
+    <android.view.View package="com.instagram.barcelona" resource-id="tabs_bottom_bar" bounds="[0,1947][1080,2094]">
+      <android.view.View package="com.instagram.barcelona" resource-id="barcelona_tab_profile" enabled="true" selected="false" bounds="[839,1947][1038,2094]" />
+    </android.view.View>
+  </android.view.View>
+</hierarchy>

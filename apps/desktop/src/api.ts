@@ -834,6 +834,7 @@ export async function deviceThreadsBuild(udid: string) {
 
 export interface ThreadsAccountInfo extends ThreadsBuildInfo {
   account: string;
+  publishSupported: boolean;
 }
 
 export async function deviceThreadsAccount(udid: string) {
@@ -1208,12 +1209,12 @@ export async function publishReconcile(campaignId: string) {
 }
 
 /** The Sheet delivery config, minus the token itself (only whether one is set). */
-export async function publishSheetGetConfig() {
-  return invoke<PublishSheetConfig>("publish_sheet_get_config");
+export async function publishSheetGetConfig(network?: "threads" | "tiktok") {
+  return invoke<PublishSheetConfig>("publish_sheet_get_config", { network });
 }
 
-export async function publishSheetCheck(sheetUrl: string) {
-  return invoke<PublishSheetCheckResult>("publish_sheet_check", { sheetUrl });
+export async function publishSheetCheck(sheetUrl: string, network?: "threads" | "tiktok") {
+  return invoke<PublishSheetCheckResult>("publish_sheet_check", { sheetUrl, network });
 }
 
 export async function publishSheetPrepare(sheetUrl: string) {
@@ -1777,11 +1778,14 @@ export function googleSheetsPickFile() {
 export function googleSheetsListTabs(spreadsheetId: string) {
   return invoke<import("./types").GoogleSheetTab[]>("google_sheets_list_tabs", { spreadsheetId });
 }
-export function googleSheetsConnect(spreadsheetId: string, sheetId: number, confirmed: boolean, legacyWritersStopped = false) {
-  return invoke<PublishSheetCheckResult>("google_sheets_connect", { spreadsheetId, sheetId, confirmed, legacyWritersStopped });
+export function googleSheetsConnect(spreadsheetId: string, sheetId: number, confirmed: boolean, legacyWritersStopped = false, network?: "threads" | "tiktok") {
+  return invoke<PublishSheetCheckResult>("google_sheets_connect", { spreadsheetId, sheetId, confirmed, legacyWritersStopped, network });
 }
 export function googleSheetsDisconnect() {
   return invoke<import("./types").GoogleSheetsStatus>("google_sheets_disconnect");
+}
+export function googleSheetsRecoverLock(spreadsheetId: string, sheetId: number, writersStopped: boolean) {
+  return invoke<void>("google_sheets_recover_lock", { spreadsheetId, sheetId, writersStopped });
 }
 
 export interface PublishLimits { transfer: number; compose: number; verify: number; deviceTotal: number }

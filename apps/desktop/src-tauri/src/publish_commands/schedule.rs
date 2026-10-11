@@ -131,7 +131,7 @@ async fn prepare_schedule(
     validate_schedule(request)?;
     let manifest = preflight::scan_preflight_source(&request.source_root).await?;
     let sheet_choice =
-        preflight::verify_sheet_delivery_choice(&state.db, request.sheet_enabled).await;
+        preflight::verify_sheet_delivery_choice(&state.db, request.network, request.sheet_enabled).await;
     let mut prepared = Vec::new();
     for (index, slot) in request.slots.iter().enumerate() {
         let input = riviu_core::PublishPreflightRequest {

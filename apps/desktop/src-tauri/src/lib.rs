@@ -435,6 +435,7 @@ pub fn run() {
             google_sheet_commands::google_sheets_pick_file,
             google_sheet_commands::google_sheets_list_tabs,
             google_sheet_commands::google_sheets_connect,
+            google_sheet_commands::google_sheets_recover_lock,
             commands::list_device_work_states,
             commands::refresh_devices,
             commands::prepare_device,

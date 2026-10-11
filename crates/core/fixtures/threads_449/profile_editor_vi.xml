@@ -1,0 +1,11 @@
+<hierarchy>
+  <android.view.View package="com.instagram.barcelona" bounds="[0,0][1080,2220]">
+    <android.view.View package="com.instagram.barcelona" resource-id="navigation_bar_back_button" enabled="true" bounds="[0,74][158,200]" />
+    <android.view.View package="com.instagram.barcelona" resource-id="profile_editor_card_done_button" enabled="true" bounds="[911,104][1038,170]" />
+    <android.view.View package="com.instagram.barcelona" bounds="[84,459][996,604]">
+      <android.widget.TextView package="com.instagram.barcelona" resource-id="ig_text" text="Tên người dùng" bounds="[84,459][363,507]" />
+      <android.widget.TextView package="com.instagram.barcelona" text="fixture.account" bounds="[84,518][382,566]" />
+      <android.view.View package="com.instagram.barcelona" bounds="[84,541][996,641]" />
+    </android.view.View>
+  </android.view.View>
+</hierarchy>

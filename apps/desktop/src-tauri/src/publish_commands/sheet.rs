@@ -253,7 +253,7 @@ pub struct PublishSheetConfig {
     pub sheet_url: String,
 }
 
-pub(super) fn publish_sheet_config_of(db: &Database) -> Result<PublishSheetConfig, CommandError> {
+pub(super) fn publish_sheet_config_of(db: &Database, network: riviu_core::SocialNetwork) -> Result<PublishSheetConfig, CommandError> {
     let settings = db.publish_sheet_delivery_settings().map_err(err)?;
     let webhook_url = settings.webhook_url;
     let has_token = !settings.token.trim().is_empty();
@@ -267,24 +267,32 @@ pub(super) fn publish_sheet_config_of(db: &Database) -> Result<PublishSheetConfi
         webhook_url,
         has_token,
         internal_reporting: settings.internal_reporting,
-        sheet_url: db
-            .get_setting(riviu_core::publish_sheet::SHEET_URL_SETTING)
-            .map_err(err)?
-            .unwrap_or_default(),
+        sheet_url: if network == riviu_core::SocialNetwork::Threads {
+            db.get_setting(riviu_core::publish_sheet::THREADS_SHEET_URL_SETTING)
+                .map_err(err)?
+                .unwrap_or_default()
+        } else {
+            db.get_setting(riviu_core::publish_sheet::TIKTOK_SHEET_URL_SETTING)
+                .map_err(err)?
+                .or(db.get_setting(riviu_core::publish_sheet::SHEET_URL_SETTING).map_err(err)?)
+                .unwrap_or_default()
+        },
     })
 }
 
 #[tauri::command]
 pub fn publish_sheet_get_config(
     state: State<'_, AppState>,
+    network: Option<riviu_core::SocialNetwork>,
 ) -> Result<PublishSheetConfig, CommandError> {
-    publish_sheet_config_of(&state.db)
+    publish_sheet_config_of(&state.db, network.unwrap_or_default())
 }
 
 #[tauri::command]
 pub async fn publish_sheet_check(
     state: State<'_, AppState>,
     sheet_url: String,
+    network: Option<riviu_core::SocialNetwork>,
 ) -> Result<riviu_core::publish_sheet::SheetCheckResult, CommandError> {
     let _admission = state.ensure_accepting_work()?;
     let settings = state.db.publish_sheet_delivery_settings().map_err(err)?;
@@ -292,13 +300,21 @@ pub async fn publish_sheet_check(
         .await
         .map_err(crate::google_sheet_commands::connection_error)?;
     if result.connection_verified {
-        state
-            .db
-            .set_setting(
-                riviu_core::publish_sheet::SHEET_URL_SETTING,
-                &result.sheet_url,
-            )
-            .map_err(err)?;
+        let setting = if network.unwrap_or_default() == riviu_core::SocialNetwork::Threads {
+            riviu_core::publish_sheet::THREADS_SHEET_URL_SETTING
+        } else {
+            riviu_core::publish_sheet::TIKTOK_SHEET_URL_SETTING
+        };
+        state.db.set_setting(setting, &result.sheet_url).map_err(err)?;
+        if network.is_none() {
+            state
+                .db
+                .set_setting(
+                    riviu_core::publish_sheet::SHEET_URL_SETTING,
+                    &result.sheet_url,
+                )
+                .map_err(err)?;
+        }
         let internal = result.layout.as_deref() == Some("internal");
         if internal != settings.internal_reporting {
             state
@@ -399,7 +415,7 @@ pub fn publish_sheet_save_config(
              body, http:// là gửi chúng trần trụi ({webhook_url})"
         )));
     }
-    let stored = publish_sheet_config_of(&state.db)?;
+    let stored = publish_sheet_config_of(&state.db, riviu_core::SocialNetwork::TikTok)?;
     if token_must_be_restated(&stored.webhook_url, &webhook_url, token.as_deref()) {
         return Err(err(
             "đổi webhook thì phải nhập lại token: token là của endpoint cũ, gửi nó sang \
@@ -415,7 +431,7 @@ pub fn publish_sheet_save_config(
             internal_reporting,
         )
         .map_err(err)?;
-    publish_sheet_config_of(&state.db)
+    publish_sheet_config_of(&state.db, riviu_core::SocialNetwork::TikTok)
 }
 
 /// Independent canonical/report work with a shared durable per-assignment claim.

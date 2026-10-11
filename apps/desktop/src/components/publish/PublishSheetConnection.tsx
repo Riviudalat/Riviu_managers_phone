@@ -1,4 +1,4 @@
 ﻿import { GoogleSheetConnection } from "./GoogleSheetConnection";
-export function PublishSheetConnection({ onReadyChange }: { onReadyChange?: (ready: boolean) => void }) {
-  return <GoogleSheetConnection onReadyChange={onReadyChange} />;
+export function PublishSheetConnection({ network, onReadyChange }: { network?: "threads" | "tiktok"; onReadyChange?: (ready: boolean) => void }) {
+  return <GoogleSheetConnection key={network} network={network} onReadyChange={onReadyChange} />;
 }

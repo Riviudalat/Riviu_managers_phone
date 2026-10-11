@@ -1,4 +1,5 @@
-import { useState } from "react";
+import { useEffect, useState } from "react";
+import { getVersion } from "@tauri-apps/api/app";
 import { updateCheck, updateInstall } from "../../api";
 import { describeError } from "../../describeError";
 import { updateView } from "../../updateView";
@@ -6,16 +7,26 @@ import type { UpdateStatus } from "../../types";
 
 /** Checking for and installing a new build of this app. */
 export function UpdateSection() {
+  const [installedVersion, setInstalledVersion] = useState<string | null>(null);
   const [update, setUpdate] = useState<UpdateStatus | null>(null);
   const [updateError, setUpdateError] = useState<string | null>(null);
   const [updateSuccess, setUpdateSuccess] = useState<string | null>(null);
   const [checkingUpdate, setCheckingUpdate] = useState(false);
   const [installingUpdate, setInstallingUpdate] = useState(false);
 
+  useEffect(() => {
+    let active = true;
+    void getVersion().then((version) => {
+      if (active) setInstalledVersion(version);
+    }).catch(() => {});
+    return () => { active = false; };
+  }, []);
+
   const updateStatusView = updateView(update, updateError, installingUpdate);
   return (
     <section className="settings-section">
       <h3>Bản cập nhật</h3>
+      {installedVersion && <p className="hint">Phiên bản đang chạy: {installedVersion}</p>}
       <p>
         <span className={`chip ${updateStatusView.tone}`}>{updateStatusView.headline}</span>
       </p>

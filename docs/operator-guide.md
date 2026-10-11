@@ -490,9 +490,16 @@ chọn nội dung, ghép máy, kiểm tra trước khi đăng, hẹn giờ và t
 yêu cầu preflight và lịch, không đổi tab bằng cách chỉ thay nhãn. Preflight Android đọc package
 `com.instagram.barcelona`, version và locale; kiểm nội dung tối đa 500 ký tự cùng media,
 rồi báo riêng các bước composer/xác minh chưa được đo. Threads không dùng bộ chọn nhạc TikTok.
-Với Android chạy Threads `446.0.0.32.78` ở locale `en` hoặc `en-US`, Riviu có thể tự chuyển album ảnh của từng bài, chọn đúng ảnh theo thứ tự nguồn, nhập caption và xác minh bài trên profile của chính tài khoản trước khi lưu permalink. Mỗi bài hỗ trợ 1-14 ảnh; video, build/locale khác và album không khớp vẫn bị preflight chặn. Không cần ghi Flow hoặc chọn ảnh trong Inspector khi vận hành. Sau khi bấm Đăng một lần, kết quả chưa rõ được giữ để đối soát; không bấm Đăng lại cho cùng lượt. Nếu bật Google Sheet, cần kiểm tra kết nối ghi trước khi chạy; khi tắt Sheet, kết quả chỉ lưu trong Riviu.
-Trong **Thiết lập** và **Tiến độ chiến dịch**, nút **Mở Threads** trên từng dòng máy Android đưa ứng dụng Threads lên màn hình máy đó. Nút **Kiểm tra Threads** đọc build/ngôn ngữ và tài khoản đang đăng nhập qua phiên điều khiển của Riviu; kết quả hoặc lý do không kiểm tra được hiện ngay trên dòng máy. **Chọn nhanh** kiểm tra lại từng máy trong phạm vi và chỉ ghép máy có Threads build đã đo, tài khoản đọc được và không còn bài chờ đối soát. Những thao tác này không gửi bài; quyền chạy tự động vẫn phụ thuộc preflight của đúng máy và bài đã ghép.
-Nếu máy hiện màn đăng nhập Threads, Riviu báo chưa đăng nhập và không chọn máy đó để đăng. Một số máy báo locale hệ thống `en-US` nhưng Thư viện Threads hiển thị **Mới đây** bằng tiếng Việt; bộ chọn ảnh hiện chỉ đo giao diện tiếng Anh, nên Riviu dừng trước khi chọn ảnh hoặc bấm Đăng. Hãy dùng máy có Threads hiển thị **Recents** cho đến khi giao diện tiếng Việt được đo đầy đủ.
+Với Android chạy Threads `446.0.0.32.78` ở locale `en` hoặc `en-US`, Riviu có thể tự chuyển album ảnh của từng bài, chọn đúng ảnh theo thứ tự nguồn, nhập caption và xác minh bài trên profile của chính tài khoản trước khi lưu permalink. Mỗi thư mục set tạo một bài chứa toàn bộ 1-15 ảnh của set; video, build/locale khác và album không khớp vẫn bị preflight chặn. Không cần ghi Flow hoặc chọn ảnh trong Inspector khi vận hành. Sau khi nhập caption, Riviu đọc lại tối đa 45 giây và chỉ tiếp tục khi hai lần đọc đều xác nhận đúng caption, tài khoản và nút Đăng được bật. Nếu lệnh nhập báo timeout nhưng caption đã đúng, Riviu chỉ đọc lại, không nhập lại. Sau khi bấm Đăng một lần, kết quả chưa rõ được giữ để đối soát; không bấm Đăng lại cho cùng lượt. Nếu bật Google Sheet, cần kiểm tra kết nối ghi trước khi chạy; khi tắt Sheet, kết quả chỉ lưu trong Riviu.
+Trong Thiết lập, **Ghi kết quả lên Sheet** nằm ngay cạnh số bài đã chọn và được bật sẵn cho bản nháp mới. Riviu yêu cầu xác minh Sheet trước khi đăng nếu công tắc đang bật. Tắt công tắc chỉ khi muốn lưu link trong Riviu; hộp xác nhận đăng nhắc lại lựa chọn này.
+Trong **Threads → Theo dõi**, cột **Bài đã đăng** mở được permalink sau khi Riviu xác minh link. Bài đang chờ link tiếp tục được kiểm tra định kỳ; **Kiểm tra liên kết** chỉ đọc lại bài đã gửi, không bấm Đăng lần nữa.
+Trong **Thiết lập** và **Tiến độ chiến dịch**, nút **Mở Threads** trên từng dòng máy Android đưa ứng dụng Threads lên màn hình máy đó. Nút **Kiểm tra Threads** đọc build/ngôn ngữ và tài khoản đang đăng nhập qua phiên điều khiển của Riviu; kết quả hoặc lý do không kiểm tra được hiện ngay trên dòng máy. Với Threads `449.0.0.54.82`, lượt kiểm tra có thể tự mở tab Profile từ bảng tin rồi đọc tên ở profile hoặc màn chỉnh sửa do Riviu vừa mở; nó quay lại profile sau khi đọc và không lưu chỉnh sửa. Nếu máy đang ở màn chỉnh sửa từ trước, Riviu báo cần đóng màn này trước khi kiểm tra để không đụng vào thay đổi chưa lưu. Với build khác chưa được đo, mở profile của chính tài khoản trong Threads trước khi kiểm tra: Riviu chỉ đọc màn hình hiện tại, không tự điều hướng, và xác nhận bằng nút sửa profile cùng username duy nhất trong header, kể cả khi tab profile không có cờ selected. Tài khoản đọc được hiện riêng với trạng thái chưa hỗ trợ đăng tự động. Nếu lượt dọn nền đang giữ máy, phép kiểm tra chờ tối đa 8 giây rồi thử lại. **Chọn nhanh** kiểm tra lại từng máy trong phạm vi và chỉ ghép máy có Threads build đã đo, tài khoản đọc được và không còn phiên giữ máy. Phiên đã hủy, hoàn thành hoặc dừng sau khi nhả máy không ngăn ghép bài mới; cảnh báo thiếu link của bài cũ vẫn được giữ trong Theo dõi. Những thao tác này không gửi bài; quyền chạy tự động vẫn phụ thuộc preflight của đúng máy và bài đã ghép.
+Trong **Đăng bài → Threads → Thiết lập**, nút **Kiểm tra đăng nhập Threads** kiểm tra lần lượt mọi máy Android đang kết nối, kể cả khi chưa chọn thư mục bài. Danh sách máy hiển thị tài khoản đã đọc được, máy chưa đăng nhập hoặc lý do cần xử lý; máy chưa đăng nhập được bỏ qua, không tự đăng nhập. Kết quả này chỉ phản ánh lần kiểm tra vừa chạy; trước khi ghép bài, **Chọn nhanh** vẫn kiểm tra lại tài khoản và bài đang chờ đối soát.
+Nếu máy hiện màn đăng nhập Threads, Riviu báo chưa đăng nhập và không chọn máy đó để đăng. Một số máy báo locale hệ thống `en-US` nhưng Thư viện Threads hiển thị **Mới đây** bằng tiếng Việt. Trên Threads 446, bộ chọn ảnh nhận cả **Recents / Done** và **Mới đây / Xong**, đọc thứ tự **Đã chọn n/0** từ từng ảnh và vẫn đối chiếu thumbnail với ảnh nguồn. Mỗi set tiếp tục là một bài; không cần đổi ngôn ngữ máy cho bước chọn ảnh. Màn soạn bài nhận file đính kèm và hộp lưu nháp tiếng Việt. Các màn chưa nhận diện được vẫn dừng để kiểm tra; hỗ trợ này không mở quyền đăng cho Threads 449 hay xác nhận luồng lấy link tiếng Việt đã được đo đầy đủ.
+
+Khi hashtag mở bảng gợi ý chủ đề, Riviu nhận nút **Dismiss typeahead / Bỏ qua menu đề xuất** để đóng bảng, rồi đọc lại caption, tài khoản và nút Đăng trước khi tiếp tục.
+
+Nếu caption dài làm phần tài khoản cuộn khỏi màn soạn, Riviu cuộn về đầu một lần rồi xác minh lại tài khoản trước Đăng. Khi lấy link trên Threads 446, bộ xác minh nhận tác giả và thời gian tiếng Việt cùng nút **Đóng trang** của bảng chia sẻ. Hộp thoại chia sẻ sang Instagram chỉ được đóng tự động khi đọc được tùy chọn chia sẻ đang tắt; trạng thái bật hoặc không đọc được cần người dùng xử lý.
 
 Mỗi thư mục bài Threads dùng cấu trúc nguồn sau (tên phần sau dấu `-` có thể thay đổi):
 
@@ -558,6 +565,11 @@ về nút đã mở; đổi nguồn không được chuyển nội dung đang s�
 Thanh đầu đặt **Chọn thư mục** cạnh **Quét**. Phần Google Sheets chỉ gồm ô
 **Link Google Sheet**, nút **Đăng nhập Google** và nút **Kiểm tra kết nối**.
 Dán link của đúng tab (`gid` trong link), đăng nhập trên trình duyệt rồi kiểm tra.
+Ở mạng Threads, Riviu tìm tab có tên **Thread** hoặc **Threads** trong Google Sheet hiện tại và điền
+đúng `gid` nếu chưa lưu đích Threads. Bấm **Kiểm tra kết nối** để xác minh quyền ghi;
+việc tìm thấy tab chưa cho phép đăng. Threads lưu đích riêng, còn TikTok giữ tab đã
+kết nối trước đó. Preflight kiểm tra lại đúng tab của mạng đang chọn; đổi mạng không
+chuyển các hàng chờ cũ sang tab khác.
 Link không có `gid` dùng tab `0`. Sửa link sẽ bỏ trạng thái sẵn sàng của link cũ.
 Chuyển sang trang khác rồi quay lại giữ kết quả đã kiểm trong phiên app. Sau khi
 khởi động lại, kết nối Google và đích đã lưu cho phép đi tiếp tới bước kiểm tra
@@ -565,9 +577,9 @@ trước đăng; nhãn trung tính **Đã liên kết Google Sheet** chưa phả
 ghi hiện tại. Backend kiểm tra lại bảng, tab và quyền ghi trong preflight; lỗi tại
 đó chặn đăng. Nút **Kiểm tra kết nối** vẫn dùng để đối chiếu ngay khi cần.
 Trên màn hẹp, bấm **Thiết lập Google Sheet** để mở các control kết nối; Escape đóng
-phần này và trả focus. Trạng thái kết nối/lỗi thật vẫn hiển thị khi thu gọn. Các
-lựa chọn **Ghi kết quả lên Sheet / Xóa bản chuyển** nằm trong **Tùy chọn** ở thanh
-cuối, kèm tóm tắt trạng thái đã chọn; thu gọn không đổi lựa chọn.
+phần này và trả focus. Trạng thái kết nối/lỗi thật vẫn hiển thị khi thu gọn.
+**Ghi kết quả lên Sheet** nằm trực tiếp ở thanh cuối; **Xóa bản chuyển** nằm trong
+**Tùy chọn**. Thu gọn phần tùy chọn không đổi lựa chọn đã chọn.
 
 Kết nối kiểm tra trực tiếp bảng và tab trong link, không mở Google Picker.
 Khi đăng nhập, cấp quyền Google Sheets cho tài khoản có quyền sửa bảng đó; phiên
@@ -819,7 +831,10 @@ Giữ Riviu chạy, máy tính không ngủ và điện thoại có mạng. Khô
 vì TikTok còn xử lý/xét duyệt. **Chưa chắc chắn** giữ bằng chứng riêng và không cho đăng lại.
 
 **Hoàn tất** chỉ xuất hiện khi có liên kết đã xác minh và Sheet đã xác nhận nếu bật ghi.
-Còn nợ Sheet thì hiển thị **Hoàn tất một phần**, với **Ghi lại Sheet** khi phù hợp.
+Còn nợ Sheet thì hiển thị **Hoàn tất một phần**. Trong **Theo dõi > Chi tiết máy**,
+cột **Ghi Sheet** có nút **Ghi lại Sheet** cho từng bài đã xác minh link nhưng ghi Sheet thất bại.
+Đầu chiến dịch có **Ghi lại Sheet (số bài)** để xếp lại tất cả bài đủ điều kiện cùng lúc.
+Các nút này chỉ xếp lại link hiện có để ghi Sheet; không đăng bài lần nữa.
 Máy chờ xác minh không được tính vào số máy hoàn tất hoặc hiển thị tiến độ 100%.
 `Ghi kết quả lên Sheet` là lựa chọn riêng cho từng chiến dịch: tắt thì không
 tạo hàng chờ hoặc gửi webhook. Bật thì phải kết nối thành công trước lượt mới;
@@ -1126,6 +1141,10 @@ client gửi Content-Length. Run/cancel dùng chung admission và engine Flow v�
 
 ## Cài đặt
 
+Trong **Bản cập nhật**, dòng **Phiên bản đang chạy** cho biết phiên bản của ứng dụng
+đang mở. Sau khi cài bản mới trên máy khác, kiểm tra dòng này để xác nhận bản cài
+đã được thay thế trước khi đo lại giao diện Threads.
+
 **Bảo trì → Riviu Agent** hiển thị phần mềm điều khiển của từng điện thoại. Android
 dùng ADB/UiAutomator2 và helper Riviu; iPhone dùng Riviu Agent/WDA. Thông tin gói và
 xác thực iOS nằm riêng trong **Cấu hình Agent iOS**. Khi chỉ dùng Android hoặc chưa có
@@ -1169,3 +1188,7 @@ tin USB. Số token và độ trễ TypeSafe được ghi riêng trong log backe
 gateway sinh nội dung chưa bao gồm TypeSafe. TypeSafe không chứng minh đã Gửi, đúng
 account hoặc đã ghi Sheet; các bằng chứng đó vẫn do controller và verifier hiện có
 kiểm tra.
+
+Luồng lấy lại link Threads: ở mỗi lượt kiểm tra lại (tự động theo lịch 2 phút hoặc kiểm tra thủ công), Riviu về profile đúng tài khoản, kéo xuống làm mới danh sách, bấm biểu tượng trang cá nhân hai lần cách nhau 10 giây, rồi đọc lại và tìm caption. Với bài dài, Riviu xác minh tài khoản/caption/thời điểm trước khi cuộn trang chi tiết tìm Share (tối đa 7 lần); dừng khi mục tiêu mơ hồ. Clipboard cũ không đọc được không chặn Copy Link; clipboard sau sao chép được kiểm tra lại trong thời gian giới hạn. Lượt này chỉ xác minh bài đã gửi, không bấm Đăng lại. Nếu không đọc được profile hoặc mất kết nối, giữ bài chờ xác minh.
+
+Khi Google Sheet báo lượt ghi bị treo, dùng **Khôi phục khóa Sheet** cạnh Kiểm tra kết nối. Trước khi xác nhận, dừng ghi trên tất cả máy và chờ yêu cầu đang gửi kết thúc. Khôi phục giữ hàng chờ và lưu bản sao trạng thái cũ; sau đó kiểm tra kết nối và chọn Ghi lại Sheet. Không đăng lại bài. Lượt đã có dấu xác nhận ghi trên Google cần đối chiếu biên nhận, không bị nút này xóa khóa.

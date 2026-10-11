@@ -225,7 +225,7 @@ pub(crate) async fn build_publish_preflight_from_manifest(
     request: riviu_core::PublishPreflightRequest,
     manifest: &PublishFolderManifest,
 ) -> anyhow::Result<PreparedPublishPreflight> {
-    let sheet_choice = verify_sheet_delivery_choice(db, request.sheet_enabled).await;
+    let sheet_choice = verify_sheet_delivery_choice(db, request.network, request.sheet_enabled).await;
     build_publish_preflight_from_manifest_with_sheet(
         control,
         registry,
@@ -244,6 +244,7 @@ pub(super) type VerifiedSheetChoice =
 /// across its slots; the next request rechecks credentials and the actual target.
 pub(super) async fn verify_sheet_delivery_choice(
     db: &Database,
+    network: riviu_core::SocialNetwork,
     enabled: bool,
 ) -> VerifiedSheetChoice {
     if !enabled {
@@ -251,9 +252,14 @@ pub(super) async fn verify_sheet_delivery_choice(
     }
     let checked = async {
         let config = db.publish_sheet_delivery_settings()?;
-        let url = db
-            .get_setting(riviu_core::publish_sheet::SHEET_URL_SETTING)?
-            .unwrap_or_default();
+        let url = if network == riviu_core::SocialNetwork::Threads {
+            db.get_setting(riviu_core::publish_sheet::THREADS_SHEET_URL_SETTING)?
+                .context("Chưa kết nối tab Threads trong Google Sheet")?
+        } else {
+            db.get_setting(riviu_core::publish_sheet::TIKTOK_SHEET_URL_SETTING)?
+                .or(db.get_setting(riviu_core::publish_sheet::SHEET_URL_SETTING)?)
+                .unwrap_or_default()
+        };
         let result = crate::google_sheet_commands::check_current(db,&url).await?;
         anyhow::ensure!(result.connection_verified, "{}", result.message);
         anyhow::ensure!(
@@ -732,7 +738,7 @@ async fn build_threads_preflight(
                 "threads_media_invalid",
                 udid,
                 &bundle.id,
-                "Bài Threads phải có ảnh hoặc đúng một video MP4, không trộn hai loại",
+                "Mỗi set Threads phải có 1-15 ảnh và không chứa video MP4",
             ));
         }
 
@@ -1053,9 +1059,13 @@ mod sheet_choice_tests {
                     && issue.message.contains("shared writer refusal")));
         }
         assert_eq!(
-            verify_sheet_delivery_choice(&db, false).await.unwrap(),
+            verify_sheet_delivery_choice(&db, riviu_core::SocialNetwork::TikTok, false).await.unwrap(),
             None
         );
+        assert!(verify_sheet_delivery_choice(&db, riviu_core::SocialNetwork::Threads, true)
+            .await
+            .unwrap_err()
+            .contains("Chưa kết nối tab Threads"));
         let threads = build_publish_preflight_from_manifest_with_sheet(
             &control,
             &registry,

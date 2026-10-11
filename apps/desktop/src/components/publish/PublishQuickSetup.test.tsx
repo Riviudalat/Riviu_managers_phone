@@ -31,17 +31,45 @@ it("opens Threads only on the chosen Android device without starting publication
   expect(screen.queryByRole("button", { name: /Mở Threads trên/ })).toBeNull();
 });
 it("checks the selected phone's real Threads account without publishing", async () => {
-  vi.mocked(deviceThreadsAccount).mockResolvedValue({ packageName: "com.instagram.barcelona", version: "446.0.0.32.78", locale: "en", account: "test.account" });
+  vi.mocked(deviceThreadsAccount).mockResolvedValue({ packageName: "com.instagram.barcelona", version: "446.0.0.32.78", locale: "en", account: "test.account", publishSupported: true });
   const p = props();
   render(<PublishQuickSetup {...p} network="threads" />);
   fireEvent.click(screen.getByRole("button", { name: "Kiểm tra Threads trên Máy 2 · b" }));
-  await waitFor(() => expect(screen.getByText("@test.account")).toBeVisible());
+  await waitFor(() => expect(screen.getByText("Đã đăng nhập · @test.account")).toBeVisible());
   expect(deviceThreadsAccount).toHaveBeenCalledExactlyOnceWith("b");
   expect(p.onPreflight).not.toHaveBeenCalled();
   expect(p.onExecute).not.toHaveBeenCalled();
 });
+it("checks all connected Threads logins before any posts are selected", async () => {
+  vi.mocked(deviceThreadsAccount).mockImplementation(async udid => {
+    if (udid === "b") throw new Error("Threads account is not signed in");
+    return { packageName: "com.instagram.barcelona", version: "446.0.0.32.78", locale: "en", account: "ready.account", publishSupported: true };
+  });
+  const p = props();
+  render(<PublishQuickSetup {...p} network="threads" manifest={null} scanning={true} selectedIds={[]} assignments={{}} />);
+  fireEvent.click(screen.getByRole("button", { name: "Kiểm tra đăng nhập Threads" }));
+  await waitFor(() => expect(screen.getByText("1 đã đăng nhập · 1 hỗ trợ đăng / 2 đã kiểm tra")).toBeVisible());
+  expect(deviceThreadsAccount).toHaveBeenNthCalledWith(1, "a");
+  expect(deviceThreadsAccount).toHaveBeenNthCalledWith(2, "b");
+  expect(screen.getByText("Đã đăng nhập · @ready.account")).toBeVisible();
+  expect(screen.getByText("Chưa đăng nhập Threads")).toBeVisible();
+  expect(p.onAssign).not.toHaveBeenCalled();
+  expect(p.onPreflight).not.toHaveBeenCalled();
+  expect(p.onExecute).not.toHaveBeenCalled();
+});
+it("shows a signed-in account on an unmeasured build without offering it for automatic posting", async () => {
+  vi.mocked(deviceThreadsAccount).mockResolvedValue({ packageName: "com.instagram.barcelona", version: "447.0.0.0.0", locale: "en", account: "other.account", publishSupported: false });
+  const p = props(), assign = vi.fn();
+  render(<PublishQuickSetup {...p} network="threads" selectedIds={[]} assignments={{}} onAssignmentChange={assign} />);
+  fireEvent.click(screen.getByRole("button", { name: "Kiểm tra đăng nhập Threads" }));
+  await waitFor(() => expect(screen.getByText("2 đã đăng nhập · 0 hỗ trợ đăng / 2 đã kiểm tra")).toBeVisible());
+  expect(screen.getAllByText(/@other.account · Threads 447.0.0.0.0 \(en\) chưa hỗ trợ đăng/)).toHaveLength(2);
+  fireEvent.click(screen.getByRole("button", { name: "Chọn nhanh" }));
+  await waitFor(() => expect(deviceThreadsAccount).toHaveBeenCalledTimes(4));
+  expect(assign).not.toHaveBeenCalled();
+});
 it("quick assigns only freshly verified Threads accounts without pending posts", async () => {
-  vi.mocked(deviceThreadsAccount).mockResolvedValue({ packageName: "com.instagram.barcelona", version: "446.0.0.32.78", locale: "en", account: "ready.account" });
+  vi.mocked(deviceThreadsAccount).mockResolvedValue({ packageName: "com.instagram.barcelona", version: "446.0.0.32.78", locale: "en", account: "ready.account", publishSupported: true });
   const p = props(), assign = vi.fn();
   render(<PublishQuickSetup {...p} network="threads" selectedIds={[]} assignments={{}} deviceGuards={guards} onAssignmentChange={assign} />);
   fireEvent.click(screen.getByRole("button", { name: "Chọn nhanh" }));
@@ -49,17 +77,30 @@ it("quick assigns only freshly verified Threads accounts without pending posts",
   expect(deviceThreadsAccount).toHaveBeenCalledExactlyOnceWith("b");
   expect(p.onExecute).not.toHaveBeenCalled();
 });
+it("reuses released Threads phones with old link review while preserving the review", async () => {
+  vi.mocked(deviceThreadsAccount).mockImplementation(async udid => ({ packageName: "com.instagram.barcelona", version: "446.0.0.32.78", locale: "en", account: `${udid}.account`, publishSupported: true }));
+  const p = props(), assign = vi.fn(), open = vi.fn();
+  const released = { a: { blocking: [], linkReview: [row] }, b: { blocking: [], linkReview: [] } };
+  render(<PublishQuickSetup {...p} network="threads" selectedIds={[]} assignments={{}} deviceGuards={released} onAssignmentChange={assign} onPendingPublication={open} />);
+  fireEvent.click(screen.getByRole("button", { name: "Chọn nhanh" }));
+  await waitFor(() => expect(assign).toHaveBeenCalledExactlyOnceWith(["one", "two"], { one: "a", two: "b" }));
+  expect(screen.getByText("Bài cũ còn cần kiểm tra link")).toBeVisible();
+  fireEvent.click(screen.getByRole("button", { name: /Xem bài đang chờ/ }));
+  expect(open).toHaveBeenCalledWith("campaign-a");
+  expect(released.a.linkReview).toEqual([row]);
+  expect(p.onExecute).not.toHaveBeenCalled();
+});
 it("quick assignment leaves posts unassigned when Threads account cannot be verified", async () => {
   vi.mocked(deviceThreadsAccount).mockRejectedValue(new Error("Threads chưa cài"));
   const p = props(), assign = vi.fn();
   render(<PublishQuickSetup {...p} network="threads" selectedIds={[]} assignments={{}} onAssignmentChange={assign} />);
   fireEvent.click(screen.getByRole("button", { name: "Chọn nhanh" }));
-  await waitFor(() => expect(screen.getAllByText("Threads chưa cài")).toHaveLength(2));
+  await waitFor(() => expect(screen.getAllByText("Chưa xác minh: Threads chưa cài")).toHaveLength(2));
   expect(assign).not.toHaveBeenCalled();
   expect(p.onExecute).not.toHaveBeenCalled();
 });
 it("quick assignment uses only one machine per Threads account", async () => {
-  vi.mocked(deviceThreadsAccount).mockResolvedValue({ packageName: "com.instagram.barcelona", version: "446.0.0.32.78", locale: "en", account: "shared.account" });
+  vi.mocked(deviceThreadsAccount).mockResolvedValue({ packageName: "com.instagram.barcelona", version: "446.0.0.32.78", locale: "en", account: "shared.account", publishSupported: true });
   const p = props(), assign = vi.fn();
   render(<PublishQuickSetup {...p} network="threads" selectedIds={[]} assignments={{}} onAssignmentChange={assign} />);
   fireEvent.click(screen.getByRole("button", { name: "Chọn nhanh" }));

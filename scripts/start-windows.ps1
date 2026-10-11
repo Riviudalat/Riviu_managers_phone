@@ -132,6 +132,9 @@ try {
         Write-Host 'Prerequisites detected. Dependencies/build have not been tested.'
         exit 0
     }
+    if (Get-NetTCPConnection -LocalPort 5173 -State Listen -ErrorAction SilentlyContinue) {
+        throw 'Port 5173 is already in use. Close the running Riviu/Vite dev session before running START-RIVIU.cmd again; npm ci cannot replace native modules while Vite is using them.'
+    }
     if (-not $checks['Node/npm']) { Install-Package 'OpenJS.NodeJS.LTS' }
     if (-not (Test-Node)) { throw 'Compatible Node/npm still missing. Reopen the terminal or check the Node installation.' }
     if (-not $checks['Rustup']) { Install-Package 'Rustlang.Rustup' }
