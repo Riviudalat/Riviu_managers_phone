@@ -1733,6 +1733,7 @@ mod claim_tests {
             sound_policy: crate::publish::PublishSoundPolicy::Default,
             execution_confirmed: false,
             target_snapshot: None,
+            approval: None,
         };
         let record = db
             .create_publish_campaign(&request, &bundles)
@@ -1787,6 +1788,7 @@ mod claim_tests {
             sound_policy: crate::publish::PublishSoundPolicy::Default,
             execution_confirmed: true,
             target_snapshot: None,
+            approval: None,
         };
 
         let first = db
@@ -3109,6 +3111,7 @@ mod execution_snapshot_tests {
             sound_policy: PublishSoundPolicy::Default,
             execution_confirmed: true,
             target_snapshot: None,
+            approval: None,
         };
         (request, bundle)
     }

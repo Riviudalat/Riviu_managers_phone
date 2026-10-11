@@ -342,6 +342,9 @@ pub async fn publish_schedule_create(
                 sheet_enabled: request.sheet_enabled,
                 execution_confirmed: true,
                 target_snapshot: Some(prepared.report.target_snapshot.clone()),
+                // Frozen with the campaign: the timer, execution and dispatcher admission all
+                // check fresh work against it, and recovery expects its account.
+                approval: Some(prepared.approval()),
             };
             let snapshot = riviu_core::PublishExecutionSnapshotDraft {
                 input_digest: prepared.report.input_digest.clone(),

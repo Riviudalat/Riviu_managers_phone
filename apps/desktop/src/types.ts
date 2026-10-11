@@ -740,6 +740,8 @@ export interface PublishNeedsRelease {
   /** False: releasing would stop devices outside the selection, or an old post needs review. */
   releasable: boolean;
   message: string;
+  /** Exact identity of the holder (phone, owner kind, job or lease generation); Start may release only reviewed envelopes. */
+  envelope: string;
 }
 
 export interface PublishPreflightReport {

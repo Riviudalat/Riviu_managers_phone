@@ -35,6 +35,20 @@ fn write(conn: &Connection, id: &str, token: &str, s: &PublishRecoveryState) -> 
 fn current(conn: &Connection, id: &str, token: &str) -> anyhow::Result<bool> {
     Ok(conn.query_row("SELECT EXISTS(SELECT 1 FROM publish_assignments a JOIN publish_pipeline_runs r ON r.campaign_id=a.campaign_id JOIN publish_campaigns c ON c.id=a.campaign_id WHERE a.id=?1 AND r.token=?2 AND c.state='posting' AND a.effect_intent IS NULL AND a.state NOT IN ('cancelled','missed','uncertain','succeeded','verifying') AND NOT EXISTS(SELECT 1 FROM publish_exclude_requests e WHERE e.assignment_id=a.id))",params![id,token],|r|r.get(0))?)
 }
+/// One assignment's approval facts, read inside the caller's transaction: the campaign request
+/// (with its frozen approval), the receiving phone, and that phone's current account metadata.
+fn approval_facts(
+    conn: &Connection,
+    id: &str,
+) -> anyhow::Result<(crate::PublishCampaignRequest, String, String)> {
+    let (raw, udid, handle): (String, String, String) = conn.query_row(
+        "SELECT c.request_json,a.udid,COALESCE((SELECT handle FROM device_meta WHERE udid=a.udid),'')
+         FROM publish_assignments a JOIN publish_campaigns c ON c.id=a.campaign_id WHERE a.id=?1",
+        [id],
+        |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
+    )?;
+    Ok((serde_json::from_str(&raw)?, udid, handle))
+}
 fn record_failure(s: &mut PublishRecoveryState, failure: &RecoveryFailure) {
     s.last_error = Some(failure.message.clone());
     s.last_error_code = Some(failure.code.clone());
@@ -65,10 +79,10 @@ impl Database {
             return Ok(());
         };
         anyhow::ensure!(current(&tx, id, &token)?, "Lượt đăng đã dừng");
-        let norm = |s: &str| s.trim().trim_start_matches('@').to_lowercase();
+        let norm = |s: &str| crate::publish::normalize_publish_account(s);
         let assigned:String=tx.query_row("SELECT COALESCE((SELECT handle FROM device_meta WHERE udid=a.udid),'') FROM publish_assignments a WHERE id=?1",[id],|r|r.get(0))?;
         anyhow::ensure!(
-            assigned == s.expected_account,
+            norm(&assigned) == norm(&s.expected_account),
             "Tài khoản đã đổi; không tiếp tục bài cũ"
         );
         let expected = s.observed_account.as_deref().unwrap_or(&s.expected_account);
@@ -140,7 +154,15 @@ impl Database {
                 write(&tx, id, token, &s)?;
             }
             None => {
-                let expected:String=tx.query_row("SELECT COALESCE((SELECT handle FROM device_meta WHERE udid=a.udid),'') FROM publish_assignments a WHERE id=?1",[id],|r|r.get(0))?;
+                // The approved account is the reference; current metadata never becomes a
+                // new approval. Only a campaign from before approvals falls back to it, and
+                // admission refuses such a campaign before any device work.
+                let (request, udid, handle) = approval_facts(&tx, id)?;
+                let expected = request
+                    .approval
+                    .as_ref()
+                    .and_then(|approval| approval.accounts.get(&udid).cloned())
+                    .unwrap_or(handle);
                 write(
                     &tx,
                     id,
@@ -349,13 +371,28 @@ impl Database {
         if token != job.run.token {
             return Ok(false);
         }
-        let account:String=tx.query_row("SELECT COALESCE((SELECT handle FROM device_meta WHERE udid=a.udid),'') FROM publish_assignments a WHERE id=?1",[&job.assignment_id],|r|r.get(0))?;
-        if account != s.expected_account {
+        // The dispatcher's admission boundary, checked in the same transaction that admits the
+        // job: the campaign must carry an approval and the phone's account must still be the
+        // approved one. A refusal here happens before any transfer or composer input.
+        let (request, udid, account) = approval_facts(&tx, &job.assignment_id)?;
+        let refusal = crate::publish::publish_approval_refusal(&request, &udid, &account)
+            .map(|reason| ("publish_approval_changed", reason))
+            .or_else(|| {
+                (crate::publish::normalize_publish_account(&account)
+                    != crate::publish::normalize_publish_account(&s.expected_account))
+                .then(|| {
+                    (
+                        "retry_account_changed",
+                        "Tài khoản đã đổi; chưa tiếp tục bài cũ".to_owned(),
+                    )
+                })
+            });
+        if let Some((code, reason)) = refusal {
             s.state = "failed".into();
-            s.last_error = Some("Tài khoản đã đổi; chưa tiếp tục bài cũ".into());
+            s.last_error = Some(reason);
             s.next_retry_at = None;
-            tx.execute("UPDATE publish_dispatch_jobs SET state='finished',reason='retry_account_changed',revision=revision+1 WHERE assignment_id=?1 AND state='queued'",[&job.assignment_id])?;
-            tx.execute("UPDATE publish_assignments SET state='failed_before_dispatch',error_code='retry_account_changed',revision=revision+1 WHERE id=?1 AND effect_intent IS NULL",[&job.assignment_id])?;
+            tx.execute("UPDATE publish_dispatch_jobs SET state='finished',reason=?2,revision=revision+1 WHERE assignment_id=?1 AND state='queued'",params![&job.assignment_id,code])?;
+            tx.execute("UPDATE publish_assignments SET state='failed_before_dispatch',error_code=?2,revision=revision+1 WHERE id=?1 AND effect_intent IS NULL",params![&job.assignment_id,code])?;
             write(&tx, &job.assignment_id, &token, &s)?;
             tx.commit()?;
             return Ok(false);
@@ -563,18 +600,99 @@ mod tests {
     #[test]
     fn changed_account_and_stop_refuse_before_another_device_action() {
         let (db, _, campaign, _) = fixture();
-        let run = db.claim_publish_pipeline(&campaign).unwrap().unwrap();
-        let job = db.pending_publish_dispatch(10).unwrap().remove(0);
-        db.init_publish_recovery(&job.assignment_id, &run.token)
+        assert_eq!(
+            db.publish_approval_refusal(&campaign).unwrap(),
+            None,
+            "unchanged approval dispatches"
+        );
+        // A campaign from before approvals is reviewed again, never dispatched fresh.
+        let (legacy_db, _, legacy, _) = fixture();
+        legacy_db
+            .conn()
+            .unwrap()
+            .execute("UPDATE publish_campaigns SET request_json=json_remove(request_json,'$.approval') WHERE id=?1", [&legacy])
             .unwrap();
+        assert!(legacy_db
+            .publish_approval_refusal(&legacy)
+            .unwrap()
+            .unwrap()
+            .contains("trước khi có bản duyệt"));
+        // Rows past the effect boundary only reconcile: they are never fresh work to refuse or re-post.
+        legacy_db
+            .conn()
+            .unwrap()
+            .execute(
+                "UPDATE publish_assignments SET effect_intent='{}' WHERE campaign_id=?1",
+                [&legacy],
+            )
+            .unwrap();
+        assert_eq!(legacy_db.publish_approval_refusal(&legacy).unwrap(), None);
+        // Approved as A; by the time the schedule fires the stored account reads B.
+        let set_approved = |account: &str| {
+            let conn = db.conn().unwrap();
+            let raw: String = conn
+                .query_row(
+                    "SELECT request_json FROM publish_campaigns WHERE id=?1",
+                    [&campaign],
+                    |r| r.get(0),
+                )
+                .unwrap();
+            let mut request: crate::PublishCampaignRequest = serde_json::from_str(&raw).unwrap();
+            let approval = request.approval.as_mut().unwrap();
+            for approved in approval.accounts.values_mut() {
+                *approved = account.to_owned();
+            }
+            conn.execute(
+                "UPDATE publish_campaigns SET request_json=?2 WHERE id=?1",
+                params![&campaign, serde_json::to_string(&request).unwrap()],
+            )
+            .unwrap();
+        };
+        set_approved("approved.account");
         db.conn()
             .unwrap()
             .execute(
-                "INSERT INTO device_meta(udid,handle) VALUES(?1,'different.account')",
-                [&job.udid],
+                "INSERT INTO device_meta(udid,handle) VALUES('a','@Approved.Account'),('b','different.account'),('c','approved.account')",
+                [],
             )
             .unwrap();
+        let refusal = db.publish_approval_refusal(&campaign).unwrap().unwrap();
+        assert!(
+            refusal.contains("b: tài khoản đã đổi từ @approved.account sang @different.account"),
+            "{refusal}"
+        );
+        assert!(
+            !refusal.contains("a:") && !refusal.contains("c:"),
+            "only the stale phone is named: {refusal}"
+        );
+        let run = db.claim_publish_pipeline(&campaign).unwrap().unwrap();
+        let job = db
+            .pending_publish_dispatch(10)
+            .unwrap()
+            .into_iter()
+            .find(|job| job.udid == "b")
+            .unwrap();
+        db.init_publish_recovery(&job.assignment_id, &run.token)
+            .unwrap();
+        // Recovery expects the approved account, never the metadata that replaced it.
+        assert_eq!(
+            db.publish_recovery_state(&job.assignment_id)
+                .unwrap()
+                .unwrap()
+                .expected_account,
+            "approved.account"
+        );
         assert!(!db.admit_publish_reconnect(&job, true, 1000).unwrap());
+        let error: String = db
+            .conn()
+            .unwrap()
+            .query_row(
+                "SELECT error_code FROM publish_assignments WHERE id=?1",
+                [&job.assignment_id],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(error, "publish_approval_changed");
         assert_eq!(
             db.publish_recovery_state(&job.assignment_id)
                 .unwrap()

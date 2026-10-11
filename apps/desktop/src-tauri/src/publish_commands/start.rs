@@ -27,6 +27,7 @@ pub async fn publish_cancel_unaccepted_start(
 }
 
 #[tauri::command]
+#[allow(clippy::too_many_arguments)] // Tauri exposes each wire field as a named command argument.
 pub async fn publish_start(
     app: tauri::AppHandle,
     state: State<'_, AppState>,
@@ -35,6 +36,7 @@ pub async fn publish_start(
     approved_input_digest: String,
     confirmed: bool,
     preparation_id: Option<String>,
+    approved_release: Option<Vec<String>>,
 ) -> Result<PublishStartReceipt, CommandError> {
     let admission = state.ensure_accepting_work()?;
     state
@@ -143,6 +145,7 @@ pub async fn publish_start(
                 Some(confirmed),
                 approved_input_digest,
                 Some(request_id.clone()),
+                approved_release,
             )
             .await?;
             if campaign.run_at.is_none() {

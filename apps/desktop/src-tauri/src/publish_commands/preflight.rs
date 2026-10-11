@@ -274,6 +274,19 @@ pub async fn publish_scan_folder(
 pub(crate) struct PreparedPublishPreflight {
     pub(crate) report: riviu_core::PublishPreflightReport,
     pub(crate) bundles: Vec<riviu_core::PublishBundle>,
+    /// Each receiving phone's normalised account, exactly as `report.input_digest` bound it.
+    pub(crate) accounts: std::collections::BTreeMap<String, String>,
+}
+
+impl PreparedPublishPreflight {
+    /// The immutable approval a campaign created from this preflight carries (PLAN §3).
+    pub(crate) fn approval(&self) -> riviu_core::PublishApproval {
+        riviu_core::PublishApproval {
+            version: 1,
+            input_digest: self.report.input_digest.clone(),
+            accounts: self.accounts.clone(),
+        }
+    }
 }
 
 pub(super) fn require_new_publish_delivery(
@@ -819,7 +832,25 @@ pub(super) async fn build_publish_preflight_from_manifest_with_sheet(
         issues,
         sheet_configured,
     };
-    Ok(PreparedPublishPreflight { report, bundles })
+    let accounts = request
+        .udids
+        .iter()
+        .map(|udid| {
+            let handle = metas
+                .iter()
+                .find(|meta| meta.udid == *udid)
+                .map(|meta| meta.handle.as_str());
+            (
+                udid.clone(),
+                riviu_core::normalize_publish_account(handle.unwrap_or_default()),
+            )
+        })
+        .collect();
+    Ok(PreparedPublishPreflight {
+        report,
+        bundles,
+        accounts,
+    })
 }
 
 #[allow(clippy::too_many_arguments)] // Explicit inputs keep the per-device evidence owner visible.
@@ -1057,7 +1088,7 @@ fn evaluate_device_observation(
         // The approval binds each phone's account too: a handle changed elsewhere after the
         // review makes Start refuse instead of posting to an account nobody reviewed.
         "account": meta
-            .map(|meta| meta.handle.trim().trim_start_matches('@').to_lowercase())
+            .map(|meta| riviu_core::normalize_publish_account(&meta.handle))
             .unwrap_or_default(),
         "packageName": package_name,
         "version": version,

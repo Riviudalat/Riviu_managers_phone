@@ -511,6 +511,7 @@ fn stopped_resume_fixture() -> (super::Database, std::path::PathBuf, String, Str
         sheet_enabled: false,
         execution_confirmed: true,
         target_snapshot: None,
+        approval: None,
         sheet_delivery: None,
         verification_contract_version: None,
         verification_builds: vec![],
@@ -898,6 +899,7 @@ async fn verification_and_stored_reconciliation_hydrate_only_the_selected_public
         sound_policy: riviu_core::PublishSoundPolicy::Default,
         execution_confirmed: true,
         target_snapshot: None,
+        approval: None,
     };
     let snapshot = riviu_core::PublishExecutionSnapshotDraft {
         input_digest: "b".repeat(64),
@@ -1056,6 +1058,7 @@ fn sheet_delivery_reconciles_the_operation_before_emitting_and_rejects_a_stale_r
         sound_policy: riviu_core::PublishSoundPolicy::Default,
         execution_confirmed: true,
         target_snapshot: None,
+        approval: None,
     };
     let initial = riviu_core::PublishExecutionSnapshotDraft {
         input_digest: "a".repeat(64),
@@ -1652,6 +1655,21 @@ fn scheduled_campaigns_use_the_same_typed_runtime_as_the_manual_command() {
         "the scheduler must enqueue in the same durable pipeline consumed by the app dispatcher"
     );
     assert!(include_str!("pipeline.rs").contains(".claim_publish_pipeline(&campaign)"));
+    // Review F2: one approval validator in front of every fresh claim. The timer and
+    // `execute_pipeline` check before claiming; dispatcher admission re-checks per phone.
+    assert!(body.find("publish_approval_refusal(&id)") < body.find(".claim_publish_pipeline(&id)"));
+    let pipeline = include_str!("pipeline.rs");
+    assert!(
+        pipeline.find("publish_approval_refusal(&campaign)")
+            < pipeline.find(".claim_publish_pipeline(&campaign)")
+    );
+    let execute = code_of("pub(crate) async fn execute_publish_campaign_inner(").join(
+        "
+",
+    );
+    assert!(
+        execute.find("publish_approval_refusal(&campaign_id)") < execute.find("execute_pipeline(")
+    );
     assert!(
         !body.contains("park_legacy_scheduled_publish")
             && !body.contains("transfer_publish_campaign_inner")
@@ -1765,6 +1783,7 @@ async fn missing_sheet_config_keeps_the_confirmed_post_in_a_pending_outbox() {
         sound_policy: riviu_core::PublishSoundPolicy::Default,
         execution_confirmed: true,
         target_snapshot: None,
+        approval: None,
     };
     let campaign = db
         .create_publish_campaign(&request, &[bundle])
@@ -1829,6 +1848,7 @@ fn transfer_write_ahead_failure_stops_before_any_device_call() {
         sound_policy: riviu_core::PublishSoundPolicy::Default,
         execution_confirmed: true,
         target_snapshot: None,
+        approval: None,
     };
     let campaign = db
         .create_publish_campaign(&request, &[bundle])
@@ -2646,6 +2666,54 @@ fn new_publications_require_sheet_and_verified_import_cleanup() {
     assert!(
         create.find("replay_publish_create(")
             < create.find("preflight::require_new_publish_delivery(")
+    );
+    // PLAN §3 / review F1 check order: replay, validation, the waiting-only handoff lock, the
+    // read-only approval (digest + exact release envelope), and only then any owner effect;
+    // the fresh post-release digest still gates staging.
+    let at = |needle: &str| {
+        create
+            .find(needle)
+            .unwrap_or_else(|| panic!("{needle} missing from create"))
+    };
+    let order = [
+        "replay_publish_create(",
+        "preflight::require_new_publish_delivery(",
+        "wait_manual_handoff_until(",
+        "require_approval_before_effects(",
+        "defer_idle_work(",
+        "prepare_publish_devices(",
+        "require_current_preflight_digest(&prepared.report",
+        "let approval = prepared.approval();",
+        "create_publish_with_receipt(",
+    ];
+    for pair in order.windows(2) {
+        assert!(
+            at(pair[0]) < at(pair[1]),
+            "{} must come before {}",
+            pair[0],
+            pair[1]
+        );
+    }
+    let approval = code_of("async fn require_approval_before_effects(").join(
+        "
+",
+    );
+    assert!(
+        approval.find("require_current_preflight_digest(") < approval.find("unapproved_release(")
+            && !approval.contains("reconcile_helpers_for_admission")
+            && !approval.contains("prepare_publish_devices"),
+        "the approval check is the plain builder and touches no owner"
+    );
+    // The stop boundary re-checks the reviewed envelope before its first exclusion or stop.
+    let handoff = include_str!("../commands/device_handoff.rs");
+    let release = &handoff[handoff
+        .find("pub(crate) async fn prepare_publish_devices(")
+        .unwrap()..];
+    assert!(
+        release.find("unapproved_release(&needs, approved_release)")
+            < release.find("request_publish_handoff_exclusion(")
+            && release.find("unapproved_release(&needs, approved_release)")
+                < release.find("operation_stop(app")
     );
     let schedule = code_of("async fn prepare_schedule(").join("\n");
     assert!(schedule.contains("preflight::require_new_publish_delivery(request.sheet_enabled, request.delete_after_publish)"));

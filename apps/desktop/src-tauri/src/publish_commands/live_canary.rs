@@ -199,6 +199,7 @@ async fn live_publish_canary() -> anyhow::Result<()> {
             network: riviu_core::SocialNetwork::TikTok,
             sound_policy: request.sound_policy, sheet_enabled: false, execution_confirmed: true,
             target_snapshot: Some(prepared.report.target_snapshot.clone()),
+            approval: Some(prepared.approval()),
         };
         let campaign = db.create_publish_campaign_with_snapshot(&campaign_request, &[managed], &riviu_core::PublishExecutionSnapshotDraft {
             input_digest: prepared.report.input_digest, status: riviu_core::PublishExecutionStatus::Partial,

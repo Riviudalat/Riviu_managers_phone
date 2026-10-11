@@ -304,10 +304,73 @@ pub struct PublishCampaignRequest {
     /// replaced after restart without losing the roster, aliases or exclusions that were approved.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub target_snapshot: Option<crate::ResolvedTargetSnapshot>,
+    /// The operator's approval, frozen when the campaign is created (PLAN §3).
+    ///
+    /// Every fresh dispatch is checked against it, and recovery takes the expected account
+    /// from it rather than from metadata that may have changed since. Campaigns created
+    /// before approvals existed have none and must be reviewed again before a fresh dispatch.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub approval: Option<PublishApproval>,
 }
 
 pub const fn default_sheet_enabled() -> bool {
     true
+}
+
+/// What the operator approved for one campaign, immutable once the campaign exists.
+///
+/// `input_digest` is the preflight digest the confirmation was bound to. `accounts` is each
+/// receiving phone's account, normalised with [`normalize_publish_account`], exactly as that
+/// digest bound it: a phone whose account changes afterwards no longer matches the approval.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct PublishApproval {
+    pub version: u32,
+    pub input_digest: String,
+    pub accounts: std::collections::BTreeMap<String, String>,
+}
+
+/// The one account spelling used by approvals and the preflight digest: no `@`, no case.
+pub fn normalize_publish_account(handle: &str) -> String {
+    handle.trim().trim_start_matches('@').to_lowercase()
+}
+
+/// Why fresh work for `udid` may not be dispatched under this campaign's approval, if at all.
+///
+/// The single check shared by every path that starts publish work (the schedule timer, manual
+/// and orchestration execution, and dispatcher admission). It never adopts the current account
+/// as a new approval: a change means review again and create a new campaign.
+pub fn publish_approval_refusal(
+    request: &PublishCampaignRequest,
+    udid: &str,
+    current_handle: &str,
+) -> Option<String> {
+    let Some(approval) = request.approval.as_ref() else {
+        return Some(
+            "Lượt đăng được tạo trước khi có bản duyệt theo phiên bản; xem lại rồi tạo lượt mới, không đăng tiếp lượt cũ"
+                .into(),
+        );
+    };
+    let Some(approved) = approval.accounts.get(udid) else {
+        return Some(format!(
+            "{udid}: máy không có trong bản đã duyệt; xem lại rồi tạo lượt mới"
+        ));
+    };
+    let current = normalize_publish_account(current_handle);
+    let shown = |account: &str| {
+        if account.is_empty() {
+            "chưa gắn".to_owned()
+        } else {
+            format!("@{account}")
+        }
+    };
+    (current != *approved).then(|| {
+        format!(
+            "{udid}: tài khoản đã đổi từ {} sang {} sau khi duyệt; xem lại rồi tạo lượt mới",
+            shown(approved),
+            shown(&current)
+        )
+    })
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -2677,6 +2740,7 @@ mod execution_contract_tests {
             },
             execution_confirmed: true,
             target_snapshot: Some(target_snapshot.clone()),
+            approval: None,
         };
         let restored: PublishCampaignRequest = serde_json::from_str(
             &serde_json::to_string(&request).expect("serialize the approved request"),

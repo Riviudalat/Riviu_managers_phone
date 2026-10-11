@@ -284,8 +284,10 @@ pub async fn publish_create_campaign(
     confirmed: Option<bool>,
     approved_input_digest: String,
     request_id: Option<String>,
+    approved_release: Option<Vec<String>>,
 ) -> Result<PublishCampaignRecord, CommandError> {
     let _admission = state.ensure_accepting_work()?;
+    let approved_release = approved_release.unwrap_or_default();
     source_root = source_root.trim().to_string();
     let sound_policy = sound_policy.unwrap_or_default();
     let confirmed = confirmed.unwrap_or(false);
@@ -324,21 +326,43 @@ pub async fn publish_create_campaign(
     {
         return Ok(prior);
     }
+    // PLAN §3 check order. (1) Replay above. (2) Validate the request, then enter the handoff
+    // boundary, which only waits. (3) Verify the reviewed approval read-only — input digest and
+    // exact release envelope — before any owner is deferred, excluded, stopped or closed.
+    // (4) Release only reviewed holders, re-checked at the stop boundary. (5) Fresh post-release
+    // preflight and digest before staging, transfer or Post.
+    preflight::require_new_publish_delivery(
+        preflight_request.sheet_enabled,
+        preflight_request.delete_after_publish,
+    )
+    .map_err(err)?;
+    riviu_core::publish::validate_publish_mapping(
+        &preflight_request.bundle_ids,
+        &preflight_request.udids,
+    )
+    .map_err(err)?;
     let handoff_deadline = tokio::time::Instant::now() + Duration::from_secs(125);
-    let _idle = run_at.is_none().then(|| state.control.defer_idle_work(&udids, DeviceWorkOwner::Script));
-    let handoff = if confirmed && run_at.is_none() {
+    let releasing = confirmed && run_at.is_none();
+    let handoff = if releasing {
         Some(crate::commands::wait_manual_handoff_until(handoff_deadline).await?)
     } else {
         None
     };
     // Shutdown may have started while this accepted request waited its turn.
     let _after_handoff_admission = state.ensure_accepting_work()?;
-    preflight::require_new_publish_delivery(
-        preflight_request.sheet_enabled,
-        preflight_request.delete_after_publish,
-    )
-    .map_err(err)?;
     preparation::initialize(&state.db, &state.events, &state.registry);
+    require_approval_before_effects(
+        &state,
+        &preflight_request,
+        &approved_input_digest,
+        releasing.then_some(approved_release.as_slice()),
+    )
+    .await?;
+    let _idle = run_at.is_none().then(|| {
+        state
+            .control
+            .defer_idle_work(&udids, DeviceWorkOwner::Script)
+    });
     preparation::stage(&state.db, "preparingDevices")
         .await
         .map_err(err)?;
@@ -373,8 +397,15 @@ pub async fn publish_create_campaign(
         for udid in &udids {
             preparation::progress(udid, "preparingDevices", "running", 0, None);
         }
-        let result =
-            crate::commands::prepare_publish_devices(&app, &state, udids.clone(), handoff, handoff_deadline).await?;
+        let result = crate::commands::prepare_publish_devices(
+            &app,
+            &state,
+            udids.clone(),
+            &approved_release,
+            handoff,
+            handoff_deadline,
+        )
+        .await?;
         require_released_publish_devices(&udids, &result).map_err(err)?;
     }
     preparation::stage(&state.db, "checkingDevices")
@@ -401,6 +432,8 @@ pub async fn publish_create_campaign(
         )));
     }
     require_current_preflight_digest(&prepared.report, &approved_input_digest).map_err(err)?;
+    // Frozen now, from the fresh preflight whose digest just matched the approval.
+    let approval = prepared.approval();
     let selected = prepared.bundles;
     // Concurrent copies belong to separate preparation attempts. Only the
     // winner's managed media is committed; cleanup never deletes another caller's copy.
@@ -460,6 +493,7 @@ pub async fn publish_create_campaign(
         sound_policy,
         execution_confirmed: confirmed,
         target_snapshot: Some(prepared.report.target_snapshot.clone()),
+        approval: Some(approval),
     };
     let initial_snapshot = riviu_core::PublishExecutionSnapshotDraft {
         input_digest: prepared.report.input_digest.clone(),
@@ -485,6 +519,46 @@ pub async fn publish_create_campaign(
             Err(err(error))
         }
     }
+}
+
+/// Step 3 of the start check order: the approval the operator reviewed must still be current
+/// before this request changes any owner (PLAN §3).
+///
+/// Read-only: the plain preflight builder (no helper reconciliation), allowed to reuse the
+/// device evidence the review just read, compared with the approved digest; and, when the
+/// request will release phones, every holder observed now must be one the review listed. A
+/// mismatch settles the start as a refusal with no owner touched. The fresh post-release
+/// preflight further down stays the authority for readiness and the final digest.
+async fn require_approval_before_effects(
+    state: &AppState,
+    request: &riviu_core::PublishPreflightRequest,
+    approved_input_digest: &str,
+    approved_release: Option<&[String]>,
+) -> Result<(), CommandError> {
+    let (request_id, preparation_id) = preparation::CONTEXT
+        .try_with(|context| (context.request_id.clone(), context.preparation_id.clone()))
+        .unwrap_or_else(|_| (Uuid::new_v4().to_string(), Uuid::new_v4().to_string()));
+    let context = preparation::PreparationContext::new(
+        state.events.clone(),
+        request_id,
+        preparation_id,
+        false,
+    );
+    let current = preparation::CONTEXT
+        .scope(
+            context,
+            build_publish_preflight(&state.control, &state.registry, &state.db, request.clone()),
+        )
+        .await
+        .map_err(err)?;
+    require_current_preflight_digest(&current.report, approved_input_digest).map_err(err)?;
+    if let Some(approved) = approved_release {
+        let needs = crate::commands::observe_release_needs(state, &request.udids)?;
+        if let Some(refusal) = crate::commands::unapproved_release(&needs, approved) {
+            return Err(CommandError::operation(refusal));
+        }
+    }
+    Ok(())
 }
 
 pub(super) fn require_released_publish_devices(
@@ -1262,6 +1336,15 @@ pub(crate) async fn execute_publish_campaign_inner(
     );
     if has_fresh_assignment || detail.assignments.is_empty() {
         issues.extend(fresh_issues.iter().cloned());
+    }
+    // The approval gate shared with the schedule timer and dispatcher admission (PLAN §3):
+    // fresh work runs only under the approval frozen at creation, for every receiving phone.
+    // Submitted and uncertain rows are not fresh and keep reconciling below.
+    if has_fresh_assignment {
+        if let Some(reason) = db.publish_approval_refusal(&campaign_id)? {
+            db.refuse_publish_for_approval(&campaign_id, &reason)?;
+            issues.push(publish_issue("publish_approval_changed", None, &reason));
+        }
     }
 
     // The production command owns the complete phone-side transaction. The typed core

@@ -2029,9 +2029,11 @@ export function typesafeCheckComment(candidate: string, caption: string | null, 
 
 
 /** ACK only: background preparation/execution is observed through status and operations. */
-export async function publishStart(request: PublishPreflightRequest, requestId: string, approvedInputDigest: string, preparationId?: string) {
+/** `approvedRelease` is the exact release envelope the operator reviewed (`needsRelease[].envelope`);
+ * the backend releases those holders only and refuses any other before stopping anything. */
+export async function publishStart(request: PublishPreflightRequest, requestId: string, approvedInputDigest: string, preparationId?: string, approvedRelease: string[] = []) {
   return publishReceiptWithinDeadline(
-    invoke<import("./types").PublishStartStatus>("publish_start", { request, requestId, approvedInputDigest, confirmed: true, preparationId: preparationId ?? null }),
+    invoke<import("./types").PublishStartStatus>("publish_start", { request, requestId, approvedInputDigest, confirmed: true, preparationId: preparationId ?? null, approvedRelease }),
     "Chưa nhận xác nhận bắt đầu. Đang đối chiếu yêu cầu đã gửi.",
   );
 }

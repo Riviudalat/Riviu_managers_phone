@@ -265,6 +265,9 @@ pub(crate) async fn execute_pipeline(
                     .is_some_and(|target| target.version == 2)),
         "Lượt đăng cần kiểm tra lại theo cơ chế xác minh mới trước khi chạy"
     );
+    if let Some(reason) = db.publish_approval_refusal(&campaign)? {
+        anyhow::bail!(reason);
+    }
     let run = db
         .claim_publish_pipeline(&campaign)?
         .ok_or(PipelineClaimRejected)?;
@@ -742,6 +745,7 @@ mod tests {
             sheet_enabled: false,
             execution_confirmed: true,
             target_snapshot: None,
+            approval: None,
         };
         let campaign = db.create_publish_campaign(&request, &bundles).unwrap();
         let run = db.claim_publish_pipeline(&campaign.id).unwrap().unwrap();

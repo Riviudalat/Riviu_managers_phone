@@ -1145,7 +1145,10 @@ export function PublishPage({
       let status = await publishStartStatus(pending.requestId);
       if (!status) {
         try {
-          status = await publishStart(preflightRequest, pending.requestId, approved.inputDigest, approved.preparationId);
+          // The reviewed release envelope travels with the digest: the backend releases only
+          // these holders and refuses any other before stopping anything.
+          status = await publishStart(preflightRequest, pending.requestId, approved.inputDigest, approved.preparationId,
+            (approved.needsRelease ?? []).map((row) => row.envelope));
         } catch (error) {
           status = await publishStartStatus(pending.requestId);
           if (!status) throw error;

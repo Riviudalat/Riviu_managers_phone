@@ -2705,9 +2705,18 @@ impl AppState {
                                 "schedule_capacity_deadline",
                             )
                         } else {
-                            publish_db
-                                .claim_publish_pipeline(&id)
-                                .map(|run| run.is_some())
+                            // The approval gate shared with execution and dispatcher
+                            // admission (PLAN §3): a stale or missing approval is settled
+                            // before the claim, so nothing reaches the dispatcher.
+                            match publish_db.publish_approval_refusal(&id) {
+                                Ok(Some(reason)) => publish_db
+                                    .refuse_publish_for_approval(&id, &reason)
+                                    .map(|()| false),
+                                Ok(None) => publish_db
+                                    .claim_publish_pipeline(&id)
+                                    .map(|run| run.is_some()),
+                                Err(error) => Err(error),
+                            }
                         };
                         if let Err(error) = result {
                             log::error!("publish schedule {id}: {error:#}");

@@ -788,6 +788,7 @@ impl ProductionOrchestrationPort {
             sound_policy: config.sound_policy.clone(),
             execution_confirmed: true,
             target_snapshot: Some(request.target.clone()),
+            approval: Some(prepared.approval()),
         };
         let (_record, created) = self
             .db

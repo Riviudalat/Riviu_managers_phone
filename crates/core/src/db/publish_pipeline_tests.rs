@@ -42,6 +42,14 @@ pub(in crate::db) fn fixture() -> (
         sheet_enabled: true,
         execution_confirmed: true,
         target_snapshot: None,
+        // The fixture phones carry no account metadata, so each was approved without one.
+        approval: Some(crate::PublishApproval {
+            version: 1,
+            input_digest: "0".repeat(64),
+            accounts: ["a", "b", "c"]
+                .map(|udid| (udid.to_owned(), String::new()))
+                .into(),
+        }),
     };
     let c = db.create_publish_campaign(&request, &bundles).unwrap();
     let a = db.get_publish_campaign(&c.id).unwrap().unwrap().assignments;

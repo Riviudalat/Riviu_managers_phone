@@ -811,6 +811,7 @@ async fn verification_stops_tiktok_only_after_the_submitted_upload_is_proven_set
             sheet_enabled: false,
             execution_confirmed: true,
             target_snapshot: None,
+            approval: None,
             sheet_delivery: None,
             verification_contract_version: None,
             verification_builds: vec![],

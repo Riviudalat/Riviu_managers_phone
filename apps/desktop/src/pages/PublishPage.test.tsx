@@ -417,6 +417,26 @@ describe("production publish wizard", () => {
     expect(createCampaign).not.toHaveBeenCalled();
     expect(executeCampaign).not.toHaveBeenCalled();
   });
+  it("voids the review when a different job now holds a reviewed phone, and sends no start", async () => {
+    // Review F1: the same phone and an unchanged digest, but Nuôi was replaced by Tương tác.
+    // The holder is compared by its exact envelope, never by phone alone.
+    const implementation = preflightCampaign.getMockImplementation()!;
+    const hold = (owner: string, title: string, envelope: string) =>
+      ({ udid: "PHONE-A", owner, title, releasable: true, message: "", envelope });
+    preflightCampaign
+      .mockImplementationOnce(async (request) => ({ ...(await implementation(request)), needsRelease: [hold("nurture", "Nuôi sáng", "operation:PHONE-A:nurture:run-1")] }))
+      .mockImplementationOnce(async (request) => ({ ...(await implementation(request)), needsRelease: [hold("interaction", "Tương tác chiều", "operation:PHONE-A:interaction:run-2")] }));
+    render(<PublishPage devices={devices} selected={[]} onSelectUdids={() => {}} />);
+    await prepareOne();
+    await waitFor(() => expect(screen.getByRole("button", { name: "Kiểm tra & đăng" })).toBeEnabled());
+    await userEvent.click(screen.getByRole("button", { name: "Kiểm tra & đăng" }));
+    const confirm = await screen.findByRole("button", { name: "Xác nhận đăng công khai 1 bài" });
+    await waitFor(() => expect(confirm).toBeEnabled());
+    await userEvent.click(confirm);
+    expect(await screen.findByText(/đổi từ nurture · Nuôi sáng sang interaction · Tương tác chiều/)).toBeVisible();
+    expect(preflightCampaign).toHaveBeenCalledTimes(2);
+    expect(publishStart).not.toHaveBeenCalled();
+  });
   it("admits one start from the single review confirmation while its receipt is pending", async () => {
     let accept!: (value: Awaited<ReturnType<typeof publishStart>>) => void;
     vi.mocked(publishStart).mockImplementationOnce(() => new Promise(resolve => { accept = resolve; }));
@@ -546,7 +566,9 @@ describe("production publish wizard", () => {
     expect(publishStart).not.toHaveBeenCalled();
     await userEvent.click(confirm);
     await waitFor(() => expect(publishStart).toHaveBeenCalledOnce());
-    expect(publishStart).toHaveBeenCalledWith(expect.objectContaining({sourceRoot:"C:/carousels",bundleIds:["b1"],udids:["PHONE-A"],runAt:null,captionOverrides:{b1:"caption for bo1"},sheetEnabled:true,deleteAfterPublish:true}),expect.any(String),"approved-digest-1",undefined);
+    expect(publishStart).toHaveBeenCalledWith(expect.objectContaining({sourceRoot:"C:/carousels",bundleIds:["b1"],udids:["PHONE-A"],runAt:null,captionOverrides:{b1:"caption for bo1"},sheetEnabled:true,deleteAfterPublish:true}),expect.any(String),"approved-digest-1",undefined,
+      // The reviewed release envelope travels with the digest; nothing was held here.
+      []);
     expect(requestConfirm).not.toHaveBeenCalled();
     expect(createCampaign).not.toHaveBeenCalled();
     expect(executeCampaign).not.toHaveBeenCalled();

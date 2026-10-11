@@ -513,6 +513,7 @@ mod tests {
                 sound_policy: crate::PublishSoundPolicy::Default,
                 execution_confirmed: false,
                 target_snapshot: None,
+                approval: None,
             };
             let campaign = self
                 .db

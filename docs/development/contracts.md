@@ -698,12 +698,35 @@ có versionCode tối thiểu 5 cho launcher; APK, manifest và NOTICE phải kh
   đích (số máy, alias, `rosterSha256` của cả fleet), và mỗi máy: số, alias, **tài khoản**
   (`DeviceMeta.handle` đã chuẩn hóa, từ 10/2026), package/version/locale TikTok, ngưỡng và
   kết luận dung lượng, cùng `sheetDelivery` (spreadsheet, gid, phiên bản). Không bind: số
-  byte trống, mtime, bài nhạc cụ thể (chọn lúc chạy theo `soundPolicy`), chủ giữ máy.
-- Start (`publish_create_campaign`) so digest sau khi nhả máy và chạy lại preflight, trước
-  staging, chuyển media và Post. Việc nhả máy đã liệt kê ở `needsRelease` nên xảy ra trước
-  so sánh này; UI kiểm lại digest và tập `needsRelease` ngay trước khi gửi Start để một bản
-  xem lại cũ dừng trước mọi hiệu lực. Tạo lịch so digest trước staging và trước khi ghi DB;
-  khi lịch chạy không so lại digest.
+  byte trống, mtime, bài nhạc cụ thể (chọn lúc chạy theo `soundPolicy`), chủ giữ máy. Chủ giữ
+  máy được duyệt riêng bằng phong bì nhả máy bên dưới, vì nhả máy đã duyệt cố ý đổi chủ.
+- Mỗi dòng `needsRelease` có `envelope`: máy, loại chủ và đúng việc đang giữ (id thao tác,
+  lượt/assignment đăng, hoặc thế hệ lease khi chủ không có thao tác nào được liệt kê). Điều
+  khiển trực tiếp và dọn nền là tạm thời, không thuộc phong bì. Start gửi kèm phong bì đã
+  xem (`approvedRelease`); chỉ các chủ trong phong bì được nhả. Chủ đã đi thì không cần duyệt;
+  chủ mới hoặc việc khác trên cùng máy làm Start bị từ chối trước khi dừng bất cứ gì.
+- Thứ tự kiểm của Start (`publish_create_campaign`): (1) replay đúng request ID và
+  fingerprint, trả receipt cũ, không dừng/tạo lại; (2) kiểm request, rồi vào khóa handoff (chỉ
+  chờ); (3) `require_approval_before_effects`: preflight chỉ đọc bằng builder gốc (không
+  reconcile helper, được dùng lại bằng chứng máy mà bản xem lại vừa đọc), so digest đã duyệt,
+  rồi so mọi chủ đang giữ với phong bì; lệch thì receipt thành từ chối, không đổi chủ nào;
+  (4) chỉ sau đó mới `defer_idle_work`, loại assignment, dừng/đóng máy, và
+  `prepare_publish_devices` quan sát lại dưới khóa, so phong bì lần nữa ngay trước loại/dừng
+  đầu tiên; (5) preflight mới sau khi nhả, `canExecute` và digest trước staging, chuyển media,
+  Post. Kiểm lại ở UI trước khi gửi chỉ giúp báo sớm, không thay các bước backend này.
+- Lượt tạo mới mang `approval` bất biến trong `request_json`: digest đã duyệt và tài khoản đã
+  chuẩn hóa của từng máy nhận. Một bộ kiểm duy nhất (`publish_approval_refusal`, kiểm cả tập máy
+  nhận chưa qua biên hiệu lực) chạy trước claim của bộ hẹn giờ, trước claim của
+  `execute_pipeline` (chạy tay, lịch qua điều phối, thử lại) và lặp theo từng máy ở cổng nhận
+  của dispatcher (`admit_publish_reconnect`, cùng transaction nhận việc, trước chuyển media hay
+  composer). Lượt không có `approval` (tạo trước 10/2026), máy không có trong bản duyệt, hoặc
+  tài khoản hiện tại khác tài khoản đã duyệt đều chuyển `failed_before_dispatch` với
+  `publish_approval_changed: lý do`; thử lại vẫn so với cùng bản duyệt nên không "hợp thức
+  hóa" thay đổi, chỉ lượt mới được xem lại mới mang đầu vào mới. Recovery lấy
+  `expectedAccount` từ bản duyệt, không từ metadata hiện tại; bằng chứng tài khoản trên điện
+  thoại trước Post so với tài khoản đó. Hàng đã gửi hoặc chưa rõ không phải việc mới: chỉ đối
+  chiếu, không đăng lại. Nội dung của lịch là bản sao managed đã kiểm hash lúc tạo; sửa file
+  nguồn sau đó không đổi thứ được đăng.
 
 ## Xác minh Publish và kết quả qua restart
 

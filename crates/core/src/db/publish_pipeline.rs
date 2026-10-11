@@ -9,6 +9,81 @@ pub struct PublishPipelineRun {
 }
 
 impl Database {
+    /// The approval gate in front of every fresh claim (PLAN §3): the schedule timer and the
+    /// manual, scheduled and orchestration execution paths all call it before
+    /// [`Self::claim_publish_pipeline`], and dispatcher admission repeats the same per-phone
+    /// check atomically. It reads the frozen approval and the current account of every phone
+    /// that has not crossed the effect boundary, and refuses the whole receiver set when any
+    /// one is stale: a smaller, silently re-chosen set is never dispatched. Submitted and
+    /// uncertain rows are not fresh work and are not looked at here.
+    pub fn publish_approval_refusal(&self, campaign_id: &str) -> anyhow::Result<Option<String>> {
+        let conn = self.conn()?;
+        let Some(raw) = conn
+            .query_row(
+                "SELECT request_json FROM publish_campaigns WHERE id=?1",
+                [campaign_id],
+                |row| row.get::<_, String>(0),
+            )
+            .optional()?
+        else {
+            return Ok(None);
+        };
+        let request: crate::PublishCampaignRequest = serde_json::from_str(&raw)?;
+        let mut statement = conn.prepare(
+            "SELECT a.udid,COALESCE((SELECT handle FROM device_meta WHERE udid=a.udid),'')
+             FROM publish_assignments a WHERE a.campaign_id=?1 AND a.effect_intent IS NULL
+             AND a.state IN ('queued','scheduled','ready','imported','failed_before_dispatch')
+             ORDER BY a.ordinal",
+        )?;
+        let fresh = statement
+            .query_map([campaign_id], |row| {
+                Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
+            })?
+            .collect::<Result<Vec<_>, _>>()?;
+        if fresh.is_empty() {
+            return Ok(None);
+        }
+        if request.approval.is_none() {
+            return Ok(crate::publish::publish_approval_refusal(&request, "", ""));
+        }
+        let refusals: Vec<String> = fresh
+            .iter()
+            .filter_map(|(udid, handle)| {
+                crate::publish::publish_approval_refusal(&request, udid, handle)
+            })
+            .collect();
+        Ok((!refusals.is_empty()).then(|| refusals.join("; ")))
+    }
+
+    /// Settle a refusal from [`Self::publish_approval_refusal`] before any device work: the
+    /// fresh rows and the campaign become `failed_before_dispatch` with the reason kept in
+    /// `error_code`. A later retry is checked against the same frozen approval and refused
+    /// again; only a newly reviewed campaign can carry changed inputs. Rows past the effect
+    /// boundary are not touched.
+    pub fn refuse_publish_for_approval(
+        &self,
+        campaign_id: &str,
+        reason: &str,
+    ) -> anyhow::Result<()> {
+        let mut conn = self.conn()?;
+        let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
+        let now = Utc::now().to_rfc3339();
+        let code = format!("publish_approval_changed: {reason}");
+        tx.execute(
+            "UPDATE publish_assignments SET state='failed_before_dispatch',error_code=?2,revision=revision+1,updated_at=?3
+             WHERE campaign_id=?1 AND effect_intent IS NULL
+             AND state IN ('queued','scheduled','ready','imported','failed_before_dispatch')",
+            params![campaign_id, code, now],
+        )?;
+        tx.execute(
+            "UPDATE publish_campaigns SET state='failed_before_dispatch',error_code=?2,revision=revision+1,updated_at=?3
+             WHERE id=?1 AND state IN ('queued','scheduled','ready','imported','failed_before_dispatch')",
+            params![campaign_id, code, now],
+        )?;
+        tx.commit()?;
+        Ok(())
+    }
+
     pub fn claim_publish_pipeline(
         &self,
         campaign_id: &str,

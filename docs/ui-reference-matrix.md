@@ -318,8 +318,12 @@ Lịch đăng bài là lịch một lần theo từng bài, mỗi dòng gắn m�
   nào.** cùng danh sách thay đổi; phải **Kiểm tra lại**. Bấm xác nhận thì app kiểm lại đúng
   yêu cầu đó ngay trước khi gửi; khác máy, bài, bản TikTok, dung lượng, máy cần nhả, đích
   Sheet, roster hoặc digest thì dừng, không gửi, giữ kết quả kiểm tra mới trên hộp kèm danh
-  sách đã đổi, và người vận hành xác nhận lại. Không tự thay máy hay tài khoản, không âm thầm
-  bớt phạm vi. Lượt đã gửi (có dấu chờ đối chiếu) không bị kiểm lại hay gửi lại.
+  sách đã đổi, và người vận hành xác nhận lại. Máy cần nhả so theo đúng việc đang giữ
+  (`envelope`), không chỉ theo máy: cùng máy nhưng việc khác thì hiện "đổi từ … sang …" và phải
+  xác nhận lại; Start gửi kèm phong bì đã xem để backend chỉ nhả đúng các việc đó. Kiểm ở UI chỉ
+  để báo sớm; backend vẫn tự kiểm bản duyệt trước mọi thay đổi chủ (xem `contracts.md`). Không tự
+  thay máy hay tài khoản, không âm thầm bớt phạm vi. Lượt đã gửi (có dấu chờ đối chiếu) không bị
+  kiểm lại hay gửi lại.
 - Hộp xác nhận Nuôi và Tương tác cũng hết hiệu lực khi phạm vi, thiết lập hoặc trạng thái
   roster của máy trong phạm vi đổi trong lúc hộp mở (máy vừa bận hoặc mất kết nối): không bắt
   đầu máy nào và báo phải kiểm tra lại.

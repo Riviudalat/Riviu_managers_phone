@@ -167,6 +167,7 @@ async fn main() -> anyhow::Result<()> {
         sound_policy: riviu_core::PublishSoundPolicy::Default,
         execution_confirmed: false,
         target_snapshot: None,
+        approval: None,
     };
     let initial_snapshot = riviu_core::PublishExecutionSnapshotDraft {
         input_digest: "a".repeat(64),

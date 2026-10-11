@@ -65,6 +65,33 @@ pub struct NeedsRelease {
     /// when an old post may already be public and needs review instead of a stop.
     pub releasable: bool,
     pub message: String,
+    /// Exact identity of what would be stopped (PLAN §3): the phone, the owner kind and the
+    /// job (operation id, publish campaign/assignment, or lease generation for an owner
+    /// without a listed job). Confirmation approves releasing these envelopes and nothing
+    /// else; a different job on the same phone is a different envelope.
+    pub envelope: String,
+}
+
+impl NeedsRelease {
+    /// Direct control and the idle sweep hold a phone for moments and yield to a confirmed
+    /// start; whether one happens to be there is not part of what the operator approved.
+    fn transient(&self) -> bool {
+        self.owner == "ManualControl" || self.owner == "IdleSweep"
+    }
+}
+
+/// The first holder that the reviewed release envelope does not cover, if any. A holder
+/// that went away needs no approval; a new or different one refuses the start before
+/// anything is stopped, excluded or closed.
+pub(crate) fn unapproved_release(needs: &[NeedsRelease], approved: &[String]) -> Option<String> {
+    needs
+        .iter()
+        .filter(|row| !row.transient())
+        .find(|row| !approved.contains(&row.envelope))
+        .map(|row| {
+            let job = if row.title.is_empty() { row.owner.clone() } else { format!("{} · {}", row.owner, row.title) };
+            format!("{}: tác vụ đang giữ máy ({job}) khác với lúc xem lại; chưa dừng gì, kiểm tra lại rồi xác nhận", row.udid)
+        })
 }
 
 /// Read-only: what a confirmed handoff would have to release for exactly `udids`.
@@ -129,6 +156,7 @@ pub(crate) fn observe_release_needs(
         for udid in devices.iter().filter(|d| selected.contains(*d)) {
             covered.insert((udid.clone(), key.clone()));
             needs.push(NeedsRelease {
+                envelope: format!("operation:{udid}:{}", detail.summary.id),
                 udid: udid.clone(),
                 owner: detail.summary.kind.as_key().into(),
                 title: detail.summary.title.clone(),
@@ -160,6 +188,7 @@ pub(crate) fn observe_release_needs(
             // assignment (stopping its verifier) and closes the phone. A possibly public
             // post becomes needsReview, so the verification debt is kept, not cleared.
             needs.push(NeedsRelease {
+                envelope: format!("publish-hold:{udid}:{}:{}", hold.campaign_id, hold.assignment_id),
                 udid: udid.clone(),
                 owner: "publish".into(),
                 title: hold.campaign_id.clone(),
@@ -190,7 +219,13 @@ pub(crate) fn observe_release_needs(
                 owner,
                 DeviceWorkOwner::ManualControl | DeviceWorkOwner::IdleSweep | DeviceWorkOwner::Nurture
             );
+            // No job is listed for this owner, so its lease generation is its identity.
+            let generation = state
+                .control
+                .held_work(udid)
+                .map_or_else(String::new, |held| held.token.to_string());
             needs.push(NeedsRelease {
+                envelope: format!("lease:{udid}:{owner:?}:{generation}"),
                 udid: udid.clone(),
                 owner: format!("{owner:?}"),
                 title: String::new(),
@@ -217,8 +252,21 @@ pub async fn operation_prepare_devices(
     let _admission = state.ensure_accepting_work()?;
     let handoff = lock_manual_handoff()?;
     if selected_only.unwrap_or(false) {
-        return prepare_publish_devices(&app, &state, udids, &handoff,
-            tokio::time::Instant::now() + std::time::Duration::from_secs(125)).await;
+        // This command is itself the operator's explicit release of the selection, so it
+        // approves exactly the holders it observes now (V6 replaces it with a reviewed list).
+        let approved: Vec<String> = observe_release_needs(&state, &udids)?
+            .into_iter()
+            .map(|row| row.envelope)
+            .collect();
+        return prepare_publish_devices(
+            &app,
+            &state,
+            udids,
+            &approved,
+            &handoff,
+            tokio::time::Instant::now() + std::time::Duration::from_secs(125),
+        )
+        .await;
     }
     prepare_manual_devices(&app, &state, udids, &handoff).await
 }
@@ -472,6 +520,7 @@ pub(crate) async fn prepare_publish_devices(
     app: &tauri::AppHandle,
     state: &AppState,
     udids: Vec<String>,
+    approved_release: &[String],
     _handoff: &tokio::sync::MutexGuard<'static, ()>,
     deadline: tokio::time::Instant,
 ) -> Result<OperationStopResult, CommandError> {
@@ -488,6 +537,11 @@ pub(crate) async fn prepare_publish_devices(
     let needs = observe_release_needs(state, &devices)?;
     if let Some(blocked) = needs.iter().find(|row| !row.releasable) {
         return Err(CommandError::operation(format!("{}: {}", blocked.udid, blocked.message)));
+    }
+    // Compare-and-stop: re-observed under the handoff lock, right before the first exclusion
+    // or stop. Only holders the operator reviewed may be released; anything else refuses.
+    if let Some(refusal) = unapproved_release(&needs, approved_release) {
+        return Err(CommandError::operation(refusal));
     }
     let mut stopped = HandoffStops { scoped: true, ..Default::default() };
     // Complete the scope check before stopping even one operation.
@@ -834,6 +888,40 @@ mod tests {
         let source = HashSet::from(["b".to_owned(), "other".to_owned()]);
         assert_eq!(selected_operation_scope(&selected, Some(&source)), ["b"]);
         assert!(selected_operation_scope(&selected, None).is_empty());
+        // What a confirmed handoff may stop is the reviewed envelope, not whatever holds the
+        // phone now (review F1): another job on the same phone refuses before any stop.
+        let row = |owner: &str, envelope: &str| NeedsRelease {
+            udid: "b".into(),
+            owner: owner.into(),
+            title: "Lượt cũ".into(),
+            releasable: true,
+            message: String::new(),
+            envelope: envelope.into(),
+        };
+        let reviewed = vec!["operation:b:nurture:run-1".to_owned()];
+        assert_eq!(
+            unapproved_release(&[row("nurture", "operation:b:nurture:run-1")], &reviewed),
+            None
+        );
+        let refusal = unapproved_release(
+            &[row("interaction", "operation:b:interaction:run-2")],
+            &reviewed,
+        )
+        .expect("a different job on a reviewed phone is not approved");
+        assert!(
+            refusal.starts_with("b: ") && refusal.contains("interaction"),
+            "{refusal}"
+        );
+        assert_eq!(
+            unapproved_release(&[], &reviewed),
+            None,
+            "a holder that left needs no approval"
+        );
+        assert_eq!(
+            unapproved_release(&[row("IdleSweep", "lease:b:IdleSweep:token")], &[]),
+            None,
+            "momentary owners are not part of the approval"
+        );
     }
     #[tokio::test(start_paused = true)]
     async fn handoff_waits_for_repair_without_stealing_or_outliving_its_deadline() {

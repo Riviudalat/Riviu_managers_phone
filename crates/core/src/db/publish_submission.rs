@@ -272,6 +272,7 @@ mod tests {
             sound_policy: crate::PublishSoundPolicy::Default,
             execution_confirmed: true,
             target_snapshot: None,
+            approval: None,
         };
         let campaign = db.create_publish_campaign(&request, &bundles).unwrap();
         db.update_publish_campaign_state(&campaign.id, S::Posting, None)

@@ -1,4 +1,4 @@
-import type { DeviceInfo, DeviceMeta, PublishPreflightReport } from "../../types";
+import type { DeviceInfo, DeviceMeta, PublishNeedsRelease, PublishPreflightReport } from "../../types";
 
 /**
  * A public-post review is valid for one version of its inputs (PLAN §3).
@@ -67,12 +67,27 @@ export function reviewChanges(
   }
   const reviewed = new Set(before.assignments.map((row) => row.udid));
   for (const row of after.assignments) if (!reviewed.has(row.udid)) changes.push(`${label(row.udid)} mới vào lượt đăng`);
-  const held = new Map((before.needsRelease ?? []).map((row) => [row.udid, row]));
-  const holds = new Map((after.needsRelease ?? []).map((row) => [row.udid, row]));
-  for (const [udid, row] of holds) {
-    if (!held.has(udid)) changes.push(`${label(udid)} vừa bận: ${row.title}; xác nhận sẽ phải dừng việc này`);
+  // Holders are compared by their exact envelope (phone, owner kind, job or lease generation),
+  // never by phone alone: a different job on the same phone voids the confirmation. Direct
+  // control and the idle sweep are momentary and not part of what was approved.
+  const transient = (row: PublishNeedsRelease) => row.owner === "ManualControl" || row.owner === "IdleSweep";
+  const job = (row: PublishNeedsRelease) => row.title ? `${row.owner} · ${row.title}` : row.owner;
+  const reviewedHolds = (before.needsRelease ?? []).filter((row) => !transient(row));
+  const freshHolds = (after.needsRelease ?? []).filter((row) => !transient(row));
+  const reviewedEnvelopes = new Set(reviewedHolds.map((row) => row.envelope));
+  const freshEnvelopes = new Set(freshHolds.map((row) => row.envelope));
+  for (const row of freshHolds) {
+    if (reviewedEnvelopes.has(row.envelope)) continue;
+    const old = reviewedHolds.filter((reviewedRow) => reviewedRow.udid === row.udid && !freshEnvelopes.has(reviewedRow.envelope));
+    changes.push(old.length
+      ? `${label(row.udid)}: việc đang giữ máy đổi từ ${old.map(job).join(", ")} sang ${job(row)}`
+      : `${label(row.udid)} vừa bận: ${job(row)}; xác nhận sẽ phải dừng việc này`);
   }
-  for (const udid of held.keys()) if (!holds.has(udid)) changes.push(`${label(udid)} không còn việc cần dừng`);
+  for (const row of reviewedHolds) {
+    if (!freshEnvelopes.has(row.envelope) && !freshHolds.some((fresh) => fresh.udid === row.udid)) {
+      changes.push(`${label(row.udid)} không còn việc cần dừng`);
+    }
+  }
   const sheet = (report: PublishPreflightReport) =>
     report.sheetDelivery ? `${report.sheetDelivery.spreadsheetId}#${report.sheetDelivery.sheetGid}` : "";
   if (sheet(before) !== sheet(after) || before.sheetEnabled !== after.sheetEnabled) changes.push("Đích ghi Google Sheet đã đổi");

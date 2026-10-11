@@ -348,6 +348,7 @@ mod tests {
                 excluded: vec![],
                 roster_sha256: "a".repeat(64),
             }),
+            approval: None,
         };
         let campaign = db.create_publish_campaign(&request, &[bundle]).unwrap().id;
         let assignment = db

@@ -747,6 +747,7 @@ mod tests {
             sound_policy: crate::publish::PublishSoundPolicy::Default,
             execution_confirmed: false,
             target_snapshot: None,
+            approval: None,
         };
         let campaign = db
             .create_publish_campaign(&request, &[bundle(&bundle_id)])
