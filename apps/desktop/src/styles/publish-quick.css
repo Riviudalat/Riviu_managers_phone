@@ -67,7 +67,12 @@
 .pq-device-tools { gap:6px; border-bottom:1px solid var(--line); padding-bottom:6px; }
 .pq-quick-actions { display:flex; align-items:center; gap:6px; min-width:0; }
 .pq-quick-actions>button { flex:1; min-width:0; min-height:32px; padding:4px 6px; font-size:var(--text-xs); white-space:nowrap; }
-.pq-quick-actions>.pq-quick-button { font-weight:600; }
+/* The auto-pair button takes the width its label needs and wraps before it would overflow: an
+   even half of the row was narrower than "Ghép tự động (chưa đăng)" (V6) at 1440 px. Icons
+   never shrink away (the icon-only Hoàn tác showed a cut "H" instead of its icon). */
+.pq-quick-actions>.pq-quick-button { flex:1 1 auto; font-weight:600; white-space:normal; line-height:1.25; }
+.pq-quick-actions>button:not(.pq-quick-button) { flex:0 0 auto; }
+.pq-quick-actions>button>svg { flex:none; }
 .pq-quick-label { flex:none; font-size:var(--text-xs); font-weight:600; color:var(--text-3); white-space:nowrap; }
 .pq-quick-label-short { display:none; }
 .pq-panel>header h2 .pq-scope-count { display:block; overflow:hidden; text-overflow:ellipsis; font-size:var(--text-xs); font-weight:400; line-height:1.5; color:var(--text-3); font-variant-numeric:tabular-nums; }
@@ -200,6 +205,9 @@
   .pq-devices>header>span { grid-column:1 / -1; grid-row:2; }
   .pq-quick-actions { gap:4px; }
   .pq-quick-actions>button { padding:4px; }
+  /* At 820x560 the 154 px label gets a 145 px button (measured in the mock), so it wraps; tight
+     lines keep the row within ~4 px of one line and the roster keeps two full rows. */
+  .pq-quick-actions>.pq-quick-button { padding:1px 4px; line-height:1.15; }
   .pq-quick-actions>button>svg { display:none; }
   .pq-active-post { padding:0; min-height:18px; }
   .pq-device-row>.machine-choice { grid-template-columns:minmax(0,1fr) auto; grid-template-rows:minmax(35px,auto) minmax(19px,auto); padding-right:0; min-height:58px; }
@@ -220,7 +228,9 @@
   .pq-settings:not(.is-open) .pq-settings-label-full { display:none; }
   .pq-settings:not(.is-open) .pq-settings-label-short { display:inline; }
   .pq-settings:not(.is-open) .pq-settings-content { min-width:0; }
-  .pq-settings:not(.is-open) .publish-sheet-result { white-space:nowrap; overflow:hidden; text-overflow:ellipsis; }
+  /* Block, not the base flex row: an ellipsis never shows on a flex container, so the hint was
+     cut mid-word at 820x560. The full text stays in its title. */
+  .pq-settings:not(.is-open) .publish-sheet-result { display:block; white-space:nowrap; overflow:hidden; text-overflow:ellipsis; }
   .pq-settings-content { max-height:90px; }
   .pq-settings.is-open .pq-settings-content { max-height:65vh; }
   .pq-device-filters>summary { line-height:1.5; }
@@ -302,11 +312,11 @@
 .pq-review dt { font-weight:600; color:var(--text-2); }
 .pq-review dd { margin:0; overflow-wrap:anywhere; }
 .pq-review>.pq-hint { margin:0; padding:0 8px 8px; }
-/* "Ghép tự động (chưa đăng)" is read in full: under 1000 px the group label yields and the
-   button wraps to two lines instead of clipping the "chưa đăng" promise. */
-@media (max-width:1000px) {
+/* "Ghép tự động (chưa đăng)" is read in full: under 1400 px the group label yields, Hoàn tác
+   shows only its icon and the button wraps to two lines instead of clipping the "chưa đăng"
+   promise (one line from 900 to 1400 px in the mock). */
+@media (max-width:1400px) {
   .pq-quick-actions>.pq-quick-label { display:none; }
-  .pq-quick-actions>.pq-quick-button { flex:1 1 auto; white-space:nowrap; }
   /* Hoàn tác keeps its accessible name ("Hoàn tác gán nhanh") and shows only its icon. */
   .pq-quick-actions>button:not(.pq-quick-button) { flex:none; width:32px; padding:0 7px; overflow:hidden; justify-content:flex-start; gap:12px; white-space:nowrap; }
   .pq-quick-actions>button:not(.pq-quick-button)>svg { display:inline; }
