@@ -1,5 +1,5 @@
 import { machineNumberLabel } from "../deviceNaming";
-import { useEffect, useLayoutEffect, useMemo, useRef, useState, type ReactElement } from "react";
+import { useEffect, useEffectEvent, useLayoutEffect, useMemo, useRef, useState, type ReactElement } from "react";
 import { createPortal } from "react-dom";
 import { DeviceContextMenu } from "./DeviceContextMenu";
 import type { DeviceInfo, GroupInputReport, HardwareKey } from "../types";
@@ -512,6 +512,13 @@ export function FocusStream({
   const quick = useQuickPhrases();
   const ime = useDeviceKeyboards(device.udid, runBusy);
 
+  // Effect events, not dependencies: both are new functions every render, and re-running the
+  // wheel effect on each render would set `disposed` and end a scroll that is still draining.
+  // Neither was stale in practice (both read only refs and a stable setter), but this keeps
+  // the listener on the latest render's versions without re-subscribing it.
+  const keyboardBusy = useEffectEvent(() => phoneKeyboard.isBusy());
+  const runWheelSwipe = useEffectEvent((work: () => Promise<void>) => runExclusive(work));
+
   // Ctrl+wheel zooms the preview. Plain wheel scrolls the phone. Registered
   // by hand because React's synthetic onWheel is passive.
   useEffect(() => {
@@ -523,7 +530,7 @@ export function FocusStream({
     const wheelTargets = targetKey.split("\0").filter(Boolean);
     const masterUdid = activeSync?.masterUdid;
     const drain = async () => {
-      if (phoneKeyboard.isBusy() || sending || disposed || inFlight.current || pointerBusyRef.current || !pendingTicks || !sessionReady) return;
+      if (keyboardBusy() || sending || disposed || inFlight.current || pointerBusyRef.current || !pendingTicks || !sessionReady) return;
       sending = true;
       try {
         while (pendingTicks && !disposed) {
@@ -535,7 +542,7 @@ export function FocusStream({
             0,
             Math.min(encodedH - 1, startY - ticks * encodedH * 0.18),
           );
-          await runExclusive(async () => {
+          await runWheelSwipe(async () => {
             if (wheelTargets.length > 1) {
               reportGroup(
                 await groupInput({
@@ -580,7 +587,7 @@ export function FocusStream({
         return;
       }
       if (!encodedW || !encodedH || !sessionReady) return;
-      if (phoneKeyboard.isBusy() || pointerBusyRef.current || (inFlight.current && !sending)) return;
+      if (keyboardBusy() || pointerBusyRef.current || (inFlight.current && !sending)) return;
       pendingTicks = Math.max(-3, Math.min(3, pendingTicks + Math.sign(event.deltaY)));
       void drain();
     };
