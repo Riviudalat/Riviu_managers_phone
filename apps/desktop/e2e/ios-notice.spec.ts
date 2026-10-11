@@ -48,5 +48,9 @@ test("iOS warning follows connected iPhones and stays inspectable in Settings", 
   await expect(page.getByTestId("device-tile")).toHaveCount(2);
   await emitRiviuEvent(page, { type: "devicesUpdated", devices: [...android, iphone] });
   await expect(warning).toHaveCount(0);
-  expect((await mockCommandCalls(page)).filter(call => /^(agent_repair|agent_preflight|agent_bulk_repair|install_ipa)$/.test(call.command))).toEqual([]);
+  // 5daf7d97: the Control Center checks idle Android phones by itself (agent_preflight). The iOS
+  // warning still never repairs, installs or checks anything.
+  const androidUdids = new Set(android.map(device => device.udid));
+  expect((await mockCommandCalls(page)).filter(call => /^(agent_repair|agent_preflight|agent_bulk_repair|install_ipa)$/.test(call.command))
+    .filter(call => !(call.command === "agent_preflight" && androidUdids.has(call.args?.udid)))).toEqual([]);
 });

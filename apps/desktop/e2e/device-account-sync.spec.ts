@@ -128,7 +128,8 @@ for (const width of [1440, 820]) {
     await menu.getByRole("menuitem", { name: "Đọc và gán nick TikTok (2 máy đã chọn)" }).click();
     await expect(tiles.nth(0).locator(".dev-phone-handle")).toHaveText("@nick_1");
     await expect(tiles.nth(1).locator(".dev-phone-handle")).toHaveText("@nick_7");
-    await expect(tiles.nth(2).locator(".dev-phone-handle")).toHaveCount(0);
+    // e42fcce5: the TikTok-name line always exists; a phone without a read nick shows "—".
+    await expect(tiles.nth(2).locator(".dev-phone-handle")).toHaveText("—");
     expect((await calls()).filter(c => c.cmd === "apply_account_reconciliation").map(c => c.args.udid)).toEqual(["MOCK-FLEET-1", "MOCK-FLEET-2"]);
 
     await tiles.nth(2).click({ modifiers: ["Control"] });
