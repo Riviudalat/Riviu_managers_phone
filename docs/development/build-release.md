@@ -91,6 +91,16 @@ một máy, chúng trùng tên hiển thị nhưng không trùng dữ liệu. Bi
 được CI đóng gói. Trên macOS, bundle vẫn là `Riviu Manager Full.app`; chỉ
 tiêu đề cửa sổ và tên file phát hành được đổi.
 
+Khi sửa hook hoặc template:
+
+- Tauri 2.11.4 nạp `installerHooks` trước khi định nghĩa `PRODUCTNAME` và
+  `MAINBINARYNAME`. Hai define này chỉ được dùng bên trong macro hook; `Function` ở cấp
+  ngoài cùng của file hook phải dùng chuỗi literal.
+- Registry cargo không có mã nguồn tauri-bundler. Template NSIS và WiX nằm trong
+  `node_modules/@tauri-apps/cli-win32-x64-msvc/cli.win32-x64-msvc.node`. Có thể dùng
+  `%LOCALAPPDATA%\tauri\NSIS\makensis.exe` và `WixTools314` để biên dịch thử một hook
+  hay template ngay trên máy, không cần build bộ cài.
+
 ## macOS và phạm vi hỗ trợ
 
 CI có arm64/x64, runtime Python native theo kiến trúc và mapping resource bảo toàn
