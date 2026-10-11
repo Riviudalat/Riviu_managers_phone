@@ -621,3 +621,131 @@ button.linkish,
   color: var(--rv-text-3);
   font-variant-numeric: tabular-nums;
 }
+
+/* ——— Tổng quan: the short tile (PLAN §2) ———
+   Text left, a small preview right, ~80 px tall instead of the portrait card, so 1366×768 and
+   Windows 125% (≈1093×614) still show a full 20-phone box. Máy N is 20 px and never truncates;
+   status is 14 px. Below 700 px of height the preview narrows; the text never shrinks. */
+.window-canvas[data-mode="overview"] {
+  grid-template-columns: repeat(auto-fill, minmax(min(100%, 150px), 1fr));
+  gap: 6px;
+}
+.window-canvas[data-mode="overview"] > .dev-phone {
+  flex-direction: row;
+  /* No paint containment here: a selected or focused tile lets its @account run past the
+     strip over its own preview instead of hiding behind an ellipsis. */
+  contain: layout;
+  content-visibility: visible;
+}
+.window-canvas[data-mode="overview"] .dev-phone-strip {
+  flex: 1 1 auto;
+  justify-content: flex-start;
+  gap: 1px;
+  height: 78px;
+  padding: 4px 8px;
+  border-bottom: 0;
+  border-right: 1px solid var(--rv-border);
+  border-radius: 7px 0 0 7px;
+  overflow: visible;
+  font-size: var(--rv-font-body);
+}
+.window-canvas[data-mode="overview"] .dev-phone-strip-head {
+  align-items: center;
+}
+.window-canvas[data-mode="overview"] .dev-phone-index {
+  flex: none;
+  overflow: visible;
+  font-size: var(--rv-font-device-lg);
+  line-height: 24px;
+}
+.window-canvas[data-mode="overview"] .dev-phone-ident {
+  font-size: var(--rv-font-body);
+  line-height: 20px;
+}
+.window-canvas[data-mode="overview"] .dev-phone-model {
+  display: none;
+}
+.window-canvas[data-mode="overview"] .dev-phone:is(.selected, :focus-visible, :focus-within) .dev-phone-ident {
+  position: relative;
+  z-index: 5;
+  width: max-content;
+  max-width: none;
+  overflow: visible;
+  padding-right: 4px;
+  background: var(--rv-surface-panel);
+  color: var(--rv-text-1);
+}
+.window-canvas[data-mode="overview"] .dev-phone-run {
+  flex-direction: row;
+  align-items: center;
+  gap: 4px;
+  margin-top: 0;
+}
+.window-canvas[data-mode="overview"] .dev-phone-status {
+  flex: 0 1 auto;
+  font-size: var(--rv-font-body);
+  line-height: 20px;
+}
+.window-canvas[data-mode="overview"] .dev-phone-detail {
+  flex: 1 1 0;
+}
+/* The run step stays on the status line after the chip, truncated; the alias and the cable
+   badge leave the short tile (both stay in the tooltip and accessible name). */
+.window-canvas[data-mode="overview"] .dev-phone-name,
+.window-canvas[data-mode="overview"] .dev-phone-conn {
+  display: none;
+}
+.window-canvas[data-mode="overview"] .dev-phone-screen {
+  flex: none;
+  width: 40px;
+  height: 80px;
+  aspect-ratio: auto;
+  border-radius: 0 7px 7px 0;
+}
+/* The open button covers most of a 40 px preview, so it shows on hover, focus and selection;
+   it stays in the tab order and appears as soon as it has keyboard focus. */
+.window-canvas[data-mode="overview"] .dev-phone-open {
+  right: 4px;
+  bottom: 4px;
+  width: 32px;
+  opacity: 0;
+}
+.window-canvas[data-mode="overview"] .dev-phone:is(:hover, :focus-within, .selected) .dev-phone-open {
+  opacity: 0.86;
+}
+.window-canvas[data-mode="overview"] .dev-phone-open:focus-visible {
+  opacity: 1;
+}
+@media (max-height: 700px) {
+  .window-canvas[data-mode="overview"] .dev-phone-screen {
+    width: 36px;
+  }
+}
+
+/* Frame age (frameFreshness.ts): words in the header band past the first threshold, and a
+   "Hình cũ" layer over the picture past the second. Never the connection badge's colours. */
+.dev-phone-age {
+  flex: none;
+  margin-left: auto;
+  font-size: var(--rv-font-caption);
+  font-variant-numeric: tabular-nums;
+  color: var(--rv-text-3);
+  white-space: nowrap;
+}
+.dev-phone-age[data-state="stale"] {
+  color: var(--rv-status-attention-text);
+  font-weight: 600;
+}
+.dev-phone-stale {
+  position: absolute;
+  inset: 0;
+  z-index: 2;
+  display: grid;
+  place-items: center;
+  background: var(--rv-stage-scrim);
+  color: var(--rv-text-inverse);
+  font-size: var(--rv-font-caption);
+  font-weight: 700;
+  text-align: center;
+  pointer-events: none;
+}

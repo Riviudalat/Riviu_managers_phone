@@ -46,9 +46,11 @@ của trang khác, không lặp trong cùng một màn hình.
 Modal và drawer giữ focus, Escape đóng lớp đang thao tác, đóng trả focus về nút mở.
 Các cửa sổ điện thoại là non-modal: không phủ tối, không giữ Tab bên trong;
 chọn được máy và trang khác khi cửa sổ đang mở. Một cửa sổ phóng to dùng lại khi đổi
-máy, trả phiên cũ trước khi mở phiên mới. Menu/confirm vẫn ở trên. Chất lượng và FPS
-Android chỉnh trực tiếp tại rail; hover bung bảng nổi, ghim giữ bảng cạnh lưới, nhóm
-bung/thu số máy bên trong. Dropdown dùng chung nền lớp nổi, viền trung tính, option
+máy, trả phiên cũ trước khi mở phiên mới. Menu/confirm vẫn ở trên. Không còn rail dọc:
+nút **Hiển thị** trên thanh công cụ mở/đóng một bảng ngang dưới thanh (chỉ khi bấm, không theo
+hover): cỡ ô (Nhỏ/Vừa/Lớn + thanh trượt), cỡ màn hình lớn, chất lượng lưới, chất lượng cửa sổ
+lớn, FPS (áp dụng cho mọi máy Android, kèm câu "sẽ khởi động lại luồng hình Android"), lọc kết
+nối, Xoay máy đã chọn, Cài đặt. Chỉ ghi "Đã áp dụng" sau khi lệnh lưu trả kết quả. Dropdown dùng chung nền lớp nổi, viền trung tính, option
 hover/đang trỏ nền xám, dấu chọn và menu cuộn, chuyển động 180–200 ms.
 Quy trình ứng dụng dùng bảng ứng dụng gọn. Mở ứng dụng vào trang vận hành cũ; Thêm Flow mở editor
 riêng với thư viện hành động bên trái, canvas chính, cấu hình và thiết bị bên phải.
@@ -58,16 +60,41 @@ cao 88 px. Dấu chọn trên thẻ và bộ đếm dưới thanh lọc dùng c�
 Dải thông tin gồm số máy/tên, @nick · model, dòng trạng thái gộp (`DeviceStatusLine`: biểu
 tượng + "Nhãn: việc/lý do" + màu trạng thái) và bước đang chạy hoặc lý do cần xử lý; chữ dài
 bị cắt nhưng vẫn đọc đủ qua tên truy cập và tooltip.
-Máy cần xử lý có viền hổ phách; máy đã chọn có viền cam và dấu tích. Rail **Hiển thị** giữ thanh
-trượt và Ctrl + lăn chuột, thêm ba cỡ: **Tổng quan** (ô tối thiểu 100 px), **Vừa** (140 px),
-**Lớn** (190 px). Kiểu dải theo dải độ rộng hiện tại, không theo nút đã bấm.
-**Ngoại lệ có tên — dải Tổng quan:** chỉ ở cỡ Tổng quan, dải cao khoảng 64 px và chữ phụ
-11,5 px (`--text-tile-compact`), dưới mức tối thiểu 12 px, để 20 ô trọn vẹn vừa màn
-1366×768 khi sidebar mở; riêng **Máy N** vẫn 18 px đậm và đọc đủ. Vừa và Lớn dùng dải 88 px
-với chữ ≥ 12 px; nút trong dải vẫn ≥ 12 px. Chip trạng thái trên ô theo bảng màu trạng thái:
+Máy cần xử lý có viền hổ phách; máy đã chọn có viền cam và dấu tích.
+
+**Ba chế độ xem** (nút có chữ trên thanh công cụ, nhớ theo người dùng, tập chọn giữ nguyên khi
+đổi): **Tổng quan** (mặc định cho người mới), **Màn hình** (preview lớn như cũ) và **Danh sách**.
+Ô **Tổng quan** là ô ngắn ~82 px: chữ bên trái, preview 40 px (36 px khi cửa sổ thấp hơn
+700 px) bên phải để định vị máy; Máy N 20 px đậm không bao giờ bị cắt; @tài khoản 14 px rút
+gọn trên ô và hiện đủ khi ô được chọn hoặc có focus (kể cả bàn phím); một dòng trạng thái 14 px
+có lý do/bước. Nút mở màn hình hiện khi hover/focus/chọn; nhấp đúp vẫn mở. Màn hình giữ thanh
+trượt và Ctrl + lăn chuột với ba cỡ **Nhỏ** (100 px), **Vừa** (140 px), **Lớn** (190 px); kiểu
+dải theo dải độ rộng hiện tại. Ở cỡ Nhỏ, dải cao khoảng 64 px với chữ phụ 11,5 px
+(`--text-tile-compact`, ngoại lệ có tên); Vừa và Lớn dùng dải 88 px với chữ ≥ 12 px.
+
+| Cỡ cửa sổ (CSS px) | Tổng quan, trọn vẹn ở đầu trang | Máy N / trạng thái | Cuộn ngang |
+|---|---|---|---|
+| 1920×1080 | 40/40 ô | 20 / 14 px | không |
+| 1366×768 | 34 ô (≥ 20) | 20 / 14 px | không |
+| 1093×614 (Windows 125%) | 20 ô | 20 / 14 px | không |
+| 820×560 | 6 ô | 20 / 14 px | không |
+
+Đo bằng mock trình duyệt, `fleetSize: 40`, hai box 20 + 19 máy không theo dải số, sidebar mở.
+
+**Box là danh sách máy được gán**, không suy từ Máy N: mỗi nhóm đã lưu là một box. Lưới Tổng
+quan và Màn hình chia theo box, mỗi phần có tiêu đề "tên · Laptop này · tổng · sẵn sàng · đang
+chạy · cần xử lý"; máy không thuộc nhóm nào nằm ở phần **Chưa thuộc box** cuối lưới; máy thuộc
+hai nhóm hiện một lần ở nhóm đầu. Chip box dưới thanh công cụ lọc lưới về một box và ghi
+"Đang lọc: … · Bỏ lọc box"; **+ Box** mở quản lý nhóm. Thứ tự trong box là thứ tự số máy, không
+đổi khi trạng thái đổi.
+
+**Độ mới hình**: ô ghi "hình N giây trước" khi khung hình gần nhất cũ hơn 20 giây và phủ
+**Hình cũ** lên preview khi quá 60 giây (`frameFreshness.ts`). Đây là tuổi hình, không phải
+tuổi lần kiểm trạng thái hay kết nối; Làm mới không đặt lại nó. Chip trạng thái trên ô theo bảng màu trạng thái:
 Sẵn sàng xanh lá, Đã kết nối (chưa kiểm điều khiển) xanh xám, Bận xanh dương, Cần xem hổ
 phách, Ngoại tuyến xám.
-Chế độ **Danh sách** của Thiết bị là bảng `<table>` gọn: mỗi máy một dòng 34 px, chữ 13 px,
+Cột Danh sách: Máy · Box · Tài khoản · Công việc (trục việc) · Điều khiển (trục điều khiển) ·
+Lý do · Bằng chứng · Kết nối. Chế độ **Danh sách** của Thiết bị là bảng `<table>` gọn: mỗi máy một dòng 34 px, chữ 13 px,
 đủ ≥ 15 dòng ở 1366×768. Cột: Máy (số · tên), Tài khoản (@nick), Trạng thái (dòng
 trạng thái gộp + bước), Cần xử lý (chỉ máy cần xử lý; nút Khôi phục helper khi có), Bằng chứng
 gần nhất, Kết nối (ẩn dưới 1100 px). Ô dài bị cắt một dòng, còn đủ qua tooltip và tên truy cập
@@ -339,9 +366,8 @@ Lịch đăng bài là lịch một lần theo từng bài, mỗi dòng gắn m�
   cho nó lấy từ thao tác phụ: từ 1280 px có chữ; 1180–1279 px Nhóm/Công cụ/Bảo trì chỉ còn icon (giữ tên
   đọc được và tooltip); 1024–1179 px Nhóm, Công cụ, Bảo trì và Quét lại vào menu **⋯ Thêm thao tác thiết
   bị** có chữ (Escape đóng và trả focus về ⋯; hộp thoại mở từ menu trả focus về ⋯; đổi cỡ cửa sổ hoặc
-  ghim/bỏ ghim qua mốc thì menu đóng, focus về Nhóm khi thao tác trở lại hàng, về ⋯ khi chúng vào menu). Khi bảng Hiển thị đang
-  ghim, các mốc này lùi 180 px (icon 1360–1599, menu 1024–1359); nếu vẫn không đủ, phần lọc xuống hàng thứ
-  hai chứ không co ô tìm. Nút chính giữ chữ. Toolbar không lặp số máy (đã ở thanh hệ thống). Dưới 1024 px
+  ghim/bỏ ghim qua mốc thì menu đóng, focus về Nhóm khi thao tác trở lại hàng, về ⋯ khi chúng vào menu). Nếu vẫn không đủ, phần lọc
+  xuống hàng thứ hai chứ không co ô tìm. Nút chính giữ chữ. Toolbar không lặp số máy (đã ở thanh hệ thống). Dưới 1024 px
   phần lọc xuống hàng thứ hai; thông báo luôn chiếm một hàng riêng. Nút chính ≥ 40 px được giữ ở cả các
   footer/toolbar riêng (Nuôi, Đăng bài, Quy trình ứng dụng, Tác vụ đã lưu, Quản lý tài khoản).
 - Không resize control theo label/hover/loading. Chữ wrap có chủ đích; không tràn, đè hàng sau hoặc scale theo viewport.

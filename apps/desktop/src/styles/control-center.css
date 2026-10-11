@@ -490,3 +490,135 @@
     justify-content: flex-end;
   }
 }
+
+/* ——— V4 Control Center (PLAN §2) ———
+   No vertical rail: the toolbar, the box chips and the opened "Hiển thị" panel share one column
+   with the wall, so a laptop gives every pixel of width to the tiles. `section.` outranks the
+   older two-column rules in operator-parity.css and the width tiers above. */
+section.device-browser {
+  grid-template-columns: minmax(0, 1fr);
+}
+section.device-browser > .device-browser-toolbar,
+section.device-browser > .device-browser-content {
+  grid-column: 1;
+}
+.box-chips {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: var(--rv-space-2);
+  min-width: 0;
+}
+.box-chips .group-tabs {
+  margin: 0;
+  border: 0;
+  padding: 0;
+}
+.box-chips .box-create {
+  min-height: var(--rv-control-dense);
+}
+.filter-toolbar .view-seg button {
+  white-space: nowrap;
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  font-size: var(--rv-font-body);
+}
+.filter-toolbar .display-toggle {
+  white-space: nowrap;
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  margin-left: var(--rv-space-2);
+}
+.control-display-panel {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: flex-start;
+  gap: var(--rv-space-3) var(--rv-space-6, 24px);
+  padding: var(--rv-space-3);
+  border: 1px solid var(--rv-border);
+  border-radius: var(--rv-radius-panel);
+  background: var(--rv-surface-panel);
+}
+.control-display-panel .display-group {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: flex-end;
+  gap: var(--rv-space-2) var(--rv-space-3);
+  min-width: 0;
+  margin: 0;
+  padding: 0;
+  border: 0;
+}
+.control-display-panel legend {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  margin-bottom: var(--rv-space-2);
+  font-size: var(--rv-font-body);
+  font-weight: 600;
+  color: var(--rv-text-1);
+}
+.control-display-panel label {
+  display: grid;
+  gap: 4px;
+  min-width: 150px;
+  font-size: var(--rv-font-body);
+  color: var(--rv-text-2);
+}
+.control-display-panel label > span {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+.control-display-panel output {
+  margin-left: auto;
+  font-variant-numeric: tabular-nums;
+  color: var(--rv-text-3);
+}
+.control-display-panel input[type="range"] {
+  width: 100%;
+  accent-color: var(--rv-primary);
+}
+.control-display-panel .control-connections {
+  display: flex;
+  gap: 4px;
+  margin: 0;
+  padding: 0;
+}
+.control-display-panel .control-shortcuts {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+}
+.control-display-panel .control-stream-hint,
+.control-display-panel .control-stream-status {
+  flex-basis: 100%;
+  margin: 0;
+  font-size: var(--rv-font-secondary);
+  color: var(--rv-text-2);
+}
+
+/* Box section header: one row across the wall, inside the same grid so selection, the rubber
+   band and Ctrl + wheel keep working across sections. */
+.window-canvas > .box-section-head {
+  grid-column: 1 / -1;
+  min-width: 0;
+}
+.box-section-head > [role="rowheader"] {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: baseline;
+  gap: 4px var(--rv-space-3);
+  padding: 2px 2px 0;
+  font-size: var(--rv-font-body);
+  color: var(--rv-text-2);
+}
+.box-section-head strong {
+  font-size: var(--rv-font-label);
+  color: var(--rv-text-1);
+}
+.box-section-counts {
+  font-variant-numeric: tabular-nums;
+}

@@ -7,7 +7,6 @@ import type { DeviceEvidence } from "../deviceEvidence";
 import { timeAgoVi } from "../timeAgo";
 import type { DeviceInfo } from "../types";
 import { TableColumnChooser } from "./table/ResponsiveTable";
-import { DeviceStatusLine } from "./DeviceStatusLine";
 import { readTableView, saveTableView, type TableView } from "./table/tableView";
 
 export interface DeviceListRow {
@@ -15,6 +14,8 @@ export interface DeviceListRow {
   machineNumber: number;
   name: string;
   handle?: string;
+  /** The box (saved group) that lists this phone, or "Chưa thuộc box". */
+  box: string;
   status: DeviceOperationalView;
   evidence: DeviceEvidence;
 }
@@ -32,9 +33,13 @@ interface Props {
 
 const COLUMNS = [
   { id: "machine", label: "Máy" },
+  { id: "box", label: "Box" },
   { id: "account", label: "Tài khoản" },
-  { id: "work", label: "Trạng thái" },
-  { id: "attention", label: "Cần xử lý" },
+  // The work axis alone: "Việc đang chạy" used to print the condensed status, so a free phone
+  // read "Sẵn sàng" under a work heading (PLAN §2, §4).
+  { id: "work", label: "Công việc" },
+  { id: "control", label: "Điều khiển" },
+  { id: "attention", label: "Lý do" },
   // The header says "Bằng chứng" so it fits its 14% column; the chooser and tooltip say it in full.
   { id: "evidence", label: "Bằng chứng gần nhất", header: "Bằng chứng" },
   { id: "connection", label: "Kết nối" },
@@ -42,6 +47,10 @@ const COLUMNS = [
 type ColumnId = (typeof COLUMNS)[number]["id"];
 
 const VIEW_KEY = "devices";
+
+function axisText(axis: { label: string; detail?: string }): string {
+  return axis.detail ? `${axis.label}: ${axis.detail}` : axis.label;
+}
 
 function evidenceText(evidence: DeviceEvidence, nowMs: number): string {
   if (evidence.state === "missing") return "Chưa có";
@@ -52,8 +61,9 @@ function evidenceText(evidence: DeviceEvidence, nowMs: number): string {
 /**
  * The compact device list: one 34 px line per phone, so 15+ phones fit a 1366×768 window.
  * Every cell truncates on one line; the row's accessible name and each cell's tooltip keep
- * the full text. The tile wall's status line is reused as is (`DeviceStatusLine`): the run and
- * its step are the work, and only a phone that needs the operator carries an attention reason.
+ * the full text. Công việc and Điều khiển are two of the three status axes (PLAN §4), each in
+ * its own column; the run and its step are the work, and only a phone that needs the operator
+ * carries a reason under Lý do.
  */
 export function DeviceListTable({ rows, selected, nowMs, onSelect, onToggle, onOpen, onDetails, onHelperMaintenance }: Props) {
   const [view, setView] = useState(() => readTableView(VIEW_KEY));
@@ -80,7 +90,7 @@ export function DeviceListTable({ rows, selected, nowMs, onSelect, onToggle, onO
         </tr>
       </thead>
       <tbody>
-        {rows.map(({ device, machineNumber, name, handle, status, evidence }) => {
+        {rows.map(({ device, machineNumber, name, handle, box, status, evidence }) => {
           const sel = selected.includes(device.udid);
           const label = machineNumberLabel(machineNumber);
           const statusLabel = deviceStatusText(status);
@@ -134,15 +144,23 @@ export function DeviceListTable({ rows, selected, nowMs, onSelect, onToggle, onO
                   <span className="device-table-alias"> · {name}</span>
                 </td>
               )}
+              {shown("box") && (
+                <td className="device-table-box" title={box}>{box}</td>
+              )}
               {shown("account") && (
                 <td className="device-table-account" title={account || "Chưa gắn tài khoản"}>
                   {account || <span className="device-table-missing">Chưa gắn</span>}
                 </td>
               )}
               {shown("work") && (
-                <td className="device-table-work" title={[statusLabel, status.step].filter(Boolean).join(" · ")}>
-                  <DeviceStatusLine view={status} />
+                <td className="device-table-work" title={[axisText(status.axes.work), status.step].filter(Boolean).join(" · ")}>
+                  {axisText(status.axes.work)}
                   {status.step && <span className="device-table-step"> {status.step}</span>}
+                </td>
+              )}
+              {shown("control") && (
+                <td className="device-table-control" title={status.axes.control.reason ?? axisText(status.axes.control)}>
+                  {axisText(status.axes.control)}
                 </td>
               )}
               {shown("attention") && (

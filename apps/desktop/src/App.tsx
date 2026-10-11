@@ -2,6 +2,7 @@ import { machineNumberLabel, operatorName } from "./deviceNaming";
 import { useNumberWallpaperSync } from "./wallpaperSync";
 import { deviceNumbersByUdid } from "./deviceNaming";
 import {
+  Fragment,
   lazy,
   Suspense,
   useCallback,
@@ -46,7 +47,9 @@ import { OperationSourceDetail } from "./components/OperationSourceDetail";
 import { PUBLISH_START_ACKNOWLEDGED } from "./features/operations/publishStartBridge";
 import { OperationProgressCenter } from "./features/operations/OperationProgressCenter";
 import { DeviceTile } from "./components/DeviceTile";
-import { FilterToolbar, type ViewMode } from "./components/FilterToolbar";
+import { FilterToolbar } from "./components/FilterToolbar";
+import { loadViewMode, storeViewMode, type ViewMode } from "./viewMode";
+import { GroupTabs } from "./components/GroupTabs";
 import { DeviceListTable } from "./components/DeviceListTable";
 import { deviceEvidence } from "./deviceEvidence";
 import { FleetCounters } from "./components/FleetCounters";
@@ -63,7 +66,7 @@ import { DeviceSyslogPopup } from "./components/DeviceSyslogPopup";
 import { DeviceHealthPopup } from "./components/DeviceHealthPopup";
 import { DeviceDetailsDrawer } from "./components/DeviceDetailsDrawer";
 import { FleetDiagnosticsPage } from "./components/FleetDiagnosticsPage";
-import { ALL_DEVICES_TAB, devicesInTab, groupTabs, withDeviceAdded } from "./deviceGroups";
+import { ALL_DEVICES_TAB, devicesInTab, groupTabs, wallBoxSections, withDeviceAdded } from "./deviceGroups";
 import { FocusStream } from "./components/FocusStream";
 import { InspectorLauncher } from "./components/InspectorLauncher";
 import { NavigationPalette, type PaletteDevice } from "./components/NavigationPalette";
@@ -88,7 +91,7 @@ import { OperatorRecordsPage } from "./pages/OperatorRecordsPage";
 import { OperatorSchedulesPage } from "./pages/OperatorSchedulesPage";
 import { clearAutomationMode, requestAutomationMode } from "./automationModeRequest";
 import { SavedTasksPage } from "./pages/SavedTasksPage";
-import { ControlCenterRail } from "./components/ControlCenterRail";
+import { DisplayPanel } from "./components/DisplayPanel";
 import { Sidebar } from "./components/Sidebar";
 import { MenuTabs } from "./components/MenuTabs";
 import { TargetSelector } from "./components/TargetSelector";
@@ -219,12 +222,16 @@ function App() {
   const setFocusUdid = useCallback((udid: string | null) => {
     openDeviceWindow(udid);
   }, [openDeviceWindow]);
-  const [viewMode, setViewMode] = useState<ViewMode>("window");
+  // Tổng quan is the default for a new user; each user's own choice is remembered (PLAN §2).
+  const [viewMode, setViewModeState] = useState<ViewMode>(loadViewMode);
+  const setViewMode = useCallback((mode: ViewMode) => {
+    setViewModeState(mode);
+    storeViewMode(mode);
+  }, []);
   const [settingsSection, setSettingsSection] = useState<"control" | "integration" | "maintenance" | undefined>();
   const [tileWidth, setTileWidth] = useState(() => loadZoom(TILE_ZOOM));
-  const [displayPinned, setDisplayPinned] = useState(() => {
-    try { return localStorage.getItem("riviu.control.displayPinned") === "true"; } catch { return false; }
-  });
+  // The "Hiển thị" panel opens from its toolbar button only, and takes no room until then.
+  const [displayOpen, setDisplayOpen] = useState(false);
   const [groupToolsView, setGroupToolsView] = useState<"closed" | "dialog" | "recording">("closed");
   const [macroSession, setMacroSession] = useState<{ udids: string[] } | null>(null);
   const closeGroupTools = useCallback(() => {
@@ -613,7 +620,7 @@ function App() {
     canvasRef,
     onCanvasMouseDown,
     band,
-  } = useBoxSelection(devices, visibleDevices, page === "control" && viewMode === "window", {
+  } = useBoxSelection(devices, visibleDevices, page === "control" && viewMode !== "list", {
     blockedReason: selectionBlock,
     onRefused: refuseSelection,
   });
@@ -1006,6 +1013,17 @@ function App() {
     deviceSearch.trim() && `tìm “${deviceSearch.trim()}”`,
     connectionFilter !== "all" && `kết nối ${connectionFilter === "usb" ? "USB" : "Wi-Fi"}`,
   ].filter((part): part is string => Boolean(part));
+  // Each phone's condensed status, once per render, for its tile and its box header. Box totals
+  // count the box's whole roster; search and status filters only change what is drawn (F9).
+  const wallViews = new Map(devices.map((device) => [device.udid, deviceOperationalView(
+    device,
+    currentDeviceWorkOwner(device.udid),
+    deviceWorkOwnerReadState,
+    cachedAgent(device.udid),
+    currentDeviceWorkState(device.udid)?.activity,
+    cachedLoad(device.udid),
+  )] as const));
+  const boxSections = wallBoxSections(wallDevices, devices, groups, groupTab, wallViews);
   const goToDevice = (udid: string) => {
     void requestPage("control", true).then((activated) => {
       if (!activated) return;
@@ -1287,13 +1305,7 @@ function App() {
           </SystemNotices>
 
           {page === "control" && (
-            <section className={`device-browser${displayPinned ? "" : " rail-unpinned"}`} aria-label="Danh sách và màn hình thiết bị">
-              <ControlCenterRail tileWidth={tileWidth} onTileWidth={setTileWidth} connection={connectionFilter} onConnection={setConnectionFilter}
-                pinned={displayPinned} onPinnedChange={next => { setDisplayPinned(next); try { localStorage.setItem("riviu.control.displayPinned", String(next)); } catch { /* optional preference */ } }}
-                groups={tabs.map(tab => ({ ...tab, udids: groups.find(group => group.id === tab.id)?.udids }))} group={groupTab} onGroup={setGroupTab}
-                machines={devices.map(d=>({id:d.udid,number:fleetNumberByUdid.get(d.udid)??0,name:tileName(d,metaMap.get(d.udid)),selected:selected.includes(d.udid),connection:d.connection}))}
-                onSelect={id=>onSelect(id,true)} onSettings={()=>{setSettingsSection("control");void requestPage("settings");}}
-                onGroups={()=>setGroupsOpen(true)} onRotate={()=>void(async()=>{const targets=selectedDevices.filter(device=>device.platform==="android");if(!targets.length){pushToast("info","Chọn máy Android để xoay");return;}const results=await Promise.allSettled(targets.map(device=>setScreenRotation(device.udid,1)));const confirmed=results.filter(result=>result.status==="fulfilled"&&result.value===1).length;pushToast(confirmed===targets.length?"ok":"warn",`Đã xác nhận xoay ${confirmed}/${targets.length} máy`);})()}/>
+            <section className="device-browser" aria-label="Danh sách và màn hình thiết bị">
               <div className="device-browser-toolbar">
               <ProfileToolbar
                 selected={selectedDevices}
@@ -1550,7 +1562,8 @@ function App() {
                     Chọn tất cả ({selectableVisible.length})
                   </button>
                 </div>
-                <FilterToolbar viewMode={viewMode} onViewMode={setViewMode} />
+                <FilterToolbar viewMode={viewMode} onViewMode={setViewMode}
+                  displayOpen={displayOpen} onDisplay={() => setDisplayOpen((open) => !open)} />
               </div>
               {activeFilters.length > 0 && (
                 <div className="device-filter-summary">
@@ -1560,6 +1573,19 @@ function App() {
                   </span>
                   <button type="button" className="ghost" onClick={clearWallFilters}>Bỏ lọc</button>
                 </div>
+              )}
+              {/* Box chips (PLAN §2): a box is a saved device list, never a Máy N range. A chip
+                  filters the wall to that box and says so; "Tất cả" shows every box section. */}
+              <div className="box-chips">
+                <GroupTabs tabs={tabs} active={groupTab} onSelect={setGroupTab} />
+                <button type="button" className="ghost box-create" aria-label="Tạo nhóm thiết bị" title="Tạo box (nhóm thiết bị)" onClick={() => setGroupsOpen(true)}>+ Box</button>
+              </div>
+              {displayOpen && (
+                <DisplayPanel tileWidth={tileWidth} onTileWidth={setTileWidth} connection={connectionFilter} onConnection={setConnectionFilter}
+                  groups={tabs.map(tab => ({ ...tab, udids: groups.find(group => group.id === tab.id)?.udids }))} group={groupTab}
+                  machines={devices.map(d => ({ id: d.udid, connection: d.connection }))}
+                  onSettings={() => { setSettingsSection("control"); void requestPage("settings"); }}
+                  onRotate={()=>void(async()=>{const targets=selectedDevices.filter(device=>device.platform==="android");if(!targets.length){pushToast("info","Chọn máy Android để xoay");return;}const results=await Promise.allSettled(targets.map(device=>setScreenRotation(device.udid,1)));const confirmed=results.filter(result=>result.status==="fulfilled"&&result.value===1).length;pushToast(confirmed===targets.length?"ok":"warn",`Đã xác nhận xoay ${confirmed}/${targets.length} máy`);})()} />
               )}
               </div>
 
@@ -1573,6 +1599,7 @@ function App() {
                     return {
                       device,
                       machineNumber: fleetNumberByUdid.get(device.udid) ?? 0,
+                      box: groups.find((group) => group.udids.includes(device.udid))?.name ?? "Chưa thuộc box",
                       name: tileName(device, meta),
                       handle: meta?.handle,
                       status: deviceOperationalView(
@@ -1596,11 +1623,12 @@ function App() {
                 />
               )}
 
-              {wallDevices.length > 0 && viewMode === "window" && (
+              {wallDevices.length > 0 && viewMode !== "list" && (
                 <div
                   className="window-canvas"
-                  style={{ "--device-tile-min-width": `${tileWidth}px` } as CSSProperties}
-                  data-density={tileDensity(tileWidth)}
+                  style={viewMode === "window" ? { "--device-tile-min-width": `${tileWidth}px` } as CSSProperties : undefined}
+                  data-mode={viewMode}
+                  data-density={viewMode === "window" ? tileDensity(tileWidth) : undefined}
                   ref={canvasRef}
                   role="grid"
                   aria-label="Lưới thiết bị"
@@ -1618,7 +1646,21 @@ function App() {
                       }}
                     />
                   )}
-                  {wallDevices.map((device) => (
+                  {boxSections.map((section) => (
+                    <Fragment key={section.id}>
+                      <div className="box-section-head" role="row">
+                        <div role="rowheader" aria-label={`${section.label}: ${section.total} máy, ${section.ready} sẵn sàng, ${section.busy} đang chạy, ${section.warning} cần xử lý${section.devices.length < section.total ? `, đang thấy ${section.devices.length}/${section.total}` : ""}`}>
+                          <strong>{section.label}</strong>
+                          <span>Laptop này</span>
+                          <span className="box-section-counts">
+                            {section.total} máy · {section.ready} sẵn sàng · {section.busy} đang chạy · {section.warning} cần xử lý
+                          </span>
+                          {section.devices.length < section.total && (
+                            <span className="box-section-shown">đang lọc: thấy {section.devices.length}/{section.total}</span>
+                          )}
+                        </div>
+                      </div>
+                  {section.devices.map((device) => (
                     <DeviceTile
                       key={device.udid}
                       device={device}
@@ -1626,14 +1668,7 @@ function App() {
                       index={fleetNumberByUdid.get(device.udid) ?? 0}
                       name={tileName(device, metaMap.get(device.udid))}
                       handle={metaMap.get(device.udid)?.handle}
-                      operational={deviceOperationalView(
-                        device,
-                        currentDeviceWorkOwner(device.udid),
-                        deviceWorkOwnerReadState,
-                        cachedAgent(device.udid),
-                        currentDeviceWorkState(device.udid)?.activity,
-                        cachedLoad(device.udid),
-                      )}
+                      operational={wallViews.get(device.udid)}
                       onHelperMaintenance={udid => void runHelperMaintenance([udid])}
                       onContextMenu={(udid, x, y) => setTileMenu({ udid, x, y })}
                       selected={selected.includes(device.udid)}
@@ -1653,6 +1688,8 @@ function App() {
                           .catch((error) => toastError(`Không mở lại được ${device.name}`, error));
                       }}
                     />
+                  ))}
+                    </Fragment>
                   ))}
                 </div>
               )}

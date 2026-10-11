@@ -701,6 +701,13 @@ export function useViewDecodeFailed(udid: string): boolean {
   );
 }
 
+/// When this phone's picture last advanced (the paint beat that counted a new frame), or
+/// undefined before its first frame. Frame age only: it says nothing about the connection or the
+/// last status check, and nothing but a newly drawn frame moves it — Làm mới does not.
+export function viewLastFrameAt(udid: string): number | undefined {
+  return lastPaintBeat.get(udid)?.at;
+}
+
 export function useViewSize(udid: string): ViewSize | undefined {
   return useSyncExternalStore(
     (onStoreChange) => subscribe(udid, onStoreChange),

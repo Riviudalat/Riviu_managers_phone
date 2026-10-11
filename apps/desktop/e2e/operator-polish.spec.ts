@@ -1,7 +1,7 @@
 import { test, expect } from "@playwright/test";
 import { installTauriMock } from "./fixtures/tauriMock";
 
-for (const width of [1440, 820]) test(`hover rail pins, groups fold, native dropdown and compact transfers at ${width}`, async ({ page }) => {
+for (const width of [1440, 820]) test(`display panel opens from the toolbar, native dropdown and compact transfers at ${width}`, async ({ page }) => {
   await page.setViewportSize({width, height: 900});
   await installTauriMock(page, {androidRoster: true, fleetSize: 4});
   await page.addInitScript(() => {
@@ -19,26 +19,20 @@ for (const width of [1440, 820]) test(`hover rail pins, groups fold, native drop
     };
   });
   await page.goto('/');
-  const rail=page.getByRole('complementary',{name:'Thiết lập Trung tâm điều khiển'});
-  const panel=rail.locator('.rail-panel');
-  await expect(panel).toHaveAttribute('aria-hidden','true');
+  // The vertical rail is gone (PLAN §2): "Hiển thị" is a toolbar button that opens a horizontal
+  // panel and closes it again; neither moves the wall sideways.
+  const toggle=page.getByRole('button',{name:'Hiện bảng Hiển thị',exact:true});
+  const panel=page.getByRole('region',{name:'Hiển thị',exact:true});
+  await expect(panel).toHaveCount(0);
   const before=await page.getByTestId('device-tile').first().boundingBox();
-  await rail.getByRole('button',{name:'Hiện bảng Hiển thị'}).hover();
-  await expect(panel).toHaveAttribute('aria-hidden','false');
+  await toggle.click();
+  await expect(toggle).toHaveAttribute('aria-expanded','true');
+  await expect(panel).toBeVisible();
   const after=await page.getByTestId('device-tile').first().boundingBox();
   expect(after!.x).toBe(before!.x);
-  await rail.getByRole('button',{name:'Ghim bảng Hiển thị',exact:true}).click();
-  await page.mouse.move(width-15, 10);
-  await expect(rail).toHaveClass(/is-pinned/);
-  await rail.locator('.rail-group-trigger').first().click();
-  await expect(rail.getByRole('button',{name:/Chọn nhanh Máy/})).toHaveCount(4);
-  await rail.locator('.rail-group-trigger').first().click();
-  await expect(rail.getByRole('button',{name:/Chọn nhanh Máy/})).toHaveCount(0);
-  await page.screenshot({path:test.info().outputPath('rail-pinned.png')});
-  await page.reload();await expect(rail).toHaveClass(/is-pinned/);
-  await rail.getByRole('button',{name:'Bỏ ghim bảng Hiển thị',exact:true}).click();
-  await page.mouse.move(width-15, 10);
-  await expect(panel).toHaveAttribute('aria-hidden','true');
+  await page.screenshot({path:test.info().outputPath('display-panel.png')});
+  await toggle.click();
+  await expect(panel).toHaveCount(0);
   await page.getByTestId('device-tile').first().dblclick();
   const focus=page.locator('.device-floating-window');
   await focus.getByRole('button',{name:'PC → Điện thoại',exact:true}).click();

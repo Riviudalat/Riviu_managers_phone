@@ -77,3 +77,61 @@ export function withDeviceAdded(
   if (!group || group.udids.includes(udid)) return null;
   return { ...group, udids: [...group.udids, udid] };
 }
+
+/** One box section of the wall: a saved group, or the phones no group lists. */
+export interface WallBoxSection {
+  id: string;
+  label: string;
+  /** The phones drawn after search, status and connection filters. */
+  devices: DeviceInfo[];
+  /** The box's whole present roster: filters never change these counts (PLAN §2). */
+  total: number;
+  ready: number;
+  busy: number;
+  warning: number;
+}
+
+/** The pseudo-section for phones no box lists. Never saved; never derived from Máy N. */
+export const UNASSIGNED_BOX_ID = "__unassigned__";
+
+/**
+ * The wall's box sections (PLAN §2). A box is the list of udids the operator assigned, so a
+ * phone's section comes from membership alone — never from its Máy N. Sections keep the
+ * groups' own order; inside one, phones keep the order they arrive in (number order), so a
+ * status change never moves a tile. A phone listed by two boxes shows once, under the first;
+ * phones no box lists close the wall under "Chưa thuộc box". With a box chip active only that
+ * box's section is shown. Totals and status counts come from `roster` (every present phone),
+ * so a search narrows the tiles without shrinking the box; `shown` is what the filters leave.
+ */
+export function wallBoxSections(
+  shown: DeviceInfo[],
+  roster: DeviceInfo[],
+  groups: DeviceGroup[],
+  activeTab: string,
+  views: ReadonlyMap<string, { kind: string }>,
+): WallBoxSection[] {
+  const visible = new Set(shown.map((device) => device.udid));
+  const placed = new Set<string>();
+  const section = (id: string, label: string, members: DeviceInfo[]): WallBoxSection => ({
+    id,
+    label,
+    devices: shown.filter((device) => members.some((member) => member.udid === device.udid)),
+    total: members.length,
+    ready: members.filter((device) => views.get(device.udid)?.kind === "ready").length,
+    busy: members.filter((device) => views.get(device.udid)?.kind === "busy").length,
+    warning: members.filter((device) => views.get(device.udid)?.kind === "warning").length,
+  });
+  const sections: WallBoxSection[] = [];
+  for (const group of groups) {
+    const listed = new Set(group.udids);
+    const members = roster.filter((device) => listed.has(device.udid) && !placed.has(device.udid));
+    members.forEach((device) => placed.add(device.udid));
+    if (activeTab !== ALL_DEVICES_TAB && activeTab !== group.id) continue;
+    if (members.some((device) => visible.has(device.udid))) sections.push(section(group.id, group.name, members));
+  }
+  const rest = roster.filter((device) => !placed.has(device.udid));
+  if (rest.some((device) => visible.has(device.udid)) && (activeTab === ALL_DEVICES_TAB || !groups.some((group) => group.id === activeTab))) {
+    sections.push(section(UNASSIGNED_BOX_ID, "Chưa thuộc box", rest));
+  }
+  return sections;
+}

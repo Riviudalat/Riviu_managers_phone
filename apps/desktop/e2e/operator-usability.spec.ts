@@ -2,13 +2,15 @@ import { openOperatorPage } from "./fixtures/operatorNavigation";
 import { test, expect } from "@playwright/test";
 import { installTauriMock } from "./fixtures/tauriMock";
 
-test("preview scales, display rail hides, and group creation stays reachable", async ({ page }) => {
+test("preview scales, display panel closes, and group creation stays reachable", async ({ page }) => {
   await page.setViewportSize({ width: 1440, height: 900 });
   await installTauriMock(page, { androidRoster: true, fleetSize: 4 });
   await page.goto("/");
   const tiles = page.getByTestId("device-tile");
   await expect(tiles).toHaveCount(4);
-  await page.getByRole("button", { name: "Hiện bảng Hiển thị", exact: true }).hover();
+  // Màn hình is the large-preview view; Tổng quan (the default) keeps a fixed small preview.
+  await page.getByRole("group", { name: "Chế độ hiển thị" }).getByRole("button", { name: "Màn hình" }).click();
+  await page.getByRole("button", { name: "Hiện bảng Hiển thị", exact: true }).click();
   // Match the real stream's small encoded frame. The CSS must enlarge it with its tile.
   await page.evaluate(() => {
     for (const host of document.querySelectorAll(".dev-phone-screen .phone-canvas-host")) {
@@ -26,8 +28,7 @@ test("preview scales, display rail hides, and group creation stays reachable", a
   expect(image!.width).toBeGreaterThan(300);
   expect(Math.abs(image!.width - bounds!.width)).toBeLessThan(2);
   expect(Math.abs(image!.height - bounds!.height)).toBeLessThan(2);
-  await page.keyboard.press("Escape");
-  await page.mouse.move(1400, 10);
+  await page.getByRole("button", { name: "Hiện bảng Hiển thị", exact: true }).click();
   await expect(page.getByRole("slider", { name: "Kích thước ô xem trước", exact: true })).toBeHidden();
   await page.getByRole("button", { name: "Hiện bảng Hiển thị", exact: true }).click();
   await expect(page.getByRole("slider", { name: "Kích thước ô xem trước", exact: true })).toHaveValue("350");

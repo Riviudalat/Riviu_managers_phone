@@ -76,7 +76,26 @@ export function ControlStreamSettings() {
     <>
       <label>
         <span>
-          Chất lượng{" "}
+          Chất lượng lưới{" "}
+          <output>{LABELS[QUALITIES.indexOf(draft.gridQuality)]}</output>
+        </span>
+        <input
+          aria-label="Chất lượng lưới Android"
+          type="range"
+          min={0}
+          max={3}
+          step={1}
+          value={QUALITIES.indexOf(draft.gridQuality)}
+          onChange={(event) =>
+            setDraft({ ...draft, gridQuality: QUALITIES[Number(event.target.value)] })
+          }
+          onPointerUp={commit}
+          onKeyUp={commit}
+        />
+      </label>
+      <label>
+        <span>
+          Cửa sổ lớn{" "}
           <output>{LABELS[QUALITIES.indexOf(draft.focusQuality)]}</output>
         </span>
         <input
@@ -86,10 +105,9 @@ export function ControlStreamSettings() {
           max={3}
           step={1}
           value={QUALITIES.indexOf(draft.focusQuality)}
-          onChange={(event) => {
-            const quality = QUALITIES[Number(event.target.value)];
-            setDraft({ ...draft, focusQuality: quality, gridQuality: quality });
-          }}
+          onChange={(event) =>
+            setDraft({ ...draft, focusQuality: QUALITIES[Number(event.target.value)] })
+          }
           onPointerUp={commit}
           onKeyUp={commit}
         />
@@ -112,6 +130,7 @@ export function ControlStreamSettings() {
           onKeyUp={commit}
         />
       </label>
+      <p className="control-stream-hint">Đổi chất lượng hoặc FPS sẽ khởi động lại luồng hình Android; máy iPhone không đổi.</p>
       <p className="control-stream-status" role="status">
         {saving
           ? "Đang áp dụng…"

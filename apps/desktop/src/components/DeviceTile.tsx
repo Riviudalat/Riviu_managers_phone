@@ -6,6 +6,7 @@ import type { DeviceOperationalView } from "../deviceWork";
 import type { DeviceInfo } from "../types";
 import { streamPlaceholder } from "../streamPlaceholder";
 import { useViewDecodeFailed, useViewLive, useViewSize } from "../viewStore";
+import { useFrameFreshness } from "../frameFreshness";
 import { PhoneCanvas } from "./PhoneCanvas";
 import { StreamPlaceholder } from "./StreamPlaceholder";
 import { DeviceStatusLine } from "./DeviceStatusLine";
@@ -103,6 +104,10 @@ function DeviceTileInner({
     tileStreamState: device.tileStreamState,
     lastError: device.lastError,
   });
+  // Frame age, not status-check age and not the connection (frameFreshness.ts).
+  const freshness = useFrameFreshness(device.udid, hasView && !focused);
+  const frameAge = freshness.state === "aging" || freshness.state === "stale" ? freshness.ageText : undefined;
+  const frameLabel = [accessibleName, frameAge].filter(Boolean).join(", ");
 
   return (
     <article
@@ -113,7 +118,7 @@ function DeviceTileInner({
       aria-selected={selected}
       tabIndex={0}
       aria-roledescription="thẻ thiết bị"
-      aria-label={accessibleName}
+      aria-label={frameLabel}
       style={{ width }}
       onClick={(e) => onSelect(device.udid, e.metaKey || e.ctrlKey || e.shiftKey)}
       onKeyDown={(event) => {
@@ -144,6 +149,7 @@ function DeviceTileInner({
         <div className="dev-phone-strip-head">
           <span className="dev-phone-index">{machineNumberLabel(index)}</span>
           <span className="dev-phone-name" title={displayName}>{displayName}</span>
+          {frameAge && <span className="dev-phone-age" data-state={freshness.state} title="Tuổi hình: lúc màn hình gửi khung hình mới gần nhất. Không phải lần kiểm trạng thái, không phải kết nối.">{frameAge}</span>}
           <span className="dev-phone-check" aria-hidden="true">{selected && <Check size={10} strokeWidth={3.5} />}</span>
         </div>
         {identity && (
@@ -173,6 +179,7 @@ function DeviceTileInner({
       <div className="dev-phone-screen" role="gridcell">
         <PhoneCanvas udid={device.udid} surfaceId="tile" />
         {focused && <div className="dev-phone-focused-message" role="status">Đang mở phóng to</div>}
+        {freshness.state === "stale" && <div className="dev-phone-stale" aria-hidden="true">Hình cũ</div>}
         {!focused && <StreamPlaceholder
           view={view}
           deviceName={displayName}

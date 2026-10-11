@@ -2,7 +2,7 @@ import { fireEvent, render, screen, within } from "@testing-library/react";
 import { expect, it, vi } from "vitest";
 
 import { ALL_DEVICES_TAB } from "../deviceGroups";
-import { ControlCenterRail } from "./ControlCenterRail";
+import { DisplayPanel } from "./DisplayPanel";
 
 vi.mock("./ControlStreamSettings", () => ({ ControlStreamSettings: () => null }));
 
@@ -18,10 +18,10 @@ const groups = [
 ];
 
 function rail(group: string, onConnection = vi.fn()) {
-  return <ControlCenterRail
+  return <DisplayPanel
     tileWidth={180} onTileWidth={vi.fn()} connection="all" onConnection={onConnection}
-    groups={groups} group={group} onGroup={vi.fn()} machines={machines}
-    onSelect={vi.fn()} onSettings={vi.fn()} pinned onPinnedChange={vi.fn()}
+    groups={groups} group={group} machines={machines}
+    onSettings={vi.fn()}
   />;
 }
 
@@ -43,11 +43,11 @@ it("shows connection counts for the current group and keeps filtering explicit",
 });
 
 it("shows zero for an empty group without changing the selected connection", () => {
-  render(<ControlCenterRail
+  render(<DisplayPanel
     tileWidth={180} onTileWidth={vi.fn()} connection="wifi" onConnection={vi.fn()}
     groups={[...groups, { id: "empty", label: "Trống", count: 0, udids: [] }]}
-    group="empty" onGroup={vi.fn()} machines={machines}
-    onSelect={vi.fn()} onSettings={vi.fn()} pinned onPinnedChange={vi.fn()}
+    group="empty" machines={machines}
+    onSettings={vi.fn()}
   />);
   const filters = within(screen.getByRole("group", { name: "Lọc kết nối" }));
   expect(filters.getByRole("button", { name: "Tất cả · 0 máy" })).toBeTruthy();

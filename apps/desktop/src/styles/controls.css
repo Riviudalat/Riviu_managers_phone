@@ -375,58 +375,12 @@ button:disabled {
     display: inline;
   }
 }
-@media (min-width: 1180px) and (max-width: 1359px) {
-  .device-browser:not(.rail-unpinned) .toolbar-more { display: block; position: relative; flex: none; }
-  .device-browser:not(.rail-unpinned) .toolbar-more-toggle { display: inline-flex; }
-  .device-browser:not(.rail-unpinned) .toolbar-secondary { display: none; }
-  .device-browser:not(.rail-unpinned) .toolbar-secondary[data-open="true"] {
-    position: absolute;
-    top: calc(100% + var(--rv-space-1));
-    left: 0;
-    z-index: var(--z-menu);
-    display: grid;
-    gap: 0;
-    min-width: 232px;
-    padding: var(--rv-space-2);
-    border: 1px solid var(--rv-border);
-    border-radius: var(--rv-radius-panel);
-    background: var(--rv-surface-overlay);
-    box-shadow: var(--rv-shadow-overlay);
-  }
-  .device-browser:not(.rail-unpinned) .toolbar-secondary[data-open="true"] > .tb-btn,
-  .device-browser:not(.rail-unpinned) .toolbar-secondary[data-open="true"] .toolbar-maintenance > summary {
-    justify-content: flex-start;
-    width: 100%;
-    min-height: var(--rv-control);
-  }
-  .device-browser:not(.rail-unpinned) .toolbar-secondary[data-open="true"] .tb-label {
-    position: static;
-    width: auto;
-    height: auto;
-    overflow: visible;
-    clip-path: none;
-  }
-  .device-browser:not(.rail-unpinned) .toolbar-secondary[data-open="true"] .toolbar-more-only {
-    display: inline;
-  }
-}
-
-/* Icon tier: 1180–1279 px, and 1360–1599 px beside a pinned Hiển thị rail. The secondary fleet
+/* Icon tier: 1180–1279 px. The secondary fleet
    actions — Nhóm, Công cụ, Bảo trì — keep their icon, tooltip and accessible name but drop the
    visible word, so the actions and a readable search stay one toolbar row. The primary action keeps
    its label. Below 1024 px the filters take their own row, so the words come back. */
 @media (min-width: 1180px) and (max-width: 1279px) {
   .profile-toolbar .tb-label {
-    position: absolute;
-    width: 1px;
-    height: 1px;
-    overflow: hidden;
-    clip-path: inset(50%);
-    white-space: nowrap;
-  }
-}
-@media (min-width: 1360px) and (max-width: 1599px) {
-  .device-browser:not(.rail-unpinned) .profile-toolbar .tb-label {
     position: absolute;
     width: 1px;
     height: 1px;
@@ -449,16 +403,18 @@ button:disabled {
 }
 .view-seg {
   display: inline-flex;
+  flex: none;
   border: 1px solid var(--rv-border-strong);
   border-radius: var(--rv-radius-control);
   overflow: hidden;
   background: var(--rv-surface-panel);
 }
 .view-seg button {
-  width: 34px;
+  /* Three named views (PLAN §2): the word, not an icon alone. */
+  width: auto;
   height: 34px;
   min-height: 34px;
-  padding: 0;
+  padding: 0 10px;
   border: none;
   border-radius: 0;
   background: var(--rv-surface-panel);

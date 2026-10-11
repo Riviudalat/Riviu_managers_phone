@@ -31,6 +31,8 @@ afterEach(() => {
   for (const key of Object.keys(localStorage)) {
     if (key.startsWith("riviu.form-draft.v1.")) localStorage.removeItem(key);
   }
+  // The remembered wall view is per user; each test starts as a new user on Tổng quan.
+  localStorage.removeItem("riviu.control.viewMode");
 });
 
 /**

@@ -358,8 +358,7 @@ describe("device group scope", () => {
 
     render(<App />);
     await waitFor(() => expect(screen.getByText("Note 8")).toBeInTheDocument());
-    await userEvent.hover(screen.getByRole("button", { name: "Hiện bảng Hiển thị" }));
-    await userEvent.click(screen.getByRole("button", { name: /Máy Redmi/ }));
+    await userEvent.click(screen.getByRole("tab", { name: /Máy Redmi/ }));
     await userEvent.click(screen.getByTitle("Danh sách"));
 
     expect(screen.getByRole("cell", { name: /Máy 1.*Redmi/ })).toBeInTheDocument();
@@ -637,7 +636,7 @@ describe("device operational identity", () => {
     expect(screen.getByRole("cell", { name: /Máy 2.*Kệ giữa/ })).toBeVisible();
     expect(screen.queryByRole("cell", { name: /Máy 3.*Kệ cuối/ })).toBeNull();
 
-    await userEvent.click(screen.getByTitle("Cửa sổ stream"));
+    await userEvent.click(screen.getByTitle("Màn hình"));
     const [visibleTile] = screen.getAllByTestId("device-tile");
     expect(screen.getAllByTestId("device-tile")).toHaveLength(1);
     expect(screen.getByText("Máy 2")).toBeVisible();

@@ -13,7 +13,7 @@ describe("FilterToolbar", () => {
     await userEvent.click(screen.getByTitle("Danh sách"));
 
     expect(onViewMode).toHaveBeenCalledWith("list");
-    expect(screen.getByRole("button", { name: "Hiển thị dạng lưới stream" })).toHaveAttribute(
+    expect(screen.getByRole("button", { name: "Màn hình" })).toHaveAttribute(
       "aria-pressed",
       "true",
     );

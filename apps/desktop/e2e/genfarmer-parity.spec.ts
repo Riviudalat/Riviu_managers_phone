@@ -13,7 +13,7 @@ for (const width of [1440, 820]) {
     });
     await page.goto('/');
     await expect(page.getByTestId('device-tile')).toHaveCount(4);
-    await page.getByRole('button',{name:'Hiện bảng Hiển thị',exact:true}).hover();
+    await page.getByRole('button',{name:'Hiện bảng Hiển thị',exact:true}).click();
     await page.getByRole('slider',{name:'FPS màn hình Android'}).fill('18');
     await page.getByRole('slider',{name:'FPS màn hình Android'}).press('ArrowRight');
     await expect.poll(async()=> (await mockCommandCalls(page)).some(call=>call.command==='set_stream_settings'&&(call.args.settings as {fps:number}).fps===19)).toBe(true);
