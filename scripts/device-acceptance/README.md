@@ -40,6 +40,8 @@ node scripts/device-acceptance/close.mjs end-r0 <campaignId,...>
 # 3. Mở controller mới: backup DB chỉ đọc trước, từ chối nếu đã có riviu*.exe hoặc cổng bận
 py -3.12 -I scripts/device-acceptance/launch.py r1 target/device-acceptance/r1/scope.json --build r1
 node scripts/device-acceptance/ipc.mjs list_devices
+#    Cửa sổ app bị ẩn (RIVIU_DEV_BACKGROUND=1 để bật CDP). Muốn người dùng nhìn thấy:
+powershell -NoProfile -File scripts/device-acceptance/show-window.ps1 -ProcId <pid trong bản ghi launch> -Show
 
 # 4. Preflight từng máy (chỉ đọc). Máy không đạt ghi skipped kèm lý do.
 node scripts/device-acceptance/preflight.mjs r1 target/device-acceptance/r1/scope.json

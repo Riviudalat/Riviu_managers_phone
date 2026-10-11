@@ -24,7 +24,7 @@ Skill này là trình tự và điểm quyết định; hợp đồng nằm ở 
 | 2 | Worker → merge → dọn | theo worker; 10 phút coordinator | `riviu-orca-coordinator` |
 | 3 | Cổng tích hợp trên main | 15–30 phút | [Cổng theo thay đổi](../../../docs/development/testing.md#cổng-theo-thay-đổi) |
 | 4 | Build native | 3–12 phút | `build-native.py` |
-| 5 | Đóng controller cũ, mở mới | 5 phút | `close.mjs`, `launch.py` |
+| 5 | Đóng controller cũ, mở mới | 5 phút | `close.mjs`, `launch.py`; cửa sổ bị ẩn, nên khi người dùng cần xem thì chạy `show-window.ps1 -Show` |
 | 6 | Preflight từng máy | 5–10 phút | `preflight.mjs` |
 | 7 | Chạy chế độ + theo dõi | Nuôi ~25 phút, Đăng bài ≤ 90 phút | `run-*`, `pubwatch.py`, `rotwatch.sh`, `status.mjs` |
 | 8 | Kiểm UI thật | 5 phút | `native-ui-shots.mjs` |
