@@ -6,6 +6,9 @@
   margin-top: auto;
   gap: 6px var(--space-2);
   border-color: var(--line-strong);
+  /* Shared toolbars are transparent since V1; this one floats over live phone screens, so it
+     needs its own opaque surface or the tiles show through it. */
+  background: var(--rv-surface-panel, #fff);
   box-shadow: var(--shadow-lg);
 }
 /* The bar is its own stacking context; an open panel lifts it above toasts so they never cover it. */
