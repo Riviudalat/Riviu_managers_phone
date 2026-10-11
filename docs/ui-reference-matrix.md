@@ -99,8 +99,11 @@ evidence**: content ID chuẩn được cấp trong cửa sổ của lượt (sa
 dự kiến với caption khớp — không phải giờ xuất bản (định nghĩa đầy đủ: `docs/development/contracts.md`,
 Xác minh Publish); UI không hạ bài thỏa định nghĩa này và không gọi nó là giờ đăng. Cờ không thắng
 bằng chứng mâu thuẫn trong chính bản ghi: `captionMatched=false`, `submissionTimeMatched=false`,
-thiếu tài khoản đã ghi trước Post (evidence hoặc effect intent) hoặc tác giả trong link khác tài
-khoản đó thì dòng là Chưa rõ kèm lý do. Có link mà thiếu cờ, hoặc capability `alreadyVerified`
+thiếu tài khoản đã ghi trước Post, tài khoản trong evidence (`post.expectedAccount`,
+`accountDiagnostic.expectedAccount/observedAccount`) khác tài khoản frozen trong effect intent (intent là
+nguồn chính; evidence chỉ thay khi bản ghi cũ không có tài khoản intent; so handle đã chuẩn hóa: bỏ `@`,
+khoảng trắng, không phân biệt hoa thường), hoặc tác giả trong link khác tài khoản đó thì dòng là Chưa rõ
+kèm lý do và không tính vào số đã xác minh/đã ghi Sheet. Có link mà thiếu cờ, hoặc capability `alreadyVerified`
 (chỉ kiểm hình dạng link) cũng không tính là đã xác minh. Header chiến dịch và nhãn chiến dịch dùng
 cùng mô hình: chỉ "Đã hoàn tất"/"Hoàn tất" khi mọi bài đã xác minh, chỉ "Đã ghi Sheet" khi mọi dòng
 cần ghi đã được Sheet xác nhận; snapshot chỉ giữ phạm vi thử lại. Dòng nhật ký `succeeded` thô chỉ

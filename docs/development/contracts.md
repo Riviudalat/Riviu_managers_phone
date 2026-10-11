@@ -729,8 +729,10 @@ xuất bản: UI, Sheet và tài liệu không được trình bày nó như gi�
 (`ownProfileCaptionAndCanonicalLink`) còn đọc nhãn thời gian tương đối sau `submittedAt`; các route
 metadata công khai dựa vào thời điểm cấp ID cùng tác giả, caption và content ID. Bài thỏa định nghĩa
 này là Đã xác minh; UI không hạ các bài ấy. Ngược lại, bản ghi tự mâu thuẫn (cờ đã xác minh nhưng
-`captionMatched=false`, `submissionTimeMatched=false`, thiếu tài khoản đã ghi trước Post, hoặc tác
-giả trong link khác tài khoản đó) không được hiện là Đã xác minh.
+`captionMatched=false`, `submissionTimeMatched=false`, thiếu tài khoản đã ghi trước Post, tài khoản
+trong evidence hoặc account diagnostic khác tài khoản frozen trong effect intent, hoặc tác giả trong
+link khác tài khoản đó) không được hiện là Đã xác minh. Effect intent là nguồn tài khoản chính; so
+handle đã chuẩn hóa (bỏ `@`, khoảng trắng, không phân biệt hoa thường).
 
 Lượt mới ghi `verificationContractVersion: 1` và `verificationBuilds` từ preflight.
 `PublishSubmissionProof` bắt buộc tại transaction claim: tài khoản, submittedAt,

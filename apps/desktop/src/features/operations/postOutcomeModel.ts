@@ -96,11 +96,25 @@ function postOf(evidence: Record<string, unknown>): Record<string, unknown> {
   return evidence.post && typeof evidence.post === "object" && !Array.isArray(evidence.post) ? object(evidence.post) : evidence;
 }
 
-/** The account frozen before Post: the post evidence carries it, the effect intent is its source. */
-function expectedAccountOf(input: PostOutcomeInput, evidence: Record<string, unknown>): string | null {
-  const recorded = text(postOf(evidence).expectedAccount, 64) ?? text(readPublishEvidence(input.effectIntent).expectedAccount, 64);
-  const account = recorded?.replace(/^@+/, "").trim();
-  return account ? account : null;
+/** A TikTok handle compared the way TikTok compares it: no "@", no surrounding space, any case. */
+function normalizedHandle(value: unknown): string | null {
+  const handle = text(value, 64)?.replace(/^@+/, "").trim().toLocaleLowerCase("en");
+  return handle ? handle : null;
+}
+
+/**
+ * The account frozen before Post and every other account the row claims. The effect intent is
+ * the authority; the post evidence and the account diagnostic only stand in for a legacy record
+ * without an intent account. Any claim that names another account is a contradiction.
+ */
+function accountsOf(input: PostOutcomeInput, evidence: Record<string, unknown>): { expected: string | null; conflict: string | null } {
+  const diagnostic = object(evidence.accountDiagnostic);
+  const frozen = normalizedHandle(readPublishEvidence(input.effectIntent).expectedAccount);
+  const claims = [postOf(evidence).expectedAccount, diagnostic.expectedAccount, diagnostic.observedAccount]
+    .map(normalizedHandle)
+    .filter((claim): claim is string => claim !== null);
+  const expected = frozen ?? claims[0] ?? null;
+  return { expected, conflict: expected ? claims.find(claim => claim !== expected) ?? null : null };
 }
 
 function proofOf(input: PostOutcomeInput, evidence: Record<string, unknown>, raw: string | null | undefined): PostProof {
@@ -110,7 +124,7 @@ function proofOf(input: PostOutcomeInput, evidence: Record<string, unknown>, raw
   const publication = object(diagnostic.publicationEvidence);
   const budget = object(evidence.verificationBudget);
   const methodKey = text(post.verificationMethod) ?? text(post.postConfirmedBy);
-  const account = expectedAccountOf(input, evidence);
+  const account = accountsOf(input, evidence).expected;
   return {
     method: methodKey ? METHOD_LABELS[methodKey] ?? "Phương thức xác minh chưa nhận diện" : null,
     account: account ? `@${account}` : null,
@@ -126,7 +140,8 @@ function proofOf(input: PostOutcomeInput, evidence: Record<string, unknown>, raw
 /**
  * The backend's verified state, read from the same facts it writes together, and refused when
  * the row itself contradicts it: a true flag never outranks a recorded caption or time mismatch,
- * a missing account frozen before Post, or a link whose author is another account. The time proof
+ * a missing account frozen before Post, evidence naming another account than the frozen intent,
+ * or a link whose author is another account. The time proof
  * is id-allocation-time evidence (the canonical content id was allocated inside this run's window,
  * after its prepared_at), not a publication timestamp; docs/development/contracts.md.
  */
@@ -137,10 +152,13 @@ function verificationGate(input: PostOutcomeInput, evidence: Record<string, unkn
   if (input.state !== "succeeded" || post.publicationVerified !== true || !url) return { url: null };
   if (proof.captionMatched === false) return { url: null, contradiction: "Caption trên TikTok khác caption của lượt này; không tính là đã xác minh." };
   if (proof.timeMatched === false) return { url: null, contradiction: "Mã bài không được cấp trong khoảng thời gian của lượt này; không tính là đã xác minh." };
-  const account = expectedAccountOf(input, evidence);
+  const { expected: account, conflict } = accountsOf(input, evidence);
   if (!account) return { url: null, contradiction: "Thiếu tài khoản đã ghi trước khi Đăng; chưa xác nhận link thuộc đúng tài khoản." };
-  const author = /^\/@([^/]+)\//.exec(new URL(url).pathname)?.[1];
-  if (!author || author.toLocaleLowerCase("en") !== account.toLocaleLowerCase("en")) {
+  if (conflict) {
+    return { url: null, contradiction: `Bằng chứng ghi tài khoản @${conflict}, khác tài khoản đã ghi trước khi Đăng @${account}; không tính là đã xác minh.` };
+  }
+  const author = normalizedHandle(/^\/@([^/]+)\//.exec(new URL(url).pathname)?.[1]);
+  if (author !== account) {
     return { url: null, contradiction: `Link thuộc @${author ?? "?"}, khác tài khoản của lượt @${account}; không tính là đã xác minh.` };
   }
   return { url };
