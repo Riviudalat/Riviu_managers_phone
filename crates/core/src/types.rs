@@ -122,6 +122,14 @@ pub struct DeviceInfo {
     #[serde(default)]
     pub tile_stream_state: TileStreamState,
     pub last_error: Option<String>,
+    /// The phone's Wi-Fi (wlan0) IPv4 address, for the operator to tell phones apart
+    /// the way a farm console does. Display only: Android reads it read-only during
+    /// inventory and caches it for a minute, keeping the last address when a read
+    /// fails. `None` when the phone has no Wi-Fi address, no read has answered yet,
+    /// or the platform is iOS. Never a device error.
+    #[serde(default)]
+    #[ts(optional = nullable)]
+    pub wifi_ip: Option<String>,
 }
 
 #[cfg(test)]

@@ -3551,6 +3551,7 @@ mod tests {
                 last_error: None,
                 connection: ConnectionKind::Mock,
                 status: DeviceStatus::Ready,
+                wifi_ip: None,
             })
         }
 

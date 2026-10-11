@@ -6571,6 +6571,7 @@ mod tests {
             stream_url: None,
             tile_stream_state: TileStreamState::Parked,
             last_error: None,
+            wifi_ip: None,
         }
     }
 

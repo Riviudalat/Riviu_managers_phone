@@ -975,6 +975,7 @@ fn mock_device(udid: &str) -> DeviceInfo {
         stream_url: None,
         tile_stream_state: Default::default(),
         last_error: None,
+        wifi_ip: None,
     }
 }
 

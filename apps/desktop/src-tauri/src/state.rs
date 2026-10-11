@@ -3337,6 +3337,7 @@ mod tests {
                 stream_url: None,
                 tile_stream_state: riviu_core::TileStreamState::default(),
                 last_error: None,
+                wifi_ip: None,
             }])
         }
 
@@ -3972,6 +3973,7 @@ mod tests {
             stream_url: None,
             tile_stream_state: riviu_core::TileStreamState::Parked,
             last_error: None,
+            wifi_ip: None,
         };
         let mut status = riviu_core::AgentStatus::unknown("fixture");
         assert!(background_sample_candidate(&device, &status));
@@ -4024,6 +4026,7 @@ mod tests {
             stream_url: None,
             tile_stream_state: riviu_core::TileStreamState::default(),
             last_error: None,
+            wifi_ip: None,
         }
     }
 
@@ -4165,6 +4168,7 @@ mod tests {
             stream_url: Some("mock://fixture-state".to_string()),
             tile_stream_state: riviu_core::TileStreamState::Live,
             last_error: None,
+            wifi_ip: None,
         };
         registry.upsert(device.clone());
 
@@ -4212,6 +4216,7 @@ mod tests {
             stream_url: None,
             tile_stream_state: riviu_core::TileStreamState::Sampling,
             last_error: None,
+            wifi_ip: None,
         });
 
         set_stream_state(

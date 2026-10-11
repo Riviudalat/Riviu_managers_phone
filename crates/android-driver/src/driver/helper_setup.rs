@@ -136,6 +136,22 @@ impl AndroidDriver {
         self.helper_inventory_snapshot.lock().clone()
     }
 
+    /// Cache one Wi-Fi read and answer the address to show. A failed read is unknown, not
+    /// absent: the last address stays until a read answers, and is retried a minute later.
+    pub(super) fn record_wifi_ip(
+        &self,
+        serial: String,
+        read: Option<Option<String>>,
+    ) -> Option<String> {
+        let mut wifi_ips = self.wifi_ips.lock();
+        let ip = match read {
+            Some(ip) => ip,
+            None => wifi_ips.get(&serial).and_then(|(_, ip)| ip.clone()),
+        };
+        wifi_ips.insert(serial, (std::time::Instant::now(), ip.clone()));
+        ip
+    }
+
     /// Merge optional enrichment with fresh roster states under the inventory caller lock.
     pub(super) async fn inventory_from_reading<F, Fut>(
         &self,
@@ -165,6 +181,9 @@ impl AndroidDriver {
             self.inventory_metadata_at
                 .lock()
                 .retain(|serial, _| connected.contains(serial));
+            self.wifi_ips
+                .lock()
+                .retain(|serial, _| connected.contains(serial));
             // Failure remains visible across disconnect; only qualified setup clears it.
         }
 
@@ -173,6 +192,8 @@ impl AndroidDriver {
         // JoinSet aborts owned read-only probes if this scan is cancelled.
         // Raw JoinHandles would detach and outlive the inventory caller lock.
         let mut inflight = tokio::task::JoinSet::new();
+        // Wi-Fi addresses refresh on their own minute-long clock, beside the probes.
+        let mut wifi_reads = tokio::task::JoinSet::new();
         let mut probe_fallbacks = HashMap::new();
         let mut unreachable_devices = Vec::new();
         let mut cached_devices = Vec::new();
@@ -182,6 +203,14 @@ impl AndroidDriver {
         for line in lines {
             match line.state {
                 AdbDeviceState::Device => {
+                    let wifi_fresh = self
+                        .wifi_ips
+                        .lock()
+                        .get(&line.serial)
+                        .is_some_and(|(at, _)| at.elapsed() < WIFI_IP_TTL);
+                    if !wifi_fresh {
+                        wifi_reads.spawn(read_wifi_ip(self.adb.clone(), line.serial.clone()));
+                    }
                     let Ok(guard) = self.helper_inventory_lock(&line.serial).try_read_owned()
                     else {
                         let mut device = self
@@ -238,6 +267,7 @@ impl AndroidDriver {
                 state => {
                     self.inventory_metadata_at.lock().remove(&line.serial);
                     self.inventory_cache.lock().remove(&line.serial);
+                    self.wifi_ips.lock().remove(&line.serial);
                     unreachable_devices.push(unusable_device(&line.serial, line.model, state));
                 }
             }
@@ -285,6 +315,21 @@ impl AndroidDriver {
             devices.push(device);
         }
         devices.extend(unreachable_devices);
+        while let Some(result) = wifi_reads.join_next().await {
+            let Ok((serial, read)) = result else {
+                continue;
+            };
+            self.record_wifi_ip(serial, read);
+        }
+        {
+            let wifi_ips = self.wifi_ips.lock();
+            for device in &mut devices {
+                device.wifi_ip = connected
+                    .contains(&device.udid)
+                    .then(|| wifi_ips.get(&device.udid).and_then(|(_, ip)| ip.clone()))
+                    .flatten();
+            }
+        }
         devices.sort_by_key(|device| {
             serial_order
                 .get(&device.udid)

@@ -101,6 +101,7 @@ impl MockIosDriver {
                 stream_url: None,
                 tile_stream_state: TileStreamState::Parked,
                 last_error: None,
+                wifi_ip: None,
             },
             DeviceInfo {
                 udid: "MOCK-IPHONE-02".into(),
@@ -116,6 +117,7 @@ impl MockIosDriver {
                 stream_url: None,
                 tile_stream_state: TileStreamState::Parked,
                 last_error: None,
+                wifi_ip: None,
             },
             DeviceInfo {
                 udid: "MOCK-IPHONE-03".into(),
@@ -131,6 +133,7 @@ impl MockIosDriver {
                 stream_url: None,
                 tile_stream_state: TileStreamState::Error,
                 last_error: Some("WDA signing expired".into()),
+                wifi_ip: None,
             },
         ];
         let streams = StreamHub::new();

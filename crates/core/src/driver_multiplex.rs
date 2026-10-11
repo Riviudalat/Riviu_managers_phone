@@ -705,6 +705,7 @@ mod tests {
             stream_url: None,
             tile_stream_state: Default::default(),
             last_error: None,
+            wifi_ip: None,
         }
     }
 

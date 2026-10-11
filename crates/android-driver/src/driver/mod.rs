@@ -1101,6 +1101,9 @@ pub struct AndroidDriver {
     inventory_metadata_at: Mutex<HashMap<String, std::time::Instant>>,
     /// Coalesce inventory callers only; helper setup retains its per-device writer.
     inventory_scan_lock: tokio::sync::Mutex<()>,
+    /// serial -> (when read, wlan0 IPv4) for the tile. Display only and separate from
+    /// [`Self::inventory_cache`] so it keeps its own, slower refresh ([`WIFI_IP_TTL`]).
+    wifi_ips: Mutex<HashMap<String, (std::time::Instant, Option<String>)>>,
     helper_setup_errors: Mutex<HashMap<String, String>>,
     helper_recovery: Mutex<HashMap<String, HelperRecoveryState>>,
     helper_inventory_snapshot: Mutex<Option<Vec<DeviceInfo>>>,
@@ -1691,6 +1694,7 @@ impl AndroidDriver {
             inventory_cache: Mutex::new(HashMap::new()),
             inventory_metadata_at: Mutex::new(HashMap::new()),
             inventory_scan_lock: tokio::sync::Mutex::new(()),
+            wifi_ips: Mutex::new(HashMap::new()),
             helper_setup_errors: Mutex::new(HashMap::new()),
             helper_recovery: Mutex::new(HashMap::new()),
             helper_inventory_snapshot: Mutex::new(None),
@@ -1836,7 +1840,32 @@ async fn probe_device(adb: AdbProgram, serial: String, model_hint: Option<String
         stream_url: None,
         tile_stream_state: Default::default(),
         last_error: probe_error,
+        wifi_ip: None,
     }
+}
+
+/// How long a phone's Wi-Fi address is shown before inventory reads it again. The
+/// address only changes when the phone rejoins Wi-Fi, so a minute keeps the fleet scan
+/// from paying an extra `adb shell` per phone every few seconds.
+const WIFI_IP_TTL: Duration = Duration::from_secs(60);
+/// The whole read, including the wait for an adb slot: a busy or silent phone shows no
+/// address rather than holding up the roster.
+const WIFI_IP_DEADLINE: Duration = Duration::from_secs(2);
+
+/// Read-only `ip -f inet addr show wlan0` for the tile, never a device error.
+///
+/// `Some(None)` is a phone that answered with no Wi-Fi address. `None` is a read that
+/// timed out or failed, which says nothing about the address.
+async fn read_wifi_ip(adb: AdbProgram, serial: String) -> (String, Option<Option<String>>) {
+    let read = tokio::time::timeout(
+        WIFI_IP_DEADLINE,
+        adb.shell_output(&serial, adb::WLAN_IP_SHELL, WIFI_IP_DEADLINE),
+    )
+    .await
+    .ok()
+    .and_then(Result::ok)
+    .map(|output| adb::parse_wlan_ipv4(&output.stdout));
+    (serial, read)
 }
 
 #[derive(Debug, Default, PartialEq, Eq)]
@@ -1897,6 +1926,7 @@ fn unusable_device(serial: &str, model: Option<String>, state: AdbDeviceState) -
         stream_url: None,
         tile_stream_state: Default::default(),
         last_error: state.operator_reason(),
+        wifi_ip: None,
     }
 }
 
@@ -2103,6 +2133,8 @@ impl DeviceDriver for AndroidDriver {
         self.tiktok_packages.lock().remove(udid);
         self.invalidate_screen(udid);
         let mut device = probe_device(self.adb.clone(), udid.to_string(), None).await;
+        let (serial, read) = read_wifi_ip(self.adb.clone(), udid.to_string()).await;
+        device.wifi_ip = self.record_wifi_ip(serial, read);
         let metadata_complete = device.last_error.is_none()
             && !device.os_version.is_empty()
             && !device.model.is_empty()

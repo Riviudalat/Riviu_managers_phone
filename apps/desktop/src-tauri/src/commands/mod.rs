@@ -442,6 +442,7 @@ mod tests {
             stream_url: None,
             tile_stream_state: riviu_core::TileStreamState::default(),
             last_error: None,
+            wifi_ip: None,
         }
     }
 

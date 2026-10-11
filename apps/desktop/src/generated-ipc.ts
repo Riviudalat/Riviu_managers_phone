@@ -21,7 +21,15 @@ export type DeviceInfo = { udid: string, name: string, model: string, platform: 
  * Android. Read with [`Self::platform`], never alone — it used to be called
  * `ios_version` and the UI printed a hardcoded "iOS" beside it.
  */
-osVersion: string, connection: ConnectionKind, status: DeviceStatus, battery: number | null, wdaReady: boolean, wdaExpiresAt: string | null, streamUrl: string | null, tileStreamState: TileStreamState, lastError: string | null, };
+osVersion: string, connection: ConnectionKind, status: DeviceStatus, battery: number | null, wdaReady: boolean, wdaExpiresAt: string | null, streamUrl: string | null, tileStreamState: TileStreamState, lastError: string | null,
+/**
+ * The phone's Wi-Fi (wlan0) IPv4 address, for the operator to tell phones apart
+ * the way a farm console does. Display only: Android reads it read-only during
+ * inventory and caches it for a minute, keeping the last address when a read
+ * fails. `None` when the phone has no Wi-Fi address, no read has answered yet,
+ * or the platform is iOS. Never a device error.
+ */
+wifiIp?: string | null, };
 export type StopDeviceResult = { udid: string, closed: boolean, message: string, };
 export type OperationStopResult = { operationId: string, state: string, devices: Array<StopDeviceResult>, stopMarker: string | null, };
 export type DeviceAppChoices = { udid: string, appKey: string, installedPackages: Array<string>, selectedPackage: string | null, suggestedPackage: string | null, revision: number, selectionValid: boolean, reason: string | null, };

@@ -244,6 +244,7 @@ export async function installTauriMock(
         battery: 82,
         wdaReady: false,
         tileStreamState: "parked",
+        wifiIp: "192.168.110.1",
       },
       {
         udid: "MOCK-ANDROID-02",
@@ -256,6 +257,7 @@ export async function installTauriMock(
         battery: 76,
         wdaReady: false,
         tileStreamState: "parked",
+        wifiIp: "192.168.110.2",
       },
     ];
     const initialDevices = fixtureOptions.androidRoster ? androidDevices : iosDevices;
@@ -263,6 +265,7 @@ export async function installTauriMock(
       ...initialDevices[index % initialDevices.length],
       udid: `MOCK-FLEET-${index + 1}`,
       name: `Máy thử ${index + 1}`,
+      ...(fixtureOptions.androidRoster ? { wifiIp: `192.168.110.${index + 1}` } : {}),
     })) : initialDevices;
     let orchestrationDetail: JsonRecord | null = null;
 

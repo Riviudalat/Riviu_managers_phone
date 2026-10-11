@@ -3024,6 +3024,7 @@ impl DeviceDriver for PmdIosDriver {
                     .get("pairingError")
                     .and_then(|v| v.as_str())
                     .map(String::from),
+                    wifi_ip: None,
             });
         }
         Ok(out)
