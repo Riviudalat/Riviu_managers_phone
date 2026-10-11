@@ -1082,8 +1082,9 @@ pub struct NurtureWindow {
     pub every_minutes: u32,
     /// The cap handed to each session this window starts.
     pub duration_minutes: u32,
-    /// Empty means every connected phone, and the editor says so in words rather than
-    /// leaving a blank that reads as "none".
+    /// The phones this window may run on, approved when the schedule was saved from Hẹn giờ.
+    /// Empty is a list nobody approved (a legacy row, or a window saved some other way): its
+    /// ticks are refused, never widened to the connected fleet.
     pub udids: Vec<String>,
     /// `None` means "behave like the panel above".
     pub behaviour: Option<NurtureWindowBehaviour>,
@@ -1175,6 +1176,8 @@ pub struct NurtureSettings {
     pub schedule_enabled: bool,
     pub schedule_every_minutes: u32,
     pub schedule_duration_minutes: u32,
+    /// The phones the single cadence may run on, approved when the schedule was saved from
+    /// Hẹn giờ. Empty is not approved and refused at the tick, never the whole fleet.
     #[serde(default)]
     pub schedule_udids: Vec<String>,
     /// Stretches of the day the schedule may run in, each with its own cadence.

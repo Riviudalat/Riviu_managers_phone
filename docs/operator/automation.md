@@ -42,7 +42,8 @@ chối vẫn có trong lịch sử.
 và token AI nằm trong **Theo dõi → Bình luận & chi phí AI**, bên cạnh **Tiến độ máy**.
 Nút **Sửa thiết lập** mở đúng tab và đưa focus về trường cần sửa.
 Mỗi máy hiển thị trạng thái bằng chữ cùng lý do khi chưa sẵn sàng. Tab **Hẹn giờ** chứa lịch
-tự chạy và các khung giờ riêng; bấm **Áp dụng hẹn giờ** để lưu lịch xuống ứng dụng.
+tự chạy và các khung giờ riêng; **Lưu**, **Lưu & bật** hoặc **Tắt hẹn giờ** lưu lịch xuống ứng
+dụng (xem [Lịch chạy](#lịch-chạy)).
 Chuyển tab hoặc sửa bản nháp chưa bắt đầu phiên; **Kiểm tra & bắt đầu** vẫn là
 thao tác riêng. Giữ máy tính và Riviu đang mở để lịch chạy.
 
@@ -273,7 +274,9 @@ thẳng Nuôi TikTok › Hẹn giờ.
     danh sách máy, máy bị bỏ qua được ghi vào lần chạy đó.
 
   Lịch hiện chênh lệch từng máy (thêm/bớt) và nút **Duyệt lại N máy**; hộp xác nhận liệt kê đủ
-  máy. Khi phạm vi chưa khớp, lịch đang tắt không bật được. Lịch không bao giờ tự mở rộng
+  máy. **Làm mới lịch chạy** / **Tải lại lịch** đọc lại cả thành viên nhóm, nên nhóm đổi trong lúc
+  trang đang mở cũng hiện chênh lệch; khi chưa đọc được nhóm, phạm vi là "chưa biết" (có nút
+  **Đọc lại nhóm máy**), không bao giờ là "đã duyệt". Khi phạm vi chưa khớp, lịch đang tắt không bật được. Lịch không bao giờ tự mở rộng
   phạm vi.
 - **Nâng cấp lên bản có danh sách duyệt:** lịch cũ có phạm vi là danh sách máy cụ thể được
   coi là đã duyệt đúng danh sách đó. Lịch cũ theo nhóm hoặc **Toàn bộ** hiện "Chưa duyệt
@@ -281,6 +284,15 @@ thẳng Nuôi TikTok › Hẹn giờ.
   sách máy" cho tới khi bấm **Duyệt N máy** một lần.
 - Đổi tên, đổi chu kỳ, bật/tắt hay chuyển sang bản hồ sơ mới không thay danh sách đã duyệt.
   Bản hồ sơ mới có phạm vi khác thì lịch hiện chênh lệch và chờ duyệt lại.
+- **Hẹn giờ của Nuôi TikTok (lịch cả ngày và khung giờ)** theo cùng nguyên tắc. **Lưu** ghi
+  đúng các máy đang chọn ở Thiết lập thành danh sách đã duyệt — cho lịch cả ngày và cho mọi
+  khung còn để "tất cả máy đang chọn" — và giữ trạng thái bật/tắt; **Lưu & bật** ghi rồi bật;
+  **Tắt hẹn giờ** tắt và giữ danh sách. Trang hiện danh sách sẽ duyệt cho từng khung và 5 lần
+  chạy dự kiến kèm múi giờ. Lưu thiết lập hay **Kiểm tra & bắt đầu** không đổi danh sách của
+  lịch. Đến giờ, lịch chỉ chạy trên danh sách đã duyệt; máy cắm sau không bao giờ được thêm.
+  Danh sách rỗng (lịch cũ lưu khi chưa chọn máy, hoặc khung cũ để "tất cả") **không** còn nghĩa
+  là mọi máy đang kết nối: lần đến hạn bị từ chối, ghi `nurture.schedule.refused` vào nhật ký,
+  và trang hiện "Chưa duyệt danh sách máy" cho tới khi bấm **Lưu**.
 - Giữ máy tính và Riviu mở để lịch chạy. Lần chạy thật hiện trong **Lượt chạy**. Lần bị từ
   chối không tạo lượt chạy và không gửi lệnh nào tới điện thoại; lý do nằm ở cột **Kết quả gần
   nhất** của **Lịch chạy**.

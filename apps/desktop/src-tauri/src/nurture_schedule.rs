@@ -35,13 +35,15 @@ pub(crate) enum Tick {
     /// Do nothing. The schedule is off, the clock is outside every window, or the mark has
     /// not been reached yet.
     Wait,
-    /// Nothing to run on, but the mark still has to move.
+    /// Due, but the window (or the single cadence) has no approved phone list, so nothing
+    /// runs. The mark still moves and the caller writes `reason` down.
     ///
-    /// Without this the tick would find itself due every thirty seconds forever, and each
-    /// pass would re-ask a question whose answer has not changed.
-    Rearm {
+    /// Without moving the mark the tick would find itself due every thirty seconds forever,
+    /// and each pass would re-ask a question whose answer has not changed.
+    Refuse {
         mark_key: String,
         next_run_at: DateTime<Utc>,
+        reason: &'static str,
     },
     /// Start a session on these phones, then move this window's mark.
     Run {
@@ -82,24 +84,24 @@ fn due(mark: Option<&String>, now: DateTime<Utc>) -> bool {
     }
 }
 
+/// Why a due tick ran nothing: the phone list was never approved. Saving the schedule from
+/// Hẹn giờ (Lưu / Lưu & bật) writes the list; nothing else does.
+pub(crate) const SCOPE_NOT_APPROVED: &str = "scope_not_approved";
+
 /// Decide a tick.
 ///
-/// `connected` is the fleet minus whatever the registry calls disconnected or errored; that
-/// filter stays at the call site because it speaks the registry's types and this does not.
 /// `offset` is the operator's UTC offset: windows are wall-clock hours *they* typed, and the
 /// marks are instants, so both clocks have to be in the room and neither may be guessed.
 ///
-/// **The empty-list fallback is reproduced here deliberately, not endorsed.** An empty phone
-/// list means the whole connected fleet, because that is what the loop has always done. For a
-/// window the editor prints that as the word "tất cả", so the operator can see it; for the
-/// legacy single-cadence path it stays the trap it always was — the panel's tooltip says
-/// "chỉ chạy trên những máy đã chọn khi lưu" while saving with nothing selected arms
-/// everything. Changing that is the operator's call, not something to slip into a refactor.
-/// See `the_empty_list_means_the_whole_fleet_not_no_phones`.
+/// **A schedule runs only on the phone list approved when it was saved.** An empty list —
+/// a window left on "tất cả", or a single-cadence row saved with nothing selected — used to
+/// mean the whole connected fleet, so a phone plugged in after saving joined the next run
+/// unseen. It now means "not approved": the tick refuses and moves the mark, and the
+/// connected fleet is never consulted for who runs. Approved phones that are offline drop out
+/// at the call site's preflight, as before; nothing is ever added to the list.
 pub(crate) fn decide(
     settings: &NurtureSettings,
     marks: &BTreeMap<String, String>,
-    connected: &[String],
     now: DateTime<Utc>,
     offset: FixedOffset,
 ) -> Tick {
@@ -107,7 +109,7 @@ pub(crate) fn decide(
         return Tick::Wait;
     }
     if settings.schedule_windows.is_empty() {
-        return decide_single_cadence(settings, marks, connected, now);
+        return decide_single_cadence(settings, marks, now);
     }
 
     let local = now.with_timezone(&offset);
@@ -132,20 +134,16 @@ pub(crate) fn decide(
         return Tick::Wait;
     }
     let next_run_at = now + Duration::minutes(window.every_minutes.max(1) as i64);
-    let udids = if window.udids.is_empty() {
-        connected.to_vec()
-    } else {
-        window.udids.clone()
-    };
-    if udids.is_empty() {
-        return Tick::Rearm {
+    if window.udids.is_empty() {
+        return Tick::Refuse {
             mark_key,
             next_run_at,
+            reason: SCOPE_NOT_APPROVED,
         };
     }
     Tick::Run {
         mark_key,
-        udids,
+        udids: window.udids.clone(),
         next_run_at,
         duration_minutes: window.duration_minutes.max(1),
         behaviour: window.behaviour.clone(),
@@ -160,7 +158,6 @@ pub(crate) fn decide(
 fn decide_single_cadence(
     settings: &NurtureSettings,
     marks: &BTreeMap<String, String>,
-    connected: &[String],
     now: DateTime<Utc>,
 ) -> Tick {
     // `max(1)` so a stored zero cannot make the next mark equal to now and spin the tick.
@@ -169,20 +166,16 @@ fn decide_single_cadence(
     if !due(marks.get(LEGACY_MARK), now) {
         return Tick::Wait;
     }
-    let udids = if settings.schedule_udids.is_empty() {
-        connected.to_vec()
-    } else {
-        settings.schedule_udids.clone()
-    };
-    if udids.is_empty() {
-        return Tick::Rearm {
+    if settings.schedule_udids.is_empty() {
+        return Tick::Refuse {
             mark_key,
             next_run_at,
+            reason: SCOPE_NOT_APPROVED,
         };
     }
     Tick::Run {
         mark_key,
-        udids,
+        udids: settings.schedule_udids.clone(),
         next_run_at,
         duration_minutes: settings.schedule_duration_minutes.max(1),
         behaviour: None,
@@ -243,13 +236,7 @@ mod tests {
             ..armed()
         };
         assert_eq!(
-            decide(
-                &settings,
-                &marks(&[]),
-                &["A".into()],
-                at("2026-08-24T10:00:00Z"),
-                saigon()
-            ),
+            decide(&settings, &marks(&[]), at("2026-08-24T10:00:00Z"), saigon()),
             Tick::Wait
         );
     }
@@ -260,7 +247,6 @@ mod tests {
             decide(
                 &armed(),
                 &marks(&[(LEGACY_MARK, "2026-08-24T14:00:00Z")]),
-                &["A".into()],
                 at("2026-08-24T10:00:00Z"),
                 saigon()
             ),
@@ -276,7 +262,6 @@ mod tests {
             decide(
                 &armed(),
                 &marks(&[(LEGACY_MARK, "2026-08-24T10:00:00Z")]),
-                &[],
                 now,
                 saigon()
             ),
@@ -302,7 +287,6 @@ mod tests {
         let tick = decide(
             &armed(),
             &marks(&[(LEGACY_MARK, "2026-08-24T11:00:00+07:00")]),
-            &[],
             now,
             saigon(),
         );
@@ -317,7 +301,7 @@ mod tests {
     fn an_unreadable_mark_is_treated_as_due() {
         let now = at("2026-08-24T10:00:00Z");
         for raw in ["", "soon", "2026-08-24", "not-a-date"] {
-            let tick = decide(&armed(), &marks(&[(LEGACY_MARK, raw)]), &[], now, saigon());
+            let tick = decide(&armed(), &marks(&[(LEGACY_MARK, raw)]), now, saigon());
             assert!(
                 matches!(tick, Tick::Run { .. }),
                 "an unparseable mark ({raw:?}) must not park the schedule forever"
@@ -325,57 +309,51 @@ mod tests {
         }
     }
 
-    /// **The contradiction, pinned as it is.**
+    /// **The contradiction is settled: an empty list is refused, never the whole fleet.**
     ///
-    /// Empty `schedule_udids` means the whole connected fleet, while `NurtureScheduleTab.tsx`
-    /// tells the operator the schedule runs only on the phones picked when it was saved.
-    /// Saving with nothing selected on the grid therefore arms twenty phones. This test
-    /// exists so the behaviour cannot change by accident before somebody decides which of the
-    /// two is wrong — and so whoever changes it has to come here and read this.
+    /// Empty `schedule_udids` used to mean every connected phone while the panel told the
+    /// operator the schedule ran only on the phones picked when it was saved, so saving with
+    /// nothing selected armed twenty phones and a phone plugged in later joined the next run.
+    /// `decide` no longer sees the connected fleet at all; a list nobody approved is refused.
     #[test]
-    fn the_empty_list_means_the_whole_fleet_not_no_phones() {
+    fn the_empty_list_is_refused_never_the_whole_fleet() {
         let settings = NurtureSettings {
             schedule_udids: Vec::new(),
             ..armed()
         };
-        let fleet: Vec<String> = vec!["A".into(), "B".into(), "C".into()];
         assert_eq!(
-            decide(
-                &settings,
-                &marks(&[]),
-                &fleet,
-                at("2026-08-24T10:00:00Z"),
-                saigon()
-            ),
-            Tick::Run {
+            decide(&settings, &marks(&[]), at("2026-08-24T10:00:00Z"), saigon()),
+            Tick::Refuse {
                 mark_key: LEGACY_MARK.into(),
-                udids: fleet,
                 next_run_at: at("2026-08-24T14:00:00Z"),
-                duration_minutes: 150,
-                behaviour: None,
+                reason: SCOPE_NOT_APPROVED,
             }
         );
     }
 
-    /// Due with nothing to run on still moves the mark, or the tick spins every 30 s.
+    /// A refused tick still moves the mark, or the tick spins every 30 s re-asking the same
+    /// question; the next tick before that mark waits.
     #[test]
     fn nothing_to_run_on_rearms_instead_of_retrying_forever() {
         let settings = NurtureSettings {
             schedule_udids: Vec::new(),
             ..armed()
         };
+        let Tick::Refuse { next_run_at, .. } =
+            decide(&settings, &marks(&[]), at("2026-08-24T10:00:00Z"), saigon())
+        else {
+            panic!("an unapproved list is refused");
+        };
+        assert_eq!(next_run_at, at("2026-08-24T14:00:00Z"));
+        let moved = next_run_at.to_rfc3339();
         assert_eq!(
             decide(
                 &settings,
-                &marks(&[]),
-                &[],
-                at("2026-08-24T10:00:00Z"),
+                &marks(&[(LEGACY_MARK, moved.as_str())]),
+                at("2026-08-24T10:00:30Z"),
                 saigon()
             ),
-            Tick::Rearm {
-                mark_key: LEGACY_MARK.into(),
-                next_run_at: at("2026-08-24T14:00:00Z"),
-            }
+            Tick::Wait
         );
     }
 
@@ -387,8 +365,7 @@ mod tests {
             ..armed()
         };
         let now = at("2026-08-24T10:00:00Z");
-        let Tick::Run { next_run_at, .. } = decide(&settings, &marks(&[]), &[], now, saigon())
-        else {
+        let Tick::Run { next_run_at, .. } = decide(&settings, &marks(&[]), now, saigon()) else {
             panic!("a due schedule with phones must run");
         };
         assert!(
@@ -416,13 +393,7 @@ mod tests {
         let settings = windowed(vec![window("morning", 8, 11)]);
         // 05:00Z is 12:00 in Saigon — after the morning window closed.
         assert_eq!(
-            decide(
-                &settings,
-                &marks(&[]),
-                &["A".into()],
-                at("2026-08-24T05:00:00Z"),
-                saigon()
-            ),
+            decide(&settings, &marks(&[]), at("2026-08-24T05:00:00Z"), saigon()),
             Tick::Wait
         );
     }
@@ -436,13 +407,7 @@ mod tests {
     #[test]
     fn windows_are_matched_against_the_operators_local_clock() {
         let settings = windowed(vec![window("morning", 8, 11)]);
-        let tick = decide(
-            &settings,
-            &marks(&[]),
-            &["A".into()],
-            at("2026-08-24T02:00:00Z"),
-            saigon(),
-        );
+        let tick = decide(&settings, &marks(&[]), at("2026-08-24T02:00:00Z"), saigon());
         assert_eq!(
             tick,
             Tick::Run {
@@ -461,24 +426,12 @@ mod tests {
         let settings = windowed(vec![window("night", 22, 2)]);
         // 18:00Z is 01:00 next day in Saigon — inside 22:00-02:00.
         assert!(matches!(
-            decide(
-                &settings,
-                &marks(&[]),
-                &["A".into()],
-                at("2026-08-24T18:00:00Z"),
-                saigon()
-            ),
+            decide(&settings, &marks(&[]), at("2026-08-24T18:00:00Z"), saigon()),
             Tick::Run { .. }
         ));
         // 10:00Z is 17:00 in Saigon — outside it.
         assert_eq!(
-            decide(
-                &settings,
-                &marks(&[]),
-                &["A".into()],
-                at("2026-08-24T10:00:00Z"),
-                saigon()
-            ),
+            decide(&settings, &marks(&[]), at("2026-08-24T10:00:00Z"), saigon()),
             Tick::Wait
         );
     }
@@ -500,7 +453,6 @@ mod tests {
         let tick = decide(
             &settings,
             &marks(&[(&window_mark("morning"), "2026-08-24T20:00:00Z")]),
-            &["A".into()],
             at("2026-08-24T08:00:00Z"),
             saigon(),
         );
@@ -527,13 +479,7 @@ mod tests {
         let stale = marks(&[(&window_mark("morning"), "2026-08-23T00:00:00Z")]);
         // 01:00Z is exactly 08:00 in Saigon.
         assert!(matches!(
-            decide(
-                &settings,
-                &stale,
-                &["A".into()],
-                at("2026-08-24T01:00:00Z"),
-                saigon()
-            ),
+            decide(&settings, &stale, at("2026-08-24T01:00:00Z"), saigon()),
             Tick::Run { .. }
         ));
     }
@@ -546,13 +492,7 @@ mod tests {
         evening.duration_minutes = 15;
         let settings = windowed(vec![evening]);
         // 13:00Z is 20:00 in Saigon.
-        let tick = decide(
-            &settings,
-            &marks(&[]),
-            &["A".into()],
-            at("2026-08-24T13:00:00Z"),
-            saigon(),
-        );
+        let tick = decide(&settings, &marks(&[]), at("2026-08-24T13:00:00Z"), saigon());
         let Tick::Run {
             next_run_at,
             duration_minutes,
@@ -568,24 +508,28 @@ mod tests {
         );
     }
 
-    /// An empty phone list in a window means every connected phone.
+    /// A window left on "tất cả" (an empty list) is refused, not widened to the fleet; a
+    /// window that names phones runs exactly those, whoever else is plugged in.
     #[test]
-    fn a_window_with_no_phones_named_takes_the_whole_fleet() {
+    fn a_window_with_no_phones_named_is_refused() {
         let mut all = window("evening", 20, 22);
         all.udids = Vec::new();
         let settings = windowed(vec![all]);
-        let fleet: Vec<String> = vec!["A".into(), "B".into(), "C".into()];
-        let tick = decide(
-            &settings,
-            &marks(&[]),
-            &fleet,
-            at("2026-08-24T13:00:00Z"),
-            saigon(),
+        assert_eq!(
+            decide(&settings, &marks(&[]), at("2026-08-24T13:00:00Z"), saigon(),),
+            Tick::Refuse {
+                mark_key: window_mark("evening"),
+                next_run_at: at("2026-08-24T14:00:00Z"),
+                reason: SCOPE_NOT_APPROVED,
+            }
         );
-        let Tick::Run { udids, .. } = tick else {
-            panic!("inside the window with a fleet, this runs");
+        let named = windowed(vec![window("evening", 20, 22)]);
+        let Tick::Run { udids, .. } =
+            decide(&named, &marks(&[]), at("2026-08-24T13:00:00Z"), saigon())
+        else {
+            panic!("inside the window with an approved phone, this runs");
         };
-        assert_eq!(udids, fleet);
+        assert_eq!(udids, vec!["A".to_string()]);
     }
 
     /// A window's behaviour block reaches the caller; without one, the panel's applies.
@@ -603,13 +547,7 @@ mod tests {
         let mut evening = window("evening", 20, 22);
         evening.behaviour = Some(heavy.clone());
         let settings = windowed(vec![evening]);
-        let tick = decide(
-            &settings,
-            &marks(&[]),
-            &["A".into()],
-            at("2026-08-24T13:00:00Z"),
-            saigon(),
-        );
+        let tick = decide(&settings, &marks(&[]), at("2026-08-24T13:00:00Z"), saigon());
         let Tick::Run { behaviour, .. } = tick else {
             panic!("inside the window with a phone, this runs");
         };
@@ -623,13 +561,7 @@ mod tests {
         // 19:00Z is 02:00 in Saigon — an hour no window would cover, and the old schedule ran
         // at it, because the old schedule ran at every hour.
         assert!(matches!(
-            decide(
-                &settings,
-                &marks(&[]),
-                &["A".into()],
-                at("2026-08-24T19:00:00Z"),
-                saigon()
-            ),
+            decide(&settings, &marks(&[]), at("2026-08-24T19:00:00Z"), saigon()),
             Tick::Run {
                 duration_minutes: 150,
                 ..

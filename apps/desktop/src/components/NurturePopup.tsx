@@ -37,6 +37,7 @@ import { NurtureDeviceLog } from "./nurture/NurtureDeviceLog";
 import { NurtureDeviceProgress, NurtureRunProgress } from "./nurture/NurtureProgress";
 import { NurtureBehaviourTab } from "./nurture/NurtureBehaviourTab";
 import { NurtureWindows } from "./nurture/NurtureWindows";
+import { NurtureScheduleActions, type NurtureScheduleSave } from "./nurture/NurtureScheduleActions";
 import { NurtureMachinePicker, NurtureSessionSetup, NurtureSetupSummary } from "./nurture/NurtureSessionSetup";
 import { AutomationSettingsSchedule } from "./AutomationSettingsSchedule";
 import { AutomationTabs } from "./AutomationTabs";
@@ -615,10 +616,10 @@ export function NurturePopup({
       } else setMsg(issue.message);
       return false;
     }
-    const payload = {
-      ...s,
-      scheduleUdids: s.scheduleEnabled ? targets : s.scheduleUdids,
-    };
+    // The schedule's phone lists are approved only by `applySchedule` (Hẹn giờ › Lưu); a
+    // settings save or a manual start keeps the stored lists instead of re-scoping a running
+    // schedule to whatever is selected now.
+    const payload = s;
     // Credential writes cannot replace a settings revision. Flush an edited key
     // explicitly before Start/Save as the debounced autosave may still be pending.
     settingsSaveInFlight.current = true;
@@ -647,6 +648,30 @@ export function NurturePopup({
       }
       throw error;
     } finally { settingsSaveInFlight.current = false; }
+  };
+
+  // **The only place the schedule's phone lists are approved.** The phones selected in
+  // Thiết lập become explicit lists — the all-day cadence's and every window still on "tất cả" —
+  // so the backend never widens a run to phones plugged in later. Tắt keeps the stored lists.
+  const applySchedule = async (mode: NurtureScheduleSave) => {
+    if (!settings) return;
+    const enabled = mode === "enable" ? true : mode === "disable" ? false : settings.scheduleEnabled;
+    const approve = mode !== "disable" && targets.length > 0;
+    const next: NurtureSettings = {
+      ...settings,
+      scheduleEnabled: enabled,
+      scheduleUdids: approve ? [...targets] : settings.scheduleUdids,
+      scheduleWindows: (settings.scheduleWindows ?? []).map((window) =>
+        approve && !window.udids.length ? { ...window, udids: [...targets] } : window),
+    };
+    setBusy(true);
+    try {
+      if (await save(next, true)) {
+        setMsg(mode === "disable" ? "Đã tắt lịch tự chạy."
+          : `${enabled ? "Đã lưu và bật hẹn giờ" : "Đã lưu hẹn giờ"}${approve ? ` · duyệt ${targets.length} máy` : ""}.`);
+      }
+    } catch (error) { setMsg(describeError(error)); }
+    finally { setBusy(false); }
   };
 
   useWorkspaceDraft({
@@ -1027,15 +1052,12 @@ export function NurturePopup({
                 aria-labelledby="nurture-page-tab-schedule" hidden={pageMode !== "schedule"}>
                 <div className="nurture-config-body">
                   <header className="nurture-card-heading"><div><span className="automation-section-kicker">Lịch thực hiện</span><h2>Hẹn giờ Nuôi TikTok</h2></div><span className="machine-select-count">{targets.length} máy được chọn</span></header>
-                  <NurtureWindows settings={settings} patch={patch} targets={targets} issue={settingsIssue} issueId={issueId} />
-                  <div className="nurture-default-actions"><button type="button" className="primary" disabled={busy || Boolean(settingsIssue) || (settings.scheduleEnabled && !targets.length)} onClick={async () => {
-                    setBusy(true);
-                    try { if (await save(undefined, true)) setMsg(settings.scheduleEnabled ? "Đã áp dụng hẹn giờ cho các máy đã chọn." : "Đã tắt lịch tự chạy."); }
-                    catch (error) { setMsg(describeError(error)); }
-                    finally { setBusy(false); }
-                  }} aria-describedby={scheduleBlockers.length ? `${blockerId}-schedule-0` : undefined}>Áp dụng hẹn giờ</button><span>Lịch dùng các máy đã chọn ở Thiết lập. Giữ Riviu và máy tính đang mở.</span>
-                    {/* The fix links live in the footer right under this panel; one set is enough. */}
-                    <BlockedReason id={`${blockerId}-schedule`} blockers={scheduleBlockers.slice(0, 1)} /></div>
+                  <NurtureWindows settings={settings} patch={patch} targets={targets} issue={settingsIssue} issueId={issueId} showEnableToggle={false} />
+                  <NurtureScheduleActions settings={settings} targets={targets} label={(udid) => deviceLabel(devices, metas, udid)}
+                    busy={busy} blocked={Boolean(settingsIssue)} onSave={(mode) => void applySchedule(mode)}
+                    describedBy={scheduleBlockers.length ? `${blockerId}-schedule-0` : undefined} />
+                  {/* The fix links live in the footer right under this panel; one set is enough. */}
+                  <BlockedReason id={`${blockerId}-schedule`} blockers={scheduleBlockers.slice(0, 1)} />
                   {targetRef && profileConfig && <AutomationSettingsSchedule kind="nurture" target={targetRef} config={profileConfig} disabled={Boolean(settingsIssue) || !targets.length} devices={devices} metas={metas} />}
                 </div>
               </div>}

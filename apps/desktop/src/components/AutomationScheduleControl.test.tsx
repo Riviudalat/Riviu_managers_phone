@@ -192,8 +192,17 @@ describe("AutomationScheduleControl", () => {
 
   it("edits cadence and name with CAS while retaining the pinned old profile revision", async () => {
     vi.mocked(api.automationScheduleList).mockResolvedValue([pinnedSchedule]);
-    render(<AutomationScheduleControl profile={profile} />);
+    // The pinned revision targets a group, approved as its one member.
+    const box = { id: "box-1", name: "Box 1", color: "#c2410c", udids: ["phone-1"], createdAt: profile.createdAt };
+    vi.mocked(api.automationGet).mockImplementation(async (definitionId, revision) => ({
+      definition: { ...profile, id: definitionId },
+      revision: { definitionId, revision, targetRef: { type: "group", groupId: "box-1" }, config: {}, createdAt: profile.createdAt },
+    }));
+    vi.mocked(api.listGroups).mockResolvedValue([box]);
+    const second: DeviceInfo = { ...phone, udid: "phone-2", name: "Máy thử 2" };
+    render(<AutomationScheduleControl profile={profile} devices={[phone, second]} />);
     const row = await screen.findByRole("group", { name: "Lịch Mỗi giờ" });
+    expect(await within(row).findByText("Đã duyệt 1 máy")).toBeVisible();
 
     fireEvent.change(within(row).getByLabelText("Tên lịch Mỗi giờ"), {
       target: { value: "Hai giờ" },
@@ -215,6 +224,20 @@ describe("AutomationScheduleControl", () => {
         null,
       ),
     );
+
+    // The group gains a phone while the page is open: reloading reads membership again and
+    // shows the difference instead of the old approval.
+    vi.mocked(api.listGroups).mockResolvedValue([{ ...box, udids: ["phone-1", "phone-2"] }]);
+    fireEvent.click(await screen.findByRole("button", { name: "Tải lại lịch" }));
+    expect(await screen.findByRole("button", { name: "Duyệt lại 2 máy" })).toBeVisible();
+    expect(screen.getByText(/thêm Máy thử 2/)).toBeVisible();
+
+    // A failed reread stays unknown with a retry; it never falls back to "approved".
+    vi.mocked(api.listGroups).mockRejectedValue(new Error("nhóm không đọc được"));
+    fireEvent.click(await screen.findByRole("button", { name: "Tải lại lịch" }));
+    expect(await screen.findByRole("button", { name: "Đọc lại nhóm máy" })).toBeVisible();
+    expect(screen.queryByText(/^Đã duyệt/)).toBeNull();
+    expect(screen.queryByRole("button", { name: "Duyệt lại 2 máy" })).toBeNull();
   });
 
   it("switches a schedule to the current profile revision only after explicit confirmation", async () => {

@@ -1,5 +1,5 @@
 import { resolveAutomationTarget } from "./automationTargets";
-import type { DeviceGroup, DeviceInfo, DeviceMeta, TargetRef } from "./types";
+import type { DeviceGroup, DeviceInfo, DeviceMeta, NurtureSettings, NurtureWindow, TargetRef } from "./types";
 
 /**
  * What a schedule's approval covers, and how far its target has drifted from it.
@@ -74,6 +74,40 @@ export function upcomingRuns(
 /** Runs of a schedule saved or switched on at `now`: the backend arms the first slot one interval later. */
 export function runsIfEnabledAt(now: number, everyMinutes: number, count = SCHEDULE_PREVIEW_COUNT): Date[] {
   return upcomingRuns(new Date(now + everyMinutes * 60_000).toISOString(), everyMinutes, now, count).times;
+}
+
+/** Mirrors `nurture_schedule.rs::covers`: an end at or before the start wraps past midnight. */
+function windowCovers(window: NurtureWindow, minute: number): boolean {
+  return window.startMinute <= window.endMinute
+    ? minute >= window.startMinute && minute <= window.endMinute
+    : minute >= window.startMinute || minute <= window.endMinute;
+}
+
+/**
+ * The next runs of the Nuôi schedule as `nurture_schedule::decide` starts them, assuming every
+ * window is due now: the first window covering the local minute wins, then waits its own
+ * cadence. Marks already stored can only push these later, so callers call them "dự kiến".
+ * Without windows it is the single cadence, armed one interval after it is switched on.
+ */
+export function nurtureScheduleRuns(
+  settings: Pick<NurtureSettings, "scheduleEveryMinutes" | "scheduleWindows">,
+  now: number,
+  count = SCHEDULE_PREVIEW_COUNT,
+): Date[] {
+  const windows = settings.scheduleWindows ?? [];
+  if (!windows.length) return runsIfEnabledAt(now, Math.max(1, settings.scheduleEveryMinutes), count);
+  const nextDue = new Map<string, number>();
+  const times: Date[] = [];
+  const start = Math.ceil(now / 60_000) * 60_000;
+  // Eight days covers every window at least once, whatever its hours.
+  for (let t = start; t < start + 8 * 24 * 60 * 60_000 && times.length < count; t += 60_000) {
+    const local = new Date(t);
+    const window = windows.find((candidate) => windowCovers(candidate, local.getHours() * 60 + local.getMinutes()));
+    if (!window || (nextDue.get(window.id) ?? -Infinity) > t) continue;
+    times.push(local);
+    nextDue.set(window.id, t + Math.max(1, window.everyMinutes) * 60_000);
+  }
+  return times;
 }
 
 /** The zone every schedule time is shown in, stated rather than assumed. */

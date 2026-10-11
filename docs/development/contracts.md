@@ -313,6 +313,14 @@ phải đổi phạm vi. Migration 51 coi danh sách explicit của bản hồ s
 Đổi tên, chu kỳ, bật/tắt hay revision giữ danh sách; chỉ tham số `approvedUdids` thay nó.
 `scheduleScope.ts` ở UI chép cùng quy tắc chỉ để giải thích; backend quyết định.
 
+Lịch Nuôi (`nurture.settings`, `nurture_schedule::decide`) chỉ chạy trên danh sách đã duyệt:
+`schedule_udids` cho lịch cả ngày, `udids` của khung cho từng khung. `decide` không nhận roster
+đang kết nối; danh sách rỗng trả `Tick::Refuse` (`scope_not_approved`), dời mark và ghi
+`nurture.schedule.refused`, không bao giờ mở rộng ra cả fleet. `claim_nurture_schedule_mark`
+đọc lại settings trong cùng transaction và từ chối máy ngoài danh sách của đúng mark đó hoặc
+danh sách rỗng. Danh sách chỉ được ghi từ Hẹn giờ (Lưu / Lưu & bật); lưu thiết lập và bắt đầu
+thủ công giữ danh sách cũ.
+
 `RIVIU_DEV_MANUAL_ACCEPTANCE=1` trong bản debug giữ mọi lịch tự chạy ở trạng thái
 chờ và không sửa lịch đã lưu. Chế độ này cũng không tự resume Flow/Điều phối,
 không chạy idle sweep/comment verifier, không tự đóng app và không bind

@@ -83,6 +83,8 @@ export function AutomationScheduleControl({ profile, devices = [], metas }: Prop
   const [newName, setNewName] = useState("");
   const [newMinutes, setNewMinutes] = useState(60);
   const loadGeneration = useRef(0);
+  // Bumped by every reload, so group membership is read again with the schedules.
+  const [refreshCount, setRefreshCount] = useState(0);
   const profileId = profile?.id ?? null;
   const targetKeys = useMemo(
     () => [
@@ -92,7 +94,7 @@ export function AutomationScheduleControl({ profile, devices = [], metas }: Prop
     [profile, schedules],
   );
   const targets = useScheduleTargets(targetKeys);
-  const groups = useDeviceGroups(needsGroups(targets.values()));
+  const { groups, error: groupsError, reload: reloadGroups } = useDeviceGroups(needsGroups(targets.values()), refreshCount);
   const label = useCallback((udid: string) => scheduleDeviceLabel(udid, devices, metas), [devices, metas]);
   const scopeOf = (definitionId: string, revision: number, approved: string[] | null) =>
     scheduleScope(approved, targets.get(`${definitionId}:${revision}`), devices, groups);
@@ -101,6 +103,7 @@ export function AutomationScheduleControl({ profile, devices = [], metas }: Prop
 
   const load = useCallback(async () => {
     const generation = ++loadGeneration.current;
+    setRefreshCount((value) => value + 1);
     if (!profileId) {
       setSchedules([]);
       setLoading(false);
@@ -245,6 +248,8 @@ export function AutomationScheduleControl({ profile, devices = [], metas }: Prop
                   busy={busyId === record.id}
                   scope={scopeOf(record.definitionId, record.definitionRevision, record.approvedUdids)}
                   label={label}
+                  groupsError={groupsError}
+                  onRetryGroups={reloadGroups}
                   onUpdate={update}
                 />
               ))}
@@ -320,6 +325,8 @@ function ScheduleRow({
   busy,
   scope,
   label,
+  groupsError,
+  onRetryGroups,
   onUpdate,
 }: {
   record: AutomationSchedule;
@@ -327,6 +334,8 @@ function ScheduleRow({
   busy: boolean;
   scope: ScheduleScope;
   label: (udid: string) => string;
+  groupsError: string | null;
+  onRetryGroups: () => void;
   onUpdate: (record: AutomationSchedule, values: ScheduleValues) => Promise<boolean>;
 }) {
   const parsedMinutes = readIntervalMinutes(record.schedule);
@@ -444,6 +453,8 @@ function ScheduleRow({
         label={label}
         busy={busy || parsedMinutes === null}
         onApprove={(udids) => void approve(udids)}
+        error={groupsError}
+        onRetry={onRetryGroups}
       />
       {lastError && <p className="hint">Lần gần nhất: {lastError}</p>}
       {parsedMinutes !== null && (

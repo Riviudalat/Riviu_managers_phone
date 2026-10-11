@@ -21,3 +21,4 @@
 .schedule-scope-line > summary { cursor: pointer; color: var(--text-1); }
 .schedule-scope-line > p { margin: 4px 0 0; overflow-wrap: anywhere; }
 .schedule-save-actions { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; }
+.nurture-schedule-review { display: grid; gap: 8px; min-width: 0; margin-top: 12px; }

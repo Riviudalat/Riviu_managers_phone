@@ -297,12 +297,12 @@ describe("NurturePopup", () => {
     expect(total).toHaveValue(75);
     fireEvent.change(total, { target: { value: "40" } });
     fireEvent.click(screen.getByRole("tab", { name: "Hẹn giờ" }));
-    expect(screen.getByRole("checkbox", { name: /Lịch tự chạy/ })).toBeVisible();
+    expect(screen.getByRole("button", { name: "Lưu & bật hẹn giờ" })).toBeVisible();
     expect(total).not.toBeVisible();
     fireEvent.click(screen.getByRole("tab", { name: "Thiết lập" }));
     expect(screen.queryByLabelText("Giới hạn video", { selector: "input" })).toBeNull();
     expect(screen.queryByLabelText("Vòng", { selector: "input" })).toBeNull();
-    expect(screen.queryByRole("checkbox", { name: /Lịch tự chạy/ })).toBeNull();
+    expect(screen.queryByRole("button", { name: "Lưu & bật hẹn giờ" })).toBeNull();
     fireEvent.click(screen.getByRole("tab", { name: "Thiết lập" }));
     expect(total).toHaveValue(40);
     saved.saveSettings.mockImplementationOnce(async value => value);
@@ -329,18 +329,21 @@ describe("NurturePopup", () => {
     saved.saveSettings.mockImplementationOnce(async value => value);
     render(<NurturePopup devices={devices} selected={[]} targetUdids={["mock-1"]} targetRef={{ type: "explicit", udids: ["mock-1"] }} metas={new Map()} surface="page" />);
     fireEvent.click(await screen.findByRole("tab", { name: "Hẹn giờ" }));
-    fireEvent.click(screen.getByRole("checkbox", { name: /Lịch tự chạy/ }));
     fireEvent.click(screen.getByRole("button", { name: "+ Thêm khung giờ" }));
     fireEvent.change(screen.getByLabelText("Giờ bắt đầu khung 1"), { target: { value: "09:30" } });
     fireEvent.click(screen.getByRole("tab", { name: "Thiết lập" }));
     expect(api.nurtureSaveSettings).not.toHaveBeenCalled();
     fireEvent.click(screen.getByRole("tab", { name: "Hẹn giờ" }));
     expect(screen.getByLabelText("Giờ bắt đầu khung 1")).toHaveValue("09:30");
-    fireEvent.click(screen.getByRole("button", { name: "Áp dụng hẹn giờ" }));
-    await screen.findByText("Đã áp dụng hẹn giờ cho các máy đã chọn.");
+    // Five estimated runs in the computer's zone, and the exact list Lưu approves.
+    expect(screen.getByRole("region", { name: "Nếu bật lúc này, 5 lần chạy đầu (dự kiến)" }).querySelectorAll("time")).toHaveLength(5);
+    expect(screen.getByText(/Khung 09:30–11:00: 1 máy/)).toBeVisible();
+    fireEvent.click(screen.getByRole("button", { name: "Lưu & bật hẹn giờ" }));
+    await screen.findByText("Đã lưu và bật hẹn giờ · duyệt 1 máy.");
+    // "Tất cả" is written down as the approved list, never left empty for the fleet.
     expect(api.nurtureSaveSettings).toHaveBeenCalledWith(expect.objectContaining({
       scheduleEnabled: true, scheduleUdids: ["mock-1"],
-      scheduleWindows: [expect.objectContaining({ startMinute: 570, endMinute: 660 })],
+      scheduleWindows: [expect.objectContaining({ startMinute: 570, endMinute: 660, udids: ["mock-1"] })],
     }));
     expect(api.nurtureStart).not.toHaveBeenCalled();
     expect(hasWorkspaceDrafts()).toBe(true);
@@ -352,13 +355,13 @@ describe("NurturePopup", () => {
     saved.saveSettings.mockImplementationOnce(async value => value);
     render(<NurturePopup devices={devices} selected={[]} targetUdids={[]} targetRef={{ type: "explicit", udids: [] }} metas={new Map()} surface="page" />);
     fireEvent.click(await screen.findByRole("tab", { name: "Hẹn giờ" }));
-    const apply = screen.getByRole("button", { name: "Áp dụng hẹn giờ" });
-    expect(apply).toBeDisabled();
-    fireEvent.click(screen.getByRole("checkbox", { name: /Lịch tự chạy/ }));
-    expect(apply).toBeEnabled();
-    fireEvent.click(apply);
+    expect(screen.getByRole("button", { name: "Lưu hẹn giờ" })).toBeDisabled();
+    const off = screen.getByRole("button", { name: "Tắt hẹn giờ" });
+    expect(off).toBeEnabled();
+    fireEvent.click(off);
     await screen.findByText("Đã tắt lịch tự chạy.");
-    expect(api.nurtureSaveSettings).toHaveBeenCalledWith(expect.objectContaining({ scheduleEnabled: false }));
+    // Turning off keeps the stored approval; it does not re-scope to an empty selection.
+    expect(api.nurtureSaveSettings).toHaveBeenCalledWith(expect.objectContaining({ scheduleEnabled: false, scheduleUdids: ["mock-1"] }));
     expect(api.nurtureStart).not.toHaveBeenCalled();
   });
 

@@ -19,10 +19,11 @@ async function readSchedules() {
   return { profiles, rows };
 }
 
-function scopeCell(scope: ScheduleScope, approved: string[] | null) {
+function scopeCell(scope: ScheduleScope, approved: string[] | null, groupsError: string | null) {
   switch (scope.kind) {
     case "unknown":
-      return approved ? `${approved.length} máy` : "Đang đọc…";
+      // Never the approved count: an unread or failed membership read proves nothing.
+      return groupsError ? "Chưa đọc được nhóm" : "Đang đọc…";
     case "missingGroup":
       return "Nhóm không còn";
     case "unapproved":
@@ -52,7 +53,8 @@ export function OperatorSchedulesPage({
   const profiles = data?.profiles ?? [];
   const rows = data?.rows ?? [];
   const targets = useScheduleTargets(rows);
-  const groups = useDeviceGroups(needsGroups(targets.values()));
+  // Read again with every list refresh, so a group changed elsewhere shows its difference.
+  const { groups, error: groupsError } = useDeviceGroups(needsGroups(targets.values()), data);
   const scopeOf = (row: (typeof rows)[number]) =>
     scheduleScope(row.approvedUdids, targets.get(`${row.definitionId}:${row.definitionRevision}`), devices, groups);
   return (
@@ -101,7 +103,7 @@ export function OperatorSchedulesPage({
                     <td>{profiles.find((p) => p.id === row.definitionId)?.name ?? row.definitionId}</td>
                     <td>{row.definitionRevision}</td>
                     <td>{row.enabled ? "Đang bật" : "Đã tắt"}</td>
-                    <td>{scopeCell(scope, row.approvedUdids)}</td>
+                    <td>{scopeCell(scope, row.approvedUdids, groupsError)}</td>
                     <td>{row.nextDueAt ? new Date(row.nextDueAt).toLocaleString("vi-VN") : "—"}</td>
                     <td>{scheduleErrorLabel(row.lastErrorCode) ?? "—"}</td>
                     <td>

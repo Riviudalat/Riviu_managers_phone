@@ -2790,7 +2790,6 @@ impl AppState {
         let db = self.db.clone();
         let nurture = self.nurture.clone();
         let nurture_engine = self.nurture_engine.clone();
-        let registry = self.registry.clone();
         let app_nurture = app.clone();
         let command_admission = self.command_admission.clone();
         let nurture_control = self.control.clone();
@@ -2812,19 +2811,8 @@ impl AppState {
                 // It used to be one inline block, which is why the only thing testable about
                 // this scheduler was the order of two calls in the text of the file. Arming,
                 // due-ness, a corrupt mark and the phone list are now measurable; what stays
-                // here is reading the row, writing the mark, and starting the sessions.
-                let connected: Vec<String> = registry
-                    .list()
-                    .into_iter()
-                    .filter(|d| {
-                        !matches!(
-                            d.status,
-                            riviu_core::DeviceStatus::Disconnected
-                                | riviu_core::DeviceStatus::Error
-                        )
-                    })
-                    .map(|d| d.udid)
-                    .collect();
+                // here is reading the row, writing the mark, and starting the sessions. The
+                // connected fleet is not an input: a run uses only the approved phone list.
                 // One mark per window, plus the legacy one for a schedule that has no
                 // windows. Read by name from the settings rather than by scanning the table:
                 // a window the operator deleted leaves its row behind, and a scan would hand
@@ -2844,14 +2832,22 @@ impl AppState {
                 // The operator's own offset: windows are the wall-clock hours they typed.
                 let offset = *chrono::Local::now().offset();
                 let (mark_key, udids, next_run_at, duration_minutes, behaviour) =
-                    match crate::nurture_schedule::decide(
-                        &settings, &marks, &connected, now, offset,
-                    ) {
+                    match crate::nurture_schedule::decide(&settings, &marks, now, offset) {
                         crate::nurture_schedule::Tick::Wait => continue,
-                        crate::nurture_schedule::Tick::Rearm {
+                        crate::nurture_schedule::Tick::Refuse {
                             mark_key,
                             next_run_at,
+                            reason,
                         } => {
+                            // Written down so a refused schedule does not look idle: the
+                            // operator approves the list from Hẹn giờ (Lưu / Lưu & bật).
+                            log::warn!(
+                                "lịch nuôi TT không chạy {mark_key}: chưa duyệt danh sách máy ({reason})"
+                            );
+                            let _ = db.log_op(
+                                "nurture.schedule.refused",
+                                &format!("{mark_key}: chưa duyệt danh sách máy ({reason})"),
+                            );
                             let _ = db.set_setting(&mark_key, &next_run_at.to_rfc3339());
                             continue;
                         }

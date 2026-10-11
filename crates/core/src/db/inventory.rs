@@ -372,6 +372,28 @@ impl Database {
         if !current_settings.schedule_enabled || current_settings.revision != settings_revision {
             return Ok(None);
         }
+        // Only phones on this mark's approved list, read in the same transaction as the
+        // settings row: the single cadence's `schedule_udids`, or the window's own list. An
+        // empty list was never approved and claims nothing; a phone plugged in later is not on
+        // any list.
+        let approved = if key == "nurture.schedule.next_run_at" {
+            Some(&current_settings.schedule_udids)
+        } else {
+            key.strip_prefix("nurture.schedule.next_run_at.")
+                .and_then(|id| {
+                    current_settings
+                        .schedule_windows
+                        .iter()
+                        .find(|window| window.id == id)
+                })
+                .map(|window| &window.udids)
+        };
+        let Some(approved) = approved.filter(|approved| !approved.is_empty()) else {
+            return Ok(None);
+        };
+        if udids.is_empty() || udids.iter().any(|udid| !approved.contains(udid)) {
+            return Ok(None);
+        }
         let current: Option<String> = tx
             .query_row("SELECT value FROM settings WHERE key=?1", [key], |row| {
                 row.get(0)
@@ -492,6 +514,11 @@ mod schedule_claim_tests {
         let key = "nurture.schedule.next_run_at.fixture";
         let settings = crate::NurtureSettings {
             schedule_enabled: true,
+            schedule_windows: vec![crate::NurtureWindow {
+                id: "fixture".into(),
+                udids: vec!["device-a".into()],
+                ..Default::default()
+            }],
             ..Default::default()
         };
         db.save_nurture_settings(&settings).unwrap();
@@ -517,6 +544,17 @@ mod schedule_claim_tests {
             .is_none());
         db.settle_nurture_schedule_mark(&first, &["device-a".into()])
             .unwrap();
+        // A phone outside the window's approved list claims nothing and leaves the mark.
+        assert!(db
+            .claim_nurture_schedule_mark(
+                key,
+                Some("2026-09-24T01:15:00Z"),
+                "2026-09-24T01:30:00Z",
+                1,
+                &["device-a".into(), "device-b".into()]
+            )
+            .unwrap()
+            .is_none());
         assert!(db
             .claim_nurture_schedule_mark(
                 key,

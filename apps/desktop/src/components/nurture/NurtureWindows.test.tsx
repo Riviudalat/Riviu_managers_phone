@@ -75,21 +75,21 @@ describe("NurtureWindows", () => {
     expect(screen.getByLabelText(/^Mỗi \(phút\)/)).toBeVisible();
   });
 
-  /// **"Tất cả" is written out, because an empty list means every connected phone.**
+  /// **"Tất cả" is written out, and it means the phones selected now, never the fleet.**
   ///
   /// This is the one rule in the schedule that has already bitten: the panel's own tooltip
-  /// said "chỉ chạy trên những máy đã chọn" while an empty list armed the whole fleet. A
-  /// window keeps the rule — twenty phones is often exactly what is wanted — but it may not
-  /// keep it silently, so the editor prints the word.
-  it("prints an empty phone list as tất cả, never as a blank", () => {
+  /// said "chỉ chạy trên những máy đã chọn" while an empty list armed the whole fleet. An
+  /// empty list now reads as the selection it will be saved as, with its count, and Lưu
+  /// writes that exact list; a phone plugged in later is never added.
+  it("prints an empty phone list as the current selection, never as a blank", () => {
     setup([window8to11]);
-    expect(screen.getByText("tất cả")).toBeVisible();
+    expect(screen.getByText("tất cả máy đang chọn (3)")).toBeVisible();
   });
 
   it("shows the count once a window names phones", () => {
     setup([{ ...window8to11, udids: ["A", "B"] }]);
     expect(screen.getByText("2 máy đã chọn")).toBeVisible();
-    expect(screen.queryByText("tất cả")).toBeNull();
+    expect(screen.queryByText(/tất cả máy đang chọn/)).toBeNull();
   });
 
   /// Hours go in and out as the clock the operator reads, not as minutes.

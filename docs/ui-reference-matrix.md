@@ -149,7 +149,10 @@ focus về nút.
 
 **Lịch.** Mọi trình sửa lịch lặp (Lịch chạy, Hẹn giờ của Nuôi/Tương tác, lịch mỗi giờ của Tác vụ
 đã lưu) hiện 5 lần chạy tới kèm múi giờ máy tính, tách **Lưu** (lưu, đang tắt) với **Lưu & bật**,
-và ghi danh sách máy được duyệt lúc lưu. Phạm vi sau đó khác danh sách đã duyệt (nhóm thêm/bớt
+và ghi danh sách máy được duyệt lúc lưu. Hẹn giờ khung giờ của Nuôi dùng **Lưu** (giữ bật/tắt),
+**Lưu & bật**, **Tắt hẹn giờ**, ghi danh sách tường minh cho từng khung và hiện 5 lần chạy dự
+kiến; danh sách rỗng bị từ chối, không bao giờ thành mọi máy đang kết nối. Làm mới lịch đọc lại
+thành viên nhóm; đang đọc hoặc đọc lỗi là "chưa biết", không phải "đã duyệt". Phạm vi sau đó khác danh sách đã duyệt (nhóm thêm/bớt
 máy, máy mới cắm vào lịch "Toàn bộ") thì lịch hiện chênh lệch từng máy, không bật được và lần
 chạy đến hạn bị từ chối trước khi gửi lệnh tới khi người vận hành **Duyệt lại**; lịch không tự mở
 rộng phạm vi. Máy đã duyệt nhưng đang mất kết nối chỉ bị bỏ qua ở lần chạy đó và được ghi lại.

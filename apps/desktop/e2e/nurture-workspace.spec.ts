@@ -88,7 +88,7 @@ test("nurture compact scope and machine picker preserve drafts at three viewport
   await workspace.getByRole("tab", { name: "Bình luận & chi phí AI", exact: true }).click();
   await page.screenshot({ path: test.info().outputPath("nurture-comment-tab.png") });
   await workspace.getByRole("tab", { name: "Hẹn giờ", exact: true }).click();
-  await expect(workspace.getByRole("checkbox", { name: /Lịch tự chạy/ })).toBeVisible();
+  await expect(workspace.getByRole("button", { name: "Lưu & bật hẹn giờ", exact: true })).toBeVisible();
   await workspace.getByRole("button", { name: "+ Thêm khung giờ", exact: true }).click();
   await expect(workspace.getByLabel("Giờ bắt đầu khung 1", { exact: true })).toBeVisible();
   await workspace.getByRole("tab", { name: "Thiết lập", exact: true }).click();

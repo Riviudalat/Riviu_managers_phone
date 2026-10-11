@@ -1,4 +1,5 @@
 import { useEffect, useMemo, useRef, useState } from "react";
+import { RefreshCw } from "lucide-react";
 import { automationList, automationScheduleList, automationScheduleFromSettings, automationScheduleUpdate } from "../api";
 import type { AutomationKind, AutomationSchedule, AutomationScheduleV1, DeviceInfo, DeviceMeta, JsonValue, TargetRef } from "../types";
 import { describeError } from "../describeError";
@@ -21,8 +22,10 @@ export function AutomationSettingsSchedule({ kind, target, config, disabled, dev
   const inFlight = useRef(false);
   const [message, setMessage] = useState("");
   const [editing, setEditing] = useState<Record<string, { name: string; minutes: number }>>({});
+  // Bumped by "Tải lại lịch": the rows and the group membership are read again together.
+  const [refreshCount, setRefreshCount] = useState(0);
   const targets = useScheduleTargets(rows);
-  const groups = useDeviceGroups(target.type === "group" || needsGroups(targets.values()));
+  const { groups, error: groupsError, reload: reloadGroups } = useDeviceGroups(target.type === "group" || needsGroups(targets.values()), refreshCount);
   const label = useMemo(() => (udid: string) => scheduleDeviceLabel(udid, devices, metas), [devices, metas]);
   // Saving approves exactly the phones the current setup names.
   const newScope = scheduleScope(null, target, devices, groups);
@@ -34,9 +37,10 @@ export function AutomationSettingsSchedule({ kind, target, config, disabled, dev
       if (active) setRows(schedules.filter(s => ids.has(s.definitionId)));
     }).catch(e => { if (active) setMessage(describeError(e)); });
     return () => { active = false; };
-  }, [kind]);
+  }, [kind, refreshCount]);
   const create = async (enabled: boolean) => {
     if (disabled || inFlight.current || !name.trim() || !validMinutes(minutes)) return;
+    if (newScope.kind === "unknown") { setMessage(groupsError ? `Chưa đọc được nhóm máy: ${groupsError}. Bấm Tải lại lịch tự động.` : "Đang đọc phạm vi máy; thử lại sau giây lát."); return; }
     if (!approvable.length) { setMessage("Phạm vi hiện không có máy nào để duyệt cho lịch."); return; }
     inFlight.current=true;setBusy(true);setMessage("");
     try {
@@ -62,7 +66,7 @@ export function AutomationSettingsSchedule({ kind, target, config, disabled, dev
     await write(row, { name: row.name, enabled: row.enabled, schedule: row.schedule as unknown as AutomationScheduleV1, approvedUdids: udids }, `Đã duyệt ${udids.length} máy cho lịch ${row.name}.`);
   };
   return <section className="automation-schedule-control" aria-label="Hẹn giờ từ thiết lập">
-    <h3>Lịch tự động</h3><p>Lưu bài, hành động và máy đang chọn vào lịch. Sửa thiết lập sau đó không đổi lịch đã lưu.</p>
+    <div className="automation-schedule-heading"><h3>Lịch tự động</h3><button type="button" className="icon-btn" aria-label="Tải lại lịch tự động" title="Đọc lại lịch và nhóm máy" disabled={busy} onClick={() => setRefreshCount(value => value + 1)}><RefreshCw size={15} /></button></div><p>Lưu bài, hành động và máy đang chọn vào lịch. Sửa thiết lập sau đó không đổi lịch đã lưu.</p>
     <div className="automation-schedule-create" role="group" aria-label="Tạo lịch mới">
       <label>Tên lịch<input aria-label="Tên lịch mới" value={name} disabled={busy} onChange={e=>setName(e.target.value)}/></label>
       <label>Cách nhau (phút)<input aria-label="Chu kỳ lịch mới (phút)" type="number" min={15} max={1440} value={minutes} disabled={busy} onChange={e=>setMinutes(Number(e.target.value))}/></label>
@@ -89,7 +93,7 @@ export function AutomationSettingsSchedule({ kind, target, config, disabled, dev
           <button type="button" disabled={busy||!editing[row.id]} onClick={()=>void revise(row)}>Lưu thay đổi</button>
           <button type="button" disabled={busy||enableBlocked} title={enableBlocked?"Duyệt danh sách máy trước khi bật":undefined} onClick={()=>void toggle(row)}>{row.enabled?"Tắt lịch":"Bật lịch"}</button>
         </div>
-        <ScheduleScopeNotice scope={scope} approved={row.approvedUdids} label={label} busy={busy} onApprove={udids=>void approve(row, udids)}/>
+        <ScheduleScopeNotice scope={scope} approved={row.approvedUdids} label={label} busy={busy} onApprove={udids=>void approve(row, udids)} error={groupsError} onRetry={reloadGroups}/>
         {lastError&&<p className="hint">Lần gần nhất: {lastError}</p>}
         <NextRunsPreview nextDueAt={row.nextDueAt} everyMinutes={storedMinutes} enabled={row.enabled} compact/>
       </div>;

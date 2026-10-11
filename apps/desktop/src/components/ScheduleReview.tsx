@@ -1,4 +1,3 @@
-import { useEffect, useState } from "react";
 import {
   formatScheduleTime,
   localTimeZoneLabel,
@@ -7,43 +6,34 @@ import {
   type ScheduleScope,
 } from "../scheduleScope";
 import { StatusNotice } from "./States";
-import { deviceNames } from "../useScheduleScope";
+import { deviceNames, usePreviewClock } from "../useScheduleScope";
 import "../styles/schedule-review.css";
 
-/** The next five runs, with the zone they are in. A schedule that is off shows what switching it on now would do. */
-export function NextRunsPreview({
-  nextDueAt,
-  everyMinutes,
-  enabled,
+/** A titled list of run times with the zone they are in; compact folds it into a disclosure. */
+export function RunTimesPreview({
+  title,
+  times,
+  overdueFirst = false,
   compact = false,
+  emptyText = "Chưa có lần chạy kế tiếp.",
 }: {
-  nextDueAt: string | null;
-  everyMinutes: number;
-  enabled: boolean;
+  title: string;
+  times: Date[];
+  overdueFirst?: boolean;
   compact?: boolean;
+  emptyText?: string;
 }) {
-  const [now, setNow] = useState(() => Date.now());
-  // "If switched on now" moves with the clock; a page left open must not show stale slots.
-  useEffect(() => {
-    const timer = window.setInterval(() => setNow(Date.now()), 30_000);
-    return () => window.clearInterval(timer);
-  }, []);
-  const valid = Number.isInteger(everyMinutes) && everyMinutes > 0;
-  const { overdue, times } = enabled
-    ? upcomingRuns(nextDueAt, everyMinutes, now)
-    : { overdue: false, times: valid ? runsIfEnabledAt(now, everyMinutes) : [] };
-  const title = enabled ? "5 lần chạy tới" : "Nếu bật lúc này, 5 lần chạy đầu";
   const body = times.length ? (
     <ol className="schedule-runs-list">
       {times.map((time, index) => (
         <li key={time.toISOString()}>
           <time dateTime={time.toISOString()}>{formatScheduleTime(time)}</time>
-          {overdue && index === 0 && <span> · quá hạn, chạy ở lần quét kế tiếp khi Riviu đang mở</span>}
+          {overdueFirst && index === 0 && <span> · quá hạn, chạy ở lần quét kế tiếp khi Riviu đang mở</span>}
         </li>
       ))}
     </ol>
   ) : (
-    <p className="hint">{valid ? "Chưa có lần chạy kế tiếp." : "Nhập chu kỳ hợp lệ để xem lịch chạy."}</p>
+    <p className="hint">{emptyText}</p>
   );
   const zone = <p className="schedule-runs-zone">{localTimeZoneLabel()}</p>;
   if (compact) {
@@ -64,6 +54,34 @@ export function NextRunsPreview({
   );
 }
 
+/** The next five runs, with the zone they are in. A schedule that is off shows what switching it on now would do. */
+export function NextRunsPreview({
+  nextDueAt,
+  everyMinutes,
+  enabled,
+  compact = false,
+}: {
+  nextDueAt: string | null;
+  everyMinutes: number;
+  enabled: boolean;
+  compact?: boolean;
+}) {
+  const now = usePreviewClock();
+  const valid = Number.isInteger(everyMinutes) && everyMinutes > 0;
+  const { overdue, times } = enabled
+    ? upcomingRuns(nextDueAt, everyMinutes, now)
+    : { overdue: false, times: valid ? runsIfEnabledAt(now, everyMinutes) : [] };
+  return (
+    <RunTimesPreview
+      title={enabled ? "5 lần chạy tới" : "Nếu bật lúc này, 5 lần chạy đầu"}
+      times={times}
+      overdueFirst={overdue}
+      compact={compact}
+      emptyText={valid ? "Chưa có lần chạy kế tiếp." : "Nhập chu kỳ hợp lệ để xem lịch chạy."}
+    />
+  );
+}
+
 /** The approved device list and how the live target departs from it. */
 export function ScheduleScopeNotice({
   scope,
@@ -71,13 +89,25 @@ export function ScheduleScopeNotice({
   label,
   busy = false,
   onApprove,
+  error,
+  onRetry,
 }: {
   scope: ScheduleScope;
   approved: string[] | null;
   label: (udid: string) => string;
   busy?: boolean;
   onApprove?: (udids: string[]) => void;
+  /** A failed membership read: the scope stays unknown, never approved. */
+  error?: string | null;
+  onRetry?: () => void;
 }) {
+  if (scope.kind === "unknown" && error) {
+    return (
+      <StatusNotice tone="error" action={onRetry && <button type="button" onClick={onRetry}>Đọc lại nhóm máy</button>}>
+        Chưa đọc được nhóm máy nên chưa biết phạm vi: {error}. Lịch không bật được cho tới khi đọc lại.
+      </StatusNotice>
+    );
+  }
   if (scope.kind === "unknown") return <p className="schedule-scope-line">Đang đọc phạm vi máy…</p>;
   if (scope.kind === "missingGroup") {
     return (

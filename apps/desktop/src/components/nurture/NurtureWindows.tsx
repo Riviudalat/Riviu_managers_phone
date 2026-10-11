@@ -56,6 +56,7 @@ export function NurtureWindows({
   targets,
   issue,
   issueId,
+  showEnableToggle = true,
 }: {
   settings: NurtureSettings;
   patch: <K extends keyof NurtureSettings>(key: K, value: NurtureSettings[K]) => void;
@@ -63,6 +64,8 @@ export function NurtureWindows({
   targets: string[];
   issue?: NurtureSettingsIssue | null;
   issueId?: string;
+  /** The page switches the schedule with Lưu & bật / Tắt hẹn giờ instead of this checkbox. */
+  showEnableToggle?: boolean;
 }) {
   const windows = settings.scheduleWindows ?? [];
 
@@ -91,7 +94,7 @@ export function NurtureWindows({
 
   return (
     <div className="nurture-sect nurture-sched">
-      <label className="check">
+      {showEnableToggle && <label className="check">
         <input
           type="checkbox"
           checked={settings.scheduleEnabled}
@@ -104,7 +107,7 @@ export function NurtureWindows({
             what="Tự khởi động phiên, không cần bấm Bắt đầu. Không có khung giờ nào thì chạy cả ngày theo một chu kỳ duy nhất; có khung thì chỉ chạy trong khung."
           />
         </span>
-      </label>
+      </label>}
 
       {(windows.length === 0 || issue?.field === "scheduleEveryMinutes" || issue?.field === "scheduleDurationMinutes") && (
         <>
@@ -220,17 +223,20 @@ export function NurtureWindows({
             </div>
 
             {/* **The phone list says "tất cả" in words, not as a blank.**
-                An empty list means every connected phone — the same rule the schedule has
-                always had — and the one thing that makes that rule safe is being able to read
-                it. A blank field here would look like "none". */}
+                An empty list is "every phone selected in Thiết lập", written out as that exact
+                list when the schedule is saved from Hẹn giờ. It never means the connected
+                fleet: a stored empty list is refused at the tick, and a phone plugged in
+                later is on no list. A blank field here would look like "none". */}
             <div className="nu-window-phones">
               {/* Plain text, not `.nu-inline`: that class is an inline *flex* row, so
                   "Máy:" and the value became two flex items and stacked into two lines the
                   moment the 360px panel ran out of room. */}
               <span className="nu-window-who">
                 Máy:{" "}
-                <strong title={window.udids.join(", ") || undefined}>
-                  {window.udids.length ? `${window.udids.length} máy đã chọn` : "tất cả"}
+                <strong
+                  title={window.udids.join(", ") || "Khi lưu hẹn giờ, khung này ghi đúng các máy đang chọn ở Thiết lập; máy cắm sau không được thêm."}
+                >
+                  {window.udids.length ? `${window.udids.length} máy đã chọn` : `tất cả máy đang chọn (${targets.length})`}
                 </strong>
               </span>
               <button
