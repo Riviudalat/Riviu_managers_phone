@@ -77,12 +77,43 @@ Playwright dùng mock Tauri bridge, cần Chromium đúng version. Screenshot ba
 chỉ thay sau khi xem actual. Vitest không thay typecheck. Lỗi mock/export khác lỗi
 UI thật; timeout khác lỗi assertion. Không tăng timeout hoặc bỏ assertion tùy tiện.
 
-- `playwright.config.ts` cố định cổng 1421 và `reuseExistingServer`, nên khi nhiều
-  worktree chạy song song, Playwright có thể âm thầm test dev server của worktree khác.
-  Mỗi worktree dùng một cổng riêng.
+- Playwright mặc định dùng cổng 1421 và bật `reuseExistingServer`. Nếu nhiều worktree
+  chạy song song trên cùng cổng, Playwright sẽ âm thầm test dev server của worktree khác.
+  Mỗi worktree chạy song song đặt cổng riêng, ví dụ `$env:RIVIU_E2E_PORT = '1431'` rồi
+  `npm run test:e2e`. Không đặt thì vẫn là 1421 như CI. Vite chạy với `--strictPort`,
+  nên khi cổng bị chiếm nó báo lỗi luôn, không lặng lẽ chuyển sang cổng khác.
 - Fixture e2e nào ghi đè `google_sheets_status` cũng phải trả lời
   `google_sheets_verify_readonly`. Nếu không, bước tự kiểm tra read-only biến panel
   Sheet thành cảnh báo.
+
+### Cổng tập trung theo vùng thay đổi
+
+Worker chạy cổng của vùng mình sửa, cộng `cargo fmt`/lint/typecheck. Coordinator vẫn chạy
+**toàn bộ** cổng CI một lần trước khi phát hành hoặc merge lô. Danh sách này giúp chọn
+nhanh hơn, không bỏ bớt cổng nào, timeout hay assertion nào.
+
+| Thay đổi | Chạy | Bỏ được cho tới cổng đầy đủ |
+|---|---|---|
+| Chỉ UI (`apps/desktop/src`, không đổi `api.ts`/IPC) | `npx tsc -b`, `npm run lint`, Vitest của file/thư mục đã sửa, spec Playwright liên quan (`-g`/tên file) | Mọi test Cargo |
+| IPC (`api.ts`, `types.ts`, `generated-ipc.ts`, command) | Hàng trên + `export_ipc`, `check_generated_ipc.py`, `cargo test -p riviu-managers-phone` lọc theo module, clippy desktop | `riviu-core` đầy đủ, nếu core không đổi |
+| Chỉ driver (`crates/android-driver` hoặc `ios-driver`) | test + clippy của crate đó | Vitest, Playwright, `riviu-core` |
+| Core (`crates/core`) | `cargo test -p riviu-core <module>` cho module đã sửa, clippy core; thêm desktop nếu kiểu public đổi | Vitest, Playwright |
+| Command/lifecycle desktop | `cargo test -p riviu-managers-phone` (gồm các test quét source) + clippy desktop | Vitest/Playwright nếu UI không đổi |
+| Chỉ docs | `check_docs.py --include-untracked` | Mọi cổng code |
+
+Thời gian đo (11/10/2026 khi máy tải, và log merge gate ngày 09/10/2026):
+
+| Cổng | Thời gian |
+|---|---:|
+| `npm test` (Vitest, 196 file) | 257 s. Khi máy tải có 3 test timeout, chạy lại riêng thì qua |
+| `npm run test:e2e` (243 test, 10 worker) | 350 s. Khi máy tải có 2 test timeout, chạy lại riêng thì qua |
+| `npx tsc -b` | 34–38 s |
+| `cargo test -p riviu-core` | compile 6 phút 34 + chạy 933 s ≈ 22 phút |
+| `cargo test -p riviu-managers-phone` | compile 2 phút 35–3 phút 40 + chạy ~50 s |
+| `cargo test -p riviu-android-driver` | compile 1 phút 04 + chạy 18 s |
+
+`riviu-core` với `--test-threads=1` là cổng đắt nhất. Lọc theo module trước, chỉ chạy
+đầy đủ ở cổng cuối. Test timeout khi máy tải là tín hiệu về tải, không phải lý do tăng timeout.
 
 ### Python, tooling và docs — tại gốc
 
@@ -123,6 +154,9 @@ Khi một lượt chạy trên máy dừng hoặc kẹt, chụp màn hình và h
 Regression quan trọng cần baseline→modified→rollback trên bản sao. Compile failure
 không chứng minh assertion bắt được lỗi. Test zero cases không được ghi PASS feature.
 Không chạy cùng cache Cargo song song giữa các worktree; xem `scripts/dev_compile_cache.ps1`.
+Worktree mới có target Cargo riêng, trừ khi `CARGO_TARGET_DIR` trỏ về `target/` của checkout
+chính (`dev_compile_cache.ps1` làm việc này). Dù vậy, các crate trong workspace vẫn build
+lại từ đầu cho mỗi đường dẫn worktree.
 
 ## Bàn giao
 

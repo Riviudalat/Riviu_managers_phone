@@ -101,6 +101,56 @@ Khi sửa hook hoặc template:
   `%LOCALAPPDATA%\tauri\NSIS\makensis.exe` và `WixTools314` để biên dịch thử một hook
   hay template ngay trên máy, không cần build bộ cài.
 
+## Thời gian build đo được
+
+Đo trên máy dev (i7-12700H, 20 luồng, 31,7 GB RAM), target Cargo chung, đúng
+`.cargo/config.toml` (incremental tắt) và profile release hiện hành. "Máy tải" là lúc
+controller, điện thoại hoặc agent khác cùng chạy. Số đo cho biết cỡ thời gian, không phải cam kết.
+
+| Bước | Thời gian | Nguồn |
+|---|---:|---|
+| `npm run build` (tsc -b + Vite) | 28–41 s | 11/10/2026 |
+| Checker release (`riviu-deployment-checker`) | 48 s | bản 0.2.81, 08/10/2026 |
+| `tauri build --no-bundle` (frontend + Rust release; đổi android-driver và app) | 495 s (Cargo 7 phút 55) | bản 0.2.81 |
+| `riviu-core` release, CGU=1, chỉ crate này | 272 s | 11/10/2026, `--timings` |
+| `bundle_windows_installers.py` (NSIS rồi MSI) | 129 s | bản 0.2.81 |
+| Giải nén và kiểm hai bộ cài | 195 s | bản 0.2.81 |
+| Ký Authenticode | không có | chưa ký |
+
+Tổng một lần phát hành khi cache dependency còn ấm là khoảng 15 phút. Phần lớn thời gian
+**do chính lựa chọn công nghệ**, không phải lỗi cấu hình:
+
+- `codegen-units = 1` + `lto = "thin"` khiến mỗi crate lớn được tối ưu trên một luồng:
+  `riviu-core` (~233k dòng) mất 272 s, app `app_lib` (~71k dòng) cùng cỡ. Hai crate này
+  nối tiếp nhau trên đường găng nên 20 luồng gần như không giúp được. Giữ profile này
+  cho bản giao. Hạ nó chỉ được làm cho build nội bộ, và chỉ khi đã đo (xem follow-up bên dưới).
+- NSIS và MSI chạy nối tiếp vì cả hai đổi dấu loại bộ cài trong **cùng một** EXE đã build,
+  rồi script trả byte đó về như cũ. Chạy song song sẽ ghi đè lên nhau.
+- Build acceptance nội bộ (`cargo build -p riviu-managers-phone --features tauri/custom-protocol`,
+  profile dev) với thay đổi **chỉ ở frontend**: cold workspace 305 s, đổi frontend rồi build lại 114 s
+  khi máy rảnh. Lần build lúc máy tải ngày 10–11/10 mất 5–6 phút, có lần tới 20 phút. Lý do
+  phải build lại: `build.rs` gọi `frontend_provenance.mjs verify-cargo`, script này
+  `rerun-if-changed` trên `src/`, `public/` và `dist`. Mỗi lần build script chạy lại,
+  Cargo biên dịch lại toàn bộ `app_lib` (102 s) và link EXE (9 s), dù Rust không đổi.
+  Đây là cổng chống nhúng dist cũ, nên không được bỏ. Muốn tránh thì phải tách `app_lib`
+  thành crate riêng, không chung build script với bin. Việc đó đụng mọi nhánh đang mở
+  nên chưa làm.
+
+Follow-up chưa đo (chỉ đo khi máy rảnh, Cargo chạy tuần tự, cùng target chung):
+
+```powershell
+# 1. Profile acceptance nội bộ: thêm tạm [profile.acceptance] inherits="release",
+#    lto=false, codegen-units=16 (vẫn kế thừa panic="abort", strip="symbols"), rồi:
+cargo build --offline --locked --profile acceptance -p riviu-managers-phone --features tauri/custom-protocol --bin riviu-managers-phone --timings
+# So với release đủ chuẩn cùng lệnh nhưng dùng --release --target x86_64-pc-windows-msvc.
+# 2. Linker: chỉ thử khi --timings cho thấy unit bin (link/LTO) chiếm phần lớn thời gian.
+#    RUSTFLAGS thay hẳn rustflags trong .cargo/config.toml (phải ghi lại +crt-static)
+#    và buộc build lại mọi crate, nên một lần đo sẽ tốn thời gian của một cold build.
+$env:RUSTFLAGS = '-C target-feature=+crt-static -C linker=rust-lld'
+```
+
+Chỉ đưa vào repo thứ gì đo được là có ích. Bản giao vẫn dùng `[profile.release]`.
+
 ## macOS và phạm vi hỗ trợ
 
 CI có arm64/x64, runtime Python native theo kiến trúc và mapping resource bảo toàn
