@@ -36,4 +36,9 @@ try {
   const tile = page.locator('[tabindex][data-udid]').first();
   if (await tile.count()) { await tile.click({button: 'right'}); await shot('menu-1366'); await page.keyboard.press('Escape'); }
   const before = await tileCanvases(); await page.waitForTimeout(8000); console.log('canvases stable', before, await tileCanvases());
-} finally { await page.setViewportSize(null).catch(() => {}); await c.close(); }
+} finally {
+  // setViewportSize(null) is rejected by Playwright and left the app stuck at the last
+  // emulated size inside the real window; clear the CDP override explicitly.
+  await page.context().newCDPSession(page).then((s) => s.send('Emulation.clearDeviceMetricsOverride')).catch(() => {});
+  await c.close();
+}
