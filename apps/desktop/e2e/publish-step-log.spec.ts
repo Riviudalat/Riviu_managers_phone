@@ -34,13 +34,14 @@ test("submitted posts show incomplete progress and processing evidence without a
   const panel = page.getByRole("dialog", { name: "Cửa sổ tiến trình" });
   // A post awaiting proof makes the whole run indeterminate: no percentage until it is verified.
   await expect(panel.getByRole("progressbar", { name: "Tiến độ công việc" })).not.toHaveAttribute("aria-valuenow");
-  await expect(panel.getByLabel("Kết quả từng máy")).toContainText("1 hoàn tất");
+  // Separate numbers from the campaign itself: the one assignment is submitted and still verifying.
+  await expect(panel.getByLabel("Kết quả từng máy")).toContainText("1 đã gửi · 0 đã xác minh · 0 đã ghi Sheet · 0 chưa rõ · 1 đang xác minh");
   await expect(panel.getByLabel("Kết quả từng máy")).toContainText("1 đang chờ/chạy");
-  await panel.getByRole("button", { name: /Máy 2 Chờ xác minh bài đăng/ }).click();
+  await panel.getByRole("button", { name: /Máy 2 Đang xác minh/ }).click();
   // The runtime step text is shown as written, beside the coarse "do not post again" state.
   const timeline = panel.getByRole("list", { name: "Nhật ký theo thời gian" });
   await expect(timeline).toContainText("[12] Đã bấm Đăng; chờ TikTok xử lý");
-  await expect(timeline).toContainText("Đang kiểm tra kết quả thao tác Đăng đã có — không bấm Đăng lại");
+  await expect(timeline).toContainText("Đã gửi — đang xác minh bài đăng; không bấm Đăng lại");
   await expect(panel).not.toContainText("100%");
   await expect(panel).not.toContainText("Thành công");
   await panel.screenshot({ path: "../../target/stable-installer-20260909/frontend/publish-pending.png" });
@@ -65,14 +66,14 @@ for (const viewport of [{ width: 1440, height: 900 }, { width: 820, height: 560 
       const entries = messages.map((message, index) => ({ id: String(index + 1), at: `2026-09-08T07:03:${String(index).padStart(2, "0")}`, action: "publishStep", state: index === messages.length - 1 ? "finished" : "working", text: `[${index + 1}] ${message}`, detail: null }));
       w.__TAURI_INTERNALS__.invoke = async (command, args) => {
         if (command === "operation_query_runs") return { runs: [summary], total: 1, counts: { active: 0, succeeded: 1, attention: 0 }, hasMore: false };
-        if (command === "operation_get_run") return { summary, items: [{ id: "assignment", kind: "assignment", label: "Máy 2", state: "succeeded", udid: "snapshot-phone-2", errorCode: null, detail: null, evidence: null, retryable: false }], batch: null };
+        if (command === "operation_get_run") return { summary, items: [{ id: "assignment", kind: "assignment", label: "Máy 2", state: "succeeded", udid: "snapshot-phone-2", errorCode: null, detail: null, evidence: JSON.stringify({ post: { publicationVerified: true, postUrl: "https://www.tiktok.com/@fixture/video/2" } }), retryable: false }], batch: null };
         if (command === "operation_device_log") return { entries, truncated: false };
         return original(command, args);
       };
     });
     await page.goto("/");
     await page.getByRole("button", { name: "Mở rộng tiến trình", exact: true }).click();
-    await page.getByRole("button", { name: /Máy 2 Hoàn tất/ }).click();
+    await page.getByRole("button", { name: /Máy 2 Đã xác minh/ }).click();
     const log = page.getByRole("list", { name: "Nhật ký theo thời gian" });
     await expect(log.getByRole("listitem").first()).toContainText("[12] Thành công — máy 2 đã đăng bài");
     await expect(log.getByRole("listitem").first()).toContainText("07:03:11");

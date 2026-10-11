@@ -1,6 +1,7 @@
 import { ArrowRight, Cable, ClipboardList, Code2, FolderOpen, HelpCircle } from "lucide-react";
 import { StatusNotice } from "../components/States";
 import { DeviceStatusLegend } from "../components/DeviceStatusLine";
+import { PostOutcomeLegend } from "../features/operations/PostOutcome";
 import type { PageId } from "../types";
 
 const TOPICS = [
@@ -29,6 +30,10 @@ export function HelpPage({ onOpenPage }: { onOpenPage: (page: PageId) => void })
       <section className="operator-help-vocabulary" aria-labelledby="help-device-status">
         <h3 id="help-device-status">Đọc trạng thái máy</h3>
         <DeviceStatusLegend />
+      </section>
+      <section className="operator-help-vocabulary" aria-labelledby="help-post-outcome">
+        <h3 id="help-post-outcome">Đọc kết quả bài đăng</h3>
+        <PostOutcomeLegend />
       </section>
       <StatusNotice tone="info">Khi kết quả chưa rõ, giữ bằng chứng để đối chiếu. Không đăng lại bài hoặc gửi lại bình luận chỉ vì thiếu link hay báo cáo.</StatusNotice>
       <section className="operator-help-api">

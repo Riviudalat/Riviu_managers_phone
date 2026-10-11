@@ -18,7 +18,7 @@ describe("operation progress", () => {
     expect(logMessage(failed)).toBe(failed.text);
     expect(timelineEntries([step, failed])).toEqual([step, failed]);
     const legacy = { ...step, action: "publish", state: "succeeded", text: null };
-    expect(logMessage(legacy)).toBe("Thành công — đã xác nhận bài đăng");
+    expect(logMessage(legacy)).toBe("Đã xác minh bài đăng — link, tài khoản, caption và thời điểm");
     expect(timelineEntries([legacy])).toEqual([legacy]);
   });
   it("keeps old history and terminal fallback while removing duplicate coarse publish transitions", () => {
@@ -52,7 +52,7 @@ describe("operation progress", () => {
     expect(deviceRows([{ id: "posted", udid: "a", kind: "assignment", state: "succeeded", errorCode: "post_verification_pending" } as OperationRunItem])[0])
       .toMatchObject({ state: "uncertain", fraction: null, pendingPublish: true });
     expect(logMessage({ id: "pending", at: null, action: "publish", state: "verifying", text: null, detail: null }))
-      .toBe("Đang kiểm tra kết quả thao tác Đăng đã có — không bấm Đăng lại");
+      .toBe("Đã gửi — đang xác minh bài đăng; không bấm Đăng lại");
   });
   it("keeps publication needing review out of active progress without displaying completion", () => {
     const review = { ...run, kind: "publish", state: "uncertain", retryScope: "linkAndSheet" } as OperationRunSummary;

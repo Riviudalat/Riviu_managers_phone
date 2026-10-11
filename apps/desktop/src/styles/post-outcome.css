@@ -1,0 +1,59 @@
+/* One post-result vocabulary (PLAN §6): Đã gửi → Đã xác minh → Đã ghi Sheet, Chưa rõ apart.
+ * Every layer carries an icon and a word, so the result reads without colour.
+ * TODO(ui2-tokens): the Chưa rõ violet-grey comes from device-status.css until V1's tokens land. */
+.post-outcome { display: grid; gap: 4px; min-width: 0; }
+.post-outcome-headline {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  font-weight: var(--weight-semibold);
+  color: var(--text);
+}
+.post-outcome.is-verified .post-outcome-headline { color: var(--ok-strong); }
+.post-outcome.is-verifying .post-outcome-headline,
+.post-outcome.is-sending .post-outcome-headline { color: var(--info-strong); }
+.post-outcome.is-uncertain .post-outcome-headline { color: var(--status-unknown, #5b4b8a); }
+.post-outcome.is-notSent .post-outcome-headline { color: var(--text-2); }
+
+.post-outcome-layers {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 2px 10px;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+  font-size: var(--text-xs);
+  color: var(--text-3);
+}
+/* Scoped twice so list styles of a host (Lượt chạy's timeline) never reach the layers. */
+.post-outcome .post-outcome-layers li {
+  display: inline-flex;
+  align-items: center;
+  gap: 3px;
+  padding: 0;
+  border: 0;
+  white-space: nowrap;
+}
+.post-outcome-layers li[data-state="done"] { color: var(--ok-strong); }
+.post-outcome-layers li[data-state="pending"] { color: var(--info-strong); }
+.post-outcome-layers li[data-state="unknown"] { color: var(--status-unknown, #5b4b8a); }
+.post-outcome-layers li[data-state="failed"] { color: var(--danger-strong); }
+.post-outcome-layers li[data-state="off"] { color: var(--text-3); }
+.post-outcome-reason { margin: 0; color: var(--text-2); font-size: var(--text-xs); line-height: 1.45; overflow-wrap: anywhere; }
+
+.post-outcome-sheet.is-failed { color: var(--danger-strong); }
+.post-outcome-sheet.is-sent { color: var(--ok-strong); }
+.post-outcome-sheet p { margin: 2px 0 0; color: var(--text-2); font-size: var(--text-xs); }
+
+.post-outcome-evidence > summary { cursor: pointer; color: var(--link); font-size: var(--text-xs); }
+.post-outcome-evidence dl { display: grid; gap: 2px; margin: 4px 0 0; font-size: var(--text-xs); }
+.post-outcome-evidence dl > div { display: grid; grid-template-columns: minmax(0, 130px) minmax(0, 1fr); gap: 6px; }
+.post-outcome-evidence dt { color: var(--text-3); }
+.post-outcome-evidence dd { margin: 0; overflow-wrap: anywhere; }
+
+.post-outcome-totals {
+  margin: 0;
+  font-weight: var(--weight-semibold);
+  font-variant-numeric: tabular-nums;
+  color: var(--text);
+}

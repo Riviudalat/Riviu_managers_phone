@@ -1,9 +1,12 @@
 import {useCallback,useEffect,useRef,useState} from "react";
-import {operationDeviceLog,publishExcludeAssignment,publishGet,publishRecoveryCapabilities,publishRetryAssignment,publishCheckLinks,publishResumeVerification,publishRetrySheetAssignment,listDevices} from "../../api";
+import {operationDeviceLog,publishExcludeAssignment,publishRetryAssignment,publishCheckLinks,publishResumeVerification,publishRetrySheetAssignment,listDevices} from "../../api";
 import {useMonitorRead} from "./useMonitorRead";
 import {describeError} from "../../describeError";
 import {logMessage,publishDeviceProgress,progressLabel} from "./operationProgress";
 import {ProgressBar} from "../../components/ProgressBar";
+import {PostOutcomeEvidence,PostOutcomeLayers} from "./PostOutcome";
+import {postOutcome} from "./postOutcomeModel";
+import {usePublishRunRead,type PublishRunCapability} from "./publishRunRead";
 import type {PublishExcludeResult,PublishRecoveryCapability} from "../../types";
 
 const stepLabel:Record<string,string>={device:"Chuẩn bị máy",transfer:"Chuyển nội dung",media:"Chọn ảnh/video",sound:"Chọn nhạc",caption:"Nhập caption"};
@@ -37,13 +40,11 @@ function verificationSummary(evidence: Record<string, unknown>, now: number): {t
  const ordinary=budgetPair(budget.noProgressObservations,budget.limit), metadata=budgetPair(budget.metadataObservations,budget.metadataLimit);
  return {text,budget:[ordinary?`Không có tiến triển ${ordinary}`:null,metadata?`Metadata ${metadata}`:null].filter(Boolean).join(" · ")};
 }
-type PublishProgressCapability = PublishRecoveryCapability & {
+type PublishProgressCapability = PublishRunCapability & {
  exclusion?: PublishExcludeResult | null;
- sheetRequired?: boolean;
 };
 export function PublishDeviceRecovery({campaignId,udid}:{campaignId:string;udid:string}) {
- const read=useCallback(async()=>{const [detail,capabilities]=await Promise.all([publishGet(campaignId),publishRecoveryCapabilities(campaignId)]);return {assignments:detail?.assignments??[],capabilities,createdAt:detail?.campaign.createdAt};},[campaignId]);
- const state=useMonitorRead(read,2000,["publishRecovery",campaignId]);
+ const state=usePublishRunRead(campaignId);
  const readLog=useCallback(()=>operationDeviceLog(`publish:${campaignId}`,udid),[campaignId,udid]);
  const log=useMonitorRead(readLog,2000,["deviceTimeline",`publish:${campaignId}`,udid]);
  const [now,setNow]=useState(() => Date.now());
@@ -98,9 +99,11 @@ export function PublishDeviceRecovery({campaignId,udid}:{campaignId:string;udid:
    const end=active?now:latest?.at?Date.parse(latest.at):null;
    const elapsed=step?.at&&end!==null?Math.max(0,Math.floor((end-Date.parse(step.at))/1000)):null;
    const total=state.value?.createdAt&&end!==null?Math.max(0,Math.floor((end-Date.parse(state.value.createdAt))/1000)):null;
+   // `checkLink.reason === "alreadyVerified"` only means a link-shaped URL is stored; the
+   // verified layer comes from the shared outcome, which needs the backend's verified state.
+   const outcome=postOutcome(a,{sheetRequired:c?.sheetRequired});
    const progress=publishDeviceProgress(a,log.value?.entries??[],{
     sheetRequired:c?.sheetRequired,
-    publicationVerified:c?.checkLink.reason==="alreadyVerified",
     exclusionState:exclusion?.state,
     recoveryStep:r&&["retryWaiting","waitingDevice","failed","exhausted","interrupted"].includes(r.state)?r.step:undefined,
    });
@@ -109,23 +112,24 @@ export function PublishDeviceRecovery({campaignId,udid}:{campaignId:string;udid:
     <ProgressBar label={`Tiến độ đăng trên máy ${udid} · bài ${a.ordinal+1}`} fraction={log.error&&!progress.done?null:progress.fraction}
       tone={progress.done?"done":progress.stopped?"failed":"run"}/>
     <small>{progress.stage} · {progress.completed}/{progress.total} bước đã xác nhận · {progressLabel(log.error&&!progress.done?null:progress.fraction)}</small>
-    {progress.uncertain&&<small>Đã gửi hoặc đang xác minh bài; chưa đủ bằng chứng để tính hoàn tất.</small>}
-    {progress.verified&&!progress.done&&!progress.stopped&&<small>{c?.sheetRequired===undefined&&!a.sheetDelivery?"Chưa đọc được yêu cầu Sheet; chưa thể xác nhận hoàn tất.":"Bài đã xác minh · chờ hoàn tất Sheet."}</small>}
-    <small>{progress.verified ? (a.sheetDelivery?.state==="sent"?"Bài đã xác minh · Sheet đã ghi.":"Bài đã xác minh.") : a.effectIntent ? verification.text : step?logMessage(step):stepLabel[r?.step??""]??"Chờ mốc tiến trình"}</small>
-    {!progress.verified&&a.effectIntent&&verification.budget&&<small>{verification.budget}</small>}
+    {outcome.post!=="notSent"&&<PostOutcomeLayers outcome={outcome} reason={!outcome.verified&&a.effectIntent?verification.text:undefined}/>}
+    {outcome.verified&&c?.sheetRequired===undefined&&!a.sheetDelivery&&<small>Chưa đọc được yêu cầu Sheet; chưa thể xác nhận hoàn tất.</small>}
+    {(outcome.post==="notSent"||(!outcome.verified&&!a.effectIntent))&&<small>{step?logMessage(step):stepLabel[r?.step??""]??"Chờ mốc tiến trình"}</small>}
+    {!outcome.verified&&a.effectIntent&&verification.budget&&<small>{verification.budget}</small>}
+    {outcome.post!=="notSent"&&!outcome.verified&&<PostOutcomeEvidence outcome={outcome}/>}
     <small>{elapsed===null?"Chưa có thời gian bước":`Bước ${elapsed} giây`} · {total===null?"Chưa có tổng thời gian":`Tổng ${total} giây`}</small>
     {log.error&&<small role="status">Chưa cập nhật được mốc tiến trình: {log.error}</small>}
     {exclusion&&<small role="status">{exclusion.state==="excluded"?"Đã loại máy khỏi lượt này.":exclusion.state==="stopping"?"Đang dừng riêng máy này; chờ nhả máy.":"Máy còn bài cần đối chiếu; giữ nguyên nghĩa vụ xác minh."}{exclusion.reason&&` ${exclusion.reason}`}</small>}
     {c&&!["succeeded","cancelled","missed"].includes(a.state)&&<button type="button" disabled={busy||!!exclusion} title="Chỉ dừng máy này trong lượt đăng; giữ nguyên bài đã gửi và nghĩa vụ xác minh" onClick={()=>void exclude(c)}>Loại khỏi lượt này</button>}
 
-    {!progress.verified&&text&&<small role="status">{text}</small>}
-    {!progress.verified&&guidance&&<small role="status">{guidance}</small>}
-    {!progress.verified&&!guidance&&r?.lastError&&["failed","exhausted","interrupted"].includes(r.state)&&<small>{describeError(r.lastError)}</small>}
+    {!outcome.verified&&text&&<small role="status">{text}</small>}
+    {!outcome.verified&&guidance&&<small role="status">{guidance}</small>}
+    {!outcome.verified&&!guidance&&r?.lastError&&["failed","exhausted","interrupted"].includes(r.state)&&<small>{describeError(r.lastError)}</small>}
     {!c&&<small>Chưa đọc được quyền thao tác cho máy này.</small>}
     {c&&!a.effectIntent&&(a.state==="failedBeforeDispatch"||waiting)&&<><button type="button" disabled={busy||!!exclusion||!!waiting||!online||!c.retryBeforePost.allowed} title={!online?"Máy chưa kết nối":c.retryBeforePost.allowed?"Chạy thêm đúng một lần; giữ nguyên bài và máy":c.retryBeforePost.reason??"Đang phục hồi"} onClick={()=>void act(c,"retry")}>Thử lại</button>{!online&&<small>Máy chưa kết nối</small>}</>}
     {a.effectIntent&&c?.resumeVerification.allowed&&<button type="button" disabled={busy} onClick={()=>void act(c,"resume")}>Tiếp tục kiểm tra link</button>}
     {a.effectIntent&&c?.checkLink.allowed&&!c.resumeVerification.allowed&&<button type="button" disabled={busy} onClick={()=>void act(c,"link")}>Kiểm tra liên kết</button>}
-    {a.effectIntent&&a.sheetDelivery?.state==="failed"&&c?.checkLink.reason==="alreadyVerified"&&<button type="button" disabled={busy} onClick={()=>void act(c,"sheet")}>Ghi lại Sheet</button>}
+    {outcome.verified&&a.sheetDelivery?.state==="failed"&&c&&<button type="button" disabled={busy} onClick={()=>void act(c,"sheet")}>Ghi lại Sheet</button>}
    </div>;
   })}
   {message&&<small role="status">{message}</small>}

@@ -1,6 +1,6 @@
 import { act, cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import { afterEach, beforeEach, expect, it, vi } from "vitest";
-import { operationDeviceLog, operationGetRun, operationQueryRuns, operationStop, operationStopStatus, publishCancelUnacceptedStart, publishCheckLinks, publishResumeVerification, publishRetryAssignment, publishRetrySheetAssignment, publishStartStatus } from "../../api";
+import { operationDeviceLog, operationGetRun, operationQueryRuns, operationStop, operationStopStatus, publishCancelUnacceptedStart, publishCheckLinks, publishGet, publishResumeVerification, publishRetryAssignment, publishRetrySheetAssignment, publishStartStatus } from "../../api";
 import { observePendingPublishStart } from "./publishStartBridge";
 import type { OperationRunDetail, OperationRunSummary } from "../../types";
 import { OperationProgressCenter } from "./OperationProgressCenter";
@@ -20,6 +20,7 @@ beforeEach(() => {
   HTMLElement.prototype.setPointerCapture = vi.fn();
   vi.mocked(operationQueryRuns).mockResolvedValue({ runs: [run], total: 1, counts: { active: 1, succeeded: 0, attention: 0 }, hasMore: false });
   vi.mocked(operationGetRun).mockResolvedValue(detail);
+  vi.mocked(publishGet).mockResolvedValue({ assignments: [] } as never);
   vi.mocked(operationDeviceLog).mockResolvedValue({ entries: [{ id: "log", at: "2026-09-07T12:34:56", action: "publish", state: "posting", text: null, detail: null }], truncated: false });
 });
 
@@ -153,13 +154,19 @@ it.each(["running", "partial"] as const)("does not display complete progress for
   vi.mocked(operationGetRun).mockResolvedValue({ ...detail, summary: pending, items: [detail.items[0], {
     ...detail.items[1], state, errorCode: "post_verification_pending",
   }] });
+  // The campaign behind the run: one post the backend verified, one still awaiting proof.
+  vi.mocked(publishGet).mockResolvedValue({ campaign: { createdAt: "2026-09-07T12:00:00Z" }, assignments: [
+    { id: "a", udid: "a", ordinal: 0, state: "succeeded", effectIntent: "post", evidenceJson: JSON.stringify({ post: { publicationVerified: true, postUrl: "https://www.tiktok.com/@fixture/video/1" } }) },
+    { id: "b", udid: "b", ordinal: 1, state: "verifying", effectIntent: "post", errorCode: "post_verification_pending" },
+  ] } as never);
   await openDevices();
   // A post awaiting proof makes the whole run indeterminate, running or not: no percentage.
   expect(screen.getByRole("progressbar", { name: "Tiến độ công việc" })).not.toHaveAttribute("aria-valuenow");
   expect(screen.queryByText("100%")).toBeNull();
-  expect(screen.getByRole("button", { name: /Máy 5.*Chờ xác minh bài đăng/ })).toBeVisible();
-  expect(screen.getByLabelText("Kết quả từng máy")).toHaveTextContent("1 hoàn tất");
-  expect(screen.getByLabelText("Kết quả từng máy")).toHaveTextContent(state === "running" ? "1 đang chờ/chạy" : "1 cần kiểm tra");
+  expect(screen.getByRole("button", { name: /Máy 5.*Đang xác minh/ })).toBeVisible();
+  // Separate numbers from the same campaign read as the detail page; a submitted post is never done.
+  await waitFor(() => expect(screen.getByLabelText("Kết quả từng máy")).toHaveTextContent("2 đã gửi · 1 đã xác minh · 0 đã ghi Sheet · 0 chưa rõ · 1 đang xác minh"));
+  if (state === "running") expect(screen.getByLabelText("Kết quả từng máy")).toHaveTextContent("1 đang chờ/chạy");
 });
 
 it("renders numbered Publish steps with original times in both sort directions", async () => {

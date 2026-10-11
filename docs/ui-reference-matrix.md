@@ -88,6 +88,21 @@ mã lượt chạy và mã thiết bị nằm trong **Chi tiết**. Mục không
 Lời toast theo nguyên tắc ACK chưa phải bằng chứng: "Đã gửi lệnh…", không "Thành công" cho
 tác động chưa được xác minh.
 
+**Kết quả bài đăng: một bộ từ.** Chi tiết chiến dịch (cột Kết quả, Bài đã đăng, Ghi Sheet), cửa sổ
+tiến trình (dòng máy, `PublishDeviceRecovery`, ô "Kết quả từng máy") và Lượt chạy dùng cùng
+`features/operations/postOutcomeModel.ts` + `PostOutcome.tsx`: các lớp **Đã gửi → Đã xác minh →
+Đã ghi Sheet**, mỗi lớp có biểu tượng và chữ, cùng **Đang xác minh** và **Chưa rõ** là trạng thái
+riêng. **Đã xác minh** chỉ khi bản ghi là trạng thái đã xác minh của backend: `succeeded` +
+`post.publicationVerified === true` + link TikTok chuẩn; backend chỉ đặt cờ đó sau khi bước lấy link
+chứng minh link, tài khoản, caption và thời điểm của lượt. Có link mà thiếu cờ, hoặc capability
+`alreadyVerified` (chỉ kiểm hình dạng link) thì không tính là đã xác minh: dòng hiện Đang xác minh
+hoặc Chưa rõ và nêu bằng chứng còn thiếu. **Đã ghi Sheet** cần `sheetDelivery.state === "sent"`;
+lỗi Sheet không hạ bài đã xác minh và vẫn giữ link. Tổng hợp luôn là số riêng ("20 đã gửi · 18 đã
+xác minh · 17 đã ghi Sheet · 2 chưa rõ", thêm "N đang xác minh" khi có), không cộng đã gửi thành
+thành công. Dòng Chưa rõ chỉ có **Xem bằng chứng** (cách xác minh, tài khoản, giờ bấm Đăng, khớp
+caption/thời điểm, link ứng viên, dữ liệu gốc) và các lệnh theo dõi đã có (**Kiểm tra liên kết**,
+**Tiếp tục xác minh bài đã gửi**); không có nút đăng/gửi lại.
+
 **Lý do bị khóa nằm cạnh nút.** Nút chính bị tắt luôn có lý do ngay bên cạnh (`BlockedReason`,
 `aria-describedby` trỏ vào lý do) và nút sửa đưa focus tới đúng trường: Nuôi (phạm vi, thiết lập),
 Tương tác (link, Chọn máy, trường bước 2), Đăng bài (thư mục, Chọn nhanh, máy nhận, caption),

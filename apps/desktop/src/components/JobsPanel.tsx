@@ -42,6 +42,7 @@ import type {
   OperationRunPage,
 } from "../types";
 import { SelectionStrip } from "./SelectionStrip";
+import { PublishItemOutcome, PublishRunOutcomeTotals } from "../features/operations/PublishRunOutcome";
 import { EmptyState, LoadingState, StatusNotice } from "./States";
 import { ButtonMenu, MenuItem } from "./ui/Menu";
 import "../styles/operations.css";
@@ -599,6 +600,7 @@ export function JobsPanel({
                     </button>
                   )}
                 </header>
+                {shownSummary.kind === "publish" && <PublishRunOutcomeTotals campaignId={shownSummary.sourceId} />}
                 {shownSummary.issueCount > 0 && (
                   <StatusNotice
                     tone={
@@ -622,12 +624,16 @@ export function JobsPanel({
                                 ? (deviceNames.get(item.udid) ?? item.label)
                                 : item.label}
                           </strong>
-                          <small>
-                            {RUN_LABEL[item.state]}
-                            {item.retryable
-                              ? " · Có thể chạy lại từ nguồn gốc"
-                              : ""}
-                          </small>
+                          {shownSummary.kind === "publish" ? (
+                            <PublishItemOutcome
+                              campaignId={shownSummary.sourceId}
+                              item={item}
+                              fallback={<small>{RUN_LABEL[item.state]}</small>}
+                            />
+                          ) : (
+                            <small>{RUN_LABEL[item.state]}</small>
+                          )}
+                          {item.retryable && <small>Có thể chạy lại từ nguồn gốc</small>}
                           {onOpenSource &&
                             item.retryable &&
                             shownSummary.kind !== "script" && (

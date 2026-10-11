@@ -36,6 +36,8 @@ import {
   type PublishLimits,
 } from "../api";
 import { PublishPreparationProgress } from "../components/publish/PublishPreparationProgress";
+import { PostOutcomeEvidence, PostOutcomeLayers, PostOutcomeLink, PostOutcomeSheet, PostOutcomeTotals } from "../features/operations/PostOutcome";
+import { postOutcome, postOutcomeTotals } from "../features/operations/postOutcomeModel";
 import { acknowledgePublishStart, observePendingPublishStart, readPendingPublishStart, savePendingPublishStart, retirePublishStart, PUBLISH_START_RETIRED } from "../features/operations/publishStartBridge";
 import { useWorkspaceDraft } from "../workspaceDraft";
 import { writeFormDraft } from "../formDraftStorage";
@@ -89,7 +91,7 @@ const PUBLISH_STATE_LABELS: Record<PublishCampaignRecord["state"], string> = {
   verifying: "Kiểm tra thao tác Đăng đã có · chờ xác minh",
   succeeded: "Đã đăng",
   failedBeforeDispatch: "Dừng trước khi đăng",
-  uncertain: "Chưa chắc chắn",
+  uncertain: "Chưa rõ",
   cancelled: "Đã huỷ",
   missed: "Lỡ lịch",
 };
@@ -132,7 +134,8 @@ function publicationReviewReason(evidenceJson?: string | null): string | null {
   }
 }
 
-function verificationDetail(evidenceJson?: string | null): string | null {
+/** When the post is checked next; the reason itself is the post outcome's own line. */
+function verificationSchedule(evidenceJson?: string | null): string | null {
   try {
     const value = JSON.parse(evidenceJson ?? "null");
     const status = value?.verificationStatus;
@@ -153,14 +156,13 @@ function verificationDetail(evidenceJson?: string | null): string | null {
     const reasonCode = typeof status?.reasonCode === "string" ? status.reasonCode : null;
     const attempts = typeof status?.attempts === "number" ? `Đã kiểm: ${status.attempts} lượt` : null;
     return [
-      reason,
       reasonCode && `Lý do: ${reasonCode}`,
       attempts,
       stopped,
       checked && `Kiểm tra gần nhất: ${checked}`,
       next && status?.state === "pending" && `Kiểm tra tiếp: ${next}`,
       status?.state === "pending" && budget,
-    ].filter(Boolean).join(" · ");
+    ].filter(Boolean).join(" · ") || null;
   } catch { return null; }
 }
 
@@ -224,7 +226,7 @@ function campaignView(
   if (state === "succeeded")
     return { label: "Hoàn tất", tone: "success", retryScope: "none" };
   if (state === "uncertain")
-    return { label: "Chưa chắc chắn", tone: "warning", retryScope: "none" };
+    return { label: "Chưa rõ", tone: "warning", retryScope: "none" };
   if (state === "partial")
     return { label: "Hoàn tất một phần", tone: "warning", retryScope };
   return {
@@ -406,7 +408,6 @@ function cleanupEvidence(
 }
 
 function postEvidence(evidenceJson?: string | null): {
-  url: string | null;
   sound: {
     title: string;
     artist: string;
@@ -416,7 +417,7 @@ function postEvidence(evidenceJson?: string | null): {
     confirmed: boolean;
   } | null;
 } {
-  const empty = { url: null, sound: null };
+  const empty = { sound: null };
   try {
     const evidence = JSON.parse(evidenceJson ?? "null") as unknown;
     if (!evidence || typeof evidence !== "object" || Array.isArray(evidence))
@@ -426,23 +427,12 @@ function postEvidence(evidenceJson?: string | null): {
       root.post && typeof root.post === "object" && !Array.isArray(root.post)
         ? (root.post as Record<string, unknown>)
         : root;
-    let url: string | null = null;
-    if (typeof post.postUrl === "string") {
-      const parsed = new URL(post.postUrl);
-      if (
-        parsed.protocol === "https:" &&
-        ["www.tiktok.com", "tiktok.com"].includes(parsed.hostname) &&
-        /^\/@[^/]+\/(?:video|photo)\/\d+\/?$/.test(parsed.pathname)
-      )
-        url = parsed.href;
-    }
     const rawSound = post.soundSelection ?? root.soundSelection;
     const sound =
       rawSound && typeof rawSound === "object" && !Array.isArray(rawSound)
         ? (rawSound as Record<string, unknown>)
         : null;
     return {
-      url,
       sound:
         sound &&
         typeof sound.title === "string" &&
@@ -1725,6 +1715,9 @@ function CampaignDetail({
     || detail?.assignments.some((assignment) => assignment.state === "verifying") === true;
   const reviewPost = detail?.assignments.some(needsPublicationReview) === true;
   const supersededSheet = detail?.assignments.some(assignment => assignment.sheetDelivery?.state === "superseded") === true;
+  const sheetRequired = snapshot ? snapshotSheetEnabled(snapshot) : undefined;
+  const outcomes = new Map((detail?.assignments ?? []).map(assignment => [assignment.id, postOutcome(assignment, { sheetRequired })]));
+  const outcomeOf = (assignment: PublishAssignmentRecord) => outcomes.get(assignment.id) ?? postOutcome(assignment, { sheetRequired });
   return (
     <section
       className="publish-campaign-detail"
@@ -1771,7 +1764,7 @@ function CampaignDetail({
                   : !snapshotSheetEnabled(snapshot)
                   ? "Không ghi Sheet"
                   : reviewPost || pendingPost ? "Sheet chờ liên kết đã xác minh" : snapshot.status === "complete"
-                    ? "Sheet đã xác nhận"
+                    ? "Đã ghi Sheet"
                     : snapshot.retryScope === "sheetOnly"
                       ? "Sheet chưa hoàn tất"
                       : "Sheet chưa xác nhận hoàn tất"}
@@ -1787,6 +1780,7 @@ function CampaignDetail({
             <span>{detail.assignments.filter(a => a.state === "verifying").length} máy chờ liên kết</span>
             <span>{detail.assignments.filter(a => ["uncertain", "failedBeforeDispatch", "missed"].includes(a.state)).length} máy cần xử lý</span>
           </div>
+          <PostOutcomeTotals totals={postOutcomeTotals([...outcomes.values()])} />
           <ResponsiveTable
             label="Kết quả theo máy"
             rows={detail.assignments}
@@ -1818,11 +1812,20 @@ function CampaignDetail({
                   const capability = recoveryCapabilities?.find(item => item.assignmentId === assignment.id);
                   const retryable = canRetryAssignment(assignment, detail.campaign);
                   const retryReason = recoveryReason(capability?.retryBeforePost.reason) ?? "Chưa xác nhận được quyền thử lại; tải lại chi tiết.";
+                  const outcome = outcomeOf(assignment);
+                  const schedule = verificationSchedule(assignment.evidenceJson);
                   return <span>
                     {capability?.recovery?.state==="waitingDevice"&&<p>Mất kết nối · chờ đúng máy kết nối lại, còn {Math.max(0,Math.ceil(((capability.recovery.reconnectDeadline??0)-Date.now())/1000))} giây</p>}
                     {capability?.recovery?.state==="retryWaiting"&&<p>Thử lại {capability.recovery.retriesUsed}/{capability.recovery.maxRetries} · {capability.recovery.step}</p>}
-                    {needsPublicationReview(assignment) ? <>Cần kiểm tra bài đăng<p>{publicationReviewReason(assignment.evidenceJson) ?? "Chưa có đủ bằng chứng xác nhận bài; kiểm tra TikTok trước khi tiếp tục."}</p></>
-                      : <>{isComposing(assignment) ? "Đang chuẩn bị bài trên TikTok" : PUBLISH_STATE_LABELS[assignment.state] ?? "Trạng thái chưa nhận diện"}{dispatchDetail(assignment) && <p>{dispatchDetail(assignment)}</p>}{verificationDetail(assignment.evidenceJson) && <p>{verificationDetail(assignment.evidenceJson)}</p>}</>}
+                    {outcome.post === "notSent" || outcome.post === "sending"
+                      ? <>{isComposing(assignment) ? "Đang chuẩn bị bài trên TikTok" : PUBLISH_STATE_LABELS[assignment.state] ?? "Trạng thái chưa nhận diện"}{dispatchDetail(assignment) && <p>{dispatchDetail(assignment)}</p>}</>
+                      : <>
+                        <PostOutcomeLayers outcome={outcome} reason={needsPublicationReview(assignment) ? publicationReviewReason(assignment.evidenceJson) ?? undefined : undefined} />
+                        {dispatchDetail(assignment) && <p>{dispatchDetail(assignment)}</p>}
+                        {schedule && !needsPublicationReview(assignment) && <p>{schedule}</p>}
+                        {/* The raw record is already under the device column's "Chi tiết". */}
+                        <PostOutcomeEvidence outcome={outcome} raw={false} />
+                      </>}
                     <PrePostFailureEvidence assignment={assignment}/>
                     {retryable && <><button type="button" disabled={busy || loading || !capability?.retryBeforePost.allowed}
                       aria-label={`Thử lại trước khi Đăng · ${deviceDisplayName(devices, metas, assignment.udid)}`}
@@ -1840,36 +1843,12 @@ function CampaignDetail({
               {
                 id: "link",
                 label: "Bài đã đăng",
-                render: (assignment: PublishAssignmentRecord) => {
-                  const evidence = postEvidence(assignment.evidenceJson);
-                  return evidence.url ? (
-                    <a href={evidence.url} target="_blank" rel="noreferrer" aria-label="Mở bài đã xác nhận">
-                      Đã xác minh link · Mở bài
-                    </a>
-                  ) : (
-                    <span>{needsPublicationReview(assignment) ? "Chưa có liên kết; không tự đăng lại" : assignment.state === "verifying" ? "Đã gửi bài; chờ TikTok hoàn tất và xác minh liên kết" : "Chưa có liên kết xác nhận"}</span>
-                  );
-                },
+                render: (assignment: PublishAssignmentRecord) => <PostOutcomeLink outcome={outcomeOf(assignment)} />,
               },
               {
                 id: "delivery",
                 label: "Ghi Sheet",
-                render: (assignment: PublishAssignmentRecord) => {
-                  const delivery = assignment.sheetDelivery;
-                  if (!delivery) return snapshot && !snapshotSheetEnabled(snapshot)
-                    ? "Không ghi Sheet" : "Chờ liên kết đã xác minh";
-                  if (delivery.state === "superseded") return "Đợt báo cáo đã đóng · giữ lịch sử trong app";
-                  const next = delivery.nextAttemptAtMs == null ? null
-                    : new Date(delivery.nextAttemptAtMs).toLocaleTimeString("vi-VN");
-                  return <span>
-                    {delivery.state === "sent" ? "Sheet đã xác nhận"
-                      : delivery.nextAttemptAtMs == null ? "Cần xử lý ghi Sheet" : "Đang chờ ghi Sheet"}
-                    {delivery.state !== "sent" && delivery.lastError && <p>{delivery.lastError}</p>}
-                    {delivery.attempts > 0 && <p>Đã thử {delivery.attempts} lần · Gần nhất: {new Date(delivery.updatedAt).toLocaleTimeString("vi-VN")}</p>}
-                    {delivery.state !== "sent" && next && <p>Thử tiếp: {next}</p>}
-                    {delivery.state !== "sent" && delivery.nextAttemptAtMs == null && <p>Sửa nguyên nhân rồi chọn Ghi lại Sheet</p>}
-                  </span>;
-                },
+                render: (assignment: PublishAssignmentRecord) => <PostOutcomeSheet outcome={outcomeOf(assignment)} delivery={assignment.sheetDelivery} />,
               },
               {
                 id: "sound",

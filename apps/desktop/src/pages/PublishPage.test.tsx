@@ -799,7 +799,7 @@ describe("publish campaign monitoring", () => {
     expect(executeCampaign).not.toHaveBeenCalled();
     expect(createCampaign).not.toHaveBeenCalled();
     expect(publishStart).not.toHaveBeenCalled();
-    expect(screen.getByText("Đã gửi bài; chờ TikTok hoàn tất và xác minh liên kết")).toBeVisible();
+    expect(screen.getByText("Đã gửi; đang xác minh link, tài khoản, caption và thời điểm")).toBeVisible();
   });
 
   it.each([
@@ -1073,7 +1073,7 @@ describe("publish campaign monitoring", () => {
     expect(within(panel).getByText("Sheet chờ liên kết đã xác minh")).toBeVisible();
     expect(within(panel).getByText("đã giữ nội dung và để TikTok tiếp tục xử lý")).toBeVisible();
     expect(screen.queryByText("Đã hoàn tất", { exact: true })).toBeNull();
-    expect(screen.queryByText("Sheet đã xác nhận", { exact: true })).toBeNull();
+    expect(screen.queryByText("Đã ghi Sheet", { exact: true })).toBeNull();
     expect(screen.queryByRole("link", { name: "Mở bài đã xác nhận" })).toBeNull();
     expect(screen.queryByRole("button", { name: "Chạy lại từ đầu" })).toBeNull();
     expect(executeCampaign).not.toHaveBeenCalled();
@@ -1108,7 +1108,7 @@ describe("publish campaign monitoring", () => {
     expect(within(panel).getByText("Sheet chờ liên kết đã xác minh")).toBeVisible();
     expect(within(panel).getByText("đã giữ nội dung và để TikTok tiếp tục xử lý")).toBeVisible();
     expect(screen.queryByText("Đã hoàn tất", { exact: true })).toBeNull();
-    expect(screen.queryByText("Sheet đã xác nhận", { exact: true })).toBeNull();
+    expect(screen.queryByText("Đã ghi Sheet", { exact: true })).toBeNull();
     expect(screen.queryByRole("link", { name: "Mở bài đã xác nhận" })).toBeNull();
     expect(screen.queryByRole("button", { name: "Chạy lại từ đầu" })).toBeNull();
     expect(within(panel).getByText(/TikTok đang xử lý/)).toBeVisible();
@@ -1419,7 +1419,7 @@ describe("publish campaign monitoring", () => {
     fireEvent.click(await screen.findByRole("button", { name: "Chi tiết máy" }));
     expect(await screen.findByText("Đợt báo cáo đã đóng · giữ lịch sử trong app")).toBeVisible();
     expect(screen.getByText("Nghĩa vụ ghi Sheet cũ đã đóng; kết quả giữ trong app")).toBeVisible();
-    expect(screen.queryByText("Sheet đã xác nhận")).toBeNull();
+    expect(screen.queryByText("Đã ghi Sheet")).toBeNull();
     expect(screen.queryByRole("button", { name: "Ghi lại Sheet" })).toBeNull();
   });
 
@@ -1462,6 +1462,7 @@ describe("publish campaign monitoring", () => {
           },
           evidenceJson: JSON.stringify({
             post: {
+              publicationVerified: true,
               postUrl: "https://www.tiktok.com/@fixture/video/123",
               soundSelection: {
                 title: "Bài nhạc trên tài khoản",
@@ -1493,7 +1494,7 @@ describe("publish campaign monitoring", () => {
     expect(screen.getByText("Google tạm thời gián đoạn")).toBeVisible();
     expect(screen.getByText(/Đã thử 2 lần/)).toBeVisible();
     expect(screen.getByText(/Thử tiếp:/)).toBeVisible();
-    expect(screen.queryByText("Sheet đã xác nhận")).toBeNull();
+    expect(screen.queryByText("Đã ghi Sheet")).toBeNull();
     fireEvent.click(screen.getByText("Đã xác nhận nhạc"));
     expect(screen.getByText("sound-digest")).toBeVisible();
     expect(screen.getByText("Đề xuất", { exact: true })).toBeVisible();
@@ -1616,6 +1617,7 @@ describe("publish campaign monitoring", () => {
     };
     const detail = (state: string) => ({ campaign, bundles: [], events: [], assignments: [{
       id: "a-live", campaignId: campaign.id, bundleId: "b1", ordinal: 0, udid: "PHONE-A", state, errorCode: null,
+      evidenceJson: state === "succeeded" ? JSON.stringify({ post: { publicationVerified: true, postUrl: "https://www.tiktok.com/@fixture/video/9" } }) : null,
     }] });
     vi.mocked(publishList).mockResolvedValue([campaign] as never);
     vi.mocked(publishGet).mockReset().mockResolvedValueOnce(detail("posting") as never);
@@ -1633,7 +1635,7 @@ describe("publish campaign monitoring", () => {
     await waitFor(() => expect(within(panel).queryByText("Đang đăng")).toBeNull());
     await act(async () => older(detail("verifying")));
     expect(within(panel).queryByText("Kiểm tra thao tác Đăng đã có · chờ xác minh")).toBeNull();
-    expect(within(panel).getByText("Đã đăng")).toBeVisible();
+    expect(within(panel).getByRole("link", { name: "Mở bài đã xác nhận" })).toBeVisible();
     expect(publishReconcile).toHaveBeenCalledTimes(1);
     expect(executeCampaign).not.toHaveBeenCalled();
   });

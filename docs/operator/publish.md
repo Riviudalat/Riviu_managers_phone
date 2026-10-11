@@ -239,9 +239,9 @@ Trạng thái / Lỗi để biết đang chờ hay đã dừng tự kiểm tra. 
 minh thì thêm dòng theo thứ tự nhận link; ngày vẫn lấy lúc Đăng. Gửi lại cùng kết
 quả không thêm dòng mới.
 Kết quả **Ghi Sheet** được theo dõi riêng: **Đang chờ ghi Sheet** có giờ thử tiếp,
-số lần đã thử và lỗi gần nhất; **Cần xử lý ghi Sheet** yêu cầu sửa nguyên nhân rồi
-bấm **Ghi lại Sheet**; **Sheet đã xác nhận** chứng minh đúng hàng và link đã được
-ghi. Mất mạng được thử lại với thời gian chờ tăng dần, tối đa 15 phút giữa các
+số lần đã thử và lỗi gần nhất; **Lỗi ghi Sheet** yêu cầu sửa nguyên nhân rồi
+bấm **Ghi lại Sheet**; **Đã ghi Sheet** chứng minh đúng hàng và link đã được
+ghi. Lỗi Sheet không hạ bài đã xác minh và vẫn giữ link. Mất mạng được thử lại với thời gian chờ tăng dần, tối đa 15 phút giữa các
 lần; khởi động lại app giữ lịch gửi. Máy đã có link không cần chờ các máy khác
 để gửi kết quả lên Sheet. Lỗi báo cáo tiến độ cũng không chặn link mới của máy khác.
 
@@ -394,13 +394,28 @@ Chuyển về tab **Thiết lập** giữ nguyên bài và máy đang ghép.
 gán cho từng bài. **Thao tác:** preflight trước dispatch; đối chiếu một bài với một máy
 đã gán và toàn bộ hậu quả cleanup; chạy pipeline rồi xem projection trong Theo dõi.
 
-**Kết quả:** bằng chứng Post, URL, nhạc, Sheet và cleanup riêng biệt. **Đã bấm Đăng · chờ xác minh**
-nghĩa TikTok đã nhận thao tác nhưng Riviu chưa xác nhận bài đã xuất bản. Về bảng tin
+**Kết quả:** bằng chứng Post, URL, nhạc, Sheet và cleanup riêng biệt. Mỗi bài dùng một bộ
+từ chung ở chi tiết chiến dịch, cửa sổ tiến trình và Lượt chạy:
+
+| Lớp | Nghĩa |
+|---|---|
+| **Đã gửi** | Riviu đã bấm Đăng. Gửi lệnh chưa phải là thành công. |
+| **Đang xác minh** | Đã gửi, đang chờ bằng chứng; dòng kết quả nêu bằng chứng còn thiếu. |
+| **Đã xác minh** | Chỉ khi backend xác nhận bài của đúng lượt: link bài chuẩn, đúng tài khoản, đúng caption và thời điểm sau lúc gửi. Có link mà thiếu xác nhận này thì vẫn là **Chưa rõ** kèm lý do. |
+| **Đã ghi Sheet** | Google Sheet đã xác nhận dòng của bài đã xác minh. |
+| **Chưa rõ** | Trạng thái riêng: có thể đã gửi nhưng chưa có kết luận. Chỉ có **Xem bằng chứng** và theo dõi (**Kiểm tra liên kết**, **Tiếp tục xác minh bài đã gửi**); không bao giờ có nút đăng lại. |
+
+Tổng hợp luôn là các số riêng, ví dụ "20 đã gửi · 18 đã xác minh · 17 đã ghi Sheet ·
+2 chưa rõ"; số đã gửi không bao giờ được cộng thành thành công. **Xem bằng chứng** đọc
+cách xác minh, tài khoản của lượt, giờ bấm Đăng, kết quả khớp caption/thời điểm và link
+ứng viên (nếu có) trước khi xem dữ liệu gốc.
+
+**Đang xác minh** nghĩa TikTok đã nhận thao tác nhưng Riviu chưa xác nhận bài đã xuất bản. Về bảng tin
 không phải bằng chứng tải xong. Riviu chờ máy rảnh rồi mở lại TikTok trên Android để kiểm tra liên kết;
 quá trình tiếp tục khi mở lại app và kết nối lại máy. Nút **Kiểm tra liên kết** cho kiểm tra
 sớm, chỉ lấy liên kết/ghi Sheet, không đăng lại bài hay đăng các bài còn lại trong lượt đó.
 Giữ Riviu chạy, máy tính không ngủ và điện thoại có mạng. Không có thời gian hoàn tất cố định
-vì TikTok còn xử lý/xét duyệt. **Chưa chắc chắn** giữ bằng chứng riêng và không cho đăng lại.
+vì TikTok còn xử lý/xét duyệt. **Chưa rõ** giữ bằng chứng riêng và không cho đăng lại.
 
 Với lượt mới, **Hoàn tất** chỉ xuất hiện khi có liên kết đã xác minh và Sheet đã
 xác nhận.

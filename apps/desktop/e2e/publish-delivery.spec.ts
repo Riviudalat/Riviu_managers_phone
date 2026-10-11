@@ -55,7 +55,7 @@ for (const width of [1440, 820]) {
     await expect(page.getByText("Google tạm thời gián đoạn", { exact: true })).toBeVisible();
     await expect(page.getByText(/Đã thử 2 lần/)).toBeVisible();
     await expect(page.getByText(/Thử tiếp:/)).toBeVisible();
-    await expect(page.getByText("Sheet đã xác nhận", { exact: true })).toHaveCount(0);
+    await expect(page.getByText("Đã ghi Sheet", { exact: true })).toHaveCount(0);
     await expect(page.getByRole("button", { name: "Ghi lại Sheet", exact: true })).toBeVisible();
     await page.getByRole("cell", { name: /^Đang chờ ghi Sheet/ }).scrollIntoViewIfNeeded();
     await page.screenshot({ path: testInfo.outputPath(`pending-${width}.png`) });
@@ -65,12 +65,12 @@ for (const width of [1440, 820]) {
 
     await page.evaluate(() => sessionStorage.setItem("delivery-fixture-sent", "true"));
     await openMonitor();
-    await expect(page.getByRole("cell", { name: /^Sheet đã xác nhận/ })).toBeVisible();
+    await expect(page.getByRole("cell", { name: /^Đã ghi Sheet/ })).toBeVisible();
     await expect(link).toHaveAttribute("href", "https://www.tiktok.com/@fixture/video/1234567890123");
     await expect(page.getByText("Google tạm thời gián đoạn", { exact: true })).toHaveCount(0);
     await expect(page.getByText(/Thử tiếp:/)).toHaveCount(0);
     await expect(page.getByRole("button", { name: "Ghi lại Sheet", exact: true })).toHaveCount(0);
-    await page.getByRole("cell", { name: /^Sheet đã xác nhận/ }).scrollIntoViewIfNeeded();
+    await page.getByRole("cell", { name: /^Đã ghi Sheet/ }).scrollIntoViewIfNeeded();
     await page.screenshot({ path: testInfo.outputPath(`sent-${width}.png`) });
     expect(await page.evaluate((commands) => (window as unknown as { deliveryFixture: { calls: string[] } })
       .deliveryFixture.calls.filter(command => commands.includes(command)), mutations)).toEqual([]);

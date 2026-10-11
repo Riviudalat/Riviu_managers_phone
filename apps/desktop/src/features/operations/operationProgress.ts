@@ -3,6 +3,7 @@ import type { NurtureSessionStatus, OperationDeviceLogEntry, OperationRunItem, O
 import { ACTION_PRESENTATION } from "../../components/flow/actionPresentation";
 import type { ActionKind } from "../../types";
 import type { PublishAssignmentRecord } from "../../types";
+import { postOutcome } from "./postOutcomeModel";
 
 const PUBLISH_STAGES = ["Chuẩn bị", "Chuyển nội dung", "Chọn ảnh/video", "Nhạc", "Caption", "Đăng", "Liên kết", "Sheet"];
 const PUBLISH_STEP_COMPLETED: Record<string, number> = {
@@ -18,17 +19,11 @@ const PUBLISH_STEP_COMPLETED: Record<string, number> = {
 /** Semantic milestones, never elapsed-time estimates or terminal-state-as-success. */
 export function publishDeviceProgress(assignment: PublishAssignmentRecord, entries: OperationDeviceLogEntry[], options: {
   sheetRequired?: boolean;
-  publicationVerified?: boolean;
   exclusionState?: string;
   recoveryStep?: string;
 } = {}) {
-  let proof: Record<string, unknown> = {};
-  try {
-    const parsed: unknown = JSON.parse(assignment.evidenceJson ?? "{}");
-    if (parsed && typeof parsed === "object" && !Array.isArray(parsed)) proof = parsed as Record<string, unknown>;
-  } catch { /* Missing evidence cannot establish publication. */ }
-  const post = proof.post && typeof proof.post === "object" ? proof.post as Record<string, unknown> : proof;
-  const verified = options.publicationVerified === true || post.publicationVerified === true;
+  // The same verified rule as every post result: missing evidence cannot establish publication.
+  const verified = postOutcome(assignment).verified;
   const sheetDone = options.sheetRequired === false || assignment.sheetDelivery?.state === "sent";
   const stopped = ["failedBeforeDispatch", "cancelled", "missed"].includes(assignment.state) || !!options.exclusionState;
   let completed = assignment.state === "transferring" ? 1 : assignment.state === "imported" ? 2 : 0;
@@ -138,11 +133,11 @@ export function logMessage(row: OperationDeviceLogEntry): string {
       queued: "Đang chờ bắt đầu đăng bài",
       transferring: "Đang tải ảnh/video vào điện thoại",
       imported: "Đã tải ảnh/video vào thư viện điện thoại",
-      posting: "Bắt đầu thao tác Đăng và chờ xác nhận",
-      verifying: "Đang kiểm tra kết quả thao tác Đăng đã có — không bấm Đăng lại",
-      succeeded: "Thành công — đã xác nhận bài đăng",
+      posting: "Đang gửi: bấm Đăng và chờ xác nhận",
+      verifying: "Đã gửi — đang xác minh bài đăng; không bấm Đăng lại",
+      succeeded: "Đã xác minh bài đăng — link, tài khoản, caption và thời điểm",
       failed_before_dispatch: "Dừng trước khi đăng — xem chi tiết lỗi",
-      uncertain: "Chưa xác nhận bài đã lên — cần kiểm tra trên TikTok",
+      uncertain: "Chưa rõ bài đã lên — chỉ theo dõi và xem bằng chứng, không đăng lại",
       cancelled: "Đã dừng lượt đăng bài",
     };
     if (messages[row.state]) return messages[row.state];

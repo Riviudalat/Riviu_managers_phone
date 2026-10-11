@@ -22,16 +22,17 @@ it.each([
  {name:"malformed", evidence:"{", expected:"Chưa rõ lịch kiểm tra tiếp theo.", action:"Kiểm tra liên kết"},
  {name:"invalid fields", evidence:{verificationStatus:{state:"pending",nextCheckAt:123},verificationBudget:{noProgressObservations:-1,limit:3}}, expected:"Chưa rõ lịch kiểm tra tiếp theo.", action:"Kiểm tra liên kết"},
  {name:"oversized", evidence:" ".repeat(262145), expected:"Chưa rõ lịch kiểm tra tiếp theo.", action:"Kiểm tra liên kết"},
- {name:"verified", evidence:{verificationStatus:{state:"needsReview",reason:"obsolete review"}}, expected:"Bài đã xác minh · Sheet đã ghi.", action:null},
+ {name:"verified", evidence:{post:{publicationVerified:true,postUrl:"https://www.tiktok.com/@fixture/video/1"},verificationStatus:{state:"needsReview",reason:"obsolete review"}}, expected:"Đã xác minh", action:null},
 ])("submitted work projects $name without Post retry",async({name,evidence,expected,action})=>{
  const verified=name==="verified";
  vi.mocked(operationDeviceLog).mockResolvedValue({entries:[{action:"publishStep",state:"post_uncertain",text:"old Post uncertainty",at:"2026-09-29T00:00:00Z"}],truncated:false} as never);
  vi.mocked(publishGet).mockResolvedValue({campaign:{createdAt:"2026-09-29T00:00:00Z"},assignments:[{id:"a",ordinal:0,udid:"device",state:verified?"succeeded":"verifying",effectIntent:"post",errorCode:"account_mismatch",sheetDelivery:verified?{state:"sent"}:null,evidenceJson:typeof evidence==="string"?evidence:JSON.stringify(evidence)}]} as never);
  vi.mocked(publishRecoveryCapabilities).mockResolvedValue([{assignmentId:"a",revision:9,retryBeforePost:{allowed:false},checkLink:{allowed:!verified,reason:verified?"alreadyVerified":null},resumeVerification:{allowed:name==="review"},recovery:verified?{state:"exhausted",step:"sound",lastError:"obsolete recovery",lastErrorCode:"account_mismatch"}:null}] as never);
  render(<PublishDeviceRecovery campaignId="campaign" udid="device"/>);
- await screen.findByText(text=>text.startsWith(expected));
+ expect((await screen.findAllByText(text=>text.startsWith(expected))).length).toBeGreaterThan(0);
  if(verified){
   expect(screen.getByText(/8\/8 bước đã xác nhận/)).toBeInTheDocument();
+  expect(screen.getByRole("list",{name:"Các lớp kết quả bài đăng"})).toHaveTextContent(/Đã gửi.*Đã xác minh.*Đã ghi Sheet/);
   expect(screen.queryByText(/old Post uncertainty|obsolete recovery|obsolete review|Tài khoản đang mở khác|Đã hết lượt tự thử/)).not.toBeInTheDocument();
  }else{
   expect(screen.getByText(/Chưa rõ %/)).toBeInTheDocument();

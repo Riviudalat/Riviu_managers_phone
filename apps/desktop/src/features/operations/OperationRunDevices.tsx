@@ -11,6 +11,8 @@ import { deviceProgress } from "../../nurtureProgress";
 import { useMediaQuery } from "../../useMediaQuery";
 import { PublishPager } from "../../components/publish/PublishPager";
 import { PublishDeviceRecovery } from "./PublishDeviceRecovery";
+import { PublishRunOutcomeTotals } from "./PublishRunOutcome";
+import { runItemsPostOutcome } from "./postOutcomeModel";
 
 export function MonitorReadError({ message, retry }: { message: string; retry: () => void }) {
   return <div className="run-monitor-error" role="alert"><span>{message}</span><button type="button" onClick={retry}><RefreshCw size={14} /> Thử lại</button></div>;
@@ -97,20 +99,34 @@ export function OperationRunDevices({ run, labels, sessions, compact = false }: 
   const pendingPublication = run.kind === "publish" && rows.some(row => row.pendingPublish || row.reviewPublish);
   const fraction = pendingPublication ? null : runProgress(summary, sessions);
   const counts = deviceStateCounts(rows);
+  // Publish rows speak the post-result vocabulary: a finished item is "Đã xác minh" only with
+  // the backend's proof in its evidence; a post awaiting proof is "Đang xác minh", never done.
+  const publishOutcome = (row: (typeof rows)[number]) => run.kind === "publish" ? runItemsPostOutcome(row.entries) : null;
+  const rowLabel = (row: (typeof rows)[number]) => {
+    if (run.kind !== "publish") return RUN_STATE_LABEL[row.state];
+    if (row.reviewPublish) return "Chưa rõ";
+    if (row.pendingPublish) return "Đang xác minh";
+    return publishOutcome(row)?.postLabel ?? RUN_STATE_LABEL[row.state];
+  };
+  const rowDone = (row: (typeof rows)[number]) => run.kind === "publish"
+    ? publishOutcome(row)?.verified === true && !row.pendingPublish && !row.reviewPublish
+    : row.state === "succeeded";
   const showDevices = () => {
     setSelected(null);
     queueMicrotask(() => deviceListRef.current?.querySelector<HTMLButtonElement>("button")?.focus());
   };
   return <>
     <div className="run-monitor-summary">
-      <div className="run-monitor-result"><StatusChip tone={pendingPublication || issueState(summary.state) ? "warning" : activeRun(summary) ? "info" : summary.state === "succeeded" ? "success" : "neutral"}>{pendingPublication ? "Chờ xác minh bài đăng" : RUN_STATE_LABEL[summary.state]}</StatusChip>
+      <div className="run-monitor-result"><StatusChip tone={pendingPublication || issueState(summary.state) ? "warning" : activeRun(summary) ? "info" : summary.state === "succeeded" ? "success" : "neutral"}>{pendingPublication ? "Đang xác minh bài đăng" : RUN_STATE_LABEL[summary.state]}</StatusChip>
         <span className="run-processed-count" title={`${summary.completedItems}/${summary.totalItems} mục đã xử lý`}>{summary.completedItems}/{summary.totalItems} đã xử lý</span>
         <strong className="run-percent">{progressLabel(fraction)}</strong>
       </div>
       <ProgressBar fraction={fraction} label="Tiến độ công việc" tone={activeRun(summary) ? "run" : "idle"} />
       <div className="run-monitor-counts" aria-label="Kết quả từng máy">
-        <span><CheckCircle2 size={13} aria-hidden="true" /> {counts.succeeded} hoàn tất</span>
-        <span className={counts.issues ? "run-attention" : ""}><CircleAlert size={13} aria-hidden="true" /> {counts.issues} cần kiểm tra</span>
+        {run.kind === "publish" ? <PublishRunOutcomeTotals campaignId={run.sourceId} /> : <>
+          <span><CheckCircle2 size={13} aria-hidden="true" /> {counts.succeeded} hoàn tất</span>
+          <span className={counts.issues ? "run-attention" : ""}><CircleAlert size={13} aria-hidden="true" /> {counts.issues} cần kiểm tra</span>
+        </>}
         {counts.active > 0 && <span><Clock3 size={13} aria-hidden="true" /> {counts.active} đang chờ/chạy</span>}
         {counts.stopped > 0 && <span>{counts.stopped} dừng/bỏ qua</span>}
       </div>
@@ -126,12 +142,12 @@ export function OperationRunDevices({ run, labels, sessions, compact = false }: 
           {shown.slice(currentPage * 8, (currentPage + 1) * 8).map((row) => {
             const status = sessions.find((session) => session.runId === run.sourceId && session.udid === row.udid);
             const fraction = status && activeRun(row) ? Math.min(.99, deviceProgress(status) ?? 0) : row.fraction;
-            const Icon = row.state === "succeeded" && !row.pendingPublish && !row.reviewPublish ? CheckCircle2 : issueState(row.state) ? CircleAlert : Clock3;
+            const Icon = rowDone(row) ? CheckCircle2 : issueState(row.state) || publishOutcome(row)?.uncertain ? CircleAlert : Clock3;
             return <div key={row.udid}><button type="button" className="run-device-row" aria-pressed={selected === row.udid} title={row.label} onClick={() => {
               if (selected !== row.udid) { setSelected(row.udid); setTab("log"); }
             }}>
-              <Icon size={16} className={row.state === "succeeded" ? "run-success" : issueState(row.state) ? "run-attention" : "run-state"} aria-hidden="true" />
-              <span className="run-device-copy"><strong>{row.name}</strong><small>{row.reviewPublish ? "Cần kiểm tra bài đăng" : row.pendingPublish ? "Chờ xác minh bài đăng" : RUN_STATE_LABEL[row.state]}</small></span>
+              <Icon size={16} className={rowDone(row) ? "run-success" : issueState(row.state) || publishOutcome(row)?.uncertain ? "run-attention" : "run-state"} aria-hidden="true" />
+              <span className="run-device-copy"><strong>{row.name}</strong><small>{rowLabel(row)}</small></span>
               {run.kind!=="publish"&&activeRun(row) && <span className="run-percent">{progressLabel(fraction)}</span>}
             </button>{run.kind==="publish"&&row.udid&&<PublishDeviceRecovery campaignId={run.sourceId} udid={row.udid}/>}</div>;
           })}
@@ -141,7 +157,7 @@ export function OperationRunDevices({ run, labels, sessions, compact = false }: 
       <section className="run-monitor-log" aria-label="Chi tiết máy" hidden={singlePane && !selectedRow}>
         {!selectedRow ? <div className="run-monitor-placeholder"><List size={24} /><strong>Chọn máy để xem nhật ký</strong></div> : <>
           <div className="run-inspector-top"><header className="run-device-heading">{singlePane && <button ref={backRef} type="button" className="icon-btn" onClick={showDevices} title="Về danh sách máy" aria-label="Về danh sách máy"><ArrowLeft size={18} /></button>}<div><strong title={selectedRow.label}>{selectedRow.name}</strong>{!compact && selectedRow.model && <small>{selectedRow.model}</small>}</div>
-            <StatusChip tone={issueState(selectedRow.state) ? "warning" : selectedRow.state === "succeeded" ? "success" : "neutral"}>{selectedRow.reviewPublish ? "Cần kiểm tra bài đăng" : selectedRow.pendingPublish ? "Chờ xác minh bài đăng" : RUN_STATE_LABEL[selectedRow.state]}</StatusChip>
+            <StatusChip tone={issueState(selectedRow.state) || publishOutcome(selectedRow)?.uncertain ? "warning" : rowDone(selectedRow) ? "success" : "neutral"}>{rowLabel(selectedRow)}</StatusChip>
           </header>
           {run.kind==="publish"&&selectedRow.udid&&<PublishDeviceRecovery campaignId={run.sourceId} udid={selectedRow.udid}/>}
           <WorkspaceTabs label="Chi tiết hoạt động máy" tabs={tabs} value={tab} onChange={setTab} /></div>

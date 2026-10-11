@@ -59,7 +59,7 @@ async function fixture(page: Page, scenario: "interaction" | "publish", restored
         if (command === "operation_list_runs") return [summary];
         if (command === "operation_get_run") return { summary, items: [] };
         if (command === "publish_reconcile") return { campaignId: campaign.id, inputDigest: "digest", status: "partial", retryScope: "sheetOnly", reportJson: {}, updatedAt: campaign.updatedAt };
-        if (command === "publish_get") return { campaign, bundles: [], events: [], assignments: [{ id: "assignment", campaignId: campaign.id, bundleId: "bundle", ordinal: 0, udid: "MOCK-ANDROID-01", state: "succeeded", evidenceJson: JSON.stringify({ post: { postUrl: url, soundSelection: { title: "Nhạc đã chọn trên tài khoản", artist: "Tác giả", section: "recommended", index: 2, candidatesDigest: "verified-sound-digest", confirmed: true } }, cleanup: { state: "cleaned" } }) }] };
+        if (command === "publish_get") return { campaign, bundles: [], events: [], assignments: [{ id: "assignment", campaignId: campaign.id, bundleId: "bundle", ordinal: 0, udid: "MOCK-ANDROID-01", state: "succeeded", evidenceJson: JSON.stringify({ post: { publicationVerified: true, postUrl: url, soundSelection: { title: "Nhạc đã chọn trên tài khoản", artist: "Tác giả", section: "recommended", index: 2, candidatesDigest: "verified-sound-digest", confirmed: true } }, cleanup: { state: "cleaned" } }) }] };
         if (command === "publish_execute") { w.__AUTOMATION_CALLS__.push({ command, args }); throw new Error("fixture dispatch must remain blocked"); }
       }
       return invoke(command, args);
