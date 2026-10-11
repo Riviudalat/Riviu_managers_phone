@@ -3,13 +3,11 @@ import { ExcludedDevicesNotice } from "./ExcludedDevicesNotice";
 import "../styles/busy-scope.css";
 
 /** The scope line and "Bị loại" list for an automation run; the rules live in `useBusyScope`. */
-export function BusyScopeNotice({ targets, runTargets, excluded, label, onTake, disabled, onlyWhenExcluded }: {
+export function BusyScopeNotice({ targets, runTargets, excluded, label, onlyWhenExcluded }: {
   targets: readonly string[];
   runTargets: readonly string[];
   excluded: readonly ExcludedDevice[];
   label: (udid: string) => string;
-  onTake: (udid: string, label: string) => void;
-  disabled?: boolean;
   /** Render nothing while no phone is excluded, for a page that already counts its phones. */
   onlyWhenExcluded?: boolean;
 }) {
@@ -21,10 +19,7 @@ export function BusyScopeNotice({ targets, runTargets, excluded, label, onTake, 
     </p>
     {excluded.length > 0 && <>
       <ExcludedDevicesNotice excluded={excluded} label={label}/>
-      <div className="busy-scope-actions">{excluded.map(entry => <button key={entry.udid} type="button" className="ghost" disabled={disabled}
-        aria-label={`Dừng việc cũ và dùng máy này · ${label(entry.udid)}`} onClick={() => onTake(entry.udid, label(entry.udid))}>
-        Dừng việc cũ và dùng {label(entry.udid)}
-      </button>)}</div>
+      <p className="busy-scope-hint">Chưa thể giành máy bận từ trang này. Dừng việc cũ trong Lượt chạy, rồi bỏ máy khỏi phạm vi và chọn lại.</p>
     </>}
   </div>;
 }

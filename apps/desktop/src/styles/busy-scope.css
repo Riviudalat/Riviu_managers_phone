@@ -2,5 +2,4 @@
 .busy-scope { display:flex; flex-direction:column; gap:6px; margin:6px 0; min-width:0; }
 .busy-scope-line { margin:0; font-size:var(--text-sm); color:var(--text-2); font-variant-numeric:tabular-nums; overflow-wrap:anywhere; }
 .busy-scope .excluded-devices { display:flex; flex-wrap:wrap; align-items:center; gap:6px; padding:6px 8px; border-left:3px solid var(--warn); background:var(--warn-soft); font-size:var(--text-sm); overflow-wrap:anywhere; }
-.busy-scope-actions { display:flex; flex-wrap:wrap; gap:6px; }
-.busy-scope-actions>button { min-height:32px; }
+.busy-scope-hint { margin:0; font-size:var(--text-sm); color:var(--text-3); }

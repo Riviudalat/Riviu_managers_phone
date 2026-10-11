@@ -18,10 +18,11 @@ phạm vi, còn sửa danh sách chuyển phạm vi Toàn bộ hoặc Nhóm thà
 **Xong** hoặc Escape đóng bảng nhưng giữ lựa chọn. **Chọn tất cả đang kết nối** gồm
 cả máy ngoài kết quả tìm kiếm; **Bỏ chọn** xóa lựa chọn. Máy đang bận vẫn
 nằm trong phạm vi nhưng mặc định **Bị loại**: dòng phạm vi ghi "N trong phạm vi · M thực hiện
-· K bị loại (Máy 4 – Đang chạy tác vụ, …)" và máy đó không nhận lệnh. Muốn dùng máy bận, bấm
-**Dừng việc cũ và dùng máy này** của đúng máy; hộp xác nhận nêu tên việc sẽ bị dừng. Chỉ máy
-đã xác nhận như vậy mới bị dừng việc cũ khi bắt đầu; app chờ nhả máy rồi kiểm tra sẵn sàng.
-Tương tác không bắt đầu khi danh sách máy thực hiện còn máy bị loại. Máy chưa chuẩn bị vẫn
+· K bị loại (Máy 4 – Đang chạy tác vụ, …)" và máy đó không nhận lệnh. Máy bị loại vẫn bị loại
+khi rảnh lại. Trang này **chưa có thao tác giành máy bận**: muốn dùng máy đó, dừng việc cũ trong
+**Lượt chạy**, rồi bỏ máy khỏi phạm vi và chọn lại. Nếu có máy vừa bận trong lúc hộp xác nhận
+đang mở, app không bắt đầu và yêu cầu kiểm tra lại. Tương tác không bắt đầu khi danh sách máy
+thực hiện còn máy bị loại. Máy chưa chuẩn bị vẫn
 chọn được. Máy mất kết nối không được chọn thêm. Tìm kiếm không đổi phạm vi của lượt.
 Cấu hình và tóm tắt phiên đọc từ thiết lập hiện tại; thanh tab và nút bắt đầu
 nằm ngoài vùng cuộn. Phạm vi Nuôi không thay lựa chọn của Tương tác hoặc Đăng bài.
@@ -42,8 +43,8 @@ lưu, bình luận do AI viết, theo dõi) kèm tỷ lệ, kể cả khi tab H�
 là **Tỷ lệ hành động (%)**; nhịp xem là **Thời gian xem ngắn nhất/dài nhất**.
 
 Nút **Yêu cầu dừng** của Nuôi gửi yêu cầu, rồi hiện **Đang dừng · a/n máy đã xác nhận** và kết
-quả từng máy. Chỉ khi mọi máy báo không còn chạy mới ghi **Đã dừng**; máy chưa có trạng thái
-ghi "Chưa rõ: chưa có xác nhận từ máy". Dừng không thu hồi tim, lưu, bình luận hay theo dõi đã gửi.
+quả từng máy. Chỉ dòng kết thúc của đúng lượt vừa dừng mới tính là xác nhận; chỉ khi mọi máy
+xác nhận mới ghi **Đã dừng**. Máy chưa có dòng của lượt đó ghi "Chưa rõ". Dừng không thu hồi tim, lưu, bình luận hay theo dõi đã gửi.
 
 Nuôi đang chờ quyền điều khiển vẫn nhận lệnh **Yêu cầu dừng**; thời lượng phiên có tính
 thời gian chờ này. Thao tác đã gửi được chờ kết thúc trước khi nhả máy. Bấm chạy

@@ -285,7 +285,10 @@
 .publish-quick.is-steps[data-step="1"] .pq-mapping,.publish-quick.is-steps[data-step="1"] .pq-devices { display:none; }
 .publish-quick.is-steps[data-step="2"] .pq-library { display:none; }
 .publish-quick.is-steps[data-step="2"] .pq-columns { grid-template-columns:minmax(0,1fr) minmax(0,1fr); }
-.publish-quick.is-steps .pq-link-account>span { max-width:none; overflow-wrap:anywhere; }
+/* Step mode reads the assigned account in full: wrap instead of clipping. */
+.publish-quick.is-steps .pq-link-account>span { max-width:none; white-space:normal; overflow:visible; text-overflow:clip; overflow-wrap:anywhere; }
+.publish-quick.is-steps .pq-link { grid-template-rows:auto; height:auto; }
+.publish-quick.is-steps .pq-link-account { min-width:0; align-items:flex-start; }
 @media (max-width:760px) { .publish-quick.is-steps[data-step="2"] .pq-columns { grid-template-columns:minmax(0,1fr); } }
 /* The review names every approved field in full: wrap, never ellipsis. */
 .pq-review { max-height:min(46vh,420px); overflow:auto; margin:8px 0; border:1px solid var(--line); border-radius:6px; }

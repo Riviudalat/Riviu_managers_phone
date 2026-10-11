@@ -364,7 +364,7 @@ export function NurturePopup({
    * counts as stopped once its own status row reports it is no longer running, and a phone
    * with no row stays unconfirmed, never "Đã dừng".
    */
-  const [stopRequest, setStopRequest] = useState<{ targets: string[]; sent: boolean } | null>(null);
+  const [stopRequest, setStopRequest] = useState<{ targets: { udid: string; runId: string | null }[]; sent: boolean } | null>(null);
   const [msg, setMsg] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
   const issueId = useId();
@@ -414,6 +414,8 @@ export function NurturePopup({
   const scopeLatest = useRef({ targets, devices });
   scopeLatest.current = { targets, devices };
   const busyScope = useBusyScope(devices, targets);
+  const latestRunTargets = useRef("");
+  latestRunTargets.current = busyScope.runTargets.join(",");
   const anyRunning = statuses.some((s) => s.running);
   const runningTargets = useMemo(
     () => [...new Set(statuses.filter((status) => status.running).map((status) => status.udid))],
@@ -768,15 +770,17 @@ export function NurturePopup({
     // Busy phones stay out unless the operator took each one back explicitly (PLAN §8).
     const runTargets = [...busyScope.runTargets];
     if (!runTargets.length) {
-      setMsg("Mọi máy trong phạm vi đang bận. Chọn máy rảnh hoặc dùng \"Dừng việc cũ và dùng máy này\" cho từng máy.");
+      setMsg("Mọi máy trong phạm vi đang bận. Dừng việc cũ trong Lượt chạy hoặc chọn máy rảnh.");
       return;
     }
     const runSettings = settings;
     const runTargetRef = targetRef;
+    const reviewedScope = [...targets];
     const statusOf = (udid: string) => scopeLatest.current.devices.find((device) => device.udid === udid)?.status;
     const reviewedStatus = new Map(runTargets.map((udid) => [udid, statusOf(udid)]));
     setBusy(true);
     setStartReport(null);
+    setStopRequest(null);
     try {
       if (pageSurface && settings) {
         const enabled = [
@@ -802,7 +806,8 @@ export function NurturePopup({
             && (status === undefined || status === "disconnected" || status === "busy");
         });
         if (settingsRef.current !== runSettings || targetRefLatest.current !== runTargetRef
-          || now.targets.length !== runTargets.length || now.targets.some((udid, index) => udid !== runTargets[index]) || lost.length) {
+          || now.targets.length !== reviewedScope.length || now.targets.some((udid, index) => udid !== reviewedScope[index])
+          || latestRunTargets.current !== runTargets.join(",") || lost.length) {
           setMsg(`Phạm vi hoặc thiết lập đã đổi trong lúc xác nhận${lost.length ? ` (${lost.length} máy vừa bận hoặc mất kết nối)` : ""}. Chưa bắt đầu máy nào; kiểm tra lại rồi bấm bắt đầu.`);
           return;
         }
@@ -831,11 +836,12 @@ export function NurturePopup({
   };
 
   const stop = async () => {
-    const requested = [...stopTargets];
+    // Bind each phone to the run being stopped; only that run's terminal row confirms it.
+    const requested = stopTargets.map((udid) => ({ udid, runId: statuses.find((row) => row.udid === udid)?.runId ?? null }));
     setBusy(true);
     setStopRequest({ targets: requested, sent: false });
     try {
-      await nurtureStop(requested);
+      await nurtureStop(requested.map((entry) => entry.udid));
       setStopRequest({ targets: requested, sent: true });
       setStartedTargets([]);
       await reload();
@@ -846,12 +852,15 @@ export function NurturePopup({
       setBusy(false);
     }
   };
-  const stopRows = stopRequest?.targets.map((udid) => {
-    const status = statuses.find((row) => row.udid === udid);
+  const stopRows = stopRequest?.targets.map(({ udid, runId }) => {
+    const row = statuses.find((candidate) => candidate.udid === udid);
+    // A row from another run is no evidence about this one.
+    const status = row && runId !== null && row.runId === runId ? row : undefined;
     const confirmed = stopRequest.sent && !!status && !status.running;
-    return { udid, confirmed, text: !stopRequest.sent ? "Đang gửi yêu cầu dừng" : !status ? "Chưa rõ: chưa có xác nhận từ máy"
-      : status.running ? "Đang dừng" : status.outcome === "stopped" ? "Đã dừng (máy xác nhận)"
-        : status.outcome === "failed" ? "Đã ngừng · cần kiểm tra" : "Đã ngừng (máy xác nhận)" };
+    return { udid, confirmed, text: !stopRequest.sent ? "Đang gửi yêu cầu dừng" : runId === null ? "Chưa rõ: không có mã lượt để đối chiếu"
+      : !status ? "Chưa rõ: chưa có xác nhận của lượt này"
+        : status.running ? "Đang dừng" : status.outcome === "stopped" ? "Đã dừng (máy xác nhận)"
+          : status.outcome === "failed" ? "Đã ngừng · cần kiểm tra" : "Đã ngừng (máy xác nhận)" };
   }) ?? [];
   const stopConfirmed = stopRows.filter((row) => row.confirmed).length;
   const stopping = !!stopRequest && stopConfirmed < stopRows.length;
@@ -1092,7 +1101,7 @@ export function NurturePopup({
                     {stopRows.map((row) => <li key={row.udid}><strong>{deviceLabel(devices, metas, row.udid)}</strong> · {row.text}</li>)}
                   </ul>
                   <p>Dừng không thu hồi hành động đã gửi trước đó (tim, lưu, bình luận, theo dõi).</p>
-                  {!stopping && <button type="button" className="ghost" onClick={() => setStopRequest(null)}>Đóng kết quả dừng</button>}
+                  <button type="button" className="ghost" onClick={() => setStopRequest(null)}>Đóng kết quả dừng</button>
                 </StatusNotice>
               )}
 
@@ -1115,7 +1124,7 @@ export function NurturePopup({
                 >
                   <NurtureMachinePicker devices={devices} metas={metas} targets={targets} onTargetRefChange={onTargetRefChange} scopeControl={scopeControl} />
                   <BusyScopeNotice targets={targets} runTargets={busyScope.runTargets} excluded={busyScope.excluded}
-                    label={(udid) => deviceLabel(devices, metas, udid)} disabled={busy} onTake={(udid, label) => void busyScope.take(udid, label)} />
+                    label={(udid) => deviceLabel(devices, metas, udid)} />
                   <div className="nurture-session-layout">
                     <div className="nurture-setup-fields">
                     <section className="nurture-config-body nurture-settings-tabs" aria-label="Thiết lập Nuôi TikTok">
@@ -1132,7 +1141,7 @@ export function NurturePopup({
                       </div>
                     </section>
                     </div>
-                    <NurtureSetupSummary settings={settings} targetCount={targets.length} />
+                    <NurtureSetupSummary settings={settings} targetCount={busyScope.runTargets.length} />
                   </div>
                 </div>
               )}
@@ -1287,7 +1296,7 @@ export function NurturePopup({
                           </span>
                         </button>
                         {pageSurface && row.status && <div className="nurture-monitor-row-status">
-                          <span className={`nurture-machine-state${row.status.outcome === "done" ? " is-ready" : ""}`}>{row.running ? stopRequest?.sent && stopRequest.targets.includes(row.udid) ? "Đang dừng" : "Đang chạy" : row.status.outcome === "failed" ? "Cần kiểm tra" : row.status.outcome === "done" ? "Hoàn tất" : row.status.outcome === "stopped" ? "Đã dừng" : row.status.outcome === "partial" ? "Hoàn tất một phần" : "Chờ xử lý"}</span>
+                          <span className={`nurture-machine-state${row.status.outcome === "done" ? " is-ready" : ""}`}>{row.running ? stopRequest?.sent && stopRequest.targets.some((entry) => entry.udid === row.udid && entry.runId !== null && entry.runId === row.status?.runId) ? "Đang dừng" : "Đang chạy" : row.status.outcome === "failed" ? "Cần kiểm tra" : row.status.outcome === "done" ? "Hoàn tất" : row.status.outcome === "stopped" ? "Đã dừng" : row.status.outcome === "partial" ? "Hoàn tất một phần" : "Chờ xử lý"}</span>
                           <span>{row.status.videosDone}/{row.status.videoTarget} bài đã xem</span>
                           {row.status.updatedAt && <time dateTime={row.status.updatedAt}>{new Date(row.status.updatedAt).toLocaleTimeString("vi-VN", { hour12: false })}</time>}
                         </div>}

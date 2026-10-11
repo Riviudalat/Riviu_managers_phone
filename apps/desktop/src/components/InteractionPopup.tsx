@@ -19,7 +19,7 @@ import {
 } from "../api";
 import { describeError } from "../describeError";
 import { requestConfirm } from "../confirmStore";
-import { tileName } from "../deviceNaming";
+import { machineNumberLabel, tileName } from "../deviceNaming";
 import { parseMentions, resolveMentionActors, unionActors } from "../interactionMentions";
 import { useDeviceHandles } from "../useDeviceHandles";
 import {
@@ -326,7 +326,11 @@ export function InteractionPopup({
   // A busy actor is "Bị loại": Start never stops its job silently and never drops it from the
   // reviewed cohorts by itself, so it blocks until the operator removes it or takes it back.
   const busyScope = useBusyScope(devices, effectiveActors);
-  const busyActorLabel = (udid: string) => deviceLabel.get(udid) ?? udid;
+  const busyActorLabel = (udid: string) => {
+    const number = deviceNumber.get(udid);
+    return `${number !== undefined ? machineNumberLabel(number) : "Máy chưa đánh số"} · ${deviceLabel.get(udid) ?? udid}`;
+  };
+  const busyBlockedRef = useRef(false);
 
   /// Seed the default **once**, and never again.
   ///
@@ -629,10 +633,11 @@ export function InteractionPopup({
   useEffect(() => () => { latestRunRevision.current = null; }, []);
   const starting = useRef(false);
   const busyBlocked = busyScope.excluded.length > 0;
+  busyBlockedRef.current = busyBlocked;
   const run = useCallback(async () => {
     if (issues.length || starting.current) return;
     if (busyBlocked) {
-      setRunError("Có máy đang bận trong danh sách máy tương tác. Bỏ máy đó khỏi danh sách, hoặc bấm \"Dừng việc cũ và dùng máy này\" cho từng máy.");
+      setRunError("Có máy đang bận trong danh sách máy tương tác. Dừng việc cũ trong Lượt chạy hoặc bỏ máy đó khỏi danh sách.");
       return;
     }
     starting.current = true;
@@ -648,7 +653,7 @@ export function InteractionPopup({
           cancelLabel: "Quay lại",
         });
         if (!approved) return;
-        if (latestRunRevision.current !== runRevision || actorStatuses(effectiveActors) !== reviewedStatuses) {
+        if (latestRunRevision.current !== runRevision || actorStatuses(effectiveActors) !== reviewedStatuses || busyBlockedRef.current) {
           if (latestRunRevision.current !== null) setRunError("Thiết lập hoặc danh sách máy đã thay đổi. Kiểm tra lượt chạy rồi xác nhận lại.");
           return;
         }
@@ -846,7 +851,7 @@ export function InteractionPopup({
           hidden={tab !== "setup"}
         >
           <BusyScopeNotice targets={effectiveActors} runTargets={busyScope.runTargets} excluded={busyScope.excluded}
-            label={busyActorLabel} disabled={runBusy} onlyWhenExcluded onTake={(udid, label) => void busyScope.take(udid, label)} />
+            label={busyActorLabel} onlyWhenExcluded />
           {pageSurface ? <InteractionWorkspaceSetup setup={setupProps} profiles={null} scopeControl={scopeControl}
             effectiveActors={effectiveActors} busy={runBusy} onRun={() => void run()}
             onReparse={() => setParseRevision((value) => value + 1)} /> : <InteractionSetupTab {...setupProps} />}
