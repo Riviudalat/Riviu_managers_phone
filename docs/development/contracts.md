@@ -302,6 +302,17 @@ cùng session, picker đã rời và ô soạn khớp toàn bộ phép thay toke
 đọc cuối trước Gửi phải khớp nguyên văn kết quả đã chứng minh. Không suy nickname
 thành username và không dùng mapping này cho build khác chưa đo.
 
+Lịch tự động (`automation_schedules`) ghim bản hồ sơ và, từ migration 51, danh sách máy
+đã duyệt (`approved_udids_json`). Claim một lần đến hạn so target vừa resolve với danh sách
+đó trong cùng transaction (`approved_scope_difference`): máy được include mà không có trong
+danh sách, hoặc máy đã duyệt mà nhóm/danh sách không còn chỉ tới, làm occurrence `failed`
+với `approved_scope_changed`; lịch chưa có danh sách (lịch cũ theo nhóm hoặc Toàn bộ) cho
+`scope_not_approved`. Cả hai không tạo child, không gửi lệnh, vẫn dời `next_due_at` và ghi
+`last_error_code`. Máy đã duyệt nhưng mất kết nối là exclusion runtime trong snapshot, không
+phải đổi phạm vi. Migration 51 coi danh sách explicit của bản hồ sơ đang ghim là đã duyệt.
+Đổi tên, chu kỳ, bật/tắt hay revision giữ danh sách; chỉ tham số `approvedUdids` thay nó.
+`scheduleScope.ts` ở UI chép cùng quy tắc chỉ để giải thích; backend quyết định.
+
 `RIVIU_DEV_MANUAL_ACCEPTANCE=1` trong bản debug giữ mọi lịch tự chạy ở trạng thái
 chờ và không sửa lịch đã lưu. Chế độ này cũng không tự resume Flow/Điều phối,
 không chạy idle sweep/comment verifier, không tự đóng app và không bind

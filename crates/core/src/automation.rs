@@ -227,8 +227,97 @@ pub struct AutomationSchedule {
     pub schedule: Value,
     pub next_due_at: Option<String>,
     pub last_error_code: Option<String>,
+    /// The device list the operator approved for this schedule. `None` is a schedule saved
+    /// before approval existed with a group or "all" target: it runs nothing until approved.
+    pub approved_udids: Option<Vec<String>>,
     pub created_at: String,
     pub updated_at: String,
+}
+
+/// The most phones one approved list may name. Far above a laptop's fleet; it bounds the row.
+pub const MAX_APPROVED_SCHEDULE_DEVICES: usize = 1_000;
+
+/// Error code of a due run refused because the schedule has no approved device list.
+pub const SCHEDULE_SCOPE_NOT_APPROVED: &str = "scope_not_approved";
+/// Error code of a due run refused because its target no longer matches the approved list.
+pub const SCHEDULE_SCOPE_CHANGED: &str = "approved_scope_changed";
+
+pub fn validate_approved_udids(udids: &[String]) -> anyhow::Result<()> {
+    anyhow::ensure!(
+        !udids.is_empty(),
+        "approved device list must name at least one device"
+    );
+    anyhow::ensure!(
+        udids.len() <= MAX_APPROVED_SCHEDULE_DEVICES,
+        "approved device list is longer than {MAX_APPROVED_SCHEDULE_DEVICES} devices"
+    );
+    let mut seen = HashSet::new();
+    for udid in udids {
+        anyhow::ensure!(
+            !udid.trim().is_empty() && udid.trim() == udid,
+            "approved device list contains an empty or padded device ID"
+        );
+        anyhow::ensure!(
+            seen.insert(udid.as_str()),
+            "approved device list contains duplicate devices"
+        );
+    }
+    Ok(())
+}
+
+/// Where a due run's resolved target departs from the approved list. `added` are phones that
+/// would receive the command without approval; `removed` are approved phones the target no
+/// longer names (a group member taken out). An approved phone that is merely offline is
+/// neither: it stays a runtime exclusion recorded in the occurrence's target snapshot.
+#[derive(Clone, Debug, Default, Eq, PartialEq)]
+pub struct ApprovedScopeDifference {
+    pub added: Vec<String>,
+    pub removed: Vec<String>,
+}
+
+impl ApprovedScopeDifference {
+    pub fn is_empty(&self) -> bool {
+        self.added.is_empty() && self.removed.is_empty()
+    }
+}
+
+pub fn approved_scope_difference(
+    approved: &[String],
+    target: &ResolvedTargetSnapshot,
+) -> ApprovedScopeDifference {
+    let approved_set: HashSet<&str> = approved.iter().map(String::as_str).collect();
+    let added = target
+        .included
+        .iter()
+        .filter(|device| !approved_set.contains(device.udid.as_str()))
+        .map(|device| device.udid.clone())
+        .collect();
+    // "All" names every connected phone, so an approved phone missing from it is offline,
+    // not removed. A group or explicit list keeps naming its offline members as exclusions.
+    let removed = match target.target_ref {
+        TargetRef::All => Vec::new(),
+        TargetRef::Group { .. } | TargetRef::Explicit { .. } => {
+            let named: HashSet<&str> = target
+                .included
+                .iter()
+                .map(|device| device.udid.as_str())
+                .chain(
+                    target
+                        .excluded
+                        .iter()
+                        .filter(|exclusion| exclusion.reason == ExcludedDeviceReason::NotInRoster)
+                        .map(|exclusion| exclusion.device.udid.as_str()),
+                )
+                .collect();
+            let mut seen = HashSet::new();
+            approved
+                .iter()
+                .filter(|udid| !named.contains(udid.as_str()) && seen.insert(udid.as_str()))
+                .cloned()
+                .collect()
+        }
+    };
+    ApprovedScopeDifference { added, removed }
 }
 
 pub const AUTOMATION_SCHEDULE_SCHEMA_VERSION: u8 = 1;

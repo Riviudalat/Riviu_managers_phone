@@ -90,6 +90,7 @@ pub fn automation_schedule_list(
 }
 
 #[tauri::command]
+#[allow(clippy::too_many_arguments)]
 pub fn automation_schedule_from_settings(
     state: State<'_, AppState>,
     name: String,
@@ -97,11 +98,21 @@ pub fn automation_schedule_from_settings(
     target: TargetRef,
     config: Value,
     schedule: AutomationScheduleV1,
+    enabled: bool,
+    approved_udids: Vec<String>,
 ) -> Result<AutomationSchedule, CommandError> {
     let _admission = state.ensure_accepting_work()?;
     state
         .db
-        .create_automation_schedule_from_settings(&name, kind, &target, &config, &schedule)
+        .create_automation_schedule_from_settings(
+            &name,
+            kind,
+            &target,
+            &config,
+            &schedule,
+            enabled,
+            &approved_udids,
+        )
         .map_err(CommandError::from_service)
 }
 
@@ -113,6 +124,7 @@ pub fn automation_schedule_create(
     definition_revision: u64,
     enabled: bool,
     schedule: AutomationScheduleV1,
+    approved_udids: Vec<String>,
 ) -> Result<AutomationSchedule, CommandError> {
     let _admission = state.ensure_accepting_work()?;
     state
@@ -123,6 +135,7 @@ pub fn automation_schedule_create(
             definition_revision,
             enabled,
             &schedule,
+            &approved_udids,
         )
         .map_err(CommandError::from_service)
 }
@@ -138,6 +151,7 @@ pub fn automation_schedule_update(
     definition_revision: u64,
     enabled: bool,
     schedule: AutomationScheduleV1,
+    approved_udids: Option<Vec<String>>,
 ) -> Result<AutomationSchedule, CommandError> {
     let _admission = state.ensure_accepting_work()?;
     state
@@ -150,6 +164,7 @@ pub fn automation_schedule_update(
             definition_revision,
             enabled,
             &schedule,
+            approved_udids.as_deref(),
         )
         .map_err(CommandError::from_service)
 }

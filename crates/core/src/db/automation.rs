@@ -6,16 +6,18 @@ use uuid::Uuid;
 
 use super::Database;
 use crate::{
-    validate_automation_config, validate_automation_profile_config, AutomationDefinition,
-    AutomationDefinitionArchived, AutomationDefinitionNotFound, AutomationDefinitionRecord,
-    AutomationDefinitionRevision, AutomationKind, AutomationProfileRef, AutomationRevisionConflict,
-    AutomationSchedule, AutomationScheduleConflict, AutomationScheduleNotFound,
-    AutomationScheduleOccurrence, AutomationScheduleOccurrenceState, AutomationScheduleV1,
-    ChildCampaignOutcome, ResolvedTargetSnapshot, TargetRef,
+    approved_scope_difference, validate_approved_udids, validate_automation_config,
+    validate_automation_profile_config, AutomationDefinition, AutomationDefinitionArchived,
+    AutomationDefinitionNotFound, AutomationDefinitionRecord, AutomationDefinitionRevision,
+    AutomationKind, AutomationProfileRef, AutomationRevisionConflict, AutomationSchedule,
+    AutomationScheduleConflict, AutomationScheduleNotFound, AutomationScheduleOccurrence,
+    AutomationScheduleOccurrenceState, AutomationScheduleV1, ChildCampaignOutcome,
+    ResolvedTargetSnapshot, TargetRef, SCHEDULE_SCOPE_CHANGED, SCHEDULE_SCOPE_NOT_APPROVED,
 };
 
 impl Database {
     /// Save the current setup and its first schedule atomically; no profile UI required.
+    #[allow(clippy::too_many_arguments)]
     pub fn create_automation_schedule_from_settings(
         &self,
         name: &str,
@@ -23,21 +25,26 @@ impl Database {
         target: &TargetRef,
         config: &serde_json::Value,
         schedule: &AutomationScheduleV1,
+        enabled: bool,
+        approved_udids: &[String],
     ) -> anyhow::Result<AutomationSchedule> {
         let name = name.trim();
         anyhow::ensure!(!name.is_empty(), "tên lịch không được trống");
         schedule.validate()?;
+        validate_approved_udids(approved_udids)?;
         validate_automation_profile_config(kind, config)?;
         validate_automation_config(config)?;
         let definition_id = Uuid::new_v4();
         let schedule_id = Uuid::new_v4();
         let now = timestamp();
-        let next_due = next_due_from(&now, schedule.every_minutes)?;
+        let next_due = enabled
+            .then(|| next_due_from(&now, schedule.every_minutes))
+            .transpose()?;
         let mut connection = self.conn()?;
         let transaction = connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
         transaction.execute("INSERT INTO automation_definitions(id,name,kind,latest_revision,archived,created_at,updated_at) VALUES(?1,?2,?3,1,0,?4,?4)", params![definition_id.to_string(),name,kind.as_str(),now])?;
         transaction.execute("INSERT INTO automation_definition_revisions(definition_id,revision,target_json,config_json,created_at) VALUES(?1,1,?2,?3,?4)",params![definition_id.to_string(),serde_json::to_string(target)?,serde_json::to_string(config)?,now])?;
-        transaction.execute("INSERT INTO automation_schedules(id,revision,name,definition_id,definition_revision,enabled,schedule_json,next_due_at,last_error_code,created_at,updated_at) VALUES(?1,1,?2,?3,1,1,?4,?5,NULL,?6,?6)",params![schedule_id.to_string(),name,definition_id.to_string(),serde_json::to_string(schedule)?,next_due,now])?;
+        transaction.execute("INSERT INTO automation_schedules(id,revision,name,definition_id,definition_revision,enabled,schedule_json,next_due_at,last_error_code,approved_udids_json,created_at,updated_at) VALUES(?1,1,?2,?3,1,?4,?5,?6,NULL,?7,?8,?8)",params![schedule_id.to_string(),name,definition_id.to_string(),i64::from(enabled),serde_json::to_string(schedule)?,next_due,serde_json::to_string(approved_udids)?,now])?;
         let result = query_schedule(&transaction, schedule_id)?.context("lịch vừa lưu bị thiếu")?;
         transaction.commit()?;
         Ok(result)
@@ -263,6 +270,7 @@ impl Database {
         definition_revision: u64,
         enabled: bool,
         schedule: &AutomationScheduleV1,
+        approved_udids: &[String],
     ) -> anyhow::Result<AutomationSchedule> {
         let name = name.trim();
         anyhow::ensure!(
@@ -270,9 +278,12 @@ impl Database {
             "automation schedule name must not be empty"
         );
         schedule.validate()?;
+        validate_approved_udids(approved_udids)?;
         validate_schedule_profile(self, definition_id, definition_revision)?;
         let schedule_json =
             serde_json::to_string(schedule).context("serialize automation schedule")?;
+        let approved_json =
+            serde_json::to_string(approved_udids).context("serialize approved devices")?;
         let id = Uuid::new_v4();
         let now = timestamp();
         let next_due_at = enabled
@@ -281,8 +292,8 @@ impl Database {
         self.conn()?.execute(
             "INSERT INTO automation_schedules(
                 id,revision,name,definition_id,definition_revision,enabled,
-                schedule_json,next_due_at,last_error_code,created_at,updated_at
-             ) VALUES(?1,1,?2,?3,?4,?5,?6,?7,NULL,?8,?8)",
+                schedule_json,next_due_at,last_error_code,approved_udids_json,created_at,updated_at
+             ) VALUES(?1,1,?2,?3,?4,?5,?6,?7,NULL,?8,?9,?9)",
             params![
                 id.to_string(),
                 name,
@@ -291,6 +302,7 @@ impl Database {
                 i64::from(enabled),
                 schedule_json,
                 next_due_at,
+                approved_json,
                 now,
             ],
         )?;
@@ -304,6 +316,7 @@ impl Database {
             schedule: serde_json::to_value(schedule).context("serialize automation schedule")?,
             next_due_at,
             last_error_code: None,
+            approved_udids: Some(approved_udids.to_vec()),
             created_at: now.clone(),
             updated_at: now,
         })
@@ -319,6 +332,7 @@ impl Database {
         definition_revision: u64,
         enabled: bool,
         schedule: &AutomationScheduleV1,
+        approved_udids: Option<&[String]>,
     ) -> anyhow::Result<AutomationSchedule> {
         let name = name.trim();
         anyhow::ensure!(
@@ -326,9 +340,17 @@ impl Database {
             "automation schedule name must not be empty"
         );
         schedule.validate()?;
+        if let Some(approved_udids) = approved_udids {
+            validate_approved_udids(approved_udids)?;
+        }
         validate_schedule_profile(self, definition_id, definition_revision)?;
         let schedule_json =
             serde_json::to_string(schedule).context("serialize automation schedule")?;
+        // `None` keeps the stored approval: renaming or pausing a schedule approves nothing.
+        let approved_json = approved_udids
+            .map(serde_json::to_string)
+            .transpose()
+            .context("serialize approved devices")?;
         let mut connection = self.conn()?;
         let transaction = connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
         let actual_sql: Option<i64> = transaction
@@ -359,7 +381,8 @@ impl Database {
         let changed = transaction.execute(
             "UPDATE automation_schedules
              SET revision=?2,name=?3,definition_id=?4,definition_revision=?5,
-                 enabled=?6,schedule_json=?7,next_due_at=?8,last_error_code=NULL,updated_at=?9
+                 enabled=?6,schedule_json=?7,next_due_at=?8,last_error_code=NULL,updated_at=?9,
+                 approved_udids_json=COALESCE(?11,approved_udids_json)
              WHERE id=?1 AND revision=?10",
             params![
                 schedule_id.to_string(),
@@ -372,6 +395,7 @@ impl Database {
                 next_due_at,
                 updated_at,
                 revision_to_sql(expected_revision)?,
+                approved_json,
             ],
         )?;
         if changed != 1 {
@@ -403,7 +427,8 @@ impl Database {
         let connection = self.conn()?;
         let mut statement = connection.prepare(
             "SELECT id,revision,name,definition_id,definition_revision,enabled,
-                    schedule_json,next_due_at,last_error_code,created_at,updated_at
+                    schedule_json,next_due_at,last_error_code,created_at,updated_at,
+                    approved_udids_json
              FROM automation_schedules ORDER BY updated_at DESC,id ASC",
         )?;
         let rows = statement.query_map([], schedule_from_row)?;
@@ -502,10 +527,17 @@ impl Database {
         let (kind, archived) = profile_row
             .context("scheduled automation profile revision does not exist during claim")?;
         let kind = AutomationKind::from_str(&kind)?;
-        let (target, error_code) = if archived {
-            (None, Some("profile_archived"))
-        } else {
-            (target, error_code)
+        let (target, error_code) = match (archived, target, &schedule.approved_udids) {
+            (true, _, _) => (None, Some("profile_archived")),
+            (false, Some(_), None) => (None, Some(SCHEDULE_SCOPE_NOT_APPROVED)),
+            // Checked inside the claim, against the row it advances: a target that reaches an
+            // unapproved phone or lost an approved one never becomes a queued child.
+            (false, Some(resolved), Some(approved))
+                if !approved_scope_difference(approved, resolved).is_empty() =>
+            {
+                (None, Some(SCHEDULE_SCOPE_CHANGED))
+            }
+            (false, target, _) => (target, error_code),
         };
         let occurrence_id = Uuid::new_v4();
         let child_campaign_id = Uuid::new_v4();
@@ -749,7 +781,8 @@ fn query_schedule(
     connection
         .query_row(
             "SELECT id,revision,name,definition_id,definition_revision,enabled,
-                    schedule_json,next_due_at,last_error_code,created_at,updated_at
+                    schedule_json,next_due_at,last_error_code,created_at,updated_at,
+                    approved_udids_json
              FROM automation_schedules WHERE id=?1",
             [schedule_id.to_string()],
             schedule_from_row,
@@ -879,6 +912,7 @@ struct ScheduleRow {
     last_error_code: Option<String>,
     created_at: String,
     updated_at: String,
+    approved_udids_json: Option<String>,
 }
 
 fn schedule_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<ScheduleRow> {
@@ -894,6 +928,7 @@ fn schedule_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<ScheduleRow> {
         last_error_code: row.get(8)?,
         created_at: row.get(9)?,
         updated_at: row.get(10)?,
+        approved_udids_json: row.get(11)?,
     })
 }
 
@@ -915,6 +950,10 @@ impl ScheduleRow {
             schedule,
             next_due_at: self.next_due_at,
             last_error_code: self.last_error_code,
+            approved_udids: self
+                .approved_udids_json
+                .map(|raw| serde_json::from_str(&raw).context("parse approved schedule devices"))
+                .transpose()?,
             created_at: self.created_at,
             updated_at: self.updated_at,
         })
@@ -1491,6 +1530,7 @@ mod tests {
                 1,
                 true,
                 &interval_schedule(60),
+                &["phone-1".to_owned()],
             )
             .expect("create schedule");
 
@@ -1520,6 +1560,7 @@ mod tests {
                 2,
                 true,
                 &interval_schedule(60),
+                None,
             )
             .expect("explicitly apply profile revision");
         assert_eq!(updated.definition_revision, 2);
@@ -1538,6 +1579,7 @@ mod tests {
                 1,
                 false,
                 &interval_schedule(120),
+                None,
             )
             .expect_err("stale schedule update");
         assert_eq!(
@@ -1570,6 +1612,7 @@ mod tests {
                 2,
                 true,
                 &interval_schedule(60),
+                &["phone-1".to_owned()],
             )
             .expect_err("exact revision required");
         assert!(missing_revision
@@ -1612,6 +1655,7 @@ mod tests {
                     1,
                     false,
                     &interval_schedule(minutes),
+                    &["phone-1".to_owned()],
                 )
                 .expect("valid boundary interval");
         }
@@ -1637,6 +1681,7 @@ mod tests {
                 1,
                 true,
                 &interval_schedule(60),
+                &["phone-1".to_owned()],
             )
             .expect("create schedule");
         let scheduled_for = schedule.next_due_at.clone().expect("enabled due time");

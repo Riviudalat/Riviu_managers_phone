@@ -128,6 +128,7 @@ impl Fixture {
                     kind: AutomationScheduleKind::Interval,
                     every_minutes: 15,
                 },
+                &["phone-1".to_owned()],
             )
             .expect("create schedule");
         let due = schedule.next_due_at.expect("enabled schedule is armed");

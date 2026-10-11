@@ -84,6 +84,7 @@ pub fn app_workflow_schedule(
     target: riviu_core::TargetRef,
     name: String,
     every_minutes: u32,
+    approved_udids: Vec<String>,
 ) -> Result<riviu_core::AutomationSchedule, CommandError> {
     let _admission = state.ensure_accepting_work()?;
     let doc = state
@@ -110,7 +111,15 @@ pub fn app_workflow_schedule(
     .map_err(|error| CommandError::from_service(error.into()))?;
     state
         .db
-        .create_automation_schedule_from_settings(&name, doc.kind, &target, &config, &schedule)
+        .create_automation_schedule_from_settings(
+            &name,
+            doc.kind,
+            &target,
+            &config,
+            &schedule,
+            true,
+            &approved_udids,
+        )
         .map_err(CommandError::from_service)
 }
 

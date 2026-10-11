@@ -2404,6 +2404,7 @@ mod interaction_tests {
                     kind: crate::AutomationScheduleKind::Interval,
                     every_minutes: 60,
                 },
+                &["actor-a".to_owned()],
             )
             .expect("create schedule");
         let due = schedule.next_due_at.clone().expect("due");

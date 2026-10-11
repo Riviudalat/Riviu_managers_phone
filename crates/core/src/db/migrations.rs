@@ -335,7 +335,38 @@ const MIGRATIONS: &[Migration] = &[
         apply: apply_migration_50,
         rebuilds_tables: false,
     },
+    Migration {
+        version: 51,
+        name: "automation-schedule-approved-devices",
+        apply: apply_migration_51,
+        rebuilds_tables: false,
+    },
 ];
+
+/// The device list the operator approved when a schedule was saved. A due run whose target
+/// would reach a phone outside it, or whose group lost an approved phone, is refused until
+/// the operator approves again. An explicit target was already a list the operator chose,
+/// so it carries over; a group or "all" schedule stays NULL and waits for that approval.
+fn apply_migration_51(tx: &Transaction<'_>) -> anyhow::Result<()> {
+    tx.execute_batch(
+        r#"
+ALTER TABLE automation_schedules ADD COLUMN approved_udids_json TEXT
+  CHECK (approved_udids_json IS NULL OR json_type(approved_udids_json)='array');
+
+UPDATE automation_schedules
+SET approved_udids_json=(
+  SELECT json_extract(r.target_json,'$.udids')
+  FROM automation_definition_revisions r
+  WHERE r.definition_id=automation_schedules.definition_id
+    AND r.revision=automation_schedules.definition_revision
+    AND json_extract(r.target_json,'$.type')='explicit'
+    AND json_type(r.target_json,'$.udids')='array'
+    AND json_array_length(r.target_json,'$.udids')>0
+);
+"#,
+    )?;
+    Ok(())
+}
 
 /// The non-secret half of a stored TikTok login. The identifier and the secret live only
 /// in the OS credential store under `tiktok-login:<handle>`; this table records that an
