@@ -88,8 +88,9 @@ giữ lệnh toàn fleet (Mở toàn bộ và Công cụ khi chưa chọn máy, 
 - Thứ tự thẻ và dòng cố định theo số máy trong nhóm; trạng thái đổi không bao giờ sắp xếp lại.
   Trong lúc nút chuột đang nhấn trên lưới hoặc bảng, tập máy hiện, thứ tự và hai banner phía trên
   lưới giữ nguyên dù nhấn lâu bao nhiêu; chỉ chính con trỏ kết thúc: thả đúng con trỏ đó (áp dụng
-  sau cú click của lần thả), hủy, cửa sổ mất focus giữa thao tác, hoặc một sự kiện con trỏ sau đó
-  chứng minh không còn nút nào nhấn (thả ngoài cửa sổ). Không có hẹn giờ nào tự mở khóa. Chữ
+  sau cú click của lần thả), hủy, cửa sổ mất focus giữa thao tác, hoặc một sự kiện sau đó của
+  chính con trỏ đó chứng minh nút đã nhả (thả ngoài cửa sổ); con trỏ khác (bút, chuột thứ hai)
+  không mở khóa. Không có hẹn giờ nào tự mở khóa. Chữ
   trạng thái trong thẻ vẫn cập nhật vì dải thông tin cao cố định.
 - Mọi bộ lọc người vận hành đặt (nhóm, trạng thái, tìm, kết nối) hiện thành một dòng
   **Đang lọc: …** kèm "đang thấy V/T máy" và nút **Bỏ lọc**; dòng này chỉ xuất hiện hay mất

@@ -281,10 +281,12 @@ export function usePointerHold<T>(live: T): {
     const cancelled = (event: PointerEvent) => {
       if (event.pointerId === pointerId) end();
     };
-    // A release outside the window that was never delivered: a later pointer event with no
-    // button down proves the press is over. One with the button still down keeps the hold.
+    // A release outside the window that was never delivered: a later event from the same
+    // pointer with no button down proves the press is over. `buttons` describes only the
+    // pointer that sent the event, so a hovering pen or second mouse proves nothing about
+    // this one, and the same pointer with its button still down keeps the hold.
     const proved = (event: PointerEvent) => {
-      if (event.buttons === 0) end();
+      if (event.pointerId === pointerId && event.buttons === 0) end();
     };
     window.addEventListener("pointerup", released, true);
     window.addEventListener("pointercancel", cancelled, true);

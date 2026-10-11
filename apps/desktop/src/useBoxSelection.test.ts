@@ -222,6 +222,14 @@ describe("usePointerHold", () => {
       window.dispatchEvent(pointer("pointermove", 1, 1));
     });
     expect(result.current.shown).toBe(1);
+    // Review R2-F3: another pointer (a hovering pen, a second mouse) with no button down says
+    // nothing about the held one; its moves, hovers and cancels leave the snapshot alone.
+    act(() => {
+      window.dispatchEvent(pointer("pointermove", 77, 0));
+      window.dispatchEvent(pointer("pointerover", 77, 0));
+      window.dispatchEvent(pointer("pointercancel", 77, 0));
+    });
+    expect(result.current).toMatchObject({ shown: 1, held: true });
     act(() => {
       window.dispatchEvent(pointer("pointerover", 1, 0));
     });
