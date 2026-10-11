@@ -7,21 +7,14 @@ import { MENU } from "./navigationMenu";
 interface Props {
   page: PageId;
   selectedCount: number;
-  total: number;
-  /** Proved-ready phones; `null` when readiness is not known on this page. */
-  readyCount: number | null;
   groupMode: boolean;
   forceCompact?: boolean;
   onPage: (page: PageId) => void;
 }
 
-const unknownReadyTitle = "Sẵn sàng chỉ được xác nhận trong Control Center; trang này chưa đọc trạng thái điều khiển.";
-
 export function Sidebar({
   page,
   selectedCount,
-  total,
-  readyCount,
   groupMode,
   forceCompact = false,
   onPage,
@@ -94,14 +87,10 @@ export function Sidebar({
 
       </nav>
 
+      {/* Fleet counts live once, in the header's counters; the footer keeps only this window's
+          own state (grid selection, Sync). */}
       <footer className="aside-stats" aria-label="Trạng thái hệ thống">
-        {compactRail && <strong className="aside-compact-status" title={readyCount === null ? unknownReadyTitle : `${readyCount}/${total} máy sẵn sàng`}>{readyCount === null ? "?" : readyCount}/{total}</strong>}
-        <h4>Kết nối</h4>
-        <div className="aside-stat-row">
-          <span>Sẵn sàng</span>
-          <span />
-          <strong title={readyCount === null ? unknownReadyTitle : undefined}>{readyCount === null ? "Chưa rõ" : `${readyCount}/${total}`}</strong>
-        </div>
+        {compactRail && <strong className="aside-compact-status" title={`Đồng bộ: ${groupMode ? "Bật" : "Tắt"}`}>Đồng bộ {groupMode ? "bật" : "tắt"}</strong>}
         {page === "control" && <div className="aside-stat-row">
           <span>Đã chọn trong lưới</span>
           <span />

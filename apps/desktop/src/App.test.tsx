@@ -373,7 +373,7 @@ describe("device group scope", () => {
     await waitFor(() => expect(screen.getByText("Redmi")).toBeInTheDocument());
     await userEvent.click(screen.getByTitle("Danh sách"));
 
-    const row = screen.getByRole("row", { name: /Máy 1, Redmi, Đã kết nối/ });
+    const row = screen.getByRole("row", { name: /Máy 1, Redmi, Chưa rõ: chưa đọc điều khiển/ });
     row.focus();
     await userEvent.keyboard("{Enter}");
     expect(screen.getByRole("checkbox", { name: "Chọn Máy 1" })).toBeChecked();
@@ -429,8 +429,12 @@ describe("device operational identity", () => {
     }] : []);
     render(<App />);
     const tile = await screen.findByTestId("device-tile");
-    expect(await within(tile).findByText("Đã kết nối")).toBeVisible();
-    expect(within(tile).getByText("Đã kết nối")).toHaveAttribute("title", "Điều khiển được kiểm tra khi mở máy hoặc chạy tác vụ; hiện không có kiểm tra đang chạy.");
+    // A preflight without the helper is "Chưa kiểm"; no cached status at all is "Chưa rõ".
+    const [text, reason] = preflight
+      ? ["Chưa kiểm", "Điều khiển chưa được chứng minh: được kiểm khi mở máy hoặc chạy tác vụ; hiện không có kiểm tra đang chạy."]
+      : ["Chưa rõ: chưa đọc điều khiển", "Chưa đọc được bằng chứng điều khiển của máy này (chỉ đọc trong Trung tâm điều khiển), nên không coi là Sẵn sàng."];
+    expect(await within(tile).findByText(text)).toBeVisible();
+    expect(within(tile).getByText(text).closest(".device-status")).toHaveAttribute("title", `${text}\n${reason}`);
     expect(within(tile).queryByText("Sẵn sàng")).toBeNull();
     expect(api.deviceControlBegin).not.toHaveBeenCalled();
     expect(api.agentHelperMaintenancePrepare).not.toHaveBeenCalled();
@@ -457,7 +461,7 @@ describe("device operational identity", () => {
     });
     try {
       render(<App />);
-      const tile = await screen.findByRole("row", { name: /Redmi, Cần khôi phục helper/ });
+      const tile = await screen.findByRole("row", { name: /Redmi, Cần xử lý: Cần khôi phục helper/ });
       expect(within(tile).queryByText("Sẵn sàng")).toBeNull();
       await userEvent.click(within(tile).getByRole("button", { name: "Khôi phục helper" }));
       const confirm = await screen.findByRole("alertdialog");
@@ -469,7 +473,7 @@ describe("device operational identity", () => {
       await waitFor(() => expect(api.agentHelperMaintenanceExecute).toHaveBeenCalledExactlyOnceWith(plan, true, true));
       expect(api.deviceControlBegin).not.toHaveBeenCalled();
       await userEvent.click(screen.getByTitle("Danh sách"));
-      const row = await screen.findByRole("row", { name: /Redmi, Cần khôi phục helper/ });
+      const row = await screen.findByRole("row", { name: /Redmi, Cần xử lý: Cần khôi phục helper/ });
       expect(within(row).getByRole("button", { name: "Khôi phục helper" })).toBeVisible();
     } finally {
       vi.mocked(api.agentListStatuses).mockResolvedValue([]);
@@ -495,7 +499,7 @@ describe("device operational identity", () => {
     try {
       render(<App />);
       const tile = (await screen.findAllByTestId("device-tile")).find(item => within(item).queryByText("Redmi"));
-      expect(await within(tile!).findByText("Cần khôi phục helper")).toBeVisible();
+      expect(await within(tile!).findByText("Cần xử lý: Cần khôi phục helper")).toBeVisible();
       const maintenance = screen.getByText("Bảo trì").closest("summary")!;
       await userEvent.click(maintenance);
       await userEvent.click(within(maintenance.closest("details")!).getByRole("button", { name: "Khôi phục helper" }));
@@ -516,7 +520,7 @@ describe("device operational identity", () => {
     try {
       render(<App />);
       const tile = await screen.findByTestId("device-tile");
-      expect(await within(tile).findByText("Nuôi TikTok")).toBeVisible();
+      expect(await within(tile).findByText("Đang chạy: Nuôi TikTok")).toBeVisible();
       expect(within(tile).getByText("Đang lướt video")).toBeVisible();
       const poll = async () => { await act(async () => {
         for (const [callback, delay] of intervals.mock.calls) {
@@ -531,12 +535,12 @@ describe("device operational identity", () => {
       expect(screen.getByRole("cell", { name: /Nuôi TikTok.*Đang chuyển video/ })).toBeVisible();
       vi.mocked(api.listDeviceWorkStates).mockResolvedValue([{ udid: androidPhone.udid, currentOwner: "manualControl" }]);
       await poll();
-      expect(screen.getByText("Bận · Điều khiển trực tiếp")).toBeVisible();
+      expect(screen.getByText("Đang chạy: Điều khiển trực tiếp")).toBeVisible();
       expect(screen.queryByText("Đang chuyển video")).toBeNull();
       vi.mocked(api.listDeviceWorkStates).mockResolvedValue([{ udid: androidPhone.udid, currentOwner: null }]);
       await poll();
-      expect(screen.getByRole("cell", { name: "Đã kết nối" })).toBeVisible();
-      expect(screen.queryByText("Bận · Điều khiển trực tiếp")).toBeNull();
+      expect(screen.getByRole("cell", { name: "Chưa rõ: chưa đọc điều khiển" })).toBeVisible();
+      expect(screen.queryByText("Đang chạy: Điều khiển trực tiếp")).toBeNull();
       expect(api.deviceControlBegin).not.toHaveBeenCalled();
     } finally {
       intervals.mockRestore();
@@ -555,7 +559,7 @@ describe("device operational identity", () => {
     await waitFor(() => expect(screen.getByText("Redmi")).toBeInTheDocument());
     await userEvent.click(screen.getByTitle("Danh sách"));
 
-    expect(screen.getByText("Bận · Tương tác")).toBeVisible();
+    expect(screen.getByText("Đang chạy: Tương tác")).toBeVisible();
     expect(screen.queryByText(androidPhone.model)).toBeNull();
     expect(screen.queryByText(androidPhone.udid)).toBeNull();
 
@@ -563,7 +567,9 @@ describe("device operational identity", () => {
     const details = screen.getByRole("dialog", { name: "Chi tiết Máy 1" });
     expect(within(details).getByText(androidPhone.model)).toBeVisible();
     expect(within(details).getByText(androidPhone.udid)).toBeVisible();
-    expect(within(details).getByText("Tương tác")).toBeVisible();
+    // The condensed line and the Công việc axis both name the job.
+    for (const owner of within(details).getAllByText("Đang chạy: Tương tác")) expect(owner).toBeVisible();
+    expect(within(details).getAllByText("Đang chạy: Tương tác")).toHaveLength(2);
     expect(within(details).getByText("ready")).toBeVisible();
   });
 
@@ -574,7 +580,7 @@ describe("device operational identity", () => {
 
     render(<App />);
 
-    expect(await screen.findByText("Chưa đọc được tác vụ")).toBeVisible();
+    expect(await screen.findByText("Chưa rõ: chưa đọc được tác vụ")).toBeVisible();
     const tile = screen.getByTestId("device-tile");
     expect(within(tile).queryByText("Sẵn sàng")).toBeNull();
     const alert = screen.getByRole("alert");
@@ -584,9 +590,9 @@ describe("device operational identity", () => {
     vi.mocked(api.listDeviceWorkStates).mockResolvedValue([]);
     await userEvent.click(within(alert).getByRole("button", { name: "Thử lại" }));
 
-    expect(await within(tile).findByText("Đã kết nối")).toBeVisible();
+    expect(await within(tile).findByText("Chưa rõ: chưa đọc điều khiển")).toBeVisible();
     await waitFor(() =>
-      expect(screen.queryByText("Chưa đọc được tác vụ")).not.toBeInTheDocument(),
+      expect(screen.queryByText("Chưa rõ: chưa đọc được tác vụ")).not.toBeInTheDocument(),
     );
   });
 
@@ -615,7 +621,7 @@ describe("device operational identity", () => {
 
     render(<App />);
     await waitFor(() => expect(screen.getAllByTestId("device-tile")).toHaveLength(3));
-    await waitFor(() => expect(screen.getByText("Bận · Nuôi TikTok")).toBeVisible());
+    await waitFor(() => expect(screen.getByText("Đang chạy: Nuôi TikTok")).toBeVisible());
 
     await userEvent.type(screen.getByRole("searchbox", { name: "Tìm thiết bị" }), "ke cuoi");
     expect(screen.getAllByTestId("device-tile")).toHaveLength(1);
@@ -635,7 +641,7 @@ describe("device operational identity", () => {
     const [visibleTile] = screen.getAllByTestId("device-tile");
     expect(screen.getAllByTestId("device-tile")).toHaveLength(1);
     expect(screen.getByText("Máy 2")).toBeVisible();
-    expect(within(visibleTile).getByText("Cần xem")).toBeVisible();
+    expect(within(visibleTile).getByText("Cần xử lý: Máy báo lỗi")).toBeVisible();
   });
 });
 

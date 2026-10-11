@@ -4,10 +4,11 @@ import { deviceActionCapabilities, deviceAppCandidates, deviceAppSelect } from "
 import { describeError } from "../describeError";
 import type { CapabilityEvidenceState, DeviceActionCapabilities, DeviceAppChoices } from "../generated-ipc";
 import { useModalFocus } from "./useModalFocus";
-import { StatusChip } from "./WorkspacePrimitives";
 import { TikTokLoginSection } from "./TikTokLoginSection";
+import { DeviceStatusAxes, DeviceStatusLegend, DeviceStatusLine } from "./DeviceStatusLine";
 
-import { deviceWorkOwnerLabel } from "../deviceWork";
+import { deviceOperationalView } from "../deviceWork";
+import type { DeviceOperationalView } from "../deviceWork";
 import { deviceOsLabel } from "../types";
 import type { DeviceInfo, DeviceWorkOwner } from "../types";
 
@@ -16,12 +17,15 @@ export function DeviceDetailsDrawer({
   machineLabel,
   currentOwner,
   ownerReadFailed,
+  operational,
   onClose,
 }: {
   device: DeviceInfo;
   machineLabel: string;
   currentOwner: DeviceWorkOwner | null;
   ownerReadFailed: boolean;
+  /** The wall's own status for this phone; derived from the owner alone when omitted. */
+  operational?: DeviceOperationalView;
   onClose: () => void;
 }) {
   const dialogRef = useModalFocus<HTMLElement>(onClose);
@@ -61,11 +65,7 @@ export function DeviceDetailsDrawer({
     ? capabilities.actions.find((action) => action.state === "buildNotAllowed")?.reason
     : undefined;
 
-  const ownerLabel = ownerReadFailed
-    ? "Chưa đọc được"
-    : currentOwner
-      ? deviceWorkOwnerLabel(currentOwner)
-      : "Đang rảnh";
+  const status = operational ?? deviceOperationalView(device, currentOwner, ownerReadFailed ? "error" : "known");
 
   return (
     <div className="device-detail-backdrop" onClick={onClose}>
@@ -96,7 +96,7 @@ export function DeviceDetailsDrawer({
         </header>
 
         <dl className="device-detail-list">
-          <div><dt>Tác vụ hiện tại</dt><dd><StatusChip tone={ownerReadFailed ? "warning" : currentOwner ? "info" : "success"}>{ownerLabel}</StatusChip></dd></div>
+          <div><dt>Trạng thái</dt><dd><DeviceStatusLine view={status} /></dd></div>
           <div><dt>Dòng máy</dt><dd>{device.model}</dd></div>
           <div><dt>Hệ điều hành</dt><dd>{deviceOsLabel(device)}</dd></div>
           <div><dt>Serial / UDID</dt><dd className="mono">{device.udid}</dd></div>
@@ -105,6 +105,11 @@ export function DeviceDetailsDrawer({
           <div><dt>Luồng hình</dt><dd>{device.tileStreamState ?? "Chưa có dữ liệu"}</dd></div>
         </dl>
 
+        <section className="device-detail-evidence" aria-label="Trạng thái theo ba trục">
+          <h3>Trạng thái theo ba trục</h3>
+          <DeviceStatusAxes view={status} />
+          <DeviceStatusLegend />
+        </section>
         <section className="device-detail-evidence" aria-label="Lỗi và bằng chứng gần nhất">
           <h3>Lỗi và bằng chứng gần nhất</h3>
           {device.lastError ? <pre>{device.lastError}</pre> : <p>Chưa ghi nhận lỗi.</p>}

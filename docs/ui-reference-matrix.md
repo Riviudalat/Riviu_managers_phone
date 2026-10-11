@@ -37,8 +37,9 @@ riêng với thư viện hành động bên trái, canvas chính, cấu hình v�
 Tên, model, tài khoản và trạng thái máy nằm trên nền sáng riêng phía trên preview;
 không che hình điện thoại. Preview trong lưới giữ tỉ lệ 1:2; thẻ có thêm phần thông tin
 cao 88 px. Dấu chọn trên thẻ và bộ đếm dưới thanh lọc dùng cùng selection hiện có.
-Dải thông tin gồm số máy/tên, @nick · model, chip trạng thái theo `deviceWork` và bước đang
-chạy hoặc lý do cần xử lý; chữ dài bị cắt nhưng vẫn đọc đủ qua tên truy cập và tooltip.
+Dải thông tin gồm số máy/tên, @nick · model, dòng trạng thái gộp (`DeviceStatusLine`: biểu
+tượng + "Nhãn: việc/lý do" + màu trạng thái) và bước đang chạy hoặc lý do cần xử lý; chữ dài
+bị cắt nhưng vẫn đọc đủ qua tên truy cập và tooltip.
 Máy cần xử lý có viền hổ phách; máy đã chọn có viền cam và dấu tích. Rail **Hiển thị** giữ thanh
 trượt và Ctrl + lăn chuột, thêm ba cỡ: **Tổng quan** (ô tối thiểu 100 px), **Vừa** (140 px),
 **Lớn** (190 px). Kiểu dải theo dải độ rộng hiện tại, không theo nút đã bấm.
@@ -49,8 +50,8 @@ với chữ ≥ 12 px; nút trong dải vẫn ≥ 12 px. Chip trạng thái trê
 Sẵn sàng xanh lá, Đã kết nối (chưa kiểm điều khiển) xanh xám, Bận xanh dương, Cần xem hổ
 phách, Ngoại tuyến xám.
 Chế độ **Danh sách** của Thiết bị là bảng `<table>` gọn: mỗi máy một dòng 34 px, chữ 13 px,
-đủ ≥ 15 dòng ở 1366×768. Cột: Máy (số · tên), Tài khoản (@nick), Việc đang chạy (chip
-`deviceWork` + bước), Cần xử lý (chỉ máy cần xử lý; nút Khôi phục helper khi có), Bằng chứng
+đủ ≥ 15 dòng ở 1366×768. Cột: Máy (số · tên), Tài khoản (@nick), Trạng thái (dòng
+trạng thái gộp + bước), Cần xử lý (chỉ máy cần xử lý; nút Khôi phục helper khi có), Bằng chứng
 gần nhất, Kết nối (ẩn dưới 1100 px). Ô dài bị cắt một dòng, còn đủ qua tooltip và tên truy cập
 của dòng. Nút **Chọn cột** dùng chung với `ResponsiveTable`, nhớ trên máy tính này; cột Máy luôn hiện.
 Bằng chứng gần nhất là mốc mới nhất backend ghi cho máy (cập nhật lượt chạy hoặc mẫu đo tải),
@@ -223,7 +224,7 @@ Lịch đăng bài là lịch một lần theo từng bài, mỗi dòng gắn m�
   **Ngoại lệ có tên — focus guard của Base UI:** span `data-base-ui-focus-guard` (aria-hidden,
   tabindex 0) chỉ chuyển focus; kiểm axe menu loại trừ đúng selector này.
 - **Bảng lệnh** (Ctrl+K, ⌘K trên macOS, hoặc nút **Tìm máy, trang…** trên thanh hệ thống; dưới
-  1600 px, và dưới 1760 px khi cột theo dõi đang ghim, chỉ còn icon có tooltip ghi phím tắt) dùng primitive `components/ui/CommandPalette.tsx`: Base UI Dialog + Autocomplete inline, CSS
+  1600 px, và ở mọi độ rộng khi cột theo dõi đang ghim, chỉ còn icon có tooltip ghi phím tắt) dùng primitive `components/ui/CommandPalette.tsx`: Base UI Dialog + Autocomplete inline, CSS
   thuần, cùng alias với menu. Lọc không phân biệt dấu ("may 3" khớp "Máy 3"). Giai đoạn 1 chỉ điều
   hướng và chọn: đi tới trang (các trang của sidebar và Điều phối), đi tới **Máy N** (về Thiết bị,
   chỉ chọn máy đó, focus thẻ/dòng của nó; nếu bộ lọc đang ẩn máy thì bỏ lọc), và **Chọn N máy cần
@@ -255,30 +256,44 @@ Lịch đăng bài là lịch một lần theo từng bài, mỗi dòng gắn m�
 
 ## Thuật ngữ trạng thái máy và phạm vi
 
-Bốn trạng thái khác nhau; nhãn và số đếm đứng cạnh nhãn phải dùng cùng một điều kiện.
+Một bộ từ cho trạng thái máy (`deviceWork.ts`), ba trục; mỗi trục có **Chưa rõ** khi thiếu
+bằng chứng. Thiếu dữ liệu không bao giờ tự thành Sẵn sàng hay Mất kết nối.
 
-| Từ trên UI | Nghĩa | Điều kiện |
+| Trục | Giá trị | Điều kiện |
 |---|---|---|
-| **Đã kết nối** | Máy có trong danh sách và trả lời, nhưng chưa chứng minh điều khiển được | `deviceOperationalView(...).kind === "connected"` |
-| **Bận** (hoặc nhãn hoạt động như "Đang nuôi TikTok") | Một tác vụ đang giữ máy | `kind === "busy"`: có chủ sở hữu hiện tại hoặc roster `busy` |
-| **Chọn được** (Nuôi, Tương tác) / **có thể gán** (Đăng bài) | Máy được phép đưa vào phạm vi, danh sách máy thực hiện hoặc phân công. Máy bận vẫn chọn được, vì tác vụ cũ dừng khi lượt mới bắt đầu. Đây không phải lời khẳng định đã sẵn sàng. | roster `ready`, `busy` hoặc `connected`; lịch Đăng bài còn đòi roster `ready` và không vướng bài đang chờ |
-| **Sẵn sàng** | Đã chứng minh điều khiển được: Android có helper, phiên và xác thực sẵn sàng; iOS ở trạng thái `ready` hoặc WDA sẵn sàng | chỉ `deviceOperationalView(...).kind === "ready"` |
+| **Kết nối** | Đã kết nối · Mất kết nối · Chưa rõ | Mất kết nối = roster `disconnected`; trạng thái roster chưa nhận diện = Chưa rõ |
+| **Điều khiển** | Sẵn sàng · Chưa kiểm · Không đạt (+ lý do) · Chưa rõ | Sẵn sàng chỉ khi có bằng chứng còn hiệu lực cho kết nối hiện tại: Android cần bản ghi agent `ready` + `authReady` + `sessionReady` + `helperReady` (bộ nhớ đệm, chỉ đọc trong Control Center, đọc lại khi dòng roster đổi); iOS roster `ready` hoặc WDA sẵn sàng. Agent `unknown`/`starting` hoặc thiếu helper = Chưa kiểm; agent lỗi hoặc cần khôi phục helper = Không đạt; chưa đọc được bản ghi = Chưa rõ |
+| **Công việc** | Rảnh · Đang chạy (+ việc) · Cần xử lý (+ lý do) · Chưa rõ | Đang chạy = có chủ sở hữu hiện tại hoặc roster `busy` (không nhận việc mới); Cần xử lý = điều khiển Không đạt, roster `error` hoặc máy quá tải; chưa đọc được chủ sở hữu = Chưa rõ |
 
-Không dùng "sẵn sàng" cho tập rộng hơn `kind === "ready"`. Thẻ chọn máy chỉ có trạng thái roster,
-nên roster `ready` hiện là **Đã chuẩn bị**, còn `connected` là **Chưa chuẩn bị**. Số **Sẵn sàng**
-ở header và sidebar đếm đúng điều kiện của thẻ máy. Khi chưa đọc được chủ sở hữu tác vụ hoặc
-bằng chứng helper Android (bộ nhớ đệm này chỉ được đọc trong Control Center), số đó hiện
-**Chưa rõ**, không hiện 0.
+**Chọn được** (Nuôi, Tương tác) / **có thể gán** (Đăng bài) là quy tắc riêng của từng workspace,
+không phải một giá trị trạng thái: máy được phép đưa vào phạm vi, danh sách máy thực hiện hoặc phân
+công khi roster `ready`, `busy` hoặc `connected`; lịch Đăng bài còn đòi roster `ready` và không
+vướng bài đang chờ. Máy bận vẫn chọn được, vì tác vụ cũ dừng khi lượt mới bắt đầu. Đây không phải
+lời khẳng định đã sẵn sàng.
 
-Thanh hệ thống luôn có bốn **bộ đếm fleet**: **Rảnh** (`kind` là `ready` hoặc `connected`), **Đang chạy**
-(`busy`), **Cần xử lý** (`warning`, gồm cả máy quá tải theo sức khỏe máy) và **Mất kết nối**
-(`offline`). Số 0 vẫn hiện; số chưa biết hiện **Chưa rõ** theo đúng quy tắc của số Sẵn sàng (Mất kết
-nối chỉ chưa rõ trước khi danh sách máy tải xong). Rảnh không có nghĩa là Sẵn sàng. Bấm một bộ đếm
-đặt đúng state lọc của select **Trạng thái thiết bị** trên lưới (select có thêm mục **Rảnh**), bấm lại
-thì bỏ lọc; từ trang khác thì chuyển về Control Center. Bộ đếm và bộ lọc dùng chung một state và
-cùng điều kiện của thẻ máy, không có bản sao thứ hai. Bộ đếm là dòng đọc trạng thái (chấm màu ·
-nhãn · số), không viền; bộ đếm đang lọc có nền xám và chữ đậm, không cam. Dưới 1600 px (dưới 1760 px
-khi cột theo dõi tác vụ đang ghim) bộ đếm thu về cỡ chú thích. Mở và đóng **Chọn thiết bị**
+Ô máy, dòng danh sách, thẻ chọn máy, chi tiết máy và Ctrl+K dùng một dòng gộp
+(`deviceOperationalView` → `DeviceStatusLine`): Mất kết nối → Đang chạy → Cần xử lý → Chưa rõ →
+Chưa kiểm → Sẵn sàng, kèm biểu tượng riêng cho từng trạng thái để đọc được khi không có màu.
+Màu: Sẵn sàng xanh lá, Chưa kiểm xanh xám, Đang chạy xanh dương, Cần xử lý hổ phách, Mất kết nối
+xám + icon rút cáp, Chưa rõ tím xám. Chi tiết máy hiện riêng ba trục và lời giải thích thường trực;
+trang Trợ giúp có cùng lời giải thích. Không dùng "sẵn sàng" cho tập rộng hơn dòng gộp Sẵn sàng.
+Thẻ chọn máy chỉ có dòng roster (không có chủ sở hữu, không có bằng chứng helper), nên máy Android
+rảnh hiện **Chưa rõ: đã chuẩn bị** (hoặc chưa chuẩn bị; tooltip nói rõ đã kết nối), không bao giờ Sẵn sàng; quy
+tắc chọn máy của từng workspace không đổi.
+
+Thanh hệ thống luôn có bộ đếm **Tổng · Sẵn sàng · Chưa kiểm · Đang chạy · Cần xử lý · Mất kết nối ·
+Chưa rõ**, mỗi số kèm mẫu số Tổng. Mỗi máy được đếm đúng một lần theo dòng gộp (các trục chồng
+nhau, nên bộ đếm ghi rõ điều này trong tooltip), nên các số cộng lại bằng Tổng. Một số hiện **?**
+khi máy Chưa rõ có thể thuộc nhóm đó (chưa đọc chủ sở hữu → Sẵn sàng/Chưa kiểm/Đang chạy/Cần xử lý;
+chưa đọc bản ghi điều khiển → Sẵn sàng/Chưa kiểm/Cần xử lý); trước khi danh sách máy tải xong mọi
+số đều **?**. Bấm một bộ đếm đặt đúng state lọc của select **Trạng thái thiết bị** trên lưới (cùng
+bảy giá trị), bấm lại hoặc bấm **Tổng** thì bỏ lọc; từ trang khác thì chuyển về Control Center.
+Khi đang lọc, cạnh select có nhãn **Đang lọc: …** và nút **Bỏ lọc**. Bộ đếm là dòng đọc trạng
+thái (icon trạng thái · nhãn · số), không viền; bộ đếm đang lọc có nền xám và chữ đậm, không cam.
+Bộ đếm và bộ lọc dùng chung một state và cùng điều kiện của thẻ máy, không có bản sao thứ hai;
+chân sidebar không còn khối "Kết nối · Sẵn sàng" trùng lặp (chỉ giữ Đã chọn trong lưới và Đồng bộ).
+
+Mở và đóng **Chọn thiết bị**
 mà không sửa thì giữ nguyên phạm vi Toàn bộ, Nhóm hoặc Máy cụ thể. Phạm vi chỉ thành Máy
 cụ thể khi người vận hành sửa trong drawer. Phạm vi rỗng không bao giờ thành Toàn bộ;
 nút chạy hiện lý do bị khóa.

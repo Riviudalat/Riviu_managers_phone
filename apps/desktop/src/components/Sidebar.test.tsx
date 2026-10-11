@@ -11,8 +11,6 @@ function renderSidebar() {
     <Sidebar
       page="control"
       selectedCount={2}
-      total={5}
-      readyCount={4}
       groupMode={false}
       onPage={onPage}
     />,
@@ -23,10 +21,10 @@ function renderSidebar() {
 describe("Sidebar information architecture", () => {
   beforeEach(() => localStorage.clear());
   it("does not present grid selection as the scope of an automation workspace", () => {
-    render(<Sidebar page="publish" selectedCount={21} total={21} readyCount={20}
+    render(<Sidebar page="publish" selectedCount={21}
       groupMode={false} onPage={vi.fn()} />);
     expect(screen.queryByText("Đã chọn trong lưới")).toBeNull();
-    expect(screen.getByText("20/21")).toBeVisible();
+    expect(screen.getByLabelText("Trạng thái hệ thống")).toHaveTextContent("Đồng bộ");
   });
   it("groups every workspace in the requested operator order", () => {
     renderSidebar();
@@ -58,7 +56,7 @@ describe("Sidebar information architecture", () => {
     expect(sidebar).toHaveAttribute("data-rail-collapsed", "true");
     expect(localStorage.getItem("riviu.sidebar.rail")).toBe("true");
     expect(screen.getByRole("button", { name: "My Apps" })).toBeVisible();
-    expect(screen.getByLabelText("Trạng thái hệ thống")).toHaveTextContent("4/5");
+    expect(screen.getByLabelText("Trạng thái hệ thống")).toHaveTextContent("Đồng bộ tắt");
     await user.click(screen.getByRole("button", { name: "My Apps" }));
     expect(onPage).toHaveBeenCalledWith("myApps");
     await user.click(screen.getByRole("button", { name: "Mở rộng thanh điều hướng" }));
@@ -80,13 +78,15 @@ describe("Sidebar information architecture", () => {
     const navigation = screen.getByRole("navigation", { name: "Điều hướng chính" });
     const status = screen.getByLabelText("Trạng thái hệ thống");
     expect(navigation).not.toContainElement(status);
-    expect(status).toHaveTextContent("4/5");
     expect(status).toHaveTextContent("Đã chọn trong lưới");
+    // The fleet's readiness is counted once, by the header counters; no second "Kết nối" block.
+    expect(status).not.toHaveTextContent("Kết nối");
+    expect(status).not.toHaveTextContent("Sẵn sàng");
   });
 
   it("marks a collapsed group containing the current page", async () => {
     localStorage.clear();
-    render(<Sidebar page="publish" selectedCount={0} total={5} readyCount={4}
+    render(<Sidebar page="publish" selectedCount={0}
       groupMode={false} onPage={vi.fn()} />);
     const automation = screen.getByRole("button", { name: "Automation" });
     await userEvent.setup().click(automation);

@@ -6,7 +6,7 @@ export interface PaletteDevice {
   udid: string;
   /** "Máy N · tên", the label every other surface uses for this phone. */
   label: string;
-  /** The tile's operational label: Sẵn sàng, Bận, Cần xem… */
+  /** The tile's status line: "Sẵn sàng", "Đang chạy: Nuôi TikTok", "Cần xử lý: …" */
   status: string;
   handle?: string;
 }

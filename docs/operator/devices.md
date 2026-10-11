@@ -92,7 +92,7 @@ thì hiện chủ giữ máy: Tác vụ tự động, Điều khiển trực ti�
 
 Riviu đo tải từng máy Android (CPU của surfaceflinger, RAM trống, swap) khi một việc
 Nuôi, Tương tác, Đăng bài hoặc Flow nhận máy, và khoảng mỗi phút trên máy đang chạy việc.
-Phép đo chỉ đọc, không chạm TikTok. Máy quá tải hiện **Cần xem** trên ô máy, kèm lý do
+Phép đo chỉ đọc, không chạm TikTok. Máy quá tải hiện **Cần xử lý** trên ô máy, kèm lý do
 bắt đầu bằng "máy quá tải". Mỗi bước dưới đây được ghi vào Nhật ký hoạt động.
 
 - Khi nhận việc, máy quá tải được **dọn nhẹ** trước: tắt app chạy nền, dừng các app nền
@@ -112,17 +112,42 @@ Trong menu chuột phải của ô máy, **ADB → Kiểm tra sức khỏe** đo
 **ADB → Dọn máy** chạy bước dọn nhẹ rồi đo lại. Dọn máy cần máy rảnh: máy đang chạy việc
 bị từ chối, không bị chiếm quyền. Khởi động lại bằng tay vẫn là lệnh riêng có hỏi xác nhận.
 
+### Đọc trạng thái máy
+
+Mỗi máy có ba trục, mỗi trục có **Chưa rõ** khi thiếu bằng chứng:
+
+| Trục | Giá trị | Nghĩa |
+|---|---|---|
+| **Kết nối** | Đã kết nối · Mất kết nối · Chưa rõ | Máy còn trả lời qua USB/Wi-Fi hay không. |
+| **Điều khiển** | Sẵn sàng · Chưa kiểm · Không đạt (kèm lý do) · Chưa rõ | **Sẵn sàng** chỉ khi có bằng chứng điều khiển còn hiệu lực cho kết nối hiện tại (Android: helper, phiên và xác thực; iPhone: WDA). **Chưa kiểm** là chưa có lần kiểm nào chứng minh, khác **Không đạt**. |
+| **Công việc** | Rảnh · Đang chạy (kèm việc) · Cần xử lý (kèm lý do) · Chưa rõ | Máy đang chạy không nhận việc mới. |
+
+Ô máy, dòng danh sách, thẻ chọn máy và chi tiết máy gộp ba trục thành **một dòng** có
+biểu tượng, chữ và lý do, theo thứ tự: Mất kết nối → Đang chạy → Cần xử lý → Chưa rõ →
+Chưa kiểm → Sẵn sàng. Thiếu dữ liệu luôn là Chưa rõ, không bao giờ tự thành Sẵn sàng hay
+Mất kết nối. **Chi tiết máy** hiện riêng từng trục kèm lời giải thích; trang **Trợ giúp**
+có cùng bảng giải thích.
+
+Bộ đếm trên header: **Tổng · Sẵn sàng · Chưa kiểm · Đang chạy · Cần xử lý · Mất kết nối ·
+Chưa rõ**, mỗi số kèm mẫu số. Mỗi máy được đếm một lần theo dòng gộp, nên các số cộng lại
+bằng Tổng. Một số hiện **?** khi các máy Chưa rõ có thể thuộc nhóm đó. Bấm một số để lọc
+lưới; lưới ghi **Đang lọc: …** kèm **Bỏ lọc**; bấm lại số đó hoặc **Tổng** cũng bỏ lọc.
+
+Thẻ chọn máy trong Nuôi, Tương tác và Đăng bài chỉ có dòng danh sách máy, không đọc bằng
+chứng helper, nên máy Android rảnh hiện **Chưa rõ: đã chuẩn bị** (hoặc
+**chưa chuẩn bị**); điều khiển được kiểm khi bắt đầu chạy.
+
 ### Riviu Helper trên Android
 
-**Đã kết nối** chỉ xác nhận máy có kết nối, không có kiểm tra điều khiển đang chạy.
-Rê vào trạng thái để xem giải thích: điều khiển được kiểm tra khi mở máy hoặc chạy tác vụ. Ảnh preview
-hoặc trạng thái USB không chứng minh helper đã hoạt động. Android chỉ hiện **Sẵn sàng**
-khi bản ghi phiên hiện tại xác nhận điều khiển và helper đã được kết nối. Mỗi chức năng
-vẫn kiểm tra điều kiện riêng trước khi chạy; giao diện chỉ đọc bản ghi đã có, không tự
-mở phiên kiểm tra trên toàn bộ máy lúc khởi động. Mất bản ghi hoặc lỗi đọc giữ trạng thái
-chưa kiểm tra, không suy thành sẵn sàng.
+Ảnh preview hoặc trạng thái USB không chứng minh helper đã hoạt động. Android chỉ hiện
+**Sẵn sàng** khi bản ghi phiên hiện tại xác nhận điều khiển và helper đã được kết nối;
+bản ghi chưa chứng minh thì là **Chưa kiểm**. Rê vào trạng thái để xem giải thích:
+điều khiển được kiểm tra khi mở máy hoặc chạy tác vụ. Mỗi chức năng vẫn kiểm tra điều
+kiện riêng trước khi chạy; giao diện chỉ đọc bản ghi đã có (chỉ trong Trung tâm điều
+khiển), không tự mở phiên kiểm tra trên toàn bộ máy lúc khởi động. Mất bản ghi hoặc lỗi
+đọc là **Chưa rõ**, không suy thành sẵn sàng.
 
-Khi hiện **Cần khôi phục helper**, rê vào trạng thái để đọc lý do hoặc mở màn hình
+Khi hiện **Cần xử lý: Cần khôi phục helper**, rê vào trạng thái để đọc lý do hoặc mở màn hình
 điều khiển để xem thông báo đầy đủ. Bấm **Khôi phục helper** ngay trên đúng ô máy,
 hàng thiết bị hoặc thông báo lỗi trong cửa sổ điều khiển. Lối vào này chỉ chuẩn bị
 kế hoạch cho máy bị lỗi, không dùng phạm vi nhiều máy đang chọn. Đọc phạm vi và
@@ -137,7 +162,7 @@ trên Android), không khôi phục helper. Kết quả đếm máy đã sửa v
 agent nhưng helper vẫn lỗi được nêu riêng kèm lời nhắc chọn **Khôi phục helper**.
 
 Nếu adb shell của máy chạy quyền root (uid 0), ví dụ box bật `adb root` khi khởi động,
-helper từ chối và ô máy hiện **Cần khôi phục helper** với hướng dẫn chạy
+helper từ chối và ô máy hiện **Cần xử lý: Cần khôi phục helper** với hướng dẫn chạy
 `adb -s <serial> unroot` hoặc tắt adb root khi khởi động. Máy đang ở người dùng Android
 khác người dùng chính cũng được báo riêng. Helper không có đường lùi chạy bằng root.
 
@@ -146,7 +171,7 @@ clipboard cần đối soát; chỉ còn bản ghi trong bộ nhớ không có n
 Nếu helper vẫn đang hoàn tất thao tác, ứng dụng báo chờ trên đúng máy. Lần bị chặn
 trước khi thực thi giữ nguyên kế hoạch để tiếp tục sau; kết quả chưa rõ sau thực thi
 chỉ được đối soát. Khôi phục thành công khóa các kết nối helper cũ, giữ bản ghi và
-trả máy về **Đã kết nối**; mở điều khiển hoặc chạy tác vụ để kiểm phiên mới.
+trả máy về **Chưa kiểm**; mở điều khiển hoặc chạy tác vụ để kiểm phiên mới.
 
 Khi phát hiện điện thoại Android đã cho phép gỡ lỗi USB, Riviu Manager tự kiểm tra
 **Riviu Helper**, cài nếu thiếu, cập nhật gói chưa phù hợp và xác minh runtime trước

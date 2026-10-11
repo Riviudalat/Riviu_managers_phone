@@ -3,6 +3,7 @@ import { describe, expect, it } from "vitest";
 import {
   deviceMatchesFleetFilter,
   deviceOperationalView,
+  deviceStatusText,
   deviceWorkOwnerLabel,
   helperRecoveryTargets,
 } from "./deviceWork";
@@ -32,38 +33,33 @@ describe("device work owner presentation", () => {
 });
 
 describe("device operational status", () => {
-  it("uses the current owner as Busy and names that owner separately", () => {
-    expect(deviceOperationalView(readyDevice, "interaction")).toEqual({
-      kind: "busy",
-      label: "Bận",
-      ownerLabel: "Tương tác",
-      tone: "warn",
-    });
+  it("uses the current owner as Đang chạy and names that owner as the job", () => {
+    const view = deviceOperationalView(readyDevice, "interaction");
+    expect(view).toMatchObject({ kind: "busy", label: "Đang chạy", detail: "Tương tác" });
+    expect(view.axes.work).toMatchObject({ state: "running", label: "Đang chạy", detail: "Tương tác" });
+    expect(deviceStatusText(view)).toBe("Đang chạy: Tương tác");
   });
 
+  // No cached control proof is passed here, so an Android row without an owner is "Chưa rõ":
+  // a roster `ready` or `wdaReady` never stands in for the helper proof.
   it.each([
-    [{ status: "ready", wdaReady: false }, "connected", "Đã kết nối", "info"],
-    [{ status: "connected", wdaReady: true }, "connected", "Đã kết nối", "info"],
-    [{ status: "busy", wdaReady: false }, "busy", "Bận", "warn"],
-    [{ status: "error", wdaReady: false }, "warning", "Cần xem", "warn"],
-    [{ status: "disconnected", wdaReady: false }, "offline", "Ngoại tuyến", "info"],
-  ] as const)("maps %o to %s", (overrides, kind, label, tone) => {
-    expect(deviceOperationalView({ ...readyDevice, ...overrides }, null)).toMatchObject({
-      kind,
-      label,
-      ownerLabel: null,
-      tone,
-    });
+    [{ status: "ready", wdaReady: false }, "unknown", "Chưa rõ"],
+    [{ status: "connected", wdaReady: true }, "unknown", "Chưa rõ"],
+    [{ status: "busy", wdaReady: false }, "busy", "Đang chạy"],
+    [{ status: "error", wdaReady: false }, "warning", "Cần xử lý"],
+    [{ status: "disconnected", wdaReady: false }, "offline", "Mất kết nối"],
+  ] as const)("maps %o to %s", (overrides, kind, label) => {
+    expect(deviceOperationalView({ ...readyDevice, ...overrides }, null)).toMatchObject({ kind, label });
   });
 
   it("uses a publish activity for the shared script owner without leaking it after release", () => {
     const activity: DeviceActivity = { operationId: "publish:live", kind: "publish", label: "Đăng bài", step: "Đang chuẩn bị ảnh", state: "running", updatedAt: null };
-    expect(deviceOperationalView(readyDevice, "script", "known", undefined, activity)).toEqual({
-      kind: "busy", label: "Đăng bài", ownerLabel: null, tone: "warn", step: "Đang chuẩn bị ảnh",
+    expect(deviceOperationalView(readyDevice, "script", "known", undefined, activity)).toMatchObject({
+      kind: "busy", label: "Đang chạy", detail: "Đăng bài", step: "Đang chuẩn bị ảnh",
     });
     expect(deviceOperationalView(readyDevice, null, "known", undefined, activity).step).toBeUndefined();
     expect(deviceOperationalView(readyDevice, "script", "known", undefined, { ...activity, state: "uncertain", step: "Chưa xác nhận kết quả" }).step).toBe("Chưa xác nhận kết quả");
-    expect(deviceOperationalView(readyDevice, "script", "known", undefined, { ...activity, state: "succeeded" }).ownerLabel).toBe("Tác vụ tự động");
+    expect(deviceOperationalView(readyDevice, "script", "known", undefined, { ...activity, state: "succeeded" }).detail).toBe("Tác vụ tự động");
   });
 
   it("keeps an offline phone offline even if a stale work owner remains", () => {
@@ -72,11 +68,10 @@ describe("device operational status", () => {
         { ...readyDevice, status: "disconnected", wdaReady: false },
         "nurture",
       ),
-    ).toEqual({
+    ).toMatchObject({
       kind: "offline",
-      label: "Ngoại tuyến",
-      ownerLabel: "Nuôi TikTok",
-      tone: "info",
+      label: "Mất kết nối",
+      reason: "Máy không còn trả lời qua USB/Wi-Fi. Nuôi TikTok vẫn đang giữ máy.",
     });
   });
 
@@ -89,8 +84,8 @@ describe("device operational status", () => {
     };
     expect(deviceOperationalView(readyDevice, null, "known", agent).kind).toBe("ready");
     expect(deviceMatchesFleetFilter(readyDevice, null, 1, "Máy A", "", "ready", "known", agent)).toBe(true);
-    expect(deviceOperationalView(readyDevice, null, "known", { ...agent, features: [] }).kind).toBe("connected");
-    expect(deviceOperationalView(readyDevice, null, "known", { ...agent, sessionReady: false }).kind).toBe("connected");
+    expect(deviceOperationalView(readyDevice, null, "known", { ...agent, features: [] }).kind).toBe("unchecked");
+    expect(deviceOperationalView(readyDevice, null, "known", { ...agent, sessionReady: false }).kind).toBe("unchecked");
     expect(deviceOperationalView({ ...readyDevice, platform: "ios" }, null).kind).toBe("ready");
   });
 
@@ -102,7 +97,7 @@ describe("device operational status", () => {
       message: "Riviu Helper: runtime qualification failed; recovery required (no action replay); stage=runtime_acquisition; category=recovery_required; Cần đối soát phiên helper đang giữ; chưa nhận phiên thay thế.",
     };
     expect(deviceOperationalView(readyDevice, null, "known", latched)).toMatchObject({
-      kind: "warning", label: "Cần khôi phục helper", helperRecovery: true,
+      kind: "warning", label: "Cần xử lý", detail: "Cần khôi phục helper", helperRecovery: true,
     });
   });
 });
@@ -135,16 +130,16 @@ describe("toolbar helper recovery scope", () => {
   });
 
   it.each([
-    ["loading", "Đang đọc tác vụ"],
-    ["error", "Chưa đọc được tác vụ"],
+    ["loading", "đang đọc tác vụ"],
+    ["error", "chưa đọc được tác vụ"],
   ] as const)(
     "fails closed while the work-owner projection is %s",
-    (ownerReadState, label) => {
-      expect(deviceOperationalView(readyDevice, null, ownerReadState)).toEqual({
-        kind: "warning",
-        label,
-        ownerLabel: null,
-        tone: "warn",
+    (ownerReadState, detail) => {
+      expect(deviceOperationalView(readyDevice, null, ownerReadState)).toMatchObject({
+        kind: "unknown",
+        label: "Chưa rõ",
+        detail,
+        axes: { work: { state: "unknown" } },
       });
     },
   );

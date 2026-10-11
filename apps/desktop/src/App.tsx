@@ -94,9 +94,12 @@ import { PageHeader, StatusChip } from "./components/WorkspacePrimitives";
 import { RosterUpdated } from "./components/RosterUpdated";
 import { resolveAutomationTarget } from "./automationTargets";
 import {
+  DEVICE_STATUS_FILTERS,
+  DEVICE_STATUS_LABELS,
   deviceMatchesFleetFilter,
   fleetCounts,
   deviceOperationalView,
+  deviceStatusText,
   helperRecoveryTargets,
 } from "./deviceWork";
 import type { DeviceOperationalFilter, DeviceWorkOwnerReadState } from "./deviceWork";
@@ -875,20 +878,6 @@ function App() {
     }
   };
 
-  // `null` is unknown, never 0: owners are unread, or an idle Android phone has no cached helper
-  // proof (only Control Center reads that cache), so the tile predicate cannot be applied.
-  const readyCount = useMemo((): number | null => {
-    if (deviceWorkOwnerReadState !== "known") return null;
-    let count = 0;
-    for (const device of devices) {
-      const owner = currentDeviceWorkOwner(device.udid);
-      const agent = cachedAgent(device.udid);
-      if (device.platform === "android" && device.status !== "disconnected" && !owner && !agent) return null;
-      if (deviceOperationalView(device, owner, deviceWorkOwnerReadState, agent, null, cachedLoad(device.udid)).kind === "ready") count += 1;
-    }
-    return count;
-  }, [devices, currentDeviceWorkOwner, deviceWorkOwnerReadState, cachedAgent, cachedLoad]);
-
   const counts = useMemo(
     () => fleetCounts(devices, fleetSettled, currentDeviceWorkOwner, deviceWorkOwnerReadState, cachedAgent, cachedLoad),
     [devices, fleetSettled, currentDeviceWorkOwner, deviceWorkOwnerReadState, cachedAgent, cachedLoad],
@@ -908,8 +897,8 @@ function App() {
       udid: device.udid,
       label: automationDeviceLabels.get(device.udid) ?? device.udid,
       handle: metaMap.get(device.udid)?.handle,
-      status: deviceOperationalView(device, currentDeviceWorkOwner(device.udid), deviceWorkOwnerReadState,
-        cachedAgent(device.udid), currentDeviceWorkState(device.udid)?.activity, cachedLoad(device.udid)).label,
+      status: deviceStatusText(deviceOperationalView(device, currentDeviceWorkOwner(device.udid), deviceWorkOwnerReadState,
+        cachedAgent(device.udid), currentDeviceWorkState(device.udid)?.activity, cachedLoad(device.udid))),
     }));
   }, [paletteOpen, orderedDevices, automationDeviceLabels, metaMap, currentDeviceWorkOwner, deviceWorkOwnerReadState, cachedAgent, currentDeviceWorkState, cachedLoad]);
   // "Cần xử lý" is the header counter's set: the tile's warning state, unknown exactly when that
@@ -1061,8 +1050,6 @@ function App() {
         page={page}
         forceCompact={myAppsEditorOpen && page === "myApps"}
         selectedCount={selected.length}
-        total={devices.length}
-        readyCount={readyCount}
         groupMode={activeSync !== null}
         onPage={(next) => void requestPage(next, true)}
       />
@@ -1452,14 +1439,17 @@ function App() {
                     }
                   >
                     <option value="all">Mọi trạng thái</option>
-                    <option value="idle">Rảnh</option>
-                    <option value="ready">Sẵn sàng</option>
-                    <option value="connected">Đã kết nối</option>
-                    <option value="busy">Bận</option>
-                    <option value="warning">Cần xem</option>
-                    <option value="offline">Ngoại tuyến</option>
+                    {DEVICE_STATUS_FILTERS.map((status) => (
+                      <option key={status} value={status}>{DEVICE_STATUS_LABELS[status]}</option>
+                    ))}
                   </select>
                 </div>
+                {deviceStatusFilter !== "all" && (
+                  <span className="device-filter-active" role="status">
+                    <span>Đang lọc: <strong>{DEVICE_STATUS_LABELS[deviceStatusFilter]}</strong></span>
+                    <button type="button" className="link" onClick={() => setDeviceStatusFilter("all")}>Bỏ lọc</button>
+                  </span>
+                )}
                 {/* **Selects what is on screen, and says how many.**
                     `visibleDevices`, not `devices`: this sits beside the group tabs, so
                     "tất cả" has to mean the tab the operator is looking at. Saying the
@@ -1854,6 +1844,8 @@ function App() {
           machineLabel={machineNumberLabel(fleetNumberByUdid.get(detailsDevice.udid))}
           currentOwner={currentDeviceWorkOwner(detailsDevice.udid)}
           ownerReadFailed={deviceWorkOwners.state !== "known"}
+          operational={deviceOperationalView(detailsDevice, currentDeviceWorkOwner(detailsDevice.udid), deviceWorkOwnerReadState,
+            cachedAgent(detailsDevice.udid), currentDeviceWorkState(detailsDevice.udid)?.activity, cachedLoad(detailsDevice.udid))}
           onClose={() => setDetailsFor(null)}
         />
       )}

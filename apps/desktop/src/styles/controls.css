@@ -236,7 +236,7 @@ button:disabled {
 .toolbar-sync-target small { margin-top: 2px; font-size: var(--rv-font-caption); color: var(--rv-text-3); }
 .toolbar-sync-target-state { text-align: right; max-width: 180px; }
 .toolbar-sync-target[data-state="error"] .toolbar-sync-target-state span,
-.toolbar-sync-target[data-state="ngoại tuyến"] .toolbar-sync-target-state span { color: var(--rv-status-error-text); }
+.toolbar-sync-target[data-state="mất kết nối"] .toolbar-sync-target-state span { color: var(--rv-status-error-text); }
 .toolbar-sync-actions { display: flex; align-items: center; gap: 10px; }
 .toolbar-sync-actions p { margin: 0; color: var(--rv-text-3); font-size: var(--rv-font-caption); }
 .toolbar-sync-options { border-top: 1px solid var(--rv-border); margin-top: 12px; padding-top: 12px; }

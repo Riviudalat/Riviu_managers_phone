@@ -13,10 +13,7 @@
 .machine-choice-name strong { font-size: var(--text-sm); font-weight: 650; }
 .machine-choice-name > span { font-size: var(--text-xs); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; color: var(--text-3); }
 .machine-choice .machine-choice-pick > input { width: 16px; height: 16px; margin: 0; flex: none; accent-color: var(--primary); }
-.machine-choice-status { display: flex; align-items: center; gap: 6px; padding: 0 9px 8px; font-size: var(--text-xs); line-height: 1.4; color: var(--text-2); }
-.machine-choice-status.is-ready { color: var(--ok); }
-.machine-choice-status.is-error { color: var(--danger-deep); }
-.machine-choice-state { width: 5px; height: 5px; border-radius: 50%; background: currentColor; flex: none; }
+.machine-choice-status { display: flex; align-items: center; gap: 6px; min-width: 0; padding: 0 9px 8px; font-size: var(--text-xs); line-height: 1.4; color: var(--text-2); }
 .machine-choice-detail { display: flex; align-items: center; gap: 6px; min-width: 0; padding: 7px 9px; border-top: 1px solid var(--line); font-size: var(--text-xs); color: var(--text-3); }
 .machine-choice-detail > span { min-width: 0; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 .machine-choice-detail button { margin-top: 0; }

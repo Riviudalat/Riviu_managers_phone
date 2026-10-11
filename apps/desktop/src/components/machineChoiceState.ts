@@ -1,14 +1,15 @@
-const statusLabels: Record<string, string> = {
-  // Roster `ready` alone is not proved control; "Sẵn sàng" belongs to deviceOperationalView.
-  ready: "Đã chuẩn bị",
-  busy: "Đang bận",
-  disconnected: "Mất kết nối",
-  pairing: "Đang ghép nối",
-  connected: "Chưa chuẩn bị",
-  preparing: "Đang chuẩn bị",
-  error: "Cần kiểm tra",
-};
+import { deviceRosterView, deviceStatusText } from "../deviceWork";
+import type { DeviceOperationalView } from "../deviceWork";
+import type { DevicePlatform, DeviceStatus } from "../types";
+
+/**
+ * A picker only has the roster row: no work owner and no helper proof. Without a platform the
+ * phone is read as Android, the stricter rule, so a picker never claims Sẵn sàng it cannot prove.
+ */
+export function machineStatusView(status: string, reason?: string | null, platform: DevicePlatform = "android"): DeviceOperationalView {
+  return deviceRosterView({ platform, status: status as DeviceStatus, wdaReady: false, lastError: reason ?? null });
+}
 
 export function machineStatusLabel(status: string) {
-  return statusLabels[status] ?? "Chưa rõ trạng thái";
+  return deviceStatusText(machineStatusView(status));
 }

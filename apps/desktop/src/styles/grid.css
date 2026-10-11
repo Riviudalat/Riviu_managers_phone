@@ -90,22 +90,7 @@
   text-overflow: ellipsis;
   white-space: nowrap;
 }
-.dev-phone-status.is-ready {
-  background: var(--rv-status-ready-fill);
-  color: var(--rv-status-ready-text);
-}
-.dev-phone-status.is-busy {
-  background: var(--rv-status-running-fill);
-  color: var(--rv-status-running-text);
-}
-.dev-phone-status.is-warning {
-  background: var(--rv-status-attention-fill);
-  color: var(--rv-status-attention-text);
-}
-.dev-phone-status.is-offline {
-  background: var(--rv-status-offline-fill);
-  color: var(--rv-status-offline-text);
-}
+/* State colours and icons come from `.device-status` (styles/device-status.css). */
 .dev-phone-detail {
   max-width: 100%;
   color: var(--rv-text-2);

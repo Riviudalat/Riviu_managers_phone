@@ -119,7 +119,7 @@ export function SelectionBar({
     : !masterValid
       ? "Chọn lại một máy chính trong phạm vi."
       : disconnected.length > 0
-        ? `${disconnected.map(labelFor).join(", ")} đang ngoại tuyến.`
+        ? `${disconnected.map(labelFor).join(", ")} đang mất kết nối.`
         : null;
   const status = !activeSync
     ? "Đang tắt"
@@ -250,7 +250,7 @@ export function SelectionBar({
               const master = device.udid === (activeSync?.masterUdid ?? resolvedMasterUdid);
               const failure = failures[device.udid];
               const sessionState = device.status === "disconnected"
-                ? "Ngoại tuyến"
+                ? "Mất kết nối"
                 : failure
                   ? "Cần xử lý"
                   : activeSync

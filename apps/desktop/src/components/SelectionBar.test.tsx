@@ -73,7 +73,7 @@ describe("selection bar sync", () => {
     );
     await userEvent.click(screen.getByRole("button", { name: "Đồng bộ thao tác" }));
     expect(screen.getByRole("button", { name: "Bật đồng bộ thao tác" })).toBeDisabled();
-    expect(screen.getByRole("status")).toHaveTextContent("ngoại tuyến");
+    expect(screen.getByRole("status")).toHaveTextContent("mất kết nối");
 
     view.rerender(
       <SelectionBar

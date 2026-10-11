@@ -266,19 +266,7 @@
   font-weight: var(--weight-medium);
 }
 
-.fleet-counter-dot {
-  width: 8px;
-  height: 8px;
-  flex: none;
-  border-radius: 50%;
-  background: var(--rv-status-unknown-solid);
-}
-
-.fleet-counter.tone-ok .fleet-counter-dot { background: var(--rv-status-ready-solid); }
-.fleet-counter.tone-info .fleet-counter-dot { background: var(--rv-status-running-solid); }
-/* "Cần xử lý" is amber in the status palette (PLAN §1); red is kept for Lỗi. */
-.fleet-counter.tone-danger .fleet-counter-dot { background: var(--rv-status-attention-solid); }
-.fleet-counter.tone-muted .fleet-counter-dot { background: var(--rv-status-offline-solid); }
+/* Each counter's state icon and its colour: styles/device-status.css. */
 
 .fleet-counter:hover {
   border-color: var(--rv-border);

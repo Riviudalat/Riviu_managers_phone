@@ -146,9 +146,10 @@
   text-align: center;
 }
 
-/* The system bar entry. Collapses to its icon below 1600 px (and beside the docked run column),
-   where the page name, scope, counters, Inspector and the run pill need the room; the name stays
-   for assistive technology through `aria-label` and the shortcut in the tooltip. */
+/* The system bar entry. Collapses to its icon below 1600 px (and beside the docked run column at
+   any width), where the page name, scope, the seven fleet counters, Inspector and the run pill
+   need the room; the name stays for assistive technology through `aria-label` and the shortcut in
+   the tooltip. */
 .ui-palette-launcher {
   display: inline-flex;
   flex: none;
@@ -174,9 +175,7 @@
     display: none;
   }
 }
-@media (max-width: 1759px) {
-  .shell:has(.run-monitor.is-docked:not(.is-maximized)) .ui-palette-launcher-text,
-  .shell:has(.run-monitor.is-docked:not(.is-maximized)) .ui-palette-launcher kbd {
-    display: none;
-  }
+.shell:has(.run-monitor.is-docked:not(.is-maximized)) .ui-palette-launcher-text,
+.shell:has(.run-monitor.is-docked:not(.is-maximized)) .ui-palette-launcher kbd {
+  display: none;
 }

@@ -1,0 +1,148 @@
+/* One status vocabulary (PLAN §4): icon + text + the state's colour, readable without colour.
+ * TODO(ui2-tokens): Chưa kiểm (blue-grey) and Chưa rõ (violet-grey) have no shared token yet;
+ * move these two pairs onto V1's --rv-status-* tokens when they land. */
+:root {
+  --status-unchecked: #475569;
+  --status-unchecked-soft: #f1f5f9;
+  --status-unknown: #5b4b8a;
+  --status-unknown-soft: #f3f0fa;
+}
+
+.device-status {
+  display: inline-flex;
+  max-width: 100%;
+  min-width: 0;
+  align-items: center;
+  gap: 4px;
+  padding: 0 6px;
+  border-radius: 999px;
+  background: var(--bg-muted);
+  color: var(--text-2);
+  font-weight: var(--weight-semibold);
+  line-height: 18px;
+  white-space: nowrap;
+}
+.device-status-icon { flex: none; }
+.device-status-text {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.device-status.is-ready { background: var(--ok-soft); color: var(--ok-strong); }
+.device-status.is-unchecked { background: var(--status-unchecked-soft); color: var(--status-unchecked); }
+.device-status.is-busy { background: var(--info-soft); color: var(--info-strong); }
+.device-status.is-warning { background: var(--warn-soft); color: var(--warn-strong); }
+.device-status.is-offline { background: var(--bg-muted); color: var(--text-3); }
+.device-status.is-unknown { background: var(--status-unknown-soft); color: var(--status-unknown); }
+
+/* Details drawer: the three axes and the permanent explanation. */
+.device-status-axes {
+  display: grid;
+  gap: var(--space-2);
+  margin: 0;
+}
+.device-status-axis {
+  display: grid;
+  grid-template-columns: 88px minmax(0, 1fr);
+  gap: var(--space-2);
+  align-items: start;
+}
+.device-status-axis dt { color: var(--text-3); font-size: var(--text-sm); }
+.device-status-axis dd { display: grid; gap: 2px; min-width: 0; margin: 0; }
+.device-status-axis dd small { color: var(--text-3); font-size: var(--text-xs); line-height: 1.45; overflow-wrap: anywhere; }
+.device-status-axis-value {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  font-weight: var(--weight-semibold);
+}
+.device-status-axis-value.tone-ok { color: var(--ok-strong); }
+.device-status-axis-value.tone-neutral { color: var(--text); }
+.device-status-axis-value.tone-info { color: var(--info-strong); }
+.device-status-axis-value.tone-warn { color: var(--warn-strong); }
+.device-status-axis-value.tone-danger { color: var(--danger-strong); }
+.device-status-axis-value.tone-muted { color: var(--text-3); }
+.device-status-axis-value.tone-unchecked { color: var(--status-unchecked); }
+.device-status-axis-value.tone-unknown { color: var(--status-unknown); }
+
+.device-status-legend { color: var(--text-2); font-size: var(--text-sm); line-height: 1.5; }
+.device-status-legend p { margin: 0 0 var(--space-1); }
+.device-status-legend ul { margin: 0 0 var(--space-1); padding-left: 18px; }
+.device-status-legend li + li { margin-top: 2px; }
+
+/* Header fleet counters (FleetCounters.tsx): the state's icon carries the colour. */
+.fleet-counter-icon { flex: none; color: var(--text-3); }
+.fleet-counter.tone-ready .fleet-counter-icon { color: var(--ok); }
+.fleet-counter.tone-unchecked .fleet-counter-icon { color: var(--status-unchecked); }
+.fleet-counter.tone-busy .fleet-counter-icon { color: var(--info); }
+.fleet-counter.tone-warning .fleet-counter-icon { color: var(--warn); }
+.fleet-counter.tone-unknown .fleet-counter-icon { color: var(--status-unknown); }
+.fleet-counter-value { display: inline-flex; align-items: baseline; font-variant-numeric: tabular-nums; }
+.fleet-counter-of { color: var(--text-3); font-weight: var(--weight-regular); }
+.fleet-counter.tone-warning.active {
+  border-color: var(--warn);
+  background: var(--warn-soft);
+  color: var(--warn-strong);
+}
+
+/* "Đang lọc: …" beside the wall's status filter. */
+.device-filter-active {
+  display: inline-flex;
+  flex: 0 0 auto;
+  align-items: center;
+  gap: var(--space-2);
+  min-width: 0;
+  color: var(--text-2);
+  font-size: var(--text-sm);
+  white-space: nowrap;
+}
+.device-filter-active strong { color: var(--text); }
+
+/* Trợ giúp: the same explanation as the details drawer. */
+.operator-help-vocabulary {
+  padding: var(--space-4);
+  border: 1px solid var(--line);
+  border-radius: var(--radius);
+  background: var(--bg-elevated);
+}
+.operator-help-vocabulary h3 { margin: 0 0 var(--space-2); font-size: var(--text-base); font-weight: var(--weight-semibold); }
+
+/* Below 1600 px the header keeps one row: Tổng carries the denominator for every count, and
+   each counter's accessible name still says "N trên Tổng máy". */
+@media (max-width: 1599px) {
+  .fleet-counter-of { display: none; }
+}
+
+/* 981-1279 px (Windows 125% on a 1366 px laptop is ~1093 px): the seven counters keep one
+   header row by dropping their icons; the words and numbers stay. */
+@media (min-width: 981px) and (max-width: 1279px) {
+  .fleet-counter-icon { display: none; }
+}
+
+/* Seven counters never push the header wider than the window: when a long page title and the
+   run pill leave too little room, the counters wrap inside the header instead of scrolling it.
+   (`:has` outranks workspace.css's `flex-shrink: 0` on the same box.) */
+@media (min-width: 981px) {
+  .shell > .main-col > .page-header .page-header-meta:has(.fleet-counters) {
+    flex-shrink: 1;
+    min-width: 0;
+  }
+  .shell > .main-col > .page-header .fleet-counters {
+    flex-wrap: wrap;
+    row-gap: 4px;
+  }
+}
+
+/* Seven counters instead of four: tighter pills below 1600 px so the header keeps one row at
+   1366-1440 px, tighter again where the icons drop out. */
+@media (max-width: 1599px) {
+  .fleet-counters .fleet-counter { padding: 0 6px; }
+}
+@media (min-width: 981px) and (max-width: 1279px) {
+  .fleet-counters { gap: 3px; }
+  .fleet-counters .fleet-counter { gap: 3px; padding: 0 5px; }
+}
+
+/* A docked run column takes ~320 px from the header at any width; count it as a narrow header. */
+.shell:has(.run-monitor.is-docked:not(.is-maximized)) .fleet-counter-of { display: none; }
+.shell:has(.run-monitor.is-docked:not(.is-maximized)) .fleet-counters .fleet-counter { padding: 0 6px; }

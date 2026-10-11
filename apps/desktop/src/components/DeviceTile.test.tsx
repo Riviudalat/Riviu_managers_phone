@@ -71,7 +71,7 @@ describe("device tile, before any frame arrives", () => {
 
     expect(screen.getByText("Máy 1")).toBeVisible();
     expect(screen.getAllByText("Điện thoại gốc").length).toBeGreaterThan(0);
-    expect(screen.getByText("Bận · Nuôi TikTok")).toBeVisible();
+    expect(screen.getByText("Đang chạy: Nuôi TikTok")).toBeVisible();
     // The strip names the model too, because here it says something the alias does not.
     expect(screen.getByText("SM-G955F")).toBeVisible();
     expect(screen.queryByText("device-1")).toBeNull();

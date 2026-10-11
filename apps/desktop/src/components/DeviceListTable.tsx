@@ -1,11 +1,13 @@
 import { useState } from "react";
 import { MoreHorizontal } from "lucide-react";
 import { machineNumberLabel } from "../deviceNaming";
+import { deviceStatusText } from "../deviceWork";
 import type { DeviceOperationalView } from "../deviceWork";
 import type { DeviceEvidence } from "../deviceEvidence";
 import { timeAgoVi } from "../timeAgo";
 import type { DeviceInfo } from "../types";
 import { TableColumnChooser } from "./table/ResponsiveTable";
+import { DeviceStatusLine } from "./DeviceStatusLine";
 import { readTableView, saveTableView, type TableView } from "./table/tableView";
 
 export interface DeviceListRow {
@@ -31,7 +33,7 @@ interface Props {
 const COLUMNS = [
   { id: "machine", label: "Máy" },
   { id: "account", label: "Tài khoản" },
-  { id: "work", label: "Việc đang chạy" },
+  { id: "work", label: "Trạng thái" },
   { id: "attention", label: "Cần xử lý" },
   // The header says "Bằng chứng" so it fits its 14% column; the chooser and tooltip say it in full.
   { id: "evidence", label: "Bằng chứng gần nhất", header: "Bằng chứng" },
@@ -50,8 +52,8 @@ function evidenceText(evidence: DeviceEvidence, nowMs: number): string {
 /**
  * The compact device list: one 34 px line per phone, so 15+ phones fit a 1366×768 window.
  * Every cell truncates on one line; the row's accessible name and each cell's tooltip keep
- * the full text. The tile wall's vocabulary is reused as is: the run label and step are the
- * work, and only a phone that needs the operator carries an attention reason.
+ * the full text. The tile wall's status line is reused as is (`DeviceStatusLine`): the run and
+ * its step are the work, and only a phone that needs the operator carries an attention reason.
  */
 export function DeviceListTable({ rows, selected, nowMs, onSelect, onToggle, onOpen, onDetails, onHelperMaintenance }: Props) {
   const [view, setView] = useState(() => readTableView(VIEW_KEY));
@@ -81,7 +83,7 @@ export function DeviceListTable({ rows, selected, nowMs, onSelect, onToggle, onO
         {rows.map(({ device, machineNumber, name, handle, status, evidence }) => {
           const sel = selected.includes(device.udid);
           const label = machineNumberLabel(machineNumber);
-          const statusLabel = status.ownerLabel ? `${status.label} · ${status.ownerLabel}` : status.label;
+          const statusLabel = deviceStatusText(status);
           const username = handle?.trim().replace(/^@+/, "");
           const account = username ? `@${username}` : "";
           // Same rule as the tile strip: a healthy phone's reason only explains how control
@@ -139,7 +141,7 @@ export function DeviceListTable({ rows, selected, nowMs, onSelect, onToggle, onO
               )}
               {shown("work") && (
                 <td className="device-table-work" title={[statusLabel, status.step].filter(Boolean).join(" · ")}>
-                  <span className={`chip ${status.tone}`} title={status.reason}>{statusLabel}</span>
+                  <DeviceStatusLine view={status} />
                   {status.step && <span className="device-table-step"> {status.step}</span>}
                 </td>
               )}

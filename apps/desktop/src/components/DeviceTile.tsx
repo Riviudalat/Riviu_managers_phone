@@ -1,13 +1,14 @@
 import { machineNumberLabel } from "../deviceNaming";
 import { memo } from "react";
 import { Check, Maximize2 } from "lucide-react";
-import { deviceOperationalView } from "../deviceWork";
+import { deviceOperationalView, deviceStatusText } from "../deviceWork";
 import type { DeviceOperationalView } from "../deviceWork";
 import type { DeviceInfo } from "../types";
 import { streamPlaceholder } from "../streamPlaceholder";
 import { useViewDecodeFailed, useViewLive, useViewSize } from "../viewStore";
 import { PhoneCanvas } from "./PhoneCanvas";
 import { StreamPlaceholder } from "./StreamPlaceholder";
+import { DeviceStatusLine } from "./DeviceStatusLine";
 
 interface Props {
   device: DeviceInfo;
@@ -60,18 +61,18 @@ function DeviceTileInner({
   const operational = providedOperational ?? deviceOperationalView(device, null);
   const displayName = name ?? device.name;
   const username = handle?.trim().replace(/^@+/, "");
-  const operationalLabel = operational.ownerLabel
-    ? `${operational.label} · ${operational.ownerLabel}`
-    : operational.label;
+  const operationalLabel = deviceStatusText(operational);
   // The alias usually is the model when the operator has not named the phone, so the model is
   // only worth a second mention when it says something the name does not.
   const model = device.model?.trim();
   const shownModel = model && model !== displayName ? model : undefined;
   const identity = [username ? `@${username}` : "", shownModel ?? ""].filter(Boolean).join(" · ");
-  // A phone that needs the operator gets a red ring and its reason on the strip. The reason a
-  // healthy phone carries ("connected" explains when control gets checked) stays in the tooltip.
+  // A phone that needs the operator gets a ring and its reason on the strip, and so does a lost
+  // phone a job still holds. The reason a healthy phone carries (when control gets checked)
+  // stays in the tooltip.
   const attention = operational.kind === "warning";
-  const detail = operational.step ?? (attention ? operational.reason : undefined);
+  const heldOffline = operational.kind === "offline" && operational.axes.work.state === "running";
+  const detail = operational.step ?? (attention || heldOffline ? operational.reason : undefined);
   // Hovering anywhere on the strip shows every line in full, including the ones the compact
   // Tổng quan strip leaves out.
   const stripTitle = [
@@ -79,7 +80,7 @@ function DeviceTileInner({
     identity,
     operationalLabel,
     operational.step,
-    attention ? operational.reason : undefined,
+    operational.reason,
   ].filter(Boolean).join("\n");
   const accessibleName = [
     machineNumberLabel(index),
@@ -87,7 +88,7 @@ function DeviceTileInner({
     operationalLabel,
     operational.step,
     identity,
-    attention ? operational.reason : undefined,
+    attention || heldOffline ? operational.reason : undefined,
     selected ? "đã chọn" : undefined,
   ].filter(Boolean).join(", ");
   const hasView = useViewLive(device.udid);
@@ -153,9 +154,7 @@ function DeviceTileInner({
           </span>
         )}
         <div className="dev-phone-run">
-          <span className={`dev-phone-status is-${operational.kind}`} title={operational.reason ?? operationalLabel}>
-            {operationalLabel}
-          </span>
+          <DeviceStatusLine view={operational} className="dev-phone-status" />
           {operational.helperRecovery && onHelperMaintenance ? (
             <button type="button" className="link dev-phone-detail" title={operational.reason}
               onDoubleClick={event => event.stopPropagation()}
