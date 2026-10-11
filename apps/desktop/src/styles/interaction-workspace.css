@@ -3,6 +3,11 @@
 .interaction-workspace .interaction-tabs { padding: 0; gap: 8px; align-self: flex-start; }
 .interaction-workspace .interaction-tabs button { min-height: 36px; padding: 8px 16px; }
 .interaction-workspace #interaction-panel-setup { padding: 0; overflow: hidden; }
+/* The Bị loại notice (V6) sits above the wizard: it keeps its own height and the wizard takes the
+   rest, so the step's command row is never pushed below the clipped panel. */
+.interaction-workspace #interaction-panel-setup:not([hidden]) { display: flex; flex-direction: column; }
+.interaction-workspace #interaction-panel-setup > .busy-scope { flex: none; }
+.interaction-workspace #interaction-panel-setup > .interaction-wizard { flex: 1; height: auto; }
 .interaction-wizard { display: flex; flex-direction: column; gap: 12px; min-width: 0; height: 100%; min-height: 0; padding-top: 10px; color: var(--text-1); font-size: var(--text-base); }
 .interaction-wizard [hidden] { display: none; }
 .interaction-wizard h3, .interaction-wizard p { margin: 0; }
