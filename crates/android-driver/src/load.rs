@@ -104,7 +104,9 @@ pub fn parse_sample(stdout: &str, target_package: Option<&str>, now_ms: i64) -> 
     sample.battery_temp_tenths_c = sections
         .get("battery_temp")
         .and_then(|temp| temp.trim().parse::<i32>().ok())
-        .filter(|temp| (-200..=1000).contains(temp));
+        // -200 (-20.0 °C) is the "no reading" value some phones in the 2026-10-10 fleet sample
+        // returned, so the range starts above it and that reading stays unknown.
+        .filter(|temp| (-199..=1000).contains(temp));
     sample
 }
 
