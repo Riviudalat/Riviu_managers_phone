@@ -217,6 +217,7 @@ function App() {
   /** Draft master selection. The active session owns its own immutable copy. */
   const [controlCenter, setControlCenter] = useState<string | null>(null);
   const deviceWindows = useDeviceWindows(devices);
+  const [dockSlot, setDockSlot] = useState<HTMLDivElement | null>(null);
   const focusUdid = deviceWindows.activeUdid;
   const overlayUdid = focusUdid;
   const openDeviceWindow = deviceWindows.open;
@@ -1613,6 +1614,8 @@ function App() {
               )}
               </div>
 
+              {/* GF2: the pinned device window docks here, left of the wall (GF1 owns the final row). */}
+              <div className="cc-wall-row"><div data-cc-dock-slot ref={setDockSlot} />
               <div className="device-browser-content" onPointerDownCapture={holdWall}>
 
               {wallDevices.length > 0 && viewMode === "list" && (
@@ -1826,6 +1829,7 @@ function App() {
                 />
               )}
               </div>
+              </div>
             </section>
           )}
 
@@ -2026,6 +2030,9 @@ function App() {
           name={operatorName(fleetNumberByUdid.get(udid), metaMap.get(udid))}
           deviceNumbers={fleetNumberByUdid}
           onClose={() => deviceWindows.close(udid)}
+          dock={deviceWindows.pinned ? dockSlot : null}
+          pinned={deviceWindows.pinned}
+          onPinnedChange={deviceWindows.setPinned}
           activeSync={activeSync?.masterUdid === udid ? activeSync : null}
           onReadinessChange={activeSync?.masterUdid === udid ? setSyncReadiness : undefined}
           onHelperMaintenance={targetUdid => void runHelperMaintenance([targetUdid])}

@@ -619,3 +619,35 @@
     grid-template-columns: 160px minmax(0, 1fr);
   }
 }
+/* GF2: a pinned device window docks in-flow at the left of the wall (GenFarmer "ghim");
+   unpinned it floats as above. The slot is empty, and takes no room, while nothing is docked. */
+.cc-wall-row {
+  display: flex;
+  align-items: flex-start;
+  gap: 12px;
+  min-width: 0;
+}
+.cc-wall-row > .device-browser-content {
+  flex: 1 1 0;
+  min-width: 0;
+}
+[data-cc-dock-slot] {
+  flex: none;
+  position: sticky;
+  top: 0;
+  z-index: 2;
+}
+[data-cc-dock-slot]:empty {
+  display: none;
+}
+.focus-overlay.device-floating-window.is-docked {
+  position: static;
+  inset: auto;
+  display: block;
+  padding: 0;
+  background: transparent;
+  pointer-events: auto;
+}
+.device-floating-window.is-docked .focus-stage {
+  margin: 0;
+}

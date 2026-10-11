@@ -46,7 +46,11 @@ của trang khác, không lặp trong cùng một màn hình.
 Modal và drawer giữ focus, Escape đóng lớp đang thao tác, đóng trả focus về nút mở.
 Các cửa sổ điện thoại là non-modal: không phủ tối, không giữ Tab bên trong;
 chọn được máy và trang khác khi cửa sổ đang mở. Một cửa sổ phóng to dùng lại khi đổi
-máy, trả phiên cũ trước khi mở phiên mới. Menu/confirm vẫn ở trên. Không còn rail dọc:
+máy, trả phiên cũ trước khi mở phiên mới. Như GenFarmer, cửa sổ máy mặc định **ghim**: màn hình
+cỡ "Màn hình lớn" và danh sách chức năng nằm cố định bên trái lưới trong Trung tâm (lưới dàn lại
+bên phải); nút ghim/bỏ ghim trên đầu danh sách chức năng chuyển sang cửa sổ nổi kéo được, lựa chọn
+nhớ theo người dùng. Bề rộng ô ghim chỉ theo cỡ màn hình lớn và cửa sổ, không theo trạng thái máy;
+ở trang khác hoặc cửa sổ hẹp hơn 900 px cửa sổ nổi. Menu/confirm vẫn ở trên. Không còn rail dọc:
 nút **Hiển thị** trên thanh công cụ mở/đóng một bảng ngang dưới thanh (chỉ khi bấm, không theo
 hover): cỡ ô (Nhỏ/Vừa/Lớn + thanh trượt), cỡ màn hình lớn, chất lượng lưới, chất lượng cửa sổ
 lớn, FPS (áp dụng cho mọi máy Android, kèm câu "sẽ khởi động lại luồng hình Android"), lọc kết

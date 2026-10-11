@@ -1,5 +1,6 @@
 import { machineNumberLabel } from "../deviceNaming";
 import { useEffect, useMemo, useRef, useState, type ReactElement } from "react";
+import { createPortal } from "react-dom";
 import { DeviceContextMenu } from "./DeviceContextMenu";
 import type { DeviceInfo, GroupInputReport, HardwareKey } from "../types";
 import { groupInputOutcome } from "../groupInput";
@@ -98,7 +99,21 @@ interface Props {
    */
   functions?: DeviceMenuNode[];
   recordingControls?: ReactElement | null;
+  /**
+   * The Control Center's dock slot while the window is pinned (GenFarmer's "ghim"): the window
+   * then renders in-flow at the left of the wall instead of floating. Null floats it.
+   */
+  dock?: HTMLElement | null;
+  pinned?: boolean;
+  onPinnedChange?: (pinned: boolean) => void;
 }
+
+/// Below this width the wall keeps no useful room beside a docked phone, so a pinned window floats.
+const DOCK_MIN_VIEWPORT = 900;
+/// Height above the dock (title bar, wall toolbar, box chips: 209 px) plus a bottom margin, measured
+/// in the 40-phone browser mock at 1920×1080 and 1366×768; a constant, so a toolbar notice never
+/// resizes the docked phone under the pointer.
+const DOCK_TOP_RESERVE = 200;
 
 function mapToDevice(
   el: HTMLElement,
@@ -128,10 +143,16 @@ export function FocusStream({
   onSelectDevice,
   functions = [],
   recordingControls,
+  dock = null,
+  pinned = false,
+  onPinnedChange,
 }: Props) {
   const { closing, close: onClose } = useClosingTransition(onClosed, 180, device.udid);
   const dialogRef = useRef<HTMLDivElement>(null);
-  useEffect(() => { if (active && document.activeElement !== screenRef.current) dialogRef.current?.focus({ preventScroll: true }); }, [active]);
+  const [viewport, setViewport] = useState(() => ({ width: window.innerWidth, height: window.innerHeight }));
+  const docked = dock !== null && viewport.width >= DOCK_MIN_VIEWPORT;
+  // `docked` re-runs it: pin/unpin remounts the window's DOM, and the pressed button goes with it.
+  useEffect(() => { if (active && document.activeElement !== screenRef.current) dialogRef.current?.focus({ preventScroll: true }); }, [active, docked]);
   useEffect(() => {
     void viewSetPreset(device.udid, "overlay").catch(error => console.warn("overlay preset refused", error));
     return () => { void viewSetPreset(device.udid, "tile").catch(() => {}); };
@@ -139,7 +160,6 @@ export function FocusStream({
   const hasView = useViewLive(device.udid);
   const viewSize = useViewSize(device.udid);
   const [busy, setBusy] = useState(false);
-  const [pinned,setPinned]=useState(false);
   const stageRef=useRef<HTMLDivElement>(null);
   const stageOffset=useRef({x:0,y:0});
   const stageDrag=useRef<{x:number;y:number;origin:{x:number;y:number}}|null>(null);
@@ -156,8 +176,7 @@ export function FocusStream({
   const [showKeyboards, setShowKeyboards] = useState(false);
   const [frameWidth, setFrameWidth] = useState(() => loadZoom(FOCUS_ZOOM));
   const resizeDrag = useRef<{ x: number; width: number } | null>(null);
-  const [viewport, setViewport] = useState(() => ({ width: window.innerWidth, height: window.innerHeight }));
-  useEffect(()=>{stageDrag.current=null;stageOffset.current={x:0,y:0};if(stageRef.current)stageRef.current.style.transform="";},[device.udid,viewport.width,viewport.height]);
+  useEffect(()=>{stageDrag.current=null;stageOffset.current={x:0,y:0};if(stageRef.current)stageRef.current.style.transform="";},[device.udid,viewport.width,viewport.height,docked]);
   useEffect(() => {
     const resized = () => setViewport({ width: window.innerWidth, height: window.innerHeight });
     window.addEventListener("resize", resized);
@@ -285,7 +304,10 @@ export function FocusStream({
   const encodedW = viewSize?.width && viewSize.width > 0 ? viewSize.width : 0;
   const encodedH =
     viewSize?.height && viewSize.height > 0 ? viewSize.height : 0;
-  const layout = focusLayout(encodedW, encodedH, frameWidth, viewport.width, viewport.height);
+  const layout = focusLayout(encodedW, encodedH, frameWidth, viewport.width, docked ? viewport.height - DOCK_TOP_RESERVE : viewport.height);
+  // The dock's width comes from the size setting and the window, not the frame, so the first
+  // frame or a status change never reflows the wall beside it (only a landscape frame widens it).
+  const dockWidth = Math.max(focusLayout(0, 0, frameWidth, viewport.width, viewport.height - DOCK_TOP_RESERVE).screenWidth, layout.screenWidth) + 228;
   useEffect(() => () => {
     // Never finish a gesture using coordinates from a newer orientation/generation
     // or carry a held pointer across a confirmed device disconnect.
@@ -533,7 +555,7 @@ export function FocusStream({
       pendingTicks = 0;
       screen.removeEventListener("wheel", onWheel);
     };
-  }, [activeSync?.masterUdid, device.udid, encodedH, encodedW, sessionReady, targetKey]);
+  }, [activeSync?.masterUdid, device.udid, docked, encodedH, encodedW, sessionReady, targetKey]);
 
   /// The most samples a single drag is allowed to carry.
   ///
@@ -905,17 +927,17 @@ export function FocusStream({
         { key: "back", title: "Back", Icon: IconBack },
       ];
 
-  return (
+  const windowElement = (
     <div
       ref={dialogRef}
       tabIndex={-1}
-      className={`focus-overlay device-floating-window${closing ? " is-closing" : ""}`}
+      className={`focus-overlay device-floating-window${docked ? " is-docked" : ""}${closing ? " is-closing" : ""}`}
       inert={closing}
       role="dialog"
       aria-modal="false"
       data-active={active}
-      data-pinned={pinned}
-      style={{ zIndex: 40 + (pinned ? 6 : 0) + (active ? 2 : windowOrder / 100), translate: `${windowOrder % 5 * 18}px ${windowOrder % 5 * 12}px` }}
+      data-pinned={docked}
+      style={docked ? { width: Math.round(dockWidth) } : { zIndex: 40 + (active ? 2 : windowOrder / 100), translate: `${windowOrder % 5 * 18}px ${windowOrder % 5 * 12}px` }}
       aria-busy={busy}
       aria-label={`Điều khiển ${device.name}`}
       onPointerDownCapture={onActivate}
@@ -1150,11 +1172,11 @@ export function FocusStream({
           style={{ height: layout.menuHeight }}
         >
           <header className="focus-menu-head">
-            <div className="focus-drag-title" title="Kéo để di chuyển bảng điều khiển"
-              onPointerDown={e=>{if(e.button!==0)return;e.currentTarget.setPointerCapture(e.pointerId);stageDrag.current={x:e.clientX,y:e.clientY,origin:{...stageOffset.current}};}}
+            <div className="focus-drag-title" title={docked ? undefined : "Kéo để di chuyển bảng điều khiển"}
+              onPointerDown={e=>{if(docked||e.button!==0)return;e.currentTarget.setPointerCapture(e.pointerId);stageDrag.current={x:e.clientX,y:e.clientY,origin:{...stageOffset.current}};}}
               onPointerMove={e=>{const d=stageDrag.current;if(!d||!stageRef.current)return;const box=stageRef.current.getBoundingClientRect();const proposed={x:d.origin.x+e.clientX-d.x,y:d.origin.y+e.clientY-d.y};const dx=Math.max(12-box.left,Math.min(proposed.x-stageOffset.current.x,window.innerWidth-12-box.right));const dy=Math.max(12-box.top,Math.min(proposed.y-stageOffset.current.y,window.innerHeight-12-box.bottom));stageOffset.current={x:stageOffset.current.x+dx,y:stageOffset.current.y+dy};stageRef.current.style.transform=`translate(${stageOffset.current.x}px, ${stageOffset.current.y}px)`;}}
               onPointerUp={()=>{stageDrag.current=null;}} onPointerCancel={()=>{stageDrag.current=null;}}>
-              <GripVertical size={15} aria-hidden="true"/><span className="focus-machine-number">{index > 0 ? index : machineNumberLabel(index)}</span>
+              {!docked && <GripVertical size={15} aria-hidden="true"/>}<span className="focus-machine-number">{index > 0 ? index : machineNumberLabel(index)}</span>
               <strong title={`${machineNumberLabel(index)} · ${device.name} (${device.udid})`}>{device.name}</strong>
             </div>
             {activeSync && (
@@ -1195,7 +1217,7 @@ export function FocusStream({
             >
               <IconCopy size={14} />
             </button>
-            <button type="button" className="ghost" aria-label={pinned?"Bỏ ghim bảng điều khiển":"Ghim bảng điều khiển"} aria-pressed={pinned} onClick={()=>setPinned(v=>!v)} title={pinned?"Bỏ ghim":"Giữ cửa sổ phía trên các máy khác"}>{pinned?<PinOff size={15}/>:<Pin size={15}/>}</button>
+            {onPinnedChange && <button type="button" className="ghost" aria-label={pinned?"Bỏ ghim cửa sổ máy":"Ghim cửa sổ máy"} aria-pressed={pinned} onClick={()=>onPinnedChange(!pinned)} title={pinned?"Bỏ ghim: cửa sổ nổi trên lưới, kéo được":"Ghim: cửa sổ cố định bên trái lưới máy"}>{pinned?<PinOff size={15}/>:<Pin size={15}/>}</button>}
             <button
               type="button"
               className="close"
@@ -1439,4 +1461,5 @@ export function FocusStream({
       </div>
     </div>
   );
+  return docked && dock ? createPortal(windowElement, dock) : windowElement;
 }

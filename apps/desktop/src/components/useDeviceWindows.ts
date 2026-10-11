@@ -1,9 +1,21 @@
 import { useCallback, useEffect, useState } from "react";
 import type { DeviceInfo } from "../types";
 
+const PINNED_KEY = "riviu.deviceWindow.pinned";
+
+/** Pinned (docked beside the wall) is the default, as in GenFarmer; storage may be blocked. */
+function loadPinned(): boolean {
+  try { return window.localStorage.getItem(PINNED_KEY) !== "false"; } catch { return true; }
+}
+
 export function useDeviceWindows(devices: DeviceInfo[]) {
   const [openUdids, setOpenUdids] = useState<string[]>([]);
   const [activeUdid, setActiveUdid] = useState<string | null>(null);
+  const [pinned, setPinnedState] = useState(loadPinned);
+  const setPinned = useCallback((next: boolean) => {
+    setPinnedState(next);
+    try { window.localStorage.setItem(PINNED_KEY, String(next)); } catch { /* per-viewer convenience only */ }
+  }, []);
   const open = useCallback((udid: string | null) => {
     if (!udid) { setOpenUdids([]); setActiveUdid(null); return; }
     setOpenUdids(current => current.length === 1 && current[0] === udid ? current : [udid]);
@@ -20,5 +32,5 @@ export function useDeviceWindows(devices: DeviceInfo[]) {
     setOpenUdids(current => current.every(id => present.has(id)) ? current : current.filter(id => present.has(id)));
     setActiveUdid(current => current && present.has(current) ? current : null);
   }, [roster]);
-  return { openUdids, activeUdid, open, close, activate: setActiveUdid };
+  return { openUdids, activeUdid, open, close, activate: setActiveUdid, pinned, setPinned };
 }
