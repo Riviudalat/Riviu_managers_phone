@@ -656,7 +656,9 @@ có versionCode tối thiểu 5 cho launcher; APK, manifest và NOTICE phải kh
 - Preflight và Start dùng chung một request ID dự định. Bị chặn do acceptance mode hoặc
   owner không tách được đều làm `canExecute` false. Một owner không nhả được thắng mọi
   hàng nhả được khác trên cùng máy.
-- Report hết hạn bị bỏ để operator kiểm lại. Receipt failed không có campaign là từ chối
+- Report hết hạn (30 giây) không chặn nút xác nhận: Start chạy lại preflight một lần cùng
+  request ID, kể cả khi có pending marker chưa có receipt, rồi áp đúng luật so sánh review
+  (`reviewChanges`); khác hoặc `canExecute` false thì dừng trước effect. Receipt failed không có campaign là từ chối
   bền; retire xóa pending marker local và phát cho cả trang lẫn progress monitor. Lỗi
   storage không phát retire. Receipt null không bao giờ có nghĩa là bị từ chối.
 - ID pending lịch sử không có receipt có nút **Hủy yêu cầu chưa được tiếp nhận** trên
@@ -1170,8 +1172,12 @@ hiện cần kiểm tra; người vận hành chủ động yêu cầu đọc l�
 
 
 Điều phối Đăng bài dùng `publish_dispatch_jobs` trong SQLite (migration41), cùng
-claim độc quyền theo thiết bị và giới hạn riêng cho chuyển media. Soạn bài, xác
-minh, cleanup và hoàn tất ứng dụng không dùng trần số máy. Worker chỉ tạo task sau admission;
+claim độc quyền theo thiết bị và giới hạn riêng cho chuyển media. Pha `compose` (quan sát,
+chọn nhạc, soạn, Post) giữ tối đa `PUBLISH_COMPOSE_PHONE_CAP` = 6 máy trong toàn ứng dụng
+(đo 2026-10-12 trên host Windows: 20 máy Android soạn cùng lúc với 20 tile live làm adb
+daemon timeout, ra `publish_observation_deadline`, `publish_sound_budget_exhausted`,
+`device_overloaded`). Job vượt trần ở lại `queued` với lý do `stage_capacity`, trước mọi
+effect và intent. Xác minh, cleanup và hoàn tất ứng dụng không dùng trần số máy. Worker chỉ tạo task sau admission;
 media được tải theo bài đã nhận, hàng chờ chỉ giữ ID. `publish_attempts` giữ lịch
 sử lần thử; `publication_id` được backfill bằng assignment ID và bất biến, không
 nhóm lại dữ liệu cũ theo caption, thư mục hoặc tên máy. Intent và revision của
@@ -1179,7 +1185,7 @@ pipeline vẫn kiểm tại nút Đăng. Worker đã lỗi sau effect chỉ chuy
 
 `publish_get_limits`/`publish_set_limits` nhận `{transfer,compose,verify,deviceTotal}`,
 lưu ở `publish.dispatch.limits` theo database máy chủ, mỗi giá trị từ 1 đến 64.
-Giữ cả bốn trường để tương thích dữ liệu cũ; chỉ `transfer` tác động admission.
+Giữ cả bốn trường để tương thích dữ liệu cũ; chỉ `transfer` tác động admission (trần compose là hằng số ở trên, không đọc từ trường `compose`).
 Giảm `transfer` chặn cấp lượt chuyển mới đến khi số đang chạy xuống mức mới,
 không cắt request đang thực hiện. Phân trang candidate chỉ phân chia lượt quét,
 không giới hạn tổng worker. Foreground stream tăng theo số máy đã phát hiện;

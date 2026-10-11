@@ -161,7 +161,9 @@ không tự gán sang bài khác. **Bỏ chọn toàn bộ bài/máy** tác đ�
 Dòng tổng kết và hộp kiểm tra ghi rõ đích Sheet bắt buộc. Có thể Hủy khi đang
 chuyển nội dung trước Đăng. Theo dõi tự đọc lại kết quả mỗi5giây khi đang mở.
 Đăng nhiều máy chạy theo từng máy: máy nào tải đủ và xác nhận ảnh xong sẽ bắt đầu
-đăng ngay khi có lượt điều khiển, trong lúc máy khác tiếp tục tải. Một máy lỗi
+đăng ngay khi có lượt điều khiển, trong lúc máy khác tiếp tục tải. Tối đa 6 máy cùng
+thao tác TikTok (soạn, chọn nhạc, bấm Đăng); máy còn lại hiện **Chờ lượt** và chưa bị
+chạm, không bị tính lỗi. Một máy lỗi
 không dừng cả nhóm. Chi tiết hiển thị đồng thời các máy đang tải, chờ đăng, đang
 gửi và chờ liên kết. Hủy chặn các bài chưa bấm Đăng; bài đã gửi vẫn được xác minh.
 Trước nút Đăng, Riviu kiểm tra clipboard của Helper rồi khôi phục nội dung ban đầu.
@@ -380,7 +382,10 @@ Cách chạy một lượt trong Bàn đăng nhanh:
 4. Kiểm tra đúng link/tab Google Sheet đã xác minh, rồi bấm **Xem lại trước khi đăng**.
    Hộp **Xem lại và xác nhận đăng công khai** là cửa xác nhận duy nhất: bảng đọc đủ từng
    Máy N, @tài khoản, phiên bản nội dung (tên file, thời lượng, mã bản), caption, nhạc và
-   link Sheet, không cắt "…". Đọc kết quả từng máy, bấm **Xác nhận đăng công khai N bài** (xác nhận cuối, không có popup thứ hai). Nhạc được
+   link Sheet, không cắt "…". Đọc kết quả từng máy, bấm **Xác nhận đăng công khai N bài** (xác nhận cuối, không có popup thứ hai).
+   Kết quả kiểm tra chỉ sống 30 giây; nếu đã quá hạn, cùng cú bấm đó tự kiểm tra lại một lần
+   trước khi gửi lệnh. Kết quả như cũ thì đăng luôn; máy, tài khoản, nội dung đổi hoặc có máy
+   không đạt thì chưa gửi lệnh nào, hộp hiện phần đã đổi và lỗi chặn để xác nhận lại. Nhạc được
    chọn và đọc lại trong TikTok sau khi mở máy; kiểm tra đầu vào chưa có nghĩa đã chọn
    nhạc. Các máy có thể dùng trùng nhạc. Bài chưa xác minh giữ media đã chuyển trên
    điện thoại; sau khi xác minh liên kết, app dọn bản chuyển và hiển thị kết quả dọn

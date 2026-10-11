@@ -39,6 +39,13 @@ impl PublishLimits {
     }
 }
 
+/// Phones allowed in the compose stage (observe, sound, compose, Post) at once; the rest wait
+/// queued as `stage_capacity`, before any effect. Measured 2026-10-12 02:28 on the Windows host
+/// with 20 Android phones composing while 20 live tiles streamed: the adb daemon timed out and
+/// the run ended `publish_observation_deadline` x5, `publish_sound_budget_exhausted` x3 and
+/// `device_overloaded` x2.
+pub const PUBLISH_COMPOSE_PHONE_CAP: i64 = 6;
+
 /// No timer revokes a live device call. Drop releases exactly this token; startup
 /// recovery clears process claims only after the old process has ended.
 pub struct PublishWorkPermit {
@@ -310,8 +317,8 @@ impl Database {
         let connection = self.dispatch_conn()?;
         let mut conn = connection.lock();
         let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
-        // Phone concurrency remains unchanged. Network metadata reads use the
-        // configured verify cap, independently of device ownership and transfers.
+        // Compose holds at most `PUBLISH_COMPOSE_PHONE_CAP` phones. Network metadata reads use
+        // the configured verify cap, independently of device ownership and transfers.
         anyhow::ensure!(
             matches!(
                 stage,
@@ -320,12 +327,13 @@ impl Database {
             "unknown publish work stage"
         );
         let limits = Self::publish_limits_from_connection(&tx)?;
-        let (transfers, metadata, busy): (i64, i64, i64) = tx.query_row(
-            "SELECT COALESCE(SUM(stage='transfer'),0),COALESCE(SUM(stage='metadata'),0),
+        let (transfers, composes, metadata, busy): (i64, i64, i64, i64) = tx.query_row(
+            "SELECT COALESCE(SUM(stage='transfer'),0),COALESCE(SUM(stage='compose'),0),COALESCE(SUM(stage='metadata'),0),
              COALESCE(SUM(udid=?1 OR (owner=?2 AND ((?3='metadata' AND stage='verify')
                  OR (?3='verify' AND stage='metadata')))),0) FROM publish_work_claims",
-            params![key, owner, stage], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)))?;
+            params![key, owner, stage], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)))?;
         if busy > 0 || (stage == "transfer" && transfers >= limits.transfer as i64)
+            || (stage == "compose" && composes >= PUBLISH_COMPOSE_PHONE_CAP)
             || (stage == "metadata" && metadata >= limits.verify as i64) {
             return Ok(None);
         }

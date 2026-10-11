@@ -291,6 +291,7 @@ function dispatchDetail(assignment: PublishAssignmentRecord): string | null {
   const reasons: Record<string, string> = {
     device_busy: "Máy đang bận",
     account_busy: "Tài khoản đang được sử dụng",
+    stage_capacity: "Chờ lượt: đã đủ số máy chạy cùng bước này; chưa thao tác trên máy",
     schedule_capacity_deadline: "Chưa được cấp lượt trong cửa sổ 30 giây; không tự đăng bù",
     app_opened_after_deadline: "Ứng dụng mở sau giờ hẹn; không tự đăng bù",
     app_closing: "Ứng dụng đang đóng",
@@ -340,7 +341,7 @@ function PublishHostLimits({ onSaved }: { onSaved: () => void }) {
     if (event.currentTarget.open && !limits && !flight.current) void read();
   }}>
     <summary>Giới hạn chạy đồng thời</summary>
-    <p>Mỗi điện thoại chạy độc lập; các bài trên cùng một máy chạy lần lượt. Chỉ giới hạn chuyển media để bảo vệ USB. Sheet giữ tối đa 2 yêu cầu.</p>
+    <p>Mỗi điện thoại chạy độc lập; các bài trên cùng một máy chạy lần lượt. Giới hạn chuyển media để bảo vệ USB; tối đa 6 máy cùng thao tác TikTok, máy còn lại chờ lượt. Sheet giữ tối đa 2 yêu cầu.</p>
     {busy && <p role="status">Đang đọc hoặc lưu giới hạn…</p>}
     {error && <p role="alert">{error}</p>}
     {limits && <fieldset disabled={busy}><legend>Giới hạn của máy tính này</legend>
@@ -1102,11 +1103,10 @@ export function PublishPage({
       // The review dialog is the sole public-post confirmation boundary.
       const createKey = JSON.stringify(preflightRequest);
       let approved = currentPreflight;
-      if (approved.expiresAt && Date.parse(approved.expiresAt) <= Date.now()) {
-        // Drop the stale report so the setup shows Kiểm tra lại instead of a dead Start.
-        invalidatePreflight();
-        throw new Error("Kết quả kiểm tra đã hết hạn. Bấm Kiểm tra lại trước khi đăng.");
-      }
+      // The backend check lives 30 s (`preflight.rs`), shorter than reading a 20-phone review.
+      // An expired check is not an error: the fresh check below re-runs it once in this same
+      // click, a pending start included, and the review rules decide what happens next.
+      const expired = Boolean(approved.expiresAt && Date.parse(approved.expiresAt) <= Date.now());
       if (approved.startBlock) throw new Error(approved.startBlock);
       let pending = readPendingPublishStart();
       if (pending && pending.inputKey !== createKey) {
@@ -1122,12 +1122,13 @@ export function PublishPage({
       }
       const intendedId = intendedStart.current?.inputKey === createKey ? intendedStart.current.requestId : null;
       if (!pending && !intendedId) throw new Error("Thiết lập đã đổi sau khi kiểm tra. Kiểm tra lại trước khi đăng.");
-      if (!pending) {
+      // A pending start with a recorded status is settled below and never re-checked.
+      if (!pending || (expired && !(await publishStartStatus(pending.requestId)))) {
         // Nothing has been sent for this request yet, so check the review once more right
         // before sending (PLAN §3): a phone that went busy, an account changed elsewhere, a
         // replaced file or a new Sheet target voids it. Stop, show what changed and keep the
         // fresh check on screen; the operator confirms again. Nothing is substituted or dropped.
-        const fresh = await publishPreflight(preflightRequest, intendedId!);
+        const fresh = await publishPreflight(preflightRequest, pending?.requestId ?? intendedId!);
         if (!mounted.current || latestInputKey.current !== reviewedKey) throw new Error("Thiết lập đã đổi sau khi kiểm tra. Kiểm tra lại trước khi đăng.");
         // An account changed here already stopped the click above; one changed elsewhere moves
         // the backend digest, which `reviewChanges` reports.
