@@ -304,10 +304,15 @@ export function FocusStream({
   const encodedW = viewSize?.width && viewSize.width > 0 ? viewSize.width : 0;
   const encodedH =
     viewSize?.height && viewSize.height > 0 ? viewSize.height : 0;
-  const layout = focusLayout(encodedW, encodedH, frameWidth, viewport.width, docked ? viewport.height - DOCK_TOP_RESERVE : viewport.height);
-  // The dock's width comes from the size setting and the window, not the frame, so the first
-  // frame or a status change never reflows the wall beside it (only a landscape frame widens it).
-  const dockWidth = Math.max(focusLayout(0, 0, frameWidth, viewport.width, viewport.height - DOCK_TOP_RESERVE).screenWidth, layout.screenWidth) + 228;
+  const rawLayout = focusLayout(encodedW, encodedH, frameWidth, viewport.width, docked ? viewport.height - DOCK_TOP_RESERVE : viewport.height);
+  // The dock's width comes from the size setting and the window, never from the frame: a first
+  // frame, a status change or a landscape frame must not reflow the wall beside it. A landscape
+  // frame is letterboxed inside the portrait allocation instead.
+  const dockScreenWidth = focusLayout(0, 0, frameWidth, viewport.width, viewport.height - DOCK_TOP_RESERVE).screenWidth;
+  const layout = docked && rawLayout.screenWidth > dockScreenWidth
+    ? { ...rawLayout, screenWidth: dockScreenWidth, screenHeight: dockScreenWidth * (rawLayout.screenHeight / rawLayout.screenWidth) }
+    : rawLayout;
+  const dockWidth = dockScreenWidth + 228;
   useEffect(() => () => {
     // Never finish a gesture using coordinates from a newer orientation/generation
     // or carry a held pointer across a confirmed device disconnect.
