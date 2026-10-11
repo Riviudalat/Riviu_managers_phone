@@ -13,6 +13,13 @@
 .operator-help-api { display:flex; flex-wrap:wrap; align-items:center; gap:var(--space-4); padding:var(--space-4); border:1px solid var(--line); border-radius:var(--radius); background:var(--bg-elevated); }
 .operator-help-api > div { flex:1; min-width:220px; }
 @media(max-width:960px) { .operator-help-topic { grid-template-columns:24px minmax(0,1fr); } .operator-help-topic button { grid-column:2; justify-self:start; } }
+.operator-help-migration { padding:var(--space-4); border:1px solid var(--line); border-radius:var(--radius); background:var(--bg-elevated); min-width:0; }
+.operator-help-migration h3 { margin:0; font-size:var(--text-base); font-weight:var(--weight-semibold); }
+.operator-help-migration p { margin:var(--space-1) 0 var(--space-3); font-size:var(--text-sm); color:var(--text-3); }
+.operator-help-migration table { width:100%; border-collapse:collapse; font-size:var(--text-sm); }
+.operator-help-migration th, .operator-help-migration td { padding:var(--space-2) var(--space-3) var(--space-2) 0; border-top:1px solid var(--line); text-align:left; vertical-align:top; overflow-wrap:anywhere; }
+.operator-help-migration thead th { border-top:0; color:var(--text-3); font-weight:var(--weight-medium); }
+.operator-help-migration tbody th { font-weight:var(--weight-semibold); white-space:nowrap; }
 .admin-workspace {
   display: grid;
   min-width: 0;

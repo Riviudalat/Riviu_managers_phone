@@ -10,7 +10,7 @@ it("hướng dẫn theo nhiệm vụ chỉ điều hướng, không thực thi t
   expect(screen.getByRole("heading", { name: "Bạn cần làm gì?" })).toBeVisible();
   for (const [label, page] of [
     ["Kiểm tra thiết bị", "diagnostics"],
-    ["Mở My Apps", "myApps"],
+    ["Mở Quy trình ứng dụng", "myApps"],
     ["Thiết lập Đăng bài", "publish"],
     ["Xem lượt chạy", "jobs"],
     ["Tham chiếu API", "api"],
