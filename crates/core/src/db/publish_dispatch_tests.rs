@@ -615,7 +615,7 @@ fn cached_candidates_cannot_start_two_publications_on_the_same_device() {
 }
 
 #[test]
-fn held_phone_does_not_block_more_than_old_cap_of_compose_dispatches() {
+fn compose_admits_the_phone_cap_and_queues_the_rest_behind_a_held_phone() {
     let (db, _, campaign, _) = fixture();
     seed_load(&db, &campaign, 66, 66);
     db.conn()
@@ -630,20 +630,38 @@ fn held_phone_does_not_block_more_than_old_cap_of_compose_dispatches() {
         .unwrap()
         .unwrap();
     assert!(db.claim_publish_dispatch(held, 0).unwrap());
+    // The held phone takes one compose slot; the cap admits the rest of its width and every
+    // other phone gets no permit, so its job stays queued before any effect.
+    let cap = PUBLISH_COMPOSE_PHONE_CAP as usize;
     let mut siblings = Vec::new();
+    let mut waiting = Vec::new();
     for job in db.pending_publish_dispatch(128).unwrap() {
-        let permit = db
+        match db
             .try_publish_work(&job.udid, &job.phase, &job.attempt_id)
             .unwrap()
-            .unwrap();
-        assert!(db.claim_publish_dispatch(&job, 0).unwrap());
-        siblings.push((job, permit));
+        {
+            Some(permit) => {
+                assert!(db.claim_publish_dispatch(&job, 0).unwrap());
+                siblings.push((job, permit));
+            }
+            None => waiting.push(job),
+        }
     }
-    assert_eq!(siblings.len(), 65);
+    assert_eq!(siblings.len(), cap - 1);
+    assert_eq!(waiting.len(), 65 - (cap - 1));
     for (job, permit) in siblings {
         assert!(db.finish_publish_dispatch(&job, None).unwrap());
         drop(permit);
     }
+    // A freed slot admits a phone that was waiting.
+    let next = &waiting[0];
+    let next_permit = db
+        .try_publish_work(&next.udid, &next.phase, &next.attempt_id)
+        .unwrap()
+        .unwrap();
+    assert!(db.claim_publish_dispatch(next, 0).unwrap());
+    assert!(db.finish_publish_dispatch(next, None).unwrap());
+    drop(next_permit);
     assert!(db
         .try_publish_work(&held.udid, "verify", "sibling")
         .unwrap()
