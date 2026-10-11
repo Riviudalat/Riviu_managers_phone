@@ -30,8 +30,8 @@ test("submitted posts show incomplete progress and processing evidence without a
     };
   });
   await page.goto("/");
-  await page.getByRole("button", { name: "Mở rộng tiến trình", exact: true }).click();
-  const panel = page.getByRole("dialog", { name: "Cửa sổ tiến trình" });
+  await page.getByRole("button", { name: "Tiến trình công việc", exact: true }).click();
+  const panel = page.getByRole("complementary", { name: "Hàng đợi Cần xử lý" }).getByRole("tabpanel", { name: "Đang chạy" });
   // A post awaiting proof makes the whole run indeterminate: no percentage until it is verified.
   await expect(panel.getByRole("progressbar", { name: "Tiến độ công việc" })).not.toHaveAttribute("aria-valuenow");
   // Separate numbers from the campaign itself: the one assignment is submitted and still verifying.
@@ -45,7 +45,7 @@ test("submitted posts show incomplete progress and processing evidence without a
   await expect(panel).not.toContainText("100%");
   await expect(panel).not.toContainText("Thành công");
   await panel.screenshot({ path: "../../target/stable-installer-20260909/frontend/publish-pending.png" });
-  await panel.getByRole("button", { name: "Thu nhỏ tiến trình", exact: true }).click();
+  await page.getByRole("button", { name: "Đóng hàng đợi", exact: true }).click();
   await openOperatorPage(page, 'Đăng bài');
   await page.getByRole("tab", { name: "Theo dõi", exact: true }).click();
   await page.getByRole("button", { name: /^Chiến dịch 1 / }).click();
@@ -79,7 +79,10 @@ for (const viewport of [{ width: 1440, height: 900 }, { width: 820, height: 560 
       };
     });
     await page.goto("/");
-    await page.getByRole("button", { name: "Mở rộng tiến trình", exact: true }).click();
+    // A finished run lives in Lượt chạy, which reopens its phones in the queue's "Đang chạy".
+    await openOperatorPage(page, "Lượt chạy");
+    await page.getByRole("button", { name: "Xem lượt chạy Đăng bài", exact: true }).click();
+    await page.getByRole("button", { name: "Xem nhật ký từng máy", exact: true }).click();
     await page.getByRole("button", { name: /Máy 2 Đã xác minh/ }).click();
     const log = page.getByRole("list", { name: "Nhật ký theo thời gian" });
     await expect(log.getByRole("listitem").first()).toContainText("[12] Thành công — máy 2 đã đăng bài");
@@ -87,7 +90,7 @@ for (const viewport of [{ width: 1440, height: 900 }, { width: 820, height: 560 
     await page.getByRole("button", { name: "Mới nhất trước" }).click();
     await expect(log.getByRole("listitem").first()).toContainText("[1] Kiểm tra kết nối");
     await expect(log.getByRole("listitem").first()).toContainText("07:03:00");
-    const panel = page.getByRole("dialog", { name: "Cửa sổ tiến trình" });
+    const panel = page.getByRole("complementary", { name: "Hàng đợi Cần xử lý" });
     const bounds = await panel.boundingBox();
     expect(bounds).not.toBeNull();
     expect(bounds!.x + bounds!.width).toBeLessThanOrEqual(viewport.width + 1);

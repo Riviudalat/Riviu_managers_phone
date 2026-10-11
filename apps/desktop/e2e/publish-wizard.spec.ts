@@ -145,10 +145,12 @@ for (const viewport of [
       expect(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth)).toBe(true);
       const root = page.locator(".publish-quick");
       const before = await root.boundingBox();
-      const surface = page.locator(".run-monitor");
-      await surface.evaluate(element => element.classList.remove("is-minimized"));
+      // The queue opens over the page and closes back without moving it.
+      await page.getByRole("button", { name: /^Hàng đợi Cần xử lý/ }).click();
+      await expect(page.getByRole("complementary", { name: "Hàng đợi Cần xử lý" })).toBeVisible();
       expect(await root.boundingBox()).toEqual(before);
-      await surface.evaluate(element => element.classList.add("is-minimized"));
+      await page.getByRole("button", { name: "Đóng hàng đợi", exact: true }).click();
+      expect(await root.boundingBox()).toEqual(before);
       const footer = root.locator(".pq-footer");
       const box = await footer.boundingBox();
       expect(box!.x).toBeGreaterThanOrEqual(0);

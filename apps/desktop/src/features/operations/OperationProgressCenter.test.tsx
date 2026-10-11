@@ -2,6 +2,7 @@ import { act, cleanup, fireEvent, render, screen, waitFor, within } from "@testi
 import { afterEach, beforeEach, expect, it, vi } from "vitest";
 import { operationDeviceLog, operationGetRun, operationQueryRuns, operationStop, operationStopStatus, publishCancelUnacceptedStart, publishCheckLinks, publishGet, publishResumeVerification, publishRetryAssignment, publishRetrySheetAssignment, publishStartStatus } from "../../api";
 import { observePendingPublishStart } from "./publishStartBridge";
+import { readQueryClient } from "../../readQuery";
 import type { OperationRunDetail, OperationRunSummary } from "../../types";
 import { OperationProgressCenter } from "./OperationProgressCenter";
 let narrowViewport = false;
@@ -12,7 +13,11 @@ const run: OperationRunSummary = { id: "publish:run", sourceId: "run", kind: "pu
 const detail: OperationRunDetail = { summary: run, items: ["a", "b"].map((udid, i) => ({ id: udid, udid, label: `Bài ${i + 1}`, kind: "assignment", state: i ? "running" : "succeeded", detail: null, errorCode: null, evidence: null, retryable: false })) };
 const labels = new Map([["a", "Máy 2 · Nội dung"], ["b", "Máy 5 · Đăng bài"]]);
 afterEach(cleanup);
+// jsdom gives a `hidden` element no accessible name, so the drawer is found by its role alone.
+const drawer = () => screen.getAllByRole("complementary", { hidden: true }).find(element => element.getAttribute("aria-label") === "Hàng đợi Cần xử lý")!;
+const chip = () => screen.getByRole("button", { name: /^Hàng đợi Cần xử lý/ });
 beforeEach(() => {
+  readQueryClient.clear();
   narrowViewport = false;
   localStorage.clear();
   vi.clearAllMocks();
@@ -24,11 +29,16 @@ beforeEach(() => {
   vi.mocked(operationDeviceLog).mockResolvedValue({ entries: [{ id: "log", at: "2026-09-07T12:34:56", action: "publish", state: "posting", text: null, detail: null }], truncated: false });
 });
 
-it("opens the new pending start immediately and keeps a status error visible before ACK", async () => {
+it("shows a new pending start in the pill without opening and keeps a status error visible before ACK", async () => {
   vi.mocked(publishStartStatus).mockRejectedValueOnce(new Error("Chưa đọc được trạng thái lượt đăng"));
   render(<OperationProgressCenter deviceLabels={labels} />);
   await act(async () => observePendingPublishStart({ requestId: "new-start", inputKey: "{}", requestedAt: new Date().toISOString() }));
-  expect(screen.getByRole("dialog", { name: "Cửa sổ tiến trình" })).toBeVisible();
+  // Never auto-open (PLAN §5): the start only shows in the bar until the operator opens it.
+  expect(drawer()).not.toBeVisible();
+  const pill = screen.getByRole("button", { name: "Tiến trình công việc" });
+  await waitFor(() => expect(pill).toHaveAttribute("title", expect.stringContaining("Lượt đăng đang chuẩn bị")));
+  fireEvent.click(pill);
+  expect(drawer()).toBeVisible();
   expect(await screen.findByText("Chưa đọc được trạng thái lượt đăng")).toBeVisible();
   expect(screen.getByText("Tác vụ: publish-start:new-start")).toBeVisible();
 });
@@ -69,64 +79,68 @@ it("offers pause for a legacy stopped publication that has not released its devi
  const stopped={...run,state:"cancelled" as const};
  vi.mocked(operationQueryRuns).mockResolvedValue({runs:[stopped],total:1,counts:{active:0,succeeded:0,attention:1},hasMore:false});
  vi.mocked(operationStopStatus).mockResolvedValue({operationId:run.id,state:"closed",devices:[]});
- await openDevices();
+ // A finished run leaves "Đang chạy"; its Chưa rõ post keeps it reachable from the queue.
+ vi.mocked(publishGet).mockResolvedValue({ campaign: { createdAt: "2026-09-07T12:00:00Z" }, assignments: [{ id: "a", udid: "a", ordinal: 0, state: "uncertain", effectIntent: "post" }] } as never);
+ await openDevices(false, stopped);
  expect(screen.getByRole("button",{name:"Dừng tác vụ và về màn hình chính"})).toHaveTextContent("Tạm dừng");
 });
 
-it("drags the title without a separate grip and does not toggle on release", async () => {
+it("opens over the wall from the bar, never docks, keeps focus where it was and closes back to its launcher", async () => {
   await openDevices();
-  expect(screen.queryByRole("button", { name: "Di chuyển cửa sổ tiến trình" })).not.toBeInTheDocument();
-  const title = screen.getByRole("button", { name: "Tiến trình công việc" });
-  const panel = screen.getByRole("dialog", { name: "Cửa sổ tiến trình" });
-  const rect = vi.spyOn(panel, "getBoundingClientRect").mockReturnValue({ left: 300, top: 200, width: 760, height: 500 } as DOMRect);
-  try {
-    fireEvent.pointerDown(title, { button: 0, isPrimary: true, pointerId: 1, clientX: 360, clientY: 220 });
-    fireEvent.pointerMove(title, { pointerId: 1, clientX: 200, clientY: 120 });
-    fireEvent.pointerUp(title, { button: 0, pointerId: 1, clientX: 200, clientY: 120 });
-    fireEvent.click(title, { detail: 1 });
-    expect(panel).toHaveStyle({ left: "140px", top: "100px" });
-    expect(screen.getByRole("dialog", { name: "Cửa sổ tiến trình" })).toBe(panel);
-    fireEvent.pointerDown(title, { button: 0, isPrimary: true, pointerId: 2, clientX: 200, clientY: 120 });
-    fireEvent.pointerUp(title, { button: 0, pointerId: 2, clientX: 200, clientY: 120 });
-    fireEvent.click(title, { detail: 1 });
-    expect(screen.queryByRole("dialog")).not.toBeInTheDocument();
-  } finally { rect.mockRestore(); }
+  const pill = screen.getByRole("button", { name: "Tiến trình công việc" });
+  expect(pill).toHaveAttribute("aria-expanded", "true");
+  // An overlay on document.body, not a column beside the wall: nothing it does takes width.
+  expect(drawer().parentElement).toBe(document.body);
+  expect(drawer()).not.toHaveClass("is-docked");
+  fireEvent.click(pill);
+  expect(drawer()).not.toBeVisible();
+  pill.focus();
+  fireEvent.click(pill);
+  expect(drawer()).toBeVisible();
+  expect(pill).toHaveFocus();
+  screen.getByRole("button", { name: "Đóng hàng đợi" }).focus();
+  fireEvent.keyDown(screen.getByRole("button", { name: "Đóng hàng đợi" }), { key: "Escape" });
+  expect(drawer()).not.toBeVisible();
+  expect(pill).toHaveFocus();
 });
 
-it("keeps tiny pointer movement as a click and excludes the minimize control from dragging", async () => {
-  await openDevices();
-  const title = screen.getByRole("button", { name: "Tiến trình công việc" });
-  const panel = screen.getByRole("dialog", { name: "Cửa sổ tiến trình" });
-  fireEvent.pointerDown(title, { button: 0, isPrimary: true, pointerId: 1, clientX: 100, clientY: 100 });
-  fireEvent.pointerMove(title, { pointerId: 1, clientX: 102, clientY: 101 });
-  expect(HTMLElement.prototype.setPointerCapture).not.toHaveBeenCalled();
-  fireEvent.pointerUp(title, { pointerId: 1 });
-  const minimize = screen.getByRole("button", { name: "Thu nhỏ tiến trình" });
-  fireEvent.pointerDown(minimize, { button: 0, isPrimary: true, pointerId: 2, clientX: 100, clientY: 100 });
-  fireEvent.pointerMove(minimize, { pointerId: 2, clientX: 180, clientY: 150 });
-  fireEvent.pointerUp(minimize, { pointerId: 2 });
-  fireEvent.keyDown(minimize, { key: "ArrowLeft" });
-  expect(panel.style.left).toBe("");
-  expect(HTMLElement.prototype.setPointerCapture).not.toHaveBeenCalled();
-  fireEvent.click(title, { detail: 1 });
-  expect(screen.queryByRole("dialog")).not.toBeInTheDocument();
-});
-
-it("cancels a touch drag without blocking subsequent keyboard activation", async () => {
-  await openDevices();
-  const title = screen.getByRole("button", { name: "Tiến trình công việc" });
-  fireEvent.pointerDown(title, { button: 0, isPrimary: true, pointerId: 1, pointerType: "touch", clientX: 100, clientY: 100 });
-  fireEvent.pointerMove(title, { pointerId: 1, pointerType: "touch", clientX: 180, clientY: 150 });
-  fireEvent.pointerCancel(title, { pointerId: 1, pointerType: "touch" });
-  fireEvent.click(title, { detail: 0 });
-  expect(screen.queryByRole("dialog")).not.toBeInTheDocument();
-  fireEvent.click(title);
-  expect(screen.getByRole("dialog", { name: "Cửa sổ tiến trình" })).toBeVisible();
-});
-
-async function openDevices(wide = false) {
+it("counts a new item on the chip with a notice and never opens the queue on its own", async () => {
+  vi.mocked(publishGet).mockResolvedValue({ campaign: { createdAt: "2026-09-07T12:00:00Z" }, assignments: [] } as never);
   render(<OperationProgressCenter deviceLabels={labels} />);
-  fireEvent.click(await screen.findByLabelText("Tiến trình công việc"));
+  await waitFor(() => expect(chip()).toHaveAccessibleName("Hàng đợi Cần xử lý: 0 mục"));
+  vi.mocked(publishGet).mockResolvedValue({ campaign: { createdAt: "2026-09-07T12:00:00Z" }, assignments: [{ id: "a", udid: "a", ordinal: 0, state: "uncertain", effectIntent: "post" }] } as never);
+  await act(async () => { await readQueryClient.invalidateQueries(); });
+  await waitFor(() => expect(chip()).toHaveAccessibleName("Hàng đợi Cần xử lý: 1 mục"));
+  expect(screen.getByText(/Cần xử lý: thêm 1 mục\. Máy 2 · Chưa rõ bài đã lên/)).toBeInTheDocument();
+  expect(drawer()).not.toBeVisible();
+  expect(chip()).toHaveAttribute("aria-expanded", "false");
+});
+
+it("toggles with Ctrl+Shift+X without moving focus, and the Chưa rõ row offers only evidence and Theo dõi", async () => {
+  vi.mocked(publishGet).mockResolvedValue({ campaign: { createdAt: "2026-09-07T12:00:00Z" }, assignments: [{ id: "a", udid: "a", ordinal: 0, state: "uncertain", effectIntent: "post" }] } as never);
+  render(<><button type="button">Máy 9 trên lưới</button><OperationProgressCenter deviceLabels={labels} /></>);
+  const tile = screen.getByRole("button", { name: "Máy 9 trên lưới" });
+  tile.focus();
+  fireEvent.keyDown(window, { key: "X", ctrlKey: true, shiftKey: true });
+  expect(drawer()).toBeVisible();
+  expect(tile).toHaveFocus();
+  const row = await screen.findByRole("listitem", { name: /^Máy 2 · Chưa thuộc box · Chưa rõ bài đã lên/ });
+  expect(within(row).getByText("Ở lại tới khi có kết luận")).toBeVisible();
+  expect(within(row).getAllByRole("button").map(button => button.textContent)).toEqual(["Theo dõi"]);
+  expect(within(row).getByText("Xem bằng chứng")).toBeVisible();
+  fireEvent.keyDown(window, { key: "X", ctrlKey: true, shiftKey: true });
+  expect(drawer()).not.toBeVisible();
+  expect(tile).toHaveFocus();
+});
+
+/** Opens "Đang chạy" on `target`: from the pill while it runs, from its queue row once finished. */
+async function openDevices(wide = false, target: OperationRunSummary = run) {
+  render(<OperationProgressCenter deviceLabels={labels} />);
+  if (target.state === "running" || target.state === "queued") fireEvent.click(await screen.findByLabelText("Tiến trình công việc"));
+  else {
+    fireEvent.click(chip());
+    fireEvent.click((await screen.findAllByRole("button", { name: "Theo dõi" }))[0]);
+  }
   await screen.findByRole("button", { name: /Máy 2/ });
   if (wide) fireEvent.click(screen.getByRole("button", { name: "Phóng rộng tiến trình" }));
 }
@@ -144,7 +158,7 @@ it("opens run, exact device and HH:mm:ss log without dispatching work", async ()
   expect(await screen.findByText("12:34:56")).toBeVisible();
   expect(operationDeviceLog).toHaveBeenCalledWith("publish:run", "a");
   expect(within(screen.getByLabelText("Chi tiết máy")).getByText(labels.get("a")!)).toBeVisible();
-  fireEvent.keyDown(screen.getByLabelText("Tiến trình công việc"), { key: "Escape" });
+  fireEvent.keyDown(screen.getByRole("button", { name: "Đóng hàng đợi" }), { key: "Escape" });
   await waitFor(() => expect(screen.getByLabelText("Chi tiết máy")).not.toBeVisible());
 });
 
@@ -162,7 +176,7 @@ it.each(["running", "partial"] as const)("does not display complete progress for
       evidenceJson: JSON.stringify({ post: { publicationVerified: true, postUrl: `https://www.tiktok.com/@${conflict ? "other" : "fixture"}/video/1`, expectedAccount: conflict ? "other" : "fixture" } }) },
     { id: "b", udid: "b", ordinal: 1, state: "verifying", effectIntent: "post", errorCode: "post_verification_pending" },
   ] } as never);
-  await openDevices();
+  await openDevices(false, pending);
   // A post awaiting proof makes the whole run indeterminate, running or not: no percentage.
   expect(screen.getByRole("progressbar", { name: "Tiến độ công việc" })).not.toHaveAttribute("aria-valuenow");
   expect(screen.queryByText("100%")).toBeNull();
@@ -237,43 +251,53 @@ it("shows an inline retry for logs and does not turn a read error into an empty 
   expect(await screen.findByText("12:34:56")).toBeVisible();
 });
 
-it("minimizes without hiding progress and prevents deleting running records", async () => {
+it("closes without hiding progress and offers no deletion of running records", async () => {
   await openDevices();
-  expect(screen.getByRole("dialog", { name: "Cửa sổ tiến trình" })).toHaveClass("is-floating");
-  expect(screen.getByRole("button", { name: "Xoá bản ghi Đăng bài" })).toBeDisabled();
-  expect(screen.getByRole("button", { name: "Xoá các bản ghi đã kết thúc" })).toBeDisabled();
-  fireEvent.click(screen.getByRole("button", { name: "Thu nhỏ tiến trình" }));
-  expect(screen.queryByRole("dialog")).not.toBeInTheDocument();
-  expect(screen.getByRole("progressbar", { name: "Tiến độ công việc" })).toHaveAttribute("aria-valuenow", "50");
-  fireEvent.click(screen.getByRole("button", { name: "Mở rộng tiến trình" }));
+  expect(screen.queryByRole("button", { name: /Xoá bản ghi/ })).toBeNull();
+  fireEvent.click(screen.getByRole("button", { name: "Đóng hàng đợi" }));
+  expect(drawer()).not.toBeVisible();
+  expect(screen.getByRole("progressbar", { name: "Tiến độ các lượt đang chạy" })).toHaveAttribute("aria-valuenow", "50");
+  fireEvent.click(screen.getByRole("button", { name: "Tiến trình công việc" }));
   expect(await screen.findByRole("button", { name: /Máy 2/ })).toBeVisible();
 });
 
-it("deletes a finished record from the monitor, persists and supports undo", async () => {
-  const done = { ...run, state: "partial" as const, updatedAt: "2026-09-07T00:00:00Z" };
-  vi.mocked(operationQueryRuns).mockResolvedValue({ runs: [done], total: 1, counts: { active: 0, succeeded: 0, attention: 1 }, hasMore: false });
-  await openDevices();
-  fireEvent.click(screen.getByRole("button", { name: "Xoá bản ghi Đăng bài" }));
-  expect(screen.getByText("Không còn bản ghi trong cửa sổ này.")).toBeVisible();
-  expect(screen.getByRole("button", { name: "Hoàn tác xoá" })).toBeVisible();
-  fireEvent.click(screen.getByRole("button", { name: "Hoàn tác xoá" }));
-  expect(await screen.findByRole("button", { name: "Xoá bản ghi Đăng bài" })).toBeEnabled();
-  fireEvent.click(screen.getByRole("button", { name: "Xoá các bản ghi đã kết thúc" }));
+const failedNurture: OperationRunSummary = { ...run, id: "nurture:done", sourceId: "done", kind: "nurture", title: "Nuôi TikTok", state: "partial", issueCount: 2, updatedAt: "2026-09-07T00:00:00Z" };
+const failedNurtureDetail: OperationRunDetail = { summary: failedNurture, items: [
+  { id: "f", udid: "a", label: "Máy 2", kind: "device", state: "failed", detail: "TikTok không lên màn hình chính", errorCode: null, evidence: null, retryable: false },
+  { id: "u", udid: "b", label: "Máy 5", kind: "device", state: "uncertain", detail: "Đã bấm Gửi nhưng chưa thấy bình luận", errorCode: null, evidence: null, retryable: false },
+] };
+
+it("hides a finished run's failures once seen, persists and supports undo, while Chưa rõ stays", async () => {
+  vi.mocked(operationQueryRuns).mockResolvedValue({ runs: [failedNurture], total: 1, counts: { active: 0, succeeded: 0, attention: 1 }, hasMore: false });
+  vi.mocked(operationGetRun).mockResolvedValue(failedNurtureDetail);
+  render(<OperationProgressCenter deviceLabels={labels} />);
+  fireEvent.click(chip());
+  expect(await screen.findByRole("listitem", { name: /^Máy 2 · .*Thất bại/ })).toBeVisible();
+  fireEvent.click(screen.getByRole("button", { name: "Đã xem các mục lỗi của Nuôi TikTok" }));
+  expect(screen.queryByRole("listitem", { name: /^Máy 2 · / })).toBeNull();
+  expect(screen.getByRole("listitem", { name: /^Máy 5 · .*Chưa rõ kết quả thao tác/ })).toBeVisible();
+  fireEvent.click(screen.getByRole("button", { name: "Hoàn tác" }));
+  expect(await screen.findByRole("listitem", { name: /^Máy 2 · / })).toBeVisible();
+  fireEvent.click(screen.getByRole("button", { name: "Đã xem các mục lỗi của Nuôi TikTok" }));
   cleanup();
   render(<OperationProgressCenter deviceLabels={labels} />);
-  await waitFor(()=>expect(operationQueryRuns).toHaveBeenCalled());
-  expect(screen.queryByLabelText("Tiến trình công việc")).not.toBeInTheDocument();
-  expect(screen.queryByRole("button", { name: "Xoá bản ghi Đăng bài" })).not.toBeInTheDocument();
+  fireEvent.click(chip());
+  expect(await screen.findByRole("listitem", { name: /^Máy 5 · / })).toBeVisible();
+  expect(screen.queryByRole("listitem", { name: /^Máy 2 · / })).toBeNull();
+  expect(screen.queryByRole("button", { name: "Đã xem các mục lỗi của Nuôi TikTok" })).toBeNull();
 });
 
-it("retains a finished record if saving its dismissal fails", async () => {
-  vi.mocked(operationQueryRuns).mockResolvedValue({ runs: [{ ...run, state: "succeeded" }], total: 1, counts: { active: 0, succeeded: 1, attention: 0 }, hasMore: false });
-  await openDevices();
+it("retains a finished run's failures if saving the dismissal fails", async () => {
+  vi.mocked(operationQueryRuns).mockResolvedValue({ runs: [failedNurture], total: 1, counts: { active: 0, succeeded: 0, attention: 1 }, hasMore: false });
+  vi.mocked(operationGetRun).mockResolvedValue(failedNurtureDetail);
+  render(<OperationProgressCenter deviceLabels={labels} />);
+  fireEvent.click(chip());
+  await screen.findByRole("listitem", { name: /^Máy 2 · / });
   const failedWrite = vi.spyOn(Storage.prototype, "setItem").mockImplementation(() => { throw Error("quota reached"); });
   try {
-    fireEvent.click(screen.getByRole("button", { name: "Xoá bản ghi Đăng bài" }));
+    fireEvent.click(screen.getByRole("button", { name: "Đã xem các mục lỗi của Nuôi TikTok" }));
     expect(screen.getByRole("alert")).toHaveTextContent("quota reached");
-    expect(screen.getByRole("button", { name: "Xoá bản ghi Đăng bài" })).toBeVisible();
+    expect(screen.getByRole("listitem", { name: /^Máy 2 · / })).toBeVisible();
   } finally { failedWrite.mockRestore(); }
 });
 
@@ -282,7 +306,7 @@ it("shows one progress bar, filters devices and separates evidence from the time
     { ...detail.items[0], state: "failed", evidence: '{"verified":true}' }, detail.items[1],
   ] });
   await openDevices(true);
-  expect(screen.getAllByRole("progressbar")).toHaveLength(1);
+  expect(within(screen.getByRole("tabpanel", { name: "Đang chạy" })).getAllByRole("progressbar")).toHaveLength(1);
   fireEvent.change(screen.getByRole("combobox", { name: "Lọc trạng thái máy" }), { target: { value: "issues" } });
   expect(screen.queryByRole("button", { name: /Máy 5/ })).not.toBeInTheDocument();
   fireEvent.click(screen.getByRole("button", { name: /Máy 2/ }));
@@ -303,9 +327,9 @@ it("keeps the selected device, timeline order and scroll through minimize", asyn
   const timeline = screen.getByLabelText("Nhật ký theo thời gian");
   const scroller = timeline.parentElement!;
   scroller.scrollTop = 120;
-  fireEvent.click(screen.getByRole("button", { name: "Thu nhỏ tiến trình" }));
+  fireEvent.click(screen.getByRole("button", { name: "Đóng hàng đợi" }));
   expect(timeline).not.toBeVisible();
-  fireEvent.click(screen.getByRole("button", { name: "Mở rộng tiến trình" }));
+  fireEvent.click(screen.getByRole("button", { name: "Tiến trình công việc" }));
   expect(within(screen.getByLabelText("Chi tiết máy")).getByText(labels.get("b")!)).toBeVisible();
   expect(screen.getByRole("button", { name: "Cũ nhất trước" })).toBeVisible();
   expect(screen.getByLabelText("Nhật ký theo thời gian")).toBe(timeline);
@@ -336,20 +360,17 @@ it("uses a full-width device detail with Back on narrow viewports", async () => 
   expect(screen.getByLabelText("Chi tiết máy")).not.toBeVisible();
 });
 
-it("maximizes without losing selection and Escape closes options before minimizing", async () => {
+it("maximizes without losing selection and Escape inside the drawer closes it", async () => {
   await openDevices();
   fireEvent.click(screen.getByRole("button", { name: /Máy 5/ }));
   await screen.findByText("12:34:56");
   fireEvent.click(screen.getByRole("button", { name: "Phóng rộng tiến trình" }));
-  expect(screen.getByRole("dialog")).toHaveClass("is-maximized");
+  expect(drawer()).toHaveClass("is-maximized");
   expect(screen.getByRole("button", { name: /Máy 5/ })).toHaveAttribute("aria-pressed", "true");
   fireEvent.click(screen.getByRole("button", { name: "Khôi phục kích thước" }));
-  const menu = screen.getByLabelText("Tuỳ chọn bản ghi").parentElement!;
-  fireEvent.click(screen.getByLabelText("Tuỳ chọn bản ghi"));
-  expect(menu).toHaveAttribute("open");
-  fireEvent.keyDown(screen.getByLabelText("Tuỳ chọn bản ghi"), { key: "Escape" });
-  expect(menu).not.toHaveAttribute("open");
-  expect(screen.getByRole("dialog")).toBeVisible();
+  expect(drawer()).not.toHaveClass("is-maximized");
+  fireEvent.keyDown(screen.getByRole("button", { name: "Phóng rộng tiến trình" }), { key: "Escape" });
+  expect(drawer()).not.toBeVisible();
 });
 
 it("does not steal the inspector when a newer run enters the polled list", async () => {
@@ -380,7 +401,7 @@ it("switches the exact run and drops device selection without cross-run log leak
 
 it("starts compact on desktop, opens only the selected log, and expands on demand", async () => {
   await openDevices();
-  const monitor = screen.getByRole("dialog");
+  const monitor = screen.getByRole("tabpanel", { name: "Đang chạy" });
   expect(monitor).toHaveClass("is-compact");
   expect(screen.getByLabelText("Tiến độ từng máy")).toBeVisible();
   expect(screen.getByLabelText("Chi tiết máy")).not.toBeVisible();

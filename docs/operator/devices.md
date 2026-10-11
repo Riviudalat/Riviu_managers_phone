@@ -263,7 +263,7 @@ khởi động lại stream. Nút quét thiết bị nằm bên phải toolbar. 
 thống** trên header khác phạm vi **Máy thực hiện** của từng tác vụ.
 
 Các cửa sổ chi tiết giữ thao tác bàn phím bên trong; Escape đóng cửa sổ trên cùng
-và trả focus về nơi mở. Cửa sổ tiến trình cho phép tiếp tục làm việc với trang chính.
+và trả focus về nơi mở. Hàng đợi Cần xử lý không modal: vẫn làm việc với trang chính khi nó mở.
 Trong **Chi tiết thiết bị → Khả năng thiết bị**, **Chọn ứng dụng TikTok** liệt kê
 các gói TikTok thực sự đang cài. Máy có cả Global và Trill nên chọn một lần trước
 khi kiểm tra khả năng hoặc chạy; lựa chọn được lưu theo serial. Không đổi được lựa
@@ -313,21 +313,26 @@ thể lưu Macro để dùng sau, nhưng không phát lại lên máy vừa xu�
 bản ghi không tự phát lại thao tác; nút **Chạy** là hành động riêng. Bản ghi đang thu
 giữ trong phiên ứng dụng; lưu thành Macro trước khi đóng ứng dụng để giữ lâu dài.
 
-Thanh **Tiến trình công việc** nằm trong cửa sổ nổi ở góc trên bên phải khi có tác vụ đang chạy
-hoặc vừa kết thúc. Cửa sổ nằm trên các trang, không chiếm diện tích layout; kéo tiêu đề để đổi vị trí. Bấm mở rồi chọn số máy/alias để xem kết quả và nhật ký
-`giờ:phút:giây`. Chuyển trang vẫn giữ monitor. 100% là đã xử lý xong, không có nghĩa
-tất cả đều thành công; đọc trạng thái lỗi/chưa xác nhận bên cạnh. Dữ liệu thiếu giờ
-không được tự gán giờ hiện tại. Các tác vụ cũ hơn xem tại **Lượt chạy**.
-Giữ và kéo trên thanh tiêu đề để di chuyển; bấm nhẹ mở/thu gọn, nút dấu trừ thu nhỏ
-cửa sổ. Nút thùng rác
-xoá bản ghi đã kết thúc khỏi cửa sổ theo dõi, không xoá lịch sử/bằng chứng trong
-**Lượt chạy** và không dừng công việc. **Hoàn tác xoá** khôi phục lượt xoá gần nhất.
-Trong cửa sổ, chọn tác vụ theo tên và thời gian; tìm máy hoặc lọc **Cần kiểm tra**.
+**Nơi tìm việc cần xử lý: chip Cần xử lý N trên thanh hệ thống.** Khi có máy cần xử lý, bài đăng
+Chưa rõ, lỗi ghi Sheet hoặc máy lỗi trong lượt chạy, chip tăng số và một thông báo nhỏ hiện cạnh chip
+vài giây; hàng đợi **không bao giờ tự mở** và không làm hẹp lưới máy. Bấm chip (hoặc **Ctrl+Shift+X**)
+để mở ngăn phủ bên phải; bấm lại, **Đóng hàng đợi** hoặc Escape để đóng, lưới trở lại đủ ô, tập chọn và
+thứ tự máy không đổi. Tab **Cần xử lý** ghi cho từng mục: Máy N · box · lý do · từ lúc · việc đang giữ
+máy · bước tiếp. Bài **Chưa rõ** và **lỗi Sheet** ở lại tới khi Riviu có kết luận; chỉ có **Xem bằng
+chứng** và **Theo dõi**, không có nút đăng lại. Mục lỗi khác bấm **Đã xem** để bỏ khỏi hàng đợi trên máy
+tính này (Lượt chạy vẫn giữ bản ghi; **Hoàn tác** được). Số "≥N" nghĩa là còn nguồn chưa đọc được.
+
+Khi có tác vụ đang chạy, pill **Tiến trình công việc** (icon · số lượt · %) cạnh chip mở tab **Đang
+chạy**: chọn lượt rồi chọn số máy/alias để xem kết quả và nhật ký `giờ:phút:giây`. Chuyển trang vẫn
+giữ hàng đợi. 100% là đã xử lý xong, không có nghĩa tất cả đều thành công; đọc trạng thái lỗi/chưa xác
+nhận bên cạnh. Dữ liệu thiếu giờ không được tự gán giờ hiện tại. Lượt đã xong nằm trong **Lượt chạy**;
+ở đó **Xem nhật ký từng máy** mở lại lượt đó trong tab Đang chạy.
+Trong tab, chọn tác vụ theo tên và thời gian; tìm máy hoặc lọc **Cần kiểm tra**.
 Danh sách máy chỉ báo tiến độ phần trăm khi còn chạy; máy đã kết thúc có trạng thái
 riêng. Tab **Nhật ký** hiển thị hoạt động theo giờ, tab **Bằng chứng** chứa kết quả
 xác minh. Dòng lặp giữ số lần và thời gian cuối; nút thông tin bên phải mở bản ghi gốc.
-Nút **Phóng rộng tiến trình** mở rộng vùng đọc; **Khôi phục kích thước** trở lại cửa sổ
-nhỏ. Thu nhỏ giữ máy/tab/vị trí đang đọc. Nhật ký mặc định mới nhất trước, đổi thứ tự
+Nút **Phóng rộng tiến trình** mở rộng ngăn; **Khôi phục kích thước** trở lại ngăn
+hẹp. Đóng ngăn giữ máy/tab/vị trí đang đọc. Nhật ký mặc định mới nhất trước, đổi thứ tự
 bằng nút cạnh số mốc. Trên màn hẹp, chọn máy mở chi tiết toàn chiều rộng và dùng mũi
 tên quay lại danh sách. Menu ba chấm có lệnh dọn các bản ghi đã kết thúc.
 Mặc định cửa sổ gọn: mỗi máy một dòng, chọn máy mới mở nhật ký. Thu nhỏ còn thanh

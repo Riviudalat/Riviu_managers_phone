@@ -13,15 +13,21 @@ export interface PublishRunRead {
   createdAt?: string;
 }
 
+export async function readPublishRun(campaignId: string): Promise<PublishRunRead> {
+  const [detail, capabilities] = await Promise.all([publishGet(campaignId), publishRecoveryCapabilities(campaignId)]);
+  return { assignments: detail?.assignments ?? [], capabilities, createdAt: detail?.campaign.createdAt };
+}
+
+/** The query key every reader of one campaign's assignments shares (monitor, totals, queue). */
+export const publishRunScope = (campaignId: string) => ["monitor", "publishRecovery", campaignId] as const;
+
 /**
- * One poll per campaign, shared by every monitor row, the run totals and Lượt chạy: the scope
- * key makes TanStack keep a single in-flight read however many surfaces show the campaign.
+ * One poll per campaign, shared by every monitor row, the run totals, the Cần xử lý queue and
+ * Lượt chạy: the scope key makes TanStack keep a single in-flight read however many surfaces
+ * show the campaign.
  */
 export function usePublishRunRead(campaignId: string, enabled = true) {
-  const read = useCallback(async (): Promise<PublishRunRead> => {
-    const [detail, capabilities] = await Promise.all([publishGet(campaignId), publishRecoveryCapabilities(campaignId)]);
-    return { assignments: detail?.assignments ?? [], capabilities, createdAt: detail?.campaign.createdAt };
-  }, [campaignId]);
+  const read = useCallback(() => readPublishRun(campaignId), [campaignId]);
   return useMonitorRead(read, 2000, ["publishRecovery", campaignId], enabled);
 }
 

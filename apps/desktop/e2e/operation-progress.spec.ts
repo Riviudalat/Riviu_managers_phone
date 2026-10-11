@@ -19,8 +19,10 @@ test("progress expands to per-device timed logs, stays available after navigatio
     };
   });
   await page.goto("/");
-  const center = page.locator(".run-monitor");
-  await expect(center.getByRole("progressbar", { name: "Tiến độ công việc" })).toHaveAttribute("aria-valuenow", "50");
+  const center = page.getByRole("complementary", { name: "Hàng đợi Cần xử lý" });
+  // Progress shows in the bar's run pill; the queue itself never opens on its own.
+  await expect(page.getByRole("progressbar", { name: "Tiến độ các lượt đang chạy" })).toHaveAttribute("aria-valuenow", "50");
+  await expect(center).toBeHidden();
   await page.getByLabel("Tiến trình công việc", { exact: true }).press("Enter");
   await center.getByRole("button", { name: /Máy 1/ }).click();
   await expect(center.getByText("12:34:56", { exact: true })).toBeVisible();
@@ -34,8 +36,8 @@ test("progress expands to per-device timed logs, stays available after navigatio
   await page.setViewportSize({ width: 1440, height: 900 });
   await openOperatorPage(page, 'Tác vụ');
   await expect(center.getByText("12:34:56", { exact: true })).toBeVisible();
-  await center.getByRole("button", { name: "Thu nhỏ tiến trình" }).press("Escape");
-  await expect(center).toHaveClass(/is-minimized/);
+  await center.getByRole("button", { name: "Đóng hàng đợi" }).press("Escape");
+  await expect(center).toBeHidden();
   await expect(page.getByRole("alert")).toHaveCount(0);
 });
 

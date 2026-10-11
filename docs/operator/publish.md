@@ -400,7 +400,7 @@ gán cho từng bài. **Thao tác:** preflight trước dispatch; đối chiếu
 đã gán và toàn bộ hậu quả cleanup; chạy pipeline rồi xem projection trong Theo dõi.
 
 **Kết quả:** bằng chứng Post, URL, nhạc, Sheet và cleanup riêng biệt. Mỗi bài dùng một bộ
-từ chung ở chi tiết chiến dịch, cửa sổ tiến trình và Lượt chạy:
+từ chung ở chi tiết chiến dịch, hàng đợi Cần xử lý (tab Cần xử lý và Đang chạy) và Lượt chạy:
 
 | Lớp | Nghĩa |
 |---|---|

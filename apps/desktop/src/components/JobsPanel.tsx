@@ -13,6 +13,7 @@ import {
   ChevronLeft,
   ChevronRight,
   ArrowUpRight,
+  List,
   X,
 } from "lucide-react";
 import { useModalFocus } from "./useModalFocus";
@@ -43,6 +44,7 @@ import type {
 } from "../types";
 import { SelectionStrip } from "./SelectionStrip";
 import { PublishItemOutcome, PublishRunOutcomeTotals } from "../features/operations/PublishRunOutcome";
+import { watchRunInQueue } from "../features/operations/queueBridge";
 import { EmptyState, LoadingState, StatusNotice } from "./States";
 import { ButtonMenu, MenuItem } from "./ui/Menu";
 import "../styles/operations.css";
@@ -580,6 +582,17 @@ export function JobsPanel({
                       {KIND_LABEL[shownSummary.kind]}
                     </button>
                   )}
+                  {/* The per-phone log and evidence of any run, finished or not, in the queue's "Đang chạy". */}
+                  <button
+                    type="button"
+                    className="ghost"
+                    onClick={() => {
+                      setSelectedRunId(null);
+                      watchRunInQueue(shownSummary);
+                    }}
+                  >
+                    <List size={16} /> Xem nhật ký từng máy
+                  </button>
                   {shownSummary.kind === "script" && isActive(shownSummary) && (
                     <button
                       type="button"

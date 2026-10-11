@@ -111,12 +111,36 @@ của dòng. Nút **Chọn cột** dùng chung với `ResponsiveTable`, nhớ tr
 Bằng chứng gần nhất là mốc mới nhất backend ghi cho máy (cập nhật lượt chạy hoặc mẫu đo tải),
 không lấy từ toast hay lần UI đọc: không có thì ghi **Chưa có**, cũ hơn 3 phút ghi **Cũ · …**.
 Chưa dùng TanStack Table/Virtual: 50 dòng không cần.
-Monitor tiến trình vẫn không modal và hoạt động xuyên trang. **Thay đổi hợp đồng (10/2026):**
-từ 1500 px, monitor mở rộng ghim thành cột bên phải, làm hẹp lưới chứ không phủ lên;
-khi thu gọn hoặc màn hẹp hơn, nó là một nút gọn trong header. Trạng thái thu gọn của cột được
-nhớ trên máy. Cột ghim và nút header không kéo được nữa; chỉ cửa sổ nổi (mở từ nút header dưới
-1500 px) còn kéo đổi vị trí. Đổi chỗ ghim/thu gọn không dựng lại canvas điện thoại. Toast không
-che lệnh: nằm trên thanh chọn máy và bên trái cột monitor.
+**Hàng đợi Cần xử lý (PLAN §5) thay panel "Theo dõi tác vụ" (10/2026).** Không gì ngoài thao tác
+của người dùng được mở hàng đợi hay đổi diện tích lưới, ở mọi cỡ màn: không còn cột ghim từ 1500 px,
+không còn cửa sổ nổi kéo được, lượt đăng mới không tự mở. Thanh hệ thống có chip **Cần xử lý N**
+(hổ phách khi N > 0; **≥N** khi một nguồn chưa đọc được hoặc chưa trả lời, không bao giờ coi là
+không có) và, khi có lượt chạy, pill **Tiến trình công việc** (icon · số lượt · %, thanh tiến độ
+mảnh). Mục mới chỉ tăng chip và hiện một thông báo cạnh chip ~6 giây: lớp phủ không chiếm chỗ,
+không bấm được, không lấy focus (trình đọc màn hình đọc qua vùng live). Hàng đợi mở bằng chip, pill
+hoặc **Ctrl+Shift+X**, là ngăn phủ bên phải dưới thanh hệ thống (460 px, **Phóng rộng** tới 1180 px),
+không bao giờ là cột: mở/đóng không đổi tập chọn, thứ tự ô hay focus (bấm chip giữ focus ở chip;
+phím tắt giữ focus ở ô đang focus; Tab từ chip/pill vào ngăn; Escape trong ngăn đóng và trả focus
+về nút đã mở). Đóng là trở lại đủ ô. Hai tab:
+- **Cần xử lý**: mỗi mục một máy và một lý do — Máy N · box (nhóm được gán, không có thì "Chưa
+  thuộc box") · lý do · từ lúc (tương đối + giờ; máy cần xử lý ghi "Thấy từ" vì đó là lúc cửa sổ
+  thấy) · việc đang giữ máy (trục Công việc hiện tại; chưa đọc được thì "Chưa rõ") · bước tiếp.
+  Nguồn: các máy của bộ đếm Cần xử lý (cùng tập); bài đăng Chưa rõ và lỗi ghi Sheet từ mô hình kết
+  quả chung (§6) của các lượt trong 24 giờ và các lượt đăng `uncertain`/`partial` trong 30 ngày;
+  máy thất bại/chưa rõ của lượt Nuôi/Tương tác/Flow có lỗi trong 24 giờ. Mỗi lượt đăng có tổng ba
+  số riêng (`PublishRunOutcomeTotals`), nên chi tiết chiến dịch, hàng đợi và Lượt chạy cùng số.
+  Dòng bài dùng `PostOutcomeLayers`; lỗi Sheet vẫn giữ link. **Chưa rõ và lỗi Sheet ở lại tới khi có
+  kết luận** ("Ở lại tới khi có kết luận"), chỉ có **Xem bằng chứng** và **Theo dõi**; không có nút
+  đăng/gửi lại hay nhận máy. Mục thất bại khác có **Đã xem** theo lượt (nhớ trên máy tính này, lượt
+  cập nhật thì hiện lại, Hoàn tác được). Máy cần xử lý có **Chi tiết máy**. Thứ tự cố định theo số
+  máy. Ngân sách đọc hữu hạn: tối đa 30 lượt đăng và 20 lượt khác.
+- **Đang chạy**: các lượt đang chạy (từ hai lượt có danh sách tiến độ từng lượt), lượt đang chọn
+  với tiến độ từng máy, nhật ký, bằng chứng và **Dừng/Tạm dừng**. Lượt đã xong rời tab này (vào
+  **Lượt chạy**), trừ lượt đang được theo dõi (đang mở trên tab, chọn bằng Theo dõi, vừa bắt đầu
+  hoặc vừa dừng) cho tới khi đóng ngăn. **Lượt chạy** có **Xem nhật ký từng máy** để mở lại một lượt
+  bất kỳ ở tab này.
+Đổi trang vẫn giữ hàng đợi; tab Đang chạy giữ máy/tab/vị trí đọc khi đóng rồi mở lại. Toast không
+che lệnh: nằm trên thanh chọn máy.
 Khi có máy được chọn, mọi lệnh trên các máy đó nằm ở một **thanh chọn máy** dính dưới lưới:
 Mở màn hình, Đồng bộ thao tác, Chạy Flow…, Công cụ nhóm…, Thêm vào nhóm, Bỏ chọn. Toolbar chỉ
 giữ lệnh toàn fleet (Mở toàn bộ và Công cụ khi chưa chọn máy, Nhóm, Bảo trì, quét lại).
@@ -217,17 +241,17 @@ sách máy được đọc gần nhất (`listDevices` hoặc sự kiện `devic
 đọc lần nào thì ghi **Cập nhật: Chưa rõ**. Đây là tuổi của danh sách, không phải tuổi hình hay kiểm
 trạng thái của từng máy.
 
-Một hàng 48 px từ 1040 px, kể cả khi có lượt chạy, 40 máy và bảy bộ đếm **Chưa rõ**: từ 1600 px phạm
-vi/giờ cập nhật là một cột cạnh bộ đếm; từ 1024 đến 1599 px phạm vi và giờ cập nhật thành một dòng chú
-thích nằm trên bộ đếm trong cùng 48 px, nhường chỗ cho tên trang, pill theo dõi, Ctrl+K, Inspector có
-chữ, chuông và nút quét lại. Khi cột theo dõi đang ghim (lấy ~320 px), dòng phạm vi cũng xếp trên bộ
-đếm từ 1600 px và bộ đếm bỏ icon ở mọi độ rộng. Dưới 1760 px (và khi cột ghim) mẫu số chỉ còn ở dòng
-phạm vi và **Tổng**; dưới 1366 px bộ đếm bỏ icon, giữ chữ và số; dưới 1280 px **Tổng** nhường chỗ
-vì dòng phạm vi ngay cạnh hoặc ngay trên ("Laptop này · N máy") đã là tổng. Chiều cao thanh với bảy bộ
-đếm bằng đúng thanh bốn bộ đếm cũ ở mọi độ rộng đã đo (820–1920 px, có lượt chạy, 40 máy). Tên trang
-tối đa hai dòng; pill theo dõi co tới 120 px và cắt chữ, câu đầy đủ ở
-tooltip. Dưới 1024 px (và 1024–1039 px khi có pill) thanh xuống hai hàng: tên trang và các nút ở hàng
-trên, phạm vi, bộ đếm và giờ cập nhật ở hàng dưới. Không cuộn ngang ở 820 px.
+Một hàng 48 px từ 1090 px, kể cả khi có lượt chạy, chip Cần xử lý, 40 máy, bảy bộ đếm **Chưa rõ** và
+tên trang dài nhất; không lượt chạy thì từ 1024 px: từ 1920 px phạm vi/giờ cập nhật là một cột cạnh bộ
+đếm; từ 1024 đến 1919 px phạm vi và giờ cập nhật thành một dòng chú thích nằm trên bộ đếm trong cùng
+48 px, nhường chỗ cho tên trang, chip Cần xử lý, pill tiến trình, Ctrl+K, Inspector có chữ, chuông và
+nút quét lại. Chip và pill không co và không cắt chữ: chữ "đang chạy" của pill chỉ hiện từ 1920 px,
+dưới 1440 px pill chỉ còn icon và % (câu đầy đủ ở tooltip và tên truy cập). Dưới 1760 px mẫu số chỉ còn
+ở dòng phạm vi và **Tổng**; dưới 1366 px (dưới 1440 px khi có pill) bộ đếm bỏ icon, giữ chữ và số;
+dưới 1280 px **Tổng** nhường chỗ vì dòng phạm vi ngay cạnh hoặc ngay trên ("Laptop này · N máy") đã là
+tổng. Tên trang tối đa hai dòng. Dưới 1024 px (và 1024–1089 px khi có pill) thanh xuống hai hàng (77 px):
+tên trang và các nút ở hàng trên, phạm vi, bộ đếm và giờ cập nhật ở hàng dưới. Không chồng chữ và
+không cuộn ngang ở 820–1920 px (đo trên Thiết bị và Trung tâm ứng dụng, có và không có lượt chạy).
 
 ## Token
 
@@ -323,7 +347,7 @@ Lịch đăng bài là lịch một lần theo từng bài, mỗi dòng gắn m�
 
 - Nút công cụ dùng icon quen thuộc, tooltip và accessible name. Lệnh nghiệp vụ dùng icon+kèm nhãn khi cần.
 - Chế độ dùng segmented control; binary dùng checkbox/toggle; số dùng input/stepper/slider; option dùng menu.
-- Thanh có `flex-wrap` xuống dòng theo flex-basis trước khi co, nên thanh dựa vào một phần tử co được (run pill `flex-shrink: 1000`) phải `nowrap` và đổi bố cục bằng breakpoint hoặc `:has()` (đo ở thanh hệ thống 1024–1099 px khi có lượt chạy).
+- Thanh có `flex-wrap` xuống dòng theo flex-basis trước khi co, nên thanh dựa vào phần tử co được phải `nowrap` và đổi bố cục bằng breakpoint hoặc `:has()` (đo ở thanh hệ thống 1024–1099 px khi có lượt chạy). Một nhóm flex được co (`min-width: 0`) mà con của nó `flex: none` thì con tràn ra và đè lên nút bên cạnh, `scrollWidth` không phát hiện được: đo chồng hình chữ nhật giữa các nút.
 - Menu tràn "⋯" dựng từ chính các nút inline phải giữ style popup trong đúng mức media hiện menu, và đóng khi mức đổi bằng cách theo dõi nút mở (ResizeObserver), không theo bề rộng cửa sổ; nếu không, trạng thái mở cũ đổi style các nút inline.
 - Menu chức năng của máy (chuột phải trên thẻ hoặc trong cửa sổ điện thoại; Shift+F10 hay phím
   ContextMenu trên thẻ) dùng primitive `components/ui/Menu.tsx`: Base UI, CSS thuần, alias riêng
@@ -335,7 +359,7 @@ Lịch đăng bài là lịch một lần theo từng bài, mỗi dòng gắn m�
   **Ngoại lệ có tên — focus guard của Base UI:** span `data-base-ui-focus-guard` (aria-hidden,
   tabindex 0) chỉ chuyển focus; kiểm axe menu loại trừ đúng selector này.
 - **Bảng lệnh** (Ctrl+K, ⌘K trên macOS, hoặc nút **Tìm máy, trang…** trên thanh hệ thống; dưới
-  1600 px, và ở mọi độ rộng khi cột theo dõi đang ghim, chỉ còn icon có tooltip ghi phím tắt) dùng primitive `components/ui/CommandPalette.tsx`: Base UI Dialog + Autocomplete inline, CSS
+  1920 px, và ở mọi độ rộng khi có pill tiến trình, chỉ còn icon có tooltip ghi phím tắt) dùng primitive `components/ui/CommandPalette.tsx`: Base UI Dialog + Autocomplete inline, CSS
   thuần, cùng alias với menu. Lọc không phân biệt dấu ("may 3" khớp "Máy 3"). Giai đoạn 1 chỉ điều
   hướng và chọn: đi tới trang (các trang của sidebar, hai thẻ của Ứng dụng và Điều phối; tên cũ
   Control Center, My Apps, Automation, Runs, Tasks, Schedules, Trung tâm ứng dụng vẫn khớp), mở

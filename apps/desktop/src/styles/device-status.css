@@ -96,15 +96,18 @@
 }
 .operator-help-vocabulary h3 { margin: 0 0 var(--rv-space-2); font-size: var(--rv-font-body); font-weight: var(--weight-semibold); }
 
-/* Seven counters instead of four in the same bar. Below 1760 px, and beside a docked run column,
-   Tổng carries the denominator for every count (each accessible name still says "N trên Tổng
+/* Seven counters instead of four in the same bar. Below 1760 px Tổng carries the denominator for
+   every count (each accessible name still says "N trên Tổng
    máy"); below 1366 px the icons drop out and the words and numbers stay. */
 @media (max-width: 1759px) {
   .fleet-counter-of { display: none; }
 }
-.shell:has(.run-monitor.is-docked:not(.is-maximized)) .fleet-counter-of { display: none; }
 @media (max-width: 1365px) {
   .fleet-counter-icon { display: none; }
+}
+/* Beside the run pill the readout icons go from 1440 px, as they did beside the docked run column. */
+@media (max-width: 1439px) {
+  .shell:has(.queue-run-pill) .fleet-counter-icon { display: none; }
 }
 /* Seven readouts in the bar: tighter readouts below 1600 px; below 1280 px the scope line beside or
    above them ("Laptop này · N máy") is the total, so the Tổng readout steps aside there. */
@@ -123,36 +126,3 @@
   .fleet-counters .fleet-counter { gap: 2px; padding: 0 1px; }
   .fleet-counters { gap: 6px; }
 }
-
-/* A docked run column takes ~320 px from the bar, which then has the room of a 1000–1400 px
-   window: from 1600 px the scope line stacks above the readouts as it does below 1600 px
-   (workspace.css), and at any width the readout icons drop out. */
-@media (min-width: 1600px) {
-  .shell:has(.run-monitor.is-docked:not(.is-maximized)) > .main-col > .page-header .page-header-meta {
-    display: grid;
-    grid-template-rows: auto auto;
-    justify-content: start;
-    align-content: center;
-    column-gap: var(--rv-space-2);
-    row-gap: 0;
-  }
-  .shell:has(.run-monitor.is-docked:not(.is-maximized)) > .main-col > .page-header .page-header-meta > * {
-    grid-row: 2;
-  }
-  .shell:has(.run-monitor.is-docked:not(.is-maximized)) > .main-col > .page-header .fleet-counter {
-    min-height: 24px;
-  }
-  .shell:has(.run-monitor.is-docked:not(.is-maximized)) > .main-col > .page-header .fleet-status-label {
-    font-size: var(--rv-font-caption);
-  }
-  .shell:has(.run-monitor.is-docked:not(.is-maximized)) > .main-col > .page-header .page-header-meta > .system-bar-scope {
-    display: flex;
-    grid-row: 1;
-    grid-column: 1;
-    align-items: baseline;
-    gap: var(--rv-space-2);
-    padding: 0 0 0 var(--rv-space-1);
-    border-right: 0;
-  }
-}
-.shell:has(.run-monitor.is-docked:not(.is-maximized)) .fleet-counter-icon { display: none; }

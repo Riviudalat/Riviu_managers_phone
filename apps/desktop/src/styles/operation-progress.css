@@ -1,18 +1,6 @@
-.run-monitor { position: fixed; right: 16px; top: 72px; z-index: var(--z-flyout); width: 300px; max-width: calc(100vw - 16px); min-width: 0; display: flex; flex-direction: column; border: 1px solid var(--line-strong); border-top: 2px solid var(--rv-status-running-solid); border-radius: var(--radius); background: var(--bg-elevated); color: var(--text); box-shadow: var(--shadow-lg); overflow: hidden; font-size: var(--text-md); }
-.run-monitor.is-expanded { width: 480px; height: min(480px, calc(100dvh - 24px)); }
-.run-monitor.is-maximized { inset: 12px; width: auto; height: auto; max-width: none; }
+/* Tab "Đang chạy" of the Cần xử lý drawer (styles/attention-queue.css places the drawer). */
+.run-monitor { min-width: 0; display: flex; flex-direction: column; color: var(--text); font-size: var(--text-md); }
 .run-monitor [hidden] { display: none !important; }
-.run-monitor-titlebar { display: flex; align-items: center; gap: 6px; padding: 2px 12px; min-height: 40px; flex: 0 0 auto; cursor: grab; touch-action: none; user-select: none; background: var(--bg-subtle); }
-.run-monitor.is-maximized .run-monitor-titlebar { cursor: default; }
-.run-monitor-titlebar:active, .run-monitor-toggle:active { cursor: grabbing; }
-.run-monitor-toggle { flex: 1; display: flex; gap: 8px; align-items: center; min-width: 0; padding: 4px; border: 0; background: none; color: var(--text); text-align: left; cursor: inherit; }
-.run-monitor-toggle strong { min-width: 0; overflow-wrap: anywhere; font-size: var(--text-md); }
-.run-monitor-toggle svg { flex-shrink: 0; color: var(--rv-status-running-solid); }
-.run-monitor-total { color: var(--text-3); font-size: var(--text-sm); white-space: nowrap; }
-.run-monitor-overview { display: flex; align-items: center; gap: 8px; padding: 0 14px 10px; flex: 0 0 auto; }
-.run-monitor-overview > .nu-bar { flex: 1; min-width: 40px; }
-.run-monitor-overview .run-percent { width: auto; min-width: 32px; }
-.run-monitor-overview .run-attention { font-size: var(--text-sm); }
 .run-percent { font-variant-numeric: tabular-nums; font-size: var(--text-sm); text-align: right; white-space: nowrap; }
 .run-state { color: var(--text-3); }
 .run-attention { color: var(--warn-strong); }
@@ -25,15 +13,6 @@
 .run-stop-feedback.is-error { color: var(--danger); }
 .run-monitor-tools > select { flex: 1; min-width: 0; height: 36px; border: 1px solid var(--line-strong); border-radius: var(--radius-sm); padding: 0 8px; color: var(--text); background: var(--bg-elevated); font: inherit; text-overflow: ellipsis; }
 .run-selector-label { color: var(--text-3); font-size: var(--text-sm); margin-right: 4px; white-space: nowrap; }
-.run-monitor-history-menu { position: relative; }
-.run-monitor-history-menu > summary { display: grid; place-items: center; list-style: none; width: 32px; height: 36px; border-radius: var(--radius-sm); cursor: pointer; color: var(--text-2); }
-.run-monitor-history-menu > summary:hover { background: var(--bg-muted); }
-.run-monitor-history-menu > summary::-webkit-details-marker { display: none; }
-.run-monitor-history-menu > div { position: absolute; right: 0; top: 100%; width: 236px; max-width: calc(100vw - 32px); background: var(--bg-elevated); border: 1px solid var(--line-strong); box-shadow: var(--shadow); border-radius: var(--radius-sm); padding: 4px; z-index: 4; }
-.run-monitor-history-menu button { width: 100%; padding: 9px; text-align: left; border: 0; background: none; color: var(--text); font: inherit; }
-.run-monitor-history-menu button:hover:not(:disabled) { background: var(--bg-muted); }
-.run-monitor-history-menu button:disabled { color: var(--muted); }
-.run-monitor-undo { display: flex; align-items: center; gap: 8px; justify-content: space-between; padding: 6px 14px; background: var(--bg-subtle); font-size: var(--text-sm); }
 .run-monitor-summary { flex-shrink: 0; padding: 0 14px 8px; display: grid; grid-template-columns: minmax(0, 1fr) auto; gap: 8px 12px; align-items: center; }
 .run-monitor-result { display: flex; align-items: center; flex-wrap: wrap; gap: 8px; font-size: var(--text-sm); color: var(--text-2); grid-column: 1 / -1; }
 .run-monitor-result .run-percent { margin-left: auto; color: var(--text); }
@@ -90,16 +69,10 @@
 .run-monitor-empty { margin: 0; padding: 20px 14px; color: var(--text-3); }
 .run-monitor-history-note { flex-shrink: 0; border-top: 1px solid var(--line); margin: 0; padding: 6px 14px; font-size: var(--text-sm); color: var(--text-3); }
 .run-monitor summary:focus-visible { outline: 2px solid var(--primary); outline-offset: 2px; }
-.run-monitor.is-compact .run-monitor-total, .run-monitor.is-compact .run-selector-label { display: none; }
-.run-monitor.is-compact .run-monitor-titlebar { min-height: 36px; padding: 0 8px; gap: 4px; }
-.run-monitor.is-compact .run-monitor-titlebar .icon-btn { width: 28px; height: 32px; min-height: 32px; }
-.run-monitor.is-compact .run-monitor-toggle { gap: 6px; min-height: 30px; }
-.run-monitor.is-compact .run-monitor-toggle strong { font-size: var(--text-md); }
-.run-monitor.is-minimized .run-monitor-overview { padding: 0 10px 6px; }
-.run-monitor.is-minimized .run-monitor-overview .nu-bar { height: 4px; }
+.run-monitor.is-compact .run-selector-label { display: none; }
 .run-monitor.is-compact .run-monitor-tools { padding: 5px 8px; gap: 4px; }
 .run-monitor.is-compact .run-monitor-tools > select { height: 32px; }
-.run-monitor.is-compact .run-monitor-tools .icon-btn, .run-monitor.is-compact .run-monitor-history-menu > summary { width: 28px; height: 32px; min-height: 32px; }
+.run-monitor.is-compact .run-monitor-tools .icon-btn { width: 28px; height: 32px; min-height: 32px; }
 .run-monitor.is-compact .run-monitor-summary { padding: 0 10px 6px; gap: 5px 8px; }
 .run-monitor.is-compact .run-monitor-result { gap: 6px; }
 .run-monitor.is-compact .run-monitor-summary > .nu-bar { min-width: 30px; height: 4px; }
@@ -122,10 +95,7 @@
 .run-monitor.is-compact .run-log-scroll, .run-monitor.is-compact .run-evidence-scroll { padding: 0 10px 8px; }
 .run-monitor.is-compact .run-device-log > li { padding: 5px 0; gap: 8px; }
 @media (max-width: 600px) {
-  .run-monitor { right: 8px; }
-  .run-monitor.is-expanded { height: min(450px, calc(100dvh - 16px)); }
   .run-monitor-detail { grid-template-columns: minmax(0, 1fr); }
-  .run-monitor.is-maximized { inset: 8px; height: auto; }
   .run-monitor-summary { grid-template-columns: minmax(0, 1fr); }
   .run-monitor-counts { gap: 6px 10px; }
   .run-monitor-tools { padding: 6px 8px; }
@@ -137,7 +107,6 @@
   .run-log-toolbar { padding: 6px 8px; flex-wrap: wrap; }
   .run-log-scroll, .run-evidence-scroll { padding: 0 10px 10px; }
   .run-device-log > li { grid-template-columns: 60px minmax(0, 1fr); gap: 8px; }
-  .run-monitor-total { display: none; }
   .run-selector-label { display: none; }
   .run-monitor-device-pane { border-right: 0; }
 }
@@ -161,20 +130,3 @@
 .run-device-recovery button { margin: 3px 4px 0 0; font-size: var(--text-sm); }
 
 .run-start-bridge { display: grid; gap: 6px; padding: 12px 14px; border-left: 3px solid var(--rv-status-running-solid); background: var(--rv-status-running-fill); overflow-wrap: anywhere; }
-/* Placements. From 1500 px the expanded monitor docks as a column beside the wall (the
-   wall narrows, nothing is covered); folded or narrower, it is a pill in the page header. */
-.run-monitor-dock { display: flex; flex: 0 0 auto; min-width: 0; min-height: 0; }
-.run-monitor-dock:empty { display: none; }
-.run-monitor.is-docked { position: relative; inset: auto; z-index: auto; max-width: none; border: 0; border-left: 1px solid var(--line); border-radius: 0; box-shadow: none; }
-.run-monitor.is-docked.is-expanded { width: 320px; height: auto; align-self: stretch; }
-.run-monitor.is-docked.is-maximized { position: fixed; inset: 12px; z-index: var(--z-flyout); width: auto; border: 1px solid var(--line-strong); border-top: 2px solid var(--rv-status-running-solid); border-radius: var(--radius); box-shadow: var(--shadow-lg); }
-.run-monitor.is-docked .run-monitor-titlebar, .run-monitor.is-pill .run-monitor-titlebar { cursor: default; touch-action: auto; }
-.run-monitor-pill-slot { display: contents; }
-.run-monitor.is-pill { position: relative; inset: auto; z-index: auto; flex: 0 1000 auto; width: 280px; min-width: 120px; max-width: 32vw; border-top-width: 1px; border-radius: var(--radius); box-shadow: none; }
-.run-monitor.is-pill .run-monitor-titlebar { min-height: 32px; padding: 0 4px 0 6px; background: none; }
-.run-monitor.is-pill .run-monitor-toggle { cursor: pointer; }
-.run-monitor.is-pill .run-monitor-toggle strong { overflow: hidden; white-space: nowrap; text-overflow: ellipsis; font-size: var(--text-sm); }
-.run-monitor.is-pill .run-monitor-overview { padding: 0 8px 4px; }
-.run-monitor.is-pill .run-monitor-overview .nu-bar { height: 3px; }
-/* Toasts stay clear of the docked column's commands. */
-.shell:has(.run-monitor.is-docked:not(.is-maximized)) .activity-center-current { right: calc(320px + 12px); }

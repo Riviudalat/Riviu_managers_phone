@@ -19,7 +19,7 @@ for(const width of [1440,820]) test(`stop the chosen task and retain its history
  });
  const errors:string[]=[];page.on("pageerror",e=>errors.push(e.message));
  await page.goto("/");await page.getByRole("button",{name:"Tiến trình công việc"}).click();
- const monitor=page.getByRole("dialog",{name:"Cửa sổ tiến trình"});
+ const monitor=page.getByRole("complementary",{name:"Hàng đợi Cần xử lý"});
  await expect(monitor.getByRole("button",{name:"Dừng tác vụ và về màn hình chính"})).toBeVisible();
  await page.screenshot({path:info.outputPath(`monitor-stop-${width}.png`)});
  await monitor.getByRole("button",{name:"Dừng tác vụ và về màn hình chính"}).click();

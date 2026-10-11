@@ -1,12 +1,13 @@
 import { Activity, useCallback, useEffect, useId, useMemo, useRef, useState } from "react";
 import { ArrowDown, ArrowLeft, ArrowUp, CheckCircle2, CircleAlert, Clock3, FileSearch, Info, List, RefreshCw, Search } from "lucide-react";
-import { operationDeviceLog, operationGetRun, operationTraceExport } from "../../api";
+import { operationDeviceLog, operationTraceExport } from "../../api";
 import { describeError } from "../../describeError";
 import { ProgressBar } from "../../components/ProgressBar";
 import { StatusChip, WorkspaceTabs } from "../../components/WorkspacePrimitives";
 import type { NurtureSessionStatus, OperationRunSummary } from "../../types";
 import { activeRun, compactLogEntries, deviceRows, deviceStateCounts, issueState, logMessage, logTime, monitorDeviceName, progressLabel, runProgress, RUN_STATE_LABEL, timelineEntries } from "./operationProgress";
 import { useMonitorRead } from "./useMonitorRead";
+import { readOperationRun } from "./operationRunRead";
 import { deviceProgress } from "../../nurtureProgress";
 import { useMediaQuery } from "../../useMediaQuery";
 import { PublishPager } from "../../components/publish/PublishPager";
@@ -60,11 +61,7 @@ function DeviceTimeline({ operationId, udid }: { operationId: string; udid: stri
 }
 
 export function OperationRunDevices({ run, labels, sessions, compact = false }: { run: OperationRunSummary; labels: ReadonlyMap<string, string>; sessions: NurtureSessionStatus[]; compact?: boolean }) {
-  const read = useCallback(async () => {
-    const next = await operationGetRun(run.id);
-    if (!next || next.summary.id !== run.id) throw new Error("Tác vụ không còn trong nguồn dữ liệu.");
-    return next;
-  }, [run.id]);
+  const read = useCallback(() => readOperationRun(run.id), [run.id]);
   const state = useMonitorRead(read, 2000, ["run", run.id]);
   // The same full-assignment read (with the frozen intent) as the detail and the totals.
   const publishRead = usePublishRunRead(run.sourceId, run.kind === "publish");

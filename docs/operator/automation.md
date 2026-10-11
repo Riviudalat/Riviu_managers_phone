@@ -27,7 +27,7 @@ chọn được. Máy mất kết nối không được chọn thêm. Tìm kiế
 Cấu hình và tóm tắt phiên đọc từ thiết lập hiện tại; thanh tab và nút bắt đầu
 nằm ngoài vùng cuộn. Phạm vi Nuôi không thay lựa chọn của Tương tác hoặc Đăng bài.
 
-Nút **Tạm dừng** của phiên đăng bài (các tác vụ khác là **Dừng**) cạnh danh sách trong cửa sổ **Theo dõi tác vụ** dừng toàn bộ máy của
+Nút **Tạm dừng** của phiên đăng bài (các tác vụ khác là **Dừng**) ở tab **Đang chạy** của hàng đợi **Cần xử lý** (mở bằng pill tiến trình trên thanh hệ thống) dừng toàn bộ máy của
 tác vụ đang chọn và đóng TikTok về màn hình chính. Đây là dừng/hủy phần việc còn lại,
 không phải tạm ngưng để tự chạy tiếp. App chờ thao tác đang thực hiện trả quyền máy,
 báo từng máy đã đóng hoặc cần kiểm tra. Kết quả đã đăng/gửi và bằng chứng vẫn giữ;

@@ -1,41 +1,61 @@
-import { Activity, useCallback, useEffect, useId, useLayoutEffect, useRef, useState } from "react";
+import { Activity, useCallback, useEffect, useId, useLayoutEffect, useMemo, useRef, useState, type KeyboardEvent as ReactKeyboardEvent } from "react";
 import { createPortal } from "react-dom";
-import { Clock3, Maximize2, Minimize2, Minus, MoreHorizontal, Trash2, TriangleAlert, Undo2, Square } from "lucide-react";
+import { Clock3, Inbox, Maximize2, Minimize2, Square, TriangleAlert, X } from "lucide-react";
 import { operationGetRun, publishStartStatus, publishCancelUnacceptedStart, nurtureSessionStatus, operationQueryRuns, operationStop, operationStopStatus, type OperationStopResult } from "../../api";
 import { ProgressBar } from "../../components/ProgressBar";
+import { WorkspaceTabs } from "../../components/WorkspacePrimitives";
 import type { OperationRunSummary } from "../../types";
-import { activeRun, issueState, progressLabel, runOptionLabel, runProgress } from "./operationProgress";
+import { activeRun, progressLabel, runOptionLabel, runProgress } from "./operationProgress";
 import { useMonitorRead } from "./useMonitorRead";
 import { describeError } from "../../describeError";
-import { dismissMonitorRecords, monitorRecordKey, readDismissedRecords, visibleMonitorRuns, writeDismissedRecords, type DismissedRecord } from "./monitorRecords";
-import { useFloatingMonitor } from "./useFloatingMonitor";
-import { useMediaQuery } from "../../useMediaQuery";
+import { dismissMonitorRecords, monitorRecordKey, readDismissedRecords, writeDismissedRecords, type DismissedRecord } from "./monitorRecords";
 import { MonitorReadError, OperationRunDevices } from "./OperationRunDevices";
 import { acknowledgePublishStart, publishStageLabel, PUBLISH_START_PENDING, PUBLISH_START_ACKNOWLEDGED, PUBLISH_START_RETIRED, readPendingPublishStart, retirePublishStart, type PendingPublishStart } from "./publishStartBridge";
+import { AttentionQueueList } from "./AttentionQueue";
+import type { DeviceAttention, QueuePhone } from "./attentionQueueModel";
+import { useAttentionQueue } from "./useAttentionQueue";
+import { QUEUE_WATCH_RUN } from "./queueBridge";
 import "../../styles/operation-progress.css";
+import "../../styles/attention-queue.css";
 
-/** Wide enough to give the monitor its own column and still keep a useful wall. */
-export const MONITOR_DOCK_QUERY = "(min-width: 1500px)";
-const COLLAPSED_KEY = "riviu.runMonitor.collapsed";
-function readCollapsed(): boolean {
-  try { return localStorage.getItem(COLLAPSED_KEY) === "1"; } catch { return false; }
+/** Opens and closes the queue from anywhere outside a phone's keyboard and a modal dialog. */
+export const QUEUE_SHORTCUT = "Control+Shift+X";
+const NOTICE_MS = 6000;
+const EMPTY_PHONES: ReadonlyMap<string, QueuePhone> = new Map();
+const EMPTY_ATTENTION: readonly DeviceAttention[] = [];
+const FOCUSABLE = "a[href], button:not([disabled]), input:not([disabled]), select:not([disabled]), textarea:not([disabled]), summary, [tabindex]:not([tabindex='-1'])";
+
+function focusables(root: ParentNode): HTMLElement[] {
+  return [...root.querySelectorAll<HTMLElement>(FOCUSABLE)]
+    .filter(element => !element.closest("[hidden]") && (element.checkVisibility?.() ?? true));
 }
-function writeCollapsed(collapsed: boolean): void {
-  try { localStorage.setItem(COLLAPSED_KEY, collapsed ? "1" : "0"); } catch { /* optional preference */ }
-}
+
+type QueueTab = "attention" | "running";
 
 /**
- * Monitor plus an explicit stop. Dismissing a record still leaves its source audit intact.
+ * The "Cần xử lý" queue and the run monitor (PLAN §5), replacing the "Theo dõi tác vụ" panel.
  *
- * One component, three placements: a column docked beside the wall from 1500 px (the wall
- * narrows, nothing is covered), a pill in the page header when folded or narrower, and the
- * floating non-modal window when opened below the dock width. Without hosts (unit tests,
- * startup) it keeps the floating placement on `document.body`.
+ * In the system bar: a "Cần xử lý N" chip, and while something runs a pill with its progress.
+ * Neither ever opens anything on its own: a new item only raises the count and shows a notice
+ * that takes no layout space and no focus. The queue opens only from the chip, the pill or
+ * Ctrl+Shift+X, as a drawer laid over the wall (never a column that narrows it); opening and
+ * closing never touch the wall's selection, its order or the focused element, and closing gives
+ * the whole wall back. Tab "Đang chạy" is the run monitor with Stop; a finished run leaves it
+ * (Lượt chạy keeps it) unless the operator is watching it.
+ *
+ * Without a host (unit tests, startup) the bar controls fall back to `document.body`.
  */
-export function OperationProgressCenter({ deviceLabels, dockHost = null, pillHost = null }: {
+export function OperationProgressCenter({ deviceLabels, phones = EMPTY_PHONES, attention = EMPTY_ATTENTION, attentionKnown = true, pillHost = null, onDeviceDetails, onOpenRuns }: {
   deviceLabels: ReadonlyMap<string, string>;
-  dockHost?: HTMLElement | null;
+  /** Every phone's number, box and current holder. */
+  phones?: ReadonlyMap<string, QueuePhone>;
+  /** The phones the header counter "Cần xử lý" counts, as far as they are known. */
+  attention?: readonly DeviceAttention[];
+  /** False while that counter is unknown ("?"): the list may then miss phones. */
+  attentionKnown?: boolean;
   pillHost?: HTMLElement | null;
+  onDeviceDetails?: (udid: string) => void;
+  onOpenRuns?: () => void;
 }) {
   const [initialStart] = useState(() => {
     try { return { pending: readPendingPublishStart(), error: null as string | null }; }
@@ -64,9 +84,12 @@ export function OperationProgressCenter({ deviceLabels, dockHost = null, pillHos
     finally { cancelStartInFlight.current = false; setCancellingStart(false); }
   };
   const [pinnedRun, setPinnedRun] = useState<OperationRunSummary | null>(null);
-  const [expanded, setExpanded] = useState(!!initialStart.pending || !!initialStart.error);
+  const [open, setOpen] = useState(false);
+  const [tab, setTab] = useState<QueueTab>("attention");
   const [maximized, setMaximized] = useState(false);
   const [selectedId, setSelectedId] = useState<string | null>(null);
+  /** A finished run the operator is watching stays in "Đang chạy" until they let it go. */
+  const [watchId, setWatchId] = useState<string | null>(null);
   const [stopResult,setStopResult]=useState<OperationStopResult|null>(null);
   const [stopError,setStopError]=useState<string|null>(null);
   const [stopping,setStopping]=useState(false);
@@ -77,34 +100,14 @@ export function OperationProgressCenter({ deviceLabels, dockHost = null, pillHos
     catch (error) { return { records: [] as DismissedRecord[], error: describeError(error) }; }
   });
   const [undoKeys, setUndoKeys] = useState<string[]>([]);
-  const toggleRef = useRef<HTMLButtonElement>(null);
-  const menuRef = useRef<HTMLDetailsElement>(null);
+  /** The notice beside the chip for items that arrived since the last look. */
+  const [notice, setNotice] = useState<{ id: number; count: number; text: string } | null>(null);
+  const chipRef = useRef<HTMLButtonElement>(null);
+  const pillRef = useRef<HTMLButtonElement>(null);
+  const openerRef = useRef<HTMLElement | null>(null);
+  const drawerRef = useRef<HTMLElement>(null);
+  const drawerId = useId();
   const bodyId = useId();
-  const wide = useMediaQuery(MONITOR_DOCK_QUERY) && dockHost !== null;
-  const lastWide = useRef(false);
-  useEffect(() => {
-    if (wide === lastWide.current) return;
-    lastWide.current = wide;
-    // Entering dock width restores the remembered fold. Leaving it folds into the pill: a
-    // floating window appearing on its own would cover the narrower wall.
-    setExpanded(current => wide ? current || !readCollapsed() : false);
-  }, [wide]);
-  const placement = wide && expanded ? "docked" : expanded || !pillHost ? "floating" : "pill";
-  const dialog = expanded && placement === "floating";
-  const floating = useFloatingMonitor(dialog, dialog && maximized);
-  // Opening or folding moves the monitor to another host, so focus follows its toggle.
-  const focusToggle = useRef(false);
-  useLayoutEffect(() => {
-    if (!focusToggle.current) return;
-    focusToggle.current = false;
-    toggleRef.current?.focus();
-  });
-  const open = (next: boolean) => {
-    setExpanded(next);
-    // Only the dock remembers its fold; the floating window is always opened on purpose.
-    if (wide) writeCollapsed(!next);
-    if (pillHost) focusToggle.current = true;
-  };
   const read = useCallback(async () => {
     const page = await operationQueryRuns({ limit: 200, offset: 0, since: new Date(Date.now() - 24 * 60 * 60_000).toISOString() });
     const sessions = page.runs.some((run) => run.kind === "nurture" && activeRun(run)) ? await nurtureSessionStatus() : [];
@@ -112,15 +115,79 @@ export function OperationProgressCenter({ deviceLabels, dockHost = null, pillHos
   }, []);
   const state = useMonitorRead(read, 2000, ["runs", "last24h", 200, 0]);
   const listedRuns = state.value?.page.runs ?? [];
-  const runs = visibleMonitorRuns(pinnedRun && !listedRuns.some(run => run.id === pinnedRun.id)
-    ? [pinnedRun, ...listedRuns] : listedRuns, dismissal.records);
-  const selectedRun = pendingStart ? null : runs.find((run) => run.id === selectedId) ?? pinnedRun ?? runs[0] ?? null;
+  const allRuns = pinnedRun && !listedRuns.some(run => run.id === pinnedRun.id) ? [pinnedRun, ...listedRuns] : listedRuns;
+  // "Đang chạy" holds running runs; a finished one stays only while it is watched.
+  const runs = allRuns.filter(run => activeRun(run) || run.id === watchId);
+  const selectedRun = pendingStart ? null : runs.find((run) => run.id === selectedId) ?? runs.find(run => run.id === pinnedRun?.id) ?? runs[0] ?? null;
+  const queue = useAttentionQueue({
+    runs: listedRuns, runsSettled: state.value !== null || state.error !== null, runsError: state.error,
+    phones, attention, attentionKnown, labels: deviceLabels, dismissed: dismissal.records,
+  });
+
+  const openQueue = useCallback((next: QueueTab, opener: HTMLElement | null) => {
+    openerRef.current = opener;
+    setTab(next);
+    setOpen(true);
+    // The operator is looking at the queue now; the notice would only cover it.
+    setNotice(null);
+  }, []);
+  const stopIssue = (id: string | null) => !!id && stopResult?.operationId === id && stopResult.state !== "closed";
+  const close = () => {
+    setOpen(false);
+    setWatchId(current => {
+      const run = allRuns.find(item => item.id === current);
+      return run && (activeRun(run) || stopIssue(current)) ? current : null;
+    });
+    // Focus only returns when it was inside the drawer; a focused tile keeps it.
+    if (drawerRef.current?.contains(document.activeElement)) (openerRef.current ?? chipRef.current)?.focus();
+  };
+  const openRef = useRef(open);
+  useEffect(() => { openRef.current = open; });
+  const latest = useRef({ open, close, openQueue });
+  useEffect(() => { latest.current = { open, close, openQueue }; });
+  useEffect(() => {
+    const onKeyDown = (event: KeyboardEvent) => {
+      if (event.defaultPrevented || event.isComposing || event.altKey || !event.shiftKey) return;
+      if (!(event.ctrlKey || event.metaKey) || event.key.toLowerCase() !== "x") return;
+      if (document.querySelector('[aria-modal="true"]')) return;
+      event.preventDefault();
+      // The shortcut never moves focus: the wall keeps its focused tile.
+      if (latest.current.open) latest.current.close();
+      else latest.current.openQueue("attention", null);
+    };
+    window.addEventListener("keydown", onKeyDown);
+    return () => window.removeEventListener("keydown", onKeyDown);
+  }, []);
+  // Lượt chạy asks to show a run's phones: the operator pressed it, so the drawer opens on it.
+  useEffect(() => {
+    const watchRun = (event: Event) => {
+      const run = (event as CustomEvent<OperationRunSummary>).detail;
+      setPinnedRun(run); setWatchId(run.id); setSelectedId(run.id);
+      latest.current.openQueue("running", null);
+    };
+    window.addEventListener(QUEUE_WATCH_RUN, watchRun);
+    return () => window.removeEventListener(QUEUE_WATCH_RUN, watchRun);
+  }, []);
+
+  // The drawer starts under the system bar, whatever height the bar wrapped to.
+  const [top, setTop] = useState(48);
+  useLayoutEffect(() => {
+    if (!open) return;
+    const header = (pillHost ?? chipRef.current)?.closest("header");
+    if (!header) return;
+    const measure = () => setTop(Math.round(header.getBoundingClientRect().bottom));
+    measure();
+    const observer = typeof ResizeObserver === "undefined" ? null : new ResizeObserver(measure);
+    observer?.observe(header);
+    window.addEventListener("resize", measure);
+    return () => { observer?.disconnect(); window.removeEventListener("resize", measure); };
+  }, [open, pillHost]);
+
   useEffect(() => {
     const receive = (event: Event) => {
       const next = (event as CustomEvent<PendingPublishStart>).detail;
+      // Shown in the pill and in "Đang chạy"; the queue still never opens on its own.
       setPendingStart(next); setSelectedId(next.status?.operationId ?? null);
-      // Show the request immediately, including status-read failures before ACK.
-      setExpanded(true);
       setStartReadError(null);
     };
     // A durable pre-accept rejection retires the marker; the monitor must forget it too,
@@ -168,7 +235,7 @@ export function OperationProgressCenter({ deviceLabels, dockHost = null, pillHos
         if (status.campaignId) {
           const run = await operationGetRun(`publish:${status.campaignId}`);
           if (!live || !run) return;
-          setPinnedRun(run.summary); setSelectedId(run.summary.id); setPendingStart(null);
+          setPinnedRun(run.summary); setSelectedId(run.summary.id); setWatchId(run.summary.id); setPendingStart(null);
           retirePublishStart(pendingRequestId);
         }
       } catch (error) { if (live) setStartReadError(describeError(error)); }
@@ -216,7 +283,7 @@ export function OperationProgressCenter({ deviceLabels, dockHost = null, pillHos
   },[resolvedSelectedId]);
   const stopSelected=async()=>{
     if(!selectedRun||stopping)return;
-    const id=selectedRun.id;++stopTicket.current;setStopping(true);setStopError(null);
+    const id=selectedRun.id;++stopTicket.current;setStopping(true);setStopError(null);setWatchId(id);
     try{const result=await operationStop(id);if(selectionRef.current===id){setStopResult(result);state.retry();}}
     catch(error){if(selectionRef.current===id)setStopError(describeError(error));}
     finally{setStopping(false);}
@@ -225,23 +292,21 @@ export function OperationProgressCenter({ deviceLabels, dockHost = null, pillHos
     // Pin the initial selection too: a newly updated run must not steal the open inspector.
     if (resolvedSelectedId && resolvedSelectedId !== selectedId) setSelectedId(resolvedSelectedId);
   }, [resolvedSelectedId, selectedId]);
+  // The run on screen in "Đang chạy" is watched: it does not vanish when it finishes.
   useEffect(() => {
-    if (!expanded) return;
-    const closeMenu = (event: PointerEvent) => {
-      if (event.target instanceof Node && !menuRef.current?.contains(event.target) && menuRef.current) menuRef.current.open = false;
-    };
-    document.addEventListener("pointerdown", closeMenu);
-    return () => document.removeEventListener("pointerdown", closeMenu);
-  }, [expanded]);
-  const dismiss = (selected: OperationRunSummary[]) => {
-    if (menuRef.current) menuRef.current.open = false;
-    const settled = selected.filter((run) => !activeRun(run));
+    if (open && tab === "running" && resolvedSelectedId) setWatchId(resolvedSelectedId);
+  }, [open, tab, resolvedSelectedId]);
+  // Lượt chạy is a page: the drawer closes so it does not cover what was asked for.
+  const openRuns = onOpenRuns ? () => { close(); onOpenRuns(); } : undefined;
+  const watch = (run: OperationRunSummary) => {
+    setWatchId(run.id); setSelectedId(run.id); setTab("running");
+  };
+  const dismiss = (run: OperationRunSummary) => {
     try {
-      const next = dismissMonitorRecords(dismissal.records, settled);
+      const next = dismissMonitorRecords(dismissal.records, [run]);
       writeDismissedRecords(next);
       setDismissal({ records: next, error: null });
-      setUndoKeys(settled.map(monitorRecordKey));
-      toggleRef.current?.focus();
+      setUndoKeys([monitorRecordKey(run)]);
     } catch (error) { setDismissal((current) => ({ ...current, error: describeError(error) })); }
   };
   const undo = () => {
@@ -252,86 +317,196 @@ export function OperationProgressCenter({ deviceLabels, dockHost = null, pillHos
       setUndoKeys([]);
     } catch (error) { setDismissal((current) => ({ ...current, error: describeError(error) })); }
   };
-  const active = runs.filter(activeRun);
-  const shown = active.length ? active : runs.slice(0, 1);
-  const progress = shown.map((run) => runProgress(run, state.value?.sessions ?? []));
+  // First sight of each item (for rows the backend gives no time) and the notice for new ones.
+  // The first complete read is the baseline, and so is the moment the header counter becomes
+  // known: phones that were only unread are not news.
+  const [seenAt, setSeenAt] = useState<ReadonlyMap<string, number>>(() => new Map());
+  const items = useMemo(() => queue.groups.flatMap(group => group.items), [queue.groups]);
+  const itemsRef = useRef(items);
+  useEffect(() => { itemsRef.current = items; });
+  const signature = items.map(item => item.key).join("\n");
+  const noticedRef = useRef<{ keys: Set<string>; attentionKnown: boolean } | null>(null);
+  useEffect(() => {
+    const keys = signature ? signature.split("\n") : [];
+    setSeenAt(previous => {
+      const now = Date.now();
+      return new Map(keys.map(key => [key, previous.get(key) ?? now]));
+    });
+    if (!queue.settled) return;
+    const previous = noticedRef.current;
+    noticedRef.current = { keys: new Set(keys), attentionKnown };
+    if (!previous) return;
+    const fresh = keys.filter(key => !previous.keys.has(key) && (previous.attentionKnown || !key.startsWith("device:")));
+    if (!fresh.length || openRef.current) return;
+    const names = itemsRef.current.filter(item => fresh.includes(item.key)).map(item => `${item.machine} · ${item.reason}`);
+    setNotice({ id: Date.now(), count: fresh.length, text: names.slice(0, 3).join("; ") + (names.length > 3 ? `; và ${names.length - 3} mục khác` : "") });
+  }, [signature, queue.settled, attentionKnown]);
+  useEffect(() => {
+    if (!notice) return;
+    const timer = window.setTimeout(() => setNotice(current => current?.id === notice.id ? null : current), NOTICE_MS);
+    return () => window.clearTimeout(timer);
+  }, [notice]);
+  const [noticeAt, setNoticeAt] = useState<{ top: number; right: number } | null>(null);
+  useLayoutEffect(() => {
+    if (!notice) return;
+    const rect = chipRef.current?.getBoundingClientRect();
+    setNoticeAt(rect ? { top: Math.round(rect.bottom + 6), right: Math.max(8, Math.round(window.innerWidth - rect.right)) } : null);
+  }, [notice]);
+
+  const active = allRuns.filter(activeRun);
+  const progress = active.map((run) => runProgress(run, state.value?.sessions ?? []));
   const fraction = !pendingStart && progress.length && progress.every((value) => value !== null)
     ? progress.reduce((sum, value) => sum + value!, 0) / progress.length : null;
-  if (!pendingStart && !startReadError && !runs.length && !state.error && !dismissal.error && (!expanded || !undoKeys.length)) return null;
-  const minimize = () => { open(false); focusToggle.current = true; };
-  const host = placement === "docked" && dockHost ? dockHost : placement === "pill" && pillHost ? pillHost : document.body;
-  const toggleLabel = expanded ? "Theo dõi tác vụ" : state.error ? "Chưa đọc được tiến trình" : pendingStart ? "Lượt đăng đang chuẩn bị" : active.length ? `${active.length} tác vụ đang xử lý / chờ` : runs.length ? `${runs.length} tác vụ đã kết thúc` : "Không còn bản ghi";
-  return createPortal(<section ref={floating.ref} style={placement === "floating" ? floating.style : undefined}
-    className={`run-monitor is-${placement}${expanded ? " is-expanded" : " is-minimized"}${expanded && maximized ? " is-maximized" : " is-compact"}`}
-    role={dialog ? "dialog" : "region"} aria-modal={dialog ? false : undefined} aria-label="Cửa sổ tiến trình"
-    onKeyDown={(event) => {
-      if (event.key !== "Escape" || !expanded) return;
-      if (menuRef.current?.open) { event.stopPropagation(); menuRef.current.open = false; menuRef.current.querySelector("summary")?.focus(); }
-      // The dock is part of the layout, not a window: Escape only leaves its maximized view.
-      else if (dialog) { event.stopPropagation(); minimize(); }
-      else if (maximized) { event.stopPropagation(); setMaximized(false); }
-    }}>
-    <header className="run-monitor-titlebar" {...(placement === "floating" ? floating.handle : {})}>
-      <button ref={toggleRef} type="button" className="run-monitor-toggle" aria-label="Tiến trình công việc"
-        aria-expanded={expanded} aria-controls={bodyId} title={expanded ? undefined : toggleLabel} onClick={() => expanded ? minimize() : open(true)}>
-        <Clock3 size={16} aria-hidden="true" /><strong>{toggleLabel}</strong>
+  const runningCount = active.length + (pendingStart ? 1 : 0);
+  const showPill = !!pendingStart || !!startReadError || active.length > 0 || !!state.error;
+  const pillLabel = state.error ? "Chưa đọc được tiến trình" : pendingStart ? "Lượt đăng đang chuẩn bị"
+    : active.length ? `${active.length} tác vụ đang xử lý / chờ` : "Lượt đăng cần kiểm tra";
+  const pillAttention = !!startReadError || !!state.error;
+  // "≥5": some source is unread, so the count is a floor and never claims there is nothing more.
+  const countText = queue.unknown ? `≥${queue.total}` : String(queue.total);
+  const chipLabel = queue.unknown
+    ? `Hàng đợi Cần xử lý: ít nhất ${queue.total} mục; một số nguồn chưa đọc được`
+    : `Hàng đợi Cần xử lý: ${queue.total} mục`;
+  const deviceCount = queue.groups.find(group => group.key === "devices")?.items.length ?? 0;
+  const chipTitle = `${chipLabel}. ${deviceCount} máy cần xử lý (cùng bộ đếm Cần xử lý), ${queue.total - deviceCount} mục từ lượt chạy: bài Chưa rõ, lỗi ghi Sheet, máy lỗi. Bấm hoặc Ctrl+Shift+X để mở; hàng đợi không tự mở.`;
+
+  // Tab moves from the bar controls into the open drawer and back, as if it sat beside them.
+  const enterDrawer = (event: ReactKeyboardEvent<HTMLButtonElement>) => {
+    if (!open || event.key !== "Tab" || event.shiftKey || !drawerRef.current) return;
+    const first = focusables(drawerRef.current)[0];
+    if (!first) return;
+    event.preventDefault();
+    openerRef.current = event.currentTarget;
+    first.focus();
+  };
+  const leaveDrawer = (event: ReactKeyboardEvent<HTMLElement>) => {
+    if (event.key === "Escape") {
+      event.stopPropagation();
+      close();
+      return;
+    }
+    if (event.key !== "Tab" || !drawerRef.current) return;
+    const inside = focusables(drawerRef.current);
+    if (event.shiftKey && document.activeElement === inside[0]) {
+      event.preventDefault();
+      (openerRef.current ?? chipRef.current)?.focus();
+    } else if (!event.shiftKey && document.activeElement === inside.at(-1)) {
+      const launchers = [chipRef.current, pillRef.current].filter((element): element is HTMLButtonElement => !!element);
+      const outside = focusables(document).filter(element => !drawerRef.current?.contains(element));
+      const after = outside[outside.indexOf(launchers.at(-1) as HTMLElement) + 1];
+      if (after) { event.preventDefault(); after.focus(); }
+    }
+  };
+
+  const bar = <span className="queue-launchers" role="group" aria-label="Hàng đợi và tiến trình">
+    <button ref={chipRef} type="button" className={`queue-chip${queue.total > 0 ? " has-items" : ""}${queue.unknown ? " is-unknown" : ""}`}
+      aria-label={chipLabel} title={chipTitle} aria-expanded={open && tab === "attention"} aria-controls={drawerId} aria-keyshortcuts={QUEUE_SHORTCUT}
+      onKeyDown={enterDrawer}
+      onClick={(event) => open && tab === "attention" ? close() : openQueue("attention", event.currentTarget)}>
+      {queue.total > 0 ? <TriangleAlert size={14} aria-hidden="true" /> : <Inbox size={14} aria-hidden="true" />}
+      <span className="queue-chip-label">Cần xử lý</span>
+      <strong className="queue-chip-count">{countText}</strong>
+    </button>
+    {showPill && <span className={`queue-run-pill${pillAttention ? " has-attention" : ""}`}>
+      <button ref={pillRef} type="button" className="queue-run-toggle" aria-label="Tiến trình công việc" title={`${pillLabel} · ${state.error ? "?" : progressLabel(fraction)}`}
+        aria-expanded={open && tab === "running"} aria-controls={drawerId} onKeyDown={enterDrawer}
+        onClick={(event) => open && tab === "running" ? close() : openQueue("running", event.currentTarget)}>
+        <Clock3 size={14} aria-hidden="true" />
+        <strong className="queue-run-count">{state.error ? "?" : runningCount}</strong>
+        <span className="queue-run-label">{pendingStart && !active.length ? "đang chuẩn bị" : "đang chạy"}</span>
+        <span className="run-percent">{state.error ? "?" : progressLabel(fraction)}</span>
+        {pillAttention && <TriangleAlert className="run-attention" size={13} aria-label="Có kết quả cần kiểm tra" />}
       </button>
-      {expanded && <span className="run-monitor-total">{runs.length} bản ghi</span>}
-      {!expanded && <span className="run-percent">{!runs.length && !state.error ? "—" : state.error ? "?" : progressLabel(fraction)}</span>}
-      {!expanded && shown.some((run) => issueState(run.state) || run.issueCount > 0) && <span className="run-attention" title="Có kết quả cần kiểm tra" aria-label="Có kết quả cần kiểm tra"><TriangleAlert size={14} /></span>}
-      {expanded && <button type="button" className="icon-btn" data-monitor-no-drag
-        aria-label={maximized ? "Khôi phục kích thước" : "Phóng rộng tiến trình"} title={maximized ? "Khôi phục kích thước" : "Phóng rộng tiến trình"}
-        onClick={() => setMaximized((value) => !value)}>{maximized ? <Minimize2 size={16} /> : <Maximize2 size={16} />}</button>}
-      <button type="button" className="icon-btn" data-monitor-no-drag aria-label={expanded ? "Thu nhỏ tiến trình" : "Mở rộng tiến trình"}
-        title={expanded ? "Thu nhỏ tiến trình" : "Mở rộng tiến trình"} onClick={() => expanded ? minimize() : open(true)}>
-        {expanded ? <Minus size={16} /> : <Maximize2 size={15} />}
+      <ProgressBar fraction={state.error ? null : fraction} label="Tiến độ các lượt đang chạy" tone={active.length ? "run" : "idle"} className="queue-run-bar" />
+    </span>}
+  </span>;
+
+  const drawer = <aside ref={drawerRef} id={drawerId} hidden={!open} style={{ top }}
+    className={`queue-drawer${maximized ? " is-maximized" : ""}`} aria-label="Hàng đợi Cần xử lý" onKeyDown={leaveDrawer}>
+    <header className="queue-drawer-head">
+      <WorkspaceTabs label="Hàng đợi" value={tab} onChange={(next) => setTab(next as QueueTab)} tabs={[
+        { id: "attention", label: `Cần xử lý (${countText})`, panelId: `${drawerId}-attention` },
+        { id: "running", label: `Đang chạy (${runningCount})`, panelId: `${drawerId}-running` },
+      ]} />
+      <button type="button" className="icon-btn" aria-label={maximized ? "Khôi phục kích thước" : "Phóng rộng tiến trình"}
+        title={maximized ? "Khôi phục kích thước" : "Phóng rộng tiến trình"} onClick={() => setMaximized((value) => !value)}>
+        {maximized ? <Minimize2 size={16} /> : <Maximize2 size={16} />}
       </button>
+      <button type="button" className="icon-btn" aria-label="Đóng hàng đợi" title="Đóng hàng đợi (Esc)" onClick={close}><X size={16} /></button>
     </header>
-    {!expanded && <div className="run-monitor-overview">
-      <ProgressBar fraction={state.error ? null : fraction} label="Tiến độ công việc" tone={active.length ? "run" : "idle"} />
-    </div>}
-    <Activity mode={expanded ? "visible" : "hidden"}><div className="run-monitor-body" id={bodyId}>
-      <div className="run-monitor-tools">
-        <label className="run-selector-label" htmlFor={`${bodyId}-run`}>Phiên chạy</label>
-        <select id={`${bodyId}-run`} aria-label="Chọn tác vụ theo dõi" title={selectedRun ? runOptionLabel(selectedRun) : undefined} value={pendingStart ? pendingStart.status?.operationId ?? pendingStart.requestId : selectedRun?.id ?? ""} onChange={(event) => setSelectedId(event.target.value)} disabled={!!pendingStart || !runs.length}>
-          {pendingStart && <option value={pendingStart.status?.operationId ?? pendingStart.requestId}>Lượt đăng đang bắt đầu</option>}
-          {!runs.length && !pendingStart && <option value="">Không còn bản ghi</option>}
-          {runs.map((run) => <option key={run.id} value={run.id}>{runOptionLabel(run)}</option>)}
-        </select>
-        {selectedRun&&(activeRun(selectedRun)||canPausePublish||selectedStop?.state==="needsAttention"||selectedStop?.state==="failed")&&<button type="button" className="run-monitor-stop" title="Dừng toàn bộ máy của tác vụ đang chọn và đóng TikTok" aria-label="Dừng tác vụ và về màn hình chính" disabled={stopping||selectedStop?.state==="stopping"||!!state.error} onClick={()=>void stopSelected()}><Square size={14}/>{stopping||selectedStop?.state==="stopping"?"Đang dừng và nhả máy…":selectedRun.kind==="publish"?"Tạm dừng":"Dừng"}</button>}
-        {selectedRun && <button type="button" className="icon-btn" title="Xoá bản ghi đang xem khỏi cửa sổ theo dõi" aria-label={`Xoá bản ghi ${selectedRun.title}`}
-          disabled={!!state.error || activeRun(selectedRun)} onClick={() => dismiss([selectedRun])}><Trash2 size={16} /></button>}
-        <details ref={menuRef} className="run-monitor-history-menu"><summary aria-label="Tuỳ chọn bản ghi" title="Tuỳ chọn bản ghi"><MoreHorizontal size={18} aria-hidden="true" /></summary>
-          <div><button type="button" disabled={!!state.error || !runs.some((run) => !activeRun(run))} onClick={() => dismiss(runs)}>Xoá các bản ghi đã kết thúc</button></div>
-        </details>
+    {/* Rendered only while shown: a closed queue leaves no second "Máy N" in the page. */}
+    {open && tab === "attention" && (
+      <div id={`${drawerId}-attention`} role="tabpanel" aria-label="Cần xử lý" className="queue-panel">
+        <AttentionQueueList groups={queue.groups} total={queue.total} unknown={queue.unknown} omitted={queue.omitted}
+          runsError={state.error} retryRuns={state.retry} attentionUnknown={!attentionKnown}
+          seenAt={(key) => seenAt.get(key) ?? null} onWatch={watch} onDeviceDetails={onDeviceDetails}
+          onDismiss={dismiss} undoCount={undoKeys.length} onUndo={undo} dismissError={dismissal.error} onOpenRuns={openRuns} />
       </div>
-      {pendingStart && <div className="run-start-bridge" role="status">
-        <strong>{pendingStart.status?.state === "failed" ? "Không thể bắt đầu" : pendingStart.status?.state === "uncertain" ? "Đang đối chiếu yêu cầu" : "Đang chuẩn bị lượt đăng"}</strong>
-        <span>{pendingStart.status ? publishStageLabel(pendingStart.status.stage) : "Chờ xác nhận từ ứng dụng"}</span>
-        <small>Tác vụ: {pendingStart.status?.operationId ?? `publish-start:${pendingStart.requestId}`}</small>
-        {pendingStart.status?.error && <p role="alert">{pendingStart.status.error.message}</p>}
-        {!pendingStart.status && <div>
-          <p>Chỉ hủy mã nếu ứng dụng chưa tiếp nhận yêu cầu. Nếu lượt đã bắt đầu, ứng dụng giữ nguyên để đối chiếu. Mã đã hủy không thể dùng lại.</p>
-          <button type="button" disabled={cancellingStart} onClick={() => void cancelUnacceptedStart()}>
-            {cancellingStart ? "Đang đối chiếu và hủy…" : "Hủy yêu cầu chưa được tiếp nhận"}
-          </button>
-        </div>}
+    )}
+    <Activity mode={open && tab === "running" ? "visible" : "hidden"}>
+      <div id={`${drawerId}-running`} role="tabpanel" aria-label="Đang chạy"
+        className={`run-monitor queue-panel ${maximized ? "is-maximized" : "is-compact"}`}>
+        <div className="run-monitor-body" id={bodyId}>
+          {/* Several runs at once: each one's progress side by side, a press shows its phones. */}
+          {active.length > 1 && <ul className="queue-run-list" aria-label="Lượt đang chạy">
+            {active.map((run, index) => <li key={run.id}>
+              <button type="button" aria-pressed={!pendingStart && run.id === selectedRun?.id} disabled={!!pendingStart}
+                onClick={() => { setSelectedId(run.id); setWatchId(run.id); }}>
+                <span>{runOptionLabel(run)}</span>
+                <span className="run-percent">{progressLabel(progress[index])}</span>
+              </button>
+              <ProgressBar fraction={progress[index]} label={`Tiến độ ${runOptionLabel(run)}`} />
+            </li>)}
+          </ul>}
+          <div className="run-monitor-tools">
+            <label className="run-selector-label" htmlFor={`${bodyId}-run`}>Phiên chạy</label>
+            <select id={`${bodyId}-run`} aria-label="Chọn tác vụ theo dõi" title={selectedRun ? runOptionLabel(selectedRun) : undefined} value={pendingStart ? pendingStart.status?.operationId ?? pendingStart.requestId : selectedRun?.id ?? ""} onChange={(event) => { setSelectedId(event.target.value); setWatchId(event.target.value); }} disabled={!!pendingStart || !runs.length}>
+              {pendingStart && <option value={pendingStart.status?.operationId ?? pendingStart.requestId}>Lượt đăng đang bắt đầu</option>}
+              {!runs.length && !pendingStart && <option value="">Không có lượt đang chạy</option>}
+              {runs.map((run) => <option key={run.id} value={run.id}>{activeRun(run) ? runOptionLabel(run) : `${runOptionLabel(run)} · đã kết thúc`}</option>)}
+            </select>
+            {selectedRun&&(activeRun(selectedRun)||canPausePublish||selectedStop?.state==="needsAttention"||selectedStop?.state==="failed")&&<button type="button" className="run-monitor-stop" title="Dừng toàn bộ máy của tác vụ đang chọn và đóng TikTok" aria-label="Dừng tác vụ và về màn hình chính" disabled={stopping||selectedStop?.state==="stopping"||!!state.error} onClick={()=>void stopSelected()}><Square size={14}/>{stopping||selectedStop?.state==="stopping"?"Đang dừng và nhả máy…":selectedRun.kind==="publish"?"Tạm dừng":"Dừng"}</button>}
+          </div>
+          {pendingStart && <div className="run-start-bridge" role="status">
+            <strong>{pendingStart.status?.state === "failed" ? "Không thể bắt đầu" : pendingStart.status?.state === "uncertain" ? "Đang đối chiếu yêu cầu" : "Đang chuẩn bị lượt đăng"}</strong>
+            <span>{pendingStart.status ? publishStageLabel(pendingStart.status.stage) : "Chờ xác nhận từ ứng dụng"}</span>
+            <small>Tác vụ: {pendingStart.status?.operationId ?? `publish-start:${pendingStart.requestId}`}</small>
+            {pendingStart.status?.error && <p role="alert">{pendingStart.status.error.message}</p>}
+            {!pendingStart.status && <div>
+              <p>Chỉ hủy mã nếu ứng dụng chưa tiếp nhận yêu cầu. Nếu lượt đã bắt đầu, ứng dụng giữ nguyên để đối chiếu. Mã đã hủy không thể dùng lại.</p>
+              <button type="button" disabled={cancellingStart} onClick={() => void cancelUnacceptedStart()}>
+                {cancellingStart ? "Đang đối chiếu và hủy…" : "Hủy yêu cầu chưa được tiếp nhận"}
+              </button>
+            </div>}
+          </div>}
+          {startReadError && <p role="alert" className="run-stop-feedback is-error">{startReadError}</p>}
+          {stopError&&<p className="run-stop-feedback is-error" role="alert">{stopError}</p>}
+          {stopResult&&stopResult.operationId===selectedRun?.id&&<div className="run-stop-feedback" role="status">
+            <strong>{stopResult.state==="stopping"?"Đang dừng và nhả máy…":stopResult.state==="closed"?`Đã dừng · TikTok đã tắt trên ${stopResult.devices.length} máy`:"Đã yêu cầu dừng · Có máy cần kiểm tra"}</strong>
+            {stopResult.state!=="stopping"&&stopResult.devices.filter(d=>!d.closed).map(d=><span key={d.udid}>{deviceLabels.get(d.udid)??d.udid}: {d.message}</span>)}
+          </div>}
+          {state.error ? <MonitorReadError message={state.error} retry={state.retry} /> : selectedRun
+            ? <OperationRunDevices key={selectedRun.id} run={selectedRun} labels={deviceLabels} sessions={state.value?.sessions ?? []} compact={!maximized} />
+            : pendingStart ? null : <p className="run-monitor-empty">Không có lượt đang chạy. Lượt đã xong nằm trong Lượt chạy.</p>}
+          <p className="run-monitor-history-note">
+            Chỉ lượt đang chạy và lượt bạn đang theo dõi. Lượt đã xong nằm trong Lượt chạy.
+            {openRuns && <> <button type="button" className="ghost" onClick={openRuns}>Mở Lượt chạy</button></>}
+          </p>
+        </div>
+      </div>
+    </Activity>
+  </aside>;
+
+  return <>
+    {createPortal(bar, pillHost ?? document.body)}
+    {createPortal(drawer, document.body)}
+    {createPortal(<>
+      {/* Read once by assistive technology; never takes focus. */}
+      <span className="visually-hidden" role="status" aria-live="polite">{notice ? `Cần xử lý: thêm ${notice.count} mục. ${notice.text}` : ""}</span>
+      {notice && noticeAt && <div className="queue-notice" aria-hidden="true" style={{ top: noticeAt.top, right: noticeAt.right }}>
+        <TriangleAlert size={14} />
+        <span><strong>Thêm {notice.count} mục cần xử lý</strong><small>{notice.text}</small></span>
       </div>}
-      {startReadError && <p role="alert" className="run-stop-feedback is-error">{startReadError}</p>}
-      {stopError&&<p className="run-stop-feedback is-error" role="alert">{stopError}</p>}
-      {stopResult&&stopResult.operationId===selectedRun?.id&&<div className="run-stop-feedback" role="status">
-        <strong>{stopResult.state==="stopping"?"Đang dừng và nhả máy…":stopResult.state==="closed"?`Đã dừng · TikTok đã tắt trên ${stopResult.devices.length} máy`:"Đã yêu cầu dừng · Có máy cần kiểm tra"}</strong>
-        {stopResult.state!=="stopping"&&stopResult.devices.filter(d=>!d.closed).map(d=><span key={d.udid}>{deviceLabels.get(d.udid)??d.udid}: {d.message}</span>)}
-      </div>}
-      {undoKeys.length > 0 && <div className="run-monitor-undo" role="status"><span>Đã xoá {undoKeys.length} bản ghi khỏi cửa sổ.</span><button type="button" className="ghost" onClick={undo}><Undo2 size={14} /> Hoàn tác xoá</button></div>}
-      {dismissal.error && <MonitorReadError message={`Chưa lưu được danh sách bản ghi: ${dismissal.error}`} retry={() => {
-        try { setDismissal({ records: readDismissedRecords(), error: null }); }
-        catch (error) { setDismissal((current) => ({ ...current, error: describeError(error) })); }
-      }} />}
-      {state.error ? <MonitorReadError message={state.error} retry={state.retry} /> : selectedRun
-        ? <OperationRunDevices key={selectedRun.id} run={selectedRun} labels={deviceLabels} sessions={state.value?.sessions ?? []} compact={!maximized} />
-        : pendingStart ? null : <p className="run-monitor-empty">Không còn bản ghi trong cửa sổ này.</p>}
-      <p className="run-monitor-history-note">24 giờ gần nhất · Tối đa 200 bản ghi. {state.value?.page.hasMore ? "Các tác vụ khác nằm trong trang Tác vụ." : "Xem lịch sử đầy đủ tại trang Tác vụ."}</p>
-    </div></Activity>
-  </section>, host);
+    </>, document.body)}
+  </>;
 }

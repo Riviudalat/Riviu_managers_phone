@@ -19,8 +19,11 @@ for (const width of [1440,820]) test(`monitor retries just one failed device at 
    return original(command,args);
   };
  });
- await page.goto("/");await page.getByRole("button",{name:"Mở rộng tiến trình",exact:true}).click();
- const monitor=page.getByRole("dialog",{name:"Cửa sổ tiến trình"});const retry=monitor.getByRole("button",{name:"Thử lại",exact:true});await expect(retry).toHaveCount(1);await retry.click();
+ // A finished run is no longer in "Đang chạy": its failed phone is a queue row, and Theo dõi opens it.
+ await page.goto("/");await page.getByRole("button",{name:/^Hàng đợi Cần xử lý/}).click();
+ const queue=page.getByRole("complementary",{name:"Hàng đợi Cần xử lý"});
+ await queue.getByRole("listitem",{name:/Dừng trước khi bấm Đăng/}).getByRole("button",{name:"Theo dõi",exact:true}).click();
+ const monitor=queue.getByRole("tabpanel",{name:"Đang chạy"});const retry=monitor.getByRole("button",{name:"Thử lại",exact:true});await expect(retry).toHaveCount(1);await retry.click();
  await expect.poll(()=>page.evaluate(()=>(window as unknown as {retryCalls:unknown[]}).retryCalls.length)).toBe(1);
  expect(await page.evaluate(()=>(window as unknown as {retryCalls:Record<string,unknown>[]}).retryCalls[0])).toMatchObject({assignmentId:"failed",confirmed:true,expectedRevision:8});
  await expect(monitor.getByRole("button",{name:"Thử lại",exact:true})).toHaveCount(0);

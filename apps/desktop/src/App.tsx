@@ -46,6 +46,7 @@ import { ActivityCenter } from "./components/ActivityCenter";
 import { OperationSourceDetail } from "./components/OperationSourceDetail";
 import { PUBLISH_START_ACKNOWLEDGED } from "./features/operations/publishStartBridge";
 import { OperationProgressCenter } from "./features/operations/OperationProgressCenter";
+import { queueHolder, UNASSIGNED_BOX, type DeviceAttention, type QueuePhone } from "./features/operations/attentionQueueModel";
 import { DeviceTile } from "./components/DeviceTile";
 import { FilterToolbar } from "./components/FilterToolbar";
 import { loadViewMode, storeViewMode, type ViewMode } from "./viewMode";
@@ -239,8 +240,8 @@ function App() {
     setMacroSession(null);
   }, []);
   const [groupsOpen, setGroupsOpen] = useState(false);
-  // Hosts the run monitor moves between; both stay mounted so the wall never remounts.
-  const [monitorDock, setMonitorDock] = useState<HTMLDivElement | null>(null);
+  // The system-bar slot of the Cần xử lý chip and the run pill; the queue drawer lies over the
+  // wall and never takes width from it.
   const [monitorPill, setMonitorPill] = useState<HTMLSpanElement | null>(null);
   const workspaceDirty = useWorkspaceDirty();
   const [automationView, setAutomationView] = useState<"device" | "orchestration">("device");
@@ -949,6 +950,25 @@ function App() {
     [devices, fleetSettled, currentDeviceWorkOwner, deviceWorkOwnerReadState, cachedAgent, cachedLoad],
   );
 
+  // The queue's view of each phone (number, box, current holder) and the header counter's
+  // Cần xử lý set, from the same status the tiles show.
+  const queueFleet = useMemo(() => {
+    const phones = new Map<string, QueuePhone>();
+    const attention: DeviceAttention[] = [];
+    for (const device of orderedDevices) {
+      const view = deviceOperationalView(device, currentDeviceWorkOwner(device.udid), deviceWorkOwnerReadState,
+        cachedAgent(device.udid), currentDeviceWorkState(device.udid)?.activity, cachedLoad(device.udid));
+      const boxes = groups.filter((group) => group.udids.includes(device.udid)).map((group) => group.name);
+      phones.set(device.udid, {
+        machine: machineNumberLabel(fleetNumberByUdid.get(device.udid)),
+        box: boxes.length ? boxes.join(", ") : UNASSIGNED_BOX,
+        holder: queueHolder(view),
+      });
+      if (view.kind === "warning") attention.push({ udid: device.udid, view });
+    }
+    return { phones, attention };
+  }, [orderedDevices, groups, fleetNumberByUdid, currentDeviceWorkOwner, deviceWorkOwnerReadState, cachedAgent, currentDeviceWorkState, cachedLoad]);
+
   const runningJobs = useMemo(
     () => jobs.filter((j) => j.status === "running" || j.status === "queued").length,
     [jobs],
@@ -1174,7 +1194,7 @@ function App() {
           }
           actions={
             <>
-              <span ref={setMonitorPill} className="run-monitor-pill-slot" />
+              <span ref={setMonitorPill} className="queue-launcher-slot" />
               <button
                 type="button"
                 className="ui-palette-launcher"
@@ -1240,7 +1260,9 @@ function App() {
           }}
         />
         {!focusDevice && recordingControls}
-        <OperationProgressCenter deviceLabels={automationDeviceLabels} dockHost={monitorDock} pillHost={monitorPill} />
+        <OperationProgressCenter deviceLabels={automationDeviceLabels} pillHost={monitorPill}
+          phones={queueFleet.phones} attention={queueFleet.attention} attentionKnown={counts.attention !== null}
+          onDeviceDetails={setDetailsFor} onOpenRuns={() => void requestPage("jobs", true)} />
         <div
           ref={contentRef}
           className={`content content-${page} ${page === "scripts" ? "content-flow" : ""}`}
@@ -1954,8 +1976,6 @@ function App() {
           )}
         </div>
       </div>
-      {/* A flex sibling, so a docked monitor narrows the wall instead of covering it. */}
-      <div ref={setMonitorDock} className="run-monitor-dock" />
 
       {/* **Outside the control-page block, and that placement is the fix.** Both of these are
           opened from `tileActions`, which `FocusStream` renders — and `FocusStream` is mounted
