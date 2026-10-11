@@ -975,3 +975,8 @@ button.linkish,
   -webkit-box-orient: vertical;
   overflow: hidden;
 }
+
+/* Owner request: the number stays as it is; the other caption lines are a little smaller. */
+.window-canvas[data-mode="window"] .dev-phone-line { font-size: 10.5px; line-height: 1.2; }
+.window-canvas[data-mode="window"] .dev-phone-status,
+.window-canvas[data-mode="window"] .dev-phone-detail { font-size: 11px; }
