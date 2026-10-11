@@ -9,7 +9,8 @@ tile/canvas, mật độ và cử chỉ thiết bị. Thông báo ngắn có th�
 hành động, monitor nguồn và ActivityCenter. Đây là tiêu chí triển khai, không tự xác nhận mọi
 màn hình đã vượt cổng screenshot/accessibility.
 
-Sidebar rộng 224 px (200 px trên màn hẹp), có nút thu gọn thành icon;
+Sidebar rộng 196 px (184 px từ 1100 px trở xuống), có nút thu gọn thành icon; khi mở,
+tên **Riviu Manager** hiện đủ cạnh logo và nút thu gọn, không bị cắt;
 dưới 960 px mặc định dùng thanh icon, vẫn mở rộng được bằng nút điều hướng;
 tiêu đề nhóm ẩn/hiện các mục bên trong. Mục đang chọn dùng nền cam nhạt,
 chữ cam đậm và vạch cam bên trái. Automation có ba trang Nuôi TikTok, Tương tác,
@@ -142,8 +143,8 @@ bộ lọc. Refresh lỗi giữ dữ liệu cũ khi còn hợp lệ; response c�
 - Chế độ dùng segmented control; binary dùng checkbox/toggle; số dùng input/stepper/slider; option dùng menu.
 - Menu chức năng của máy (chuột phải trên thẻ hoặc trong cửa sổ điện thoại; Shift+F10 hay phím
   ContextMenu trên thẻ) dùng primitive `components/ui/Menu.tsx`: Base UI, CSS thuần, alias riêng
-  `--ui-hover`/`--ui-border`/`--ui-ring`/`--primary-foreground`, không đổi `--accent`. Tên máy và ô
-  **Tìm chức năng** nằm ngoài phần tử `menu`. Mở bằng bàn phím thì focus vào ô tìm; ↓ vào danh sách,
+  `--ui-hover`/`--ui-border`/`--ui-ring`/`--primary-foreground`, không đổi `--accent`. Tên máy (cùng tên
+  với thẻ: alias nếu có, không thì **Máy N**; model và udid ở tooltip) và ô **Tìm chức năng** nằm ngoài phần tử `menu`. Mở bằng bàn phím thì focus vào ô tìm; ↓ vào danh sách,
   → hoặc Enter mở menu con, ← hoặc Escape đóng một cấp, Escape nữa đóng menu và trả focus về thẻ đã mở.
   Menu không modal: không khóa cuộn, không làm inert/ẩn cửa sổ điện thoại phía sau; bấm ra ngoài thì
   đóng. Dòng được chọn chạy sau khi menu đóng hẳn. Hover chỉ đổi màu, không lấy focus khỏi ô tìm.

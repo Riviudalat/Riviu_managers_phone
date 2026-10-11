@@ -73,6 +73,8 @@ interface Props {
   device: DeviceInfo;
   /** 1-based index in the visible grid, shown in the sidebar header. */
   index: number;
+  /** The tile's operator name for menus ("Máy N" or the alias); defaults to the number label. */
+  name?: string;
   deviceNumbers?: ReadonlyMap<string, number>;
   onClose: () => void;
   activeSync?: ActiveGroupSync | null;
@@ -116,6 +118,7 @@ export function FocusStream({
   onActivate,
   device,
   index,
+  name,
   deviceNumbers,
   onClose: onClosed,
   activeSync = null,
@@ -918,7 +921,7 @@ export function FocusStream({
       onPointerDownCapture={onActivate}
       onKeyDown={event => { if (event.key === "Escape" && active && !event.defaultPrevented) { event.stopPropagation(); if(contextMenu) setContextMenu(null); else onClose(); } }}
     >
-      {contextMenu?.udid===device.udid && <DeviceContextMenu key={`${contextMenu.x}:${contextMenu.y}`} device={device} groups={[]} x={contextMenu.x} y={contextMenu.y} nodes={panelNodes} onAddToGroup={()=>{}} onClose={()=>setContextMenu(current=>current===contextMenu?null:current)} />}
+      {contextMenu?.udid===device.udid && <DeviceContextMenu key={`${contextMenu.x}:${contextMenu.y}`} device={device} name={name ?? machineNumberLabel(index)} groups={[]} x={contextMenu.x} y={contextMenu.y} nodes={panelNodes} onAddToGroup={()=>{}} onClose={()=>setContextMenu(current=>current===contextMenu?null:current)} />}
       <div ref={stageRef} className={`focus-stage${layout.stacked ? " is-stacked" : ""}${layout.landscape ? " is-landscape" : ""}`} onClick={(event) => event.stopPropagation()}>
         <div
           ref={screenRef}

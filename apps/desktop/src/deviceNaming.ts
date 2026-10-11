@@ -30,6 +30,12 @@ export function machineNumberLabel(number: number | null | undefined): string {
   return number != null && number > 0 ? `Máy ${number}` : "Đang gán số";
 }
 
+/** What menus call the phone, matching its tile: the operator's alias, else "Máy N" — never the model. */
+export function operatorName(number: number | null | undefined, meta: DeviceMeta | undefined): string {
+  const alias = meta?.alias?.trim();
+  return alias ? alias : machineNumberLabel(number);
+}
+
 /**
  * Numbered phones first in number order, then everything else in the order it arrived.
  *

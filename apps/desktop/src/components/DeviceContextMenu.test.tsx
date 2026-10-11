@@ -32,6 +32,7 @@ describe("DeviceContextMenu", () => {
     render(
       <DeviceContextMenu
         device={REDMI}
+        name="Máy 7"
         groups={[]}
         x={10}
         y={10}
@@ -168,6 +169,7 @@ describe("DeviceContextMenu", () => {
     render(
       <DeviceContextMenu
         device={{ ...REDMI, platform: "ios", udid: "0000-iphone" }}
+        name="Máy 8"
         groups={[]}
         x={10}
         y={10}

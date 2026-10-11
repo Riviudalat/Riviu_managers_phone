@@ -1,4 +1,4 @@
-import { machineNumberLabel } from "./deviceNaming";
+import { machineNumberLabel, operatorName } from "./deviceNaming";
 import { useNumberWallpaperSync } from "./wallpaperSync";
 import { deviceNumbersByUdid } from "./deviceNaming";
 import {
@@ -1573,6 +1573,7 @@ function App() {
                   // the closing menu must not clear it when it finishes.
                   key={`${tileMenu.udid}:${tileMenu.x}:${tileMenu.y}`}
                   device={menuDevice}
+                  name={operatorName(fleetNumberByUdid.get(menuDevice.udid), metaMap.get(menuDevice.udid))}
                   groups={groups}
                   x={tileMenu.x}
                   y={tileMenu.y}
@@ -1846,6 +1847,7 @@ function App() {
           windowOrder={windowOrder}
           onActivate={() => deviceWindows.activate(udid)}
           index={fleetNumberByUdid.get(udid) ?? 0}
+          name={operatorName(fleetNumberByUdid.get(udid), metaMap.get(udid))}
           deviceNumbers={fleetNumberByUdid}
           onClose={() => deviceWindows.close(udid)}
           activeSync={activeSync?.masterUdid === udid ? activeSync : null}

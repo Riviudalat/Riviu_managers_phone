@@ -11,6 +11,8 @@ import { ContextMenu, MenuGroup, MenuItem, MenuNote, MenuSubmenu } from "./ui/Me
 
 interface Props {
   device: DeviceInfo;
+  /** The tile's operator name ("Máy N" or the alias); the model and udid stay in the tooltip. */
+  name: string;
   groups: DeviceGroup[];
   x: number;
   y: number;
@@ -45,6 +47,7 @@ interface Props {
  */
 export function DeviceContextMenu({
   device,
+  name,
   groups,
   x,
   y,
@@ -131,7 +134,7 @@ export function DeviceContextMenu({
     <ContextMenu
       open={open}
       point={{ x, y }}
-      label={`Tác vụ cho ${device.name}`}
+      label={`Tác vụ cho ${name}`}
       onOpenChange={setOpen}
       onClosed={() => {
         const action = chosen.current;
@@ -142,8 +145,8 @@ export function DeviceContextMenu({
       initialFocus={searchRef}
       header={
         <>
-          <p className="device-menu-head" title={device.udid}>
-            {device.name}
+          <p className="device-menu-head" title={`${device.name} · ${device.udid}`}>
+            {name}
           </p>
           {/* The reference product's 搜索菜单 box. With this many rows it stops being a
               nicety: scrolling to find "Reset DPI" is slower than typing "dpi". */}
