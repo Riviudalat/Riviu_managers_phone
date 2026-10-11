@@ -67,6 +67,12 @@ Get-CimInstance Win32_Process -Filter "Name='node.exe'" |
 # Xem danh sách, rồi: Stop-Process -Id <id,...>
 ```
 
+Cùng kiểu đó: một vòng `bash` `until grep … tasks/<id>.output` mà worker để chạy nền rồi
+quên (ví dụ chờ một build đã bị dừng). Command line của nó chứa đường dẫn worktree trong
+thư mục `tasks` của session. Khi đó `worker-release` trả `release_unknown`. Dừng đúng vòng
+đó, rồi release lại. Có process không lộ đường dẫn trên command line (shell có cwd trong
+worktree) thì để lại và báo người dùng, không đoán.
+
 Không dừng `node` của worktree khác, của controller hay Riviu MCP; không dừng `riviu*.exe`,
 adb hay process không có đường dẫn worktree trong command line.
 
