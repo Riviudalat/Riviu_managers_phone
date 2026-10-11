@@ -940,7 +940,7 @@ describe("Flow page integration", () => {
   it("uses the page header as the one semantic page heading", async () => {
     render(<App />);
 
-    expect(screen.getByRole("heading", { level: 1, name: "Thiết bị" })).toBeVisible();
+    expect(screen.getByRole("heading", { level: 1, name: "Trung tâm điều khiển" })).toBeVisible();
     await navigate("Dữ liệu");
     expect(screen.getByRole("heading", { level: 1, name: "Dữ liệu" })).toBeVisible();
     expect(screen.getAllByRole("heading", { level: 1 })).toHaveLength(1);
@@ -978,7 +978,7 @@ describe("Flow page integration", () => {
     await waitFor(() =>
       expect(screen.queryByRole("alertdialog")).not.toBeInTheDocument(),
     );
-    expect(screen.getByText("Flow", { selector: "[data-testid='page-title']" })).toBeVisible();
+    expect(screen.getByText("Flow thiết bị", { selector: "[data-testid='page-title']" })).toBeVisible();
 
     await navigate("Tác vụ");
     await clickConfirmation("Bỏ thay đổi");

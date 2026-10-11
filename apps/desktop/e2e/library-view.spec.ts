@@ -1,3 +1,4 @@
+import { openOperatorPage } from "./fixtures/operatorNavigation";
 import { expect, test } from "@playwright/test";
 import { installTauriMock, mockCommandCalls } from "./fixtures/tauriMock";
 
@@ -6,7 +7,7 @@ for (const viewport of [{ width: 1440, height: 900 }, { width: 820, height: 560 
     await page.setViewportSize(viewport);
     await installTauriMock(page, { androidRoster: true });
     await page.goto("/");
-    await page.getByRole("button", { name: "Trung tâm ứng dụng", exact: true }).click();
+    await openOperatorPage(page, "Trung tâm ứng dụng");
     const columns = page.getByLabel("Chọn cột: Thư viện ứng dụng");
     await columns.focus();
     await page.keyboard.press("Enter");
@@ -15,7 +16,7 @@ for (const viewport of [{ width: 1440, height: 900 }, { width: 820, height: 560 
     await expect(columns).toBeFocused();
     await expect(page.getByRole("columnheader", { name: "Nền tảng" })).toHaveCount(0);
     await page.reload();
-    await page.getByRole("button", { name: "Trung tâm ứng dụng", exact: true }).click();
+    await openOperatorPage(page, "Trung tâm ứng dụng");
     await expect(page.getByRole("columnheader", { name: "Nền tảng" })).toHaveCount(0);
     await expect(page.getByRole("button", { name: "Cài → 0 Android" })).toBeDisabled();
     const add = page.getByRole("button", { name: "Thêm gói", exact: true });

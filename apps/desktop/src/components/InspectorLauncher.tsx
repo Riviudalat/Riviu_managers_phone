@@ -1,10 +1,11 @@
-import { useState } from "react";
+import { useEffect, useState } from "react";
 import { createPortal } from "react-dom";
 import { ScanLine, Smartphone, X } from "lucide-react";
 
 import type { DeviceInfo } from "../types";
 import { DeviceInspector } from "./DeviceInspector";
 import { useModalFocus } from "./useModalFocus";
+import { INSPECTOR_PICKER_REQUEST } from "./inspectorPicker";
 import "./inspector-launcher.css";
 
 function InspectorPicker({ devices, deviceLabels, onSelect, onClose }: {
@@ -47,6 +48,12 @@ export function InspectorLauncher({ devices, deviceLabels }: {
   const selectedConnected = connectedAndroid.some((device) => device.udid === selectedUdid);
 
   if (selectedUdid && !selectedConnected) setSelectedUdid(null);
+
+  useEffect(() => {
+    const open = () => setPickerOpen(true);
+    window.addEventListener(INSPECTOR_PICKER_REQUEST, open);
+    return () => window.removeEventListener(INSPECTOR_PICKER_REQUEST, open);
+  }, []);
 
   return <>
     <button type="button" className="inspector-launcher" title="Bắt thuộc tính & ghi Flow (chỉ máy Android)" aria-label="Mở Inspector" onClick={() => setPickerOpen(true)}>

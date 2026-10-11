@@ -1,3 +1,4 @@
+import { openOperatorPage } from "./fixtures/operatorNavigation";
 import { expect, test } from "@playwright/test";
 import { installTauriMock, mockCommandCalls } from "./fixtures/tauriMock";
 
@@ -21,9 +22,9 @@ for (const width of [1440, 820]) {
     await page.getByTestId('device-tile').first().dblclick();
     const first=page.getByRole('dialog',{name:'Điều khiển Máy thử 1',exact:true});
     await expect(first).toHaveAttribute('aria-modal','false');
-    await page.getByRole('button',{name:'My Apps',exact:true}).click();
+    await openOperatorPage(page,'My Apps');
     await expect(first).toBeVisible();
-    await page.getByRole('button',{name:'Control Center',exact:true}).click();
+    await openOperatorPage(page,'Thiết bị');
     // Changing device reuses the existing window, including when it covers the tile.
     await page.getByTestId('device-tile').nth(1).dispatchEvent('dblclick');
     await expect(page.locator('.device-floating-window')).toHaveCount(1);
@@ -44,7 +45,7 @@ test('account records persist, edit with revisions, and do not execute device ac
     return invoke(command,args);
    };
  });
- await page.goto('/');await page.getByRole('button',{name:'Quản lý tài khoản',exact:true}).click();
+ await page.goto('/');await openOperatorPage(page,'Quản lý tài khoản');
  await page.getByRole('button',{name:'Thêm tài khoản',exact:true}).click();
  const editor=page.getByRole('complementary',{name:'Chỉnh bản ghi'});
  await editor.getByLabel('Tên',{exact:true}).fill('Đội nội dung');

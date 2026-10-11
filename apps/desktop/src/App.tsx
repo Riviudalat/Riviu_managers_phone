@@ -89,6 +89,7 @@ import { clearAutomationMode, requestAutomationMode } from "./automationModeRequ
 import { SavedTasksPage } from "./pages/SavedTasksPage";
 import { ControlCenterRail } from "./components/ControlCenterRail";
 import { Sidebar } from "./components/Sidebar";
+import { MenuTabs } from "./components/MenuTabs";
 import { TargetSelector } from "./components/TargetSelector";
 import { PageHeader, StatusChip } from "./components/WorkspacePrimitives";
 import { RosterUpdated } from "./components/RosterUpdated";
@@ -129,13 +130,13 @@ const OrchestrationWorkspace = lazy(async () => {
 
 const PAGE_TITLE: Partial<Record<PageId, string>> = {
   accounts: "Quản lý tài khoản", networks: "Mạng & Router", schedules: "Lịch chạy", savedTasks: "Tác vụ đã lưu", help: "Trợ giúp",
-  myApps: "My Apps",
-  control: "Thiết bị",
+  myApps: "Ứng dụng",
+  control: "Trung tâm điều khiển",
   nurture: "Nuôi TikTok",
   interaction: "Tương tác",
   material: "Kho nội dung",
-  apps: "Trung tâm ứng dụng",
-  scripts: "Flow",
+  apps: "Ứng dụng",
+  scripts: "Flow thiết bị",
   jobs: "Lượt chạy",
   publish: "Đăng bài",
   diagnostics: "Chẩn đoán",
@@ -1136,6 +1137,13 @@ function App() {
             requestPage("scripts", true).then((activated) => activated && requestAutomationView("orchestration")),
             "#flow-mode-tab-orchestration",
           )}
+          onGroups={() => paletteNavigate(requestPage("control", true).then((activated) => {
+            if (activated) {
+              if (groupToolsView !== "recording") closeGroupTools();
+              setGroupsOpen(true);
+            }
+            return activated;
+          }), ".group-manager .group-new button")}
           onGoToDevice={goToDevice}
           onSelectDevices={(udids) => {
             // Selecting from another page lands on Thiết bị; on it, focus stays where it was.
@@ -1683,6 +1691,7 @@ function App() {
               onSelectUdids={setSelected}
             />
           )}
+          {!myAppsEditorOpen && <MenuTabs page={page} onPage={(next) => void requestPage(next, true)} />}
           {page === "apps" && (
             <AppsPage
               deviceNumbers={fleetNumberByUdid}

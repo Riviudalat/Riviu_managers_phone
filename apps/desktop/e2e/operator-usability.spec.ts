@@ -1,3 +1,4 @@
+import { openOperatorPage } from "./fixtures/operatorNavigation";
 import { test, expect } from "@playwright/test";
 import { installTauriMock } from "./fixtures/tauriMock";
 
@@ -34,23 +35,24 @@ test("preview scales, display rail hides, and group creation stays reachable", a
   await expect(page.getByRole("button", { name: /Tạo Nhóm/ })).toBeVisible();
 });
 
-test("Automation collapses while the three original workspaces remain direct destinations", async ({ page }) => {
+test("Công việc folds while the three original workspaces stay pinned destinations", async ({ page }) => {
   await installTauriMock(page);
   await page.goto("/");
   const nav = page.getByRole("navigation", { name: "Điều hướng chính" });
-  await nav.getByRole("button", { name: "Automation", exact: true }).click();
-  for (const name of ["Nuôi TikTok", "Tương tác", "Đăng bài"]) {
-    await expect(nav.getByRole("button", { name, exact: true })).toBeHidden();
-  }
+  const work = nav.getByRole("button", { name: "Công việc", exact: true });
+  // 1280×720 is a short window: the groups start folded, the pinned row never does.
+  await expect(work).toHaveAttribute("aria-expanded", "false");
+  await expect(nav.getByRole("button", { name: "Lịch chạy", exact: true })).toBeHidden();
+  await work.click();
   await page.reload();
-  await expect(nav.getByRole("button", { name: "Automation", exact: true })).toHaveAttribute("aria-expanded", "false");
-  await nav.getByRole("button", { name: "Automation", exact: true }).click();
+  await expect(work).toHaveAttribute("aria-expanded", "true");
+  await expect(nav.getByRole("button", { name: "Lịch chạy", exact: true })).toBeVisible();
   for (const name of ["Nuôi TikTok", "Tương tác", "Đăng bài"]) {
     await nav.getByRole("button", { name, exact: true }).click();
     await expect(page.getByRole("heading", { name, exact: true }).first()).toBeVisible();
     await expect(page.locator(".react-flow")).toHaveCount(0);
   }
-  await nav.getByRole("button", { name: "My Apps", exact: true }).click();
+  await openOperatorPage(page, "My Apps");
   await expect(page.getByRole("button", { name: "Thêm Flow", exact: true })).toHaveCount(3);
   await page.getByRole("button", { name: "Mở chức năng", exact: true }).first().click();
   await expect(page.getByRole("heading", { name: "Nuôi TikTok", exact: true }).first()).toBeVisible();

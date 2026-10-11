@@ -1,5 +1,6 @@
 import { CommandPalette, type PaletteGroup } from "./ui/CommandPalette";
 import { MENU as SIDEBAR_MENU } from "./navigationMenu";
+import { requestInspectorPicker } from "./inspectorPicker";
 import type { PageId } from "../types";
 
 export interface PaletteDevice {
@@ -19,12 +20,16 @@ interface Props {
   attentionUdids: string[] | null;
   onPage: (page: PageId) => void;
   onOrchestration: () => void;
+  /** Goes to Trung tâm điều khiển and opens its Nhóm panel. */
+  onGroups: () => void;
   onGoToDevice: (udid: string) => void;
   onSelectDevices: (udids: string[]) => void;
 }
 
 /**
  * Ctrl+K, phase 1: go to a page, go to a phone, select the phones that need attention.
+ * Pages also answer to their old names (Control Center, My Apps, Automation, Runs…), so an
+ * operator who knows GenFarmer or an earlier Riviu finds them without guessing an icon.
  *
  * Nothing here runs work on a phone. "Chạy tác vụ đã lưu" opens the saved-task list, whose own
  * Chạy button asks for confirmation as it always has; the per-phone function menu stays the
@@ -37,6 +42,7 @@ export function NavigationPalette({
   attentionUdids,
   onPage,
   onOrchestration,
+  onGroups,
   onGoToDevice,
   onSelectDevices,
 }: Props) {
@@ -63,25 +69,41 @@ export function NavigationPalette({
           keywords: "tac vu da luu",
           run: () => onPage("savedTasks"),
         },
+        {
+          id: "inspector",
+          label: "Bắt thuộc tính (Inspector)",
+          hint: "Chỉ máy Android · mở danh sách máy",
+          keywords: "inspector ghi flow",
+          run: requestInspectorPicker,
+        },
+        {
+          id: "groups",
+          label: "Nhóm máy",
+          hint: "Mở bảng Nhóm trong Trung tâm điều khiển",
+          keywords: "groups box",
+          run: onGroups,
+        },
       ],
     },
     {
       label: "Trang",
       items: [
         ...SIDEBAR_MENU.flatMap((group) =>
-          group.items.map((item) => ({
-            id: `page-${item.id}`,
-            label: item.label,
-            hint: group.label,
-            keywords: "trang di toi",
-            run: () => onPage(item.id),
-          })),
+          group.items.flatMap((item) =>
+            (item.tabs ?? [item]).map((entry) => ({
+              id: `page-${entry.id}`,
+              label: item.tabs ? `${item.label} › ${entry.label}` : entry.label,
+              hint: group.label,
+              keywords: `trang di toi ${entry.aliases ?? ""}`,
+              run: () => onPage(entry.id),
+            })),
+          ),
         ),
         {
           id: "page-orchestration",
           label: "Điều phối",
-          hint: "Automation",
-          keywords: "trang di toi orchestration flow",
+          hint: "Công việc",
+          keywords: "trang di toi orchestration flow automation",
           run: onOrchestration,
         },
       ],

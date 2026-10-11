@@ -1,3 +1,4 @@
+import { openOperatorPage } from "./fixtures/operatorNavigation";
 import { expect, test } from "@playwright/test";
 import { installTauriMock } from "./fixtures/tauriMock";
 for (const width of [1440, 820]) {
@@ -33,7 +34,7 @@ for (const width of [1440, 820]) {
       };
     });
     await page.goto("/");
-    await page.getByRole("navigation", { name: "Điều hướng chính" }).getByRole("button", { name: "Cài đặt", exact: true }).click();
+    await openOperatorPage(page, "Cài đặt");
     await page.getByRole("link", { name: "Kết nối và API" }).click();
     const section = page.getByRole("region", {
       name: "Nhận diện giao diện",

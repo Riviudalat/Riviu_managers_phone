@@ -1,3 +1,4 @@
+import { openOperatorPage } from "./fixtures/operatorNavigation";
 import { expect, test } from "@playwright/test";
 import { installTauriMock, mockCommandCalls } from "./fixtures/tauriMock";
 
@@ -37,7 +38,7 @@ test("group tools use keyboard tabs and return focus to their launcher", async (
 });
 
 test("API connection link opens and focuses the integration settings", async ({ page }) => {
-  await page.getByRole("navigation", { name: "Điều hướng chính" }).getByRole("button", { name: "API", exact: true }).click();
+  await openOperatorPage(page, "API");
   await page.getByRole("button", { name: "Cấu hình kết nối", exact: true }).click();
   await expect(page.getByRole("heading", { level: 1, name: "Cài đặt" })).toBeVisible();
   await expect(page.locator("#settings-integration")).toBeFocused();

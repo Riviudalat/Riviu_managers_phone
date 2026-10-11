@@ -3,12 +3,12 @@ import { installTauriMock, mockCommandCalls } from "./fixtures/tauriMock";
 import { openOperatorPage } from "./fixtures/operatorNavigation";
 
 const pages = [
-  ["Thiết bị", "Thiết bị"], ["Cài đặt máy", "Cài đặt máy"], ["Nuôi TikTok", "Nuôi TikTok"],
+  ["Thiết bị", "Trung tâm điều khiển"], ["Cài đặt máy", "Cài đặt máy"], ["Nuôi TikTok", "Nuôi TikTok"],
   ["Tương tác", "Tương tác"], ["Đăng bài", "Đăng bài"],
-  ["My Apps", "My Apps"], ["Tác vụ", "Lượt chạy"],
-  ["Tác vụ đã lưu", "Tác vụ đã lưu"], ["Flow", "Flow"],
+  ["My Apps", "Ứng dụng"], ["Tác vụ", "Lượt chạy"],
+  ["Tác vụ đã lưu", "Tác vụ đã lưu"], ["Flow", "Flow thiết bị"],
   ["Quản lý tài khoản", "Quản lý tài khoản"], ["Lịch chạy", "Lịch chạy"],
-  ["Kho nội dung", "Kho nội dung"], ["Trung tâm ứng dụng", "Trung tâm ứng dụng"],
+  ["Kho nội dung", "Kho nội dung"], ["Trung tâm ứng dụng", "Ứng dụng"],
   ["API", "API"], ["Chẩn đoán", "Chẩn đoán"],
   ["Cài đặt", "Cài đặt"], ["Trợ giúp", "Trợ giúp"],
 ] as const;

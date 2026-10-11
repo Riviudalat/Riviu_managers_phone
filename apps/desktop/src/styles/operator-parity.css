@@ -29,7 +29,7 @@
 .control-group-list {border:1px solid var(--rv-border);border-radius:4px;padding:6px;}
 .control-rail-content[hidden] {display:none;}
 .control-center-rail .rail-toggle,.control-center-rail .rail-create-group {display:grid;place-items:center;width:var(--rv-control-dense);height:var(--rv-control-dense);min-height:var(--rv-control-dense);padding:0;flex-shrink:0;color:var(--rv-text-2);border:0;background:transparent;margin-left:auto;}
-.sidebar-group-toggle {display:flex;align-items:center;justify-content:space-between;width:100%;padding:0;border:0;background:transparent;color:inherit;font:inherit;text-align:left;min-height:28px;}
+.sidebar-group-toggle {display:flex;align-items:center;justify-content:space-between;width:100%;padding:0;border:0;background:transparent;color:inherit;font:inherit;text-align:left;min-height:var(--rv-control-dense);}
 .sidebar-group-toggle[aria-expanded="false"] svg {transform:rotate(-90deg);}
 .sidebar-group-toggle:hover {color:var(--primary);}
 .menu-group > div[hidden] {display:none;}

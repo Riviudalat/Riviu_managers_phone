@@ -115,9 +115,10 @@
   background: var(--rv-surface-sunken);
   color: var(--rv-text-1);
 }
+/* The narrow rail keeps a short name under every icon: an icon alone is a guess. */
 .aside[data-rail-collapsed="true"] {
-  width: 56px;
-  min-width: 56px;
+  width: var(--aside-w-collapsed);
+  min-width: var(--aside-w-collapsed);
 }
 .aside[data-rail-collapsed="true"] .aside-logo {
   justify-content: center;
@@ -125,15 +126,15 @@
 }
 .aside[data-rail-collapsed="true"] .aside-logo > img,
 .aside[data-rail-collapsed="true"] .aside-logo > strong,
-.aside[data-rail-collapsed="true"] .menu-group h2,
-.aside[data-rail-collapsed="true"] .menu-label {
+.aside[data-rail-collapsed="true"] .menu-group h2 {
   display: none;
 }
 .aside[data-rail-collapsed="true"] .aside-rail-toggle {
   margin: 0;
 }
-.aside[data-rail-collapsed="true"] .aside-scroll {
-  padding: 6px;
+.aside[data-rail-collapsed="true"] .aside-scroll,
+.aside[data-rail-collapsed="true"] .menu-pinned {
+  padding: var(--rv-space-1);
 }
 .aside[data-rail-collapsed="true"] .menu-group + .menu-group {
   margin-top: 7px;
@@ -141,11 +142,18 @@
   border-top: 1px solid var(--rv-border);
 }
 .aside[data-rail-collapsed="true"] .menu-item {
+  flex-direction: column;
   justify-content: center;
-  width: 42px;
-  min-height: 40px;
-  padding: 8px;
+  gap: 2px;
+  min-height: 52px;
+  padding: 6px 2px;
   margin: 1px 0;
+  font-size: var(--rv-font-caption);
+  line-height: 1.25;
+  text-align: center;
+}
+.aside[data-rail-collapsed="true"] .menu-label {
+  overflow-wrap: anywhere;
 }
 .aside-compact-status {
   display: none;
@@ -164,6 +172,25 @@
   color: var(--rv-text-1);
 }
 
+/* Pinned shortcuts above, groups below: only the groups scroll, so the six daily pages stay
+   on screen at 1093×614 (and 820×560) however many groups are open. */
+.aside-nav {
+  flex: 1;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+}
+
+.menu-pinned {
+  flex: 0 0 auto;
+  padding: var(--rv-space-1) var(--rv-space-2);
+  border-bottom: 1px solid var(--rv-border);
+}
+
+.menu-pinned .menu-item {
+  min-height: var(--rv-control-primary);
+}
+
 .aside-scroll {
   flex: 1;
   min-height: 0;
@@ -175,6 +202,14 @@
 
 .menu-group + .menu-group {
   margin-top: var(--rv-space-4);
+}
+
+/* Folded groups stack as a short list of headings, so all four fit under the pinned row. */
+.aside:not([data-rail-collapsed="true"]) .menu-group:has(> h2 > .sidebar-group-toggle[aria-expanded="false"]) + .menu-group {
+  margin-top: var(--rv-space-1);
+}
+.aside:not([data-rail-collapsed="true"]) .menu-group:has(> h2 > .sidebar-group-toggle[aria-expanded="false"]) > h2 {
+  margin-bottom: 0;
 }
 
 .menu-group h2 {
@@ -549,7 +584,16 @@
   color: var(--rv-text-2);
 }
 
-.automation-tabs button[aria-selected="true"] {
+.content-myApps > .menu-tabs {
+  margin: var(--rv-space-4) var(--space-5) 0;
+}
+
+.content-myApps > .menu-tabs + .my-app-library {
+  padding-top: 0;
+}
+
+.automation-tabs button[aria-selected="true"],
+.menu-tabs button[aria-current="page"] {
   border-bottom-color: var(--rv-selected-line);
   color: var(--rv-selected-text);
   font-weight: var(--weight-semibold);

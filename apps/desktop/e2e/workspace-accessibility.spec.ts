@@ -5,6 +5,8 @@ import { installTauriMock } from "./fixtures/tauriMock";
 
 const pages = ["Thiết bị", "Chẩn đoán", "Nuôi TikTok", "Tương tác", "Đăng bài", "Flow",
   "Tác vụ", "Kho nội dung", "Trung tâm ứng dụng", "API", "Cài đặt"];
+// Old test names whose page now has another title.
+const HEADING: Record<string, string> = { "Thiết bị": "Trung tâm điều khiển", "Flow": "Flow thiết bị", "Tác vụ": "Lượt chạy", "Trung tâm ứng dụng": "Ứng dụng" };
 
 test("all workspaces expose accessible controls and a real nonempty main surface", async ({ page }, testInfo) => {
   test.setTimeout(180_000);
@@ -14,7 +16,7 @@ test("all workspaces expose accessible controls and a real nonempty main surface
   for (const name of pages) {
     if (name !== "Thiết bị") await openOperatorPage(page, name);
     await expect(page.locator(".loading-state")).toHaveCount(0);
-    await expect(page.getByRole("heading", {level:1,name:name==="Tác vụ"?"Lượt chạy":name,exact:true})).toBeVisible();
+    await expect(page.getByRole("heading", {level:1,name:HEADING[name]??name,exact:true})).toBeVisible();
     await expect(page.getByText(/Unknown mock command/)).toHaveCount(0);
     const bounds = await page.locator(".content").evaluate((element) => {
       const rect = element.getBoundingClientRect();
@@ -40,7 +42,7 @@ test("Flow save dialog traps keyboard focus and restores it on Escape", async ({
   await openOperatorPage(page, 'Flow');
   await page.getByRole("textbox", {name:"Tên Flow"}).fill("Bản nháp cần lưu");
   const destination = page.getByRole("button", {name:"API",exact:true});
-  await destination.click();
+  await openOperatorPage(page, "API");
   const dialog = page.getByRole("alertdialog", {name:"Thay đổi chưa được lưu"});
   await expect(dialog).toBeVisible();
   await expect(dialog.getByRole("button", {name:"Lưu",exact:true})).toBeFocused();

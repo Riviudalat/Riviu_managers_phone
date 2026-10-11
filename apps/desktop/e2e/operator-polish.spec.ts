@@ -19,7 +19,7 @@ for (const width of [1440, 820]) test(`hover rail pins, groups fold, native drop
     };
   });
   await page.goto('/');
-  const rail=page.getByRole('complementary',{name:'Thiết lập Control Center'});
+  const rail=page.getByRole('complementary',{name:'Thiết lập Trung tâm điều khiển'});
   const panel=rail.locator('.rail-panel');
   await expect(panel).toHaveAttribute('aria-hidden','true');
   const before=await page.getByTestId('device-tile').first().boundingBox();

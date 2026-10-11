@@ -5,7 +5,7 @@ import { installTauriMock, mockCommandCalls } from "./fixtures/tauriMock";
 test("stream autosave debounces multi-digit FPS without saving an intermediate digit", async ({ page }) => {
   await installTauriMock(page);
   await page.goto("/");
-  await page.getByRole("navigation", { name: "Điều hướng chính" }).getByRole("button", { name: "Cài đặt", exact: true }).click();
+  await openOperatorPage(page, "Cài đặt");
   const fps = page.getByLabel("FPS overlay");
   await expect(fps).toHaveValue("24");
   await fps.focus();
@@ -22,13 +22,13 @@ test("stream autosave debounces multi-digit FPS without saving an intermediate d
 test("settings navigation flushes the edited configuration without a dialog", async ({ page }) => {
   await installTauriMock(page);
   await page.goto("/");
-  await page.getByRole("navigation", { name: "Điều hướng chính" }).getByRole("button", { name: "Cài đặt", exact: true }).click();
+  await openOperatorPage(page, "Cài đặt");
   const port = page.getByLabel("Cổng", { exact: true });
   await expect(port).toHaveValue("17999");
   await port.fill("45555");
-  await page.getByRole("button", { name: "API", exact: true }).click();
+  await openOperatorPage(page, "API");
   await expect(page.getByRole("alertdialog")).toHaveCount(0);
-  await page.getByRole("navigation", { name: "Điều hướng chính" }).getByRole("button", { name: "Cài đặt", exact: true }).click();
+  await openOperatorPage(page, "Cài đặt");
   await expect(page.getByLabel("Cổng", { exact: true })).toHaveValue("45555");
   expect((await mockCommandCalls(page)).filter((call) => call.command === "local_api_set_config")).toHaveLength(1);
 });

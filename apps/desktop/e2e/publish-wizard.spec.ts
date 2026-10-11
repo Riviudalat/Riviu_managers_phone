@@ -247,7 +247,7 @@ for (const viewport of [
     expect(calls[0].args.request?.sheetEnabled).toBe(true);
     expect(errors).toEqual([]);
     await checkDialog.getByRole("button", { name: "Đóng" }).click();
-    await page.getByRole("button", { name: "API", exact: true }).click();
+    await openOperatorPage(page, "API");
     await expect(page.getByRole("alertdialog")).toHaveCount(0);
     await openOperatorPage(page, 'Đăng bài');
     await expect(page.locator(".pq-footer")).toContainText("10/10 bài có máy");

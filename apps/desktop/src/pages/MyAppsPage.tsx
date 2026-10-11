@@ -127,7 +127,7 @@ export function MyAppsPage({
       /></Suspense>
     );
   return (
-    <section className="my-app-library" aria-label="My Apps">
+    <section className="my-app-library" aria-label="Quy trình ứng dụng">
       <header className="operator-toolbar">
         <label>
           <Search size={17} aria-hidden="true" />

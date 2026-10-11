@@ -16,7 +16,7 @@ const ACTION_LABELS: Array<[string, string]> = [
   ["orchestration", "Điều phối"],
   ["agent", "Riviu Agent"],
   ["material", "Kho nội dung"],
-  ["app", "Trung tâm ứng dụng"],
+  ["app", "Ứng dụng › Gói cài đặt"],
   ["proxy", "Kết nối thiết bị"],
   ["deployment", "Khởi động ứng dụng"],
 ];

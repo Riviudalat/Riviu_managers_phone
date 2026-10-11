@@ -1,3 +1,4 @@
+import { openOperatorPage } from "./fixtures/operatorNavigation";
 import { expect, test } from "@playwright/test";
 import { installTauriMock, mockCommandCalls } from "./fixtures/tauriMock";
 
@@ -9,13 +10,13 @@ for (const surface of [
     await installTauriMock(page,{androidRoster:true,libraryBatchRunning:true});
     await page.goto("/");
     await expect(page.getByTestId("device-tile")).toHaveCount(2);
-    await page.getByRole("button",{name:surface.name,exact:true}).click();
+    await openOperatorPage(page,surface.name);
     await page.getByRole("radiogroup", { name:"Cách chọn thiết bị" }).getByText("Toàn bộ", { exact:true }).click();
     await expect(page.getByRole("radio", { name:"Toàn bộ", exact:true })).toBeChecked();
     await page.getByRole("button",{name:surface.button}).click();
-    await page.getByRole("button",{name:"API",exact:true}).click();
+    await openOperatorPage(page,"API");
     await expect(page.getByRole("heading", { name: "API", exact: true })).toBeVisible();
-    await page.getByRole("button",{name:surface.name,exact:true}).click();
+    await openOperatorPage(page,surface.name);
     await page.getByRole("radiogroup", { name:"Cách chọn thiết bị" }).getByText("Toàn bộ", { exact:true }).click();
     await expect(page.getByRole("radio", { name:"Toàn bộ", exact:true })).toBeChecked();
     await expect(page.getByRole("table",{name:"Tiến độ batch đã lưu"})).toBeVisible();
@@ -24,7 +25,7 @@ for (const surface of [
     expect((await mockCommandCalls(page)).filter((call) => call.command === surface.command)).toHaveLength(1);
     await page.reload();
     await expect(page.getByTestId("device-tile")).toHaveCount(2);
-    await page.getByRole("button",{name:surface.name,exact:true}).click();
+    await openOperatorPage(page,surface.name);
     await page.getByRole("radiogroup", { name:"Cách chọn thiết bị" }).getByText("Toàn bộ", { exact:true }).click();
     await expect(page.getByRole("radio", { name:"Toàn bộ", exact:true })).toBeChecked();
     await expect(page.getByText("Máy 1 · Kệ 1",{exact:true})).toBeVisible();

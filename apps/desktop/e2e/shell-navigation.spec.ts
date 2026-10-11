@@ -63,11 +63,14 @@ test("icon rail preserves navigation and makes room for compact workspaces", asy
     const sidebar = page.getByRole("complementary", { name: "Riviu Manager" });
     await expect(sidebar).toHaveAttribute("data-rail-collapsed", "true");
     const width = await sidebar.evaluate((element) => element.getBoundingClientRect().width);
-    expect(width).toBeLessThanOrEqual(60);
+    // Wide enough for a short name under each icon, never an icon alone.
+    expect(width).toBeLessThanOrEqual(80);
+    await expect(sidebar.getByRole("button", { name: "Trung tâm điều khiển" }).locator(".menu-label")).toHaveText("Trung tâm");
+    await expect(sidebar.getByRole("button", { name: "Trung tâm điều khiển" }).locator(".menu-label")).toBeVisible();
     await expect(sidebar.getByLabel("Trạng thái hệ thống")).toBeVisible();
-    await sidebar.getByRole("button", { name: "My Apps" }).click();
-    await expect(page.getByTestId("page-title")).toHaveText("My Apps");
-    await expect(sidebar.getByRole("button", { name: "My Apps" })).toHaveAttribute("aria-current", "page");
+    await sidebar.getByRole("button", { name: "Ứng dụng" }).click();
+    await expect(page.getByTestId("page-title")).toHaveText("Ứng dụng");
+    await expect(sidebar.getByRole("button", { name: "Ứng dụng" })).toHaveAttribute("aria-current", "page");
     await page.screenshot({ path: testInfo.outputPath(`icon-rail-${viewport.width}x${viewport.height}.png`) });
     await page.getByRole("button", { name: "Mở rộng thanh điều hướng" }).click();
     await expect(sidebar).toHaveAttribute("data-rail-collapsed", "false");

@@ -1,3 +1,4 @@
+import { openOperatorPage } from "./fixtures/operatorNavigation";
 import { expect, test, type Page } from "@playwright/test";
 import { emitRiviuEvent, installTauriMock } from "./fixtures/tauriMock";
 
@@ -75,8 +76,7 @@ test("empty recording returns only Macro on another page and later tools open no
   await prepare(page);
   await openMacro(page);
   await beginRecording(page);
-  const navigation = page.getByRole("navigation", { name: "Điều hướng chính" });
-  await navigation.getByRole("button", { name: "Cài đặt", exact: true }).click();
+  await openOperatorPage(page, "Cài đặt");
   await expect(page.getByRole("heading", { level: 1, name: "Cài đặt", exact: true })).toBeVisible();
   await expect(recordingBar(page)).toHaveCount(1);
   await expect(recordingBar(page)).toContainText("0 bước");
@@ -87,7 +87,7 @@ test("empty recording returns only Macro on another page and later tools open no
   await expect(macroDialog(page)).toContainText("Chưa có bước nào");
   await page.keyboard.press("Escape");
   await expect(macroDialog(page)).toHaveCount(0);
-  await navigation.getByRole("button", { name: "Control Center", exact: true }).click();
+  await openOperatorPage(page, "Thiết bị");
   await page.getByRole("button", { name: "Công cụ", exact: true }).click();
   await expect(macroDialog(page).getByRole("tab")).toHaveCount(8);
   await expect(macroDialog(page).getByRole("tab", { name: "Phân phối văn bản", exact: true })).toHaveAttribute("aria-selected", "true");

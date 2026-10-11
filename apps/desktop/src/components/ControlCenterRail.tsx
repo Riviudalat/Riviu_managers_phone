@@ -63,7 +63,7 @@ export function ControlCenterRail(p: Props) {
   return (
     <aside
       className={`control-center-rail rail-hover${p.pinned ? " is-pinned" : " is-unpinned"}${open ? " is-open" : ""}`}
-      aria-label="Thiết lập Control Center"
+      aria-label="Thiết lập Trung tâm điều khiển"
       onPointerEnter={reveal}
       onPointerLeave={conceal}
       onFocusCapture={reveal}

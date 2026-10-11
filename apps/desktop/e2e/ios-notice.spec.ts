@@ -1,3 +1,4 @@
+import { openOperatorPage } from "./fixtures/operatorNavigation";
 import { expect, test } from "@playwright/test";
 import { emitRiviuEvent, installTauriMock, mockCommandCalls } from "./fixtures/tauriMock";
 
@@ -21,8 +22,7 @@ test("iOS warning follows connected iPhones and stays inspectable in Settings", 
   const warning = page.getByText(/Nhánh iOS không sẵn sàng/);
   await expect(warning).toHaveCount(0);
   await page.screenshot({ path: info.outputPath("android-without-ios-warning.png") });
-  const nav = page.getByRole("navigation", { name: "Điều hướng chính" });
-  await nav.getByRole("button", { name: "Cài đặt", exact: true }).click();
+  await openOperatorPage(page, "Cài đặt");
   await page.getByRole("link", { name: "Bảo trì", exact: true }).click();
   const detail = page.locator('details[aria-label="Cấu hình Agent iOS"]');
   await expect(detail).not.toHaveAttribute("open");
@@ -31,7 +31,7 @@ test("iOS warning follows connected iPhones and stays inspectable in Settings", 
   await expect(detail).toContainText("fixture credential missing");
   await expect(detail).toContainText("không quyết định trạng thái Agent Android");
   await page.screenshot({ path: info.outputPath("ios-diagnostic-disclosure.png") });
-  await nav.getByRole("button", { name: "Control Center", exact: true }).click();
+  await openOperatorPage(page, "Thiết bị");
   const android = await page.evaluate(() => (window as unknown as {
     __TAURI_INTERNALS__: { invoke: (command: string) => Promise<Record<string, unknown>[]> };
   }).__TAURI_INTERNALS__.invoke("list_devices"));

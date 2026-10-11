@@ -13,7 +13,7 @@ interface ApiDocGroup {
 }
 
 const HTTP_GROUPS = [
-  { title: "HTTP · My Apps", routes: [
+  { title: "HTTP · Quy trình ứng dụng", routes: [
     ["GET", "/v1/apps", "Danh sách ứng dụng và phiên bản đã lưu."],
     ["GET", "/v1/apps/{id}?revision=1", "Đọc graph và cấu hình của đúng phiên bản ứng dụng."],
     ["POST", "/v1/apps/{id}/runs", "Chạy bằng revision và target đã chọn; dùng chung bộ chạy với desktop."],
