@@ -147,17 +147,6 @@ const PAGE_TITLE: Partial<Record<PageId, string>> = {
   deviceSettings: "Cài đặt máy",
 };
 
-/** The status filter's names as its select shows them, for the "Đang lọc" line. */
-const STATUS_FILTER_LABEL: Record<DeviceOperationalFilter, string> = {
-  all: "Mọi trạng thái",
-  idle: "Rảnh",
-  ready: "Sẵn sàng",
-  connected: "Đã kết nối",
-  busy: "Bận",
-  warning: "Cần xem",
-  offline: "Ngoại tuyến",
-};
-
 type DeviceWorkOwnerProjection =
   | { state: "loading" }
   | { state: "known"; roster: string; owners: Map<string, DeviceWorkState> }
@@ -1013,7 +1002,7 @@ function App() {
   const activeTab = groupTab === ALL_DEVICES_TAB ? undefined : tabs.find((tab) => tab.id === groupTab);
   const activeFilters = [
     activeTab && `nhóm ${activeTab.label}`,
-    deviceStatusFilter !== "all" && `trạng thái ${STATUS_FILTER_LABEL[deviceStatusFilter]}`,
+    deviceStatusFilter !== "all" && `trạng thái ${DEVICE_STATUS_LABELS[deviceStatusFilter]}`,
     deviceSearch.trim() && `tìm “${deviceSearch.trim()}”`,
     connectionFilter !== "all" && `kết nối ${connectionFilter === "usb" ? "USB" : "Wi-Fi"}`,
   ].filter((part): part is string => Boolean(part));
