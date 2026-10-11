@@ -1,4 +1,4 @@
-import type { OperationRunItem, PublishCampaignState, PublishSheetDeliveryProgress } from "../../types";
+import type { PublishCampaignState, PublishSheetDeliveryProgress } from "../../types";
 
 /**
  * One post-result vocabulary (PLAN §6): Đã gửi → Đã xác minh → Đã ghi Sheet, with Chưa rõ as its
@@ -283,21 +283,14 @@ export function postOutcomeTotalsText(totals: PostOutcomeTotals): string {
 }
 
 /**
- * A Lượt chạy / monitor item carries the assignment's evidence but only the run-level state.
- * Mapped conservatively: `succeeded` still needs the evidence, a pending post is verifying,
- * and nothing here can make an item more certain than its own record.
+ * One device's outcome from the full-assignment outcomes of its run items (joined by assignment
+ * id). A run item alone lacks the frozen intent, so it is never a source: an item whose
+ * assignment is not read yet makes the device unknown (`null`), never verified.
  */
-export function runItemsPostOutcome(items: readonly Pick<OperationRunItem, "state" | "evidence" | "errorCode">[]): PostOutcome | null {
-  const outcomes = items.map(item => postOutcome({
-    state: item.state === "succeeded" ? "succeeded"
-      : item.state === "uncertain" ? "uncertain"
-        : item.errorCode === "post_verification_pending" ? "verifying"
-          : item.state === "failed" ? "failedBeforeDispatch"
-            : item.state === "cancelled" || item.state === "skipped" ? "cancelled" : "queued",
-    evidenceJson: item.evidence,
-    errorCode: item.errorCode,
-  }));
-  if (!outcomes.length) return null;
-  if (outcomes.every(outcome => outcome.verified)) return outcomes[0];
-  return outcomes.find(outcome => outcome.uncertain) ?? outcomes.find(outcome => outcome.post === "verifying") ?? null;
+export function deviceOutcome(outcomes: readonly (PostOutcome | undefined)[]): PostOutcome | null {
+  if (!outcomes.length || outcomes.some(outcome => !outcome)) return null;
+  const read = outcomes as readonly PostOutcome[];
+  if (read.every(outcome => outcome.verified)) return read[0];
+  return read.find(outcome => outcome.uncertain) ?? read.find(outcome => outcome.post === "verifying")
+    ?? read.find(outcome => outcome.post === "sending") ?? read.find(outcome => !outcome.verified) ?? null;
 }

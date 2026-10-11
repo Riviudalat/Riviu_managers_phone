@@ -4,10 +4,10 @@ import { readQueryClient } from "../../readQuery";
 import { describeError } from "../../describeError";
 
 /** One in-flight read per mounted source. Changing selection cannot publish stale data. */
-export function useMonitorRead<T>(read: () => Promise<T>, interval = 2000, scope?: readonly unknown[]) {
+export function useMonitorRead<T>(read: () => Promise<T>, interval = 2000, scope?: readonly unknown[], enabled = true) {
   const instance = useId();
   const query = useQuery({
-    queryKey: ["monitor", ...(scope ?? [instance])], queryFn: read,
+    queryKey: ["monitor", ...(scope ?? [instance])], queryFn: read, enabled,
     refetchInterval: interval, refetchIntervalInBackground: true,
   }, readQueryClient);
   return { value: query.data ?? null, error: query.error ? describeError(query.error) : null,

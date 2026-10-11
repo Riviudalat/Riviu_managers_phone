@@ -265,7 +265,8 @@ function recoveryReason(reason: string | null | undefined): string | null {
     operatorStopped: "Người dùng đã dừng kiểm tra; cần xác nhận tiếp tục xác minh",
     explicitReview: "Bài cần kiểm tra thủ công; không tự gỡ trạng thái cần xử lý",
     alreadyPending: "Bài đang được xác minh định kỳ; không khởi động lại lượt kiểm tra",
-    alreadyVerified: "Bài đã được xác minh; không đăng lại",
+    // The backend's `alreadyVerified` only means a link-shaped URL is stored, not verified.
+    alreadyVerified: "Bài đã có link; không đăng lại",
     revisionChanged: "Trạng thái bài đã thay đổi; tải lại chi tiết trước khi tiếp tục",
     confirmationRequired: "Cần xác nhận phạm vi chỉ kiểm tra bài đã gửi",
     assignmentMissing: "Không tìm thấy bài trong lượt đăng",
@@ -1197,7 +1198,9 @@ export function PublishPage({
           await reload();
           await loadCampaignDetail(campaign.id, false);
           void refreshDeviceGuards();
-          const verified = checked.outcomes.filter(outcome => outcome.verified).length;
+          // `verified` here counts link-shaped URLs (backend "alreadyVerified" included); whether a
+          // post is verified is the shared post outcome in the Kết quả column, not this count.
+          const withLink = checked.outcomes.filter(outcome => outcome.verified).length;
           const pending = checked.outcomes.filter(outcome => outcome.status === "pending").length;
           const errors = checked.outcomes.flatMap(outcome => outcome.error ? [recoveryReason(outcome.error) ?? outcome.error] : []);
           const skipped = checked.outcomes.filter(outcome => !outcome.verified && outcome.status !== "pending");
@@ -1211,7 +1214,7 @@ export function PublishPage({
           const skippedText = [...new Set(skipped.map(outcome => explanations[outcome.status as keyof typeof explanations] ?? "Chưa xác nhận kết quả kiểm tra"))].join(". ");
           setNotice({ tone: errors.length || skipped.length || !checked.outcomes.length ? "warning" : "info",
             text: !checked.outcomes.length ? (recoveryReason(checked.reason) || "Không có bài đủ điều kiện kiểm tra liên kết; xem trạng thái và lý do của từng máy.")
-              : [`${verified} bài đã xác minh liên kết.`, pending ? `${pending} bài đã bấm Đăng, chưa lấy được liên kết xác minh; Riviu tự kiểm tra khi máy rảnh, không đăng lại.${snapshotSheetEnabled(snapshot) ? " Sheet chờ liên kết đã xác minh." : ""}` : "",
+              : [`${withLink} bài có link sau lần kiểm tra; cột Kết quả cho biết bài nào đã xác minh.`, pending ? `${pending} bài đã bấm Đăng, chưa lấy được liên kết xác minh; Riviu tự kiểm tra khi máy rảnh, không đăng lại.${snapshotSheetEnabled(snapshot) ? " Sheet chờ liên kết đã xác minh." : ""}` : "",
                 skippedText, ...errors].filter(Boolean).join(" ") });
           return;
         }
@@ -1290,7 +1293,7 @@ export function PublishPage({
       const refused = result.state === "stale" || result.state === "ineligible";
       setNotice({ tone: refused ? "warning" : "info", text: recoveryReason(result.reason) || (refused
         ? "Trạng thái bài đã thay đổi hoặc chưa đủ điều kiện xác minh; không khởi động lại Post."
-        : result.state === "alreadyVerified" ? "Bài đã được xác minh; không thực hiện lại Post."
+        : result.state === "alreadyVerified" ? "Bài đã có link; không thực hiện lại Post. Cột Kết quả cho biết đã xác minh chưa."
           : "Đã nhận yêu cầu xác minh bài đã gửi. Khi chưa có link, hệ thống thử lại mỗi 5 phút; không đăng lại.") });
     } catch (error) { setNotice({ tone: "error", text: describeError(error) }); }
     finally { publishInFlight.current = false; setBusy(false); }

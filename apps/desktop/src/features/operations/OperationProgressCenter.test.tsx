@@ -154,9 +154,12 @@ it.each(["running", "partial"] as const)("does not display complete progress for
   vi.mocked(operationGetRun).mockResolvedValue({ ...detail, summary: pending, items: [detail.items[0], {
     ...detail.items[1], state, errorCode: "post_verification_pending",
   }] });
-  // The campaign behind the run: one post the backend verified, one still awaiting proof.
+  // The campaign behind the run: one finished post, one still awaiting proof. In the partial run
+  // the finished post's evidence and link name @other while the frozen intent says @fixture.
+  const conflict = state === "partial";
   vi.mocked(publishGet).mockResolvedValue({ campaign: { createdAt: "2026-09-07T12:00:00Z" }, assignments: [
-    { id: "a", udid: "a", ordinal: 0, state: "succeeded", effectIntent: "post", evidenceJson: JSON.stringify({ post: { publicationVerified: true, postUrl: "https://www.tiktok.com/@fixture/video/1", expectedAccount: "fixture" } }) },
+    { id: "a", udid: "a", ordinal: 0, state: "succeeded", effectIntent: conflict ? JSON.stringify({ effectIntent: "post", expectedAccount: "fixture" }) : "post",
+      evidenceJson: JSON.stringify({ post: { publicationVerified: true, postUrl: `https://www.tiktok.com/@${conflict ? "other" : "fixture"}/video/1`, expectedAccount: conflict ? "other" : "fixture" } }) },
     { id: "b", udid: "b", ordinal: 1, state: "verifying", effectIntent: "post", errorCode: "post_verification_pending" },
   ] } as never);
   await openDevices();
@@ -165,8 +168,20 @@ it.each(["running", "partial"] as const)("does not display complete progress for
   expect(screen.queryByText("100%")).toBeNull();
   expect(screen.getByRole("button", { name: /Máy 5.*Đang xác minh/ })).toBeVisible();
   // Separate numbers from the same campaign read as the detail page; a submitted post is never done.
-  await waitFor(() => expect(screen.getByLabelText("Kết quả từng máy")).toHaveTextContent("2 đã gửi · 1 đã xác minh · 0 đã ghi Sheet · 0 chưa rõ · 1 đang xác minh"));
+  await waitFor(() => expect(screen.getByLabelText("Kết quả từng máy")).toHaveTextContent(conflict
+    ? "2 đã gửi · 0 đã xác minh · 0 đã ghi Sheet · 1 chưa rõ · 1 đang xác minh"
+    : "2 đã gửi · 1 đã xác minh · 0 đã ghi Sheet · 0 chưa rõ · 1 đang xác minh"));
   if (state === "running") expect(screen.getByLabelText("Kết quả từng máy")).toHaveTextContent("1 đang chờ/chạy");
+  // The row badge, the selected device's header and the detail read the same full assignment.
+  const verdict = conflict ? "Chưa rõ" : "Đã xác minh";
+  expect(screen.getByRole("button", { name: new RegExp(`Máy 2.*${verdict}`) })).toBeVisible();
+  fireEvent.click(screen.getByRole("button", { name: /Máy 2/ }));
+  const detailPane = screen.getByLabelText("Chi tiết máy");
+  expect(within(detailPane).getAllByText(verdict, { exact: true }).length).toBeGreaterThanOrEqual(2);
+  if (conflict) {
+    expect(within(detailPane).queryByText("Đã xác minh", { exact: true })).toBeNull();
+    expect(within(detailPane).getByText(/Bằng chứng ghi tài khoản @other, khác tài khoản đã ghi trước khi Đăng @fixture/)).toBeVisible();
+  }
 });
 
 it("renders numbered Publish steps with original times in both sort directions", async () => {

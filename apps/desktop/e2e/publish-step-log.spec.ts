@@ -68,6 +68,13 @@ for (const viewport of [{ width: 1440, height: 900 }, { width: 820, height: 560 
         if (command === "operation_query_runs") return { runs: [summary], total: 1, counts: { active: 0, succeeded: 1, attention: 0 }, hasMore: false };
         if (command === "operation_get_run") return { summary, items: [{ id: "assignment", kind: "assignment", label: "Máy 2", state: "succeeded", udid: "snapshot-phone-2", errorCode: null, detail: null, evidence: JSON.stringify({ post: { publicationVerified: true, postUrl: "https://www.tiktok.com/@fixture/video/2", expectedAccount: "fixture" } }), retryable: false }], batch: null };
         if (command === "operation_device_log") return { entries, truncated: false };
+        // The monitor's badge reads the full assignment (with its frozen intent), as the detail does.
+        if (command === "publish_get") return { campaign: { id: "steps", createdAt: now }, bundles: [], events: [], assignments: [{
+          id: "assignment", campaignId: "steps", bundleId: "bundle", ordinal: 0, udid: "snapshot-phone-2", state: "succeeded",
+          effectIntent: JSON.stringify({ effectIntent: "post", expectedAccount: "fixture" }),
+          evidenceJson: JSON.stringify({ post: { publicationVerified: true, postUrl: "https://www.tiktok.com/@fixture/video/2", expectedAccount: "fixture" } }),
+        }] };
+        if (command === "publish_recovery_capabilities") return [];
         return original(command, args);
       };
     });

@@ -1,7 +1,7 @@
 import type { ReactNode } from "react";
 import type { OperationRunItem } from "../../types";
 import { PostOutcomeEvidence, PostOutcomeLayers, PostOutcomeTotals } from "./PostOutcome";
-import { postOutcomeTotals, runItemsPostOutcome } from "./postOutcomeModel";
+import { postOutcomeTotals } from "./postOutcomeModel";
 import { publishRunOutcomes, usePublishRunRead } from "./publishRunRead";
 
 /** The campaign's separate totals for the operation monitor and Lượt chạy, from the shared poll. */
@@ -20,7 +20,14 @@ export function PublishItemOutcome({ campaignId, item, fallback }: {
   fallback: ReactNode;
 }) {
   const state = usePublishRunRead(campaignId);
-  const outcome = publishRunOutcomes(state.value).get(item.id) ?? runItemsPostOutcome([item]);
-  if (!outcome || outcome.post === "notSent") return <>{fallback}</>;
+  const outcome = publishRunOutcomes(state.value).get(item.id);
+  // The run item lacks the frozen intent: until its assignment is read the result is unknown.
+  if (!outcome) {
+    if (state.error) return <small>Chưa rõ: chưa đọc được kết quả bài đăng</small>;
+    if (!state.value) return <small>Đang đọc kết quả bài đăng…</small>;
+    if (item.state === "succeeded" || item.state === "uncertain") return <small>Chưa rõ: chưa đọc được bản ghi của bài này</small>;
+    return <>{fallback}</>;
+  }
+  if (outcome.post === "notSent") return <>{fallback}</>;
   return <><PostOutcomeLayers outcome={outcome} /><PostOutcomeEvidence outcome={outcome} /></>;
 }

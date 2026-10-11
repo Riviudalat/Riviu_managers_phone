@@ -12,7 +12,8 @@ import { useMediaQuery } from "../../useMediaQuery";
 import { PublishPager } from "../../components/publish/PublishPager";
 import { PublishDeviceRecovery } from "./PublishDeviceRecovery";
 import { PublishRunOutcomeTotals } from "./PublishRunOutcome";
-import { runItemsPostOutcome } from "./postOutcomeModel";
+import { deviceOutcome } from "./postOutcomeModel";
+import { publishRunOutcomes, usePublishRunRead } from "./publishRunRead";
 
 export function MonitorReadError({ message, retry }: { message: string; retry: () => void }) {
   return <div className="run-monitor-error" role="alert"><span>{message}</span><button type="button" onClick={retry}><RefreshCw size={14} /> Thử lại</button></div>;
@@ -65,6 +66,9 @@ export function OperationRunDevices({ run, labels, sessions, compact = false }: 
     return next;
   }, [run.id]);
   const state = useMonitorRead(read, 2000, ["run", run.id]);
+  // The same full-assignment read (with the frozen intent) as the detail and the totals.
+  const publishRead = usePublishRunRead(run.sourceId, run.kind === "publish");
+  const assignmentOutcomes = useMemo(() => publishRunOutcomes(publishRead.value), [publishRead.value]);
   const [selected, setSelected] = useState<string | null>(null);
   const [tab, setTab] = useState("log");
   const [search, setSearch] = useState("");
@@ -84,8 +88,15 @@ export function OperationRunDevices({ run, labels, sessions, compact = false }: 
       : "Toàn tác vụ";
     return { ...row, label, ...monitorDeviceName(label) };
   }), [state.value, labels]);
+  // Publish rows speak the post-result vocabulary from the full assignment outcomes joined by
+  // assignment id, exactly what the detail below shows: "Đã xác minh" only when every assignment
+  // of the device is verified; an unread assignment is unknown, never green.
+  const publishOutcome = (row: (typeof rows)[number]) => run.kind === "publish"
+    ? deviceOutcome(row.entries.map(item => assignmentOutcomes.get(item.id))) : null;
+  // A post the shared model leaves Chưa rõ needs a check even when its run item says succeeded.
+  const needsCheck = (row: (typeof rows)[number]) => issueState(row.state) || publishOutcome(row)?.uncertain === true;
   const shown = rows.filter((row) => row.label.toLocaleLowerCase("vi-VN").includes(search.trim().toLocaleLowerCase("vi-VN"))
-    && (filter === "all" || (filter === "issues" ? issueState(row.state) : activeRun(row))));
+    && (filter === "all" || (filter === "issues" ? needsCheck(row) : activeRun(row))));
   const currentPage = Math.min(page, Math.max(0, Math.ceil(shown.length / 8) - 1));
   const selectedRow = shown.find((row) => row.udid === selected);
   const visibleSelectedId = selectedRow?.udid;
@@ -99,14 +110,14 @@ export function OperationRunDevices({ run, labels, sessions, compact = false }: 
   const pendingPublication = run.kind === "publish" && rows.some(row => row.pendingPublish || row.reviewPublish);
   const fraction = pendingPublication ? null : runProgress(summary, sessions);
   const counts = deviceStateCounts(rows);
-  // Publish rows speak the post-result vocabulary: a finished item is "Đã xác minh" only with
-  // the backend's proof in its evidence; a post awaiting proof is "Đang xác minh", never done.
-  const publishOutcome = (row: (typeof rows)[number]) => run.kind === "publish" ? runItemsPostOutcome(row.entries) : null;
   const rowLabel = (row: (typeof rows)[number]) => {
     if (run.kind !== "publish") return RUN_STATE_LABEL[row.state];
     if (row.reviewPublish) return "Chưa rõ";
+    const outcome = publishOutcome(row);
+    if (outcome && outcome.post !== "notSent") return outcome.postLabel;
     if (row.pendingPublish) return "Đang xác minh";
-    return publishOutcome(row)?.postLabel ?? RUN_STATE_LABEL[row.state];
+    if (!outcome && (row.state === "succeeded" || row.state === "uncertain")) return publishRead.error ? "Chưa rõ" : "Đang đọc kết quả";
+    return RUN_STATE_LABEL[row.state];
   };
   const rowDone = (row: (typeof rows)[number]) => run.kind === "publish"
     ? publishOutcome(row)?.verified === true && !row.pendingPublish && !row.reviewPublish
@@ -142,11 +153,11 @@ export function OperationRunDevices({ run, labels, sessions, compact = false }: 
           {shown.slice(currentPage * 8, (currentPage + 1) * 8).map((row) => {
             const status = sessions.find((session) => session.runId === run.sourceId && session.udid === row.udid);
             const fraction = status && activeRun(row) ? Math.min(.99, deviceProgress(status) ?? 0) : row.fraction;
-            const Icon = rowDone(row) ? CheckCircle2 : issueState(row.state) || publishOutcome(row)?.uncertain ? CircleAlert : Clock3;
+            const Icon = rowDone(row) ? CheckCircle2 : needsCheck(row) ? CircleAlert : Clock3;
             return <div key={row.udid}><button type="button" className="run-device-row" aria-pressed={selected === row.udid} title={row.label} onClick={() => {
               if (selected !== row.udid) { setSelected(row.udid); setTab("log"); }
             }}>
-              <Icon size={16} className={rowDone(row) ? "run-success" : issueState(row.state) || publishOutcome(row)?.uncertain ? "run-attention" : "run-state"} aria-hidden="true" />
+              <Icon size={16} className={rowDone(row) ? "run-success" : needsCheck(row) ? "run-attention" : "run-state"} aria-hidden="true" />
               <span className="run-device-copy"><strong>{row.name}</strong><small>{rowLabel(row)}</small></span>
               {run.kind!=="publish"&&activeRun(row) && <span className="run-percent">{progressLabel(fraction)}</span>}
             </button>{run.kind==="publish"&&row.udid&&<PublishDeviceRecovery campaignId={run.sourceId} udid={row.udid}/>}</div>;
@@ -157,7 +168,7 @@ export function OperationRunDevices({ run, labels, sessions, compact = false }: 
       <section className="run-monitor-log" aria-label="Chi tiết máy" hidden={singlePane && !selectedRow}>
         {!selectedRow ? <div className="run-monitor-placeholder"><List size={24} /><strong>Chọn máy để xem nhật ký</strong></div> : <>
           <div className="run-inspector-top"><header className="run-device-heading">{singlePane && <button ref={backRef} type="button" className="icon-btn" onClick={showDevices} title="Về danh sách máy" aria-label="Về danh sách máy"><ArrowLeft size={18} /></button>}<div><strong title={selectedRow.label}>{selectedRow.name}</strong>{!compact && selectedRow.model && <small>{selectedRow.model}</small>}</div>
-            <StatusChip tone={issueState(selectedRow.state) || publishOutcome(selectedRow)?.uncertain ? "warning" : rowDone(selectedRow) ? "success" : "neutral"}>{rowLabel(selectedRow)}</StatusChip>
+            <StatusChip tone={needsCheck(selectedRow) ? "warning" : rowDone(selectedRow) ? "success" : "neutral"}>{rowLabel(selectedRow)}</StatusChip>
           </header>
           {run.kind==="publish"&&selectedRow.udid&&<PublishDeviceRecovery campaignId={run.sourceId} udid={selectedRow.udid}/>}
           <WorkspaceTabs label="Chi tiết hoạt động máy" tabs={tabs} value={tab} onChange={setTab} /></div>

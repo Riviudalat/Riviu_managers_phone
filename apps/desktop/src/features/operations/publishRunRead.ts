@@ -17,12 +17,12 @@ export interface PublishRunRead {
  * One poll per campaign, shared by every monitor row, the run totals and Lượt chạy: the scope
  * key makes TanStack keep a single in-flight read however many surfaces show the campaign.
  */
-export function usePublishRunRead(campaignId: string) {
+export function usePublishRunRead(campaignId: string, enabled = true) {
   const read = useCallback(async (): Promise<PublishRunRead> => {
     const [detail, capabilities] = await Promise.all([publishGet(campaignId), publishRecoveryCapabilities(campaignId)]);
     return { assignments: detail?.assignments ?? [], capabilities, createdAt: detail?.campaign.createdAt };
   }, [campaignId]);
-  return useMonitorRead(read, 2000, ["publishRecovery", campaignId]);
+  return useMonitorRead(read, 2000, ["publishRecovery", campaignId], enabled);
 }
 
 /** Each assignment's outcome, with the Sheet requirement its capability reports. */
