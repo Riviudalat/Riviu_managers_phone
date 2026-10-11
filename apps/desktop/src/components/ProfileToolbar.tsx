@@ -46,6 +46,11 @@ export function ProfileToolbar({
   const moreId = useId();
   const moreRef = useRef<HTMLDivElement>(null);
   const moreToggle = useRef<HTMLButtonElement>(null);
+  // Set when "⋯" lost focus because it stopped being rendered (the browser blurs a focused
+  // element that leaves the layout), so the tier change below can hand focus on.
+  const toggleHiddenWhileFocused = useRef(false);
+  // The same for an inline action that goes behind "⋯".
+  const actionHiddenWhileFocused = useRef(false);
   useEffect(() => {
     if (!moreOpen) return;
     const onPointerDown = (event: PointerEvent) => {
@@ -54,6 +59,34 @@ export function ProfileToolbar({
     document.addEventListener("pointerdown", onPointerDown);
     return () => document.removeEventListener("pointerdown", onPointerDown);
   }, [moreOpen]);
+  // The tier is CSS (a media query and the rail pin), so watch its one visible effect: "⋯" being
+  // rendered or not. Crossing the boundary closes the menu, and focus never stays on something
+  // the new tier hides — "⋯" itself when the actions come back inline, or an action that just
+  // went behind "⋯".
+  useEffect(() => {
+    const toggle = moreToggle.current;
+    if (!toggle || typeof ResizeObserver === "undefined") return;
+    let overflowTier = toggle.getClientRects().length > 0;
+    const observer = new ResizeObserver(() => {
+      const now = toggle.getClientRects().length > 0;
+      if (now === overflowTier) return;
+      overflowTier = now;
+      setMoreOpen(false);
+      const active = document.activeElement;
+      const secondary = document.getElementById(moreId);
+      const lostWithToggle = active === toggle || toggleHiddenWhileFocused.current;
+      const lostWithAction = (active instanceof HTMLElement && !!secondary?.contains(active)) || actionHiddenWhileFocused.current;
+      toggleHiddenWhileFocused.current = false;
+      actionHiddenWhileFocused.current = false;
+      if (!now && lostWithToggle) {
+        secondary?.querySelector<HTMLElement>("button:not(:disabled), summary")?.focus();
+      } else if (now && lostWithAction) {
+        toggle.focus();
+      }
+    });
+    observer.observe(toggle);
+    return () => observer.disconnect();
+  }, [moreId]);
   /** Runs an action from the menu: closes it and parks focus on "⋯" first, so a dialog the action
    *  opens returns focus to a control that is still on screen. A no-op when the menu is inline. */
   const fromMore = (action: () => void) => {
@@ -89,11 +122,15 @@ export function ProfileToolbar({
         moreToggle.current?.focus();
       }}>
         <button ref={moreToggle} type="button" className="tb-btn toolbar-more-toggle" aria-label="Thêm thao tác thiết bị"
+          onFocus={() => { toggleHiddenWhileFocused.current = false; }}
+          onBlur={(event) => { toggleHiddenWhileFocused.current = !event.relatedTarget && event.currentTarget.getClientRects().length === 0; }}
           title="Thêm thao tác: Nhóm, Công cụ, Bảo trì, Quét lại" aria-expanded={moreOpen} aria-controls={moreId}
           onClick={() => setMoreOpen((open) => !open)}>
           <MoreHorizontal size={18} aria-hidden="true" />
         </button>
-        <div id={moreId} className="toolbar-secondary" data-open={moreOpen}>
+        <div id={moreId} className="toolbar-secondary" data-open={moreOpen}
+          onFocus={() => { actionHiddenWhileFocused.current = false; }}
+          onBlur={(event) => { actionHiddenWhileFocused.current = !event.relatedTarget && event.target.getClientRects().length === 0; }}>
           <button type="button" className={`tb-btn ${groupsOpen ? "active" : ""}`} aria-expanded={groupsOpen} onClick={() => fromMore(onGroups)} title="Chia fleet thành nhóm — mỗi máy thuộc đúng một nhóm">
             <FolderKanban size={16} aria-hidden="true" /><span className="tb-label">Nhóm</span>
           </button>

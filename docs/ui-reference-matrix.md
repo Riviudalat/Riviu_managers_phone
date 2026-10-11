@@ -240,7 +240,8 @@ Lịch đăng bài là lịch một lần theo từng bài, mỗi dòng gắn m�
   lọc trạng thái, Chọn tất cả, chế độ xem). Ô tìm không bao giờ hẹp hơn 176 px để đọc được từ đã gõ; chỗ
   cho nó lấy từ thao tác phụ: từ 1280 px có chữ; 1180–1279 px Nhóm/Công cụ/Bảo trì chỉ còn icon (giữ tên
   đọc được và tooltip); 1024–1179 px Nhóm, Công cụ, Bảo trì và Quét lại vào menu **⋯ Thêm thao tác thiết
-  bị** có chữ (Escape đóng và trả focus về ⋯; hộp thoại mở từ menu trả focus về ⋯). Khi bảng Hiển thị đang
+  bị** có chữ (Escape đóng và trả focus về ⋯; hộp thoại mở từ menu trả focus về ⋯; đổi cỡ cửa sổ hoặc
+  ghim/bỏ ghim qua mốc thì menu đóng, focus về Nhóm khi thao tác trở lại hàng, về ⋯ khi chúng vào menu). Khi bảng Hiển thị đang
   ghim, các mốc này lùi 180 px (icon 1360–1599, menu 1024–1359); nếu vẫn không đủ, phần lọc xuống hàng thứ
   hai chứ không co ô tìm. Nút chính giữ chữ. Toolbar không lặp số máy (đã ở thanh hệ thống). Dưới 1024 px
   phần lọc xuống hàng thứ hai; thông báo luôn chiếm một hàng riêng. Nút chính ≥ 40 px được giữ ở cả các
