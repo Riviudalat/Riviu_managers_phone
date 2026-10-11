@@ -113,6 +113,20 @@ const TIKTOK_RUNTIME_PERMISSIONS: [&str; 4] = [
     "android.permission.WRITE_EXTERNAL_STORAGE",
 ];
 
+/// Photo/video access TikTok's gallery asks for: storage up to Android 12 (SDK 32), the
+/// split media permissions from Android 13 (SDK 33).
+const TIKTOK_MEDIA_PERMISSIONS_LEGACY: [&str; 2] = [
+    "android.permission.READ_EXTERNAL_STORAGE",
+    "android.permission.WRITE_EXTERNAL_STORAGE",
+];
+const TIKTOK_MEDIA_PERMISSIONS_SDK33: [&str; 2] = [
+    "android.permission.READ_MEDIA_IMAGES",
+    "android.permission.READ_MEDIA_VIDEO",
+];
+/// Each `getprop`/`pm grant` round trip in the media grant; a wedged phone costs at most
+/// five of these before the session's own preflight takes over.
+const MEDIA_GRANT_TIMEOUT: Duration = Duration::from_secs(10);
+
 fn missing_tiktok_runtime_permissions(dump: &str) -> anyhow::Result<Vec<&'static str>> {
     let user = dump
         .split_once("User 0:")
@@ -1383,6 +1397,9 @@ impl AndroidDriver {
             return Ok(());
         }
         let package = adb::validate_package_name(package)?;
+        if self.automatic_setup_allowed {
+            self.grant_tiktok_media_permissions(serial, package).await;
+        }
         let script = format!("dumpsys package {package}");
         let before = self
             .adb
@@ -1433,6 +1450,78 @@ impl AndroidDriver {
             tracing::info!(serial, package, granted = ?missing, "TikTok runtime permissions verified");
         }
         Ok(())
+    }
+
+    /// Grant TikTok's photo/video access up front, every session ("luôn tự cấp quyền").
+    ///
+    /// Campaign 6e0bfb7c (2026-10-12 02:28, 20 phones): "Allow TikTok to access photos,
+    /// media, and files on your device?" opened over the gallery and ended the publish as a
+    /// foreground change. The ledger check above only grants a permission `dumpsys` lists
+    /// as `granted=false`, so an absent row never got one. `pm grant` of a granted
+    /// permission is a no-op; this never revokes and never clears data.
+    async fn grant_tiktok_media_permissions(&self, serial: &str, package: &str) {
+        let sdk = self
+            .adb
+            .shell_output(serial, "getprop ro.build.version.sdk", MEDIA_GRANT_TIMEOUT)
+            .await
+            .ok()
+            .and_then(|output| output.stdout.trim().parse::<u32>().ok());
+        let permissions: &[&str] = match sdk {
+            Some(sdk) if sdk >= 33 => &TIKTOK_MEDIA_PERMISSIONS_SDK33,
+            Some(_) => &TIKTOK_MEDIA_PERMISSIONS_LEGACY,
+            // Unknown release: try both pairs; the wrong pair is refused harmlessly below.
+            None => &[
+                TIKTOK_MEDIA_PERMISSIONS_LEGACY[0],
+                TIKTOK_MEDIA_PERMISSIONS_LEGACY[1],
+                TIKTOK_MEDIA_PERMISSIONS_SDK33[0],
+                TIKTOK_MEDIA_PERMISSIONS_SDK33[1],
+            ],
+        };
+        let mut granted = Vec::new();
+        let mut refused = Vec::new();
+        for permission in permissions {
+            let command = format!("pm grant --user 0 {package} {permission}");
+            match self
+                .adb
+                .shell_output(serial, &command, MEDIA_GRANT_TIMEOUT)
+                .await
+            {
+                Ok(output) if output.exit_code == 0 && output.stderr.trim().is_empty() => {
+                    granted.push(*permission);
+                }
+                Ok(output) => {
+                    let said = format!("{} {}", output.stdout.trim(), output.stderr.trim());
+                    // Android's answers for a permission this build or release cannot take.
+                    let benign = [
+                        "not a changeable permission",
+                        "has not requested",
+                        "unknown permission",
+                    ]
+                    .iter()
+                    .any(|marker| said.to_ascii_lowercase().contains(marker));
+                    if !benign {
+                        refused.push(format!("{permission}: {}", said.trim()));
+                    }
+                }
+                Err(error) => refused.push(format!("{permission}: {error:#}")),
+            }
+        }
+        if refused.is_empty() {
+            tracing::info!(
+                serial,
+                package,
+                ?granted,
+                "đã tự cấp quyền ảnh/video cho TikTok trên máy {serial}"
+            );
+        } else {
+            tracing::warn!(
+                serial,
+                package,
+                ?granted,
+                "chưa tự cấp được quyền ảnh/video cho TikTok trên máy {serial}: {}",
+                refused.join("; ")
+            );
+        }
     }
 
     async fn tiktok_build_with_preference(

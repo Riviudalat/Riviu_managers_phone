@@ -24,6 +24,24 @@ sở hữu inventory/hash; không nhân bản danh sách pin.
 - Các engine đi qua control plane. IdleSweep thấp ưu tiên, không tranh foreground.
   Không dùng direct probe khi desktop giữ cùng USB.
 
+### UiAutomator của công cụ khác và quyền TikTok
+
+- Số đo: campaign `6e0bfb7c` (12/10/2026 02:28, 20 máy, 0 bài đăng) có UiAutomator của
+  GenFarmer (`com.genfarmer.uiautomator.test/androidx.test.runner.AndroidJUnitRunner`)
+  còn chạy trên 15/20 máy và giành UiAutomation của Riviu.
+- Khi khởi động hoặc restart agent, nếu mọi instrumentation lạ đều thuộc
+  `KNOWN_CONFLICTING_AUTOMATION` (`crates/android-driver/src/driver/agent.rs`: hai gói
+  GenFarmer) thì Riviu `am force-stop` hai gói đó một lần, chờ ≤5 s đến khi ActivityManager
+  không còn ghi nhận, rồi chạy tiếp. Chủ lạ khác vẫn bị từ chối. Phiên chẩn đoán không dừng gì.
+  Không bao giờ dừng TikTok, Riviu Helper hay gói hệ thống.
+- Mỗi phiên app TikTok, Riviu tự `pm grant --user 0` quyền ảnh/video: `READ_/WRITE_EXTERNAL_STORAGE`
+  (Android ≤ 12) hoặc `READ_MEDIA_IMAGES`/`READ_MEDIA_VIDEO` (Android ≥ 13). Lý do: hộp thoại
+  "Allow TikTok to access photos, media, and files" mở trên thư viện và làm hỏng bài đăng.
+  Bỏ qua lỗi "not a changeable permission"/"has not requested". Không bao giờ revoke hay
+  `pm clear`.
+- Đẩy media lúc chuẩn bị Đăng bài (trước mọi Post) gặp `cannot connect to daemon` / `10060`
+  thì thử lại đúng lần đẩy đó một lần sau 2 s. Riviu không restart adb-server.
+
 ### Sức khỏe máy trước code
 
 Khi chỉ một máy có root không đọc được hoặc tap bị nuốt, so máy đó với một máy cùng

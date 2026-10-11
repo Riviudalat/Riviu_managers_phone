@@ -74,6 +74,19 @@ async fn terminate_instrumentation_child(child: &mut InstrumentationProcess) -> 
 
 const INSTRUMENTATION_DIAGNOSTIC_LIMIT: u64 = 64 * 1024;
 
+/// Reviewed tools whose leftover UiAutomator runner Riviu may stop. Campaign 6e0bfb7c
+/// (2026-10-12 02:28, 20 phones, 0 posted): GenFarmer's
+/// `com.genfarmer.uiautomator.test/androidx.test.runner.AndroidJUnitRunner` was still
+/// instrumenting 15/20 phones and starved Riviu's UiAutomation. An owner outside this
+/// list keeps the refusal; TikTok, the Riviu Helper and system packages are never here.
+const KNOWN_CONFLICTING_AUTOMATION: [&str; 2] = [
+    "com.genfarmer.uiautomator.test",
+    "com.genfarmer.uiautomator",
+];
+/// How long a force-stopped runner may take to leave ActivityManager's ledger.
+const FOREIGN_AUTOMATION_STOP_WAIT: Duration = Duration::from_secs(5);
+const FOREIGN_AUTOMATION_STOP_POLL: Duration = Duration::from_millis(500);
+
 struct InstrumentationProcess {
     child: tokio::process::Child,
     stdout: Option<tokio::task::JoinHandle<String>>,
@@ -1002,8 +1015,21 @@ impl InstrumentationRuntime {
         AndroidDriver::active_instrumentations(&dump, &[AGENT_PACKAGE, AGENT_TEST_PACKAGE])
     }
 
+    /// Refuse a phone another tool is instrumenting. A runner owned only by
+    /// [`KNOWN_CONFLICTING_AUTOMATION`] is force-stopped once per start attempt first: a
+    /// stop that does not clear the ledger within its wait ends in this same refusal, so
+    /// the caller never reaches a second stop.
     async fn refuse_active_foreign_instrumentation(&self, serial: &str) -> anyhow::Result<()> {
-        let active = self.active_foreign_instrumentations(serial).await;
+        let mut active = self.active_foreign_instrumentations(serial).await;
+        if self.automatic_setup_allowed
+            && !active.is_empty()
+            && active.iter().all(|component| {
+                let package = component.split('/').next().unwrap_or(component);
+                KNOWN_CONFLICTING_AUTOMATION.contains(&package)
+            })
+        {
+            active = self.stop_known_conflicting_automation(serial, active).await;
+        }
         anyhow::ensure!(
             active.is_empty(),
             "máy {serial} đang chạy UiAutomator của công cụ khác: {}. Riviu không khởi động hoặc \
@@ -1011,6 +1037,45 @@ impl InstrumentationRuntime {
             active.join(", ")
         );
         Ok(())
+    }
+
+    /// Force-stop the reviewed packages and wait, bounded, for their runner to leave the
+    /// ledger. Returns the runners still seen; an unreadable ledger proves nothing, so the
+    /// last reading stands until a read shows them gone.
+    async fn stop_known_conflicting_automation(
+        &self,
+        serial: &str,
+        mut active: Vec<String>,
+    ) -> Vec<String> {
+        for package in KNOWN_CONFLICTING_AUTOMATION {
+            if let Err(error) = self
+                .adb
+                .shell(serial, &format!("am force-stop {package}"))
+                .await
+            {
+                tracing::warn!(serial, package, %error, "force-stop of a known conflicting automation failed");
+            }
+        }
+        let deadline = std::time::Instant::now() + FOREIGN_AUTOMATION_STOP_WAIT;
+        loop {
+            if let Ok(dump) = self.adb.shell(serial, "dumpsys activity").await {
+                active = AndroidDriver::active_instrumentations(
+                    &dump,
+                    &[AGENT_PACKAGE, AGENT_TEST_PACKAGE],
+                );
+                if active.is_empty() {
+                    tracing::warn!(
+                        serial,
+                        "đã dừng UiAutomator của GenFarmer trên máy {serial} để Riviu điều khiển"
+                    );
+                    return active;
+                }
+            }
+            if std::time::Instant::now() >= deadline {
+                return active;
+            }
+            tokio::time::sleep(FOREIGN_AUTOMATION_STOP_POLL).await;
+        }
     }
 
     /// Report observed live runners. Installed packages do not prove an owner.

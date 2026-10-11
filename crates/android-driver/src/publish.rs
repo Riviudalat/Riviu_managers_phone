@@ -66,6 +66,23 @@ const VIDEOS_URI: &str = "content://media/external/video/media";
 /// Generous: `pm`/`content` calls on this fleet are 1–2 s, and a push is bounded by
 /// file size.
 const PUSH_TIMEOUT: Duration = Duration::from_secs(120);
+/// Pause before the one retry of a push whose adb client could not reach its own server.
+const PUSH_DAEMON_RETRY_BACKOFF: Duration = Duration::from_secs(2);
+
+/// The host adb client could not reach its server, so nothing reached the phone.
+/// Campaign 6e0bfb7c (2026-10-12 02:28, 20 phones): `cannot connect to daemon at
+/// tcp:5037 … (10060)` under load ended staging as `media_transfer_failed`.
+fn adb_daemon_unreachable(error: &anyhow::Error) -> bool {
+    let text = format!("{error:#}").to_ascii_lowercase();
+    [
+        "cannot connect to daemon",
+        "(10060)",
+        "(10061)",
+        "connection refused",
+    ]
+    .iter()
+    .any(|marker| text.contains(marker))
+}
 
 /// Only the characters a filename and a shell argument can both carry safely.
 ///
@@ -1100,13 +1117,24 @@ pub async fn stage(
         let bytes = std::fs::read(path).with_context(|| format!("read {}", path.display()))?;
         let local_sha = riviu_core::frame_sha256(&bytes);
         let remote = format!("{remote_root}/{safe}");
-        adb.device(
-            serial,
-            &["push", &path.display().to_string(), &remote],
-            PUSH_TIMEOUT,
-        )
-        .await
-        .with_context(|| format!("push {} to {remote}", path.display()))?;
+        // Staging is before any Post: the push only overwrites this hidden staging file and
+        // the read-back below proves it, so a daemon that refused the client gets one retry.
+        let source = path.display().to_string();
+        let args = ["push", source.as_str(), remote.as_str()];
+        let push = || adb.device(serial, &args, PUSH_TIMEOUT);
+        let pushed = match push().await {
+            Err(error) if adb_daemon_unreachable(&error) => {
+                tracing::warn!(
+                    serial,
+                    %error,
+                    "adb chưa kết nối được daemon khi đẩy media lên máy {serial}; thử lại một lần"
+                );
+                tokio::time::sleep(PUSH_DAEMON_RETRY_BACKOFF).await;
+                push().await
+            }
+            pushed => pushed,
+        };
+        pushed.with_context(|| format!("push {} to {remote}", path.display()))?;
 
         // The push's own success is not evidence. Read both back.
         let size = verify_staged_file(
