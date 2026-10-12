@@ -780,7 +780,7 @@ fn helper_maintenance_prepare_error(error: DeviceControlError) -> CommandError {
         "HelperMaintenanceRetainedOwnerMissing" => ("HelperMaintenanceRetainedOwnerMissing", "retained_owner_missing",
             "Không có hồ sơ chủ phiên helper được giữ trên PC này; chưa đủ bằng chứng để chuẩn bị khôi phục. Kiểm tra đúng PC và dữ liệu phiên; không tự giành quyền hoặc đặt lại helper.".into()),
         "maintenance cannot guess or restore a lost boot IME" => ("HelperMaintenanceImeUnproved", "ime_unproved",
-            "Chưa chứng minh được bàn phím ban đầu để khôi phục helper. Giữ nguyên phiên và kiểm tra bằng chứng bàn phím; không tự đổi IME.".into()),
+            "Bàn phím mặc định của máy vẫn là bàn phím Riviu Helper từ phiên cũ, nên Riviu không biết bàn phím gốc để trả lại và không tự đổi. Trên máy: Cài đặt → Quản lý chung → Danh sách bàn phím và mặc định → Bàn phím mặc định → chọn Bàn phím Samsung (hoặc bàn phím thường dùng). Riviu tự kiểm tra lại trong vài phút; nếu đã quá 7 phút thì rút cáp cắm lại máy.".into()),
         // Typed refusals are checked before the recovery fence they may also carry.
         _ => match HelperShellIdentityRefused::from_chain_text(cause) {
             Some(refusal) => (match refusal {

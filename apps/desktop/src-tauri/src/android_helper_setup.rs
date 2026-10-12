@@ -100,13 +100,27 @@ impl AndroidHelperSetup {
                                         Err(error) if error.is::<HelperShellIdentityRefused>() =>
                                             return Err((SetupStop::PreEffect, automatic_failure(&error))),
                                         Err(error) if error.is::<riviu_android_driver::riviu_agent::HelperRecoveryRequired>() => {}
+                                        // The phone dropped off adb mid-preparation (install or
+                                        // identity read unanswered): helper setup is not an action
+                                        // effect, and the retry resumes or fences the owner itself.
+                                        Err(error) if adb_transport_lost(&error) =>
+                                            return Err((SetupStop::PreEffect, automatic_failure(&error))),
                                         Err(error) => return Err((SetupStop::Terminal, automatic_failure(&error))),
                                     }
                                 }
                                 // Owner decision 2026-10-12: supersede under this Repair lease
                                 // whatever the ledger holds; it only names what stays recorded.
                                 let note = crate::agent_commands::helper_auto_reconcile_note(&db, &serial);
-                                crate::agent_commands::automatic_helper_maintenance(&control, &db, &context, &serial).await
+                                let maintenance = match crate::agent_commands::automatic_helper_maintenance(&control, &db, &context, &serial).await {
+                                    // Preparation persisted nothing; with the phone's keyboard back,
+                                    // the boot keyboard is known and preparation can be re-read once.
+                                    Err(AutomaticMaintenanceError::Prepare(error))
+                                        if error.code == "HelperMaintenanceImeUnproved"
+                                            && restore_keyboard_over_helper_ime(&android, &db, &serial).await =>
+                                        crate::agent_commands::automatic_helper_maintenance(&control, &db, &context, &serial).await,
+                                    other => other,
+                                };
+                                maintenance
                                     .map_err(|error| match error {
                                         AutomaticMaintenanceError::Prepare(error) => (SetupStop::PreEffect, error),
                                         AutomaticMaintenanceError::Execute(error) => (SetupStop::Terminal, error),
@@ -187,6 +201,19 @@ fn failure_disposition(stop: SetupStop, code: &str) -> FailureDisposition {
         FailureDisposition::RetryPrepare
     } else {
         FailureDisposition::Terminal
+    }
+}
+
+/// adb lost the phone itself (gone, offline, transport reset, unanswered), as opposed to
+/// a refusal the phone answered. Retried on `PREPARE_RETRY_DELAYS`, so a wrong match costs
+/// at most three bounded re-checks.
+fn adb_transport_lost(error: &anyhow::Error) -> bool {
+    use riviu_android_driver::adb::{classify_fault, AdbFault};
+    let text = format!("{error:#}");
+    match classify_fault(&text) {
+        AdbFault::Offline | AdbFault::Transient | AdbFault::Timeout => true,
+        AdbFault::UnknownDevice => text.contains("error: device '") || text.contains("no devices/emulators found"),
+        AdbFault::Unauthorized | AdbFault::Terminal => false,
     }
 }
 
@@ -273,6 +300,30 @@ async fn auto_switch_system_language(android: &AndroidDriver, db: &Database, ser
         ),
     };
     record(db, action, serial, &message);
+}
+
+/// `ime_unproved`: put the phone back on its only enabled keyboard under this connection's
+/// Repair lease (no tap; `ime set` then read back). True only when the read-back proved it.
+async fn restore_keyboard_over_helper_ime(android: &AndroidDriver, db: &Database, serial: &str) -> bool {
+    record(db, "agent.helper.keyboard.auto.started", serial,
+        "bàn phím mặc định còn là bàn phím Riviu Helper của phiên cũ; tự trả về bàn phím duy nhất còn bật trên máy nếu có.");
+    match android.restore_sole_keyboard_over_helper_ime(serial).await {
+        Ok(Some(keyboard)) => {
+            record(db, "agent.helper.keyboard.auto.done", serial,
+                &format!("đã trả bàn phím mặc định về {keyboard}; tiếp tục khôi phục helper."));
+            true
+        }
+        Ok(None) => {
+            record(db, "agent.helper.keyboard.auto.failed", serial,
+                "máy bật nhiều bàn phím (hoặc không còn bàn phím nào khác), Riviu không đoán; chưa đổi gì. Chọn bàn phím mặc định trên máy theo hướng dẫn trong thông báo.");
+            false
+        }
+        Err(error) => {
+            record(db, "agent.helper.keyboard.auto.failed", serial,
+                &format!("chưa trả được bàn phím mặc định: {error:#}. Chọn bàn phím mặc định trên máy theo hướng dẫn trong thông báo."));
+            false
+        }
+    }
 }
 
 fn record(db: &Database, action: &str, serial: &str, message: &str) {
@@ -407,12 +458,16 @@ impl SetupQueue {
                 continue;
             };
             // A scheduled prepare retry runs while the roster shows its own latched failure.
+            // The latch carries `; stage=…; category=…` after the prefix: a phone that blipped
+            // off adb mid-attempt comes back as a new connection showing that categorized latch,
+            // and must still get its attempt (seen live 12/10/2026, 30 phones, 13:08 UTC).
             if device.platform != DevicePlatform::Android
                 || !(matches!(device.status, DeviceStatus::Connected | DeviceStatus::Ready)
                     || (device.status == DeviceStatus::Error
                         && (connection.prepare_retries > 0
                             || (self.recovery.contains_key(&device.udid)
-                                && device.last_error.as_deref() == Some(HELPER_SETUP_FAILURE)))))
+                                && device.last_error.as_deref()
+                                    .is_some_and(|error| error.starts_with(HELPER_SETUP_FAILURE))))))
                 || !available(&device.udid)
                 || self
                     .tickets

@@ -1380,6 +1380,45 @@ impl AndroidDriver {
             .map(|_| ())
             .map_err(|e| anyhow!("đổi bàn phím thất bại: {e}"))
     }
+    /// A dead helper session can leave the Riviu IME as the phone's default keyboard, and
+    /// maintenance then refuses (`ime_unproved`) because the boot keyboard is unknown. Put the
+    /// phone back on its keyboard only when that is not a guess: the default is the Riviu IME
+    /// and exactly one other, non-voice keyboard is enabled. Read back after the set.
+    /// `Ok(None)`: nothing changed (not the Riviu IME, or no single candidate).
+    pub async fn restore_sole_keyboard_over_helper_ime(
+        &self,
+        serial: &str,
+    ) -> anyhow::Result<Option<String>> {
+        let current = self
+            .adb
+            .shell(serial, "settings get secure default_input_method")
+            .await?;
+        if crate::riviu_agent::parse_current_ime(&current) != Some(crate::riviu_agent::IME_ID) {
+            return Ok(None);
+        }
+        let enabled = self.adb.shell(serial, "ime list -s").await?;
+        let candidates: Vec<&str> = enabled
+            .lines()
+            .map(str::trim)
+            .filter(|id| {
+                *id != crate::riviu_agent::IME_ID && !id.to_ascii_lowercase().contains("voice")
+            })
+            .filter(|id| crate::riviu_agent::validate_ime_id(id).is_ok())
+            .collect();
+        let [keyboard] = candidates.as_slice() else {
+            return Ok(None);
+        };
+        self.set_input_method(serial, keyboard).await?;
+        let after = self
+            .adb
+            .shell(serial, "settings get secure default_input_method")
+            .await?;
+        anyhow::ensure!(
+            crate::riviu_agent::parse_current_ime(&after) == Some(*keyboard),
+            "đã đặt bàn phím {keyboard} nhưng máy vẫn báo {after:?}"
+        );
+        Ok(Some((*keyboard).to_owned()))
+    }
     /// Factory-reset the phone (xiaowei 恢复出厂). Needs root; sends the system MASTER_CLEAR
     /// broadcast. Irreversible — the UI gates this behind an explicit confirm.
     /// **Deliberately still gated on `su`, not on [`Self::can_run_privileged`].**
