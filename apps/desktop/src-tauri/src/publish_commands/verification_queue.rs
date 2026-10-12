@@ -28,7 +28,7 @@ impl VerificationWait {
         match self {
             Self::DeviceOffline => "Máy chưa kết nối — cắm lại máy để app tự kiểm tra bài đã gửi",
             Self::HelperNotReady => {
-                "Helper trên máy chưa sẵn sàng — app tự kiểm tra khi helper chạy lại; nếu kéo dài, xem máy này trong Cần xử lý"
+                "Helper trên máy chưa chạy — app tự mở helper để kiểm tra; chưa mở được thì tự thử lại sau 5 phút"
             }
             Self::AgentNotReady => {
                 "Riviu Agent trên iPhone chưa sẵn sàng — app tự kiểm tra khi agent chạy lại; nếu kéo dài, xem máy này trong Cần xử lý"
@@ -38,7 +38,16 @@ impl VerificationWait {
             Self::DeviceError => "Máy đang báo lỗi kết nối — kiểm tra cáp USB rồi cắm lại máy",
         }
     }
+
+    /// An adb-online Android phone without a running helper is still admitted: the
+    /// verifier's own read-only session starts the helper, as after restart or replug.
+    pub fn admits(self) -> bool {
+        self == Self::HelperNotReady
+    }
 }
+
+/// A cold admission whose session could not open retries at the observation cadence.
+pub(crate) const COLD_RETRY: std::time::Duration = std::time::Duration::from_secs(300);
 
 /// One observer per phone or retained metadata assignment; rows remain durable.
 pub(crate) struct VerificationQueue {
@@ -70,12 +79,12 @@ impl VerificationQueue {
             // Admit only to persist a controlled terminal diagnostic, without IO.
             Err(_) => true,
             Ok(Some(_)) => row.automatic_metadata_observation_allowed(chrono::Utc::now()),
-            Ok(None) => Self::phone_wait(device, phone_busy).is_none(),
+            Ok(None) => Self::phone_wait(device, phone_busy).is_none_or(VerificationWait::admits),
         })
     }
 
-    /// Why a phone-path observation cannot start now; `None` admits it. The same
-    /// predicate gates the worker and names the wait to the operator.
+    /// What holds a phone-path observation, or `None` when the phone is warm. The same
+    /// predicate gates the worker (through `admits`) and names the wait to the operator.
     pub fn phone_wait(
         device: Option<&riviu_core::DeviceInfo>,
         phone_busy: bool,

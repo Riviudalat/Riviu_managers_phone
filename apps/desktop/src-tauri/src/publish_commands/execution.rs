@@ -2332,7 +2332,11 @@ pub(super) async fn capture_confirmed_assignment_link(
     // restarts its exact TikTok package here; no composer or Post is reachable.
     let context = control
         .open_manual_session(&assignment.udid, DeviceWorkOwner::Script)
-        .await?;
+        .await
+        .map_err(|error| match error {
+            riviu_core::DeviceControlError::Busy(_) => anyhow::Error::from(error),
+            error => super::verification::SessionUnavailable(error.to_string()).into(),
+        })?;
     let outcome = async {
         let session = control.session(&context)?;
         session.set_gui_scope(riviu_core::ui_automation::GuiScope {

@@ -1704,15 +1704,23 @@ impl AppState {
                 let mut failed_until = std::collections::HashMap::new();
                 let mut waits: std::collections::HashMap<String, Option<&'static str>> =
                     std::collections::HashMap::new();
+                // Observers admitted while their helper was not running yet.
+                let mut cold = std::collections::HashSet::new();
                 loop {
                     tokio::select! {
                         _ = interval.tick() => {},
                         Some((udid, result)) = queue.next(), if !queue.is_empty() => {
+                            let was_cold = cold.remove(&udid);
                             if let Err(error) = &result {
                                 log::warn!("publish verification {udid}: {error}");
                             }
                             if !matches!(result, Ok(true)) {
-                                failed_until.insert(udid, Instant::now() + Duration::from_secs(30));
+                                let retry = if was_cold {
+                                    crate::publish_commands::VERIFICATION_COLD_RETRY
+                                } else {
+                                    Duration::from_secs(30)
+                                };
+                                failed_until.insert(udid, Instant::now() + retry);
                             }
                         }
                     }
@@ -1805,21 +1813,24 @@ impl AppState {
                         };
                         let device = registry.get(&row.udid);
                         let phone_busy = control.current_work_owner(&row.udid).is_some();
-                        // A due phone check that cannot start is logged once per change
-                        // of its reason, never on every 30 s tick.
-                        if row.is_due(chrono::Utc::now())
-                            && matches!(row.retained_metadata_candidate(), Ok(None))
-                        {
-                            let wait = crate::publish_commands::VerificationQueue::phone_wait(
-                                device.as_ref(),
-                                phone_busy,
-                            );
+                        let phone_path = matches!(row.retained_metadata_candidate(), Ok(None));
+                        let wait = phone_path
+                            .then(|| {
+                                crate::publish_commands::VerificationQueue::phone_wait(
+                                    device.as_ref(),
+                                    phone_busy,
+                                )
+                            })
+                            .flatten();
+                        // A due phone check's wait is logged once per change of its
+                        // reason, never on every 30 s tick.
+                        if phone_path && row.is_due(chrono::Utc::now()) {
                             let previous =
                                 waits.insert(row.assignment_id.clone(), wait.map(|w| w.code()));
                             if previous.flatten() != wait.map(|w| w.code()) {
                                 match wait {
                                     Some(wait) => log::warn!(
-                                        "Bài đã gửi trên {} đến lịch kiểm tra nhưng chưa kiểm tra được: {} (lượt {}, {}); không đăng lại",
+                                        "Bài đã gửi trên {} đến lịch kiểm tra: {} (lượt {}, {}); không đăng lại",
                                         row.udid, wait.message(), row.assignment_id, wait.code()
                                     ),
                                     None => log::info!(
@@ -1844,6 +1855,9 @@ impl AppState {
                         let Ok(admitted) = admission.ensure_accepting_work() else {
                             break;
                         };
+                        if wait.is_some_and(|wait| wait.admits()) {
+                            cold.insert(observer_key.clone());
+                        }
                         let (control, db, events) = (control.clone(), db.clone(), events.clone());
                         let queued_acceptance = acceptance.clone();
                         queue.push(observer_key, async move {

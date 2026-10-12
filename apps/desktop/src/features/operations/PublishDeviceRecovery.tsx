@@ -38,7 +38,7 @@ function verificationWait(c: PublishProgressCapability | undefined, due: number,
  const overdue=Math.floor((now-due)/60000);
  if(c.automaticVerification)
   return due>now?"app tự kiểm tra khi đến lịch"
-   :overdue>=10&&c.checkLink.allowed?`đã quá lịch ${overdue} phút mà chưa kiểm tra được — bấm Kiểm tra liên kết`
+   :overdue>=10?`đã quá lịch ${overdue} phút; app vẫn tự thử lại khi máy rảnh`
    :"app sẽ tự kiểm tra trong ít phút";
  if(c.resumeVerification.allowed)return "tự kiểm tra đang dừng — bấm Tiếp tục kiểm tra link";
  if(c.checkLink.allowed)return "bài này không tự kiểm tra — bấm Kiểm tra liên kết";

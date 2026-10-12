@@ -357,6 +357,17 @@ impl std::fmt::Display for VerificationObservation {
 }
 impl std::error::Error for VerificationObservation {}
 
+/// The verifier's own UI session did not open (helper not running or refused).
+/// No screen was read, so it is not an observation and spends no verification budget.
+#[derive(Debug)]
+pub(super) struct SessionUnavailable(pub(super) String);
+impl std::fmt::Display for SessionUnavailable {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(&self.0)
+    }
+}
+impl std::error::Error for SessionUnavailable {}
+
 /// Only this observer's publication is hydrated. Other devices' media and the
 /// campaign event history do not belong in each concurrent verification task.
 pub(super) fn verification_input(
@@ -558,8 +569,12 @@ async fn verify_pending_assignment_inner(
             ) {
                 return Ok((CheckStatus::Busy, None));
             }
-            // The stale observer can never overwrite a newer link or cancelled assignment.
             let reason: String = error.to_string().chars().take(512).collect();
+            if !manual && error.downcast_ref::<SessionUnavailable>().is_some() {
+                // The worker retries this phone at the observation cadence.
+                return Ok((CheckStatus::Busy, Some(reason)));
+            }
+            // The stale observer can never overwrite a newer link or cancelled assignment.
             let code = error
                 .downcast_ref::<VerificationObservation>()
                 .map_or("readFailed", |o| o.code);

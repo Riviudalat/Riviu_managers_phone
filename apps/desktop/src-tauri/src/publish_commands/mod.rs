@@ -28,7 +28,7 @@ mod verification_restart;
 mod verification_session;
 pub(crate) use verification::verify_pending_assignment;
 pub use verification::*;
-pub(crate) use verification_queue::VerificationQueue;
+pub(crate) use verification_queue::{VerificationQueue, COLD_RETRY as VERIFICATION_COLD_RETRY};
 mod verified_cleanup;
 /// Batched read for the device picker. No phone access and no state mutation.
 #[tauri::command]
