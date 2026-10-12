@@ -214,7 +214,8 @@ pub async fn agent_helper_maintenance_execute(
 /// Owner decision 2026-10-12: a root adbd is repaired automatically, never through a
 /// confirm step. Called under the phone's exclusive Repair lease (so no job of this
 /// controller runs on it) when the phone connects and at job admission. At most one
-/// `adb unroot` per phone boot, logged before the effect; the host adb server is never
+/// `adb unroot` per phone boot, also across app restarts (a durable marker), none while
+/// the boot id is unproved, logged before the effect; the host adb server is never
 /// touched and nothing is replayed. Returns the operator text when adbd still does not
 /// run as shell; `None` lets the normal path continue, including when the identity is
 /// unreadable (that path reports it).
@@ -249,6 +250,8 @@ pub(crate) async fn auto_unroot_adb(
             "Riviu đã tự tắt quyền root của adb nhưng adb của máy không chạy bằng tài khoản shell (uid 2000). Tắt rồi bật lại Gỡ lỗi USB trên máy; Riviu tự kiểm tra lại khi máy kết nối lại.",
         Ok(AdbRootRepair::Dispatched(AdbUnrootOutcome::NotBack)) =>
             "Riviu đã tự tắt quyền root của adb nhưng máy chưa kết nối lại trong 45 giây. Kiểm tra cáp và box; Riviu tự kiểm tra lại khi máy hiện lại.",
+        Ok(AdbRootRepair::BootUnproved) =>
+            "adb trên máy đang chạy quyền root nhưng Riviu chưa đọc được mã lần khởi động của máy, nên không tự tắt quyền root (tránh tắt lặp lại); helper không chạy với root. Tắt GenFarmer trên PC này rồi khởi động lại máy; Riviu tự kiểm tra lại khi máy kết nối lại.",
         Err(error) => {
             log::warn!("automatic adb unroot not attempted on {serial}: {error:#}");
             return None;

@@ -655,8 +655,10 @@ adbd chạy root (`id -u` = 0) được tự sửa, không có bước xác nh�
 phẩm 12/10/2026): `agent_commands::auto_unroot_adb` chạy ở worker kết nối (trước
 `prepare_helper_runtime`) và ở admission trên (trước kiểm ledger), dưới lease Repair nên
 không chen vào việc đang chạy của controller này. `AndroidDriver::repair_root_adb_shell`
-gửi `adb -s <serial> unroot` tối đa một lần cho mỗi boot id của máy (khởi động lại máy hoặc
-khởi động lại app cho thêm một lần), ghi `agent.helper.adb_unroot.started` trước effect,
+gửi `adb -s <serial> unroot` tối đa một lần cho mỗi boot id của máy (mốc đã dùng lưu bền ở
+`driver-state/adb-unroot/` trước effect nên khởi động lại app không cho thêm lần nào, chỉ
+khởi động lại máy mới cho; chưa đọc được boot id thì không gửi và báo tắt GenFarmer, khởi
+động lại máy), ghi `agent.helper.adb_unroot.started` trước effect,
 chờ hữu hạn (45 s) đến khi `id -u` = 2000, không bao giờ restart adb-server của PC hay chạy
 helper bằng root. Không phụ thuộc ledger: lệnh chỉ restart adbd của máy, không chạm trạng
 thái TikTok và không lặp thao tác. Vẫn root thì giữ `shell_root` với lý do tiếng Việt (tắt

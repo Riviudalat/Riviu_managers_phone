@@ -53,6 +53,74 @@ pub enum AdbRootRepair {
     Dispatched(AdbUnrootOutcome),
     /// adbd is root again after this boot's single `adb unroot`; nothing was sent.
     AlreadyTriedThisBoot,
+    /// adbd is root but the phone's boot id was not proved, so "one per boot" cannot be
+    /// kept; nothing was sent.
+    BootUnproved,
+}
+
+/// Upper bound of one durable "unroot spent" marker (serial + boot id).
+const ADB_UNROOT_MARKER_LIMIT: u64 = 1024;
+
+/// The kernel boot id as a canonical UUID, or `None` when the answer proves none.
+fn proved_boot_id(raw: &str) -> Option<String> {
+    let raw = raw.trim();
+    let id = uuid::Uuid::parse_str(raw)
+        .ok()
+        .filter(|id| raw.len() == 36 && !id.is_nil())?;
+    Some(id.hyphenated().to_string())
+}
+
+/// The boot id whose automatic `adb unroot` is already spent, `None` without a marker.
+/// An unreadable or foreign marker is an error, never "not spent".
+fn adb_unroot_spent_boot(path: &Path, serial: &str) -> anyhow::Result<Option<String>> {
+    use std::io::Read as _;
+    let mut bytes = Vec::new();
+    match std::fs::File::open(path) {
+        Ok(file) => {
+            file.take(ADB_UNROOT_MARKER_LIMIT + 1)
+                .read_to_end(&mut bytes)?;
+        }
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+        Err(error) => return Err(error.into()),
+    }
+    anyhow::ensure!(
+        bytes.len() as u64 <= ADB_UNROOT_MARKER_LIMIT,
+        "adb unroot marker exceeds bound"
+    );
+    let marker: serde_json::Value = serde_json::from_slice(&bytes)?;
+    anyhow::ensure!(
+        marker["serial"].as_str() == Some(serial),
+        "adb unroot marker identity mismatch"
+    );
+    marker["bootId"]
+        .as_str()
+        .and_then(proved_boot_id)
+        .map(Some)
+        .context("adb unroot marker boot id invalid")
+}
+
+/// Atomically replaces the serial's marker, so only its latest boot is kept.
+fn spend_adb_unroot(path: &Path, serial: &str, boot_id: &str) -> anyhow::Result<()> {
+    use std::io::Write as _;
+    std::fs::create_dir_all(
+        path.parent()
+            .context("adb unroot marker directory missing")?,
+    )?;
+    let bytes = serde_json::to_vec(&serde_json::json!({"serial": serial, "bootId": boot_id}))?;
+    anyhow::ensure!(
+        bytes.len() as u64 <= ADB_UNROOT_MARKER_LIMIT,
+        "adb unroot marker exceeds bound"
+    );
+    let temporary = path.with_extension(format!("{}.tmp", uuid::Uuid::new_v4().simple()));
+    let mut file = std::fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(&temporary)?;
+    file.write_all(&bytes)?;
+    file.sync_all()?;
+    drop(file);
+    std::fs::rename(temporary, path)?;
+    Ok(())
 }
 
 /// Package names of the agent halves, as published by Appium.
@@ -1151,8 +1219,6 @@ pub struct AndroidDriver {
     /// [`Self::inventory_cache`] so it keeps its own, slower refresh ([`WIFI_IP_TTL`]).
     wifi_ips: Mutex<HashMap<String, (std::time::Instant, Option<String>)>>,
     helper_setup_errors: Mutex<HashMap<String, String>>,
-    /// serial -> boot id of the one automatic `adb unroot` already sent in that boot.
-    adb_unroot_boots: Mutex<HashMap<String, String>>,
     helper_recovery: Mutex<HashMap<String, HelperRecoveryState>>,
     helper_inventory_snapshot: Mutex<Option<Vec<DeviceInfo>>>,
     /// serial -> app names and icons the helper already described, keyed on the exact set of
@@ -1362,11 +1428,14 @@ impl AndroidDriver {
     }
 
     /// Automatic repair of a root adbd (`id -u` == 0): at most one `adb unroot` per phone
-    /// boot, so Riviu never fights a tool (GenFarmer) or ROM that roots adbd again. A reboot
-    /// (new boot id) or an app restart allows one more. The caller holds the phone's
-    /// exclusive Repair lease, so no job of this controller is running on it.
+    /// boot, so Riviu never fights a tool (GenFarmer) or ROM that roots adbd again. The
+    /// spent boot id is kept durably under `driver-state/adb-unroot/`, so an app restart
+    /// does not allow another; only a reboot (new boot id) does. An unproved boot id sends
+    /// nothing ([`AdbRootRepair::BootUnproved`]). The caller holds the phone's exclusive
+    /// Repair lease, so no job of this controller is running on it.
     /// `record_intent` runs before the effect; its failure sends nothing. An unreadable
-    /// identity is an error and sends nothing: the normal preparation path reports it.
+    /// identity or marker is an error and sends nothing: the normal preparation path
+    /// reports it.
     pub async fn repair_root_adb_shell(
         &self,
         serial: &str,
@@ -1375,7 +1444,16 @@ impl AndroidDriver {
         if self.adb_shell_uid(serial).await? != "0" {
             return Ok(AdbRootRepair::NotRoot);
         }
-        let boot_id = self
+        let marker = self
+            .helper_state_dir
+            .as_ref()
+            .context("helper state directory missing; no automatic adb unroot")?
+            .join("adb-unroot")
+            .join(format!(
+                "{}.json",
+                riviu_core::frame_sha256(serial.as_bytes())
+            ));
+        let boot_id = match self
             .adb
             .shell_output(
                 serial,
@@ -1383,21 +1461,28 @@ impl AndroidDriver {
                 ADB_UNROOT_PROBE_TIMEOUT,
             )
             .await
-            .map(|output| output.stdout.trim().to_owned())
-            .unwrap_or_default();
-        if self.adb_unroot_boots.lock().get(serial) == Some(&boot_id) {
+        {
+            Ok(output) if output.exit_code == 0 => proved_boot_id(&output.stdout),
+            _ => None,
+        };
+        let Some(boot_id) = boot_id else {
+            return Ok(AdbRootRepair::BootUnproved);
+        };
+        if adb_unroot_spent_boot(&marker, serial)?.as_deref() == Some(boot_id.as_str()) {
             return Ok(AdbRootRepair::AlreadyTriedThisBoot);
         }
         record_intent()?;
-        // Marked before the effect: a lost answer never earns a second dispatch this boot.
-        self.adb_unroot_boots
-            .lock()
-            .insert(serial.to_owned(), boot_id);
+        // Spent durably before the effect: neither a lost answer nor an app restart earns
+        // a second dispatch this boot.
+        spend_adb_unroot(&marker, serial, &boot_id)?;
         match self.unroot_adb_once(serial).await {
             Ok(outcome) => Ok(AdbRootRepair::Dispatched(outcome)),
             Err(error) => {
                 // Refused before spawn: nothing reached the phone, so the attempt is unspent.
-                self.adb_unroot_boots.lock().remove(serial);
+                // A marker that cannot be removed keeps this boot spent (fail closed).
+                if let Err(remove) = std::fs::remove_file(&marker) {
+                    tracing::warn!(serial, %remove, "adb unroot marker kept after a refused dispatch");
+                }
                 Err(error)
             }
         }
@@ -1922,7 +2007,6 @@ impl AndroidDriver {
             inventory_scan_lock: tokio::sync::Mutex::new(()),
             wifi_ips: Mutex::new(HashMap::new()),
             helper_setup_errors: Mutex::new(HashMap::new()),
-            adb_unroot_boots: Mutex::new(HashMap::new()),
             helper_recovery: Mutex::new(HashMap::new()),
             helper_inventory_snapshot: Mutex::new(None),
             app_descriptions: Mutex::new(HashMap::new()),
