@@ -3226,15 +3226,21 @@ impl DeviceDriver for AndroidDriver {
         // The control plane retains the exclusive transfer/UI lease here. Qualify the
         // owned helper and its clipboard restoration before copying any media, rather
         // than discovering an unresolved owner only when the composer opens.
+        // A phone whose automatic setup had not finished prepares here, on its own turn; a
+        // failure ends only this phone before any media is copied.
         if self.automatic_setup_allowed {
-            let helper = self.prepare_helper_runtime(udid).await?;
-            anyhow::ensure!(
-                !helper.cleanup_is_pending(),
-                crate::riviu_agent::HelperRecoveryRequired
-            );
-            // An already cached diagnostic owner is not clipboard qualification.
-            // A qualified production owner only re-proves its protected identity here.
-            helper.qualify_clipboard_roundtrip().await?;
+            async {
+                let helper = self.prepare_helper_runtime(udid).await?;
+                anyhow::ensure!(
+                    !helper.cleanup_is_pending(),
+                    crate::riviu_agent::HelperRecoveryRequired
+                );
+                // An already cached diagnostic owner is not clipboard qualification.
+                // A qualified production owner only re-proves its protected identity here.
+                helper.qualify_clipboard_roundtrip().await
+            }
+            .await
+            .context("Không chuẩn bị được Riviu Helper trên máy này; chưa chuyển ảnh/video, chưa đăng bài")?;
         }
         crate::publish::stage(&self.adb, udid, campaign_id, source_root).await
     }

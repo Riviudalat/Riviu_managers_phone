@@ -123,6 +123,38 @@ impl DevAcceptancePolicy {
         !self.active || self.scope_contains(campaign_id, udid, |_| true)
     }
 
+    /// Why `allows_publish_dispatch` refuses this request on some of these phones, naming the
+    /// scope part that fired; `None` exactly when it allows every phone.
+    pub(crate) fn publish_dispatch_refusal(
+        &self,
+        campaign_id: &str,
+        udids: &[String],
+    ) -> Option<String> {
+        if !self.active {
+            return None;
+        }
+        if self.approved_device_ids.is_none() {
+            return Some("file phạm vi không hợp lệ lúc mở controller (activationId, deviceIds, hoặc capability bật khi campaignIds rỗng) nên controller này từ chối mọi lượt; mở lại controller với file phạm vi hợp lệ".into());
+        }
+        let raw = self.scope_path.as_deref().and_then(read_scope_file);
+        if raw.as_ref().is_some_and(|scope| scope.campaign_ids.is_empty()) {
+            return Some("file phạm vi chưa cấp lượt nào (campaignIds rỗng)".into());
+        }
+        let Some(scope) = self.read_scope() else {
+            return Some("file phạm vi không đọc được hoặc đã khác lúc mở controller (activationId, deviceIds, hay campaignIds/capabilities đã ghim); mở lại controller".into());
+        };
+        if !scope.campaign_ids.iter().any(|id| id == campaign_id) {
+            return Some(format!("lượt {campaign_id} chưa có trong campaignIds"));
+        }
+        let missing = udids
+            .iter()
+            .filter(|udid| !scope.device_ids.contains(udid))
+            .map(String::as_str)
+            .collect::<Vec<_>>();
+        (!missing.is_empty())
+            .then(|| format!("máy chưa có trong deviceIds: {}", missing.join(", ")))
+    }
+
     pub(crate) fn allows(
         &self,
         capability: AcceptanceCapability,
