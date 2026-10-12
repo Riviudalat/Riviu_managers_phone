@@ -533,7 +533,6 @@ export function PublishPage({
   const [sheetConnectionReady, setSheetConnectionReady] = useState(false);
   const [sheetConnectionRevision, setSheetConnectionRevision] = useState(0);
   const sheetIdentityRef = useRef<string | null>(null);
-  const [sheetLink, setSheetLink] = useState("");
   const [stepSlot, setStepSlot] = useState<HTMLDivElement | null>(null);
   const updateSheetConnection = useCallback((ready: boolean, identityKey: string | null = null) => {
     setSheetConnectionReady(ready);
@@ -1450,14 +1449,13 @@ export function PublishPage({
           }}
           preflightLoading={preflightState === "loading"}
           preflightProgress={<PublishPreparationProgress udids={targets} progress={preparationProgress} startedAt={preparationStartedAt}
-            name={udid => { const device = devices.find(d => d.udid === udid); return device ? tileName(device, metas.get(udid)) : udid; }} />}
+            name={udid => deviceDisplayName(devices, metas, udid)} />}
           preflightStage={preflightStage}
           preflight={currentPreflight}
           reviewChanges={reviewChangeList}
           reviewBlocked={liveChanges.length > 0}
           preflightError={preflightError ?? (currentPreflight ? null : publishBlockingReason ?? null)}
           blockingReason={sheetBlockingReason}
-          sheetTarget={sheetConnectionReady ? sheetLink : undefined}
           stepSlot={stepSlot} monitorActive={workspaceTab === "monitor"}
           sound={currentSoundPolicy}
           runAt=""
@@ -1491,7 +1489,7 @@ export function PublishPage({
           onPreflight={runPreflight}
           onExecute={executeNewCampaign}
           onHistory={() => setWorkspaceTab("monitor")}
-          settings={<PublishSheetConnection onReadyChange={updateSheetConnection} onLinkChange={setSheetLink} />}
+          settings={<PublishSheetConnection onReadyChange={updateSheetConnection} />}
         />
       </div>
 

@@ -17,7 +17,7 @@ import { allocateQuickPosts } from "./publishQuickAllocation";
 import { publishSelectionStatus } from "./publishSelectionStatus";
 import { deviceGuardBlock, deviceGuardPending } from "./publishDeviceGuardState";
 import { focusBlockingField } from "../blockers";
-import type { PublishBundle, PublishDeviceGuards } from "../../types";
+import type { PublishDeviceGuards } from "../../types";
 import { PublishSteps } from "./PublishSteps";
 
 type QuickProps = PublishWizardProps & {
@@ -30,8 +30,6 @@ type QuickProps = PublishWizardProps & {
   reviewChanges?: string[];
   /** The change is already visible here, so confirming waits for Kiểm tra lại. */
   reviewBlocked?: boolean;
-  /** The verified Sheet link the results go to; absent while the Sheet is not verified. */
-  sheetTarget?: string;
   /** Where the page wants the step bar; inline when absent. */
   stepSlot?: HTMLElement | null;
   /** The page shows Theo dõi, so the bar reads step 4. */
@@ -47,15 +45,6 @@ function readStepLayout() {
 function writeStepLayout(on: boolean) {
   try { window.localStorage.setItem(STEP_LAYOUT_KEY, on ? "1" : "0"); } catch { /* per-viewer convenience only */ }
 }
-/** The content version the review names: file, duration and digest, never a thumbnail alone. */
-function contentVersion(bundle: PublishBundle) {
-  if (bundle.mediaKind === "video" && bundle.video) {
-    return `${bundle.video.fileName} · ${(bundle.video.durationMs / 1000).toFixed(1)} giây · bản ${bundle.video.sha256.slice(0, 8)}`;
-  }
-  const images = [...bundle.images].sort((a, b) => a.order - b.order);
-  return `${images.length} ảnh: ${images.map(image => image.fileName).join(", ")}`;
-}
-
 function canReceive(p: QuickProps, udid: string) {
   return p.eligible.includes(udid) && p.devices.some(d => d.udid === udid && (d.status === "ready" || d.status === "busy" || d.status === "connected"))
     && (p.deviceGuards === undefined || p.deviceGuards[udid] !== undefined);
@@ -361,24 +350,6 @@ export function PublishQuickSetup(p: QuickProps) {
     {dialog === "check" && <PublishDialog title="Xem lại và xác nhận đăng công khai" wide onClose={() => { if (!p.starting) setDialog(null); }} actions={<><button type="button" disabled={p.starting} onClick={() => setDialog(null)}>Quay lại</button>{(p.preflightError || !p.preflight || !p.preflight.canExecute || p.reviewBlocked) && !p.preflightLoading && <button type="button" disabled={locked} onClick={() => { void p.onPreflight(); }}>Kiểm tra lại</button>}<button type="button" className="primary" disabled={locked || !p.preflight?.canExecute || !complete || p.reviewBlocked} onClick={() => void p.onExecute()}><Check size={16}/> {p.starting ? "Đang bắt đầu…" : `Xác nhận đăng công khai ${selected.length} bài`}</button></>}>
       <div className="pq-review-flow">
       <p>{selected.length} bài sẽ đăng công khai trên {mapped} máy. Nút xác nhận bên dưới cho phép bắt đầu lượt đăng này.</p>
-      {/* PLAN §7: everything the confirmation approves reads in full here, never "…". While
-          the check still blocks, its blockers come first and the review follows them. */}
-      <div className="pq-review" style={{ order: p.preflight?.canExecute ? undefined : 1 }} role="region" aria-label="Bản xem lại từng máy" tabIndex={0}>
-        <table>
-          <thead><tr><th scope="col">Máy</th><th scope="col">Tài khoản</th><th scope="col">Phiên bản nội dung</th><th scope="col">Caption</th></tr></thead>
-          <tbody>{selected.map(bundle => { const udid = p.assignments[bundle.id], handle = udid ? p.metas.get(udid)?.handle : undefined; return <tr key={bundle.id}>
-            <th scope="row">{udid ? label(udid) : "Chưa ghép máy"}</th>
-            <td>{handle ? `@${handle}` : "Chưa đọc được tài khoản"}</td>
-            <td><strong>{bundle.name}</strong><br/>{contentVersion(bundle)}</td>
-            <td className="pq-review-caption">{(p.captions[bundle.id] ?? bundle.caption).trim() || "Trống"}</td>
-          </tr>; })}</tbody>
-        </table>
-        <dl>
-          <div><dt>Nhạc</dt><dd>{`Nhạc Hot: chọn 1 trong ${p.sound.kind === "trendingAny" ? p.sound.poolSize : 5} bài đầu tab Hot của TikTok, xác nhận khi đăng`}</dd></div>
-          <div><dt>Ghi kết quả vào Sheet</dt><dd>{p.sheetTarget || "Sheet chưa xác minh"}</dd></div>
-        </dl>
-        <p className="pq-hint">Mọi thay đổi máy, tài khoản, nội dung, caption, nhạc hoặc Sheet sau khi kiểm tra làm bản xem lại này hết hiệu lực và phải kiểm tra lại.</p>
-      </div>
       {p.starting && <p role="status" className="pw-start-status">Đang gửi yêu cầu… Giữ nguyên lượt đăng trong khi chờ xác nhận.</p>}
       {p.startError && <p role="alert" className="pw-error">{p.startError}</p>}
       {!!p.reviewChanges?.length && !p.preflightLoading && <div className="pw-review-changed" role="status">

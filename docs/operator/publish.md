@@ -388,9 +388,10 @@ Cách chạy một lượt trong Bàn đăng nhanh:
    Chọn 10 bài chỉ cần 10 máy dù đang kết nối 20 máy. Nếu chọn riêng ít hơn số bài,
    thêm máy hoặc giảm số bài rồi ghép lại.
 4. Kiểm tra đúng link/tab Google Sheet đã xác minh, rồi bấm **Xem lại trước khi đăng**.
-   Hộp **Xem lại và xác nhận đăng công khai** là cửa xác nhận duy nhất: bảng đọc đủ từng
-   Máy N, @tài khoản, phiên bản nội dung (tên file, thời lượng, mã bản), caption, nhạc và
-   link Sheet, không cắt "…". Đọc kết quả từng máy, bấm **Xác nhận đăng công khai N bài** (xác nhận cuối, không có popup thứ hai).
+   Hộp **Xem lại và xác nhận đăng công khai** là cửa xác nhận duy nhất: ghi số bài và số
+   máy sẽ đăng, rồi tiến độ và kết quả kiểm tra từng máy theo **Máy N · tên máy**. Bảng xem
+   trước từng máy (tài khoản, phiên bản nội dung, caption) đã bỏ theo yêu cầu chủ ngày
+   2026-10-12; xem bài và caption ở bàn ghép trước khi mở hộp. Đọc kết quả từng máy, bấm **Xác nhận đăng công khai N bài** (xác nhận cuối, không có popup thứ hai).
    Kết quả kiểm tra chỉ sống 30 giây; nếu đã quá hạn, cùng cú bấm đó tự kiểm tra lại một lần
    trước khi gửi lệnh. Kết quả như cũ thì đăng luôn; máy, tài khoản, nội dung đổi hoặc có máy
    không đạt thì chưa gửi lệnh nào, hộp hiện phần đã đổi và lỗi chặn để xác nhận lại. Nhạc được

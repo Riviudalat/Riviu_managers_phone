@@ -300,18 +300,6 @@
 .publish-quick.is-steps .pq-link { grid-template-rows:auto; height:auto; }
 .publish-quick.is-steps .pq-link-account { min-width:0; align-items:flex-start; }
 @media (max-width:760px) { .publish-quick.is-steps[data-step="2"] .pq-columns { grid-template-columns:minmax(0,1fr); } }
-/* The review names every approved field in full: wrap, never ellipsis. */
-.pq-review { max-height:min(46vh,420px); overflow:auto; margin:8px 0; border:1px solid var(--line); border-radius:6px; }
-.pq-review table { width:100%; border-collapse:collapse; font-size:var(--text-sm); }
-.pq-review th,.pq-review td { padding:6px 8px; text-align:left; vertical-align:top; border-bottom:1px solid var(--line); overflow-wrap:anywhere; white-space:normal; }
-.pq-review thead th { position:sticky; top:0; background:var(--bg-elevated); font-weight:600; }
-.pq-review tbody th { white-space:nowrap; font-weight:600; }
-.pq-review-caption { white-space:pre-wrap!important; min-width:180px; }
-.pq-review dl { display:grid; gap:4px; margin:0; padding:8px; font-size:var(--text-sm); }
-.pq-review dl>div { display:grid; grid-template-columns:150px minmax(0,1fr); gap:8px; }
-.pq-review dt { font-weight:600; color:var(--text-2); }
-.pq-review dd { margin:0; overflow-wrap:anywhere; }
-.pq-review>.pq-hint { margin:0; padding:0 8px 8px; }
 /* "Ghép tự động (chưa đăng)" is read in full: under 1400 px the group label yields, Hoàn tác
    shows only its icon and the button wraps to two lines instead of clipping the "chưa đăng"
    promise (one line from 900 to 1400 px in the mock). */
