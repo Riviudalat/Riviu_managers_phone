@@ -2407,6 +2407,20 @@ impl AppState {
                     }
                 },
             ));
+            // Tier 2 at a job's own load gate, inside the job's turn; also while the automatic
+            // workers are frozen. Weak: the driver owns this hook.
+            let repair_android = Arc::downgrade(android);
+            let repair_db = self.db.clone();
+            android.set_load_reboot_repair(Arc::new(move |serial: String, why: String| {
+                let android = repair_android.clone();
+                let db = repair_db.clone();
+                Box::pin(async move {
+                    let Some(android) = android.upgrade() else {
+                        return Err("bộ điều khiển Android đã dừng".to_string());
+                    };
+                    device_load::reboot_for_job(&android, &db, &serial, &why).await
+                })
+            }));
         }
         let automatic_device_workers_frozen = self.dev_acceptance.automatic_device_workers_frozen();
         tauri::async_runtime::spawn(async move {

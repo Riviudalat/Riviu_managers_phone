@@ -249,7 +249,10 @@ lại tại chỗ không đọc lại editor): pool Hot giao danh tính đã ch�
 ba phút thì lượt kết thúc với `sound_sheet_blind_requires_fresh_attempt`: dispatcher tự cấp
 đúng một lượt mới trước Post cho mỗi phân công (mở lại TikTok sạch, phiên helper mới; khóa
 `soundSheetBlind` trong sổ khôi phục), bảng mù lần thứ hai thì hết lượt tự thử. Hết ba phút
-mà bảng không mù vẫn là `publish_sound_budget_exhausted` (terminal). Cả hai, chưa bấm Đăng, nói rõ TikTok
+mà bảng không mù là `publish_sound_budget_exhausted`, cũng retryable và dùng chung đúng một lượt
+mới đó (khóa `soundSheetBlind`): mỗi phân công có tối đa một lượt tự thử lại sau khi hết giờ
+chọn nhạc, mù hay không, luôn trước ý định Post. Đo 12/10/2026: ba trong năm máy hết giờ
+nhạc ở r91 (`d8e672cc`) đăng được ở r93 (`4a25d804`) hai giờ sau. Cả hai, chưa bấm Đăng, nói rõ TikTok
 không trả giao diện bảng nhạc, thêm "bảng nhạc không chuyển sang tab Hot" khi đường ảnh hết
 giờ mà chưa khung nào thấy Hot, và bước tiếp: dừng phần mềm khác (như GenFarmer) điều khiển máy,
 khởi động lại máy nếu máy không còn bài đăng chưa rõ, rồi Thử lại.

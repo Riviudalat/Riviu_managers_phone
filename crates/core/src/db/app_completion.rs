@@ -492,6 +492,28 @@ impl Database {
     /// Conservative persisted guard. The exclusive control-plane lease protects
     /// in-memory jobs and callers must recheck this after acquiring that lease.
     pub fn app_completion_block_reason(&self, udid: &str) -> anyhow::Result<Option<String>> {
+        self.device_work_block_reason(udid, true, true)
+    }
+    /// What keeps a load reboot ("sức khỏe máy", tier 2) off this phone: every uncertain or
+    /// in-flight check of [`Self::app_completion_block_reason`], without the publish work that
+    /// only waits for this phone. A queued, due, transferring or imported assignment has sent
+    /// nothing to TikTok (its row turns `posting` at the Post intent, which the upload guard
+    /// still blocks) and its own job waits out the reboot. `job_holds_phone`: the caller is a
+    /// job at its load gate under its exclusive lease, so no publish capacity claim, its own
+    /// included, can be driving the phone; an idle caller keeps those claims blocking.
+    pub fn load_reboot_block_reason(
+        &self,
+        udid: &str,
+        job_holds_phone: bool,
+    ) -> anyhow::Result<Option<String>> {
+        self.device_work_block_reason(udid, !job_holds_phone, false)
+    }
+    fn device_work_block_reason(
+        &self,
+        udid: &str,
+        publish_claims: bool,
+        due_publish: bool,
+    ) -> anyhow::Result<Option<String>> {
         let mut conn = self.conn()?;
         let tx = conn.transaction_with_behavior(TransactionBehavior::Deferred)?;
         let now = Utc::now().timestamp_millis();
@@ -544,6 +566,9 @@ impl Database {
             ("orchestration", "SELECT EXISTS(SELECT 1 FROM orchestration_runs r WHERE r.state IN ('queued','running','uncertain') AND (EXISTS(SELECT 1 FROM orchestration_attempts a JOIN json_each(a.snapshot_json,'$.target.included') t WHERE a.run_id=r.id AND a.state IN ('queued','dispatching','waiting_child','uncertain') AND json_extract(t.value,'$.udid')=?1) OR EXISTS(SELECT 1 FROM json_each(r.node_targets_json) n JOIN json_each(n.value,'$.included') t WHERE json_extract(t.value,'$.udid')=?1 AND NOT EXISTS(SELECT 1 FROM orchestration_attempts a WHERE a.run_id=r.id AND a.node_id=n.key AND a.state IN ('done','partial','failed','cancelled'))) OR (NOT EXISTS(SELECT 1 FROM json_each(r.node_targets_json)) AND EXISTS(SELECT 1 FROM json_each(r.target_json,'$.included') t WHERE json_extract(t.value,'$.udid')=?1))))"),
         ];
         for (name, sql) in checks {
+            if name == "publish capacity" && !publish_claims {
+                continue;
+            }
             let blocked = if matches!(name, "interaction" | "comment verification" | "public action") {
                 tx.query_row(sql, params![udid, typed_cleanup], |r| r.get::<_, bool>(0))
             } else {
@@ -563,6 +588,10 @@ impl Database {
             return Ok(Some(
                 "Chờ tải bài hoặc xác minh liên kết trên thiết bị hoàn tất".into(),
             ));
+        }
+        if !due_publish {
+            tx.commit()?;
+            return Ok(None);
         }
         let pending:bool=tx.query_row("SELECT EXISTS(SELECT 1 FROM publish_assignments a JOIN publish_campaigns c ON c.id=a.campaign_id WHERE a.udid=?1 AND (
             a.state IN ('preparing','transferring') OR (a.state IN ('queued','scheduled','ready','imported') AND c.state NOT IN ('cancelled','missed','succeeded') AND (c.run_at IS NULL OR datetime(c.run_at)<=datetime(?2))) OR EXISTS(SELECT 1 FROM publish_dispatch_jobs j WHERE j.assignment_id=a.id AND j.state IN ('queued','running') AND (j.started_at_ms IS NOT NULL OR j.deadline_ms IS NULL OR j.deadline_ms-30000<=?3))))",params![udid,local,now],|r|r.get(0))?;

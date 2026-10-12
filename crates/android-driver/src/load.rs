@@ -6,6 +6,8 @@
 //! cheap on exactly the phones that are struggling.
 
 use std::collections::HashMap;
+use std::future::Future;
+use std::pin::Pin;
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -235,6 +237,19 @@ pub fn light_cleanup_script() -> String {
 /// `(serial, action, Vietnamese message)` -> the desktop's durable activity log.
 pub type LoadJournal = Arc<dyn Fn(&str, &str, &str) + Send + Sync>;
 
+/// The desktop's tier 2 for a job's own load gate: `(serial, why)` reboots the phone when the
+/// durable ledger and the 6 h budget allow, waits for the new boot and re-applies the "Cài đặt
+/// máy" baseline. `Err` is the Vietnamese reason it did not reboot or the boot did not finish.
+/// The caller holds the job's exclusive lease and no effect of the job has run.
+pub type LoadRebootRepair = Arc<
+    dyn Fn(String, String) -> Pin<Box<dyn Future<Output = Result<(), String>> + Send>>
+        + Send
+        + Sync,
+>;
+
+/// How long after a gate reboot the gate keeps sampling for a decisive verdict.
+pub const POST_REBOOT_SAMPLE_WINDOW: Duration = Duration::from_secs(60);
+
 #[derive(Default)]
 struct PhoneLoad {
     last: Option<DeviceLoadSample>,
@@ -251,6 +266,7 @@ struct PhoneLoad {
 pub struct LoadBook {
     phones: Mutex<HashMap<String, PhoneLoad>>,
     journal: Mutex<Option<LoadJournal>>,
+    reboot_repair: Mutex<Option<LoadRebootRepair>>,
 }
 
 pub fn now_ms() -> i64 {
@@ -260,6 +276,14 @@ pub fn now_ms() -> i64 {
 impl LoadBook {
     pub fn set_journal(&self, journal: LoadJournal) {
         *self.journal.lock() = Some(journal);
+    }
+
+    pub fn set_reboot_repair(&self, repair: LoadRebootRepair) {
+        *self.reboot_repair.lock() = Some(repair);
+    }
+
+    pub fn reboot_repair(&self) -> Option<LoadRebootRepair> {
+        self.reboot_repair.lock().clone()
     }
 
     pub fn journal(&self, serial: &str, action: &str, message: &str) {

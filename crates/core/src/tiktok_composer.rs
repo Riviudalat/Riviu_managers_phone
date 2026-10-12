@@ -4710,23 +4710,18 @@ where
                 && crate::publish_recovery::describe(&error).kind
                     == crate::publish_recovery::FailureKind::Retryable
             {
-                // A blind sheet earns one automatic fresh attempt before Post: the dispatcher
-                // clean-starts TikTok and a new helper session (`start_clean_app_session`),
-                // capped at one per assignment in the recovery ledger.
-                let (code, kind) = if sound_evidence.sheet_blind() {
-                    (
-                        crate::publish_recovery::SOUND_SHEET_BLIND_FRESH_ATTEMPT,
-                        crate::publish_recovery::FailureKind::Retryable,
-                    )
+                // An expired sound budget earns one automatic fresh attempt before Post: the
+                // dispatcher clean-starts TikTok and a new helper session
+                // (`start_clean_app_session`), capped at one per assignment in the recovery
+                // ledger whether the sheet was blind or not.
+                let code = if sound_evidence.sheet_blind() {
+                    crate::publish_recovery::SOUND_SHEET_BLIND_FRESH_ATTEMPT
                 } else {
-                    (
-                        "publish_sound_budget_exhausted",
-                        crate::publish_recovery::FailureKind::Terminal,
-                    )
+                    crate::publish_recovery::SOUND_BUDGET_FRESH_ATTEMPT
                 };
                 error.context(crate::publish_recovery::RecoveryFailure::new(
                     code,
-                    kind,
+                    crate::publish_recovery::FailureKind::Retryable,
                     sound_evidence.budget_exhausted_message(),
                 ))
             } else { error }
@@ -6901,7 +6896,9 @@ mod tests {
         let error = result.expect_err("expired sound phase cannot reach Post");
         let failure = crate::publish_recovery::describe(&error);
         assert_eq!(failure.code, "publish_sound_budget_exhausted");
-        assert_eq!(failure.kind, crate::publish_recovery::FailureKind::Terminal);
+        // The one fresh attempt per assignment belongs to the dispatcher, not this phase.
+        assert_eq!(failure.kind, crate::publish_recovery::FailureKind::Retryable);
+        assert!(crate::publish_recovery::requires_fresh_preparation(&error));
         assert!(
             journal.0.load(Ordering::Relaxed) >= 1,
             "fixture must reach the sound recovery owner"

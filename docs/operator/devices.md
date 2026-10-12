@@ -103,13 +103,16 @@ bắt đầu bằng "máy quá tải". Mỗi bước dưới đây được ghi 
 - Khi nhận việc, máy quá tải được **dọn nhẹ** trước: tắt app chạy nền, dừng các app nền
   đã duyệt (Facebook services) và dọn bộ nhớ đệm. Không đụng TikTok, Riviu Helper hay dữ
   liệu tài khoản, không khởi động lại. Đo lại đạt thì việc chạy tiếp.
-- Đo lại vẫn quá tải thì máy không nhận bài đăng: bài báo **trước khi gửi** với mã
+- Dọn nhẹ chưa hết (hoặc máy đã được dọn trong 30 phút qua) thì Riviu tự **khởi động lại**
+  máy ngay trong lượt đăng đang cần máy đó, rồi đo lại và chạy tiếp nếu đạt. Không cần bấm
+  gì, kể cả khi bài đăng đang chờ đúng máy này.
+- Riviu chỉ tự khởi động lại khi sổ ghi không còn Đăng/Gửi/Thích/Bình luận/Theo dõi nào
+  chưa rõ hoặc đang chạy trên máy đó, và tối đa một lần mỗi 6 giờ. Khi máy rảnh, Riviu cũng
+  tự làm việc này. Sau khi khởi động lại, Riviu áp lại **Cài đặt máy** và chuẩn bị lại helper.
+  Máy chỉ nhận việc mới khi một lần đo mới đạt.
+- Vẫn quá tải sau đó thì máy không nhận bài đăng: bài báo **trước khi gửi** với mã
   `device_overloaded`, không chờ năm phút ở bảng nhạc rồi mới lỗi. Bấm đăng lại sau khi
   máy đã hồi phục là an toàn.
-- Khi máy rảnh, Riviu tự **khởi động lại** máy quá tải, nhưng chỉ khi sổ ghi không còn
-  Đăng/Gửi/Thích/Bình luận/Theo dõi nào chưa rõ hoặc đang chạy trên máy đó, và tối đa
-  một lần mỗi 6 giờ. Sau khi khởi động lại, Riviu áp lại **Cài đặt máy** và helper được
-  chuẩn bị lại khi máy kết nối lại. Máy chỉ nhận việc mới khi một lần đo mới đạt.
 - Không được tự khởi động lại thì ô máy báo **quá tải — chờ người vận hành** và nêu lý
   do (việc chưa rõ, máy đang bận, hoặc đã khởi động lại trong 6 giờ qua).
 

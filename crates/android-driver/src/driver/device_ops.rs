@@ -986,6 +986,12 @@ impl AndroidDriver {
         self.load.set_journal(journal);
     }
 
+    /// Install the desktop's tier 2 for the job-time load gate. Without it the gate refuses a
+    /// phone that cleanup did not fix, as before.
+    pub fn set_load_reboot_repair(&self, repair: crate::load::LoadRebootRepair) {
+        self.load.set_reboot_repair(repair);
+    }
+
     /// Every phone's last known load state, for the device tiles. No device I/O.
     pub fn load_states(&self) -> Vec<riviu_core::device_control::load::DeviceLoadState> {
         self.load.snapshot()
@@ -1191,10 +1197,14 @@ impl AndroidDriver {
     /// The load admission gate (`DeviceDriver::ensure_load_admissible`). The caller holds the
     /// job's exclusive lease and no effect step is running.
     ///
-    /// A fresh pass skips the sample. An overloaded phone gets tier 1 and a fresh sample; a
-    /// phone still overloaded is refused with the overload marker, so publish settles it as
-    /// `device_overloaded` before dispatch instead of timing out in the sound sheet. An
-    /// unreadable sample admits: unknown is never overloaded.
+    /// A fresh pass skips the sample. An overloaded phone gets tier 1 (unless it was cleaned in
+    /// the last 30 minutes) and a fresh sample. A phone still overloaded gets tier 2 here, under
+    /// the job's own lease, through the desktop's reboot repair: reboot when the ledger and the
+    /// 6 h budget allow, then sample again (12/10/2026: the background monitor never rebooted a
+    /// phone a publish job was waiting for, so each refusal cost the post). A phone still
+    /// overloaded, or not allowed to reboot, is refused with the overload marker, so publish
+    /// settles it as `device_overloaded` before dispatch instead of timing out in the sound
+    /// sheet. An unreadable sample admits: unknown is never overloaded.
     pub async fn ensure_load_admissible(
         &self,
         serial: &str,
@@ -1202,6 +1212,7 @@ impl AndroidDriver {
     ) -> anyhow::Result<()> {
         use riviu_core::device_control::load::{LoadVerdict, DEVICE_OVERLOADED_MARKER};
         const SETTLE: Duration = Duration::from_secs(3);
+        const POST_REBOOT_POLL: Duration = Duration::from_secs(5);
         if !self.automatic_setup_allowed {
             return Ok(());
         }
@@ -1218,34 +1229,64 @@ impl AndroidDriver {
         let LoadVerdict::Overloaded { reasons } = verdict else {
             return Ok(());
         };
-        let why = reasons.join("; ");
-        if !self.load.cleanup_allowed(serial, crate::load::now_ms()) {
-            anyhow::bail!(
-                "{serial}: {DEVICE_OVERLOADED_MARKER} ({why}); đã dọn nhẹ trong 30 phút qua mà \
-                 chưa hết — chờ khởi động lại tự động hoặc người vận hành"
-            );
-        }
-        if let Err(error) = self.light_cleanup(serial, &why).await {
-            anyhow::bail!("{serial}: {DEVICE_OVERLOADED_MARKER} ({why}); {error}");
-        }
-        tokio::time::sleep(SETTLE).await;
-        match self.sample_load_confirmed(serial, target_package).await {
-            Ok((_, LoadVerdict::Overloaded { reasons })) => anyhow::bail!(
-                "{serial}: {DEVICE_OVERLOADED_MARKER} sau khi dọn nhẹ ({}); không nhận việc — \
-                 chờ khởi động lại tự động hoặc người vận hành",
-                reasons.join("; ")
-            ),
-            Ok((sample, _)) => {
-                self.load.journal(
-                    serial,
-                    "device.load.admitted",
-                    &format!("dọn nhẹ xong, đo lại đạt ({})", sample.summary()),
-                );
-                Ok(())
+        let mut why = reasons.join("; ");
+        let cleaned = if self.load.cleanup_allowed(serial, crate::load::now_ms()) {
+            if let Err(error) = self.light_cleanup(serial, &why).await {
+                anyhow::bail!("{serial}: {DEVICE_OVERLOADED_MARKER} ({why}); {error}");
             }
-            Err(error) => {
-                tracing::warn!(serial, %error, "load re-sample unreadable after cleanup; admitting");
-                Ok(())
+            tokio::time::sleep(SETTLE).await;
+            match self.sample_load_confirmed(serial, target_package).await {
+                Ok((_, LoadVerdict::Overloaded { reasons })) => why = reasons.join("; "),
+                Ok((sample, _)) => {
+                    self.load.journal(
+                        serial,
+                        "device.load.admitted",
+                        &format!("dọn nhẹ xong, đo lại đạt ({})", sample.summary()),
+                    );
+                    return Ok(());
+                }
+                Err(error) => {
+                    tracing::warn!(serial, %error, "load re-sample unreadable after cleanup; admitting");
+                    return Ok(());
+                }
+            }
+            "sau khi dọn nhẹ"
+        } else {
+            "đã dọn nhẹ trong 30 phút qua mà chưa hết"
+        };
+        let Some(repair) = self.load.reboot_repair() else {
+            anyhow::bail!(
+                "{serial}: {DEVICE_OVERLOADED_MARKER} ({why}); {cleaned} — không nhận việc, chờ \
+                 khởi động lại tự động hoặc người vận hành"
+            );
+        };
+        // Tier 2 inside the job's turn: the lease is the job's own and none of its effects ran.
+        if let Err(blocker) = repair(serial.to_string(), why.clone()).await {
+            let why = format!("{why}; {cleaned}; không tự khởi động lại vì {blocker}");
+            self.load.mark_awaiting_operator(serial, &why);
+            anyhow::bail!("{serial}: {DEVICE_OVERLOADED_MARKER} ({why}) — chờ người vận hành");
+        }
+        let deadline = std::time::Instant::now() + crate::load::POST_REBOOT_SAMPLE_WINDOW;
+        loop {
+            match self.sample_load_confirmed(serial, target_package).await {
+                Ok((_, LoadVerdict::Overloaded { reasons })) => {
+                    let why = format!("vẫn quá tải sau khi khởi động lại: {}", reasons.join("; "));
+                    self.load.mark_awaiting_operator(serial, &why);
+                    anyhow::bail!("{serial}: {DEVICE_OVERLOADED_MARKER} ({why}) — chờ người vận hành");
+                }
+                Ok((sample, LoadVerdict::Healthy)) => {
+                    self.load.journal(
+                        serial,
+                        "device.load.admitted",
+                        &format!("khởi động lại xong, đo lại đạt ({})", sample.summary()),
+                    );
+                    return Ok(());
+                }
+                _ if std::time::Instant::now() >= deadline => {
+                    tracing::warn!(serial, "load undecided after reboot; admitting");
+                    return Ok(());
+                }
+                _ => tokio::time::sleep(POST_REBOOT_POLL).await,
             }
         }
     }
