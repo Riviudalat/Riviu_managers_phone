@@ -1237,6 +1237,15 @@ impl PopupBudget {
     pub fn says(&self) -> Option<&'static str> {
         self.says
     }
+
+    /// The owner replaced its own read session at an observation boundary: carry this budget
+    /// from exactly the epoch it replaced to the fresh one. Spent declines stay spent. A budget
+    /// bound to any other epoch keeps it and still refuses as a session change.
+    pub(crate) fn rebind_epoch(&mut self, replaced: &str, fresh: &str) {
+        if self.epoch.as_deref() == Some(replaced) {
+            self.epoch = Some(fresh.to_owned());
+        }
+    }
 }
 
 enum PopupGesture {
