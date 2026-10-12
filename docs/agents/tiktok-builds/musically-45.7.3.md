@@ -116,7 +116,7 @@ Cột "Layout" là số layout khai báo id. Số lớn nghĩa là id dùng chun
 | `k7u` | 4 | RecyclerView danh sách album | Chỉ khi en/45.7.3; đo trên `ce031713b0c610ab0c` |
 | `k_x` | 3 | Ô chọn ảnh, góc mang số thứ tự | Trong lưới picker; Next xác nhận đúng số ảnh |
 | `wjp` | 5 | Next của album ("Next (n)") | Có biến thể "Confirm"; kiểm text |
-| `p31` / `p2y` | 2 / 7 | Next của editor | `p2y` còn là "Your Story" ngay cạnh: chỉ dùng `p31`/text, không đoán vị trí |
+| `p31` / `p2y` | 2 / 7 | Next của editor | **Máy** (#44 `nav_editor.xml`, #46 B1j): `p2y` là khung bấm của Next, chứa `p31`; "Your Story" (`zy4`) nằm trong khung bấm `sh3` ngay bên trái. Chỉ dùng `p31`/text, không đoán vị trí |
 | `dou` | 2 | Chip "Add sound" | Cùng hàng với `doi` (Remove sound), `dop` (Sounds) |
 | `tv_top_text` | 5 | Chữ chạy trên chip sound: "Add sound" hoặc tên sound đã chọn | Trong chip `dou` |
 | `wrv` | 1 | Nhãn tab sound: For You / Hot / Favorites / Recent | Kiểm text tab |
@@ -274,6 +274,67 @@ Hệ quả cho code:
   effect. Luôn tìm Discard theo text, vì vị trí Y của nó thay đổi.
 - Các activity chồng lên nhau trong cùng một task TikTok. Back từ Home có thể rơi vào một
   trang cũ.
+
+### Đường nhạc qua link: music/detail → Use sound
+
+Đo trên máy #46 (en, 2026-10-09) bằng các dump của probe share/deep link: trang nhạc
+(B3c, B1f, B1a, B1o), recorder (B1g), picker (B1h, B1i), editor (B1j), thoát (B1k–B1o).
+Editor được so với `nav_editor.xml` của probe sound picker (#44). Dòng ghi **APK** là đọc
+tĩnh manifest và bảng chuỗi `default` của 45.7.3, nên chỉ là ứng viên.
+
+- **Định tuyến (APK).**
+  - `DeepLinkActivityV2` nhận VIEW + BROWSABLE cho scheme `snssdk1233` (và bảy scheme
+    khác) mà không khai host hay path, nên route nào cũng được nhận lặng lẽ.
+  - `com.ss.android.ugc.aweme.music.ui.MusicDetailActivity` không export. Chỉ tới được
+    trang này qua SmartRouter `//music/detail`.
+  - Link https `/music/…` đi qua `AppLinkHandlerV2`.
+- **Trang nhạc (Máy).**
+  - Với sound gốc có chứa một bài nhạc, `title` ghi "Contains: <tên bài>". Ô tìm kiếm trên
+    cùng `tv_search_sug_word` ghi đúng "<tên bài>".
+  - `b9_` "Original sound by: " đi cùng `b96` (tác giả). `used_count` ghi "‎42K posts" và
+    mở đầu bằng ký tự U+200E.
+  - Chữ **Use sound** `vu_` không clickable. Khung bấm là cha của nó, `vu2`
+    `[535,1890][1054,2052]`, ở nửa phải.
+  - Ngay bên trái là **Add to Story**: `tv_share_btn` nằm trong khung bấm `uvw`
+    `[26,1889][545,2052]`. Đây là effect Story, không bao giờ bấm. Cũng không bấm
+    "Share sound" (Button không id trong `ovy`) và "Save".
+  - Link https có thể hiện trang lỗi mạng ở lần mở đầu: `xwe` "Your network is unstable.
+    Tap to retry.", `message_tv` "Unstable network. Please try again.", nút `d1z` "Retry".
+- **Recorder sau Use sound (Máy)** chính là recorder của luồng `Create`.
+  - Có `sn3` (@2131823130) và lối vào thư viện `upload_hot_area` `[0,1892][179,2071]`. Bên
+    trong là `cry`, nhưng `cry` không clickable.
+  - Thanh chế độ `wru` đang chọn **15s**.
+  - Chip `dou` nằm ở `[278,134][703,250]`:
+    - `tv_top_text` ghi đủ "<tên bài>"; dấu "…" chỉ là phần vẽ;
+    - `dos` mang desc "Sound: <tên sound gốc> by <tác giả>";
+    - `doi` (@2131823053) là Remove sound.
+- **Picker (Máy)** dùng cùng id với luồng thường: `tv_title` "Recents", `k_x`, `wjp`
+  "Next (3)". Sau khi chọn ảnh, ô Select multiple nhường chỗ cho `crb` "AutoCut", cạnh đó
+  có `mbe` "Use layout". Không bấm hai nút này.
+- **Editor (Máy).** Tập id giống editor của luồng thường, chỉ thiếu `lj2`. Sound đặt từ
+  Use sound **được giữ**; TikTok không thay bằng sound gợi ý. Các khác biệt đã đo:
+  - Chip nằm ở y 134–250 thay vì 100–216, tức thấp hơn 34 px. Menu Discard thấp hơn 32 px
+    (`[121,291]` so với `[121,259]`). Vùng OCR chip trong
+    [`selection_recovery.rs`](../../../crates/core/src/tiktok_sound/selection_recovery.rs)
+    được đo trên editor thường, nên phải đo lại trước khi dùng cho đường này.
+  - `dou`/`dos` là Button trên recorder nhưng là LinearLayout trên editor; selector không
+    được dựa vào class. `dos` không có desc trên editor.
+- **Thoát (Máy).**
+  - Back trên editor mở menu Discard.
+  - Discard trở về picker, vẫn giữ 1/2/3 và "Next (3)", nằm trên recorder vẫn còn sound.
+  - Back không đóng recorder. `kbm` (@2131823218, Close) đưa về trang nhạc.
+- **Tên dùng để so (Máy).**
+  - Chữ trên chip khớp `tv_search_sug_word`, và khớp `title` sau khi bỏ "Contains: ".
+  - Nó không khớp desc của `dos`, cũng không khớp tên sound gốc.
+  - Điều này mới đo trên một sound gốc có chứa bài nhạc.
+- **Chưa đo:**
+  - sound là bài nhạc thường;
+  - đăng một ảnh;
+  - video: chế độ 15s có cắt clip không? Bảng `default` có chuỗi "This sound isn’t
+    available for videos over 60 seconds";
+  - id không tồn tại hoặc bị chặn theo vùng;
+  - tài khoản doanh nghiệp (chuỗi "This sound isn’t licensed for commercial use.");
+  - màn hình sau khi bấm Post trên đường này.
 
 ## 7. Đăng nhập và đăng xuất
 
