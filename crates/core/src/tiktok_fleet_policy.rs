@@ -101,6 +101,29 @@ pub struct BuildNotAllowed {
     policy: TikTokFleetPolicy,
 }
 
+impl BuildNotAllowed {
+    /// True when the package and `versionName` are on the allowlist and only the UI language
+    /// is wrong or unread. The fix is then a language change on the phone, never a downgrade.
+    pub fn only_language_differs(&self) -> bool {
+        self.policy
+            .builds
+            .iter()
+            .any(|build| build.package == self.package && build.version == self.version)
+    }
+}
+
+/// The automatic switch and the steps an operator takes when it did not stick. The locale
+/// Riviu reads is the Android system locale (`am get-config`), and TikTok 45.7.3 follows it
+/// unless its own "App language" was set, so the phone setting comes first. The desktop
+/// switches it on connect, once per phone boot (`android_helper_setup.rs`). TikTok labels are
+/// the 45.7.3 `vi-VN` strings (`docs/agents/tiktok-builds/musically-45.7.3.md` §10); the
+/// Samsung path is unmeasured.
+const SWITCH_TO_ENGLISH_STEPS: &str = "Riviu tự chuyển ngôn ngữ điện thoại sang English khi \
+     máy kết nối (một lần mỗi lần khởi động máy). Nếu vẫn bị chặn, đổi tay: Cài đặt → Ngôn \
+     ngữ (Samsung: Quản lý chung → Ngôn ngữ và bàn phím → Ngôn ngữ) → thêm English (United \
+     States) và đặt làm mặc định; nếu TikTok vẫn hiện tiếng Việt thì trong TikTok vào Hồ sơ → \
+     ☰ → Cài đặt và quyền riêng tư → Ngôn ngữ → Ngôn ngữ ứng dụng → English. Rồi kiểm tra lại.";
+
 impl fmt::Display for BuildNotAllowed {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         let or_unread = |value: &str, unread: &'static str| {
@@ -110,6 +133,19 @@ impl fmt::Display for BuildNotAllowed {
                 value.to_owned()
             }
         };
+        if self.only_language_differs() {
+            let language = match language_of(&self.locale).as_deref() {
+                None => "ngôn ngữ chưa đọc được".to_owned(),
+                Some("vi") => format!("tiếng Việt ({})", self.locale),
+                Some(_) => format!("ngôn ngữ {}", self.locale),
+            };
+            return write!(
+                formatter,
+                "TikTok {} {} trên máy đúng bản đội máy nhưng đang dùng {}; Riviu chỉ điều \
+                 khiển TikTok tiếng Anh. Chưa thực hiện thao tác nào. {}",
+                self.package, self.version, language, SWITCH_TO_ENGLISH_STEPS,
+            );
+        }
         let allowed = self
             .policy
             .builds
@@ -253,6 +289,27 @@ mod tests {
         let unread = require_fleet_build(GLOBAL, "", "").unwrap_err().to_string();
         assert!(unread.contains("chưa đọc được phiên bản"), "{unread}");
         assert!(unread.contains("chưa đọc được ngôn ngữ"), "{unread}");
+        // The right build on a Vietnamese phone needs a language change, never a downgrade.
+        let vietnamese = require_fleet_build(GLOBAL, "45.7.3", "vi-VN").unwrap_err();
+        assert!(vietnamese.only_language_differs());
+        assert_eq!(
+            vietnamese.to_string(),
+            "TikTok com.zhiliaoapp.musically 45.7.3 trên máy đúng bản đội máy nhưng đang dùng \
+             tiếng Việt (vi-VN); Riviu chỉ điều khiển TikTok tiếng Anh. Chưa thực hiện thao tác \
+             nào. Riviu tự chuyển ngôn ngữ điện thoại sang English khi máy kết nối (một lần mỗi \
+             lần khởi động máy). Nếu vẫn bị chặn, đổi tay: Cài đặt → Ngôn ngữ (Samsung: Quản lý \
+             chung → Ngôn ngữ và bàn phím → Ngôn ngữ) → thêm English (United States) và đặt làm \
+             mặc định; nếu TikTok vẫn hiện tiếng Việt thì trong TikTok vào Hồ sơ → ☰ → Cài đặt \
+             và quyền riêng tư → Ngôn ngữ → Ngôn ngữ ứng dụng → English. Rồi kiểm tra lại."
+        );
+        let no_language = require_fleet_build(GLOBAL, "45.7.3", "")
+            .unwrap_err()
+            .to_string();
+        assert!(
+            no_language.contains("ngôn ngữ chưa đọc được"),
+            "{no_language}"
+        );
+        assert!(!no_language.contains("Hạ về"), "{no_language}");
     }
 
     #[test]

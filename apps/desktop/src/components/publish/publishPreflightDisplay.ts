@@ -55,7 +55,7 @@ export function publishPreflightProblem(
       };
     case "build_not_allowed":
       return {
-        title: "Bản TikTok trên máy không nằm trong danh sách đội máy",
+        title: "TikTok trên máy sai bản hoặc sai ngôn ngữ so với đội máy",
         action: issue.message,
       };
     case "post_verification_pending":

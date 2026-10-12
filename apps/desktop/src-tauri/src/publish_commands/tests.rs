@@ -2462,7 +2462,8 @@ fn a_build_outside_the_fleet_is_refused_before_transfer_without_measuring_advice
         let readiness = fleet_readiness_of_build(package, locale, version);
         assert!(
             matches!(&readiness, PublishReadiness::BuildNotAllowed(message)
-                if message.contains(&format!("{package} {version} ({locale})"))),
+                if message.contains(&format!("{package} {version}"))
+                    && message.contains(&format!("({locale})"))),
             "{udid}: {readiness:?}"
         );
         reports.push((udid, readiness));
@@ -2477,6 +2478,12 @@ fn a_build_outside_the_fleet_is_refused_before_transfer_without_measuring_advice
     );
     assert!(
         message.contains("Hạ về 45.7.3 trong Trung tâm ứng dụng"),
+        "{message}"
+    );
+    // The right build in Vietnamese is told to change language, not to downgrade.
+    assert!(
+        message.contains("global-vi: TikTok com.zhiliaoapp.musically 45.7.3 trên máy đúng bản")
+            && message.contains("Riviu tự chuyển ngôn ngữ điện thoại sang English"),
         "{message}"
     );
     assert!(!message.contains("composer_scout"), "{message}");

@@ -13,7 +13,7 @@ describe("publish preflight operator wording", () => {
   it("passes the fleet build refusal through as the operator's instruction", () => {
     const issue = { code: "build_not_allowed", message: "TikTok trên máy đang là com.zhiliaoapp.musically 46.4.3 (en); đội máy chỉ chạy TikTok Global 45.7.3 tiếng Anh. Chưa thực hiện thao tác nào. Hạ về 45.7.3 trong Trung tâm ứng dụng rồi kiểm tra lại." };
     expect(publishPreflightProblem(issue)).toEqual({
-      title: "Bản TikTok trên máy không nằm trong danh sách đội máy",
+      title: "TikTok trên máy sai bản hoặc sai ngôn ngữ so với đội máy",
       action: issue.message,
     });
   });

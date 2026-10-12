@@ -89,6 +89,19 @@ async fn dispatch_recovery_missing_metadata_is_retryable_but_unsupported_locale_
         let failure = describe(&refused);
         assert_eq!(failure.code, "build_not_allowed");
         assert_eq!(failure.kind, FailureKind::Terminal);
+        if version == "45.7.3" {
+            // Right build, wrong language: a language change, not a downgrade.
+            assert!(
+                failure.message.starts_with(&format!(
+                    "TikTok {package} {version} trên máy đúng bản đội máy nhưng đang dùng \
+                     tiếng Việt ({language}); Riviu chỉ điều khiển TikTok tiếng Anh. Chưa thực \
+                     hiện thao tác nào. Riviu tự chuyển ngôn ngữ điện thoại sang English"
+                )),
+                "{}",
+                failure.message
+            );
+            continue;
+        }
         assert_eq!(
             failure.message,
             format!(
