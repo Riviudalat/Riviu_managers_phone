@@ -80,8 +80,9 @@ struct SoundRouteEvidence {
     tab_recycles: AtomicU32,
     /// Raised while a phase that can recycle and re-read the sheet is observing.
     recycle_armed: AtomicBool,
-    /// The epoch this stage's own recycle produced, for owners that bound the old one.
-    recycled_epoch: parking_lot::Mutex<Option<String>>,
+    /// The epoch this stage's own recycle replaced and the one it produced, for owners that
+    /// bound the old one.
+    recycled_epoch: parking_lot::Mutex<Option<(String, String)>>,
     /// The last two-read late XML pool, its epoch and when it was proved.
     late_xml: parking_lot::Mutex<Option<(String, Instant, ObservedSoundPool)>>,
     /// Switches of the read session to every-window trees this stage asked for. Capped at one.
@@ -260,12 +261,17 @@ fn tab_recycles() -> u32 {
 
 /// The epoch this stage's own recycle produced, if the session still carries it.
 pub(crate) fn recycled_epoch(session: &dyn UiSession) -> Option<String> {
+    own_recycle(session).map(|(_, fresh)| fresh)
+}
+
+/// (replaced, fresh) for this stage's own recycle, if the session still carries the fresh epoch.
+fn own_recycle(session: &dyn UiSession) -> Option<(String, String)> {
     let current = session.gui_session_epoch();
     SOUND_BUDGET
         .try_with(|budget| budget.route.recycled_epoch.lock().clone())
         .ok()
         .flatten()
-        .filter(|epoch| !epoch.is_empty() && *epoch == current)
+        .filter(|(_, fresh)| !fresh.is_empty() && *fresh == current)
 }
 
 /// Replace the blind session once, at the caller's observation boundary. The caller holds no
@@ -316,7 +322,7 @@ async fn recycle_after_tab_switch(
                 .route
                 .consecutive_unreadable
                 .store(0, Ordering::Relaxed);
-            *budget.route.recycled_epoch.lock() = Some(after.clone());
+            *budget.route.recycled_epoch.lock() = Some((before.clone(), after.clone()));
         }
     });
     tracing::warn!(serial=?session.gui_scope().map(|scope| scope.device_id),
@@ -895,6 +901,12 @@ async fn clear_sound_popup(
     let labels = crate::tiktok_labels::controls_for_runtime(package, &language, &version)
         .context("sound popup profile unavailable")?;
     let mut popup = popup.lock().await;
+    // r97 (13/10/2026, ce031713aadf361905, ce051715e9f964e10d): the stage's own blind-sheet
+    // recycle moved the session to a fresh epoch, and this budget, still bound to the old one,
+    // refused with "popup session changed". Only that recycle's exact old epoch is carried over.
+    if let Some((replaced, fresh)) = own_recycle(session) {
+        popup.rebind_epoch(&replaced, &fresh);
+    }
     loop {
         let step =
             step_before_deadline(session, labels, &mut popup, deadline, &stopped, &stopped).await;
