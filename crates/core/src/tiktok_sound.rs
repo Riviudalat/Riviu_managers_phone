@@ -757,6 +757,24 @@ pub(crate) async fn with_stage_budget<T>(
         .await
 }
 
+/// Ceiling for one local OCR request on the sound path, queue wait included.
+///
+/// Measured in the controller log (2026-10-12, `ocrRequest` -> `captureComplete`): 2.0-2.9 s
+/// with one or two phones, but p90 11.0 s / max 17.0 s with 20 phones (r91 `d8e672cc`) and
+/// p90 14.6 s / max 28.0 s with 22 (r93 `4a25d804`), because the host runs two OCR workers
+/// and every phone queues behind them. The former 15 s cut that queue tail, and a request
+/// abandoned after its worker started wastes the CPU the other phones are waiting for.
+/// 30 s is the OCR contract's own ceiling.
+pub(crate) const SOUND_OCR_BUDGET: Duration = Duration::from_secs(30);
+
+/// One OCR request's budget: what is left before `deadline`, at most [`SOUND_OCR_BUDGET`].
+pub(crate) fn sound_ocr_budget_ms(deadline: Instant) -> u64 {
+    deadline
+        .saturating_duration_since(Instant::now())
+        .min(SOUND_OCR_BUDGET)
+        .as_millis() as u64
+}
+
 pub(crate) fn phase_deadline(window: Duration) -> Instant {
     let deadline = Instant::now() + window;
     SOUND_BUDGET

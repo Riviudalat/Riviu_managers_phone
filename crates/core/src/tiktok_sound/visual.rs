@@ -648,7 +648,7 @@ async fn capture_sheet(
         observation_id: uuid::Uuid::new_v4().to_string(),
         session_epoch: epoch.clone(),
         generation,
-        remaining_ms: 15_000,
+        remaining_ms: sound_ocr_budget_ms(phase_deadline(SOUND_OCR_BUDGET)).max(1),
         screenshot: OcrImage {
             bytes_base64: base64::engine::general_purpose::STANDARD.encode(&png),
             sha256: format!("{:x}", Sha256::digest(&png)),
@@ -700,6 +700,8 @@ async fn capture_sheet(
         vietnamese_request.request_id = uuid::Uuid::new_v4().to_string();
         vietnamese_request.observation_id = uuid::Uuid::new_v4().to_string();
         vietnamese_request.languages = vec!["vi".into()];
+        vietnamese_request.remaining_ms =
+            sound_ocr_budget_ms(phase_deadline(SOUND_OCR_BUDGET)).max(1);
         visual_diagnostic(|state| {
             state.vietnamese_request_id = Some(vietnamese_request.request_id.clone());
             state.vietnamese_observation_id = Some(vietnamese_request.observation_id.clone());

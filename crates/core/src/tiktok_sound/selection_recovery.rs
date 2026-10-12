@@ -108,10 +108,7 @@ async fn observe_rendered_sheet(
             (width, height) == (1080, 2220),
             "sound recovery geometry unmeasured"
         );
-        let remaining_ms = deadline
-            .saturating_duration_since(Instant::now())
-            .as_millis()
-            .min(15_000) as u64;
+        let remaining_ms = sound_ocr_budget_ms(deadline);
         anyhow::ensure!(remaining_ms > 0, "sound recovery observation expired");
         let request = OcrRequest {
             protocol_version: 1,
@@ -143,7 +140,33 @@ async fn observe_rendered_sheet(
             },
             min_confidence: 0.9,
         };
-        let response = bounded(deadline, reasoner.ocr(request.clone())).await?;
+        // A queued or slow local OCR read is a missed frame, not a refusal. Runs r91/r93
+        // (2026-10-12, 20+ phones) ended three phones on a single `gui_deadline` here with
+        // 74-192 s of sound budget left; the window below still bounds the retries.
+        let response = match bounded(deadline, async {
+            reasoner
+                .ocr(request.clone())
+                .await
+                .map_err(|error| anyhow::Error::new(OcrReadUnavailable(error)))
+        })
+        .await
+        {
+            Ok(response) => response,
+            Err(error) if error.is::<OcrReadUnavailable>() => {
+                previous = None;
+                if Instant::now() + POLL >= deadline {
+                    return Err(crate::publish_recovery::retryable_error(
+                        "sound_ocr_unavailable",
+                        format!(
+                            "Máy tính chưa đọc kịp ảnh bảng nhạc (dịch vụ nhận diện chữ đang                              bận); chưa chọn nhạc hoặc bấm Đăng: {error:#}"
+                        ),
+                    ));
+                }
+                tokio::time::sleep(POLL).await;
+                continue;
+            }
+            Err(error) => return Err(error),
+        };
         response.validate_binding(&request)?;
         let observed = tabs(&response);
         let rows_ready = !require_rows
@@ -426,10 +449,7 @@ async fn prove_editor_chip(
             (width, height) == (1080, 2220),
             "sound editor chip geometry unmeasured"
         );
-        let remaining_ms = deadline
-            .saturating_duration_since(Instant::now())
-            .as_millis()
-            .min(15_000) as u64;
+        let remaining_ms = sound_ocr_budget_ms(deadline);
         anyhow::ensure!(remaining_ms > 0, "sound editor chip observation expired");
         let request = OcrRequest {
             protocol_version: 1,

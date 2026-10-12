@@ -94,6 +94,14 @@ use anyhow::Context;
 
 /// How long the composer may take to appear after its tab is tapped.
 pub const COMPOSER_WINDOW: Duration = Duration::from_millis(8_000);
+/// Each single-target read on the camera screen (shutter, then gallery entry) inside the
+/// enclosing gallery budget, which stays `COMPOSER_WINDOW * 2 + 33 s`.
+///
+/// Measured over 1,878 `/source` reads in runs r91/r93 (2026-10-12, 20+ phones): p90
+/// 2.8-3.3 s, p99 7.3-11.1 s. On `ce0417141550322202` (r93) a popup check plus one 5.7 s read
+/// used up an 8 s window, and the attempt ended `publish_observation_deadline` with 41 s of
+/// the gallery budget unused. Two p99 reads fit in 16 s.
+const GALLERY_STEP_WINDOW: Duration = Duration::from_secs(16);
 /// How long the picker may take after the gallery entry is tapped.
 ///
 /// Longer than the composer's own window on purpose: the picker enumerates the device's
@@ -1384,8 +1392,8 @@ impl<'a, P: TapPlanner> Composer<'a, P> {
         screen: Screen,
         stop: &AtomicBool,
     ) -> anyhow::Result<bool> {
-        // Preserve the previous stage ceilings (8 + 8 + 30 + 3 seconds),
-        // but every strategy now consumes one enclosing gallery budget.
+        // Preserve the previous enclosing ceiling (8 + 8 + 30 + 3 seconds); every strategy
+        // consumes this one gallery budget, each camera-screen read within GALLERY_STEP_WINDOW.
         let deadline =
             crate::tiktok_sound::phase_deadline(COMPOSER_WINDOW * 2 + Duration::from_secs(33));
         let epoch = self.session.gui_session_epoch();
@@ -1393,7 +1401,7 @@ impl<'a, P: TapPlanner> Composer<'a, P> {
         gallery.finish("errorOrInterrupted");
         let Some(shutter) = self
             .await_navigation_target(
-                deadline.min(Instant::now() + COMPOSER_WINDOW),
+                deadline.min(Instant::now() + GALLERY_STEP_WINDOW),
                 self.plan.shutter,
                 stop,
                 Some("composer_camera_unavailable"),
@@ -1415,7 +1423,7 @@ impl<'a, P: TapPlanner> Composer<'a, P> {
             }
             let entry = self
                 .await_navigation_target(
-                    deadline.min(Instant::now() + COMPOSER_WINDOW),
+                    deadline.min(Instant::now() + GALLERY_STEP_WINDOW),
                     entry_query,
                     stop,
                     None,
