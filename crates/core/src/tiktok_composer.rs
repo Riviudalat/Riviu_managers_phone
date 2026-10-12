@@ -4280,7 +4280,10 @@ where
         let mut selection_may_have_landed = selected.is_some();
         let mut sound_sheet_may_be_open = false;
         let mut reopen_network_sheet = false;
-        let sound_deadline = crate::tiktok_sound::phase_deadline(Duration::from_secs(180));
+        // Global 45.7.3/en, 27 Samsung phones at once (12/10/2026): the visual route took
+        // 33-60 s to reach Hot and ~30 s per OCR row proof; ce071827715f321b05 proved its Hot
+        // row Selected at 136 s and ran out of a 180 s window on the blind editor read.
+        let sound_deadline = crate::tiktok_sound::phase_deadline(Duration::from_secs(300));
         let sound_epoch = session.gui_session_epoch();
         let mut sound_trace = StageDiagnosticOperation::start("soundStage", &sound_epoch, Some(sound_deadline));
         let mut stage_epoch = sound_epoch.clone();

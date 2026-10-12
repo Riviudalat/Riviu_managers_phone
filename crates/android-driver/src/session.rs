@@ -1421,31 +1421,27 @@ impl UiSession for AndroidUiSession {
     ) -> anyhow::Result<riviu_core::HierarchySourceSnapshot> {
         let started = std::time::Instant::now();
         let result = async {
-            let xml = self.agent.source().await?;
-            // Under `enableMultiWindows` the server dumps one root per window; only the
-            // owner's package was measured, so the other windows are cut before any parse.
-            let multi_window = self.multi_window.lock().clone();
-            let xml = match multi_window {
-                None => xml,
-                Some(package) => {
-                    let selection =
-                        riviu_core::ui_automation::tree::keep_package_windows(&xml, &package)?;
-                    tracing::info!(serial = %self.serial, package = %package,
-                        windows = ?selection.windows, kept = selection.kept,
-                        ms = started.elapsed().as_millis() as u64,
-                        "hierarchy read through every window");
-                    if selection.kept == 0 {
-                        // Unknown, never absent: the app's window had no root to give.
-                        return Err(riviu_core::driver::AccessibilityReadUnavailable {
-                            message: format!(
-                                "đọc qua mọi cửa sổ không có cửa sổ nào của {package}; các cửa sổ: {:?}",
-                                selection.windows
-                            ),
+            let xml = match self.agent_source_xml(started).await {
+                Ok(xml) => xml,
+                Err(error) if blind_source_read(&error) => {
+                    // Sound sheet, Global 45.7.3, 13/10/2026: the helper's long-lived session
+                    // read nothing for 10-30 s on 23 phones whose sheet a fresh `uiautomator
+                    // dump` read in ~2 s (median 1.94 s, max 3.4 s), Hot tab and rows included.
+                    match self.fresh_dump_source().await {
+                        Ok(xml) => {
+                            tracing::warn!(serial = %self.serial, error = %format!("{error:#}"),
+                                ms = started.elapsed().as_millis() as u64,
+                                "helper source blind; read the screen through uiautomator dump");
+                            xml
                         }
-                        .into());
+                        Err(fallback) => {
+                            tracing::warn!(serial = %self.serial, fallback = %format!("{fallback:#}"),
+                                "uiautomator dump fallback failed after a blind helper source");
+                            return Err(error);
+                        }
                     }
-                    selection.xml
                 }
+                Err(error) => return Err(error),
             };
             let generation = self
                 .hierarchy_generation
@@ -1641,6 +1637,68 @@ fn state_from_attribute(raw: Option<String>) -> Option<bool> {
         Some("false") => Some(false),
         _ => None,
     }
+}
+
+impl AndroidUiSession {
+    /// The helper's `/source`, cut to the owner's windows under `enableMultiWindows`.
+    async fn agent_source_xml(&self, started: std::time::Instant) -> anyhow::Result<String> {
+        let xml = self.agent.source().await?;
+        // Under `enableMultiWindows` the server dumps one root per window; only the
+        // owner's package was measured, so the other windows are cut before any parse.
+        let multi_window = self.multi_window.lock().clone();
+        let xml = match multi_window {
+            None => xml,
+            Some(package) => {
+                let selection =
+                    riviu_core::ui_automation::tree::keep_package_windows(&xml, &package)?;
+                tracing::info!(serial = %self.serial, package = %package,
+                    windows = ?selection.windows, kept = selection.kept,
+                    ms = started.elapsed().as_millis() as u64,
+                    "hierarchy read through every window");
+                if selection.kept == 0 {
+                    // Unknown, never absent: the app's window had no root to give.
+                    return Err(riviu_core::driver::AccessibilityReadUnavailable {
+                        message: format!(
+                            "đọc qua mọi cửa sổ không có cửa sổ nào của {package}; các cửa sổ: {:?}",
+                            selection.windows
+                        ),
+                    }
+                    .into());
+                }
+                selection.xml
+            }
+        };
+        Ok(xml)
+    }
+
+    /// One read through a fresh UiAutomation connection (`uiautomator dump`), outside the
+    /// helper's session. The dumper writes only nodes visible to the user, so each node is
+    /// marked `displayed="true"` for the readers that require explicit visibility.
+    async fn fresh_dump_source(&self) -> anyhow::Result<String> {
+        let output = self
+            .adb
+            .shell_output(
+                &self.serial,
+                "uiautomator dump /sdcard/riviu-source.xml >/dev/null 2>&1; cat /sdcard/riviu-source.xml; rm -f /sdcard/riviu-source.xml",
+                std::time::Duration::from_secs(15),
+            )
+            .await?;
+        let xml = output.stdout.trim();
+        anyhow::ensure!(
+            xml.starts_with("<?xml") && xml.contains("<hierarchy"),
+            "uiautomator dump không trả cây giao diện"
+        );
+        Ok(xml.replace("<node ", "<node displayed=\"true\" "))
+    }
+}
+
+/// A full-tree read that came back without the screen: the root never arrived, no window of
+/// the owner had one, or the request ran out of time.
+fn blind_source_read(error: &anyhow::Error) -> bool {
+    error.is::<riviu_core::driver::AccessibilityReadUnavailable>()
+        || error
+            .chain()
+            .any(|cause| cause.to_string().to_ascii_lowercase().contains("timed out"))
 }
 
 #[cfg(test)]

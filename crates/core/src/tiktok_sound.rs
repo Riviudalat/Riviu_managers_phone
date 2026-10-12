@@ -894,7 +894,21 @@ async fn sound_tap_armed(
     check_wait()?;
     crate::tiktok_composer::observation::check_session(session)?;
     before_tap();
-    session.tap(point).await?;
+    // The sheet's taps go through the OS shell like the visual route's: on 23 phones
+    // (13/10/2026) `input swipe` at the measured Hot point switched the tab in 2 s every
+    // time, while acknowledged helper `/actions` taps on a blind sheet never landed. Only
+    // an unsupported session, which sent nothing, falls back to the helper.
+    let contact_ms = {
+        use rand::Rng;
+        rand::thread_rng().gen_range(45..=130)
+    };
+    let shell_point = crate::TapPoint { x: point.x, y: point.y };
+    match session.tap_outside_automation(shell_point, contact_ms).await {
+        Err(error) if error.downcast_ref::<crate::driver::UnsupportedCapability>().is_some() => {
+            session.tap(point).await?;
+        }
+        result => result?,
+    }
     check_wait()
 }
 /// Every pool, tab and row this flow proves is bound to one session epoch, and the composer's
