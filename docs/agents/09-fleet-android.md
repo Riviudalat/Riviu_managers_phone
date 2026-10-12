@@ -77,9 +77,15 @@ Khi chỉ một máy có root không đọc được hoặc tap bị nuốt, so 
 - Baseline giữ auto-rotate tắt (`accelerometer_rotation=0`). `monkey -p … 1` bật lại
   auto-rotate (đo trên SM-G955F, Android 9, 10/10/2026), nên Riviu mở app bằng
   `am start` trên component launcher đã resolve, không dùng `monkey`.
-- Sau reboot: kiểm lại auto-rotate (đã bật lại sau reboot) và khóa màn hình, rồi chạy
-  "Khôi phục helper" (pending → prepare → execute). Bỏ bước này thì job kế tiếp lỗi
-  `media_transfer_failed` / `recovery_required`.
+- Sau reboot: kiểm lại auto-rotate (đã bật lại sau reboot) và khóa màn hình. Helper được
+  tự đối soát khi máy kết nối lại hoặc ở admission của job (pending → prepare → execute
+  dưới lease Repair, không cần nút); "Khôi phục helper" chỉ là đường dự phòng khi kế hoạch
+  tự từ chối.
+- adbd chạy root (`id -u` = 0, thường do GenFarmer `adb root`) được tự sửa: một
+  `adb -s <serial> unroot` mỗi boot id dưới lease Repair, ghi intent trước, chờ ≤45 s
+  (chưa đo trên máy). Không restart adb-server của PC; vẫn root thì báo tắt GenFarmer và
+  khởi động lại máy. Lúc nhận phiên, `recovery_required` trên máy root từng che
+  `shell_root` (bản 0.2.82, PC thứ hai, 12/10/2026).
 
 [Snapshot đo Android](../archive/technical-snapshots-2026-10-01/09-fleet-android.md)
 không là danh sách thiếu chức năng hiện tại hoặc chứng nhận mọi ROM/build.

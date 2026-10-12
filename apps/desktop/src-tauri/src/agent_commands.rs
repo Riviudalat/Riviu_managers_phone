@@ -385,15 +385,26 @@ pub(crate) async fn automatic_helper_maintenance(
     Ok(())
 }
 
-/// Operator line for an automatic reconcile the durable ledger proved safe.
-pub(crate) const HELPER_AUTO_RECONCILE_NOTE: &str =
-    "tự đối soát helper: không có thao tác chưa rõ — nhận phiên mới";
+/// Operator line for an automatic reconcile, read before the supersession settles.
+///
+/// Owner decision 2026-10-12: a fenced helper owner is superseded automatically under the
+/// phone's Repair lease (so no job of this controller is running on it), whatever the
+/// ledger holds. The ledger no longer gates it; it only names what stays recorded for
+/// reconciliation. Supersession replays nothing: uncertain posts, sends and Sheet writes
+/// are still only observed.
+pub(crate) fn helper_auto_reconcile_note(db: &riviu_core::db::Database, serial: &str) -> String {
+    match helper_auto_reconcile_blocker(db, serial) {
+        Ok(None) => "tự đối soát helper: không có thao tác chưa rõ — nhận phiên mới".into(),
+        Ok(Some(record)) => format!(
+            "tự đối soát helper: nhận phiên mới; {record} vẫn được giữ để đối soát, không lặp thao tác nào"
+        ),
+        Err(_) => "tự đối soát helper: nhận phiên mới; chưa đọc được sổ thao tác, bản ghi cũ vẫn được giữ".into(),
+    }
+}
 
-/// The ledger half of automatic reconcile: the named record that keeps the
-/// "Khôi phục helper" gate, or `None` when nothing on this phone is uncertain or
-/// in flight. Records already archived by this phone's last settled maintenance
-/// do not block again; that supersession was itself authorized.
-pub(crate) fn helper_auto_reconcile_blocker(
+/// The first record on this phone that is uncertain or in flight, or `None`. Records
+/// already archived by this phone's last settled maintenance are not named again.
+fn helper_auto_reconcile_blocker(
     db: &riviu_core::db::Database,
     serial: &str,
 ) -> Result<Option<String>, CommandError> {
@@ -409,13 +420,9 @@ pub(crate) fn helper_auto_reconcile_blocker(
         })
 }
 
-pub(crate) fn helper_auto_reconcile_blocked_message(record: &str) -> String {
-    format!("Chưa tự đối soát helper vì còn {record}; cần Khôi phục helper sau khi kiểm tra bản ghi này.")
-}
-
 /// Job admission: one automatic reconcile per phone whose retained helper owner fences
-/// it, when the ledger proves nothing is uncertain. Returns the refusal to show for each
-/// phone that keeps the human gate; every other phone is left to its normal preflight.
+/// it and that no job of this controller holds. Returns the refusal to show for each
+/// phone it could not repair; every other phone is left to its normal preflight.
 pub(crate) async fn reconcile_helpers_for_admission(
     state: &AppState,
     udids: &[String],
@@ -470,13 +477,6 @@ async fn reconcile_helper_for_admission(
     if let Some(refusal) = auto_unroot_adb(android, db, udid).await {
         return Some(refusal);
     }
-    match helper_auto_reconcile_blocker(db, udid) {
-        Ok(None) => {}
-        // Returned, not logged: each caller shows or logs its own refusal, and a
-        // repeated preflight must not repeat the operation log.
-        Ok(Some(blocker)) => return Some(helper_auto_reconcile_blocked_message(&blocker)),
-        Err(error) => return Some(error.message.into()),
-    }
     // A resumable owner needs no supersession; only a refused resume reaches maintenance.
     match android.prepare_helper_runtime(udid).await {
         Ok(_) => return None,
@@ -485,6 +485,7 @@ async fn reconcile_helper_for_admission(
                 && !error.is::<HelperShellIdentityRefused>() => {}
         Err(_) => return None,
     }
+    let note = helper_auto_reconcile_note(db, udid);
     if let Err(error) = automatic_helper_maintenance(control, db, &context, udid).await {
         let error = match error {
             AutomaticMaintenanceError::Prepare(error)
@@ -502,8 +503,8 @@ async fn reconcile_helper_for_admission(
         record("agent.helper.auto_reconcile.failed", message);
         return Some(message.into());
     }
-    log::info!("{udid}: {HELPER_AUTO_RECONCILE_NOTE}");
-    record("agent.helper.auto_reconcile", HELPER_AUTO_RECONCILE_NOTE);
+    log::info!("{udid}: {note}");
+    record("agent.helper.auto_reconcile", &note);
     drop(context);
     None
 }

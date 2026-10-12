@@ -204,13 +204,15 @@ sai quyền trước khi cài hoặc nhận phiên) được tự kiểm tra l�
 5 phút rồi dừng, nên sửa máy (như tắt GenFarmer) không cần cắm lại cáp. Khi việc khôi
 phục đã bắt đầu thực thi, app không tự thử lại.
 
-Sau khi tắt app giữa chừng, rút cáp hoặc khởi động lại điện thoại, app tự đối soát
-helper khi máy kết nối lại hoặc khi bắt đầu Nuôi, Tương tác hay Đăng bài, nếu máy
-không còn thao tác nào chưa rõ (đăng bài, tim, lưu, bình luận, follow, bước Flow hoặc
-ghi Sheet chưa xác nhận). Nhật ký ghi "tự đối soát helper: không có thao tác chưa rõ —
-nhận phiên mới" và tác vụ chạy tiếp, không cần bấm gì. Nút **Khôi phục helper** chỉ
-còn cần khi máy có thao tác chưa rõ: lý do nêu đúng bản ghi đang chặn (ví dụ "bài đăng
-… đang ở trạng thái uncertain"); kiểm tra bản ghi đó rồi mới bấm.
+Sau khi tắt app giữa chừng, rút cáp, khởi động lại điện thoại, hoặc khi máy còn helper
+của bản cài cũ hay của controller khác, app tự đối soát helper khi máy kết nối lại hoặc
+khi bắt đầu Nuôi, Tương tác hay Đăng bài, miễn là không tác vụ nào của app đang giữ máy:
+dừng helper cũ, nhận phiên mới và tác vụ chạy tiếp, không cần bấm gì. Nhật ký ghi "tự đối
+soát helper: không có thao tác chưa rõ — nhận phiên mới", hoặc nêu bản ghi chưa rõ vẫn
+được giữ để đối soát (ví dụ "bài đăng … đang ở trạng thái uncertain"). Đối soát không đăng
+lại, không gửi lại và không ghi Sheet lại; bài chưa rõ vẫn chỉ được kiểm tra. Nút **Khôi
+phục helper** chỉ còn là đường dự phòng khi kế hoạch khôi phục không chứng minh được
+(ví dụ bàn phím ban đầu đã mất).
 
 Lỗi chuẩn bị helper phân biệt `runtime_acquisition` (nhận phiên runtime) và
 `clipboard_qualification` (xác minh clipboard). Thông báo chỉ dùng các nhóm nguyên

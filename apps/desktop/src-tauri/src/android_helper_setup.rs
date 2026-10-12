@@ -95,22 +95,17 @@ impl AndroidHelperSetup {
                                 if !pending {
                                     match android.prepare_helper_runtime(&serial).await {
                                         Ok(_) => return Ok(()),
-                                        Err(error) if error.is::<riviu_android_driver::riviu_agent::HelperRecoveryRequired>() => {}
-                                        // Proved before any install or claim on this phone.
+                                        // Proved before any install, claim or maintenance on this
+                                        // phone; checked first because it may also carry the fence.
                                         Err(error) if error.is::<HelperShellIdentityRefused>() =>
                                             return Err((SetupStop::PreEffect, automatic_failure(&error))),
+                                        Err(error) if error.is::<riviu_android_driver::riviu_agent::HelperRecoveryRequired>() => {}
                                         Err(error) => return Err((SetupStop::Terminal, automatic_failure(&error))),
                                     }
                                 }
-                                // Automatic only when the durable ledger proves nothing on this
-                                // phone is uncertain or in flight; otherwise the operator decides.
-                                if let Some(blocker) = crate::agent_commands::helper_auto_reconcile_blocker(&db, &serial)
-                                    .map_err(|error| (SetupStop::PreEffect, error))?
-                                {
-                                    return Err((SetupStop::Terminal, crate::command_error::CommandError::code(
-                                        "HelperAutoReconcileBlocked",
-                                        crate::agent_commands::helper_auto_reconcile_blocked_message(&blocker))));
-                                }
+                                // Owner decision 2026-10-12: supersede under this Repair lease
+                                // whatever the ledger holds; it only names what stays recorded.
+                                let note = crate::agent_commands::helper_auto_reconcile_note(&db, &serial);
                                 crate::agent_commands::automatic_helper_maintenance(&control, &db, &context, &serial).await
                                     .map_err(|error| match error {
                                         AutomaticMaintenanceError::Prepare(error) => (SetupStop::PreEffect, error),
@@ -119,8 +114,7 @@ impl AndroidHelperSetup {
                                 // After an execution the replacement claim is never retried here.
                                 android.prepare_helper_runtime(&serial).await
                                     .map_err(|error| (SetupStop::Terminal, automatic_failure(&error)))?;
-                                record(&db, "agent.helper.auto_reconcile", &serial,
-                                    crate::agent_commands::HELPER_AUTO_RECONCILE_NOTE);
+                                record(&db, "agent.helper.auto_reconcile", &serial, &note);
                                 Ok(())
                             }.await;
                             match result {

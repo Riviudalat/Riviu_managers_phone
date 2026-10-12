@@ -628,25 +628,28 @@ tiêu thụ bản ghi lỗi đã quan sát, không gọi HTTP helper trong lư�
 gặp clipboard đang làm việc không được chốt thành helper hỏng. Chỉ runtime được
 xác minh mới xóa lỗi chuẩn bị; package presence hoặc reconnect không đủ.
 
-Tự đối soát helper (retained owner bị fence `HelperRecoveryRequired`) chỉ được phép
-khi ledger bền vững chứng minh an toàn, qua `helper_auto_reconcile_blocker`: không còn
-`publish_assignments` ở `posting`/`verifying`/`uncertain`, `interaction_assignments` ở
-`sending`/`uncertain`, `tiktok_action_runs` hoặc `public_cleanup_runs` ở
-`armed`/`uncertain`, `flow_node_attempts` có hiệu ứng ở
-`intentCommitted`/`effectDispatched`/`verifying`/`uncertain`, và không có claim ghi
-Sheet nào của máy. Bản ghi cập nhật trước maintenance đã settle gần nhất của máy không
-chặn lại (lần supersession đó đã lưu trữ chúng); thời gian không đọc được coi là mới.
-Phải giữ được lease Repair (không owner sống nào khác). Tiến trình helper vắng hoặc
-dừng được bằng chính kế hoạch maintenance. Khi đủ điều kiện, app chạy đúng luồng của
-nút (`pending` → `prepare` → `execute`, không `reconcileOnly`, rồi qualify phiên
-mới), giữ `recordsRetained`/`archivedUnresolved`, ghi một dòng
-`agent.helper.auto_reconcile` "tự đối soát helper: không có thao tác chưa rõ — nhận
-phiên mới". Điểm chạy: worker kết nối (khởi động controller, cắm lại, reboot) và
-admission của Nuôi, Tương tác, Điều phối Nuôi và preflight Đăng bài, mỗi máy tối đa một
-lần mỗi admission, không lặp. Preflight Đăng bài vì vậy có thể dừng helper cũ của máy
-rảnh. Còn bản ghi chặn thì giữ cổng người vận hành và lý do nêu đúng bản ghi đó. Máy
-reboot hoặc mất tiến trình helper được coi là phiên cũ đã mất, không phải chưa rõ, khi
-ledger không có gì đang chạy.
+Tự đối soát helper (retained owner bị fence `HelperRecoveryRequired`: hồ sơ cũ từ bản
+cài trước, helper do controller khác giữ, bản helper cũ) chạy tự động, không có bước xác
+nhận (quyết định của chủ sản phẩm 12/10/2026). Điều kiện duy nhất là giữ được lease
+Repair: không tác vụ nào của controller này đang giữ máy, nên không chen vào việc đang
+chạy. Ledger không còn là cổng: `helper_auto_reconcile_note` chỉ đọc bản ghi chưa rõ hoặc
+đang chạy đầu tiên của máy (`publish_assignments` ở `posting`/`verifying`/`uncertain`,
+`interaction_assignments` ở `sending`/`uncertain`, `tiktok_action_runs` hoặc
+`public_cleanup_runs` ở `armed`/`uncertain`, `flow_node_attempts` có hiệu ứng ở
+`intentCommitted`/`effectDispatched`/`verifying`/`uncertain`, claim ghi Sheet) để nêu
+trong nhật ký rằng bản ghi đó vẫn được giữ để đối soát. Supersession không lặp thao tác
+nào: Post/Send/Sheet chưa rõ vẫn chỉ được quan sát, và bài đang xác minh cần chính helper
+mới để lấy liên kết. Tiến trình helper vắng hoặc dừng được bằng chính kế hoạch
+maintenance. App chạy đúng luồng của nút (`pending` → `prepare` → `execute`, không
+`reconcileOnly`, rồi qualify phiên mới), giữ `recordsRetained`/`archivedUnresolved`, ghi
+một dòng `agent.helper.auto_reconcile` ("tự đối soát helper: không có thao tác chưa rõ —
+nhận phiên mới", hoặc nêu bản ghi vẫn được giữ). Điểm chạy: worker kết nối (khởi động
+controller, cắm lại, reboot) và admission của Nuôi, Tương tác, Điều phối Nuôi và
+preflight Đăng bài, mỗi máy tối đa một lần mỗi admission, không lặp. Preflight Đăng bài
+vì vậy có thể dừng helper cũ của máy rảnh. Kế hoạch maintenance vẫn tự từ chối khi không
+chứng minh được (IME ban đầu mất, APK đổi nguồn, tiến trình còn khi đối soát); khi đó nút
+**Khôi phục helper** là đường dự phòng. Máy reboot hoặc mất tiến trình helper được coi là
+phiên cũ đã mất, không phải chưa rõ.
 
 adbd chạy root (`id -u` = 0) được tự sửa, không có bước xác nhận (quyết định của chủ sản
 phẩm 12/10/2026): `agent_commands::auto_unroot_adb` chạy ở worker kết nối (trước
