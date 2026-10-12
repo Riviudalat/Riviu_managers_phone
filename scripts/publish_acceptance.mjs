@@ -90,6 +90,28 @@ function validateDevScopeForSubmit(binding, campaign, udids, legacyPhoneOnly = f
     '--dev-scope đã đổi sau preflight');
   return 'activeForCampaign';
 }
+function restoreInactiveDevScope(binding, udids) {
+  const lockFile = `${binding.path}.publish-acceptance.lock`;
+  let lock;
+  try { lock = fs.openSync(lockFile, 'wx'); }
+  catch { return; }
+  try {
+    const current = readDevScope(binding.path);
+    if (current.value.campaignIds?.length === 0) return;
+    const inactive = { activationId: binding.activationId,
+      campaignIds: [], deviceIds: [...udids] };
+    const temp = `${binding.path}.${randomUUID()}.tmp`;
+    let fd;
+    try {
+      fd = fs.openSync(temp, 'wx', current.mode & 0o777);
+      fs.writeFileSync(fd, JSON.stringify(inactive, null, 2) + '\n');
+      fs.fsyncSync(fd);
+    } finally { if (fd !== undefined) fs.closeSync(fd); }
+    fs.renameSync(temp, binding.path);
+  } finally {
+    try { fs.closeSync(lock); } finally { fs.unlinkSync(lockFile); }
+  }
+}
 function activateDevScope(binding, campaignId, udids) {
   const lockFile = `${binding.path}.publish-acceptance.lock`;
   let lock;
@@ -532,6 +554,10 @@ async function runStartProtocol(options, { invoke, sleep, now, file, report, cur
     if (state === 'inactiveApproved') {
       activateDevScope(reservation.devScope, reservation.requestId, options.udids);
     }
+    // A preflight that fails after activation but before writing preflight.json
+    // must leave the scope reusable so the next attempt does not need a close/relaunch.
+    let preflightCommitted = false;
+    try {
     report.devScope = { ...reservation.devScope, state: 'activeForRequest',
       requestId: reservation.requestId };
     const writer = await checkSheet(invoke, options, null, now);
@@ -575,6 +601,13 @@ async function runStartProtocol(options, { invoke, sleep, now, file, report, cur
       sheetDelivery: target, writer, approvedRelease };
     report.confirmation = hash(approval);
     write(file('preflight.json'), { approval, confirmation: report.confirmation });
+    preflightCommitted = true;
+    } finally {
+      if (!preflightCommitted && state === 'inactiveApproved' && !scheduleScope) {
+        try { restoreInactiveDevScope(reservation.devScope, options.udids); }
+        catch { /* best-effort restore */ }
+      }
+    }
     report.acceptance = 'preflightOnly';
     report.accountSnapshot = options.udids.some(id => !currentAccounts[id])
       ? 'approvedDeviceReadback' : 'currentMetadata';
@@ -718,14 +751,31 @@ async function runStartProtocol(options, { invoke, sleep, now, file, report, cur
   return { exitCode, report };
 }
 
+function reclaimStaleLock(lockFile) {
+  let raw;
+  try { raw = fs.readFileSync(lockFile, 'utf8'); } catch { return false; }
+  const pid = Number(raw.trim());
+  if (!Number.isInteger(pid) || pid <= 0) return false;
+  try { process.kill(pid, 0); return false; } catch (e) { if (e.code === 'EPERM') return false; }
+  try { fs.unlinkSync(lockFile); return true; } catch { return false; }
+}
+
 /** Same runner for CLI and tests. Only invoke is replaced in tests; files are durable. */
 export async function runAcceptance(options, { invoke, sleep = delay, now = Date.now }) {
   fs.mkdirSync(options.reportDir, { recursive: true });
   const file = name => path.join(options.reportDir, name);
   let lock;
   try { lock = fs.openSync(file('harness.lock'), 'wx'); }
-  catch (error) { return { exitCode: 1, report: { mode: options.mode, acceptance: 'blockedFailed',
-    error: `Report directory đang khóa hoặc không ghi được: ${error.code}; không tự xóa lock` } }; }
+  catch (error) {
+    if (error.code === 'EEXIST' && reclaimStaleLock(file('harness.lock'))) {
+      try { lock = fs.openSync(file('harness.lock'), 'wx'); }
+      catch (retryError) { return { exitCode: 1, report: { mode: options.mode, acceptance: 'blockedFailed',
+        error: `Report directory đang khóa hoặc không ghi được: ${retryError.code}` } }; }
+    } else {
+      return { exitCode: 1, report: { mode: options.mode, acceptance: 'blockedFailed',
+        error: `Report directory đang khóa hoặc không ghi được: ${error.code}` } };
+    }
+  }
   let report = { mode: options.mode, at: new Date(now()).toISOString(), acceptance: 'notEvaluated',
     ...(options.sheetDisabled ? { acceptanceScope: 'phoneOnly', sheetAcceptance: 'sheetDisabled' } : {}) };
   let exitCode = 0;

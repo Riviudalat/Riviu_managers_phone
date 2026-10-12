@@ -70,8 +70,18 @@ def main() -> int:
 
     # Bundle ids must have been confirmed by publish_scan_folder (inspect-source.mjs).
     summary_path = Path(f'{D}-inspect') / 'summary.json'
+    inspect_script = REPO / 'scripts' / 'device-acceptance' / 'inspect-source.mjs'
     summary = json.loads(summary_path.read_text(encoding='utf-8')) if summary_path.exists() else {}
-    assert summary.get('bundleIdsMatchTemplate') is True, 'chạy inspect-source.mjs trước; bundle id quét được khác template'
+    source_path = Path(flag('--source'))
+    summary_stale = summary_path.exists() and source_path.exists() and summary_path.stat().st_mtime < source_path.stat().st_mtime
+    if summary.get('bundleIdsMatchTemplate') is not True or summary_stale:
+        print(json.dumps({'inspect-source': 'auto-running', 'reason': 'stale' if summary_stale else 'missing'}), flush=True)
+        inspect_cmd = ['node', str(inspect_script), '--template', str(args.template.resolve()), '--port', str(port)]
+        inspect_proc = subprocess.run(inspect_cmd, cwd=REPO)
+        if inspect_proc.returncode:
+            raise SystemExit(f'inspect-source.mjs thất bại (exit {inspect_proc.returncode})')
+        summary = json.loads(summary_path.read_text(encoding='utf-8')) if summary_path.exists() else {}
+    assert summary.get('bundleIdsMatchTemplate') is True, 'bundle id quét được khác template'
 
     def run(stage: str, extra: list[str]) -> int:
         cmd = ['node', str(runner), '--mode', stage, *common, *extra]
