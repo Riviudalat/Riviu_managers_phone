@@ -2035,7 +2035,33 @@ async fn observe_measured_sound_pool_once(
             Err(error) if error.is::<SoundStopped>() || error.is::<SoundTabSwitchBlind>() => {
                 return Err(error)
             }
-            _ => checked_measured_sound_observation(session, plan, &epoch, Ok(())).await?,
+            _ => {
+                checked_measured_sound_observation(session, plan, &epoch, Ok(())).await?;
+                // The sheet opens on For You, so a readable root has no Hot pool yet and only
+                // the visual route used to switch tabs. 13/10/2026: with the uiautomator dump
+                // fallback the root reads in ~2 s, and the XML-only route (shell Hot tap, two
+                // stable pools) selected Hot in 32 s where OCR took 60+ s or timed out. Try it
+                // first; any refusal leaves the attempt to the visual route below.
+                if selection_recovery::measured(plan) {
+                    let started = Instant::now();
+                    diagnostics.emit("xmlFirst", "start", started, "pending", None);
+                    let pool = async {
+                        snapshot::select_section_tab_xml_only(session, plan).await?;
+                        snapshot::observe_xml_only(session, plan, maximum).await
+                    }
+                    .await;
+                    diagnostics.emit("xmlFirst", "finish", started,
+                        if pool.is_ok() { "ready" } else { "error" }, pool.as_ref().err());
+                    match pool {
+                        Ok(pool) => {
+                            return checked_measured_sound_observation(session, plan, &epoch, Ok(pool))
+                                .await;
+                        }
+                        Err(error) if error.is::<SoundStopped>() => return Err(error),
+                        Err(_) => {}
+                    }
+                }
+            }
         }
     }
     let started = Instant::now();
