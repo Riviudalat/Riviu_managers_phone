@@ -128,16 +128,26 @@ async fn tap_contact_image(
     contact: SheetContact,
 ) -> anyhow::Result<()> {
     check_wait()?;
+    // Both refusals come before any tap, so they never stand for an effect. Untyped, their
+    // English text classified as `legacy_terminal` and reached the operator as is.
     let screen = read_sound(session.window_size()).await?;
-    anyhow::ensure!(
-        screen == (1080.0, 2220.0),
-        "visual sound contact coordinates unmeasured"
-    );
+    if screen != (1080.0, 2220.0) {
+        return Err(anyhow::Error::new(crate::publish_recovery::RecoveryFailure::new(
+            "sound_visual_screen_unmeasured",
+            crate::publish_recovery::FailureKind::Terminal,
+            format!(
+                "Màn hình máy là {}×{}, chưa có tọa độ đo để chọn nhạc bằng ảnh (chỉ đo 1080×2220); chưa bấm Đăng",
+                screen.0, screen.1
+            ),
+        )));
+    }
     let package = read_sound(session.active_app_bundle()).await?;
-    anyhow::ensure!(
-        session.gui_session_epoch() == epoch && package == plan.package,
-        "visual sound app/session changed before the contact tap"
-    );
+    if session.gui_session_epoch() != epoch || package != plan.package {
+        return Err(crate::publish_recovery::retryable_error(
+            "sound_visual_target_changed",
+            "Phiên điều khiển hoặc app trên máy đã đổi trước khi chạm bảng nhạc; không chạm, chưa bấm Đăng",
+        ));
+    }
     check_wait()?;
     let row_tap = match contact {
         SheetContact::Hot => None,
@@ -164,10 +174,44 @@ async fn tap_contact_image(
     let row_tap = row_tap.map(|count| format!("{count}/{ROW_TAP_CAP}"));
     tracing::info!(serial=?serial, session=%epoch, phase=dispatch, rowIndex=?index,
         rowTap=?row_tap, x=point.x, y=point.y, "visual sound contact tap");
-    let result = session.tap(point).await;
+    // This route runs because accessibility reads of the sheet are blind, and the helper's
+    // `/actions` injects through that same instrumentation: on the other PC (2026-10-12, run
+    // 72401bfd) two acknowledged helper Hot taps per phone showed no Hot frame in 64-172 s.
+    // The shell injector does not depend on it. Only an unsupported session, which sent
+    // nothing, falls back to the helper; a shell failure is never followed by a second tap.
+    let contact_ms = {
+        use rand::Rng;
+        rand::thread_rng().gen_range(45..=130)
+    };
+    let mut injector = "shell";
+    let shell_point = crate::TapPoint {
+        x: point.x,
+        y: point.y,
+    };
+    let result = match session
+        .tap_outside_automation(shell_point, contact_ms)
+        .await
+    {
+        Err(error)
+            if error
+                .downcast_ref::<crate::driver::UnsupportedCapability>()
+                .is_some() =>
+        {
+            injector = "helper";
+            session.tap(point).await
+        }
+        // Pre-Post either way: the next fresh frames prove what the sheet shows, and the
+        // Hot and row caps bound how often this can repeat.
+        Err(error) => Err(error.context(crate::publish_recovery::RecoveryFailure::new(
+            "sound_shell_tap_failed",
+            crate::publish_recovery::FailureKind::Retryable,
+            "Không gửi được chạm vào bảng nhạc qua adb; chưa bấm Đăng",
+        ))),
+        result => result,
+    };
     visual_diagnostic(|state| state.emit(ack, Some(result.is_ok())));
     tracing::info!(serial=?serial, session=%epoch, phase=ack, rowIndex=?index,
-        rowTap=?row_tap, acknowledged=result.is_ok(), "visual sound contact tap");
+        rowTap=?row_tap, injector, acknowledged=result.is_ok(), "visual sound contact tap");
     result?;
     check_wait()
 }

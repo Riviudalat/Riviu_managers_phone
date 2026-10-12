@@ -717,6 +717,42 @@ impl UiSession for AndroidUiSession {
         self.traced("tap", async { self.agent.tap(point.x, point.y).await })
             .await
     }
+    /// `input swipe` from a point to itself: a held contact injected by the shell's
+    /// InputManager, not by the UiAutomator2 instrumentation. ~1.5 s per call on an S8+ (see
+    /// `adb.rs`), so only for screens whose accessibility reads are blind. Coordinates are the
+    /// logical display space `input` uses; phone 44 (ce031713d903001b01, 2026-10-09,
+    /// `target/sound-picker-probe-20261009`) switched the 45.7.3 sheet to Hot with `input tap`.
+    async fn tap_outside_automation(&self, point: TapPoint, contact_ms: u64) -> anyhow::Result<()> {
+        self.traced("tap_outside_automation", async {
+            anyhow::ensure!(
+                point.x.is_finite() && point.y.is_finite() && point.x >= 0.0 && point.y >= 0.0,
+                "shell tap point out of range"
+            );
+            let (x, y) = (point.x.round() as i64, point.y.round() as i64);
+            let script = format!("input swipe {x} {y} {x} {y} {}", contact_ms.clamp(40, 300));
+            match self
+                .adb
+                .device_effect(
+                    &self.serial,
+                    &["shell", &script],
+                    std::time::Duration::from_secs(15),
+                )
+                .await
+            {
+                Ok(output) if output.success && output.stderr.trim().is_empty() => Ok(()),
+                Ok(output) => anyhow::bail!(
+                    "shell tap exit {:?}: {}",
+                    output.exit_code,
+                    output.stderr.trim()
+                ),
+                Err(crate::adb::AdbEffectFailure::AfterSpawn { detail }) => {
+                    anyhow::bail!("shell tap outcome unknown: {detail}")
+                }
+                Err(failure) => anyhow::bail!("shell tap not sent: {failure:?}"),
+            }
+        })
+        .await
+    }
     async fn activate_element(&self, query: riviu_core::ElementQuery<'_>) -> anyhow::Result<()> {
         self.traced("activate_element", async {
             let ids = self.agent.find_all(&to_agent_locator(query)).await?;

@@ -975,6 +975,13 @@ pub trait UiSession: Send + Sync {
         None
     }
     async fn tap(&self, point: TapPoint) -> anyhow::Result<()>;
+    /// A held contact tap injected by the OS shell, outside the automation instrumentation.
+    /// For a screen whose accessibility reads are blind: the instrumentation that cannot read
+    /// it may not deliver input to it either. Unsupported means nothing was sent.
+    async fn tap_outside_automation(&self, point: TapPoint, contact_ms: u64) -> anyhow::Result<()> {
+        let _ = (point, contact_ms);
+        unsupported("tapOutsideAutomation")
+    }
     async fn activate_element(&self, query: ElementQuery<'_>) -> anyhow::Result<()> {
         let matches = self.locate_all_described(query).await?;
         let [target] = matches.as_slice() else {
