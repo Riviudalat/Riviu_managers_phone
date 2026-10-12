@@ -504,8 +504,8 @@ fn trill_text_post_button(
 ///
 /// ce031713b0c610ab0c, Global 45.7.3, 13/10/2026: the helper's POST `/element`
 /// endpoint returned stale-tree errors for the whole pre-Post reproof, but
-/// `hierarchy_source_snapshot` (which falls back to `uiautomator dump`) could still
-/// read the screen. This function replaces the `locate()` → `find()` → `/element` →
+/// a full `/source` snapshot (`hierarchy_source_snapshot`) could still read the
+/// screen. This function replaces the `locate()` → `find()` → `/element` →
 /// attribute chain with a single parsed snapshot.
 fn locate_in_tree(
     tree: &crate::ui_automation::tree::Tree,
