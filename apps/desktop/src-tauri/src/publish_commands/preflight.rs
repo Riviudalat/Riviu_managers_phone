@@ -809,13 +809,27 @@ pub(super) async fn build_publish_preflight_from_manifest_with_sheet(
             .and_then(|target| target.ok_or_else(|| "Chưa xác minh kết nối ghi Sheet".to_owned()))
         {
             Ok(target) => sheet_delivery = Some(target),
-            Err(error) => issues.push(riviu_core::PublishExecutionIssue {
-                code: "sheet_connection_unverified".into(),
-                assignment_id: None,
-                udid: None,
-                bundle_id: None,
-                message: format!("Kiểm tra kết nối Sheet trước khi đăng: {error}"),
-            }),
+            Err(error) => {
+                use crate::google_sheet_commands::{LOCK_CONFIRM_ACTION, LOCK_HELD_MARK};
+                // A lock held by another installation is not a link/connection fault.
+                let (code, message) = if error.contains(LOCK_CONFIRM_ACTION) {
+                    ("sheet_lock_needs_confirm", error)
+                } else if error.contains(LOCK_HELD_MARK) {
+                    ("sheet_lock_held_elsewhere", error)
+                } else {
+                    (
+                        "sheet_connection_unverified",
+                        format!("Kiểm tra kết nối Sheet trước khi đăng: {error}"),
+                    )
+                };
+                issues.push(riviu_core::PublishExecutionIssue {
+                    code: code.into(),
+                    assignment_id: None,
+                    udid: None,
+                    bundle_id: None,
+                    message,
+                })
+            }
         }
     }
     observations

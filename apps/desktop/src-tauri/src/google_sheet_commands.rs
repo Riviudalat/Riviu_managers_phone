@@ -133,6 +133,45 @@ impl std::fmt::Display for SharedSheetUpgradeRequired {
     }
 }
 impl std::error::Error for SharedSheetUpgradeRequired {}
+
+/// Stable phrases the publish preflight keys its issue code on.
+pub(crate) const LOCK_HELD_MARK: &str = "đang giữ khoá ghi Sheet này";
+pub(crate) const LOCK_CONFIRM_ACTION: &str = "Máy kia đã tắt — gỡ khoá";
+
+/// Another installation's shared-writer lock that Riviu could not prove safe to remove.
+#[derive(Debug)]
+struct SheetLockHeldElsewhere {
+    holder: Option<riviu_core::google_sheets::ForeignSharedLock>,
+    own_writer: String,
+}
+impl std::fmt::Display for SheetLockHeldElsewhere {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let Some(lock) = &self.holder else {
+            return write!(f, "Một bản Riviu khác {LOCK_HELD_MARK} (khoá không đọc được nên Riviu không tự gỡ). Tắt hẳn Riviu trên máy tính khác, chờ vài phút rồi bấm Kiểm tra lại.");
+        };
+        let short = lock.writer_id.get(..8).unwrap_or(&lock.writer_id);
+        let who = if lock.writer_id == self.own_writer {
+            format!("Bản Riviu này (mã {short}, từ lần chạy trước)")
+        } else {
+            format!("Máy tính khác (mã {short})")
+        };
+        let since = chrono::DateTime::from_timestamp_millis(lock.seen_at_ms)
+            .map(|t| {
+                t.with_timezone(&chrono::Local)
+                    .format(" từ %H:%M")
+                    .to_string()
+            })
+            .unwrap_or_default();
+        if lock.committed {
+            write!(f, "{who} {LOCK_HELD_MARK}{since}. Lần ghi của nó đã xong nên Riviu tự gỡ khoá, nhưng chưa gỡ được; bấm Kiểm tra lại sau ít phút.")
+        } else if lock.confirmed_at_ms.is_some() {
+            write!(f, "{who} {LOCK_HELD_MARK}{since}. Đã xác nhận máy kia tắt nhưng khoá vẫn còn; kiểm tra kết nối mạng rồi bấm Kiểm tra lại.")
+        } else {
+            write!(f, "{who} {LOCK_HELD_MARK}{since} và lần ghi của nó chưa xong, nên Riviu không tự gỡ. Tắt hẳn Riviu trên máy tính đó, rồi bấm \"{LOCK_CONFIRM_ACTION}\". Không xoá khoá trong Sheet bằng tay.")
+        }
+    }
+}
+impl std::error::Error for SheetLockHeldElsewhere {}
 pub(crate) fn connection_error(error: anyhow::Error) -> CommandError {
     if error.is::<SharedSheetUpgradeRequired>()
         || error
@@ -622,10 +661,49 @@ async fn check_current_locked(db: &Database, url: &str) -> anyhow::Result<SheetC
     if initial.writer_schema_version != Some(2) {
         return checked_bound_result(initial, &connection);
     }
-    let check = client
+    let check = match client
         .prepare_shared_target(&connection.target, &connection.writer_id, false, db)
-        .await?;
+        .await
+    {
+        Err(error) if error.shared_lock_held_elsewhere() => {
+            return Err(SheetLockHeldElsewhere {
+                holder: riviu_core::google_sheets::shared_lock_holder(&connection.target, db)?,
+                own_writer: connection.writer_id.clone(),
+            }
+            .into())
+        }
+        result => result?,
+    };
     checked_bound_result(check, &connection)
+}
+
+/// The one operator action for a foreign Sheet lock Riviu cannot prove stale: the
+/// operator confirms the other installation is off. The confirmation is saved
+/// before the check, which removes only that exact lock value and fences its row.
+#[tauri::command]
+pub async fn google_sheets_release_foreign_lock(
+    state: State<'_, AppState>,
+) -> Result<SheetCheckResult, CommandError> {
+    let _admission = state.ensure_accepting_work()?;
+    let db = &state.db;
+    let connection = db
+        .google_sheet_connection()
+        .map_err(connection_error)?
+        .context("Chọn và kết nối Google Sheet")
+        .map_err(connection_error)?;
+    let confirmed = riviu_core::google_sheets::confirm_shared_lock_takeover(&connection.target, db)
+        .map_err(|error| connection_error(error.into()))?;
+    if let Some(lock) = confirmed {
+        log::warn!(
+            "Người vận hành xác nhận máy tính khác (mã {}) đã tắt; gỡ khoá ghi Sheet của nó",
+            lock.writer_id.get(..8).unwrap_or(&lock.writer_id)
+        );
+    }
+    let url = db
+        .get_setting(riviu_core::publish_sheet::SHEET_URL_SETTING)
+        .map_err(connection_error)?
+        .unwrap_or_default();
+    check_current(db, &url).await.map_err(connection_error)
 }
 
 #[tauri::command]

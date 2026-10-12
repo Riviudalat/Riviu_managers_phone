@@ -1,4 +1,5 @@
 import { useState } from "react";
+import { googleSheetsReleaseForeignLock } from "../../api";
 import type {
   PublishExecutionIssue,
   PublishPreflightReport,
@@ -78,6 +79,7 @@ export function PublishPreflightResult({
           {globalIssues.map((issue, index) => (
             <div key={`${issue.code}:${index}`}>
               <Problem issue={issue} />
+              {issue.code === "sheet_lock_needs_confirm" && <ReleaseForeignLock busy={busy} onDone={onRetry} />}
               <details className="pw-preflight-technical">
                 <summary>Chi tiết kỹ thuật</summary>
                 <p><code>{issue.code}</code>: {issue.message}</p>
@@ -190,6 +192,32 @@ export function PublishPreflightResult({
           Kiểm tra lại
         </button>
       )}
+    </>
+  );
+}
+
+/** The one cross-computer decision the app cannot prove: the other Riviu is off. */
+function ReleaseForeignLock({ busy, onDone }: { busy: boolean; onDone: () => void }) {
+  const [pending, setPending] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+  const release = async () => {
+    setPending(true);
+    setError(null);
+    try {
+      await googleSheetsReleaseForeignLock();
+      onDone();
+    } catch (cause) {
+      setError(cause instanceof Error ? cause.message : String(cause));
+    } finally {
+      setPending(false);
+    }
+  };
+  return (
+    <>
+      <button type="button" disabled={busy || pending} onClick={() => void release()}>
+        Máy kia đã tắt — gỡ khoá
+      </button>
+      {error && <p role="alert">{error}</p>}
     </>
   );
 }

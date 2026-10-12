@@ -248,7 +248,7 @@ fn sheet_wait_reason(error: &anyhow::Error) -> Option<&'static str> {
     if error.shared_operation_uncertain() {
         Some("Lần ghi Sheet trước chưa rõ kết quả. App chỉ đọc lại Sheet để xác nhận, không ghi lại dòng này; tự đọc lại sau ít phút. Nếu kéo dài, kiểm tra kết nối Google rồi bấm Ghi lại Sheet (chỉ đọc lại). Không xoá dòng hay khoá trong Sheet.")
     } else if error.shared_lock_held_elsewhere() {
-        Some("Máy tính khác đang ghi vào Sheet này. App tự thử lại sau ít phút; để máy tính kia ghi xong, không xoá khoá trong Sheet.")
+        Some("Máy tính khác đang giữ khoá ghi Sheet này. Riviu tự gỡ khi lần ghi của máy đó đã xong; nếu máy đó tắt giữa chừng, bấm Kiểm tra lại đợt đăng để xác nhận gỡ khoá. Không xoá khoá trong Sheet bằng tay.")
     } else {
         None
     }

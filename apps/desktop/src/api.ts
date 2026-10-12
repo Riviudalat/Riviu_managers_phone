@@ -2005,6 +2005,10 @@ export function googleSheetsListTabs(spreadsheetId: string) {
 export function googleSheetsConnect(spreadsheetId: string, sheetId: number, confirmed: boolean, legacyWritersStopped = false) {
   return invoke<PublishSheetCheckResult>("google_sheets_connect", { spreadsheetId, sheetId, confirmed, legacyWritersStopped });
 }
+/** Operator confirmed the other computer's Riviu is off; removes only the lock it left. */
+export function googleSheetsReleaseForeignLock() {
+  return invoke<PublishSheetCheckResult>("google_sheets_release_foreign_lock");
+}
 export function googleSheetsDisconnect() {
   return invoke<import("./types").GoogleSheetsStatus>("google_sheets_disconnect");
 }

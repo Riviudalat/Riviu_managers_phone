@@ -68,6 +68,12 @@ export function publishPreflightProblem(
         title: "Kết nối Sheet chưa được xác minh",
         action: "Kiểm tra link bảng và kết nối Sheet trong Thiết lập, sau đó kiểm tra lại đợt đăng.",
       };
+    case "sheet_lock_held_elsewhere":
+    case "sheet_lock_needs_confirm":
+      return {
+        title: "Máy tính khác đang giữ khoá ghi Sheet",
+        action: issue.message,
+      };
     case "automation_transport_conflict":
       return {
         title: "Kết nối điều khiển cần kiểm tra",
