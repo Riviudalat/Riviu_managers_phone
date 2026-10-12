@@ -116,6 +116,12 @@ node scripts/device-acceptance/rehearse-publish.mjs r1 target/rehearsal-scope.js
 Điều kiện: máy phải có UiAutomator đang chạy (từ phiên production trước) và TikTok đã cài.
 Kết quả ghi `target/device-acceptance/rehearsal/rehearsal-<label>.json`. Xem `--help`.
 
+CDP mở trước khi WebView vào trang app: trang đầu tiên là `about:blank`, chưa có
+`window.__TAURI_INTERNALS__`. Script chờ trang `tauri.localhost` có Tauri bridge (tối đa
+`--ready-wait`) rồi mới gọi IPC (`connectWhenReady` trong `ipc.mjs`). Ở mọi lối ra (xong, lỗi,
+Ctrl+C), script gọi `no_public_shutdown`. Nếu process chưa thoát sau 30 s, script hiện cửa sổ
+"Riviu Manager" của đúng pid đó và gửi WM_CLOSE, rồi chờ 90 s. Script không bao giờ kill.
+
 ## Nguồn
 
 Bộ này được nâng từ các script một lần dưới `target/acceptance-20261010/kit/` và
