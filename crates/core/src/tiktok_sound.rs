@@ -411,6 +411,25 @@ fn visual_handoff_due(session: &dyn UiSession, plan: SoundPickerPlan) -> bool {
         && session.gui_reasoner().is_some()
 }
 
+/// Controller r95, ce031713aadf361905 (13/10/2026 21:04-21:09): the sheet root stayed blind on
+/// one UiAutomator2 server for the whole stage, the visual route timed out and the late XML read
+/// was blind too; the session epoch never changed. The same sheet read in ~2 s through a fresh
+/// UiAutomation on 23 phones (`target/sound-probe-20261013/`). So a sheet blind past the cap gets
+/// the stage's one instrumentation restart before the visual hand-off, while no row was tapped.
+fn blind_sheet_recycle_due(session: &dyn UiSession, plan: SoundPickerPlan) -> bool {
+    blind_handoff_reached(consecutive_unreadable_roots())
+        && selection_recovery::measured(plan)
+        && row_taps() == 0
+        && tab_recycles() < TAB_SWITCH_RECYCLE_CAP
+        && session.can_recycle_read_session()
+        && SOUND_BUDGET
+            .try_with(|budget| {
+                budget.deadline.saturating_duration_since(Instant::now())
+                    >= BLIND_RECYCLE_MIN_REMAINING
+            })
+            .unwrap_or(false)
+}
+
 /// How long a blind sheet on one UiAutomator2 server is remembered across attempts. Finite: a
 /// later attempt on the same server past this window asks the root again first.
 const BLIND_SHEET_MEMORY: Duration = Duration::from_secs(600);
@@ -1634,6 +1653,14 @@ async fn observe_measured_sound_pool(
     maximum: usize,
     allow_recommended: bool,
 ) -> anyhow::Result<ObservedSoundPool> {
+    // A phase that starts on a sheet already blind past the cap restarts before it asks anything.
+    if blind_sheet_recycle_due(session, plan) {
+        if let Some(observed) =
+            Box::pin(recycle_blind_sheet(session, plan, maximum, allow_recommended)).await
+        {
+            return observed;
+        }
+    }
     let armed = RecycleArmed::arm(session);
     let observed =
         observe_measured_sound_pool_once(session, plan, maximum, allow_recommended).await;
@@ -1642,6 +1669,13 @@ async fn observe_measured_sound_pool(
         Err(error) if error.is::<SoundTabSwitchBlind>() && !error.is::<SoundStopped>() => error,
         observed => return observed,
     };
+    if blind_sheet_recycle_due(session, plan) {
+        if let Some(observed) =
+            Box::pin(recycle_blind_sheet(session, plan, maximum, allow_recommended)).await
+        {
+            return observed;
+        }
+    }
     // The blind phase returned before any further tap and holds no target. Phones 44/47
     // (Global 45.7.3/en, 2026-10-09 21:36): the active-window root stayed null on a fresh
     // server too, so a tree built from every window is asked first, on this same session.
@@ -1682,6 +1716,54 @@ async fn observe_measured_sound_pool(
             .context(format!("không khởi động lại được UiAutomator: {recycle:#}")))
         }
     }
+}
+
+/// Less stage budget than this and the restart (~6.6 s, #47) plus the XML-first read on the
+/// fresh server (32 s measured 13/10/2026) cannot finish; the existing route keeps the rest.
+const BLIND_RECYCLE_MIN_REMAINING: Duration = Duration::from_secs(40);
+
+/// The stage's one instrumentation restart for a sheet blind past the cap, at the caller's
+/// observation boundary and before any row tap. `None` when the restart was not made or failed:
+/// the unreadable run is kept and the caller continues on its existing route. Otherwise the
+/// sheet is read from nothing on the new session, XML first; every proof of the old epoch is
+/// void and the cap is spent, so nothing here restarts again.
+async fn recycle_blind_sheet(
+    session: &dyn UiSession,
+    plan: SoundPickerPlan,
+    maximum: usize,
+    allow_recommended: bool,
+) -> Option<anyhow::Result<ObservedSoundPool>> {
+    tracing::warn!(serial=?session.gui_scope().map(|scope| scope.device_id),
+        session=%session.gui_session_epoch(), consecutive=consecutive_unreadable_roots(),
+        "sound sheet blind past the cap; restarting the instrumentation before the visual route");
+    match recycle_after_tab_switch(session, plan, "bảng nhạc không đọc được, trước khi chọn nhạc")
+        .await
+    {
+        Ok(()) => {}
+        Err(error) if error.is::<SoundStopped>() => return Some(Err(error)),
+        Err(error) => {
+            tracing::warn!(error = %format!("{error:#}"),
+                "sound sheet instrumentation restart unavailable; continuing on the existing route");
+            return None;
+        }
+    }
+    let observed =
+        observe_measured_sound_pool_once(session, plan, maximum, allow_recommended).await;
+    crate::publish_recovery::note_read(
+        "sound",
+        "readAfterSessionRecycle",
+        tab_recycles(),
+        if observed.is_ok() { "ready" } else { "unavailable" },
+        Some(&match &observed {
+            Ok(pool) => format!(
+                "UiAutomator mới đọc được bảng nhạc: {} nhạc, tab {}",
+                pool.candidates.len(),
+                pool.effective_plan(plan).section_label
+            ),
+            Err(error) => format!("UiAutomator mới vẫn chưa đọc được bảng nhạc: {error:#}"),
+        }),
+    );
+    Some(observed)
 }
 
 /// The sheet observed by sight after the every-window tree was blind as well. No `/source`
@@ -2056,9 +2138,9 @@ async fn observe_measured_sound_pool_once(
             _ => {
                 checked_measured_sound_observation(session, plan, &epoch, Ok(())).await?;
                 // The sheet opens on For You, so a readable root has no Hot pool yet and only
-                // the visual route used to switch tabs. 13/10/2026: with the uiautomator dump
-                // fallback the root reads in ~2 s, and the XML-only route (shell Hot tap, two
-                // stable pools) selected Hot in 32 s where OCR took 60+ s or timed out. Try it
+                // the visual route used to switch tabs. 13/10/2026: where a fresh UiAutomation
+                // read the root in ~2 s, the XML-only route (shell Hot tap, two stable pools)
+                // selected Hot in 32 s where OCR took 60+ s or timed out. Try it
                 // first; any refusal leaves the attempt to the visual route below.
                 if selection_recovery::measured(plan)
                     && snapshot::section_tab_readable(session, plan).await
@@ -2083,6 +2165,15 @@ async fn observe_measured_sound_pool_once(
                 }
             }
         }
+    }
+    // The sheet went blind past the cap in this phase and no row was tapped: end it here, at
+    // this observation boundary, so the caller restarts the instrumentation before OCR.
+    if blind_sheet_recycle_due(session, plan) {
+        let error = anyhow::Error::new(SoundRootUnreadable {
+            reads: consecutive_unreadable_roots(),
+        });
+        diagnostics.emit("visual", "skip", started, "blindRecycle", Some(&error));
+        return Err(error.context(SoundTabSwitchBlind));
     }
     let started = Instant::now();
     diagnostics.emit("visual", "start", started, "pending", None);
