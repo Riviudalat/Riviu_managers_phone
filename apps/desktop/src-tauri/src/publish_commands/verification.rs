@@ -97,16 +97,69 @@ pub(super) fn eligible_check_candidate<'a>(
         .flatten()
 }
 
+/// The phone condition holding a due automatic check, named for the operator.
+#[derive(Debug, Clone, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PublishVerificationWait {
+    pub code: &'static str,
+    pub message: &'static str,
+}
+
+#[derive(Debug, Clone, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PublishRecoveryCapabilitiesView {
+    #[serde(flatten)]
+    pub capabilities: riviu_core::db::PublishRecoveryCapabilities,
+    /// The background verifier observes this row on its own; otherwise only an
+    /// operator action (Kiểm tra liên kết / Tiếp tục kiểm tra link) can.
+    pub automatic_verification: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub verification_wait: Option<PublishVerificationWait>,
+}
+
 #[tauri::command]
 pub fn publish_recovery_capabilities(
     state: State<'_, AppState>,
     campaign_id: String,
-) -> Result<Vec<riviu_core::db::PublishRecoveryCapabilities>, CommandError> {
+) -> Result<Vec<PublishRecoveryCapabilitiesView>, CommandError> {
     let _admission = state.ensure_accepting_work()?;
-    state
+    let capabilities = state
         .db
         .publish_recovery_capabilities(&campaign_id)
-        .map_err(preflight::err)
+        .map_err(preflight::err)?;
+    // The same rows and phone predicate the background verifier uses; read-only.
+    let automatic = state
+        .db
+        .pending_current_publish_verifications_for_campaign(&campaign_id, 1000)
+        .map_err(preflight::err)?;
+    let now = chrono::Utc::now();
+    Ok(capabilities
+        .into_iter()
+        .map(|capabilities| {
+            let row = automatic
+                .iter()
+                .find(|row| row.assignment_id == capabilities.assignment_id);
+            let verification_wait = row
+                .filter(|row| {
+                    row.is_due(now) && matches!(row.retained_metadata_candidate(), Ok(None))
+                })
+                .and_then(|row| {
+                    VerificationQueue::phone_wait(
+                        state.registry.get(&row.udid).as_ref(),
+                        state.control.current_work_owner(&row.udid).is_some(),
+                    )
+                })
+                .map(|wait| PublishVerificationWait {
+                    code: wait.code(),
+                    message: wait.message(),
+                });
+            PublishRecoveryCapabilitiesView {
+                capabilities,
+                automatic_verification: row.is_some(),
+                verification_wait,
+            }
+        })
+        .collect())
 }
 
 #[tauri::command]

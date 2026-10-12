@@ -1,6 +1,45 @@
 use std::{collections::HashMap, future::Future};
 use tokio::task::{Id, JoinSet};
 
+/// The phone condition holding a due read-only observation. Never a Post or Sheet decision.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum VerificationWait {
+    DeviceOffline,
+    HelperNotReady,
+    AgentNotReady,
+    DevicePreparing,
+    DeviceBusy,
+    DeviceError,
+}
+
+impl VerificationWait {
+    pub fn code(self) -> &'static str {
+        match self {
+            Self::DeviceOffline => "deviceOffline",
+            Self::HelperNotReady => "helperNotReady",
+            Self::AgentNotReady => "agentNotReady",
+            Self::DevicePreparing => "devicePreparing",
+            Self::DeviceBusy => "deviceBusy",
+            Self::DeviceError => "deviceError",
+        }
+    }
+
+    pub fn message(self) -> &'static str {
+        match self {
+            Self::DeviceOffline => "Máy chưa kết nối — cắm lại máy để app tự kiểm tra bài đã gửi",
+            Self::HelperNotReady => {
+                "Helper trên máy chưa sẵn sàng — app tự kiểm tra khi helper chạy lại; nếu kéo dài, xem máy này trong Cần xử lý"
+            }
+            Self::AgentNotReady => {
+                "Riviu Agent trên iPhone chưa sẵn sàng — app tự kiểm tra khi agent chạy lại; nếu kéo dài, xem máy này trong Cần xử lý"
+            }
+            Self::DevicePreparing => "Máy đang chuẩn bị kết nối — app tự kiểm tra khi máy sẵn sàng",
+            Self::DeviceBusy => "Máy đang làm việc khác — app tự kiểm tra khi máy rảnh",
+            Self::DeviceError => "Máy đang báo lỗi kết nối — kiểm tra cáp USB rồi cắm lại máy",
+        }
+    }
+}
+
 /// One observer per phone or retained metadata assignment; rows remain durable.
 pub(crate) struct VerificationQueue {
     tasks: JoinSet<anyhow::Result<bool>>,
@@ -31,7 +70,32 @@ impl VerificationQueue {
             // Admit only to persist a controlled terminal diagnostic, without IO.
             Err(_) => true,
             Ok(Some(_)) => row.automatic_metadata_observation_allowed(chrono::Utc::now()),
-            Ok(None) => !phone_busy && device.is_some_and(Self::device_can_observe),
+            Ok(None) => Self::phone_wait(device, phone_busy).is_none(),
+        })
+    }
+
+    /// Why a phone-path observation cannot start now; `None` admits it. The same
+    /// predicate gates the worker and names the wait to the operator.
+    pub fn phone_wait(
+        device: Option<&riviu_core::DeviceInfo>,
+        phone_busy: bool,
+    ) -> Option<VerificationWait> {
+        use riviu_core::{DevicePlatform, DeviceStatus};
+        let Some(device) = device else {
+            return Some(VerificationWait::DeviceOffline);
+        };
+        if Self::device_can_observe(device) {
+            return phone_busy.then_some(VerificationWait::DeviceBusy);
+        }
+        Some(match device.status {
+            DeviceStatus::Disconnected => VerificationWait::DeviceOffline,
+            DeviceStatus::Busy => VerificationWait::DeviceBusy,
+            DeviceStatus::Pairing | DeviceStatus::Preparing => VerificationWait::DevicePreparing,
+            DeviceStatus::Error => VerificationWait::DeviceError,
+            DeviceStatus::Connected | DeviceStatus::Ready => match device.platform {
+                DevicePlatform::Android => VerificationWait::HelperNotReady,
+                DevicePlatform::Ios => VerificationWait::AgentNotReady,
+            },
         })
     }
 

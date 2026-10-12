@@ -2647,6 +2647,10 @@ export interface PublishRecoveryCapability {
   resumeVerification: PublishRecoveryPermission;
   retryBeforePost: PublishRecoveryPermission;
   verificationResumed: boolean;
+  /** The background verifier observes this row on its own. */
+  automaticVerification?: boolean;
+  /** Why a due automatic check cannot start now (phone condition), with the next step. */
+  verificationWait?: { code: string; message: string } | null;
 }
 export interface PublishVerificationResumeResult {
   assignmentId: string;

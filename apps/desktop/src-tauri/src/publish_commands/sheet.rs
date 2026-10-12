@@ -218,7 +218,9 @@ async fn deliver_bound_claim(
         let retryable = transport_accepted
             || riviu_core::publish_sheet::sheet_delivery_error_is_retryable(error)
             || crate::google_sheet_commands::retryable(error);
-        let message = format!("{error:#}");
+        let message = sheet_wait_reason(error)
+            .map(str::to_owned)
+            .unwrap_or_else(|| format!("{error:#}"));
         let failed = claim.clone();
         let events = events.clone();
         db.storage_write(move |db| {
@@ -236,6 +238,19 @@ async fn deliver_bound_claim(
         .await?;
     }
     delivered
+}
+
+/// Operator text for the shared-writer states that only a later read can settle.
+/// Retrying either one first reads the journaled operation; neither re-sends a row.
+fn sheet_wait_reason(error: &anyhow::Error) -> Option<&'static str> {
+    let error = error.downcast_ref::<riviu_core::google_sheets::DirectSheetsError>()?;
+    if error.shared_operation_uncertain() {
+        Some("Lần ghi Sheet trước chưa rõ kết quả. App chỉ đọc lại Sheet để xác nhận, không ghi lại dòng này; tự đọc lại sau ít phút. Nếu kéo dài, kiểm tra kết nối Google rồi bấm Ghi lại Sheet (chỉ đọc lại). Không xoá dòng hay khoá trong Sheet.")
+    } else if error.shared_lock_held_elsewhere() {
+        Some("Máy tính khác đang ghi vào Sheet này. App tự thử lại sau ít phút; để máy tính kia ghi xong, không xoá khoá trong Sheet.")
+    } else {
+        None
+    }
 }
 
 /// What the Sheet delivery is configured with — minus the token itself.
@@ -428,15 +443,45 @@ pub(crate) async fn run_bound_sheet_worker(
 ) {
     use riviu_core::db::SheetDeliveryKind;
     use sha2::Digest;
-    let mut tasks = tokio::task::JoinSet::new();
+    let mut tasks = tokio::task::JoinSet::<anyhow::Result<()>>::new();
     let mut configured_fingerprint = None;
+    // One warning per distinct failure state; each row keeps its own outbox backoff.
+    let mut last_warning: Option<String> = None;
+    // While a shared operation is unproven, every row would read the same journal:
+    // probe once per window instead of once per row.
+    let mut unproven_until: Option<Instant> = None;
     let mut tick = tokio::time::interval(Duration::from_secs(1));
     tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
     loop {
         tokio::select! {
             _=tick.tick()=>{},
             result=tasks.join_next(),if !tasks.is_empty()=>{
-                if let Some(Err(error))=result {log::warn!("Sheet delivery worker failed: {error}");}
+                match result {
+                    Some(Ok(Ok(()))) => {
+                        unproven_until = None;
+                        if last_warning.take().is_some() {
+                            log::info!("Sheet đã ghi lại được; trạng thái chờ trước đã hết");
+                        }
+                    }
+                    Some(Ok(Err(error))) => {
+                        let warning = match sheet_wait_reason(&error) {
+                            Some(reason) => format!("{reason} ({error:#})"),
+                            None => format!("{error:#}"),
+                        };
+                        if last_warning.as_deref() != Some(warning.as_str()) {
+                            log::warn!("Sheet chưa gửi được: {warning}");
+                            last_warning = Some(warning);
+                        }
+                        if error
+                            .downcast_ref::<riviu_core::google_sheets::DirectSheetsError>()
+                            .is_some_and(|error| error.shared_operation_uncertain())
+                        {
+                            unproven_until = Some(Instant::now() + Duration::from_secs(30));
+                        }
+                    }
+                    Some(Err(error)) => log::warn!("Sheet delivery worker failed: {error}"),
+                    None => {}
+                }
             },
         }
         if stop.load(std::sync::atomic::Ordering::Acquire) {
@@ -520,6 +565,9 @@ pub(crate) async fn run_bound_sheet_worker(
             }
             configured_fingerprint = Some(fingerprint);
         }
+        if unproven_until.is_some_and(|until| Instant::now() < until) {
+            continue;
+        }
         for kind in [
             SheetDeliveryKind::Canonical,
             SheetDeliveryKind::Report,
@@ -559,11 +607,7 @@ pub(crate) async fn run_bound_sheet_worker(
                 Ok(Some(claim)) => {
                     let db = db.clone();
                     let events = events.clone();
-                    tasks.spawn(async move {
-                        if let Err(error) = deliver_bound_claim(&db, &events, claim).await {
-                            log::warn!("Sheet chưa gửi được: {error:#}");
-                        }
-                    });
+                    tasks.spawn(async move { deliver_bound_claim(&db, &events, claim).await });
                 }
                 Ok(None) => {}
                 Err(error) => log::warn!("Sheet: không nhận được hàng đến hạn: {error:#}"),
@@ -571,8 +615,10 @@ pub(crate) async fn run_bound_sheet_worker(
         }
     }
     while let Some(result) = tasks.join_next().await {
-        if let Err(error) = result {
-            log::warn!("Sheet shutdown delivery failed: {error}");
+        match result {
+            Ok(Ok(())) => {}
+            Ok(Err(error)) => log::warn!("Sheet chưa gửi được khi đóng app: {error:#}"),
+            Err(error) => log::warn!("Sheet shutdown delivery failed: {error}"),
         }
     }
 }

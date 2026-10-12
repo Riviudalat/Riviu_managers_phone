@@ -29,13 +29,28 @@ function budgetPair(used: unknown, limit: unknown): string | null {
  return typeof used === "number" && Number.isSafeInteger(used) && used >= 0
   && typeof limit === "number" && Number.isSafeInteger(limit) && limit > 0 ? `${used}/${limit}` : null;
 }
-function verificationSummary(evidence: Record<string, unknown>, now: number): {text: string; budget: string} {
+// What holds a scheduled check and the operator's next step. The backend names a phone
+// condition only for rows its background verifier observes; anything else needs an action.
+function verificationWait(c: PublishProgressCapability | undefined, due: number, now: number): string {
+ if(!c)return "chưa đọc được trạng thái kiểm tra";
+ const wait=typeof c.verificationWait?.message === "string" && c.verificationWait.message.trim() ? c.verificationWait.message.trim().slice(0,256) : null;
+ if(due<=now&&wait)return wait;
+ const overdue=Math.floor((now-due)/60000);
+ if(c.automaticVerification)
+  return due>now?"app tự kiểm tra khi đến lịch"
+   :overdue>=10&&c.checkLink.allowed?`đã quá lịch ${overdue} phút mà chưa kiểm tra được — bấm Kiểm tra liên kết`
+   :"app sẽ tự kiểm tra trong ít phút";
+ if(c.resumeVerification.allowed)return "tự kiểm tra đang dừng — bấm Tiếp tục kiểm tra link";
+ if(c.checkLink.allowed)return "bài này không tự kiểm tra — bấm Kiểm tra liên kết";
+ return "chưa có lượt tự kiểm tra cho bài này";
+}
+function verificationSummary(evidence: Record<string, unknown>, now: number, c?: PublishProgressCapability): {text: string; budget: string} {
  const status=object(evidence.verificationStatus), budget=object(evidence.verificationBudget);
  const reason=typeof status.reason === "string" && status.reason.trim() ? status.reason.trim().slice(0,512) : null;
  const due=typeof status.nextCheckAt === "string" && status.nextCheckAt.length <= 64 ? Date.parse(status.nextCheckAt) : NaN;
  const text=status.state === "needsReview" ? `Cần xem xét${reason?` · ${reason}`:" · Chưa có lý do được lưu."}`
   : status.state === "pending" && Number.isFinite(due)
-   ? `${due>now?"Chờ lịch kiểm tra từ":"Đã đến lịch kiểm tra"} ${new Date(due).toLocaleString("vi-VN")} · chờ điều kiện xác minh; không đăng lại.`
+   ? `${due>now?"Chờ lịch kiểm tra từ":"Đã đến lịch kiểm tra"} ${new Date(due).toLocaleString("vi-VN")} · ${verificationWait(c,due,now)}; không đăng lại.`
    : "Chưa rõ lịch kiểm tra tiếp theo.";
  const ordinary=budgetPair(budget.noProgressObservations,budget.limit), metadata=budgetPair(budget.metadataObservations,budget.metadataLimit);
  return {text,budget:[ordinary?`Không có tiến triển ${ordinary}`:null,metadata?`Metadata ${metadata}`:null].filter(Boolean).join(" · ")};
@@ -107,7 +122,7 @@ export function PublishDeviceRecovery({campaignId,udid}:{campaignId:string;udid:
     exclusionState:exclusion?.state,
     recoveryStep:r&&["retryWaiting","waitingDevice","failed","exhausted","interrupted"].includes(r.state)?r.step:undefined,
    });
-   const verification=verificationSummary(evidence,now);
+   const verification=verificationSummary(evidence,now,c);
    return <div key={a.id}>
     <ProgressBar label={`Tiến độ đăng trên máy ${udid} · bài ${a.ordinal+1}`} fraction={log.error&&!progress.done?null:progress.fraction}
       tone={progress.done?"done":progress.stopped?"failed":"run"}/>

@@ -52,8 +52,22 @@ fn busy(message: &str) -> DirectSheetsError {
         message: message.into(),
     }
 }
+const UNCERTAIN: &str = "Shared Sheet operation is uncertain; retry only to read its receipt. Do not remove the remote lock until all writers have stopped and recovery is verified";
+const HELD_ELSEWHERE: &str =
+    "Another computer is writing this shared Sheet; retry later. Locks are never stolen by age";
 fn uncertain() -> DirectSheetsError {
-    busy("Shared Sheet operation is uncertain; retry only to read its receipt. Do not remove the remote lock until all writers have stopped and recovery is verified")
+    busy(UNCERTAIN)
+}
+impl DirectSheetsError {
+    /// A journaled shared operation whose outcome no read has proven yet. The next
+    /// attempt only reads its lock/row receipt; it never repeats the write.
+    pub fn shared_operation_uncertain(&self) -> bool {
+        self.kind == DirectSheetsErrorKind::Busy && self.message == UNCERTAIN
+    }
+    /// Another installation holds the remote shared-writer lock.
+    pub fn shared_lock_held_elsewhere(&self) -> bool {
+        self.kind == DirectSheetsErrorKind::Busy && self.message == HELD_ELSEWHERE
+    }
 }
 fn journal_error() -> DirectSheetsError {
     busy("Shared Sheet durable journal is unavailable; no new mutation can be dispatched")
@@ -439,7 +453,7 @@ impl DirectSheetsClient {
             return Ok(());
         }
         if remote.is_some() {
-            return Err(busy("Another computer is writing this shared Sheet; retry later. Locks are never stolen by age"));
+            return Err(busy(HELD_ELSEWHERE));
         }
         if op.phase == Phase::AcquirePending {
             return Err(uncertain());

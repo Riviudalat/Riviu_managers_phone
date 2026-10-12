@@ -1292,8 +1292,10 @@ impl AppState {
             .await
         {
             Ok(0) => {}
+            // `interrupt_orphaned_publish_campaigns` stops only unsent work; a campaign
+            // with submitted posts stays `verifying` and keeps its read-only checks.
             Ok(count) => log::warn!(
-                "{count} chiến dịch đăng bài còn dở từ lần chạy trước đã được đánh dấu là đã dừng"
+                "{count} chiến dịch đăng bài còn dở từ lần chạy trước đã được đối soát: phần chưa đăng đã dừng, bài đã gửi tiếp tục được kiểm tra, không đăng lại"
             ),
             Err(error) => log::warn!("không dọn được chiến dịch đăng bài dở: {error:#}"),
         }
@@ -1700,6 +1702,8 @@ impl AppState {
                 interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
                 let mut queue = crate::publish_commands::VerificationQueue::default();
                 let mut failed_until = std::collections::HashMap::new();
+                let mut waits: std::collections::HashMap<String, Option<&'static str>> =
+                    std::collections::HashMap::new();
                 loop {
                     tokio::select! {
                         _ = interval.tick() => {},
@@ -1779,6 +1783,11 @@ impl AppState {
                     ) {
                         log::warn!("publish verification fairness: {error:#}");
                     }
+                    let pending_ids: std::collections::HashSet<&str> = pending
+                        .iter()
+                        .map(|row| row.assignment_id.as_str())
+                        .collect();
+                    waits.retain(|id, _| pending_ids.contains(id.as_str()));
                     for row in pending {
                         if stop.load(Ordering::Relaxed) {
                             break;
@@ -1795,10 +1804,38 @@ impl AppState {
                             continue;
                         };
                         let device = registry.get(&row.udid);
+                        let phone_busy = control.current_work_owner(&row.udid).is_some();
+                        // A due phone check that cannot start is logged once per change
+                        // of its reason, never on every 30 s tick.
+                        if row.is_due(chrono::Utc::now())
+                            && matches!(row.retained_metadata_candidate(), Ok(None))
+                        {
+                            let wait = crate::publish_commands::VerificationQueue::phone_wait(
+                                device.as_ref(),
+                                phone_busy,
+                            );
+                            let previous =
+                                waits.insert(row.assignment_id.clone(), wait.map(|w| w.code()));
+                            if previous.flatten() != wait.map(|w| w.code()) {
+                                match wait {
+                                    Some(wait) => log::warn!(
+                                        "Bài đã gửi trên {} đến lịch kiểm tra nhưng chưa kiểm tra được: {} (lượt {}, {}); không đăng lại",
+                                        row.udid, wait.message(), row.assignment_id, wait.code()
+                                    ),
+                                    None => log::info!(
+                                        "Bài đã gửi trên {}: máy đã sẵn sàng, bắt đầu kiểm tra (lượt {})",
+                                        row.udid, row.assignment_id
+                                    ),
+                                }
+                            }
+                        }
                         if !queue.available(&observer_key)
                             || !crate::publish_commands::VerificationQueue::can_observe(
-                                &row, device.as_ref(), control.current_work_owner(&row.udid).is_some(),
-                            ).unwrap_or(false)
+                                &row,
+                                device.as_ref(),
+                                phone_busy,
+                            )
+                            .unwrap_or(false)
                             || failed_until.contains_key(&observer_key)
                             || !row.is_due(chrono::Utc::now())
                         {
