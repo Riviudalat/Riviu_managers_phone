@@ -68,6 +68,18 @@ $env:SIZES = '1280x720,1366x768,1920x1080'; node scripts/device-acceptance/nativ
 Mọi script có `--help`. Mỗi lần chạy runner cần thư mục `--out` hoặc nhãn mới: log và intent
 mở ở chế độ exclusive.
 
+## Tự phục hồi
+
+- **Stale lock**: nếu process cũ đã chết, `publish_acceptance.mjs` tự xóa `harness.lock` cũ và
+  lấy lock mới thay vì dừng ngay.
+- **Scope sau preflight lỗi**: preflight Start protocol mà thất bại trước khi ghi
+  `preflight.json` sẽ trả dev-scope về trạng thái inactive để lần chạy tiếp không cần đóng
+  controller.
+- **close.mjs tự tìm campaign**: khi không truyền campaign id, `close.mjs --publish-dir` tự tìm
+  từ `start-intent.json`, `campaign.json` hoặc `preflight.json` trong thư mục đó.
+- **inspect-source tự chạy**: `run-publish.py` tự gọi `inspect-source.mjs` khi summary không có
+  hoặc cũ hơn thư mục source.
+
 ## Không replay
 
 - Runner ghi intent (`intent.json`, `start-intent.json`, `retry-*-intent.json`) **trước**

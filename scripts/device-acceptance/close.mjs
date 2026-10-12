@@ -25,8 +25,18 @@ const [label, ids] = args._;
 check(/^[a-z0-9-]+$/.test(label ?? ''), 'nhãn phải là [a-z0-9-]');
 const port = Number(args.port ?? DEFAULT_PORT);
 const OUT = resolvePath(args['out-dir']) ?? path.join(OUT_ROOT, 'controllers');
-const intent = args['publish-dir'] ? readJson(path.join(resolvePath(args['publish-dir']), 'start-intent.json')) : null;
-const campaignIds = ids ? ids.split(',') : (intent ? [intent.requestId] : []);
+function discoverCampaignIds(publishDir) {
+  if (!publishDir) return [];
+  const dir = resolvePath(publishDir);
+  const intent = readJson(path.join(dir, 'start-intent.json'));
+  if (intent?.requestId) return [intent.requestId];
+  const campaign = readJson(path.join(dir, 'campaign.json'));
+  if (campaign?.id) return [campaign.id];
+  const preflight = readJson(path.join(dir, 'preflight.json'));
+  if (preflight?.approval?.requestId) return [preflight.approval.requestId];
+  return [];
+}
+const campaignIds = ids ? ids.split(',') : discoverCampaignIds(args['publish-dir']);
 check(campaignIds.every(id => /^[A-Za-z0-9_-]{1,128}$/.test(id)), 'campaign id không hợp lệ');
 const waitSeconds = Number(args['wait-seconds'] ?? 300);
 check(Number.isInteger(waitSeconds) && waitSeconds >= 0 && waitSeconds <= 3600, '--wait-seconds 0..3600');
