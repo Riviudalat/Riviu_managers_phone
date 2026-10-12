@@ -1391,9 +1391,17 @@ impl Capture<'_> {
             ) && tree.nodes.iter().any(|node| {
                 node.visible(self.plan.labels.package()) && node.attr("content-desc") == "Video"
             }) {
-                if let Some(link) = self.visible_video().await? {
-                    self.public_link = Some(link);
-                    return Ok(tree);
+                match self.visible_video().await {
+                    Ok(Some(link)) => {
+                        self.public_link = Some(link);
+                        return Ok(tree);
+                    }
+                    Ok(None)
+                    | Err(
+                        VerificationReason::ClipboardUnchanged
+                        | VerificationReason::ClipboardNotPostLink,
+                    ) => {}
+                    Err(reason) => return Err(reason),
                 }
             }
             match proof {
@@ -1667,8 +1675,12 @@ impl Capture<'_> {
                 | VerificationReason::CaptionMismatch
                 | VerificationReason::SubmissionTooOld,
             ) => {}
-            Err(VerificationReason::Processing) => {
-                processing = Some(VerificationReason::Processing);
+            Err(
+                reason @ (VerificationReason::Processing
+                | VerificationReason::ClipboardUnchanged
+                | VerificationReason::ClipboardNotPostLink),
+            ) => {
+                processing = Some(reason);
             }
             Err(reason) => return Err(reason),
         }
@@ -1688,7 +1700,12 @@ impl Capture<'_> {
             }
             Err(error) => {
                 if let Some(reason) = self.matched_photo_failure(&error) {
-                    if reason == VerificationReason::Processing {
+                    if matches!(
+                        reason,
+                        VerificationReason::Processing
+                            | VerificationReason::ClipboardUnchanged
+                            | VerificationReason::ClipboardNotPostLink
+                    ) {
                         processing = Some(reason);
                     } else if !matches!(
                         reason,
@@ -1817,6 +1834,10 @@ impl Capture<'_> {
                             last_reason = VerificationReason::SubmissionTooOld;
                             break 'candidate_proof;
                         }
+                        Err(
+                            VerificationReason::ClipboardUnchanged
+                            | VerificationReason::ClipboardNotPostLink,
+                        ) => {}
                         Err(reason) => {
                             self.mark_candidate(reason);
                             return Err(reason);
