@@ -26,8 +26,11 @@ mod verification;
 mod verification_queue;
 mod verification_restart;
 mod verification_session;
-pub(crate) use verification::verify_pending_assignment;
 pub use verification::*;
+pub(crate) use verification::{
+    clear_session_wait, note_session_unavailable, retain_session_waits, verify_pending_assignment,
+    SessionUnavailable,
+};
 pub(crate) use verification_queue::{VerificationQueue, COLD_RETRY as VERIFICATION_COLD_RETRY};
 mod verified_cleanup;
 /// Batched read for the device picker. No phone access and no state mutation.

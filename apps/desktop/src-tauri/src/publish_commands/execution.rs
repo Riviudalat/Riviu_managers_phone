@@ -1464,6 +1464,8 @@ pub(crate) async fn execute_publish_campaign_inner(
             .await
         {
             Ok(_) => {}
+            // The verifier's session did not open: nothing was observed or recorded.
+            Err(error) if error.is::<super::verification::SessionUnavailable>() => {}
             Err(error) => {
                 issues.push(publish_issue(
                     "link_check_failed",
@@ -2335,7 +2337,7 @@ pub(super) async fn capture_confirmed_assignment_link(
         .await
         .map_err(|error| match error {
             riviu_core::DeviceControlError::Busy(_) => anyhow::Error::from(error),
-            error => super::verification::SessionUnavailable(error.to_string()).into(),
+            error => super::verification::SessionUnavailable::from_control_error(&error).into(),
         })?;
     let outcome = async {
         let session = control.session(&context)?;

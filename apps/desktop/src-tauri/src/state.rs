@@ -1711,15 +1711,36 @@ impl AppState {
                         _ = interval.tick() => {},
                         Some((udid, result)) = queue.next(), if !queue.is_empty() => {
                             let was_cold = cold.remove(&udid);
-                            if let Err(error) = &result {
-                                log::warn!("publish verification {udid}: {error}");
+                            let retry = if was_cold {
+                                crate::publish_commands::VERIFICATION_COLD_RETRY
+                            } else {
+                                Duration::from_secs(30)
+                            };
+                            match &result {
+                                Err(error) => match error.downcast_ref::<crate::publish_commands::SessionUnavailable>() {
+                                    // Not an observation: nothing recorded, no budget spent.
+                                    // Logged once per change of cause; the row shows it.
+                                    Some(unavailable) => {
+                                        let retry_at = chrono::Utc::now()
+                                            + chrono::Duration::from_std(retry).unwrap_or_default();
+                                        if crate::publish_commands::note_session_unavailable(&udid, unavailable, retry_at) {
+                                            log::warn!(
+                                                "Chưa mở được phiên kiểm tra bài đã gửi trên {udid}: {} ({}; {unavailable}); tự thử lại lúc {}, không đăng lại",
+                                                unavailable.message,
+                                                unavailable.category,
+                                                retry_at.with_timezone(&chrono::Local).format("%H:%M:%S")
+                                            );
+                                        }
+                                    }
+                                    None => log::warn!("publish verification {udid}: {error}"),
+                                },
+                                Ok(_) => {
+                                    if crate::publish_commands::clear_session_wait(&udid) {
+                                        log::info!("Đã mở được phiên kiểm tra bài đã gửi trên {udid}");
+                                    }
+                                }
                             }
                             if !matches!(result, Ok(true)) {
-                                let retry = if was_cold {
-                                    crate::publish_commands::VERIFICATION_COLD_RETRY
-                                } else {
-                                    Duration::from_secs(30)
-                                };
                                 failed_until.insert(udid, Instant::now() + retry);
                             }
                         }
@@ -1796,6 +1817,9 @@ impl AppState {
                         .map(|row| row.assignment_id.as_str())
                         .collect();
                     waits.retain(|id, _| pending_ids.contains(id.as_str()));
+                    crate::publish_commands::retain_session_waits(
+                        &pending.iter().map(|row| row.udid.as_str()).collect(),
+                    );
                     for row in pending {
                         if stop.load(Ordering::Relaxed) {
                             break;

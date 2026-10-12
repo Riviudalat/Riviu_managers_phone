@@ -103,6 +103,9 @@ pub(super) fn eligible_check_candidate<'a>(
 pub struct PublishVerificationWait {
     pub code: &'static str,
     pub message: &'static str,
+    /// When the background verifier tries this phone again after a session-open failure.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub retry_at: Option<String>,
 }
 
 #[derive(Debug, Clone, serde::Serialize)]
@@ -144,14 +147,27 @@ pub fn publish_recovery_capabilities(
                     row.is_due(now) && matches!(row.retained_metadata_candidate(), Ok(None))
                 })
                 .and_then(|row| {
-                    VerificationQueue::phone_wait(
+                    let wait = VerificationQueue::phone_wait(
                         state.registry.get(&row.udid).as_ref(),
                         state.control.current_work_owner(&row.udid).is_some(),
-                    )
-                })
-                .map(|wait| PublishVerificationWait {
-                    code: wait.code(),
-                    message: wait.message(),
+                    );
+                    // On an admitted phone, the last session-open failure is the cause.
+                    let session = wait
+                        .is_none_or(|wait| wait.admits())
+                        .then(|| SESSION_WAITS.lock().get(&row.udid).cloned())
+                        .flatten();
+                    match session {
+                        Some(session) => Some(PublishVerificationWait {
+                            code: session.category,
+                            message: session.message,
+                            retry_at: Some(session.retry_at.to_rfc3339()),
+                        }),
+                        None => wait.map(|wait| PublishVerificationWait {
+                            code: wait.code(),
+                            message: wait.message(),
+                            retry_at: None,
+                        }),
+                    }
                 });
             PublishRecoveryCapabilitiesView {
                 capabilities,
@@ -359,14 +375,89 @@ impl std::error::Error for VerificationObservation {}
 
 /// The verifier's own UI session did not open (helper not running or refused).
 /// No screen was read, so it is not an observation and spends no verification budget.
-#[derive(Debug)]
-pub(super) struct SessionUnavailable(pub(super) String);
+/// The cause keeps the driver's fixed helper vocabulary for the log and the device row.
+#[derive(Debug, Clone)]
+pub(crate) struct SessionUnavailable {
+    /// `shell_root`, `shell_uid`, `android_user`, `recovery_required` or `session_open`.
+    pub(crate) category: &'static str,
+    /// Vietnamese operator reason; never device output.
+    pub(crate) message: &'static str,
+    detail: String,
+}
+impl SessionUnavailable {
+    /// The control plane serializes the driver chain, so only the driver's own typed
+    /// markers name a category; anything else stays the generic session-open cause.
+    pub(super) fn from_control_error(error: &riviu_core::DeviceControlError) -> Self {
+        use riviu_android_driver::riviu_agent::{
+            HelperRecoveryRequired, HelperShellIdentityRefused,
+        };
+        let detail: String = error.to_string().chars().take(512).collect();
+        // Identity refusals first: they may also carry the recovery fence.
+        let (category, message) = match HelperShellIdentityRefused::from_chain_text(&detail) {
+            Some(refusal) => (refusal.category(), refusal.operator_message()),
+            None if detail.contains(&HelperRecoveryRequired.to_string()) => (
+                "recovery_required",
+                "Cần đối soát phiên helper đang giữ; chưa nhận phiên thay thế. App tự đối soát helper khi máy kết nối lại; nếu kéo dài, xem máy này trong Cần xử lý",
+            ),
+            None => (
+                "session_open",
+                "Chưa mở được phiên kiểm tra trên máy (helper hoặc UiAutomator chưa chạy được) — app tự thử lại; nếu kéo dài, xem máy này trong Cần xử lý",
+            ),
+        };
+        Self {
+            category,
+            message,
+            detail,
+        }
+    }
+}
 impl std::fmt::Display for SessionUnavailable {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.write_str(&self.0)
+        f.write_str(&self.detail)
     }
 }
 impl std::error::Error for SessionUnavailable {}
+
+/// The background verifier's last session-open failure on a phone and its next try.
+#[derive(Debug, Clone)]
+struct SessionWait {
+    category: &'static str,
+    message: &'static str,
+    retry_at: chrono::DateTime<chrono::Utc>,
+}
+
+/// Per phone, for the device row. Memory only, pruned to pending phones by the worker
+/// every tick; it names a wait and never admits an observation, Post or Sheet write.
+static SESSION_WAITS: std::sync::LazyLock<parking_lot::Mutex<HashMap<String, SessionWait>>> =
+    std::sync::LazyLock::new(Default::default);
+
+/// Keeps `udid`'s session-open failure; true when its cause changed, to log it once.
+pub(crate) fn note_session_unavailable(
+    udid: &str,
+    unavailable: &SessionUnavailable,
+    retry_at: chrono::DateTime<chrono::Utc>,
+) -> bool {
+    let wait = SessionWait {
+        category: unavailable.category,
+        message: unavailable.message,
+        retry_at,
+    };
+    SESSION_WAITS
+        .lock()
+        .insert(udid.to_owned(), wait)
+        .is_none_or(|previous| previous.category != unavailable.category)
+}
+
+/// The session opened (or the phone left the queue); true when a failure was kept.
+pub(crate) fn clear_session_wait(udid: &str) -> bool {
+    SESSION_WAITS.lock().remove(udid).is_some()
+}
+
+pub(crate) fn retain_session_waits(pending: &std::collections::HashSet<&str>) {
+    SESSION_WAITS
+        .lock()
+        .retain(|udid, _| pending.contains(udid.as_str()));
+}
 
 /// Only this observer's publication is hydrated. Other devices' media and the
 /// campaign event history do not belong in each concurrent verification task.
@@ -569,11 +660,12 @@ async fn verify_pending_assignment_inner(
             ) {
                 return Ok((CheckStatus::Busy, None));
             }
-            let reason: String = error.to_string().chars().take(512).collect();
             if !manual && error.downcast_ref::<SessionUnavailable>().is_some() {
-                // The worker retries this phone at the observation cadence.
-                return Ok((CheckStatus::Busy, Some(reason)));
+                // Typed, unrecorded: the worker logs and shows the cause and retries
+                // this phone later; no observation budget is spent.
+                return Err(error);
             }
+            let reason: String = error.to_string().chars().take(512).collect();
             // The stale observer can never overwrite a newer link or cancelled assignment.
             let code = error
                 .downcast_ref::<VerificationObservation>()

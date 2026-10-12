@@ -34,7 +34,8 @@ function budgetPair(used: unknown, limit: unknown): string | null {
 function verificationWait(c: PublishProgressCapability | undefined, due: number, now: number): string {
  if(!c)return "chưa đọc được trạng thái kiểm tra";
  const wait=typeof c.verificationWait?.message === "string" && c.verificationWait.message.trim() ? c.verificationWait.message.trim().slice(0,256) : null;
- if(due<=now&&wait)return wait;
+ const retry=typeof c.verificationWait?.retryAt === "string" && c.verificationWait.retryAt.length <= 64 ? Date.parse(c.verificationWait.retryAt) : NaN;
+ if(due<=now&&wait)return Number.isFinite(retry)?`${wait} · tự thử lại lúc ${new Date(retry).toLocaleTimeString("vi-VN")}`:wait;
  const overdue=Math.floor((now-due)/60000);
  if(c.automaticVerification)
   return due>now?"app tự kiểm tra khi đến lịch"
