@@ -4284,7 +4284,9 @@ where
         let sound_epoch = session.gui_session_epoch();
         let mut sound_trace = StageDiagnosticOperation::start("soundStage", &sound_epoch, Some(sound_deadline));
         let mut stage_epoch = sound_epoch.clone();
+        let mut sound_evidence = crate::tiktok_sound::SoundStageEvidence::default();
         let chosen = crate::tiktok_sound::with_deadline_budget(stop, sound_deadline, async {
+            sound_evidence = crate::tiktok_sound::SoundStageEvidence::capture();
             let deadline = sound_deadline;
             let mut epoch = session.gui_session_epoch();
             let chosen = loop {
@@ -4493,7 +4495,7 @@ where
                 error.context(crate::publish_recovery::RecoveryFailure::new(
                     "publish_sound_budget_exhausted",
                     crate::publish_recovery::FailureKind::Terminal,
-                    "Đã hết thời gian tải và xác nhận nhạc; chưa bấm Đăng. Có thể chọn Thử lại để bắt đầu lượt mới.",
+                    sound_evidence.budget_exhausted_message(),
                 ))
             } else { error }
         });

@@ -570,14 +570,16 @@ async fn capture_sheet(
             Err(error) => return Err(error),
         }
     }
+    // The selected tab and tab bounds stay those of the last frame OCR answered until this
+    // frame's OCR replaces them. Run 72401bfd (other PC, 2026-10-12): both timeouts fired while
+    // a frame was being captured, so clearing them here logged `tabBounds=[]` and hid what the
+    // sheet showed after the second Hot tap.
     visual_diagnostic(|state| {
         state.generation = generation;
         state.request_id = None;
         state.observation_id = None;
         state.vietnamese_request_id = None;
         state.vietnamese_observation_id = None;
-        state.selected_tab = None;
-        state.tab_bounds.clear();
         state.same_unselected_tabs = None;
         if generation <= 2 {
             state.emit("captureStart", None);
@@ -773,6 +775,7 @@ fn visual_pool_timeout(saw_hot: &AtomicBool) -> anyhow::Result<ObservedSoundPool
     if saw_hot.load(Ordering::Relaxed) {
         Err(VisualSoundPoolUnavailable.into())
     } else {
+        note_hot_unconfirmed();
         Err(crate::publish_recovery::retryable_error(
             "sound_tab_unavailable",
             "TikTok chưa xác nhận tab Hot của bảng nhạc; chưa chọn nhạc hoặc bấm Đăng",

@@ -271,7 +271,24 @@ pub fn describe(error: &anyhow::Error) -> RecoveryFailure {
             return RecoveryFailure::new(code, kind, format!("{error:#}"));
         }
     }
-    RecoveryFailure::legacy(format!("{error:#}"))
+    let failure = RecoveryFailure::legacy(format!("{error:#}"));
+    // Drivers raise this type for reads only: no root answered, so the screen is unknown, not
+    // refused. Run 72401bfd (other PC, 2026-10-12, ce0417141550322202 and ce031713f3d3ec1d0c):
+    // the every-window wording "đọc qua mọi cửa sổ không có cửa sổ nào …" has no retry word and
+    // settled `legacy_terminal` at the sound step's preRow, while the 500 wording of the same read
+    // ("Timed out …") stayed retryable. A refusal word in the chain still ends the attempt, and
+    // no retry is reserved once a Post intent exists.
+    if failure.kind == FailureKind::Terminal
+        && error.is::<crate::driver::AccessibilityReadUnavailable>()
+        && !specific_refusal(&failure.message.to_lowercase())
+    {
+        return RecoveryFailure::new(
+            "accessibility_read_unavailable",
+            FailureKind::Retryable,
+            failure.message,
+        );
+    }
+    failure
 }
 
 /// These observations invalidate the local prepared targets. Only the admitted
@@ -290,35 +307,7 @@ pub(crate) fn requires_fresh_preparation(error: &anyhow::Error) -> bool {
 pub fn classify(message: &str) -> FailureKind {
     let s = message.to_lowercase();
     // Specific refusals always win over words such as timeout in an error chain.
-    if [
-        "unauthorized",
-        "account mismatch",
-        "tài khoản đã đổi",
-        "sai tài khoản",
-        "unmeasured",
-        "chưa hỗ trợ",
-        "chưa đo",
-        "còn máy khác điều khiển",
-        "không khớp",
-        "source changed",
-        "nội dung đã thay đổi",
-        "permission denied",
-        "insufficient",
-        "hash mismatch",
-        "caption changed",
-        "caption differs",
-        "identity changed",
-        "ambiguous",
-        "không phân biệt",
-        "rehearsal",
-        "đã dừng",
-        "đã tạm dừng",
-        "stopped",
-        "cancelled",
-    ]
-    .iter()
-    .any(|x| s.contains(x))
-    {
+    if specific_refusal(&s) {
         return FailureKind::Terminal;
     }
     // A lock screen refused the app before anything reached TikTok. Retrying the same phone
@@ -375,6 +364,38 @@ pub fn classify(message: &str) -> FailureKind {
         return FailureKind::Retryable;
     }
     FailureKind::Terminal
+}
+
+/// A word that names a deliberate refusal; `lowercase` is the message already lowercased.
+fn specific_refusal(lowercase: &str) -> bool {
+    [
+        "unauthorized",
+        "account mismatch",
+        "tài khoản đã đổi",
+        "sai tài khoản",
+        "unmeasured",
+        "chưa hỗ trợ",
+        "chưa đo",
+        "còn máy khác điều khiển",
+        "không khớp",
+        "source changed",
+        "nội dung đã thay đổi",
+        "permission denied",
+        "insufficient",
+        "hash mismatch",
+        "caption changed",
+        "caption differs",
+        "identity changed",
+        "ambiguous",
+        "không phân biệt",
+        "rehearsal",
+        "đã dừng",
+        "đã tạm dừng",
+        "stopped",
+        "cancelled",
+    ]
+    .iter()
+    .any(|x| lowercase.contains(x))
 }
 
 pub trait RecoveryJournal: Send + Sync {

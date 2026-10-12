@@ -232,13 +232,22 @@ không yêu cầu gây hiệu ứng nào bị gửi lại. Trước khi bấm h�
 đọc được thì không hỏi thêm XML nào (không kiểm hộp thoại, không đọc lại danh sách, lần thử
 lại tại chỗ không đọc lại editor): pool Hot giao danh tính đã chốt cho đường ảnh; tab khác
 (For You) chưa đo đường ảnh nên lượt thử kết thúc trước mọi tap với
-`sound_any_choice_requires_fresh_attempt`.
+`sound_any_choice_requires_fresh_attempt`. Bước nhạc thấy bảng nhạc mù (đủ hai gốc không
+đọc được, một `/source` chạm hạn 30 giây, hoặc vào thẳng đường ảnh vì lượt trước đã mù) mà hết
+ba phút thì `publish_sound_budget_exhausted` (vẫn terminal, chưa bấm Đăng) nói rõ TikTok
+không trả giao diện bảng nhạc, thêm "bảng nhạc không chuyển sang tab Hot" khi đường ảnh hết
+giờ mà chưa khung nào thấy Hot, và bước tiếp: dừng phần mềm khác (như GenFarmer) điều khiển máy,
+khởi động lại máy nếu máy không còn bài đăng chưa rõ, rồi Thử lại.
 Khi gốc bảng nhạc không đọc được ngay trong pha có thể thay phiên (#44/#47, 2026-10-09:
 gốc cửa sổ đang hoạt động vẫn null kể cả trên server UiAutomator2 mới), Android thử đọc
 qua mọi cửa sổ trước: bật `enableMultiWindows: true` trên đúng phiên đó qua
 `/appium/settings`, đọc lại cài đặt để chứng minh, rồi đọc lại `/source`; cây trả về có
 một gốc cho mỗi cửa sổ nên chỉ giữ các cửa sổ của gói TikTok đã chọn (bỏ system UI, bàn
-phím), không có cửa sổ nào của gói đó thì coi là chưa đọc được, không phải vắng. Các bộ
+phím), không có cửa sổ nào của gói đó thì coi là chưa đọc được, không phải vắng. Lỗi đọc
+đó (`AccessibilityReadUnavailable`) có thể thử lại trước Post như lỗi gốc ~10,5 giây, dù
+câu chữ không có từ timeout (`accessibility_read_unavailable`), trừ khi chuỗi lỗi có lý do
+từ chối cụ thể; run 72401bfd (máy khác, 2026-10-12) từng kết thúc `legacy_terminal` ở
+preRow vì câu chữ này. Các bộ
 phân loại bảng nhạc chạy y nguyên trên cây đã lọc; epoch không đổi và mọi guard epoch,
 foreground, generation mới trước tap giữ nguyên. Tối đa một lần chuyển mỗi bước nhạc;
 `ReadRecovery` ghi `multiWindowRead` (`ready`/`unreadable`/`failed`/`unsupported`) kèm

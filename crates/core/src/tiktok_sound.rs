@@ -93,6 +93,58 @@ struct SoundRouteEvidence {
     source_timed_out: AtomicBool,
     /// Visual row taps dispatched in this stage, across the composer's inline recovery.
     row_taps: AtomicU32,
+    /// A visual observation ran out of time without a frame showing Hot selected.
+    hot_unconfirmed: AtomicBool,
+}
+
+/// The stage's route evidence, kept past the end of its budget scope so the composer can say
+/// why the sound stage ran out of time. It never authorizes a tap or Post.
+#[derive(Default)]
+pub(crate) struct SoundStageEvidence(Option<Arc<SoundRouteEvidence>>);
+
+impl SoundStageEvidence {
+    /// Called inside the stage's budget scope; outside one it holds nothing.
+    pub(crate) fn capture() -> Self {
+        Self(SOUND_BUDGET.try_with(|budget| budget.route.clone()).ok())
+    }
+
+    /// The operator message for a sound stage whose budget ran out. Run 72401bfd (other PC,
+    /// 2026-10-12, Máy 33/40): the sheet root never answered on many phones and the visual
+    /// route's Hot taps never showed Hot selected, yet the operator saw only a generic timeout.
+    /// Phone 44 (box3150, 2026-10-10) showed the same blind sheet and swallowed taps while
+    /// overloaded, and a reboot cleared it (docs/agents/09-fleet-android.md).
+    pub(crate) fn budget_exhausted_message(&self) -> String {
+        let Some(route) = self.0.as_ref() else {
+            return SOUND_BUDGET_EXHAUSTED.into();
+        };
+        // A blind sheet in the sense of the visual hand-off, not one stray unreadable read. A
+        // stage that adopted a blind sheet remembered from the last attempt asks no root at
+        // all; its frames skip the XML popup check, and only a blind sheet reaches the frames.
+        let hot_unconfirmed = route.hot_unconfirmed.load(Ordering::Relaxed);
+        if route.unreadable_roots.load(Ordering::Relaxed) < ROOT_UNREADABLE_CAP
+            && !route.source_timed_out.load(Ordering::Relaxed)
+            && !route.popup_check_skipped.load(Ordering::Relaxed)
+            && !hot_unconfirmed
+        {
+            return SOUND_BUDGET_EXHAUSTED.into();
+        }
+        let hot = if hot_unconfirmed {
+            " và bảng nhạc không chuyển sang tab Hot"
+        } else {
+            ""
+        };
+        format!(
+            "Đã hết thời gian chọn nhạc; chưa bấm Đăng. TikTok trên máy không trả giao diện bảng nhạc{hot}: máy có thể đang quá tải hoặc có phần mềm khác (như GenFarmer) đang điều khiển máy. Dừng phần mềm đó điều khiển máy này, khởi động lại máy nếu máy không còn bài đăng chưa rõ, rồi chọn Thử lại."
+        )
+    }
+}
+
+const SOUND_BUDGET_EXHAUSTED: &str =
+    "Đã hết thời gian tải và xác nhận nhạc; chưa bấm Đăng. Có thể chọn Thử lại để bắt đầu lượt mới.";
+
+fn note_hot_unconfirmed() {
+    let _ =
+        SOUND_BUDGET.try_with(|budget| budget.route.hot_unconfirmed.store(true, Ordering::Relaxed));
 }
 const ROUTE_XML: u8 = 1;
 const ROUTE_VISUAL: u8 = 2;
