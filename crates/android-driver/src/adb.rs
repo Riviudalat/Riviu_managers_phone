@@ -558,15 +558,19 @@ impl AdbProgram {
             .is_some_and(|watch| watch.lock().holding_starts(std::time::Instant::now()))
     }
 
-    pub(crate) fn apply_server_for_serial(&self, command: &mut Command, serial: Option<&str>) {
-        let port = serial
+    /// The server port this serial's adb calls are pinned to, when Riviu pinned one.
+    pub(crate) fn server_port_for(&self, serial: Option<&str>) -> Option<u16> {
+        serial
             .and_then(|id| {
                 self.server_routes
                     .as_ref()
                     .and_then(|routes| routes.read().get(id).copied())
             })
-            .or(self.server_port);
-        if let Some(port) = port {
+            .or(self.server_port)
+    }
+
+    pub(crate) fn apply_server_for_serial(&self, command: &mut Command, serial: Option<&str>) {
+        if let Some(port) = self.server_port_for(serial) {
             command
                 .env_remove("ADB_SERVER_SOCKET")
                 .env("ANDROID_ADB_SERVER_PORT", port.to_string());

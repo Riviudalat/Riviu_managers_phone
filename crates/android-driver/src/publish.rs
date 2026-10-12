@@ -66,22 +66,101 @@ const VIDEOS_URI: &str = "content://media/external/video/media";
 /// Generous: `pm`/`content` calls on this fleet are 1–2 s, and a push is bounded by
 /// file size.
 const PUSH_TIMEOUT: Duration = Duration::from_secs(120);
-/// Pause before the one retry of a push whose adb client could not reach its own server.
+/// Pause before the one retry when Riviu cannot tell which server port to watch.
 const PUSH_DAEMON_RETRY_BACKOFF: Duration = Duration::from_secs(2);
+/// How long a transfer step waits for the adb server to answer again before its one retry.
+/// A cap, not a target: GenFarmer's restart on 2026-10-11 06:14Z left port 5037 dark for
+/// 8 s, and a Windows connect that times out (10060) already spent ~20 s.
+const DAEMON_RETURN_WAIT: Duration = Duration::from_secs(30);
+const DAEMON_RETURN_POLL: Duration = Duration::from_secs(1);
 
 /// The host adb client could not reach its server, so nothing reached the phone.
 /// Campaign 6e0bfb7c (2026-10-12 02:28, 20 phones): `cannot connect to daemon at
-/// tcp:5037 … (10060)` under load ended staging as `media_transfer_failed`.
-fn adb_daemon_unreachable(error: &anyhow::Error) -> bool {
-    let text = format!("{error:#}").to_ascii_lowercase();
+/// tcp:5037 … (10060)` under load ended staging as `media_transfer_failed`. Campaign
+/// 4a25d804 (r93) ended a `sha256sum` read-back the same way, through the client's own
+/// `* daemon not running; starting now … failed to start daemon` fallback.
+fn adb_daemon_unreachable_text(text: &str) -> bool {
+    let text = text.to_ascii_lowercase();
     [
         "cannot connect to daemon",
+        "failed to start daemon",
         "(10060)",
         "(10061)",
         "connection refused",
     ]
     .iter()
     .any(|marker| text.contains(marker))
+}
+
+fn adb_daemon_unreachable(error: &anyhow::Error) -> bool {
+    adb_daemon_unreachable_text(&format!("{error:#}"))
+}
+
+/// Wait, bounded, until the adb server this phone is routed to answers a read-only roster
+/// request. Never spawns an adb client, so it cannot race whoever is restarting the server.
+async fn await_adb_server(adb: &AdbProgram, serial: &str) {
+    let Some(port) = adb.server_port_for(Some(serial)) else {
+        tokio::time::sleep(PUSH_DAEMON_RETRY_BACKOFF).await;
+        return;
+    };
+    let deadline = tokio::time::Instant::now() + DAEMON_RETURN_WAIT;
+    while crate::adb_server::roster(port).await.is_err() {
+        if tokio::time::Instant::now() >= deadline {
+            return;
+        }
+        tokio::time::sleep(DAEMON_RETURN_POLL).await;
+    }
+}
+
+/// One retry for a staging step whose adb client never reached its server. Only used
+/// before any Post: every caller is a hidden-staging write or a read, proved by read-back.
+async fn retry_once_after_daemon_returns<T, F, Fut>(
+    adb: &AdbProgram,
+    serial: &str,
+    operation: &str,
+    unreachable: impl Fn(&anyhow::Result<T>) -> bool,
+    mut call: F,
+) -> anyhow::Result<T>
+where
+    F: FnMut() -> Fut,
+    Fut: std::future::Future<Output = anyhow::Result<T>>,
+{
+    let first = call().await;
+    if !unreachable(&first) {
+        return first;
+    }
+    tracing::warn!(
+        serial,
+        operation,
+        "adb chưa kết nối được daemon khi chuyển media lên máy {serial} ({operation}); \
+         chờ ADB trả lời rồi thử lại một lần"
+    );
+    await_adb_server(adb, serial).await;
+    call().await
+}
+
+fn error_daemon_unreachable<T>(result: &anyhow::Result<T>) -> bool {
+    matches!(result, Err(error) if adb_daemon_unreachable(error))
+}
+
+/// A read-back shell whose adb client could not reach the server gets one retry.
+/// `adb shell` reports that as a non-zero exit with the client's stderr, not as `Err`.
+async fn staging_read(
+    adb: &AdbProgram,
+    serial: &str,
+    script: &str,
+) -> anyhow::Result<crate::adb::ShellOutput> {
+    retry_once_after_daemon_returns(
+        adb,
+        serial,
+        "read-back",
+        |result: &anyhow::Result<crate::adb::ShellOutput>| match result {
+            Ok(output) => output.exit_code != 0 && adb_daemon_unreachable_text(&output.stderr),
+            Err(error) => adb_daemon_unreachable(error),
+        },
+        || adb.shell_output(serial, script, crate::adb::DEFAULT_TIMEOUT),
+    )
+    .await
 }
 
 /// Only the characters a filename and a shell argument can both carry safely.
@@ -1039,8 +1118,7 @@ async fn reuse_verified_import(
         let remote = format!("{visible}/{}", file.name);
         if let Err(error) =
             verify_staged_file(&remote, file.bytes, &file.sha256, |script| async move {
-                adb.shell_output(serial, &script, crate::adb::DEFAULT_TIMEOUT)
-                    .await
+                staging_read(adb, serial, &script).await
             })
             .await
         {
@@ -1083,9 +1161,13 @@ pub async fn stage(
 
     // Start from empty: a re-stage after a partial failure must not inherit files the
     // new manifest does not list.
-    adb.shell(
+    let reset = format!("rm -rf {remote_root} && mkdir -p {remote_root}");
+    retry_once_after_daemon_returns(
+        adb,
         serial,
-        &format!("rm -rf {remote_root} && mkdir -p {remote_root}"),
+        "prepare",
+        error_daemon_unreachable,
+        || adb.shell(serial, &reset),
     )
     .await
     .context("prepare the staging directory")?;
@@ -1121,30 +1203,18 @@ pub async fn stage(
         // the read-back below proves it, so a daemon that refused the client gets one retry.
         let source = path.display().to_string();
         let args = ["push", source.as_str(), remote.as_str()];
-        let push = || adb.device(serial, &args, PUSH_TIMEOUT);
-        let pushed = match push().await {
-            Err(error) if adb_daemon_unreachable(&error) => {
-                tracing::warn!(
-                    serial,
-                    %error,
-                    "adb chưa kết nối được daemon khi đẩy media lên máy {serial}; thử lại một lần"
-                );
-                tokio::time::sleep(PUSH_DAEMON_RETRY_BACKOFF).await;
-                push().await
-            }
-            pushed => pushed,
-        };
-        pushed.with_context(|| format!("push {} to {remote}", path.display()))?;
+        retry_once_after_daemon_returns(adb, serial, "push", error_daemon_unreachable, || {
+            adb.device(serial, &args, PUSH_TIMEOUT)
+        })
+        .await
+        .with_context(|| format!("push {} to {remote}", path.display()))?;
 
         // The push's own success is not evidence. Read both back.
         let size = verify_staged_file(
             &remote,
             bytes.len() as u64,
             &local_sha,
-            |script| async move {
-                adb.shell_output(serial, &script, crate::adb::DEFAULT_TIMEOUT)
-                    .await
-            },
+            |script| async move { staging_read(adb, serial, &script).await },
         )
         .await?;
         staged.push(StagedFile {
