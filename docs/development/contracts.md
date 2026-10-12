@@ -692,6 +692,23 @@ chứng minh được (IME ban đầu mất, APK đổi nguồn, tiến trình c
 **Khôi phục helper** là đường dự phòng. Máy reboot hoặc mất tiến trình helper được coi là
 phiên cũ đã mất, không phải chưa rõ.
 
+Chính driver áp dụng quy tắc đó, kể cả trong lease của tác vụ (lượt tự khởi động lại khi
+quá tải, `device_load::reboot_for_job`), không chờ lease Repair. Helper chỉ giữ chủ phiên,
+token và epoch trong bộ nhớ (`OwnerSession.java`), nên chủ phiên được giữ là đã mất khi có
+một trong các bằng chứng sau (`runtime.rs::owner_restart_proof`):
+- boot id hiện tại khác boot của đúng epoch đó (`bootId` ghi trong `runtime-owner.json` lúc
+  nhận phiên; hồ sơ cũ dùng `clipboard-proof.json` cùng owner/instance/generation);
+- `pidof com.riviu.agent` trống;
+- pid khác `helperPid` đã ghi khi phiên được chứng minh.
+
+Khi đó `settle_restarted_owner` chuyển `runtime-owner.json` và `release-<owner>.json` (kể cả
+`releasePending`) vào `restarted/<ownerId>/` kèm `receipt.json` (bằng chứng, hash, không
+RELEASE, không lặp thao tác), rồi nhận phiên mới. Nó chạy ở `ensure_runtime` trước khi
+settle release, và ở client đang cache trước reconnect hoặc RELEASE lặp lại
+(`retire_if_restarted`). Đọc không được, `ime-checkpoint.json` còn, có
+`maintenance-active.json` hoặc hồ sơ khác epoch thì không có bằng chứng và fence cũ giữ
+nguyên.
+
 adbd chạy root (`id -u` = 0) được tự sửa, không có bước xác nhận (quyết định của chủ sản
 phẩm 12/10/2026): `agent_commands::auto_unroot_adb` chạy ở worker kết nối (trước
 `prepare_helper_runtime`) và ở admission trên (trước kiểm ledger), dưới lease Repair nên

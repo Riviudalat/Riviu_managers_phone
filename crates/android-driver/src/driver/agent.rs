@@ -614,6 +614,11 @@ impl AndroidDriver {
                     if helper.is_alive().await {
                         return Ok(Some(helper));
                     }
+                    // A proven reboot or helper restart already ended this owner's claim.
+                    if helper.retire_if_restarted().await? {
+                        self.helpers.lock().remove(serial);
+                        return Ok(None);
+                    }
                     if let Some(reconnected) = helper.reconnect_runtime().await? {
                         self.helpers.lock().insert(serial.to_owned(), reconnected.clone());
                         return Ok(Some(reconnected));

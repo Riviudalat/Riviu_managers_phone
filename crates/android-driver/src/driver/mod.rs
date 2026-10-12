@@ -1459,11 +1459,17 @@ impl AndroidDriver {
                 anyhow::ensure!(helper.is_scoped_canary(), crate::riviu_agent::HelperRecoveryRequired);
                 anyhow::ensure!(!helper.cleanup_is_pending(), crate::riviu_agent::HelperRecoveryRequired);
                 if helper.is_alive().await { return Ok(helper); }
-                if let Some(reconnected) = helper.reconnect_runtime().await? {
-                    self.helpers.lock().insert(serial.into(), reconnected.clone());
-                    return Ok(reconnected);
+                // A proven reboot or helper restart already ended this owner's claim:
+                // drop it and claim afresh below instead of fencing the phone.
+                if helper.retire_if_restarted().await.context(crate::riviu_agent::HelperRecoveryRequired)? {
+                    self.helpers.lock().remove(serial);
+                } else {
+                    if let Some(reconnected) = helper.reconnect_runtime().await? {
+                        self.helpers.lock().insert(serial.into(), reconnected.clone());
+                        return Ok(reconnected);
+                    }
+                    anyhow::bail!("existing debug helper cannot become a release owner");
                 }
-                anyhow::bail!("existing debug helper cannot become a release owner");
             }
             let helper = crate::riviu_agent::HelperClient::ensure_runtime(self.adb.clone(), serial, self.riviu_agent_apk.as_deref(), self.helper_state_dir.as_deref()).await?;
             self.helpers.lock().insert(serial.into(), helper.clone());

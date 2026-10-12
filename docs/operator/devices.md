@@ -219,6 +219,11 @@ lại, không gửi lại và không ghi Sheet lại; bài chưa rõ vẫn chỉ
 phục helper** chỉ còn là đường dự phòng khi kế hoạch khôi phục không chứng minh được
 (ví dụ bàn phím ban đầu đã mất).
 
+Khi điện thoại vừa khởi động lại (kể cả lần Riviu tự khởi động lại máy quá tải giữa tác
+vụ) hoặc helper trên máy vừa chạy lại, phiên helper cũ đã mất cùng tiến trình. Riviu tự bỏ
+phiên đó và nhận phiên mới ngay, kể cả khi máy đang trong tác vụ. Nhật ký ghi "tự đối soát
+helper: tiến trình giữ phiên cũ đã mất …".
+
 Lỗi chuẩn bị helper phân biệt `runtime_acquisition` (nhận phiên runtime) và
 `clipboard_qualification` (xác minh clipboard). Thông báo chỉ dùng các nhóm nguyên
 nhân cố định: `shell_root`, `shell_uid`, `android_user`, `clipboard_not_qualified`,
