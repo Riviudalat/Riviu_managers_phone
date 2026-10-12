@@ -365,6 +365,24 @@ fn bounded_json(path: &Path) -> anyhow::Result<Value> {
     Ok(serde_json::from_slice(&bytes)?)
 }
 
+/// Nonsecret record that one exact helper owner proved clipboard snapshot/restore through
+/// its IME on one phone boot. Bound to the boot, the bundled APK and the owner's service
+/// epoch, so a reboot, a new helper build, a service restart or a new claim never matches.
+fn clipboard_proof_path(state: &Path) -> PathBuf {
+    state.join("clipboard-proof.json")
+}
+
+fn clipboard_proof(serial: &str, boot_id: &str, apk_sha256: &str, owner: &CanaryOwner) -> Value {
+    json!({"serial":serial,"androidUser":0,"bootId":boot_id,"apkSha256":apk_sha256,
+        "ownerId":owner.owner_id,"serviceInstance":owner.instance,"ownerGeneration":owner.generation})
+}
+
+async fn boot_identity(adb: &AdbProgram, serial: &str) -> anyhow::Result<String> {
+    let boot_id = checked_shell(adb, serial, "cat /proc/sys/kernel/random/boot_id").await?.trim().to_owned();
+    anyhow::ensure!(!boot_id.is_empty() && boot_id.len() <= 128, "helper boot identity missing");
+    Ok(boot_id)
+}
+
 pub(super) async fn release(adb: &AdbProgram, serial: &str, owner: &CanaryOwner, token: &str, host_port: Option<u16>) -> anyhow::Result<()> {
     let path = release_path(owner);
     if path.try_exists()? {
@@ -875,6 +893,34 @@ impl HelperClient {
             .context(format!("helper cold readiness unproved; no claim ({error:#})"))))
     }
 
+    /// Record the clipboard proof this owner just made. Best effort: without the record the
+    /// next desktop start only proves the clipboard again.
+    async fn record_clipboard_proof(&self, apk_sha256: &str) {
+        let Some(owner) = self.canary.as_ref() else { return };
+        let recorded = async {
+            let boot_id = boot_identity(&self.adb, &self.serial).await?;
+            durable_json(&clipboard_proof_path(&owner.report), &clipboard_proof(&self.serial, &boot_id, apk_sha256, owner))
+        }.await;
+        if let Err(error) = recorded {
+            tracing::warn!(serial = %self.serial, error = %format!("{error:#}"), "helper clipboard proof not recorded; next start proves it again");
+        }
+    }
+
+    /// Adopt the clipboard proof that this same owner and service epoch made on this boot
+    /// with this APK, instead of switching the IME again on every desktop start. Caption
+    /// entry still proves IME selection and clipboard settlement on each use.
+    async fn reuse_clipboard_proof(&self, apk_sha256: &str) -> bool {
+        let Some(owner) = self.canary.as_ref() else { return false };
+        let Ok(recorded) = bounded_json(&clipboard_proof_path(&owner.report)) else { return false };
+        let Ok(boot_id) = boot_identity(&self.adb, &self.serial).await else { return false };
+        if recorded != clipboard_proof(&self.serial, &boot_id, apk_sha256, owner) {
+            return false;
+        }
+        self.clipboard_qualified.store(true, std::sync::atomic::Ordering::Release);
+        tracing::info!(serial = %self.serial, "helper clipboard proof reused for this boot; no IME switch");
+        true
+    }
+
     /// Called under the driver's inventory writer and the caller's control lease.
     pub(crate) async fn ensure_runtime(adb: AdbProgram, serial: &str, apk: Option<&Path>, state_dir: Option<&Path>) -> anyhow::Result<Self> {
         let state = state_path(state_dir.context("helper durable state directory missing")?, serial)?;
@@ -988,6 +1034,7 @@ impl HelperClient {
                 if reply == "protectedStatus" { persist_claim_diagnostic(&owner, serial, diagnostic)?; }
                 await_helper_ready(|| async { client.require_canary_identity().await?; let status = client.require_status().await?; anyhow::ensure!(status.features.iter().any(|f| f == "secureBootstrapBinderShell") && REQUIRED_FEATURES.iter().all(|required| status.features.iter().any(|f| f == required)), "release helper features missing"); Ok(()) }).await?;
                 client.qualify_clipboard_roundtrip().await?;
+                client.record_clipboard_proof(&hash).await;
                 Ok::<(), anyhow::Error>(())
             }.await;
             if let Err(error) = attach {
@@ -1046,7 +1093,10 @@ impl HelperClient {
             anyhow::ensure!(owner_record(state, serial)? == record, HelperRecoveryRequired);
             durable_json(&state.join("runtime-owner.json"), &persisted)?;
             client.require_canary_identity().await?;
-            client.qualify_clipboard_roundtrip().await?;
+            if !client.reuse_clipboard_proof(&hash).await {
+                client.qualify_clipboard_roundtrip().await?;
+                client.record_clipboard_proof(&hash).await;
+            }
             Ok::<(), anyhow::Error>(())
         }.await;
         if let Err(error) = proof {

@@ -22,7 +22,10 @@ use tokio::time::{Duration, Instant};
 
 use super::CommandAdmissionState;
 
-const MAX_CONCURRENT_INSTALLS: usize = 2;
+/// Phones prepared at once, each under its own Repair lease. Not a measured limit: at 2
+/// (until 2026-10-13) a 30-phone desktop start left phones queued for over five minutes.
+/// Package installs keep their own fleet-wide cap in the driver (`install_apk`).
+const MAX_CONCURRENT_PREPARATIONS: usize = 10;
 /// Finite backoff for observation-only preparation refusals on one connection: the
 /// operator may fix the phone (e.g. turn GenFarmer off) without replugging it. Then terminal.
 const PREPARE_RETRY_DELAYS: [Duration; 3] =
@@ -484,7 +487,7 @@ impl SetupQueue {
             }
         }
         for device in devices {
-            if self.tasks.len() >= MAX_CONCURRENT_INSTALLS {
+            if self.tasks.len() >= MAX_CONCURRENT_PREPARATIONS {
                 break;
             }
             let Some(connection) = self.connections.get(&device.udid) else {
@@ -802,13 +805,11 @@ mod tests {
     }
 
     #[tokio::test(start_paused = true)]
-    async fn two_slow_installs_do_not_block_tick_or_admit_a_third() {
+    async fn slow_preparations_do_not_block_tick_or_admit_past_the_cap() {
         let mut queue = SetupQueue::default();
-        let devices = vec![
-            phone("a", DeviceStatus::Ready),
-            phone("b", DeviceStatus::Ready),
-            phone("c", DeviceStatus::Ready),
-        ];
+        let devices: Vec<_> = (0..=MAX_CONCURRENT_PREPARATIONS)
+            .map(|index| phone(&format!("p{index:02}"), DeviceStatus::Ready))
+            .collect();
         let started = tokio::time::Instant::now();
         queue.tick(
             &devices,
@@ -818,7 +819,7 @@ mod tests {
                 AttemptOutcome::Finished
             },
         );
-        assert_eq!(queue.tasks.len(), 2);
+        assert_eq!(queue.tasks.len(), MAX_CONCURRENT_PREPARATIONS);
         queue.tick(
             &devices,
             |_| true,
@@ -835,7 +836,7 @@ mod tests {
                 async { AttemptOutcome::Finished }
             },
         );
-        assert_eq!(scheduled, ["c"]);
+        assert_eq!(scheduled, [format!("p{MAX_CONCURRENT_PREPARATIONS:02}")]);
         queue.drain().await;
     }
 
