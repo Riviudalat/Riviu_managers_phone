@@ -158,15 +158,103 @@ pub async fn open_clean_interaction_context(
     open_interaction_context_with_start(control, udid, true, || false).await
 }
 
+/// A session on the target app **without** the frame stream, for an observation that reads
+/// only the hierarchy and never looks at a frame: the account read.
+///
+/// The stream is what failed the read, not the read itself. Measured 13/10/2026 on an
+/// SM-G955F whose screen capture produced nothing: `startStreamAfterSession … minicap produced
+/// no decodable frame in 12s` refused every account check, so the phone could not pass publish
+/// preflight although its hierarchy was perfectly readable. The overlay already reads the
+/// account this way, through a session with no minicap behind it.
+///
+/// Same lease, same idle-sweep yield, same foreground slot as [`open_interaction_context`]:
+/// the slot is held until [`Self::close`], so a fleet-wide account check stays exactly as
+/// bounded as it was when every read started a stream.
+pub struct InteractionReadSession {
+    pub context: crate::UiSessionContext,
+    pub target_package: String,
+    capacity: crate::UiCapacityReservation,
+}
+
+impl InteractionReadSession {
+    pub fn session(
+        &self,
+        control: &DeviceControlPlane,
+    ) -> Result<Arc<dyn crate::UiSession>, DeviceControlError> {
+        control.session(&self.context)
+    }
+
+    /// Release the session, then the foreground slot it occupied.
+    pub fn close(
+        self,
+        control: &DeviceControlPlane,
+    ) -> Result<crate::ContextReleaseProof, DeviceControlError> {
+        let closed = control.close_session_context(self.context);
+        drop(self.capacity);
+        closed
+    }
+}
+
+pub async fn open_interaction_read_session(
+    control: &DeviceControlPlane,
+    udid: &str,
+) -> Result<InteractionReadSession, DeviceControlError> {
+    let _idle = control.defer_idle_work(&[udid.to_owned()], DeviceWorkOwner::Interaction);
+    let (exclusive, capacity, target_package, kind) =
+        reserve_interaction_slot(control, udid, || false).await?;
+    let context = control
+        .start_interaction_session(exclusive, &target_package, kind)
+        .await?;
+    Ok(InteractionReadSession {
+        context,
+        target_package,
+        capacity,
+    })
+}
+
 async fn open_interaction_context_with_start(
     control: &DeviceControlPlane,
     udid: &str,
     clean_start: bool,
     cancelled: impl Fn() -> bool + Send,
 ) -> Result<InteractionDevice, DeviceControlError> {
+    let _idle = control.defer_idle_work(&[udid.to_owned()], DeviceWorkOwner::Interaction);
+    let (exclusive, capacity, target_package, kind) =
+        reserve_interaction_slot(control, udid, cancelled).await?;
+    let context = if clean_start {
+        control
+            .start_clean_app_session(exclusive, capacity, &target_package, kind)
+            .await?
+    } else {
+        let session = control
+            .start_interaction_session(exclusive, &target_package, kind)
+            .await?;
+        control.start_reserved_stream(session, capacity).await?
+    };
+    Ok(InteractionDevice {
+        context,
+        target_package,
+    })
+}
+
+/// Lease and foreground slot for one interaction-owned phone, plus the package and session
+/// kind it will be driven with. The caller holds the idle-work deferral across this and the
+/// session start.
+async fn reserve_interaction_slot(
+    control: &DeviceControlPlane,
+    udid: &str,
+    cancelled: impl Fn() -> bool + Send,
+) -> Result<
+    (
+        crate::DeviceExclusiveContext,
+        crate::UiCapacityReservation,
+        String,
+        InteractionSessionKind,
+    ),
+    DeviceControlError,
+> {
     // Resolve before acquiring anything: a phone with no drivable TikTok build should
     // refuse without taking a lease or a capacity slot.
-    let _idle = control.defer_idle_work(&[udid.to_owned()], DeviceWorkOwner::Interaction);
     let target_package = control.resolve_tiktok_package(udid).await?;
     // **A phone the idle sweeper is tidying is busy for a moment, not taken.**
     //
@@ -212,20 +300,7 @@ async fn open_interaction_context_with_start(
     } else {
         InteractionSessionKind::Ordinary
     };
-    let context = if clean_start {
-        control
-            .start_clean_app_session(exclusive, capacity, &target_package, kind)
-            .await?
-    } else {
-        let session = control
-            .start_interaction_session(exclusive, &target_package, kind)
-            .await?;
-        control.start_reserved_stream(session, capacity).await?
-    };
-    Ok(InteractionDevice {
-        context,
-        target_package,
-    })
+    Ok((exclusive, capacity, target_package, kind))
 }
 
 /// Capture through the owned UI session, after settlement and before its release.

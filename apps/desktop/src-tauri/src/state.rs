@@ -2353,17 +2353,25 @@ impl AppState {
                         let registry = registry.clone();
                         let udid = device.udid.clone();
                         starts.push(tokio::spawn(async move {
-                            let started = crate::view_watchdog::start_android_view(
+                            let outcome = crate::view_watchdog::start_android_view(
                                 &android, &registry, &udid,
                             )
-                            .await
-                            .is_ok();
-                            Some((udid, started))
+                            .await;
+                            let no_picture = outcome.as_ref().is_err_and(|message| {
+                                message.starts_with(
+                                    riviu_android_driver::scrcpy::NO_PICTURE_ON_ANY_ENCODER,
+                                )
+                            });
+                            Some((udid, outcome.is_ok(), no_picture))
                         }));
                     }
                     for start in starts {
-                        if let Ok(Some((udid, started))) = start.await {
-                            start_backoff.record(&udid, started, Instant::now());
+                        if let Ok(Some((udid, started, no_picture))) = start.await {
+                            if no_picture {
+                                start_backoff.record_no_picture(&udid, Instant::now());
+                            } else {
+                                start_backoff.record(&udid, started, Instant::now());
+                            }
                         }
                     }
                 }
