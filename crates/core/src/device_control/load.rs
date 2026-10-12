@@ -29,6 +29,15 @@ pub fn mentions_device_overloaded(message: &str) -> bool {
 /// surfaceflinger %CPU (as `top` prints it, per core) at or above which the compositor is
 /// starving the app. Phone 44 measured 92% while siblings 47/39 sat at ~3% (10/10/2026); 60
 /// leaves a wide margin on both sides.
+///
+/// It counts only together with swap use above [`SWAP_USED_CEILING_KB`] (phone 44: 1.1 GB).
+/// On its own it also reads high on a working phone in the composer while Riviu captures its
+/// screen. Measured 12/10/2026 (campaign `4a25d804`, SM-G955N `ce041714d44264230d`): 82% and
+/// then 62%, four minutes apart, with 3087 MB MemAvailable, 468 MB swap, 3 h uptime and no
+/// slow helper call in the run, and the phone was still refused. The phones refused the same
+/// night for surfaceflinger with swap above 1 GB (`aadf361905` 1259 MB, `d903001b01`
+/// 1075 MB, `715f321b05` 1444 MB) logged 7, 14 and 21 slow helper calls of up to 15-28 s.
+/// On 11/10/2026, six phones at 68-102% read 6-54% one or two minutes later with no cleanup.
 pub const SURFACEFLINGER_CPU_OVERLOAD_PERCENT: f32 = 60.0;
 
 /// surfaceflinger must be high in this many consecutive samples: one spike during a scroll or
@@ -204,10 +213,15 @@ pub fn evaluate(current: &DeviceLoadSample, previous: Option<&DeviceLoadSample>)
             }
         }
     }
+    // A busy compositor counts only on a phone that is also swapping heavily; see
+    // [`SURFACEFLINGER_CPU_OVERLOAD_PERCENT`]. Unknown swap never corroborates.
     let sf_high = |sample: &DeviceLoadSample| {
         sample
             .surfaceflinger_cpu_percent
             .is_some_and(|cpu| cpu >= SURFACEFLINGER_CPU_OVERLOAD_PERCENT)
+            && sample
+                .swap_used_kb()
+                .is_some_and(|used| used > SWAP_USED_CEILING_KB)
     };
     let mut needs_confirmation = false;
     if sf_high(current) {
@@ -218,10 +232,11 @@ pub fn evaluate(current: &DeviceLoadSample, previous: Option<&DeviceLoadSample>)
         });
         if sustained {
             reasons.push(format!(
-                "surfaceflinger {:.0}% CPU ≥ {:.0}% trong {} lần đo liên tiếp",
+                "surfaceflinger {:.0}% CPU ≥ {:.0}% trong {} lần đo liên tiếp khi swap dùng {} MB",
                 current.surfaceflinger_cpu_percent.unwrap_or_default(),
                 SURFACEFLINGER_CPU_OVERLOAD_PERCENT,
-                SURFACEFLINGER_SUSTAINED_SAMPLES
+                SURFACEFLINGER_SUSTAINED_SAMPLES,
+                current.swap_used_kb().unwrap_or_default() / 1024
             ));
         } else {
             needs_confirmation = true;

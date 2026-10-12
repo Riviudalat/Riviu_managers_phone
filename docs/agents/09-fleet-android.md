@@ -57,8 +57,11 @@ Khi chỉ một máy có root không đọc được hoặc tap bị nuốt, so 
   `/proc/meminfo`, `/proc/uptime`, nhiệt độ pin; không dùng `uiautomator dump`. Không đọc
   được là chưa rõ, không bao giờ là quá tải.
 - Ngưỡng quá tải (đo trên máy 44 và máy cùng đời 47/39, 10/10/2026): surfaceflinger
-  ≥ 60% CPU trong 2 lần đo liên tiếp; hoặc MemAvailable < 600 MB; hoặc swap dùng > 1,0 GB
-  cùng MemAvailable < 900 MB.
+  ≥ 60% CPU trong 2 lần đo liên tiếp khi swap dùng > 1,0 GB; hoặc MemAvailable < 600 MB;
+  hoặc swap dùng > 1,0 GB cùng MemAvailable < 900 MB. surfaceflinger một mình không đủ:
+  ngày 12/10/2026 máy `ce041714d44264230d` ở composer, đang bị Riviu chụp màn hình, đo 82%
+  rồi 62% với RAM trống 3087 MB, swap 468 MB, không có lệnh helper chậm nào, vẫn bị từ chối.
+  Các máy bị từ chối vì surfaceflinger mà swap > 1 GB thì có 7–21 lệnh helper chậm (tới 15–28 s).
 - Lúc đo: cổng nhận việc ở `DeviceControlPlane::ensure_load_admissible` (khi mở phiên app
   cho owner Script/Interaction/Nurture, và trước khi chuyển media của Đăng bài), và mỗi
   ~60 s trên máy đang giữ việc qua vòng quét roster (`device_load.rs`). Lượt đo chờ slot
@@ -68,12 +71,21 @@ Khi chỉ một máy có root không đọc được hoặc tap bị nuốt, so 
   `pm clear`, TikTok/Trill, Riviu Helper, UiAutomator2 hay gói hệ thống. Chỉ chạy khi máy
   không có bước effect đang chạy: dưới lease của job lúc nhận việc, hoặc lease Repair khi
   máy rảnh và sổ ghi không còn việc chưa rõ/đang chạy (tối đa một lần mỗi 30 phút).
-- Tầng 2, `adb reboot`: chỉ khi máy rảnh, `app_completion_block_reason` không còn việc
-  chưa rõ hoặc đang chạy, và chưa reboot trong 6 giờ. Chờ `sys.boot_completed` (≤120 s,
-  boot id đổi), áp lại baseline, giữ lease Repair suốt lúc chờ; helper được chuẩn bị lại
-  khi máy kết nối lại. Không được reboot thì đánh dấu "quá tải — chờ người vận hành".
-- Đăng bài bị từ chối ở cổng này settle `failedBeforeDispatch` với `device_overloaded`
-  (retryable). Nuôi/Tương tác chạy tiếp nếu tầng 1 đạt.
+- Tầng 2, `adb reboot`: khi `load_reboot_block_reason` không còn việc chưa rõ hoặc đang
+  chạy và chưa reboot trong 6 giờ. Việc Đăng bài chỉ đang chờ máy (queued, đến giờ,
+  transferring, imported: chưa có ý định Post) không chặn reboot; bài đang tải/chưa rõ,
+  Tương tác/Flow/Nuôi/job/điều phối còn sống vẫn chặn. Hai nơi chạy tầng 2:
+  - ngay ở cổng nhận việc của job (`reboot_for_job`, dưới lease của chính job, trước mọi
+    effect): tầng 1 không hết, hoặc đã dọn nhẹ trong 30 phút, thì reboot luôn rồi đo lại,
+    trong vài phút chứ không chờ 30 phút. Chạy cả khi chế độ nghiệm thu đóng băng worker nền
+    (12/10/2026: monitor nền bị đóng băng ở mọi controller r91/r93 nên không máy nào được
+    reboot);
+  - monitor nền khi máy rảnh, giữ lease Repair suốt lúc chờ.
+  Chờ `sys.boot_completed` (≤120 s, boot id đổi), áp lại baseline, khởi động lại helper
+  (bước chuyển media vẫn tự kiểm helper). Không được reboot thì đánh dấu "quá tải — chờ
+  người vận hành".
+- Đăng bài vẫn bị từ chối ở cổng này settle `failedBeforeDispatch` với `device_overloaded`
+  (retryable). Nuôi/Tương tác chạy tiếp nếu tầng 1 đạt; sổ ghi của chính chúng chặn tầng 2.
 - Baseline giữ auto-rotate tắt (`accelerometer_rotation=0`). `monkey -p … 1` bật lại
   auto-rotate (đo trên SM-G955F, Android 9, 10/10/2026), nên Riviu mở app bằng
   `am start` trên component launcher đã resolve, không dùng `monkey`.

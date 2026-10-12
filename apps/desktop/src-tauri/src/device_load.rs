@@ -10,6 +10,13 @@
 //! - Idle and marked: fresh sample; tier 1 (light cleanup) under a Repair lease; then tier 2
 //!   (reboot) only when the durable ledger shows nothing uncertain or in flight on the phone,
 //!   no job holds it and the 6 h budget allows. Otherwise "quá tải — chờ người vận hành".
+//! - A job's own load gate: [`reboot_for_job`] is the driver's tier 2 inside the job's turn,
+//!   under its exclusive lease and before any of its effects. It is not a background worker,
+//!   so it also runs while acceptance mode freezes this monitor (12/10/2026: frozen in every
+//!   r91/r93 controller, so no overloaded phone was ever rebooted).
+//!
+//! Publish work that only waits for the phone (queued, due, transferring, imported) blocks
+//! neither tier: it has sent nothing to TikTok, and its job waits out the reboot.
 
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -167,16 +174,18 @@ async fn reboot_blocker(
     if !android.load_reboot_budget_left(udid) {
         return Some("đã tự khởi động lại một lần trong 6 giờ qua".into());
     }
-    ledger_blocker(db, udid).await
+    ledger_blocker(db, udid, false).await
 }
 
-/// The durable ledger's reason this phone still has work, or `None`.
-async fn ledger_blocker(db: &Arc<Database>, udid: &str) -> Option<String> {
+/// The durable ledger's reason this phone still has work, or `None`. `job_holds_phone`: the
+/// caller is a job at its load gate, under its own exclusive lease.
+async fn ledger_blocker(db: &Arc<Database>, udid: &str, job_holds_phone: bool) -> Option<String> {
     let ledger_udid = udid.to_string();
-    // Conservative: any uncertain, in-flight or due Post/Send/Like/Comment/Follow/Flow/job
-    // on this phone blocks, and an unreadable ledger blocks too.
+    // Conservative: any uncertain or in-flight Post/Send/Like/Comment/Follow, any live
+    // nurture/interaction/Flow/job/orchestration work on this phone blocks, and an unreadable
+    // ledger blocks too. Publish work that has not reached its Post intent does not.
     match db
-        .storage_read(move |db| db.app_completion_block_reason(&ledger_udid))
+        .storage_read(move |db| db.load_reboot_block_reason(&ledger_udid, job_holds_phone))
         .await
     {
         Ok(None) => None,
@@ -208,7 +217,7 @@ async fn recover_idle(
     // Tier 1, under a Repair lease so no job step is running. Conservative while idle: a phone
     // whose ledger still has uncertain or in-flight work (a post still uploading in the
     // background) is not cleaned either.
-    if let Some(blocker) = ledger_blocker(db, udid).await {
+    if let Some(blocker) = ledger_blocker(db, udid, false).await {
         android.mark_load_awaiting_operator(
             udid,
             &format!("{why}; không tự dọn hay khởi động lại vì {blocker}"),
@@ -303,8 +312,42 @@ async fn recover_idle(
     }
 }
 
+/// Tier 2 inside a job's turn, installed as the driver's reboot repair (see the module
+/// docs). The caller holds the job's exclusive lease and has run none of its effects. Reboots
+/// only when the 6 h budget and the ledger allow: anything uncertain or in flight on the phone
+/// still blocks; publish work waiting for this phone does not. `Err` is the Vietnamese reason.
+pub(super) async fn reboot_for_job(
+    android: &AndroidDriver,
+    db: &Arc<Database>,
+    udid: &str,
+    why: &str,
+) -> Result<(), String> {
+    if !android.load_reboot_budget_left(udid) {
+        return Err("đã tự khởi động lại một lần trong 6 giờ qua".into());
+    }
+    if let Some(blocker) = ledger_blocker(db, udid, true).await {
+        return Err(blocker);
+    }
+    let reboot = android
+        .issue_load_reboot(udid, why)
+        .await
+        .map_err(|error| format!("khởi động lại thất bại: {error:#}"))?;
+    android
+        .wait_for_load_reboot(udid, &reboot)
+        .await
+        .map_err(|error| format!("{error:#}"))?;
+    reapply_baseline(android, db, udid).await;
+    // The helper process ended with the boot, and automatic helper setup may be frozen. Bring
+    // it back now so a composer opened right after the gate finds it; the transfer step still
+    // qualifies it, and a failure here is left to the job's own step.
+    if let Err(error) = android.prepare_helper_runtime(udid).await {
+        log::warn!("helper not ready after load reboot of {udid}: {error:#}");
+    }
+    Ok(())
+}
+
 /// Re-apply the "Cài đặt máy" baseline after a reboot (auto-rotate comes back on), through the
-/// same driver path as the page. The caller holds the phone's Repair lease.
+/// same driver path as the page. The caller holds the phone's Repair lease or a job's lease.
 async fn reapply_baseline(android: &AndroidDriver, db: &Database, udid: &str) {
     use riviu_core::device_control::baseline::{
         summarize, BaselineOutcome, BaselineSetting, DeviceBaselineResult,

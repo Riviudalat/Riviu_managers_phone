@@ -303,11 +303,21 @@ pub(crate) fn requires_fresh_preparation(error: &anyhow::Error) -> bool {
             | "sound_recent_observation_invalidated"
             | "sound_any_choice_requires_fresh_attempt"
             | SOUND_SHEET_BLIND_FRESH_ATTEMPT
+            | SOUND_BUDGET_FRESH_ATTEMPT
     )
 }
 /// The sound budget ran out on a blind sheet. Retried only as one fresh attempt per
 /// assignment (TikTok relaunched, new helper session); the recovery ledger caps it.
 pub const SOUND_SHEET_BLIND_FRESH_ATTEMPT: &str = "sound_sheet_blind_requires_fresh_attempt";
+/// The sound budget ran out on a readable sheet, before Post. It shares the blind sheet's one
+/// fresh attempt per assignment. Measured 12/10/2026: three of the five phones that ended r91
+/// (`d8e672cc`) with it posted in r93 (`4a25d804`) two hours later, so it is not a property of
+/// the phone; and 6c950c/993001 ended with it while 1-2 of their 3 retries were unused.
+pub const SOUND_BUDGET_FRESH_ATTEMPT: &str = "publish_sound_budget_exhausted";
+/// The sound stage's automatic fresh attempts, capped together at one per assignment.
+pub(crate) fn is_sound_fresh_attempt(code: &str) -> bool {
+    code == SOUND_SHEET_BLIND_FRESH_ATTEMPT || code == SOUND_BUDGET_FRESH_ATTEMPT
+}
 pub fn classify(message: &str) -> FailureKind {
     let s = message.to_lowercase();
     // Specific refusals always win over words such as timeout in an error chain.
