@@ -37,6 +37,8 @@ function discoverCampaignIds(publishDir) {
   return [];
 }
 const campaignIds = ids ? ids.split(',') : discoverCampaignIds(args['publish-dir']);
+// The start intent, when the publish dir has one, gives the requested phone count.
+const intent = args['publish-dir'] ? readJson(path.join(resolvePath(args['publish-dir']), 'start-intent.json')) : null;
 check(campaignIds.every(id => /^[A-Za-z0-9_-]{1,128}$/.test(id)), 'campaign id không hợp lệ');
 const waitSeconds = Number(args['wait-seconds'] ?? 300);
 check(Number.isInteger(waitSeconds) && waitSeconds >= 0 && waitSeconds <= 3600, '--wait-seconds 0..3600');
