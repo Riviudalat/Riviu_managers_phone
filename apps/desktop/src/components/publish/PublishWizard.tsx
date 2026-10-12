@@ -467,7 +467,7 @@ export function PublishWizard(p: PublishWizardProps) {
                 <legend>
                   <Music2 size={15} /> Nhạc khi mở TikTok
                 </legend>
-                <p>Tự chọn từ nhạc đề xuất trên tài khoản.</p>
+                <p>Tự chọn một bài trong tab Hot của TikTok.</p>
                 <button
                   type="button"
                   className="ghost pw-detail-link"
@@ -725,8 +725,9 @@ export function PublishWizard(p: PublishWizardProps) {
       {dialog === "music" && (
         <PublishDialog title="Nhạc khi chạy" onClose={closeDialog}>
           <p>
-            Ứng dụng mở TikTok, chọn ảnh, chọn nhạc từ thư viện của tài khoản
-            rồi đọc lại tên nhạc trước Đăng.
+            Ứng dụng mở TikTok, chọn ảnh, chọn một bài trong tab Hot của bảng
+            nhạc rồi đọc lại tên nhạc trước Đăng. Không chứng minh được tab Hot
+            thì máy dừng trước Đăng.
           </p>
           <p>
             Phiên bản này cho phép trùng nhạc giữa các máy. Chế độ không trùng

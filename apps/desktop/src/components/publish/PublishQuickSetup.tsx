@@ -354,7 +354,7 @@ export function PublishQuickSetup(p: QuickProps) {
         if (current && !current.locked && current.props.active !== false && current.props.sourceRoot === captionContext.source && current.props.manifest?.bundles.some(b => b.id === captionContext.id)) current.props.onCaption(captionContext.id, e.target.value);
       }}/></label><small className="pq-char-count">{(p.captions[captionBundle.id] ?? captionBundle.caption).length} ký tự · lưu trong bản nháp, không sửa file nguồn</small>
         <div className="pq-partners"><strong>Đối tác của bài</strong><p>{captionBundle.partners?.length ? captionBundle.partners.join(" · ") : "Không có thông tin đối tác trong file nguồn"}</p><small>Người đăng trên Sheet: bot</small></div>
-        <div className="pq-sound"><Music2 size={20}/><div><strong>Nhạc thịnh hành</strong><small>Chọn và xác nhận nhạc trong TikTok khi đăng</small></div></div>
+        <div className="pq-sound"><Music2 size={20}/><div><strong>Nhạc thịnh hành</strong><small>Chọn một bài trong tab Hot của TikTok và xác nhận khi đăng</small></div></div>
         {duplicateCaptions > 0 && <p className="pq-hint">{duplicateCaptions} bài đã chọn có caption trùng; nội dung giữ nguyên, không tự sửa.</p>}
       </div></div>
     </PublishDialog>}
@@ -374,7 +374,7 @@ export function PublishQuickSetup(p: QuickProps) {
           </tr>; })}</tbody>
         </table>
         <dl>
-          <div><dt>Nhạc</dt><dd>{p.sound.kind === "trendingAny" ? `Nhạc thịnh hành: chọn 1 trong ${p.sound.poolSize} bài đầu danh sách TikTok, xác nhận khi đăng` : "Không chọn nhạc; giữ âm thanh mặc định của bài"}</dd></div>
+          <div><dt>Nhạc</dt><dd>{`Nhạc Hot: chọn 1 trong ${p.sound.kind === "trendingAny" ? p.sound.poolSize : 5} bài đầu tab Hot của TikTok, xác nhận khi đăng`}</dd></div>
           <div><dt>Ghi kết quả vào Sheet</dt><dd>{p.sheetTarget || "Sheet chưa xác minh"}</dd></div>
         </dl>
         <p className="pq-hint">Mọi thay đổi máy, tài khoản, nội dung, caption, nhạc hoặc Sheet sau khi kiểm tra làm bản xem lại này hết hiệu lực và phải kiểm tra lại.</p>
