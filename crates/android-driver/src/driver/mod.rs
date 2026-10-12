@@ -69,12 +69,49 @@ pub enum SystemLanguageSwitch {
     BootUnproved,
     /// Sent, and the locale reader now reports English.
     Switched { before: String, after: String },
-    /// Sent, but the locale reader still does not report English.
-    NotEnglish { before: String, after: String },
+    /// Sent, the locale reader still does not report English, and `system_locales` now
+    /// starts with English, so the next phone boot comes up in English.
+    SavedForReboot { before: String, after: String },
 }
 
 /// The helper call that changes the system language; HTTP_TIMEOUT bounds each request too.
 const SYSTEM_LANGUAGE_BUDGET: Duration = Duration::from_secs(20);
+
+/// `system_locales` with `en-US` first and the phone's other locales after it, in order.
+/// Only plain locale tags are kept, so the value is safe to pass to `settings put`.
+/// Centre of the package installer's Allow button in a `uiautomator dump`, only when the
+/// prompt's message names TikTok.
+fn permission_allow_button(dump: &str) -> Option<(i32, i32)> {
+    if !dump.contains("packageinstaller") || !dump.contains("TikTok") {
+        return None;
+    }
+    let node = dump
+        .split("<node ")
+        .find(|node| node.contains(":id/permission_allow_button\""))?;
+    let bounds = node.split("bounds=\"").nth(1)?.split('"').next()?;
+    let numbers: Vec<i32> = bounds
+        .split(|c: char| !c.is_ascii_digit())
+        .filter(|part| !part.is_empty())
+        .filter_map(|part| part.parse().ok())
+        .collect();
+    let [x1, y1, x2, y2] = numbers[..] else {
+        return None;
+    };
+    Some(((x1 + x2) / 2, (y1 + y2) / 2))
+}
+
+fn english_first_locales(current: &str) -> String {
+    let mut locales = vec!["en-US".to_owned()];
+    for entry in current.trim().split(',').map(str::trim) {
+        let plain = !entry.is_empty()
+            && entry != "null"
+            && entry.chars().all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_');
+        if plain && !locales.iter().any(|kept| kept.eq_ignore_ascii_case(entry)) {
+            locales.push(entry.to_owned());
+        }
+    }
+    locales.join(",")
+}
 
 /// Upper bound of one durable "unroot spent" marker (serial + boot id).
 const ADB_UNROOT_MARKER_LIMIT: u64 = 1024;
@@ -240,6 +277,13 @@ const TIKTOK_MEDIA_PERMISSIONS_LEGACY: [&str; 2] = [
 const TIKTOK_MEDIA_PERMISSIONS_SDK33: [&str; 2] = [
     "android.permission.READ_MEDIA_IMAGES",
     "android.permission.READ_MEDIA_VIDEO",
+];
+/// Owner 2026-10-13 ("tự động cấp quyền cho toàn bộ máy"): granted on every release with the
+/// media pair. `ce0417141d4decde0c`, 13/10/2026: "Allow TikTok to take pictures and
+/// record video? 1 of 2" opened over the launcher when TikTok was started (SM-G955F, Android 9).
+const TIKTOK_DEVICE_PERMISSIONS: [&str; 2] = [
+    "android.permission.CAMERA",
+    "android.permission.RECORD_AUDIO",
 ];
 /// Each `getprop`/`pm grant` round trip in the media grant; a wedged phone costs at most
 /// five of these before the session's own preflight takes over.
@@ -1454,6 +1498,8 @@ impl AndroidDriver {
     /// call like the automatic `adb unroot`; success only when the same reader reports `en`.
     /// No TikTok screen is touched, so a TikTok app language set to Vietnamese stays for the
     /// session-open gate to refuse with the manual steps.
+    /// When the helper is absent or its switch does not take, `system_locales` is written with
+    /// English first ([`SystemLanguageSwitch::SavedForReboot`]); the caller decides the reboot.
     pub async fn switch_system_language_to_english(
         &self,
         serial: &str,
@@ -1491,14 +1537,69 @@ impl AndroidDriver {
         if adb_unroot_spent_boot(&marker, serial)?.as_deref() == Some(boot_id.as_str()) {
             return Ok(SystemLanguageSwitch::AlreadyTriedThisBoot);
         }
-        let helper = self
-            .helpers
-            .lock()
-            .get(serial)
-            .cloned()
-            .context("Riviu Helper chưa sẵn sàng trên máy; chưa đổi ngôn ngữ")?;
+        let helper = self.helpers.lock().get(serial).cloned();
         record_intent(&before)?;
         spend_adb_unroot(&marker, serial, &boot_id)?;
+        let applied = match helper {
+            Some(helper) => match self.apply_english_through_helper(serial, &helper).await {
+                Ok(applied) => applied,
+                Err(error) => {
+                    tracing::warn!(serial, error = %format!("{error:#}"), "helper system language switch failed; writing system_locales");
+                    format!("helper: {error:#}")
+                }
+            },
+            None => "helper not attached".to_owned(),
+        };
+        let (_, _, after) = self.tiktok_build(serial).await?;
+        let english = after
+            .split(['-', '_'])
+            .next()
+            .is_some_and(|language| language.trim().eq_ignore_ascii_case("en"));
+        tracing::info!(serial, %before, %applied, %after, english, "system language switch");
+        if english {
+            return Ok(SystemLanguageSwitch::Switched { before, after });
+        }
+        // Samsung Android 9 (Riviu, 12/10/2026, three phones): the helper's
+        // `updatePersistentConfiguration` returned but the phones stayed `vi-rVN`; writing
+        // `system_locales` with English first and rebooting brought all three to `en-rUS`.
+        let current = self
+            .adb
+            .shell(serial, "settings get system system_locales")
+            .await
+            .unwrap_or_default();
+        let locales = english_first_locales(&current);
+        let put = self
+            .adb
+            .shell_output(
+                serial,
+                &format!("settings put system system_locales {locales}"),
+                adb::DEFAULT_TIMEOUT,
+            )
+            .await?;
+        anyhow::ensure!(
+            put.exit_code == 0 && put.stderr.trim().is_empty(),
+            "Android không nhận cài đặt ngôn ngữ system_locales: {} {}",
+            put.stdout.trim(),
+            put.stderr.trim()
+        );
+        let readback = self
+            .adb
+            .shell(serial, "settings get system system_locales")
+            .await?;
+        anyhow::ensure!(
+            readback.trim() == locales,
+            "đã ghi system_locales={locales} nhưng máy đọc lại {}",
+            readback.trim()
+        );
+        Ok(SystemLanguageSwitch::SavedForReboot { before, after })
+    }
+
+    /// Riviu Helper's `systemLocale` call, with its `CHANGE_CONFIGURATION` grant.
+    async fn apply_english_through_helper(
+        &self,
+        serial: &str,
+        helper: &crate::riviu_agent::HelperClient,
+    ) -> anyhow::Result<String> {
         let grant = self
             .adb
             .shell_output(
@@ -1516,21 +1617,9 @@ impl AndroidDriver {
             grant.stdout.trim(),
             grant.stderr.trim()
         );
-        let applied =
-            tokio::time::timeout(SYSTEM_LANGUAGE_BUDGET, helper.set_system_locale_english())
-                .await
-                .context("Riviu Helper không trả lời lệnh đổi ngôn ngữ trong 20 giây")??;
-        let (_, _, after) = self.tiktok_build(serial).await?;
-        let english = after
-            .split(['-', '_'])
-            .next()
-            .is_some_and(|language| language.trim().eq_ignore_ascii_case("en"));
-        tracing::info!(serial, %before, %applied, %after, english, "system language switch");
-        Ok(if english {
-            SystemLanguageSwitch::Switched { before, after }
-        } else {
-            SystemLanguageSwitch::NotEnglish { before, after }
-        })
+        tokio::time::timeout(SYSTEM_LANGUAGE_BUDGET, helper.set_system_locale_english())
+            .await
+            .context("Riviu Helper không trả lời lệnh đổi ngôn ngữ trong 20 giây")?
     }
 
     /// Automatic repair of a root adbd (`id -u` == 0): at most one `adb unroot` per phone
@@ -1794,20 +1883,16 @@ impl AndroidDriver {
             .await
             .ok()
             .and_then(|output| output.stdout.trim().parse::<u32>().ok());
-        let permissions: &[&str] = match sdk {
-            Some(sdk) if sdk >= 33 => &TIKTOK_MEDIA_PERMISSIONS_SDK33,
-            Some(_) => &TIKTOK_MEDIA_PERMISSIONS_LEGACY,
+        let mut permissions: Vec<&str> = match sdk {
+            Some(sdk) if sdk >= 33 => TIKTOK_MEDIA_PERMISSIONS_SDK33.to_vec(),
+            Some(_) => TIKTOK_MEDIA_PERMISSIONS_LEGACY.to_vec(),
             // Unknown release: try both pairs; the wrong pair is refused harmlessly below.
-            None => &[
-                TIKTOK_MEDIA_PERMISSIONS_LEGACY[0],
-                TIKTOK_MEDIA_PERMISSIONS_LEGACY[1],
-                TIKTOK_MEDIA_PERMISSIONS_SDK33[0],
-                TIKTOK_MEDIA_PERMISSIONS_SDK33[1],
-            ],
+            None => [TIKTOK_MEDIA_PERMISSIONS_LEGACY, TIKTOK_MEDIA_PERMISSIONS_SDK33].concat(),
         };
+        permissions.extend(TIKTOK_DEVICE_PERMISSIONS);
         let mut granted = Vec::new();
         let mut refused = Vec::new();
-        for permission in permissions {
+        for permission in &permissions {
             let command = format!("pm grant --user 0 {package} {permission}");
             match self
                 .adb
@@ -1849,6 +1934,45 @@ impl AndroidDriver {
                 "chưa tự cấp được quyền ảnh/video cho TikTok trên máy {serial}: {}",
                 refused.join("; ")
             );
+        }
+        self.accept_open_tiktok_permission_prompt(serial).await;
+    }
+
+    /// A runtime permission prompt that was already on screen stays open after `pm grant`.
+    /// When Android's own prompt has focus and names TikTok, tap its Allow button (owner
+    /// 2026-10-13: "tự động bấm cấp quyền ... khi có yêu cầu cấp quyền"), at most three
+    /// prompts ("1 of 2", "2 of 2", ...). Only the package installer's prompt is touched.
+    async fn accept_open_tiktok_permission_prompt(&self, serial: &str) {
+        for _ in 0..3 {
+            let focus = self
+                .adb
+                .shell_output(serial, "dumpsys window | grep mCurrentFocus", MEDIA_GRANT_TIMEOUT)
+                .await
+                .map(|output| output.stdout)
+                .unwrap_or_default();
+            if !focus.contains("GrantPermissionsActivity") {
+                return;
+            }
+            let dump = self
+                .adb
+                .shell_output(
+                    serial,
+                    "uiautomator dump /sdcard/riviu-permission.xml >/dev/null 2>&1; cat /sdcard/riviu-permission.xml; rm -f /sdcard/riviu-permission.xml",
+                    Duration::from_secs(20),
+                )
+                .await
+                .map(|output| output.stdout)
+                .unwrap_or_default();
+            let Some((x, y)) = permission_allow_button(&dump) else {
+                tracing::warn!(serial, "permission prompt open but its Allow button for TikTok was not read");
+                return;
+            };
+            let tap = self
+                .adb
+                .shell_output(serial, &format!("input tap {x} {y}"), MEDIA_GRANT_TIMEOUT)
+                .await;
+            tracing::info!(serial, x, y, ok = tap.is_ok(), "đã tự bấm Allow trên hộp thoại xin quyền của TikTok");
+            tokio::time::sleep(Duration::from_millis(1500)).await;
         }
     }
 

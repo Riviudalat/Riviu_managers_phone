@@ -125,7 +125,12 @@ ngôn ngữ, không bảo hạ bản. Khi máy kết nối, sau khi Riviu Helper
 lease Repair, `AndroidDriver::switch_system_language_to_english` đổi ngôn ngữ hệ thống sang
 `en-US` qua helper `systemLocale` (`CHANGE_CONFIGURATION` cấp bằng `pm grant`), một lần mỗi
 boot id (marker ghi bền trước lệnh, ý định ghi nhật ký trước), rồi đọc lại bằng
-`parse_locale` và chỉ báo xong khi ra `en`. Không có retry trong cùng boot.
+`parse_locale` và chỉ báo xong khi ra `en`. Không có retry trong cùng boot. Khi helper chưa
+gắn hoặc lệnh helper không ăn (Samsung Android 9, 12/10/2026: vẫn `vi-rVN`), Riviu ghi
+`settings put system system_locales` với `en-US` đứng đầu (giữ các locale còn lại), đọc
+lại, rồi tự khởi động lại máy một lần để áp dụng — chỉ khi sổ ghi không còn việc chưa rõ
+hay đang chạy trên máy và chưa dùng lượt khởi động lại 6 giờ của bộ theo dõi tải; nếu
+không, ngôn ngữ áp dụng ở lần khởi động sau.
 Mọi action trong
 `action_capabilities` là effect, nên bản ngoài allowlist trả `buildNotAllowed` cho tất
 cả action và `require_actions` trả một thông báo duy nhất. Publish preflight thêm issue

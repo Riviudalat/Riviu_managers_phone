@@ -288,18 +288,51 @@ async fn auto_switch_system_language(android: &AndroidDriver, db: &Database, ser
                 "đã chuyển ngôn ngữ điện thoại từ {before} sang {after}. Nếu TikTok vẫn hiện tiếng Việt thì TikTok đang đặt ngôn ngữ ứng dụng riêng: vào Hồ sơ → ☰ → Cài đặt và quyền riêng tư → Ngôn ngữ → Ngôn ngữ ứng dụng → English."
             ),
         ),
-        Ok(SystemLanguageSwitch::NotEnglish { before, after }) => (
-            "device.language.auto.failed",
-            format!(
-                "đã gửi lệnh chuyển ngôn ngữ nhưng điện thoại vẫn báo {after} (trước đó {before}); Riviu không thử lại trong lần khởi động này. {manual}"
-            ),
-        ),
+        Ok(SystemLanguageSwitch::SavedForReboot { before, after }) => {
+            match reboot_for_language(android, db, serial) {
+                Ok(()) => match android.issue_load_reboot(serial, "đổi ngôn ngữ điện thoại sang English").await {
+                    // The phone leaves adb and comes back as a new connection, so this setup
+                    // runs again on the new boot; until then the language gate still refuses it.
+                    Ok(_) => (
+                        "device.language.auto.reboot",
+                        format!(
+                            "điện thoại vẫn báo {after} (trước đó {before}) sau lệnh đổi ngôn ngữ; đã lưu English làm ngôn ngữ đầu tiên và tự khởi động lại máy để áp dụng."
+                        ),
+                    ),
+                    Err(error) => (
+                        "device.language.auto.failed",
+                        format!(
+                            "đã lưu English làm ngôn ngữ đầu tiên nhưng chưa khởi động lại được máy: {error:#}. Khởi động lại máy để áp dụng."
+                        ),
+                    ),
+                },
+                Err(blocker) => (
+                    "device.language.auto.failed",
+                    format!(
+                        "đã lưu English làm ngôn ngữ đầu tiên (máy đang báo {after}); chưa tự khởi động lại vì {blocker}. Ngôn ngữ mới áp dụng ở lần khởi động lại tiếp theo."
+                    ),
+                ),
+            }
+        }
         Err(error) => (
             "device.language.auto.failed",
             format!("chưa tự chuyển được ngôn ngữ điện thoại sang English: {error:#}. {manual}"),
         ),
     };
     record(db, action, serial, &message);
+}
+
+/// Ok when this connection may reboot the phone to apply its language: the reboot budget the
+/// load monitor uses is not spent, and the ledger has no uncertain or in-flight work.
+fn reboot_for_language(android: &AndroidDriver, db: &Database, serial: &str) -> Result<(), String> {
+    if !android.load_reboot_budget_left(serial) {
+        return Err("đã tự khởi động lại một lần trong 6 giờ qua".into());
+    }
+    match db.app_completion_block_reason(serial) {
+        Ok(None) => Ok(()),
+        Ok(Some(reason)) => Err(format!("sổ ghi còn việc chưa rõ hoặc đang chạy ({reason})")),
+        Err(error) => Err(format!("không đọc được sổ ghi thao tác ({error:#})")),
+    }
 }
 
 /// `ime_unproved`: put the phone back on its only enabled keyboard under this connection's
