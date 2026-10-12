@@ -36,6 +36,10 @@ Các script có `--help`; đối số cụ thể theo invocation trong workflow 
    file đó với CRLF, còn checkout chính có LF, nên runtime build trong worktree không
    qua `verify_runtime` khi checkout chính tái dùng. Hãy build lại runtime ngay trong
    checkout sẽ build app (khoảng 2,5 phút cộng pip install, đo ngày 12/10/2026).
+   Nếu `git diff <bản trước> -- sidecars scripts/build_desktop_sidecar.py scripts/build_gui_service.py
+   scripts/stage_android_package_tools.py` rỗng và cùng checkout build, có thể chép runtime iOS,
+   công cụ Android và GUI service đã qualify của bản trước rồi chạy lại cổng collector trên bản chép
+   (tree hash phải trùng). Bản 0.2.83 làm vậy, bước chuẩn bị chỉ mất vài giây.
 5. `scripts/build_gui_service.py`, rồi `scripts/test_gui_service_package.py`:
    GUI runtime, OCR models và overlay `target/tauri-gui-service.conf.json`.
 6. Build `riviu-deployment-checker` với target/version/config Google tương ứng;
@@ -117,6 +121,7 @@ controller, điện thoại hoặc agent khác cùng chạy. Số đo cho biết
 | Checker release (`riviu-deployment-checker`) | 48 s | bản 0.2.81, 08/10/2026 |
 | `tauri build --no-bundle` (frontend + Rust release; đổi android-driver và app) | 495 s (Cargo 7 phút 55) | bản 0.2.81 |
 | `tauri build --no-bundle` (đổi `riviu-core`, android-driver và app) | 1138 s | bản 0.2.82, 12/10/2026 |
+| `tauri build --no-bundle` (chỉ đổi frontend + nâng version) | 550 s (Cargo 8 phút 52) | bản 0.2.83, 12/10/2026 |
 | `riviu-core` release, CGU=1, chỉ crate này | 272 s | 11/10/2026, `--timings` |
 | `bundle_windows_installers.py` (NSIS rồi MSI) | 129 s | bản 0.2.81 |
 | Giải nén và kiểm hai bộ cài | 195 s | bản 0.2.81 |
