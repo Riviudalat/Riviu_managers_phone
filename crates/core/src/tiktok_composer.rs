@@ -6862,7 +6862,7 @@ mod tests {
         session
             .sound_entry_failures
             .lock()
-            .extend([Duration::from_secs(70); 4]);
+            .extend([Duration::from_secs(115); 4]);
         let started = Instant::now();
         let result = crate::publish_recovery::scope(
             journal.clone(),
@@ -6899,8 +6899,8 @@ mod tests {
             "fixture must reach the sound recovery owner"
         );
         assert!(
-            started.elapsed() <= Duration::from_secs(188),
-            "sound retry reset its 180s budget: {:?}",
+            started.elapsed() <= Duration::from_secs(308),
+            "sound retry reset its 300s budget: {:?}",
             started.elapsed()
         );
         assert!(
