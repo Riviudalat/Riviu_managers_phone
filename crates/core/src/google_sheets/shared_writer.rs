@@ -126,6 +126,155 @@ fn journal_key(target: &SheetDeliveryTarget) -> String {
         digest(format!("{}:{}", target.spreadsheet_id, target.sheet_gid).as_bytes())
     )
 }
+fn foreign_key(target: &SheetDeliveryTarget) -> String {
+    format!("{}.foreign-lock", journal_key(target))
+}
+fn fence_key(target: &SheetDeliveryTarget) -> String {
+    format!("{}.foreign-fence", journal_key(target))
+}
+
+/// The remote lock another installation left on this tab, as this one last read it.
+/// `committed` means that writer's atomic batch already applied, so removing that
+/// exact value is safe. An uncommitted lock is removed only after the operator
+/// confirms the other installation has stopped (`confirmed_at_ms`).
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ForeignSharedLock {
+    pub writer_id: String,
+    pub operation_token: String,
+    pub publication_id: Option<String>,
+    pub committed: bool,
+    pub seen_at_ms: i64,
+    pub confirmed_at_ms: Option<i64>,
+    raw: String,
+}
+impl ForeignSharedLock {
+    fn parse(raw: &str) -> Option<Self> {
+        let value: Value = serde_json::from_str(raw).ok()?;
+        if value["schemaVersion"] != 2 {
+            return None;
+        }
+        let committed = match value["phase"].as_str()? {
+            "committed" => true,
+            "acquired" => false,
+            _ => return None,
+        };
+        Some(Self {
+            writer_id: value["writerId"].as_str()?.to_owned(),
+            operation_token: value["operationToken"].as_str()?.to_owned(),
+            publication_id: value["publicationId"].as_str().map(str::to_owned),
+            committed,
+            seen_at_ms: chrono::Utc::now().timestamp_millis(),
+            confirmed_at_ms: None,
+            raw: raw.to_owned(),
+        })
+    }
+    fn read(target: &SheetDeliveryTarget, db: &Database) -> Result<(Option<String>, Option<Self>)> {
+        let raw = db
+            .google_shared_journal_read(&foreign_key(target))
+            .map_err(|_| journal_error())?;
+        let lock = raw
+            .as_deref()
+            .filter(|s| !s.is_empty())
+            .and_then(|s| serde_json::from_str(s).ok());
+        Ok((raw, lock))
+    }
+}
+
+/// The foreign lock this installation last found on the tab, if it is still held.
+pub fn shared_lock_holder(
+    target: &SheetDeliveryTarget,
+    db: &Database,
+) -> Result<Option<ForeignSharedLock>> {
+    Ok(ForeignSharedLock::read(target, db)?.1)
+}
+
+/// Records the operator's confirmation that the installation holding the recorded
+/// lock has stopped. The confirmation is durable before any delete: the next
+/// shared operation removes only that exact lock value and fences its row.
+pub fn confirm_shared_lock_takeover(
+    target: &SheetDeliveryTarget,
+    db: &Database,
+) -> Result<Option<ForeignSharedLock>> {
+    let (prior, lock) = ForeignSharedLock::read(target, db)?;
+    let Some(mut lock) = lock else {
+        return Ok(None);
+    };
+    if lock.confirmed_at_ms.is_none() {
+        lock.confirmed_at_ms = Some(chrono::Utc::now().timestamp_millis());
+        let next = serde_json::to_string(&lock).map_err(|_| journal_error())?;
+        if !db
+            .google_shared_journal_cas(&foreign_key(target), prior.as_deref(), &next)
+            .map_err(|_| journal_error())?
+        {
+            return Err(busy("Another local writer changed the recorded Sheet lock"));
+        }
+    }
+    Ok(Some(lock))
+}
+
+/// Rows a taken-over uncommitted writer may still fill if its batch lands late.
+#[derive(Default, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct ForeignFence {
+    reserve_through: Option<u32>,
+    pending: bool,
+}
+fn arm_fence(target: &SheetDeliveryTarget, db: &Database) -> Result<()> {
+    let key = fence_key(target);
+    let prior = db
+        .google_shared_journal_read(&key)
+        .map_err(|_| journal_error())?;
+    let mut fence: ForeignFence = match prior.as_deref() {
+        Some(raw) => serde_json::from_str(raw).map_err(|_| journal_error())?,
+        None => ForeignFence::default(),
+    };
+    fence.pending = true;
+    let next = serde_json::to_string(&fence).map_err(|_| journal_error())?;
+    if !db
+        .google_shared_journal_cas(&key, prior.as_deref(), &next)
+        .map_err(|_| journal_error())?
+    {
+        return Err(journal_error());
+    }
+    Ok(())
+}
+/// After a takeover, the foreign op's target row is unknown: it was the first empty
+/// row or the row after the last one it saw. Reserve every row up to the row after
+/// the last non-empty one this installation sees first, and only append after it.
+fn apply_fence(target: &SheetDeliveryTarget, scan: &mut Scan, db: &Database) -> Result<()> {
+    let key = fence_key(target);
+    let Some(prior) = db
+        .google_shared_journal_read(&key)
+        .map_err(|_| journal_error())?
+    else {
+        return Ok(());
+    };
+    let mut fence: ForeignFence = serde_json::from_str(&prior).map_err(|_| journal_error())?;
+    if fence.pending {
+        let next_row = scan.last_nonempty.map_or(1, |n| n + 1);
+        fence.reserve_through = Some(fence.reserve_through.map_or(next_row, |r| r.max(next_row)));
+        fence.pending = false;
+        let next = serde_json::to_string(&fence).map_err(|_| journal_error())?;
+        if !db
+            .google_shared_journal_cas(&key, Some(&prior), &next)
+            .map_err(|_| journal_error())?
+        {
+            return Err(journal_error());
+        }
+    }
+    if let Some(reserved) = fence.reserve_through {
+        if scan
+            .first_empty
+            .as_ref()
+            .is_some_and(|row| row.index <= reserved)
+        {
+            scan.first_empty = None;
+        }
+        scan.last_nonempty = Some(scan.last_nonempty.map_or(reserved, |n| n.max(reserved)));
+    }
+    Ok(())
+}
 impl Operation {
     fn serialized(&self) -> String {
         serde_json::to_string(self).expect("operation JSON")
@@ -452,8 +601,11 @@ impl DirectSheetsClient {
             op.transition(db, Phase::Acquired)?;
             return Ok(());
         }
-        if remote.is_some() {
-            return Err(busy(HELD_ELSEWHERE));
+        if let Some(raw) = remote {
+            if op.phase != Phase::Prepared {
+                return Err(busy(HELD_ELSEWHERE));
+            }
+            self.release_foreign(op, &raw, db).await?;
         }
         if op.phase == Phase::AcquirePending {
             return Err(uncertain());
@@ -483,6 +635,66 @@ impl DirectSheetsClient {
             return Ok(());
         }
         Err(uncertain())
+    }
+    /// Removes another writer's lock only when that is proven safe: its marker says
+    /// committed (the atomic batch already applied), or the operator confirmed the
+    /// other installation stopped. The delete filters on the exact value read, so a
+    /// refreshed or replaced lock is never removed. Ok means the tab has no lock now.
+    async fn release_foreign(&self, op: &Operation, raw: &str, db: &Database) -> Result<()> {
+        let key = foreign_key(&op.target);
+        let (prior, recorded) = ForeignSharedLock::read(&op.target, db)?;
+        let lock = match recorded.filter(|lock| lock.raw == raw) {
+            Some(lock) => lock,
+            None => {
+                let Some(lock) = ForeignSharedLock::parse(raw) else {
+                    return Err(busy(HELD_ELSEWHERE));
+                };
+                let next = serde_json::to_string(&lock).map_err(|_| journal_error())?;
+                if !db
+                    .google_shared_journal_cas(&key, prior.as_deref(), &next)
+                    .map_err(|_| journal_error())?
+                {
+                    return Err(busy(HELD_ELSEWHERE));
+                }
+                lock
+            }
+        };
+        if !lock.committed && lock.confirmed_at_ms.is_none() {
+            return Err(busy(HELD_ELSEWHERE));
+        }
+        if !lock.committed {
+            // Intent before effect: the row fence is durable before the delete.
+            arm_fence(&op.target, db)?;
+        }
+        let filter = json!({"developerMetadataLookup":{"metadataId":lock_id(op.target.sheet_gid),"metadataKey":LOCK_KEY,"metadataValue":raw,"metadataLocation":{"sheetId":op.target.sheet_gid},"visibility":"DOCUMENT"}});
+        let _ = self
+            .batch(
+                &op.target.spreadsheet_id,
+                vec![json!({"deleteDeveloperMetadata":{"dataFilter":filter}})],
+            )
+            .await;
+        if self.remote_lock(op).await?.is_some() {
+            return Err(busy(HELD_ELSEWHERE));
+        }
+        tracing::warn!(
+            "Đã gỡ khoá ghi Sheet của máy tính khác (mã {}, {})",
+            lock.writer_id.get(..8).unwrap_or(&lock.writer_id),
+            if lock.committed {
+                "lần ghi đã hoàn tất"
+            } else {
+                "người vận hành xác nhận máy kia đã tắt"
+            }
+        );
+        let current = db
+            .google_shared_journal_read(&key)
+            .map_err(|_| journal_error())?;
+        // Only forget the record this call acted on; a newer one stays for display.
+        if current.as_deref().is_some_and(|s| {
+            serde_json::from_str::<ForeignSharedLock>(s).is_ok_and(|l| l.raw == raw)
+        }) {
+            let _ = db.google_shared_journal_cas(&key, current.as_deref(), "");
+        }
+        Ok(())
     }
     async fn dispatch_shared(
         &self,
@@ -521,23 +733,18 @@ impl DirectSheetsClient {
         }
         Ok(())
     }
-    async fn committed_shared(&self, op: &Operation) -> Result<()> {
-        if self
-            .remote_lock(op)
-            .await
-            .map_err(|_| uncertain())?
-            .as_deref()
-            != Some(&op.lock_value(true))
-        {
-            return Err(uncertain());
-        }
-        Ok(())
-    }
     async fn reconcile_shared(&self, op: &mut Operation, db: &Database) -> Result<()> {
         if op.phase != Phase::MutationPending {
             return Err(uncertain());
         }
-        self.committed_shared(op).await?;
+        let marker = self.remote_lock(op).await.map_err(|_| uncertain())?;
+        if marker.as_deref() == Some(&op.lock_value(false)) {
+            return Err(uncertain());
+        }
+        // Another installation may remove a committed marker it read, or (after an
+        // operator-confirmed takeover) this uncommitted one. The batch is atomic, so
+        // without the marker only the exact row receipt below proves it applied.
+        let marker_proven = marker.as_deref() == Some(&op.lock_value(true));
         let meta = self
             .metadata(&op.target.spreadsheet_id, op.target.sheet_gid)
             .await
@@ -563,7 +770,15 @@ impl DirectSheetsClient {
                 .await
                 .map_err(|_| uncertain())?
                 .remove(0);
-            op.receipt = Some(planner::receipt(&row, payload, op.duplicate)?);
+            op.receipt = Some(
+                planner::receipt(&row, payload, op.duplicate).map_err(|error| {
+                    if marker_proven {
+                        error
+                    } else {
+                        uncertain()
+                    }
+                })?,
+            );
             if let Some(receipt) = &op.receipt {
                 db.save_sheet_receipt(&op.target, receipt)
                     .map_err(|_| journal_error())?;
@@ -657,9 +872,10 @@ impl DirectSheetsClient {
                     ));
                 }
                 planner::validate_payload(payload, target, &layout)?;
-                let scan = self
+                let mut scan = self
                     .scan_shared(&mut op, &meta, layout.width, Some(payload), db)
                     .await?;
+                apply_fence(target, &mut scan, db)?;
                 let plan = planner::plan(&meta, &layout, &scan, payload)?;
                 let before = self.metadata(&meta.spreadsheet_id, meta.gid).await?;
                 self.validate_shared_owner(&before, target, false, false)?;

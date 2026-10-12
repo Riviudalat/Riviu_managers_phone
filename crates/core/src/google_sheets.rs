@@ -12,6 +12,7 @@ mod readonly;
 pub use readonly::SheetWritePermission;
 mod reset;
 mod shared_writer;
+pub use shared_writer::{confirm_shared_lock_takeover, shared_lock_holder, ForeignSharedLock};
 #[cfg(test)]
 mod shared_writer_tests;
 use planner::{Cell, Layout, Row, Scan, WritePlan};
