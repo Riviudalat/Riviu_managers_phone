@@ -173,13 +173,16 @@ pub(super) async fn read_account(
     db: &riviu_core::db::Database,
     udid: &str,
 ) -> anyhow::Result<AccountReading> {
-    let device = open_interaction_context(control, udid).await?;
+    // No frame stream: this read is the hierarchy and nothing else, and a phone whose screen
+    // capture gives no frame must still prove its account (see `open_interaction_read_session`).
+    let device =
+        riviu_core::interaction_campaign::open_interaction_read_session(control, udid).await?;
     let result = async {
-        let session = control.streaming_session(&device.context)?;
+        let session = device.session(control)?;
         read_account_from_session(control, db, udid, session.as_ref()).await
     }
     .await;
-    let closed = control.close_ui_context(device.context).await;
+    let closed = device.close(control);
     let reading = result?;
     closed?;
     Ok(reading)

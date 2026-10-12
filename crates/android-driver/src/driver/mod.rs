@@ -592,6 +592,7 @@ fn unpack_frame_size(packed: u32) -> (u16, u16) {
 ///
 /// A failed `Replace` is also strictly safer than the old order: the operator keeps the
 /// stream they had instead of being left with a dead device.
+#[derive(Clone, Copy)]
 enum ViewStart {
     /// Nothing is streaming this serial. The generation has already been advanced.
     Fresh { generation: u64 },
@@ -1179,6 +1180,13 @@ pub struct AndroidDriver {
     /// `Tile`, so an overlay the operator had open silently dropped back to the tile encode
     /// a few seconds later and the picture went soft again with nothing to point at.
     desired_presets: parking_lot::Mutex<HashMap<String, crate::scrcpy::ViewPreset>>,
+    /// serial -> the software encoder its view switched to, and whether the app has been
+    /// told yet. Only for a phone whose default (hardware) encoder gave no keyframe and
+    /// whose software encoder then did; every later start of that serial goes straight to
+    /// it. For this process only: a controller restart tries the hardware encoder once
+    /// more, which costs one failed start on a phone that is still broken and gives back
+    /// the hardware encode to one that was only having a bad moment.
+    view_encoders: Mutex<HashMap<String, (&'static str, bool)>>,
     /// Serials with a view start in flight.
     view_starting: Mutex<HashSet<String>>,
     /// The operator's quality and frame-rate choice for the tile grid.
@@ -2209,6 +2217,7 @@ impl AndroidDriver {
             completed_stream_stops: Mutex::new(HashMap::new()),
             views: tokio::sync::Mutex::new(HashMap::new()),
             desired_presets: parking_lot::Mutex::new(HashMap::new()),
+            view_encoders: Mutex::new(HashMap::new()),
             view_starting: Mutex::new(HashSet::new()),
             // Medium reproduces the bitrate and size that shipped. The frame rate does
             // change: the launch used to ask for a hardcoded 30 while

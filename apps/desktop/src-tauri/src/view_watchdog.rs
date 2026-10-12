@@ -646,24 +646,38 @@ pub(crate) const VIEW_START_RETRY_BASE: Duration = Duration::from_secs(2);
 /// A cap, not a target: a phone that keeps failing is retried twice a minute, which is
 /// enough to come back on its own without spending the fleet's adb slots on it.
 pub(crate) const VIEW_START_RETRY_MAX: Duration = Duration::from_secs(30);
+/// Ceiling for a phone on which **every** encoder has given no picture
+/// ([`riviu_android_driver::scrcpy::NO_PICTURE_ON_ANY_ENCODER`]). Its waits start at
+/// [`VIEW_START_RETRY_MAX`] and double up to this.
+///
+/// Measured 13/10/2026: an SM-G955F whose hardware encoder returns nothing was started every
+/// ~40 s from 16:38 UTC one day into the next, each attempt an app_process, a forward and an
+/// 8 s wait, and every one ending the same way. That is not a phone that will come back on
+/// the next tick. Ten minutes is the restart path's own ceiling, so it still comes back on
+/// its own if the encoder does.
+pub(crate) const VIEW_START_NO_PICTURE_MAX: Duration = VIEW_RESTART_MAX_BACKOFF;
 
 /// Per-phone spacing of failed first starts. Owned by the keeper task, like its retune
 /// history, because nothing else starts views on its own schedule.
 #[derive(Debug, Default)]
 pub(crate) struct ViewStartBackoff {
-    failures: HashMap<String, (Instant, u32)>,
+    /// When the last start failed, how many failed in a row, and whether the last one was a
+    /// phone with no picture on any encoder.
+    failures: HashMap<String, (Instant, u32, bool)>,
 }
 
 impl ViewStartBackoff {
     pub(crate) fn is_due(&self, udid: &str, now: Instant) -> bool {
-        let Some((at, failures)) = self.failures.get(udid).copied() else {
+        let Some((at, failures, no_picture)) = self.failures.get(udid).copied() else {
             return true;
         };
+        let (base, max) = if no_picture {
+            (VIEW_START_RETRY_MAX, VIEW_START_NO_PICTURE_MAX)
+        } else {
+            (VIEW_START_RETRY_BASE, VIEW_START_RETRY_MAX)
+        };
         let factor = 1u32 << failures.saturating_sub(1).min(5);
-        now.saturating_duration_since(at)
-            >= VIEW_START_RETRY_BASE
-                .saturating_mul(factor)
-                .min(VIEW_START_RETRY_MAX)
+        now.saturating_duration_since(at) >= base.saturating_mul(factor).min(max)
     }
 
     pub(crate) fn record(&mut self, udid: &str, started: bool, now: Instant) {
@@ -671,8 +685,20 @@ impl ViewStartBackoff {
             self.failures.remove(udid);
             return;
         }
-        let failures = self.failures.get(udid).map(|(_, n)| *n).unwrap_or(0) + 1;
-        self.failures.insert(udid.to_string(), (now, failures));
+        let failures = self.failures.get(udid).map(|(_, n, _)| *n).unwrap_or(0) + 1;
+        self.failures
+            .insert(udid.to_string(), (now, failures, false));
+    }
+
+    /// A failed start after which no encoder on the phone gave a picture. Counted on its own
+    /// ladder, so the first one already waits [`VIEW_START_RETRY_MAX`].
+    pub(crate) fn record_no_picture(&mut self, udid: &str, now: Instant) {
+        let failures = match self.failures.get(udid) {
+            Some((_, n, true)) => n + 1,
+            _ => 1,
+        };
+        self.failures
+            .insert(udid.to_string(), (now, failures, true));
     }
 
     /// The phone left the fleet; when it returns, its first start is immediate.
@@ -704,6 +730,12 @@ pub(crate) async fn start_android_view(
     match android.start_view_stream(udid, preset).await {
         Ok(generation) => {
             crate::state::mark_android_view_live(registry, udid);
+            if let Some(encoder) = android.take_view_encoder_switch(udid) {
+                log::warn!(
+                    "Máy {udid} không xuất hình bằng bộ mã hóa phần cứng; đã chuyển sang bộ mã \
+                     hóa phần mềm ({encoder})."
+                );
+            }
             Ok(generation)
         }
         Err(error) => {

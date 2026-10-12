@@ -324,6 +324,55 @@ pub fn launch_command(scid: u32, tuning: ViewTuning) -> String {
     )
 }
 
+/// Where the software-encoder launch copies the JAR before running it. See
+/// [`launch_command_with_encoder`] for why it is a copy.
+pub const REMOTE_SERVER_COPY: &str = "/data/local/tmp/riviu-scrcpy-soft";
+
+/// Android's own software H.264 encoder for this release.
+///
+/// For a phone whose hardware encoder takes the job and never returns a frame. Measured
+/// 13/10/2026 on an SM-G955F (Android 9): every start logged
+/// `Using video encoder: 'OMX.Exynos.AVC.Encoder'` and then no keyframe, and
+/// `screenrecord` on the same phone wrote a 0-byte file before and after a reboot, while a
+/// second phone of the same model wrote 129 KB. Both names are AOSP's, present on every
+/// build: the OMX one up to Android 9, the Codec2 one from Android 10.
+pub fn software_encoder(sdk: u32) -> &'static str {
+    if sdk >= 29 {
+        "c2.android.avc.encoder"
+    } else {
+        "OMX.google.h264.encoder"
+    }
+}
+
+/// [`launch_command`] on a named encoder, for the software fallback.
+///
+/// `video_encoder=OMX.google.h264.encoder` is 38 bytes and the longest ordinary launch
+/// leaves 18 of the [`MAX_SERVER_ARGV`] budget, so two options give their bytes back:
+///
+/// - `control=true` (13) is 3.3.4's own default, so leaving it out changes nothing — the
+///   control socket is still opened and still expected by [`ScrcpyStream::try_accept`].
+/// - `cleanup=false` (14) goes, and with it scrcpy's clean-up process deletes the JAR it ran
+///   from. So this runs a **copy** made on the device in the same shell line: the pushed
+///   JAR is never touched, the next start of any kind still skips the push, and the `cp`
+///   sits before `app_process`, outside argv.
+///
+/// That leaves 7 bytes spare on the longest tuning, which the owner test checks.
+pub fn launch_command_with_encoder(scid: u32, tuning: ViewTuning, encoder: &str) -> String {
+    format!(
+        "cp {REMOTE_SERVER} {REMOTE_SERVER_COPY} && \
+         CLASSPATH={REMOTE_SERVER_COPY} app_process / {MAIN_CLASS} {SERVER_VERSION} \
+         scid={scid:08x} tunnel_forward=true audio=false clipboard_autosync=false \
+         max_size={} max_fps={} video_bit_rate={} \
+         video_codec_options=i-frame-interval:int=1 video_encoder={encoder}",
+        tuning.max_size, tuning.max_fps, tuning.bit_rate
+    )
+}
+
+/// Leading words of the error a view start ends with once **every** encoder has been tried
+/// on this phone. The desktop watchdog keys its long backoff on it, and the operator reads it.
+pub const NO_PICTURE_ON_ANY_ENCODER: &str =
+    "Máy không xuất hình bằng cả bộ mã hóa phần cứng lẫn phần mềm";
+
 /// Ask for a keyframe on the existing control transport.
 ///
 /// `ControlMessage.TYPE_RESET_VIDEO = 17`, one byte, no payload — confirmed against the
@@ -1398,12 +1447,19 @@ mod tests {
                 riviu_core::StreamQuality::Extra,
             ] {
                 for fps in [MIN_VIEW_FPS, riviu_core::STREAM_FPS, 30] {
-                    // 0xffffffff is the widest scid the formatter can produce.
-                    let command = launch_command(u32::MAX, preset.tuned(quality.clone(), fps));
-                    let argv = server_argv(&command).len();
-                    if argv > worst {
-                        worst = argv;
-                        worst_command = command;
+                    // 0xffffffff is the widest scid the formatter can produce. The software
+                    // fallback is the same budget with the longest encoder name in it.
+                    let tuning = preset.tuned(quality.clone(), fps);
+                    for command in [
+                        launch_command(u32::MAX, tuning),
+                        launch_command_with_encoder(u32::MAX, tuning, software_encoder(28)),
+                        launch_command_with_encoder(u32::MAX, tuning, software_encoder(29)),
+                    ] {
+                        let argv = server_argv(&command).len();
+                        if argv > worst {
+                            worst = argv;
+                            worst_command = command;
+                        }
                     }
                 }
             }

@@ -21,6 +21,26 @@ static FIRST_FRAME_DECODE_SLOTS: std::sync::LazyLock<Arc<tokio::sync::Semaphore>
 /// request indefinitely.
 const CONTROL_WRITE_BUDGET: Duration = Duration::from_secs(2);
 
+/// A view start that got a good hello and then no keyframe: the encoder took the job and
+/// produced nothing. The one start failure a different encoder can cure, so it is a type the
+/// fallback can recognise rather than a sentence it would have to match.
+#[derive(Debug)]
+struct NoKeyframeAfterHello {
+    said: String,
+}
+
+impl std::fmt::Display for NoKeyframeAfterHello {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            f,
+            "scrcpy produced no keyframe after the hello{}",
+            self.said
+        )
+    }
+}
+
+impl std::error::Error for NoKeyframeAfterHello {}
+
 /// Write one whole control message, or say exactly how much is known about it.
 ///
 /// A lock that is not had within the budget means **nothing was written**, so the caller may
@@ -676,9 +696,86 @@ impl AndroidDriver {
                 generation: sink.advance(serial),
             }
         };
-        self.spawn_view(serial, start, preset).await?;
+        self.spawn_view_on_a_working_encoder(serial, start, preset)
+            .await?;
         drop(claim);
         Ok(sink.generation(serial))
+    }
+    /// The software encoder this serial's view switched to, the **first** time it is asked
+    /// after the switch and never again. The desktop says it to the operator once; this
+    /// crate's `tracing` reaches no sink an operator reads.
+    pub fn take_view_encoder_switch(&self, serial: &str) -> Option<&'static str> {
+        let mut encoders = self.view_encoders.lock();
+        let (encoder, told) = encoders.get_mut(serial)?;
+        if *told {
+            return None;
+        }
+        *told = true;
+        Some(*encoder)
+    }
+    /// [`Self::spawn_view`] on the default encoder, and once on Android's software encoder
+    /// when the default one answered the hello and then gave no keyframe.
+    ///
+    /// A phone that already switched goes straight to its software encoder. When the
+    /// fallback fails too, the error leads with [`crate::scrcpy::NO_PICTURE_ON_ANY_ENCODER`]
+    /// so the desktop stops retrying this phone every half minute.
+    async fn spawn_view_on_a_working_encoder(
+        &self,
+        serial: &str,
+        start: ViewStart,
+        preset: crate::scrcpy::ViewPreset,
+    ) -> anyhow::Result<()> {
+        let remembered = self
+            .view_encoders
+            .lock()
+            .get(serial)
+            .map(|(encoder, _)| *encoder);
+        if let Some(encoder) = remembered {
+            return self
+                .spawn_view(serial, start, preset, Some(encoder))
+                .await
+                .map_err(|error| match error.downcast_ref::<NoKeyframeAfterHello>() {
+                    Some(_) => error.context(format!(
+                        "{} ({encoder})",
+                        crate::scrcpy::NO_PICTURE_ON_ANY_ENCODER
+                    )),
+                    None => error,
+                });
+        }
+        let hardware = match self.spawn_view(serial, start, preset, None).await {
+            Ok(()) => return Ok(()),
+            Err(error) if error.downcast_ref::<NoKeyframeAfterHello>().is_some() => error,
+            Err(error) => return Err(error),
+        };
+        // Only on this path, so a healthy start pays nothing for it.
+        let Some(sdk) = self
+            .adb
+            .shell(serial, "getprop ro.build.version.sdk")
+            .await
+            .ok()
+            .and_then(|out| out.trim().parse::<u32>().ok())
+        else {
+            return Err(hardware);
+        };
+        let encoder = crate::scrcpy::software_encoder(sdk);
+        match self.spawn_view(serial, start, preset, Some(encoder)).await {
+            Ok(()) => {
+                tracing::warn!(
+                    serial,
+                    encoder,
+                    sdk,
+                    "default encoder gave no keyframe; view switched to the software encoder"
+                );
+                self.view_encoders
+                    .lock()
+                    .insert(serial.to_string(), (encoder, false));
+                Ok(())
+            }
+            Err(software) => Err(software.context(format!(
+                "{} ({encoder}); bộ mã hóa mặc định: {hardware:#}",
+                crate::scrcpy::NO_PICTURE_ON_ANY_ENCODER
+            ))),
+        }
     }
     /// Stop the view for one serial. `true` when nothing is left running,
     /// including when there was nothing to stop.
@@ -841,6 +938,7 @@ impl AndroidDriver {
         serial: &str,
         start: ViewStart,
         preset: crate::scrcpy::ViewPreset,
+        encoder: Option<&'static str>,
     ) -> anyhow::Result<()> {
         let sink = self.view_sink()?;
         let server = self.scrcpy_server.clone().ok_or_else(|| {
@@ -919,15 +1017,14 @@ impl AndroidDriver {
         // refuses the abstract socket if nothing is bound yet, so a TCP
         // opened before listen EOFs and never becomes the video socket.
         // Retry TCP only while dummy has not arrived (`NotListening`).
+        let launch = match encoder {
+            Some(encoder) => crate::scrcpy::launch_command_with_encoder(scid, tuning, encoder),
+            None => crate::scrcpy::launch_command(scid, tuning),
+        };
         let mut child = tokio::process::Command::new(self.adb.path());
         self.adb.apply_server_for_serial(&mut child, Some(serial));
         child
-            .args([
-                "-s",
-                serial,
-                "shell",
-                &crate::scrcpy::launch_command(scid, tuning),
-            ])
+            .args(["-s", serial, "shell", &launch])
             .stdin(Stdio::null())
             // Piped, not null. `Ln.i` goes to FD 1, so discarding stdout threw away the
             // server's account of itself -- which encoder it chose, the `Device: [...]` line,
@@ -1031,7 +1128,7 @@ impl AndroidDriver {
                         .ok();
                     let said = scrcpy_exit_detail(&mut child).await;
                     let _ = child.kill().await;
-                    anyhow::bail!("scrcpy produced no keyframe after the hello{said}");
+                    return Err(NoKeyframeAfterHello { said }.into());
                 }
             };
 
@@ -1055,6 +1152,7 @@ impl AndroidDriver {
             host_port,
             generation,
             preset = preset.as_str(),
+            encoder = encoder.unwrap_or("default"),
             codec = stream.hello.codec,
             device = %stream.hello.device_name,
             width = first.width,
