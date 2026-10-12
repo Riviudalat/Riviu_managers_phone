@@ -80,6 +80,30 @@ mở ở chế độ exclusive.
   chiến dịch còn `running`.
 - `ipc.mjs` từ chối lệnh có effect nếu thiếu `--allow-effect`; dùng runner tương ứng.
 
+## Chạy thử không đăng (no-public rehearsal)
+
+`rehearse-publish.mjs` chạy toàn bộ luồng chuẩn bị đăng bài (picker, sound, caption,
+pre-Post reproof) trên N máy **song song** rồi dọn sạch draft/media mà **không Post, không
+Sheet, không AI trả phí**. Controller chạy chế độ no-public: scratch DB/credential RAM,
+`publicEffectsAllowed: false`.
+
+```powershell
+# 1. Tạo ảnh kiểm tra (chỉ cần một lần)
+py -3.12 tools/no_public_fixture.py
+
+# 2. Soạn scope JSON no-public (xem docs/development/no-public-rehearsal.md).
+#    Mỗi deviceScope cần: udid, package (com.zhiliaoapp.musically),
+#    expectedAccount (@...), sourceRoot, bundleId, publishFingerprint, soundPolicy,
+#    allowInstalledRunner: true, allowWarmLaunch: true.
+
+# 3. Chạy thử
+node scripts/device-acceptance/rehearse-publish.mjs r1 target/rehearsal-scope.json \
+  --exe target/device-acceptance/builds/<exe> --port 9377 --timeout 360 --ready-wait 120
+```
+
+Điều kiện: máy phải có UiAutomator đang chạy (từ phiên production trước) và TikTok đã cài.
+Kết quả ghi `target/device-acceptance/rehearsal/rehearsal-<label>.json`. Xem `--help`.
+
 ## Nguồn
 
 Bộ này được nâng từ các script một lần dưới `target/acceptance-20261010/kit/` và
