@@ -302,8 +302,12 @@ pub(crate) fn requires_fresh_preparation(error: &anyhow::Error) -> bool {
             | "sound_entry_observation_changed"
             | "sound_recent_observation_invalidated"
             | "sound_any_choice_requires_fresh_attempt"
+            | SOUND_SHEET_BLIND_FRESH_ATTEMPT
     )
 }
+/// The sound budget ran out on a blind sheet. Retried only as one fresh attempt per
+/// assignment (TikTok relaunched, new helper session); the recovery ledger caps it.
+pub const SOUND_SHEET_BLIND_FRESH_ATTEMPT: &str = "sound_sheet_blind_requires_fresh_attempt";
 pub fn classify(message: &str) -> FailureKind {
     let s = message.to_lowercase();
     // Specific refusals always win over words such as timeout in an error chain.

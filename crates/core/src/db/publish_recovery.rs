@@ -55,10 +55,15 @@ fn record_failure(s: &mut PublishRecoveryState, failure: &RecoveryFailure) {
     s.last_error_kind = Some(failure.kind.as_str().into());
 }
 
+/// Ledger key, not a step name: the one automatic fresh attempt after a blind sound sheet.
+const SOUND_SHEET_BLIND_KEY: &str = "soundSheetBlind";
 fn spend(s: &mut PublishRecoveryState, failure: &RecoveryFailure, now: i64) -> Option<Duration> {
     record_failure(s, failure);
     let used = *s.counts.get(&s.step).unwrap_or(&0);
-    if used >= s.max_retries {
+    // One relaunch per assignment cures a stalled sheet; a second blind sheet is the phone.
+    let blind_again = failure.code == crate::publish_recovery::SOUND_SHEET_BLIND_FRESH_ATTEMPT
+        && s.counts.insert(SOUND_SHEET_BLIND_KEY.into(), 1).is_some();
+    if used >= s.max_retries || blind_again {
         s.state = "exhausted".into();
         s.next_retry_at = None;
         return None;

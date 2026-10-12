@@ -241,7 +241,10 @@ lại tại chỗ không đọc lại editor): pool Hot giao danh tính đã ch�
 (For You) chưa đo đường ảnh nên lượt thử kết thúc trước mọi tap với
 `sound_any_choice_requires_fresh_attempt`. Bước nhạc thấy bảng nhạc mù (đủ hai gốc không
 đọc được, một `/source` chạm hạn 30 giây, hoặc vào thẳng đường ảnh vì lượt trước đã mù) mà hết
-ba phút thì `publish_sound_budget_exhausted` (vẫn terminal, chưa bấm Đăng) nói rõ TikTok
+ba phút thì lượt kết thúc với `sound_sheet_blind_requires_fresh_attempt`: dispatcher tự cấp
+đúng một lượt mới trước Post cho mỗi phân công (mở lại TikTok sạch, phiên helper mới; khóa
+`soundSheetBlind` trong sổ khôi phục), bảng mù lần thứ hai thì hết lượt tự thử. Hết ba phút
+mà bảng không mù vẫn là `publish_sound_budget_exhausted` (terminal). Cả hai, chưa bấm Đăng, nói rõ TikTok
 không trả giao diện bảng nhạc, thêm "bảng nhạc không chuyển sang tab Hot" khi đường ảnh hết
 giờ mà chưa khung nào thấy Hot, và bước tiếp: dừng phần mềm khác (như GenFarmer) điều khiển máy,
 khởi động lại máy nếu máy không còn bài đăng chưa rõ, rồi Thử lại.
@@ -279,7 +282,14 @@ sổ cũng không có cây và đã đủ hai gốc không đọc được liên
 không có đường ảnh mới khởi động lại instrumentation một lần như trước. Trên đường ảnh,
 mọi tap vào bảng (tab Hot, hàng nhạc) là tap contact 45–130 ms tại điểm OCR trên khung
 1080×2220, sau khi chứng minh màn hình cùng kích thước, cùng phiên và cùng app ngay trước
-cử chỉ (machine29 và #47: tap native 16 ms được ACK nhưng không đổi tab, không chọn hàng);
+cử chỉ (machine29 và #47: tap native 16 ms được ACK nhưng không đổi tab, không chọn hàng).
+Tap contact đó đi qua `input swipe` của shell adb (giữ tại chỗ 45–130 ms), không qua `/actions`
+của helper: đường ảnh chỉ chạy khi accessibility của bảng đã mù, và run 72401bfd (máy khác,
+2026-10-12) có tap Hot qua helper được ACK trong 0,5–0,7 giây mà 64–172 giây không khung nào
+thấy Hot. Chỉ phiên không có shell (chưa gửi gì) mới lùi về helper; tap shell lỗi thì không tap
+lại ngay (`sound_shell_tap_failed`, thử lại trước Post trong ngân sách). Hai từ chối trước tap
+có mã riêng thay vì `legacy_terminal`: màn hình khác 1080×2220 (`sound_visual_screen_unmeasured`,
+terminal) và phiên/app đã đổi (`sound_visual_target_changed`, thử lại);
 tab Hot tối đa hai lần và chỉ khi hai ảnh mới chưa đổi, hàng nhạc đúng một lần, rồi chờ hai
 ảnh mới có hàng chuyển hồng. OCR không bao giờ là bằng chứng chọn: `editorProof` ghi `xml`
 khi hai snapshot XML mới của màn chỉnh sửa cùng tên nhạc, và chỉ bằng chứng đó mới xác

@@ -4497,9 +4497,23 @@ where
                 && crate::publish_recovery::describe(&error).kind
                     == crate::publish_recovery::FailureKind::Retryable
             {
+                // A blind sheet earns one automatic fresh attempt before Post: the dispatcher
+                // clean-starts TikTok and a new helper session (`start_clean_app_session`),
+                // capped at one per assignment in the recovery ledger.
+                let (code, kind) = if sound_evidence.sheet_blind() {
+                    (
+                        crate::publish_recovery::SOUND_SHEET_BLIND_FRESH_ATTEMPT,
+                        crate::publish_recovery::FailureKind::Retryable,
+                    )
+                } else {
+                    (
+                        "publish_sound_budget_exhausted",
+                        crate::publish_recovery::FailureKind::Terminal,
+                    )
+                };
                 error.context(crate::publish_recovery::RecoveryFailure::new(
-                    "publish_sound_budget_exhausted",
-                    crate::publish_recovery::FailureKind::Terminal,
+                    code,
+                    kind,
                     sound_evidence.budget_exhausted_message(),
                 ))
             } else { error }

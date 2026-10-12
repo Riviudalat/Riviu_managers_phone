@@ -113,21 +113,23 @@ impl SoundStageEvidence {
     /// route's Hot taps never showed Hot selected, yet the operator saw only a generic timeout.
     /// Phone 44 (box3150, 2026-10-10) showed the same blind sheet and swallowed taps while
     /// overloaded, and a reboot cleared it (docs/agents/09-fleet-android.md).
+    /// A blind sheet in the sense of the visual hand-off, not one stray unreadable read. A
+    /// stage that adopted a blind sheet remembered from the last attempt asks no root at all;
+    /// its frames skip the XML popup check, and only a blind sheet reaches the frames.
+    pub(crate) fn sheet_blind(&self) -> bool {
+        self.0.as_ref().is_some_and(|route| {
+            route.unreadable_roots.load(Ordering::Relaxed) >= ROOT_UNREADABLE_CAP
+                || route.source_timed_out.load(Ordering::Relaxed)
+                || route.popup_check_skipped.load(Ordering::Relaxed)
+                || route.hot_unconfirmed.load(Ordering::Relaxed)
+        })
+    }
+
     pub(crate) fn budget_exhausted_message(&self) -> String {
-        let Some(route) = self.0.as_ref() else {
+        let Some(route) = self.0.as_ref().filter(|_| self.sheet_blind()) else {
             return SOUND_BUDGET_EXHAUSTED.into();
         };
-        // A blind sheet in the sense of the visual hand-off, not one stray unreadable read. A
-        // stage that adopted a blind sheet remembered from the last attempt asks no root at
-        // all; its frames skip the XML popup check, and only a blind sheet reaches the frames.
         let hot_unconfirmed = route.hot_unconfirmed.load(Ordering::Relaxed);
-        if route.unreadable_roots.load(Ordering::Relaxed) < ROOT_UNREADABLE_CAP
-            && !route.source_timed_out.load(Ordering::Relaxed)
-            && !route.popup_check_skipped.load(Ordering::Relaxed)
-            && !hot_unconfirmed
-        {
-            return SOUND_BUDGET_EXHAUSTED.into();
-        }
         let hot = if hot_unconfirmed {
             " và bảng nhạc không chuyển sang tab Hot"
         } else {
