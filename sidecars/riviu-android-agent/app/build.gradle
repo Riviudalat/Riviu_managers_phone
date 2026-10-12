@@ -17,8 +17,8 @@ android {
         // Kept in step with `Protocol.AGENT_VERSION`, which is what `/status` advertises and
         // what the desktop compares against. Two version strings that disagree is how a
         // stale helper looks fresh.
-        versionCode 7
-        versionName "0.7.0"
+        versionCode 8
+        versionName "0.8.0"
     }
 
     buildTypes {

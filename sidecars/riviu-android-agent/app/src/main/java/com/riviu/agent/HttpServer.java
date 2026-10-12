@@ -269,6 +269,9 @@ final class HttpServer {
         if ("POST".equals(method) && "/v1/wallpaper/set".equals(path)) {
             return WallpaperSet.setFromFile(context, json.optString("path", ""));
         }
+        if ("POST".equals(method) && "/v1/system/locale".equals(path)) {
+            return SystemLocale.set(json.optString("languageTag", ""));
+        }
         if ("POST".equals(method) && "/v1/location/set".equals(path)) {
             return MockLocation.set(context, json.optDouble("lat", 0), json.optDouble("lng", 0));
         }
