@@ -1785,13 +1785,24 @@ async fn package_installed(adb: &AdbProgram, serial: &str) -> anyhow::Result<boo
     Ok(listing.contains("package:"))
 }
 
+/// Helper APK installs running at once across the fleet. Until 2026-10-13 this was the cap
+/// on the whole desktop helper setup queue (not a measured limit); it now bounds only the
+/// install push, so phones whose helper is already current never queue behind an install.
+const MAX_CONCURRENT_HELPER_INSTALLS: usize = 2;
+
 pub(crate) async fn install_apk(adb: &AdbProgram, serial: &str, apk: &Path) -> anyhow::Result<()> {
+    static INSTALLS: std::sync::OnceLock<tokio::sync::Semaphore> = std::sync::OnceLock::new();
     let path = apk
         .to_str()
         .ok_or_else(|| anyhow!("the helper APK path is not UTF-8"))?;
     if !apk.is_file() {
         anyhow::bail!("helper APK is not a file: {}", apk.display());
     }
+    let _install = INSTALLS
+        .get_or_init(|| tokio::sync::Semaphore::new(MAX_CONCURRENT_HELPER_INSTALLS))
+        .acquire()
+        .await
+        .context("helper install slot unavailable")?;
     let output = match adb
         .device(serial, &["install", "-r", "-g", path], INSTALL_TIMEOUT)
         .await

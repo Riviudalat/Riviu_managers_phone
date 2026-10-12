@@ -193,9 +193,11 @@ việc chuẩn bị cho đúng máy sau khi tác vụ giữ máy kết thúc. Ap
 hiển thị tên **Riviu Helper** cùng logo Riviu trong danh sách ứng dụng. Mở app để xem
 chức năng và trạng thái dịch vụ; thao tác này không đổi bàn phím hoặc mở quyền mới.
 
-Việc chuẩn bị chạy nền tối đa hai máy cùng lúc. Máy đang có tác vụ hoặc được mở điều
-khiển sẽ chờ đến khi rảnh; stream vẫn giữ nguyên. Máy đã có bản phù hợp được dùng lại,
-không cài lại mỗi lần quét. Cài xong phải đọc lại phiên bản, kiểm quyền sở hữu và
+Việc chuẩn bị chạy nền tối đa mười máy cùng lúc; riêng việc cài gói helper chỉ hai máy
+một lúc. Máy đang có tác vụ hoặc được mở điều khiển sẽ chờ đến khi rảnh; stream vẫn giữ
+nguyên. Máy đã có bản phù hợp được dùng lại, không cài lại mỗi lần quét. Khi mở lại app
+mà điện thoại chưa khởi động lại và helper vẫn là phiên cũ, app dùng lại kết quả xác minh
+clipboard của lần khởi động máy đó thay vì đổi bàn phím để kiểm lại. Cài xong phải đọc lại phiên bản, kiểm quyền sở hữu và
 xác minh clipboard có khôi phục trước khi báo hoàn tất. Quyền cài USB bị ROM từ
 chối hoặc bản ghi thao tác cũ chưa đối soát được sẽ hiện trên đúng máy; app không
 lặp cài liên tục. Kế hoạch khôi phục đã thực thi chỉ được đọc lại kết quả. Lỗi được

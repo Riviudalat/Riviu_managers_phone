@@ -651,9 +651,15 @@ thêm `appearance: base-select` trong `@supports`; WebView2 152 đã xác minh p
 Escape và chọn option. WebView cũ giữ select native với khung theo token Riviu.
 
 Helper Android được chuẩn bị sau inventory ổn định bằng worker
-`android_helper_setup` trong `state`: tối đa hai máy, admission và lease Repair giữ
-stream. `prepare_helper_runtime` xác minh gói, quyền sở hữu và clipboard có khôi phục;
-khi gặp retained owner lỗi, worker dùng chung kế hoạch maintenance với lệnh thủ công.
+`android_helper_setup` trong `state`: tối đa mười máy cùng lúc (`MAX_CONCURRENT_PREPARATIONS`),
+admission và lease Repair giữ stream; riêng lệnh cài APK helper vẫn tối đa hai máy
+(`MAX_CONCURRENT_HELPER_INSTALLS` trong `install_apk`). `prepare_helper_runtime` xác minh gói,
+quyền sở hữu và clipboard có khôi phục. Bằng chứng clipboard được ghi bền vững
+(`clipboard-proof.json` trong thư mục `helper-runtime` của máy) gắn với `boot_id`, SHA-256 APK
+bundle, `ownerId`, `serviceInstance` và `ownerGeneration`; khi controller mở lại và resume đúng
+owner đó trên cùng lần khởi động máy, bằng chứng được dùng lại, không đổi bàn phím lần nữa.
+Lệch bất kỳ trường nào thì chạy lại vòng clipboard đầy đủ. Nhập caption vẫn kiểm chọn IME
+và settlement clipboard ở từng lần dùng. Khi gặp retained owner lỗi, worker dùng chung kế hoạch maintenance với lệnh thủ công.
 Mỗi kết nối hoặc episode lỗi mới có một lần chuẩn bị; contention trước dispatch
 được chờ lại, kết quả chưa rõ giữ nguyên maintenance ID để đối soát. Inventory chỉ
 tiêu thụ bản ghi lỗi đã quan sát, không gọi HTTP helper trong lượt quét. Preflight
