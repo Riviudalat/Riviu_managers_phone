@@ -224,6 +224,25 @@ tượng ra màn hình chính. Khi có bản dump thì bổ sung vào catalog.
 - **Tab Hot có thể có hàng chip vùng** "United States / Vietnam / Global" phía trên danh
   sách, đẩy hàng đầu từ y≈1370 xuống y≈1686 trên khung 1080×2220 (máy 44
   `ce031713d903001b01`, 10/10/2026). Không giả định vị trí hàng cố định.
+- **Tab Hot là bảng xếp hạng nhạc theo vùng (APK, 2026-10-12).**
+  - Trang của mỗi chip là `…music.vertical.tab.hot.HotMusicRegionPage`. Nó tải qua
+    `MusicChartRepo` → `MusicChartApi.getMusicList`, tức GET `/tiktok/music/chart/v1/`
+    với `chart_region=<mã vùng>`, `scene=2`, `source=creation_music_panel` và trang 30 hàng.
+    Request không tự thêm tham số riêng theo tài khoản; riêng `use_past_emf_music_id` giữ
+    lại một hàng quảng bá đã ghim. Lớp mạng vẫn gắn tham số chung của thiết bị và tài khoản,
+    nên chưa loại trừ được việc server cá nhân hóa. Ứng viên: hai máy cùng chip vùng thấy
+    cùng danh sách. **Chưa đo.**
+  - Ba chip theo thứ tự:
+    1. vùng của SIM, nếu không có thì vùng của locale máy;
+    2. `tv_user_data_region`: `store_region` của tài khoản, ẩn khi trùng chip 1;
+    3. "Global", hoặc vùng theo IP khi cờ server `music_panel_global_use_ip_region` bật.
+  - Chip mặc định là chip **đầu tiên**. Chip đang chọn chỉ khác màu nền/màu chữ;
+    `selected` luôn là false (dump `nav_picker_hot.xml`, máy #44). Vì vậy XML không cho
+    biết danh sách đang hiện thuộc vùng nào. Trên máy #44, chip 1 là "United States", nên
+    "Hot" mặc định ở đó là bảng của Mỹ, không phải Việt Nam.
+  - Danh sách "hot" của trang chọn nhạc toàn màn hình cũ (`//choosemusic/home` →
+    `ChooseMusicActivity`) dùng endpoint khác (`/aweme/v1/hot/music/`) và mang tiêu đề
+    "For You". Đó không phải tab Hot.
 - **Hàng đã chọn có khung đỏ 4 px quanh thumbnail** (x 110..234; ảnh chưa chọn chỉ
   ~115..230). Đây là bằng chứng ảnh của hàng đã chọn, kể cả khi OCR không đọc được tiêu
   đề đỏ. Hằng số đo nằm ở
@@ -288,6 +307,19 @@ tĩnh manifest và bảng chuỗi `default` của 45.7.3, nên chỉ là ứng v
   - `com.ss.android.ugc.aweme.music.ui.MusicDetailActivity` không export. Chỉ tới được
     trang này qua SmartRouter `//music/detail`.
   - Link https `/music/…` đi qua `AppLinkHandlerV2`.
+- **Các route nhạc khác trong bảng router (APK, 2026-10-12).** Không route nào mở một
+  trang native liệt kê đúng bảng của tab Hot:
+  - `//choosemusic/home` → `ChooseMusicActivity`: trang chọn nhạc cũ của recorder. Nó trả
+    kết quả về nơi gọi.
+  - `//assmusic/category` → `MusicDetailListActivity`: một playlist theo `mc_id`.
+  - `//music/dsp/*`, `//music/library/*`, `//music/player/*`: TikTok Music và thư viện
+    nhạc của tôi.
+  - `//profile/search_music`, `//search`: tìm theo từ khóa.
+  - Bảng xếp hạng nhạc trong app là trang Spark/Lynx
+    `aweme://roma_redirect/?spark_page=music_charts…`, lấy từ cờ server `music_chart_url`.
+    Huy hiệu hạng trên trang nhạc (`MusicChartRankStruct.desc`) mở trang này; huy hiệu bị
+    ẩn với tài khoản doanh nghiệp. Bundle Lynx tải lúc chạy nên APK không cho biết
+    endpoint. Trang có đọc được bằng uiautomator không: **Chưa đo**.
 - **Trang nhạc (Máy).**
   - Với sound gốc có chứa một bài nhạc, `title` ghi "Contains: <tên bài>". Ô tìm kiếm trên
     cùng `tv_search_sug_word` ghi đúng "<tên bài>".
