@@ -210,7 +210,8 @@ async fn deliver_bound_claim(
         {
             let deferred = claim.clone();
             db.storage_write(move |db| {
-                db.defer_bound_sheet_delivery(&deferred, chrono::Utc::now().timestamp_millis())
+                let now = chrono::Utc::now().timestamp_millis();
+                db.defer_bound_sheet_delivery(&deferred, now, now + 1000)
             })
             .await?;
             return delivered;
@@ -433,6 +434,20 @@ pub fn publish_sheet_save_config(
     publish_sheet_config_of(&state.db)
 }
 
+/// The shared-writer journal a claim writes through: one per spreadsheet tab.
+type SheetTargetKey = (String, u64);
+
+/// What the worker last saw from one target, kept until that target delivers again.
+#[derive(Default)]
+struct SheetTargetWait {
+    warning: Option<String>,
+    /// While its shared operation is unproven, the target's rows wait for this instant.
+    probe_after: Option<Instant>,
+}
+
+/// Targets tracked at once; a few configured tabs in practice.
+const SHEET_WAIT_TARGETS: usize = 64;
+
 /// Independent canonical/report work with a shared durable per-assignment claim.
 /// Reports can occupy only one slot, leaving capacity for a newly verified link.
 pub(crate) async fn run_bound_sheet_worker(
@@ -443,13 +458,13 @@ pub(crate) async fn run_bound_sheet_worker(
 ) {
     use riviu_core::db::SheetDeliveryKind;
     use sha2::Digest;
-    let mut tasks = tokio::task::JoinSet::<anyhow::Result<()>>::new();
+    let mut tasks = tokio::task::JoinSet::<(SheetTargetKey, anyhow::Result<()>)>::new();
     let mut configured_fingerprint = None;
-    // One warning per distinct failure state; each row keeps its own outbox backoff.
-    let mut last_warning: Option<String> = None;
-    // While a shared operation is unproven, every row would read the same journal:
-    // probe once per window instead of once per row.
-    let mut unproven_until: Option<Instant> = None;
+    // Per target: one warning per distinct failure state and, while its shared operation
+    // is unproven, one probe per window instead of one per row (every row of that target
+    // would read the same journal). Other targets are not held. Each row keeps its own
+    // outbox backoff.
+    let mut waits: HashMap<SheetTargetKey, SheetTargetWait> = HashMap::new();
     let mut tick = tokio::time::interval(Duration::from_secs(1));
     tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
     loop {
@@ -457,26 +472,39 @@ pub(crate) async fn run_bound_sheet_worker(
             _=tick.tick()=>{},
             result=tasks.join_next(),if !tasks.is_empty()=>{
                 match result {
-                    Some(Ok(Ok(()))) => {
-                        unproven_until = None;
-                        if last_warning.take().is_some() {
-                            log::info!("Sheet đã ghi lại được; trạng thái chờ trước đã hết");
+                    Some(Ok((target, Ok(())))) => {
+                        // The target delivered: its warning and probe window end.
+                        let waited = waits.remove(&target).is_some_and(|wait| wait.warning.is_some());
+                        if waited {
+                            log::info!(
+                                "Sheet đã ghi lại được vào tab gid {}; trạng thái chờ trước của tab này đã hết",
+                                target.1
+                            );
                         }
                     }
-                    Some(Ok(Err(error))) => {
+                    Some(Ok((target, Err(error)))) => {
                         let warning = match sheet_wait_reason(&error) {
                             Some(reason) => format!("{reason} ({error:#})"),
                             None => format!("{error:#}"),
                         };
-                        if last_warning.as_deref() != Some(warning.as_str()) {
-                            log::warn!("Sheet chưa gửi được: {warning}");
-                            last_warning = Some(warning);
-                        }
-                        if error
+                        let uncertain = error
                             .downcast_ref::<riviu_core::google_sheets::DirectSheetsError>()
-                            .is_some_and(|error| error.shared_operation_uncertain())
-                        {
-                            unproven_until = Some(Instant::now() + Duration::from_secs(30));
+                            .is_some_and(|error| error.shared_operation_uncertain());
+                        if !waits.contains_key(&target) && waits.len() >= SHEET_WAIT_TARGETS {
+                            let now = Instant::now();
+                            waits.retain(|_, wait| wait.probe_after.is_some_and(|until| now < until));
+                        }
+                        if !waits.contains_key(&target) && waits.len() >= SHEET_WAIT_TARGETS {
+                            log::warn!("Sheet chưa gửi được: {warning}");
+                        } else {
+                            let wait = waits.entry(target).or_default();
+                            if wait.warning.as_deref() != Some(warning.as_str()) {
+                                log::warn!("Sheet chưa gửi được: {warning}");
+                                wait.warning = Some(warning);
+                            }
+                            if uncertain {
+                                wait.probe_after = Some(Instant::now() + Duration::from_secs(30));
+                            }
                         }
                     }
                     Some(Err(error)) => log::warn!("Sheet delivery worker failed: {error}"),
@@ -565,9 +593,6 @@ pub(crate) async fn run_bound_sheet_worker(
             }
             configured_fingerprint = Some(fingerprint);
         }
-        if unproven_until.is_some_and(|until| Instant::now() < until) {
-            continue;
-        }
         for kind in [
             SheetDeliveryKind::Canonical,
             SheetDeliveryKind::Report,
@@ -605,9 +630,33 @@ pub(crate) async fn run_bound_sheet_worker(
                 .await
             {
                 Ok(Some(claim)) => {
+                    let target = (claim.target.spreadsheet_id.clone(), claim.target.sheet_gid);
+                    let window = waits
+                        .get(&target)
+                        .and_then(|wait| wait.probe_after)
+                        .map(|until| until.saturating_duration_since(Instant::now()))
+                        .filter(|left| !left.is_zero());
+                    if let Some(left) = window {
+                        // This target's unproven operation was probed this window: release
+                        // the row untried until the window ends. Nothing is sent.
+                        let left = i64::try_from(left.as_millis()).unwrap_or(30_000);
+                        if let Err(error) = db
+                            .storage_write(move |db| {
+                                let now = chrono::Utc::now().timestamp_millis();
+                                db.defer_bound_sheet_delivery(&claim, now, now + left)
+                            })
+                            .await
+                        {
+                            log::warn!("Sheet: không hoãn được hàng chờ đọc lại: {error:#}");
+                        }
+                        continue;
+                    }
                     let db = db.clone();
                     let events = events.clone();
-                    tasks.spawn(async move { deliver_bound_claim(&db, &events, claim).await });
+                    tasks.spawn(async move {
+                        let result = deliver_bound_claim(&db, &events, claim).await;
+                        (target, result)
+                    });
                 }
                 Ok(None) => {}
                 Err(error) => log::warn!("Sheet: không nhận được hàng đến hạn: {error:#}"),
@@ -616,8 +665,8 @@ pub(crate) async fn run_bound_sheet_worker(
     }
     while let Some(result) = tasks.join_next().await {
         match result {
-            Ok(Ok(())) => {}
-            Ok(Err(error)) => log::warn!("Sheet chưa gửi được khi đóng app: {error:#}"),
+            Ok((_, Ok(()))) => {}
+            Ok((_, Err(error))) => log::warn!("Sheet chưa gửi được khi đóng app: {error:#}"),
             Err(error) => log::warn!("Sheet shutdown delivery failed: {error}"),
         }
     }

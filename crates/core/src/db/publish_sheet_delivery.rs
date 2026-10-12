@@ -124,20 +124,23 @@ impl Database {
         Ok((target, receipt))
     }
 
+    /// Release a current claim untried, due again at `retry_at_ms`. Sends nothing and
+    /// keeps the row's attempts and error.
     pub fn defer_bound_sheet_delivery(
         &self,
         claim: &SheetDeliveryClaim,
         now_ms: i64,
+        retry_at_ms: i64,
     ) -> anyhow::Result<()> {
         let mut conn = self.conn()?;
         let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
         if claim_current(&tx, claim, now_ms)? {
             match &claim.payload {
                 SheetDeliveryPayload::Canonical { row, .. } => {
-                    tx.execute("UPDATE publish_sheet_outbox SET next_attempt_at_ms=?2 WHERE assignment_id=?1 AND revision=?3", params![row.assignment_id, now_ms + 1000, row.revision])?;
+                    tx.execute("UPDATE publish_sheet_outbox SET next_attempt_at_ms=?2 WHERE assignment_id=?1 AND revision=?3", params![row.assignment_id, retry_at_ms, row.revision])?;
                 }
                 SheetDeliveryPayload::Report(_) => {
-                    tx.execute("UPDATE publish_sheet_sync_state SET report_next_attempt_at_ms=?2 WHERE assignment_id=?1", params![claim.assignment_id, now_ms + 1000])?;
+                    tx.execute("UPDATE publish_sheet_sync_state SET report_next_attempt_at_ms=?2 WHERE assignment_id=?1", params![claim.assignment_id, retry_at_ms])?;
                 }
             }
             release_claim(&tx, claim)?;
