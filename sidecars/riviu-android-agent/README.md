@@ -28,7 +28,7 @@ See [Android contract](../../docs/agents/09-fleet-android.md).
 The manifest in `sidecars/android/` pins **bytes + SHA-256**. Inventing those
 numbers for a file that was never assembled — or pinning a debug APK from a
 local assemble without recording it — is a lie the CI gate exists to catch. The
-current pin is helper **0.7.0 (versionCode 7)**; see root `NOTICE` §2c, which is the copy CI verifies.
+current pin is helper **0.8.0 (versionCode 8)**; see root `NOTICE` §2c, which is the copy CI verifies.
 
 ## Launcher and service status
 
@@ -81,7 +81,7 @@ Precedence is `config → env → bundled`, check the current driver resolver be
 
 ## Deployment and candidate qualification
 
-The shipped production APK is **0.7.0/code7**, with package identity
+The shipped production APK is **0.8.0/code8**, with package identity
 `com.riviu.agent` and the existing signing lineage. Package preparation on arrival
 installs or upgrades the helper without starting a session or switching the IME.
 Its success is distinct from authenticated runtime readiness.
