@@ -383,6 +383,135 @@ async fn boot_identity(adb: &AdbProgram, serial: &str) -> anyhow::Result<String>
     Ok(boot_id)
 }
 
+/// The boot this exact owner epoch was claimed or proved on. Newer owner records carry
+/// `bootId`; older ones are bound through the clipboard proof naming the same epoch.
+fn owner_boot(state: &Path, serial: &str, record: &Value) -> Option<String> {
+    if let Some(boot) = record["bootId"].as_str() {
+        return Some(boot.to_owned());
+    }
+    let epoch = |field: &str| record[field].as_str().filter(|v| !v.is_empty() && *v != "-");
+    let (Some(owner), Some(instance), Some(generation)) =
+        (epoch("ownerId"), epoch("serviceInstance"), epoch("ownerGeneration")) else { return None };
+    let proof = bounded_json(&clipboard_proof_path(state)).ok()?;
+    if proof["serial"].as_str() != Some(serial) || proof["androidUser"] != 0
+        || proof["ownerId"].as_str() != Some(owner) || proof["serviceInstance"].as_str() != Some(instance)
+        || proof["ownerGeneration"].as_str() != Some(generation) {
+        return None;
+    }
+    proof["bootId"].as_str().map(str::to_owned)
+}
+
+/// Proof that the helper process holding this owner's claim is gone. The helper keeps the
+/// owner, its token and its epoch only in memory (`OwnerSession.java`), so a new phone boot,
+/// an absent helper process or a helper pid other than the recorded one ends that claim for
+/// good. `None` is no proof: an unanswered read or a same-boot, same-process helper keeps
+/// the existing fence.
+async fn owner_restart_proof(adb: &AdbProgram, serial: &str, state: &Path, record: &Value) -> Option<Value> {
+    let boot_id = boot_identity(adb, serial).await.ok()?;
+    if let Some(recorded) = owner_boot(state, serial, record) {
+        if recorded != boot_id {
+            return Some(json!({"kind":"reboot","recordedBootId":recorded,"bootId":boot_id}));
+        }
+    }
+    let process = maintenance_process(adb, serial).await.ok()?;
+    if process.is_empty() {
+        return Some(json!({"kind":"processAbsent","bootId":boot_id}));
+    }
+    let recorded = record["helperPid"].as_str()?;
+    (!process.split_whitespace().any(|pid| pid == recorded))
+        .then(|| json!({"kind":"processRestarted","recordedPid":recorded,"pid":process,"bootId":boot_id}))
+}
+
+/// Settle a retained owner whose helper process is proven gone (`owner_restart_proof`),
+/// without RELEASE, claim or action replay. Its owner record and release journal move to
+/// `restarted/<ownerId>/` beside the proof, so the caller can claim afresh. A pending
+/// clipboard/IME cleanup, an active maintenance or no proof answers `false` and keeps the
+/// existing recovery path.
+async fn settle_restarted_owner(adb: &AdbProgram, serial: &str, state: &Path) -> anyhow::Result<bool> {
+    if !state.join("runtime-owner.json").try_exists()?
+        || state.join("maintenance-active.json").try_exists()?
+        || state.join("ime-checkpoint.json").try_exists()? {
+        return Ok(false);
+    }
+    let Ok(record) = owner_record(state, serial) else { return Ok(false) };
+    let Some(owner_id) = record["ownerId"].as_str() else { return Ok(false) };
+    let Ok(credential) = owner_credential_name(serial, owner_id) else { return Ok(false) };
+    let Some(proof) = owner_restart_proof(adb, serial, state, &record).await else { return Ok(false) };
+    let archive = state.join("restarted").join(owner_id);
+    std::fs::create_dir_all(&archive)?;
+    let release_name = format!("release-{owner_id}.json");
+    let mut journals = serde_json::Map::new();
+    let mut release_port = None;
+    for name in [release_name.as_str(), "runtime-owner.json"] {
+        let Some(bytes) = journal_bytes(&state.join(name))? else {
+            journals.insert(name.into(), Value::Null);
+            continue;
+        };
+        if name == release_name {
+            release_port = serde_json::from_slice::<Value>(&bytes).ok()
+                .and_then(|receipt| receipt["hostPort"].as_u64())
+                .and_then(|port| u16::try_from(port).ok()).filter(|port| *port > 0);
+        }
+        let saved = archive.join(name);
+        match journal_bytes(&saved)? {
+            Some(existing) => anyhow::ensure!(existing == bytes, HelperRecoveryRequired),
+            None => {
+                let mut file = std::fs::OpenOptions::new().write(true).create_new(true).open(&saved)?;
+                file.write_all(&bytes)?;
+                file.sync_all()?;
+            }
+        }
+        journals.insert(name.into(), json!(riviu_core::frame_sha256(&bytes)));
+    }
+    durable_json(&archive.join("receipt.json"), &json!({"state":"settledByRestart","serial":serial,
+        "androidUser":0,"ownerId":owner_id,"proof":proof,"journalHashes":journals,
+        "exactReleaseProved":false,"actionReplay":false}))?;
+    // The owner record goes last: a crash before it leaves the same settlement to finish.
+    for name in [release_name.as_str(), "runtime-owner.json"] {
+        if state.join(name).try_exists()? { std::fs::remove_file(state.join(name))?; }
+    }
+    // Housekeeping only: neither the old forward nor the dead owner's credential can act.
+    if let Some(port) = release_port {
+        if let Err(error) = remove_owned_forward(adb, serial, port).await {
+            tracing::warn!(serial, port, error = %format!("{error:#}"), "chưa gỡ được cổng chuyển tiếp của phiên helper cũ; không ảnh hưởng phiên mới");
+        }
+    }
+    if record["tokenPersisted"] == true {
+        let retired = tokio::task::spawn_blocking(move || {
+            let store = riviu_signing::CredentialStore::system().map_err(|_| anyhow!("helper OS credential store unavailable"))?;
+            store.set_app_secret(&credential, "").map_err(|_| anyhow!("helper OS credential retirement failed"))
+        }).await;
+        if !matches!(retired, Ok(Ok(()))) {
+            tracing::warn!(serial, "chưa thu hồi được khóa của phiên helper cũ trong kho khóa hệ điều hành; phiên cũ đã mất cùng tiến trình");
+        }
+    }
+    let kind = proof["kind"].as_str().unwrap_or("unknown");
+    tracing::info!(serial, proof = kind, "tự đối soát helper: tiến trình giữ phiên cũ đã mất (máy hoặc helper khởi động lại); bỏ phiên cũ và nhận phiên mới, không lặp thao tác nào");
+    Ok(true)
+}
+
+/// Bind the durable owner to the helper process that just proved it, so a later process
+/// restart is provable from the pid alone. Best effort: without it only a reboot or an
+/// absent process proves the claim gone.
+async fn record_owner_process(adb: &AdbProgram, serial: &str, owner: &CanaryOwner) {
+    let recorded = async {
+        let pids = maintenance_process(adb, serial).await?;
+        let mut pids = pids.split_whitespace();
+        let (Some(pid), None) = (pids.next(), pids.next()) else {
+            anyhow::bail!("helper process not single");
+        };
+        let mut record = owner_record(&owner.report, serial)?;
+        anyhow::ensure!(record["ownerId"] == owner.owner_id && record["serviceInstance"] == owner.instance
+            && record["ownerGeneration"] == owner.generation, "helper owner record changed");
+        if record["helperPid"].as_str() == Some(pid) { return Ok(()); }
+        record["helperPid"] = json!(pid);
+        durable_json(&owner.report.join("runtime-owner.json"), &record)
+    }.await;
+    if let Err(error) = recorded {
+        tracing::warn!(serial, error = %format!("{error:#}"), "helper owner process not recorded; only a reboot or an absent process proves a restart");
+    }
+}
+
 pub(super) async fn release(adb: &AdbProgram, serial: &str, owner: &CanaryOwner, token: &str, host_port: Option<u16>) -> anyhow::Result<()> {
     let path = release_path(owner);
     if path.try_exists()? {
@@ -752,12 +881,39 @@ impl HelperClient {
         Ok(receipt)
     }
 
+    /// Retire this cached owner when its helper process is proven gone, so the caller drops
+    /// it and claims afresh instead of fencing the phone until an operator steps in. Busy
+    /// locks, pending clipboard work, a maintenance fence, a changed record or no proof all
+    /// answer `false`, leaving the existing reconnect and recovery path untouched.
+    pub(crate) async fn retire_if_restarted(&self) -> anyhow::Result<bool> {
+        if !self.production_runtime || self.require_unfenced().is_err() { return Ok(false); }
+        let Ok(_serial) = ime_lock(&self.serial).try_lock_owned() else { return Ok(false) };
+        let Ok(mut closed) = self.lifecycle.clone().try_lock_owned() else { return Ok(false) };
+        if *closed || self.cleanup_is_pending() { return Ok(false); }
+        let Some(owner) = self.canary.as_ref() else { return Ok(false) };
+        let Ok(record) = owner_record(&owner.report, &self.serial) else { return Ok(false) };
+        if record["ownerId"] != owner.owner_id || record["serviceInstance"] != owner.instance
+            || record["ownerGeneration"] != owner.generation {
+            return Ok(false);
+        }
+        if !settle_restarted_owner(&self.adb, &self.serial, &owner.report).await? { return Ok(false); }
+        // Every clone now reads as released: the owner record is gone and no cleanup is pending.
+        *closed = true;
+        if let Err(error) = remove_owned_forward(&self.adb, &self.serial, self.host_port).await {
+            tracing::warn!(serial = %self.serial, error = %format!("{error:#}"), "chưa gỡ được cổng chuyển tiếp của phiên helper cũ; không ảnh hưởng phiên mới");
+        }
+        Ok(true)
+    }
+
     /// A durable release (including an unresolved intent) fences authenticated reconnect.
     pub(crate) async fn settle_released_runtime(&self) -> anyhow::Result<bool> {
         let result = async {
             if !self.production_runtime { return Ok(false); }
             let owner = self.canary.as_ref().context("runtime owner missing")?;
             if !release_path(owner).try_exists()? { return Ok(false); }
+            // A release journal against a process proven gone settles by that restart; a
+            // repeated RELEASE could never reach the claim that died with the process.
+            if self.retire_if_restarted().await? { return Ok(true); }
             self.clone().shutdown().await?;
             self.is_released().await
         }.await;
@@ -925,6 +1081,9 @@ impl HelperClient {
     pub(crate) async fn ensure_runtime(adb: AdbProgram, serial: &str, apk: Option<&Path>, state_dir: Option<&Path>) -> anyhow::Result<Self> {
         let state = state_path(state_dir.context("helper durable state directory missing")?, serial)?;
         anyhow::ensure!(!state.join("maintenance-active.json").try_exists().context(HelperRecoveryRequired)?, HelperRecoveryRequired);
+        // A reboot or helper restart already ended the retained claim; its unresolved
+        // release or resume can never settle against a process that no longer exists.
+        settle_restarted_owner(&adb, serial, &state).await.context(HelperRecoveryRequired)?;
         Self::settle_runtime_release(&adb, serial, &state).await?;
         // Recovery precedes any installation, service restart or owner claim.
         if let Some(checkpoint) = pending_checkpoint(&state, serial).map_err(|_| anyhow!(HelperRecoveryRequired))? {
@@ -955,6 +1114,8 @@ impl HelperClient {
         let (version, uid, apk_path) = inventory(&adb, serial).await?;
         anyhow::ensure!(version >= MIN_VERSION && matches_bundle(&adb, serial, &apk_path, &hash).await?, "bundled release helper compatibility unverified");
         std::fs::create_dir_all(&state)?;
+        // Binds the owner to this boot, so a later reboot proves its claim gone.
+        let boot_id = boot_identity(&adb, serial).await?;
         let mut owner = CanaryOwner {
             owner_id: uuid::Uuid::new_v4().simple().to_string(), nonce: uuid::Uuid::new_v4().simple().to_string(),
             instance: "-".into(), generation: "-".into(), socket: String::new(), uid, apk_path, report: state,
@@ -965,7 +1126,7 @@ impl HelperClient {
         })?;
         let attempt = async {
             let mut intent = std::fs::OpenOptions::new().write(true).create_new(true).open(owner.report.join("runtime-owner.json"))?;
-            intent.write_all(&serde_json::to_vec(&json!({"serial":serial,"androidUser":0,"ownerId":owner.owner_id,"nonce":owner.nonce,"apkSha256":hash,"state":"claimPending","tokenPersisted":true,"credentialStore":OWNER_CREDENTIAL_STORE}))?)?;
+            intent.write_all(&serde_json::to_vec(&json!({"serial":serial,"androidUser":0,"ownerId":owner.owner_id,"nonce":owner.nonce,"apkSha256":hash,"bootId":boot_id,"state":"claimPending","tokenPersisted":true,"credentialStore":OWNER_CREDENTIAL_STORE}))?)?;
             intent.sync_all()?;
             drop(intent);
             // Tokenless foreground startup keeps the owned service alive after the bridge unbinds.
@@ -1035,6 +1196,7 @@ impl HelperClient {
                 await_helper_ready(|| async { client.require_canary_identity().await?; let status = client.require_status().await?; anyhow::ensure!(status.features.iter().any(|f| f == "secureBootstrapBinderShell") && REQUIRED_FEATURES.iter().all(|required| status.features.iter().any(|f| f == required)), "release helper features missing"); Ok(()) }).await?;
                 client.qualify_clipboard_roundtrip().await?;
                 client.record_clipboard_proof(&hash).await;
+                record_owner_process(&adb, serial, &owner).await;
                 Ok::<(), anyhow::Error>(())
             }.await;
             if let Err(error) = attach {
@@ -1093,6 +1255,7 @@ impl HelperClient {
             anyhow::ensure!(owner_record(state, serial)? == record, HelperRecoveryRequired);
             durable_json(&state.join("runtime-owner.json"), &persisted)?;
             client.require_canary_identity().await?;
+            if let Some(owner) = client.canary.as_ref() { record_owner_process(&adb, serial, owner).await; }
             if !client.reuse_clipboard_proof(&hash).await {
                 client.qualify_clipboard_roundtrip().await?;
                 client.record_clipboard_proof(&hash).await;
