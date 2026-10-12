@@ -551,10 +551,16 @@ async function runStartProtocol(options, { invoke, sleep, now, file, report, cur
     for (const reading of readings) accounts[reading.udid] = handle(reading.observedHandle);
     check(options.udids.every(id => /^[a-z0-9_.]{1,24}$/.test(handle(accounts[id]))),
       'Chưa có username hợp lệ để xác minh bài đăng');
+    // Old holders the operator approves releasing at Start, exactly as the UI's confirm does
+    // (`needsRelease[].envelope`); a holder that is not releasable blocks the lượt.
+    const holders = preflight.needsRelease ?? [];
+    check(holders.every(row => row.releasable === true && typeof row.envelope === 'string'),
+      'Có máy đang bị giữ mà không thể giải phóng; chưa tạo lượt đăng');
+    const approvedRelease = holders.map(row => row.envelope);
     const approval = { scope: scope(options), devScope: scheduleScope ?? reservation.devScope,
       requestId: reservation.requestId, accounts, metadataAccounts: currentAccounts,
       request, inputDigest: preflight.inputDigest, preparationId: preflight.preparationId,
-      sheetDelivery: target, writer };
+      sheetDelivery: target, writer, approvedRelease };
     report.confirmation = hash(approval);
     write(file('preflight.json'), { approval, confirmation: report.confirmation });
     report.acceptance = 'preflightOnly';
@@ -584,7 +590,10 @@ async function runStartProtocol(options, { invoke, sleep, now, file, report, cur
     check(hash(writer) === hash(approval.writer), 'Writer/target/epoch đã đổi; không Start');
     let intent = startIntent;
     if (!intent) {
-      await readStartAccounts(options.udids, invoke, (reading, udid) => {
+      // A phone whose old holder is released at Start cannot open Profile before it; the
+      // engine proves the account on that phone again before any Post.
+      const releasedUdids = new Set((approval.approvedRelease ?? []).map(envelope => envelope.split(':')[1]));
+      await readStartAccounts(options.udids.filter(udid => !releasedUdids.has(udid)), invoke, (reading, udid) => {
         const assigned = handle(approval.metadataAccounts[udid]);
         check(reading?.udid === udid && reading.status === (assigned ? 'matched' : 'unassigned')
           && handle(reading.expectedHandle) === assigned
@@ -594,13 +603,15 @@ async function runStartProtocol(options, { invoke, sleep, now, file, report, cur
       });
       intent = { confirmation: options.confirm, requestId: approval.requestId,
         request: approval.request, ...(approval.request.runAt ? { confirmed: true } : {}), approvedInputDigest: approval.inputDigest,
-        preparationId: approval.preparationId, at: new Date(now()).toISOString() };
+        preparationId: approval.preparationId, approvedRelease: approval.approvedRelease ?? [],
+        at: new Date(now()).toISOString() };
       write(file('start-intent.json'), intent, true);
       report.start = 'intended';
       try {
         const receipt = await invoke('publish_start', { request: intent.request,
           requestId: intent.requestId, approvedInputDigest: intent.approvedInputDigest,
-          confirmed: true, preparationId: intent.preparationId });
+          confirmed: true, preparationId: intent.preparationId,
+          approvedRelease: intent.approvedRelease });
         check(receipt?.requestId === intent.requestId
           && receipt.reservedCampaignId === intent.requestId,
         'Start receipt sai requestId');
