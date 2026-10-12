@@ -4300,32 +4300,37 @@ where
                         observed = None;
                     }
                     if observed.is_none() {
-                        let allow_current_recommended =
-                            (selected.is_none()
-                                && matches!(sound_policy,
-                                    PublishSoundPolicy::Default | PublishSoundPolicy::TrendingAny { .. }))
-                                || selected.as_ref().is_some_and(|choice| {
-                                    matches!(&choice.section, crate::publish::SoundSectionKind::Recommended)
-                                });
+                        // Owner rule 2026-10-12 ("Bắt buộc Hot"): a publish sound comes from the
+                        // Hot tab only. A sheet that opens on For You switches to Hot through the
+                        // measured XML or visual route; its For You rows are never a pool.
+                        if sound_plan.picks_from_hot()
+                            && selected.as_ref().is_some_and(|choice| {
+                                matches!(&choice.section, crate::publish::SoundSectionKind::Recommended)
+                            })
+                        {
+                            // A For You choice bound by an older attempt is never reused.
+                            return Err(crate::publish_recovery::retryable_error(
+                                "sound_any_choice_requires_fresh_attempt",
+                                "Nhạc đã chọn ở lượt trước không thuộc tab Hot; cần lượt thử mới để chọn nhạc trong tab Hot, chưa bấm Đăng",
+                            ));
+                        }
                         if sound_sheet_may_be_open {
                             observed = Some(
-                                crate::tiktok_sound::resume_open_sounds_current(
+                                crate::tiktok_sound::resume_open_sounds(
                                     session,
                                     sound_plan,
                                     visible_pool,
-                                    allow_current_recommended,
                                 )
                                 .await?,
                             );
                         } else {
                             let mut before_open = || sound_sheet_may_be_open = true;
                             observed = Some(
-                                crate::tiktok_sound::open_and_observe_sounds_armed_current(
+                                crate::tiktok_sound::open_and_observe_sounds_armed(
                                     session,
                                     sound_plan,
                                     visible_pool,
                                     &mut before_open,
-                                    allow_current_recommended,
                                 )
                                 .await?,
                             );
@@ -4346,12 +4351,12 @@ where
                                 sound_policy,
                                 PublishSoundPolicy::Default | PublishSoundPolicy::TrendingAny { .. }
                             ) {
-                                // Any current recommendation is permitted, but the
+                                // Any current Hot row is permitted, but the
                                 // bound choice stays fixed until this attempt ends.
                                 // Only the dispatcher may admit a fresh pre-Post attempt.
                                 return Err(crate::publish_recovery::retryable_error(
                                     "sound_any_choice_requires_fresh_attempt",
-                                    "Nhạc đã chọn không còn trong danh sách hiện tại; cần lượt thử mới để chọn nhạc đề xuất khác, chưa bấm Đăng",
+                                    "Nhạc đã chọn không còn trong danh sách hiện tại; cần lượt thử mới để chọn nhạc khác, chưa bấm Đăng",
                                 ));
                             }
                             observed = Some(

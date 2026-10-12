@@ -220,7 +220,10 @@ tượng ra màn hình chính. Khi có bản dump thì bổ sung vào catalog.
 - **Không có content-desc "Pause sound"/"Play sound"** trên picker ở build này. Hai chuỗi
   đó có trong bảng nhưng không hiện ra.
 - **Picker có thể mở ở tab For You chứ không phải Hot**, nên Riviu vẫn phải chạm `wrv`
-  "Hot".
+  "Hot". **Quy tắc chủ sản phẩm (2026-10-12, "Bắt buộc Hot"):** nhạc của bài đăng chỉ lấy
+  từ tab Hot. Hàng For You không bao giờ là pool. Không chứng minh được Hot thì dừng trước
+  Đăng. Xem [contracts.md](../../development/contracts.md), đoạn "Nguồn của tên nhạc kỳ
+  vọng".
 - **Tab Hot có thể có hàng chip vùng** "United States / Vietnam / Global" phía trên danh
   sách, đẩy hàng đầu từ y≈1370 xuống y≈1686 trên khung 1080×2220 (máy 44
   `ce031713d903001b01`, 10/10/2026). Không giả định vị trí hàng cố định.
@@ -252,8 +255,11 @@ tượng ra màn hình chính. Khi có bản dump thì bổ sung vào catalog.
   0,2 s). Như vậy lỗi treo khoảng 10,5 s nằm ở đường đọc của session UiAutomator2 sống lâu,
   không ở trạng thái của picker. Đây là suy luận từ việc không tái hiện được, chưa phải phép
   đo đường helper.
-- TikTok tự gắn một sound gợi ý khi vào editor. Job không chỉ định sound thì phải quyết
-  định rõ là giữ hay bỏ (chip × `doj`).
+- TikTok tự gắn một sound gợi ý khi vào editor. Đã thấy ở 3/3 editor đo được: `nav_editor.xml`
+  trên #44, A2 và A9b trên #46 (2026-10-09). Sheet không tự mở; nó chỉ mở khi chạm `dou`.
+  Đây là gợi ý kiểu For You, không phải Hot, nên Riviu không giữ sound này làm nhạc của bài
+  (quy tắc "Bắt buộc Hot" ở trên). Riviu chọn một hàng Hot thay thế, rồi chứng minh chip editor
+  mang đúng tên hàng đó.
 - Xác định foreground bằng `mCurrentFocus` hoặc mục `ACTIVITY` của TikTok. Dòng `ACTIVITY`
   đầu tiên của `dumpsys activity top` có thể là app khác.
 

@@ -238,6 +238,16 @@ ba phút thì `publish_sound_budget_exhausted` (vẫn terminal, chưa bấm Đă
 không trả giao diện bảng nhạc, thêm "bảng nhạc không chuyển sang tab Hot" khi đường ảnh hết
 giờ mà chưa khung nào thấy Hot, và bước tiếp: dừng phần mềm khác (như GenFarmer) điều khiển máy,
 khởi động lại máy nếu máy không còn bài đăng chưa rõ, rồi Thử lại.
+
+Nguồn của tên nhạc kỳ vọng là một hàng trong pool của plan (quy tắc chủ sản phẩm 2026-10-12,
+"Bắt buộc Hot"). Trên plan có pool Hot (Global musically), policy `Default` và `TrendingAny`
+đều chỉ nhận hàng Hot. Composer không bao giờ yêu cầu pool For You hiện tại (cờ
+`allow_current_recommended` luôn tắt). Bảng mở ở For You thì chuyển Hot qua đường XML hoặc đường
+ảnh đã đo. Không chứng minh được Hot thì lỗi trước Post như trên, không có đường lùi sang For
+You, và cũng không giữ nhạc TikTok tự gắn trên editor. Lựa chọn `Recommended` do lượt cũ chốt
+không được dùng lại: lượt kết thúc trước khi mở bảng với `sound_any_choice_requires_fresh_attempt`,
+và dispatcher cấp một lượt mới trước Post (binding cũ bị xóa; không có lượt mới khi đã có Post
+intent). Trill 38.3.2 không có tab Hot; pool đã đo của bản đó vẫn là Recommended.
 Khi gốc bảng nhạc không đọc được ngay trong pha có thể thay phiên (#44/#47, 2026-10-09:
 gốc cửa sổ đang hoạt động vẫn null kể cả trên server UiAutomator2 mới), Android thử đọc
 qua mọi cửa sổ trước: bật `enableMultiWindows: true` trên đúng phiên đó qua

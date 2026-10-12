@@ -275,6 +275,14 @@ nhạc vẫn được đọc lại từ cây giao diện trước khi bấm Đă
 Việc đếm này áp dụng cho cả lúc vừa mở bảng nhạc và các lần tự thử lại: app không
 quay lại chờ cây giao diện thêm hai lần nữa mà đọc tiếp bằng ảnh màn hình.
 
+Nhạc của bài đăng **luôn lấy từ tab Hot** (quy tắc chủ sản phẩm, 2026-10-12). Trên Global
+45.7.3, bảng nhạc có thể mở ở tab For You; khi đó app chuyển sang Hot rồi mới chọn, và
+không bao giờ lấy bài trong For You. App cũng không giữ bài nhạc TikTok tự gắn trên màn
+chỉnh sửa. Không chứng minh được tab Hot thì máy dừng trước Đăng với lý do cụ thể
+("chưa bấm Đăng"). Lượt cũ đã chốt một bài For You thì không dùng lại; app bắt đầu lượt
+thử mới để chọn trong Hot. Bảng nhạc đã đo của TikTok SEA (`com.ss.android.ugc.trill`
+38.3.2) không có tab Hot, nên bản đó vẫn chọn trong danh sách Recommended như trước.
+
 Lỗi tạm thời trước Đăng được **tự thử lại tối đa 3 lần ngoài lần chạy đầu**, chờ lần
 lượt 2, 5 và 10 giây. Chưa thấy nút mở soạn bài, màn camera, lối vào thư viện hoặc
 bộ chọn ảnh trong thời hạn hiện có cũng dùng ngân sách này. Nếu có nhiều mục cùng
@@ -286,7 +294,7 @@ tổng thời hạn 3 phút, gồm các lần đọc lại và khoảng chờ th
 3 phút sau mỗi lỗi. Hết thời hạn thì máy dừng trước Đăng và cần bấm **Thử lại**.
 App ưu tiên tiếp tục bước đang lỗi, giữ bài và caption đã duyệt. Trong cùng một
 lần chạy, nhạc đã chọn được giữ để đọc lại và xác nhận. Khi cần bắt đầu lần thử mới,
-app có thể chọn nhạc khác trong Recommended hiện tại; nếu mất màn soạn thì dựng
+app có thể chọn nhạc khác trong tab Hot hiện tại; nếu mất màn soạn thì dựng
 lại từ bản đã duyệt. Media còn đúng hash và MediaStore được dùng lại.
 Máy mất kết nối được chờ đúng serial tối đa **2 phút**, không giữ slot của máy khác.
 Caption tạm thời chưa đọc được được kiểm tra lại trong thời hạn của bước, không
@@ -435,7 +443,8 @@ Mọi chiến dịch mới cần kết nối Sheet đã xác minh; nếu kết n
 link đã xác minh được giữ để gửi lại đúng bảng/tab, không phát lại Post. Chiến dịch
 cũ giữ chính sách Sheet và dọn media đã lưu lúc tạo, kể cả khi chính sách mặc định
 cho lượt mới thay đổi. Nhạc được chọn ngẫu nhiên có seed từ tối đa
-năm đề xuất/thịnh hành đang hiện trên tài khoản, không lấy danh sách ngoài TikTok.
+năm bài đầu tab Hot đang hiện trên tài khoản (TikTok SEA: danh sách Recommended), không
+lấy danh sách ngoài TikTok.
 
 Nếu bước kiểm tra báo chưa hỗ trợ, xem **phiên bản TikTok và ngôn ngữ của từng máy**.
 Chọn một máy đã hỗ trợ hoặc cung cấp thông tin đó để hiệu chỉnh; không suy rằng cài
@@ -493,7 +502,7 @@ lại, nút bị khoá kèm lý do; chờ/đọc lại chi tiết, không tạo 
 Thao tác này khác tiếp tục xác minh, kiểm tra link và ghi lại Sheet.
 
 Mỗi lần chạy mới trước Post, từ **Thử lại máy này** hoặc tự phục hồi trong ngân
-sách, có thể chọn bất kỳ bài nhạc nào trong Recommended đang hiện. Lựa chọn mới
+sách, có thể chọn bất kỳ bài nhạc nào trong tab Hot đang hiện (TikTok SEA: Recommended). Lựa chọn mới
 có thể thay nhạc đã xác minh ở lần chạy trước; lựa chọn cũ vẫn được lưu trong lịch
 sử. Trong cùng một lần chạy, app giữ nhạc đã chọn và phải đọc lại đúng tên, nghệ sĩ
 và xác nhận trên màn soạn trước Post. Nếu nhạc không còn trong danh sách đã đọc

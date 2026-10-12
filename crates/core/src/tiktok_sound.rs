@@ -1200,6 +1200,11 @@ impl SoundPickerPlan {
                 })
         })
     }
+    /// The plan's own pool is the Hot tab (Global musically), so a For You row is never a
+    /// publish sound on it (owner rule 2026-10-12, "Bắt buộc Hot").
+    pub(crate) fn picks_from_hot(self) -> bool {
+        self.section_label == "Hot"
+    }
     pub(crate) fn post_back_query(self) -> Option<ElementQuery<'static>> {
         self.post_back_id.map(ElementQuery::ResourceIdSuffix)
     }
@@ -1304,8 +1309,9 @@ pub async fn open_and_observe_sounds_armed(
     open_and_observe_sounds_armed_current(session, plan, maximum_visible, before_open, false).await
 }
 
-/// A fresh Any choice or the same frozen Recommended choice may observe For You.
-/// A frozen Hot choice must use the original Hot path.
+/// `allow_recommended` lets a measured sheet that opened on For You be read as a pool. The
+/// publish composer never sets it: a publish sound comes from Hot only (owner rule 2026-10-12,
+/// "Bắt buộc Hot"), through [`open_and_observe_sounds_armed`] and [`resume_open_sounds`].
 pub async fn open_and_observe_sounds_armed_current(
     session: &dyn UiSession,
     plan: SoundPickerPlan,
