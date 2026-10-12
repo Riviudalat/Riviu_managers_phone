@@ -92,6 +92,44 @@ export async function connect(port = DEFAULT_PORT) {
   return {invoke, page, browser, close: () => browser.close()};
 }
 
+/**
+ * Connect to a controller that is still starting. CDP opens before the WebView has navigated to
+ * the app, so the single page is first about:blank with no __TAURI_INTERNALS__; an invoke there
+ * fails with "Cannot read properties of undefined (reading 'invoke')". Retries until the page is
+ * the bundled/dev app origin and the Tauri bridge exists, or the deadline passes.
+ * `abort()` returning a message stops early (e.g. the controller process exited).
+ */
+export async function connectWhenReady(port, deadlineMs, abort = () => null) {
+  let lastState = 'CDP chưa mở';
+  while (Date.now() < deadlineMs) {
+    const stop = abort();
+    if (stop) throw new Error(stop);
+    let c = null;
+    try {
+      c = await connect(port);
+      while (Date.now() < deadlineMs) {
+        const url = c.page.url();
+        const appPage = /^https?:\/\/(127\.0\.0\.1|localhost|tauri\.localhost)(:|\/)/.test(url) || url.startsWith('tauri://localhost/');
+        const bridge = appPage && await c.page.evaluate(() => typeof window.__TAURI_INTERNALS__?.invoke === 'function')
+          .catch(() => false); // the context is replaced while navigating
+        if (bridge) return c;
+        lastState = `trang ${url || '(trống)'} chưa có Tauri bridge`;
+        const halt = abort();
+        if (halt) throw new Error(halt);
+        await sleep(500);
+      }
+      await c.close().catch(() => {});
+      c = null;
+    } catch (error) {
+      if (c) await c.close().catch(() => {});
+      if (abort()) throw error;
+      lastState = String(error?.message ?? error).slice(0, 200);
+      await sleep(2000);
+    }
+  }
+  throw new Error(`Controller chưa sẵn sàng trước hạn: ${lastState}`);
+}
+
 /** Reconnect per call: survives a WebView reload during long watches. */
 export async function invokeOnce(command, args = {}, port = DEFAULT_PORT) {
   const c = await connect(port);

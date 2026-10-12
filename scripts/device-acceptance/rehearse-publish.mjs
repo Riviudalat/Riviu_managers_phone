@@ -21,7 +21,7 @@ import path from 'node:path';
 import crypto from 'node:crypto';
 import {execFile, spawn} from 'node:child_process';
 import {promisify} from 'node:util';
-import {MAIN, OUT_ROOT, CONFIG, connect, readJson, writeJson, now, sleep, parseArgs, helpAndExit, resolvePath, check, numberOf} from './ipc.mjs';
+import {MAIN, OUT_ROOT, CONFIG, connectWhenReady, readJson, writeJson, now, sleep, parseArgs, helpAndExit, resolvePath, check, numberOf} from './ipc.mjs';
 
 const USAGE = `
 Chạy thử đăng bài không công khai (no-public) trên N máy Android song song.
@@ -107,18 +107,82 @@ const processRecord = {activationId: scope.activationId, pid: child.pid, exe: ex
 writeJson(path.join(OUT, `rehearsal-${label}.process.json`), processRecord, true);
 console.log(`Controller khởi động: pid=${child.pid}, port=${PORT}`);
 
-// Wait for CDP + phones ready.
-let c;
-const connectDeadline = Date.now() + READY_WAIT_S * 1000;
-while (Date.now() < connectDeadline) {
-  try { c = await connect(PORT); break; }
-  catch { await sleep(2000); }
-  if (!alive(child.pid)) throw new Error('Controller đã thoát trước khi CDP sẵn sàng; xem log');
+// Identity of the controller we started, so a WM_CLOSE can never reach a reused pid.
+const psQuote = s => `'${String(s).replace(/'/g, "''")}'`;
+let identity = null;
+try {
+  const r = await run('powershell', ['-NoProfile', '-Command',
+    `$p=Get-Process -Id ${child.pid}; $p.Path; $p.StartTime.ToUniversalTime().Ticks.ToString()`],
+    {timeout: 30000, windowsHide: true, encoding: 'utf8'});
+  const [exe, ticks] = r.stdout.trim().split(/\r?\n/);
+  if (exe?.toLowerCase() === exePath.toLowerCase() && /^\d+$/.test(ticks ?? '')) identity = {ticks};
+} catch { /* identity unknown: WM_CLOSE will refuse */ }
+if (!identity) console.log('Cảnh báo: không đọc được định danh process; sẽ không gửi WM_CLOSE');
+
+// Background dev windows are hidden: show the one owned "Riviu Manager" window, then post
+// WM_CLOSE (the app's graceful main-close path), like tools/no_public_close.py. Never kills.
+async function postWmClose() {
+  if (!identity) return 'no-identity';
+  const script = `$ErrorActionPreference='Stop'
+$p=@(Get-Process -Id ${child.pid} -ErrorAction SilentlyContinue)
+if($p.Count -eq 0){'absent';exit 0}
+if($p[0].Path -ne ${psQuote(exePath)} -or $p[0].StartTime.ToUniversalTime().Ticks.ToString() -ne '${identity.ticks}'){'identity-differs';exit 0}
+Add-Type @"
+using System; using System.Text; using System.Runtime.InteropServices;
+public class RiviuWin {
+  public delegate bool EnumProc(IntPtr h, IntPtr l);
+  [DllImport("user32.dll")] public static extern bool EnumWindows(EnumProc f, IntPtr l);
+  [DllImport("user32.dll")] public static extern uint GetWindowThreadProcessId(IntPtr h, out uint p);
+  [DllImport("user32.dll", CharSet=CharSet.Unicode)] public static extern int GetWindowText(IntPtr h, StringBuilder s, int n);
+  [DllImport("user32.dll")] public static extern bool ShowWindow(IntPtr h, int c);
+  [DllImport("user32.dll")] public static extern bool PostMessage(IntPtr h, uint m, IntPtr w, IntPtr l);
 }
-check(c, `Không kết nối được CDP sau ${READY_WAIT_S} s`);
+"@
+$list=New-Object System.Collections.ArrayList
+[RiviuWin]::EnumWindows({ param($h,$l) $o=0; [void][RiviuWin]::GetWindowThreadProcessId($h,[ref]$o); if($o -eq ${child.pid}){ $t=New-Object Text.StringBuilder 256; [void][RiviuWin]::GetWindowText($h,$t,256); if($t.ToString() -eq 'Riviu Manager'){ [void]$list.Add($h) } }; $true },[IntPtr]::Zero)|Out-Null
+if($list.Count -ne 1){"windows=$($list.Count)";exit 0}
+[void][RiviuWin]::ShowWindow($list[0],4)
+if([RiviuWin]::PostMessage($list[0],0x0010,[IntPtr]::Zero,[IntPtr]::Zero)){'posted'}else{'post-failed'}`;
+  // -EncodedCommand: Windows PowerShell 5.1 mangles embedded double quotes in -Command.
+  const encoded = Buffer.from(script, 'utf16le').toString('base64');
+  const r = await run('powershell', ['-NoProfile', '-EncodedCommand', encoded], {timeout: 60000, windowsHide: true, encoding: 'utf8'});
+  return r.stdout.trim().split(/\r?\n/).pop();
+}
+
+const waitExit = async seconds => {
+  const deadline = Date.now() + seconds * 1000;
+  while (alive(child.pid) && Date.now() < deadline) await sleep(1000);
+  return !alive(child.pid);
+};
+
+let c;
+let closing = null;
+// Idempotent: the normal finally, an error, and Ctrl+C all end here exactly once.
+const closeController = () => closing ??= (async () => {
+  console.log('\nĐang đóng controller...');
+  if (c) {
+    try { await c.invoke('no_public_shutdown', {activationId: scope.activationId}); }
+    catch (error) { console.log(`no_public_shutdown không thành công: ${String(error?.message ?? error).slice(0, 200)}`); }
+    await c.close().catch(() => {});
+  }
+  if (await waitExit(c ? 30 : 0)) { console.log(`Controller pid ${child.pid} đã thoát`); return; }
+  let posted;
+  try { posted = await postWmClose(); } catch (error) { posted = `lỗi: ${String(error?.message ?? error).slice(0, 200)}`; }
+  console.log(`WM_CLOSE cho pid ${child.pid}: ${posted}`);
+  if (await waitExit(90)) { console.log(`Controller pid ${child.pid} đã thoát`); return; }
+  console.log(`Cảnh báo: pid ${child.pid} vẫn chạy; không kill. Hiện cửa sổ bằng show-window.ps1 và đóng tay.`);
+  process.exitCode = 1;
+})();
+for (const signal of ['SIGINT', 'SIGTERM']) {
+  process.once(signal, () => { closeController().finally(() => process.exit(130)); });
+}
 
 let report;
 try {
+  // Wait for CDP and for the app page itself: CDP opens while the page is still about:blank.
+  c = await connectWhenReady(PORT, Date.now() + READY_WAIT_S * 1000,
+    () => (alive(child.pid) ? null : 'Controller đã thoát trước khi trang app sẵn sàng; xem log'));
+
   // Verify no-public activation.
   const status = await c.invoke('no_public_status');
   check(status.publicEffectsAllowed === false && status.activationId === scope.activationId,
@@ -303,19 +367,7 @@ try {
     if (p.failureCode) console.log(`    lỗi: ${p.failurePhase} → ${p.failureCode} (${p.preflightDetail ?? ''})`);
   }
 } finally {
-  // Shutdown the controller gracefully.
-  try {
-    if (c) {
-      console.log('\nĐang đóng controller...');
-      await c.invoke('no_public_shutdown', {activationId: scope.activationId});
-    }
-  } catch { /* page may have closed already */ }
-  try { if (c) await c.close().catch(() => {}); } catch { /* ignore */ }
-  // Wait for process to exit.
-  const exitDeadline = Date.now() + 30000;
-  while (alive(child.pid) && Date.now() < exitDeadline) await sleep(1000);
-  if (alive(child.pid)) console.log(`Cảnh báo: pid ${child.pid} vẫn chạy sau 30 s`);
-  else console.log(`Controller pid ${child.pid} đã thoát`);
+  await closeController();
 }
 
 console.log(`\nBáo cáo: ${reportFile}`);
