@@ -500,6 +500,25 @@ fn trill_text_post_button(
         .filter(|button| button.enabled && button.clickable)
 }
 
+/// One hierarchy snapshot instead of chained `/element` lookups.
+///
+/// ce031713b0c610ab0c, Global 45.7.3, 13/10/2026: the helper's POST `/element`
+/// endpoint returned stale-tree errors for the whole pre-Post reproof, but
+/// `hierarchy_source_snapshot` (which falls back to `uiautomator dump`) could still
+/// read the screen. This function replaces the `locate()` → `find()` → `/element` →
+/// attribute chain with a single parsed snapshot.
+fn locate_in_tree(
+    tree: &crate::ui_automation::tree::Tree,
+    package: &str,
+    query: ElementQuery<'_>,
+) -> Option<ElementBox> {
+    let matches = tree.matching(package, query);
+    if matches.len() != 1 {
+        return None;
+    }
+    tree.nodes[matches[0]].rect()
+}
+
 /// The three locators that turn a reachable edit step into a published post.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 struct PublishTail {
@@ -2869,9 +2888,9 @@ impl<'a, P: TapPlanner> Composer<'a, P> {
             return Ok(None);
         };
         let normal =
-            crate::tiktok_sound::read_sound(self.session.locate_all(tail.post_button)).await?;
-        match normal.as_slice() {
-            [_] => {
+            crate::tiktok_sound::read_sound(self.session.locate_all(tail.post_button)).await;
+        match normal.as_deref() {
+            Ok([_]) => {
                 // Android's list API deliberately leaves clickable=false because
                 // it reads geometry only. The list proves uniqueness; locate()
                 // reads actual enabled/clickable flags and current geometry.
@@ -2881,8 +2900,24 @@ impl<'a, P: TapPlanner> Composer<'a, P> {
                         .filter(|button| button.enabled && button.clickable),
                 );
             }
-            [] => {}
-            _ => return Ok(None),
+            Ok([]) => {}
+            Ok(_) => return Ok(None),
+            Err(_) => {
+                // ce031713b0c610ab0c, Global 45.7.3, 13/10/2026: the helper's
+                // POST `/element` returned stale-tree errors while a fresh
+                // `uiautomator dump` could still read the screen. One snapshot
+                // replaces the chained `/element` + attribute lookups.
+                let snapshot = crate::tiktok_sound::read_sound(
+                    self.session.hierarchy_source_snapshot(),
+                )
+                .await?;
+                let tree = crate::ui_automation::tree::Tree::parse(snapshot)?;
+                if tail.trill_text_post {
+                    return Ok(trill_text_post_button(&tree, caption));
+                }
+                return Ok(locate_in_tree(&tree, self.plan.package, tail.post_button)
+                    .filter(|button| button.enabled && button.clickable));
+            }
         }
         if !tail.trill_text_post {
             return Ok(None);
@@ -3380,7 +3415,43 @@ impl<'a, P: TapPlanner> Composer<'a, P> {
                 // loop 28 requests against a dead server. A sealed session answers nothing
                 // again, so the phone's state is unknown and the walk ends at once.
                 Err(error) if crate::driver::session_sealed(&error) => return false,
-                Ok(ReadWaitResult::Ready(None)) | Err(_) => {}
+                Err(_) => {
+                    // ce031713b0c610ab0c, Global 45.7.3, 13/10/2026: the helper's
+                    // POST `/element` was blind while `uiautomator dump` could still
+                    // read the screen. One snapshot replaces both chained locates.
+                    if let Ok(snapshot) = self.session.hierarchy_source_snapshot().await {
+                        if self.session.gui_session_epoch() != epoch {
+                            return false;
+                        }
+                        if let Ok(tree) = crate::ui_automation::tree::Tree::parse(snapshot) {
+                            if locate_in_tree(&tree, self.plan.package, self.plan.open)
+                                .is_some()
+                            {
+                                return true;
+                            }
+                            if let Some(discard) = self.plan.discard {
+                                if let Some(row) =
+                                    locate_in_tree(&tree, self.plan.package, discard)
+                                {
+                                    if stop.load(Ordering::Relaxed) || Instant::now() >= deadline
+                                    {
+                                        return false;
+                                    }
+                                    let _ = self.session.tap(row.centre()).await;
+                                    sleep(
+                                        POLL.min(
+                                            deadline.saturating_duration_since(Instant::now()),
+                                        ),
+                                        stop,
+                                    )
+                                    .await;
+                                    continue;
+                                }
+                            }
+                        }
+                    }
+                }
+                Ok(ReadWaitResult::Ready(None)) => {}
             }
             // Only this measured Discard row can replace one cleanup Back.
             // A missing or failed read alone never authorizes a Discard tap.
@@ -3424,10 +3495,20 @@ impl<'a, P: TapPlanner> Composer<'a, P> {
             )
             .await;
         }
-        matches!(
-            read_before_deadline(self.session.locate(self.plan.open), deadline, stop).await,
-            Ok(ReadWaitResult::Ready(Some(_)))
-        ) && self.session.gui_session_epoch() == epoch
+        let final_check =
+            read_before_deadline(self.session.locate(self.plan.open), deadline, stop).await;
+        if matches!(final_check, Ok(ReadWaitResult::Ready(Some(_)))) {
+            return self.session.gui_session_epoch() == epoch;
+        }
+        if final_check.is_err() {
+            if let Ok(snapshot) = self.session.hierarchy_source_snapshot().await {
+                if let Ok(tree) = crate::ui_automation::tree::Tree::parse(snapshot) {
+                    return locate_in_tree(&tree, self.plan.package, self.plan.open).is_some()
+                        && self.session.gui_session_epoch() == epoch;
+                }
+            }
+        }
+        false
     }
 
     /// Wait for the bottom tab bar to come back, ignoring reads that fail on the way.
