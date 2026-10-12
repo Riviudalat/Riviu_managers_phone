@@ -985,10 +985,21 @@ enum MultiSelectMode {
     AlreadyOn,
     /// One tap, and the tree grew them inside the window.
     TurnedOn,
-    /// The `Select multiple` control was not on the picker at all.
+    /// Stopped before the toggle was found; nothing was tapped. A toggle that could not be
+    /// read before the deadline is an observation deadline instead, never this.
     NoToggle,
     /// Tapped, and the multi-mode nodes never appeared.
     DidNotEngage,
+}
+
+/// What one whole picker tree says about the remembered multi-select toggle.
+enum PickerMode {
+    /// The toggle and the multi-mode `Next` are in the same tree.
+    Multi,
+    /// Exactly one toggle and no `Next`: one tap turns multi mode on.
+    Single(ElementBox),
+    /// Neither shape yet — a picker still loading, or a screen that is not the picker.
+    Unsettled,
 }
 
 
@@ -1643,7 +1654,19 @@ impl<'a, P: TapPlanner> Composer<'a, P> {
             )
             .await?
         else {
-            anyhow::bail!("album_menu_missing: chưa thấy nút chọn album của picker");
+            if stop.load(Ordering::Relaxed) {
+                return Ok(AlbumChoice::NotFound);
+            }
+            // `ce061716d811302c04` (r91, 12/10/2026): the one picker `/source` hung 7 s and
+            // the window closed with no completed read. The picker was proven open just
+            // before and nothing was selected, so this is an unread screen: the typed
+            // observation deadline gives the assignment its bounded automatic retry.
+            anyhow::ensure!(
+                self.session.gui_session_epoch() == epoch,
+                "album menu session changed before read deadline"
+            );
+            return Err(crate::publish_recovery::observation_deadline()
+                .context("album_menu_missing: chưa thấy nút chọn album của picker"));
         };
         self.tap_inside(&menu).await?;
         // Galaxy S8+ fleet 08/09/2026: album rows arrive after the menu animation.
@@ -1904,16 +1927,39 @@ impl<'a, P: TapPlanner> Composer<'a, P> {
     /// facts read off the same node. The pre-probe is a single read (`Duration::ZERO`
     /// window): the walk is standing still on a settled picker, and the failure cost of a
     /// misread is one refused, retryable walk — never a wrong tap on cells.
+    ///
+    /// A probe that did not complete is unknown, not absent: it returns the typed observation
+    /// deadline and taps nothing, because tapping on an unread picker is the flip that turned
+    /// `ce051715e9f964e10d`'s multi mode off (r93, 13/10/2026).
     async fn enable_multi_select(&mut self, stop: &AtomicBool) -> anyhow::Result<MultiSelectMode> {
+        if self.picker_snapshot() {
+            return self.enable_multi_select_from_tree(stop).await;
+        }
+        let probe_deadline = crate::tiktok_sound::phase_deadline(COMPOSER_WINDOW);
         if self
-            .await_condition(Duration::ZERO, self.plan.picker_next, stop, |_| true)
+            .await_condition_inner(probe_deadline, self.plan.picker_next, stop, |_| true, true)
             .await?
             .is_some()
         {
             return Ok(MultiSelectMode::AlreadyOn);
         }
-        if !self.tap_multi_select_once(stop).await? {
+        if stop.load(Ordering::Relaxed) {
             return Ok(MultiSelectMode::NoToggle);
+        }
+        if Instant::now() >= probe_deadline {
+            return Err(crate::publish_recovery::observation_deadline().context(
+                "picker_mode_unread: chưa đọc được nút Tiếp của picker; chưa bấm 'Chọn nhiều'",
+            ));
+        }
+        if !self.tap_multi_select_once(stop).await? {
+            if stop.load(Ordering::Relaxed) {
+                return Ok(MultiSelectMode::NoToggle);
+            }
+            // The picker was proven by this toggle moments ago, so a window without it
+            // is an unread screen rather than a picker that never opened.
+            return Err(crate::publish_recovery::observation_deadline().context(
+                "picker_toggle_unread: chưa đọc được nút 'Chọn nhiều' trên picker đã mở; chưa bấm gì",
+            ));
         }
         if self
             .await_condition(ENGAGE_WINDOW, self.plan.picker_next, stop, |_| true)
@@ -1923,6 +1969,73 @@ impl<'a, P: TapPlanner> Composer<'a, P> {
             Ok(MultiSelectMode::TurnedOn)
         } else {
             Ok(MultiSelectMode::DidNotEngage)
+        }
+    }
+
+    /// [`Self::enable_multi_select`] on a build whose picker is read as one tree.
+    ///
+    /// The probe polls inside [`PICKER_WINDOW`] until a completed tree shows one mode; only
+    /// `Single` taps, once, on the toggle that same tree located. The engage wait is
+    /// `PICKER_WINDOW` rather than [`ENGAGE_WINDOW`]: the tree grows in under 1.5 s, but one
+    /// picker read took 0.8-3.2 s on the r93 phones, so a 2 s window could close before the
+    /// first read after the tap came back. Nothing is tapped again inside that wait.
+    async fn enable_multi_select_from_tree(
+        &mut self,
+        stop: &AtomicBool,
+    ) -> anyhow::Result<MultiSelectMode> {
+        use crate::ui_automation::runtime::ReadWaitResult;
+        let epoch = self.session.gui_session_epoch();
+        let deadline = crate::tiktok_sound::phase_deadline(PICKER_WINDOW);
+        let mut popup = crate::app_automation::dialogs::PopupBudget::default();
+        let toggle = loop {
+            match self.picker_mode(deadline, stop, &mut popup).await? {
+                ReadWaitResult::Ready(PickerMode::Multi) => return Ok(MultiSelectMode::AlreadyOn),
+                ReadWaitResult::Ready(PickerMode::Single(toggle)) => break toggle,
+                ReadWaitResult::Ready(PickerMode::Unsettled) => {}
+                ReadWaitResult::Cancelled => return Ok(MultiSelectMode::NoToggle),
+                ReadWaitResult::DeadlineExceeded => {
+                    anyhow::ensure!(
+                        self.session.gui_session_epoch() == epoch,
+                        "picker session changed before read deadline"
+                    );
+                    return Err(crate::publish_recovery::observation_deadline().context(
+                        "picker_mode_unread: chưa đọc được chế độ chọn của picker; chưa bấm 'Chọn nhiều'",
+                    ));
+                }
+            }
+            sleep(
+                POLL.min(deadline.saturating_duration_since(Instant::now())),
+                stop,
+            )
+            .await;
+        };
+        anyhow::ensure!(
+            self.session.gui_session_epoch() == epoch,
+            "picker session changed before the toggle tap"
+        );
+        if stop.load(Ordering::Relaxed) {
+            return Ok(MultiSelectMode::NoToggle);
+        }
+        if Instant::now() >= deadline {
+            return Err(crate::publish_recovery::observation_deadline().context(
+                "picker_mode_late: đọc được picker khi đã hết hạn; chưa bấm 'Chọn nhiều'",
+            ));
+        }
+        self.tap_inside(&toggle).await?;
+        let deadline = crate::tiktok_sound::phase_deadline(PICKER_WINDOW);
+        loop {
+            match self.picker_mode(deadline, stop, &mut popup).await? {
+                ReadWaitResult::Ready(PickerMode::Multi) => return Ok(MultiSelectMode::TurnedOn),
+                ReadWaitResult::Ready(PickerMode::Single(_) | PickerMode::Unsettled) => {}
+                ReadWaitResult::Cancelled | ReadWaitResult::DeadlineExceeded => {
+                    return Ok(MultiSelectMode::DidNotEngage)
+                }
+            }
+            sleep(
+                POLL.min(deadline.saturating_duration_since(Instant::now())),
+                stop,
+            )
+            .await;
         }
     }
 
@@ -3495,6 +3608,66 @@ impl<'a, P: TapPlanner> Composer<'a, P> {
         stop: &AtomicBool,
         popup: &mut crate::app_automation::dialogs::PopupBudget,
     ) -> anyhow::Result<crate::ui_automation::runtime::ReadWaitResult<Vec<ElementBox>>> {
+        use crate::ui_automation::runtime::ReadWaitResult;
+        let tree = match self.camera_gallery_tree(deadline, stop, popup).await? {
+            ReadWaitResult::Ready(tree) => tree,
+            ReadWaitResult::Cancelled => return Ok(ReadWaitResult::Cancelled),
+            ReadWaitResult::DeadlineExceeded => return Ok(ReadWaitResult::DeadlineExceeded),
+        };
+        // The live picker keeps the camera subtree displayed underneath it.
+        // Its measured album control has priority over shutter/gallery anchors.
+        if query != self.plan.album_menu
+            && !tree.matching(self.plan.package, self.plan.album_menu).is_empty() {
+            return Ok(ReadWaitResult::Ready(Vec::new()));
+        }
+        let labels = crate::tiktok_labels::controls_for(
+            self.plan.package, self.plan.popup_profile.0,
+            self.plan.popup_profile.1.unwrap_or_default(),
+        ).context("camera/gallery profile unavailable")?;
+        let mut indices = tree.matching(self.plan.package, query);
+        if query == self.plan.shutter {
+            indices.retain(|index| {
+                labels.description_anchored(
+                    TikTokControl::ComposerShutter,
+                    tree.nodes[*index].attr("content-desc"),
+                )
+            });
+        }
+        // 45.7.3 declares the album pill's `:id/tv_title` in 303 layouts, so the id
+        // names the pill only on the picker: the measured picker Next must be in the
+        // same tree. It is in every 45.7.3 picker read we hold (fixtures 06–09 and
+        // picker-11-*, Riviu #44 gallery dump 09/10/2026). The camera-cover check
+        // above stays unscoped on purpose: there a stray match only withholds a tap.
+        // Next is the multi-mode node, so a picker left in single mode has none; the
+        // `Select multiple` toggle (`:id/ojz`) scopes the pill there instead. The 13/10/2026
+        // probe dumps carry it on every picker read and on no camera read.
+        if query == self.plan.album_menu
+            && self.plan.popup_profile == ("en", Some("45.7.3"))
+            && tree
+                .matching(self.plan.package, self.plan.picker_next)
+                .is_empty()
+            && tree
+                .matching(self.plan.package, self.plan.multi_select)
+                .is_empty()
+        {
+            indices.clear();
+        }
+        let mut rows = Vec::with_capacity(indices.len());
+        for index in indices {
+            // A malformed match cannot be silently removed to prove uniqueness.
+            rows.push(tree.nodes[index].rect().context("camera/gallery target bounds unavailable")?);
+        }
+        Ok(ReadWaitResult::Ready(rows))
+    }
+
+    /// One whole camera/gallery tree, read after any measured covering modal is cleared and
+    /// bracketed by two foreground reads naming the target package.
+    async fn camera_gallery_tree(
+        &self,
+        deadline: Instant,
+        stop: &AtomicBool,
+        popup: &mut crate::app_automation::dialogs::PopupBudget,
+    ) -> anyhow::Result<crate::ui_automation::runtime::ReadWaitResult<crate::ui_automation::tree::Tree>> {
         use crate::ui_automation::runtime::{read_before_deadline, ReadWaitResult};
         use crate::app_automation::dialogs;
         let epoch = self.session.gui_session_epoch();
@@ -3550,41 +3723,70 @@ impl<'a, P: TapPlanner> Composer<'a, P> {
                 ReadWaitResult::Cancelled => return Ok(ReadWaitResult::Cancelled),
                 ReadWaitResult::DeadlineExceeded => return Ok(ReadWaitResult::DeadlineExceeded),
             }
-            // The live picker keeps the camera subtree displayed underneath it.
-            // Its measured album control has priority over shutter/gallery anchors.
-            if query != self.plan.album_menu
-                && !tree.matching(self.plan.package, self.plan.album_menu).is_empty() {
-                return Ok(ReadWaitResult::Ready(Vec::new()));
-            }
-            let mut indices = tree.matching(self.plan.package, query);
-            if query == self.plan.shutter {
-                indices.retain(|index| {
-                    labels.description_anchored(
-                        TikTokControl::ComposerShutter,
-                        tree.nodes[*index].attr("content-desc"),
-                    )
-                });
-            }
-            // 45.7.3 declares the album pill's `:id/tv_title` in 303 layouts, so the id
-            // names the pill only on the picker: the measured picker Next must be in the
-            // same tree. It is in every 45.7.3 picker read we hold (fixtures 06–09 and
-            // picker-11-*, Riviu #44 gallery dump 09/10/2026). The camera-cover check
-            // above stays unscoped on purpose: there a stray match only withholds a tap.
-            if query == self.plan.album_menu
-                && self.plan.popup_profile == ("en", Some("45.7.3"))
-                && tree
-                    .matching(self.plan.package, self.plan.picker_next)
-                    .is_empty()
-            {
-                indices.clear();
-            }
-            let mut rows = Vec::with_capacity(indices.len());
-            for index in indices {
-                // A malformed match cannot be silently removed to prove uniqueness.
-                rows.push(tree.nodes[index].rect().context("camera/gallery target bounds unavailable")?);
-            }
-            return Ok(ReadWaitResult::Ready(rows));
+            return Ok(ReadWaitResult::Ready(tree));
         }
+    }
+
+    /// Which multi-select state one picker tree shows, from that tree alone.
+    ///
+    /// Global 45.7.3, r91/r93 (12-13/10/2026): `ce051715e9f964e10d` read Next (`:id/wjp`)
+    /// node by node — `/element`, then four attribute calls — and ran out of the probe's
+    /// window on the last attribute. The unread Next counted as absent, the toggle was
+    /// tapped on a picker that was already in multi mode, and that turned it off.
+    /// `ce031713aadf361905` and `ce021712b32e6c950c` spent the window on the same serial
+    /// reads (one `/source` hung 7-8 s) and ended as "picker không mở" although the picker
+    /// and the album were both proven. One snapshot answers both questions in one round
+    /// trip, keeps the session's blind-source fallback, and shows the toggle and Next in
+    /// the same tree: `Multi` needs both, `Single` needs exactly one toggle and no Next.
+    async fn picker_mode(
+        &self,
+        deadline: Instant,
+        stop: &AtomicBool,
+        popup: &mut crate::app_automation::dialogs::PopupBudget,
+    ) -> anyhow::Result<crate::ui_automation::runtime::ReadWaitResult<PickerMode>> {
+        use crate::ui_automation::runtime::ReadWaitResult;
+        let epoch = self.session.gui_session_epoch();
+        let mut trace = StageDiagnosticOperation::start("pickerMode", &epoch, Some(deadline));
+        let tree = match self.camera_gallery_tree(deadline, stop, popup).await {
+            Ok(ReadWaitResult::Ready(tree)) => tree,
+            Ok(ReadWaitResult::Cancelled) => {
+                trace.finish("cancelled");
+                return Ok(ReadWaitResult::Cancelled);
+            }
+            Ok(ReadWaitResult::DeadlineExceeded) => {
+                trace.finish("deadline");
+                return Ok(ReadWaitResult::DeadlineExceeded);
+            }
+            Err(error) => {
+                trace.finish("error");
+                return Err(error);
+            }
+        };
+        let toggles = tree.matching(self.plan.package, self.plan.multi_select);
+        let next = tree.matching(self.plan.package, self.plan.picker_next);
+        let mode = match (toggles.as_slice(), next.is_empty()) {
+            ([_, ..], false) => PickerMode::Multi,
+            ([toggle], true) => PickerMode::Single(
+                tree.nodes[*toggle]
+                    .rect()
+                    .context("picker toggle bounds unavailable")?,
+            ),
+            _ => PickerMode::Unsettled,
+        };
+        if let PickerMode::Single(toggle) = &mode {
+            trace.target(toggle, None);
+        }
+        trace.finish(match mode {
+            PickerMode::Multi => "multi",
+            PickerMode::Single(_) => "single",
+            PickerMode::Unsettled => "unsettled",
+        });
+        Ok(ReadWaitResult::Ready(mode))
+    }
+
+    /// Whether this build's picker reads go through one whole-tree snapshot.
+    fn picker_snapshot(&self) -> bool {
+        self.camera_gallery_snapshot_query(self.plan.album_menu)
     }
 
     /// Clear only measured optional modals inside this caller's existing wait.
