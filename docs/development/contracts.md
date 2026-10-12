@@ -648,6 +648,20 @@ rảnh. Còn bản ghi chặn thì giữ cổng người vận hành và lý do 
 reboot hoặc mất tiến trình helper được coi là phiên cũ đã mất, không phải chưa rõ, khi
 ledger không có gì đang chạy.
 
+adbd chạy root (`id -u` = 0) được tự sửa, không có bước xác nhận (quyết định của chủ sản
+phẩm 12/10/2026): `agent_commands::auto_unroot_adb` chạy ở worker kết nối (trước
+`prepare_helper_runtime`) và ở admission trên (trước kiểm ledger), dưới lease Repair nên
+không chen vào việc đang chạy của controller này. `AndroidDriver::repair_root_adb_shell`
+gửi `adb -s <serial> unroot` tối đa một lần cho mỗi boot id của máy (khởi động lại máy hoặc
+khởi động lại app cho thêm một lần), ghi `agent.helper.adb_unroot.started` trước effect,
+chờ hữu hạn (45 s) đến khi `id -u` = 2000, không bao giờ restart adb-server của PC hay chạy
+helper bằng root. Không phụ thuộc ledger: lệnh chỉ restart adbd của máy, không chạm trạng
+thái TikTok và không lặp thao tác. Vẫn root thì giữ `shell_root` với lý do tiếng Việt (tắt
+GenFarmer, khởi động lại máy). Lúc nhận phiên, fence `HelperRecoveryRequired` chưa phân
+loại được thăm dò danh tính adbd (chỉ đọc) để chốt đúng `shell_root`/`shell_uid`/
+`android_user` thay vì `recovery_required`; readiness mang theo dòng chốt đó để preflight
+nêu cùng nguyên nhân với ô máy.
+
 Đóng app không bị giữ vô hạn: drain có deadline từng bước; drain không settle (ví dụ máy
 đã rời adb nên không chứng minh được helper vắng) vẫn thoát, giữ nguyên journal helper để
 lần mở sau tự đối soát theo luật trên.

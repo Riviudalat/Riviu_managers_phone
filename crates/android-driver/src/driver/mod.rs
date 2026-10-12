@@ -23,6 +23,38 @@ use crate::frames;
 use crate::session::AndroidUiSession;
 mod transport;
 
+/// Budgets for the automatic `adb unroot`. Not yet measured on a phone: an adbd restart
+/// takes seconds; the return budget adds margin for a slow USB re-enumeration and stays
+/// finite. Real-device check pending on the SM-G955F/N fleet.
+const ADB_UNROOT_DISPATCH_TIMEOUT: Duration = Duration::from_secs(15);
+const ADB_UNROOT_PROBE_TIMEOUT: Duration = Duration::from_secs(5);
+const ADB_UNROOT_POLL: Duration = Duration::from_secs(2);
+const ADB_UNROOT_RETURN_BUDGET: Duration = Duration::from_secs(45);
+
+/// What one `adb unroot` left on the phone, from read-only `id -u`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum AdbUnrootOutcome {
+    /// adbd came back answering shell uid 2000.
+    Shell,
+    /// adbd still answered uid 0 when the budget ended (the ROM or another tool re-roots it).
+    StillRoot,
+    /// adbd answered neither 0 nor 2000 when the budget ended.
+    UnexpectedUid,
+    /// The phone did not answer again within the budget.
+    NotBack,
+}
+
+/// Result of [`AndroidDriver::repair_root_adb_shell`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum AdbRootRepair {
+    /// adbd does not run as root; nothing was sent.
+    NotRoot,
+    /// This boot's single `adb unroot` was sent now and left this outcome.
+    Dispatched(AdbUnrootOutcome),
+    /// adbd is root again after this boot's single `adb unroot`; nothing was sent.
+    AlreadyTriedThisBoot,
+}
+
 /// Package names of the agent halves, as published by Appium.
 const AGENT_PACKAGE: &str = "io.appium.uiautomator2.server";
 const AGENT_TEST_PACKAGE: &str = "io.appium.uiautomator2.server.test";
@@ -1119,6 +1151,8 @@ pub struct AndroidDriver {
     /// [`Self::inventory_cache`] so it keeps its own, slower refresh ([`WIFI_IP_TTL`]).
     wifi_ips: Mutex<HashMap<String, (std::time::Instant, Option<String>)>>,
     helper_setup_errors: Mutex<HashMap<String, String>>,
+    /// serial -> boot id of the one automatic `adb unroot` already sent in that boot.
+    adb_unroot_boots: Mutex<HashMap<String, String>>,
     helper_recovery: Mutex<HashMap<String, HelperRecoveryState>>,
     helper_inventory_snapshot: Mutex<Option<Vec<DeviceInfo>>>,
     /// serial -> app names and icons the helper already described, keyed on the exact set of
@@ -1256,7 +1290,7 @@ impl AndroidDriver {
         // The shell-identity refusal is checked first: it also carries the recovery fence,
         // and only its own category tells the operator what to change on the phone.
         let (category, reason) = if let Some(refusal) = error.downcast_ref::<crate::riviu_agent::HelperShellIdentityRefused>() {
-            (refusal.category(), refusal.operator_message(&device))
+            (refusal.category(), refusal.operator_message().to_owned())
         } else if error.is::<crate::riviu_agent::HelperClipboardNotQualified>() {
             ("clipboard_not_qualified", "Chưa xác minh được clipboard; giữ phiên hiện tại và kiểm tra chẩn đoán của máy.".to_owned())
         } else if error.is::<crate::riviu_agent::HelperRecoveryRequired>() {
@@ -1302,7 +1336,11 @@ impl AndroidDriver {
         let stage = if result.is_ok() { "clipboard_qualification" } else { "runtime_acquisition" };
         let result = match result {
             Ok(helper) => helper.qualify_clipboard_roundtrip().await.map(|_| helper),
-            Err(error) => Err(error),
+            // Still under the inventory writer: name a root adbd behind the owner fence.
+            Err(error) => Err(crate::riviu_agent::HelperClient::name_identity_refusal(
+                &self.adb, serial, error,
+            )
+            .await),
         };
         match &result {
             Ok(_) => self.record_helper_runtime_result(serial, true),
@@ -1311,6 +1349,105 @@ impl AndroidDriver {
         if let Some(helper) = retained { helper.record_cached_acquisition(result.is_err()); }
         self.publish_helper_status(serial, result.as_ref().ok(), false);
         result
+    }
+
+    /// Read-only: the uid adbd's shell runs as on this phone (`id -u`), trimmed.
+    async fn adb_shell_uid(&self, serial: &str) -> anyhow::Result<String> {
+        let output = self
+            .adb
+            .shell_output(serial, "id -u", ADB_UNROOT_PROBE_TIMEOUT)
+            .await?;
+        anyhow::ensure!(output.exit_code == 0, "id -u unanswered");
+        Ok(output.stdout.trim().to_owned())
+    }
+
+    /// Automatic repair of a root adbd (`id -u` == 0): at most one `adb unroot` per phone
+    /// boot, so Riviu never fights a tool (GenFarmer) or ROM that roots adbd again. A reboot
+    /// (new boot id) or an app restart allows one more. The caller holds the phone's
+    /// exclusive Repair lease, so no job of this controller is running on it.
+    /// `record_intent` runs before the effect; its failure sends nothing. An unreadable
+    /// identity is an error and sends nothing: the normal preparation path reports it.
+    pub async fn repair_root_adb_shell(
+        &self,
+        serial: &str,
+        record_intent: impl FnOnce() -> anyhow::Result<()>,
+    ) -> anyhow::Result<AdbRootRepair> {
+        if self.adb_shell_uid(serial).await? != "0" {
+            return Ok(AdbRootRepair::NotRoot);
+        }
+        let boot_id = self
+            .adb
+            .shell_output(
+                serial,
+                "cat /proc/sys/kernel/random/boot_id",
+                ADB_UNROOT_PROBE_TIMEOUT,
+            )
+            .await
+            .map(|output| output.stdout.trim().to_owned())
+            .unwrap_or_default();
+        if self.adb_unroot_boots.lock().get(serial) == Some(&boot_id) {
+            return Ok(AdbRootRepair::AlreadyTriedThisBoot);
+        }
+        record_intent()?;
+        // Marked before the effect: a lost answer never earns a second dispatch this boot.
+        self.adb_unroot_boots
+            .lock()
+            .insert(serial.to_owned(), boot_id);
+        match self.unroot_adb_once(serial).await {
+            Ok(outcome) => Ok(AdbRootRepair::Dispatched(outcome)),
+            Err(error) => {
+                // Refused before spawn: nothing reached the phone, so the attempt is unspent.
+                self.adb_unroot_boots.lock().remove(serial);
+                Err(error)
+            }
+        }
+    }
+
+    /// `adb -s <serial> unroot`, dispatched exactly once, then a bounded read-only wait for
+    /// this phone's adbd to answer again.
+    ///
+    /// It restarts only the phone's adbd as the shell user (the phone leaves adb for a few
+    /// seconds, like a cable replug); the host adb server is never touched. Never retried
+    /// here. This is not a root fallback: the helper still requires uid 2000.
+    async fn unroot_adb_once(&self, serial: &str) -> anyhow::Result<AdbUnrootOutcome> {
+        match self
+            .adb
+            .device_effect(serial, &["unroot"], ADB_UNROOT_DISPATCH_TIMEOUT)
+            .await
+        {
+            Err(adb::AdbEffectFailure::BeforeSpawn { detail }) => {
+                anyhow::bail!("adb unroot not started: {detail}")
+            }
+            Err(adb::AdbEffectFailure::CancelledBeforeSpawn) => {
+                anyhow::bail!("adb unroot not started")
+            }
+            // A lost answer after spawn is observed below, never sent again.
+            Err(adb::AdbEffectFailure::AfterSpawn { detail }) => {
+                tracing::warn!(serial, %detail, "adb unroot answer lost; observing adbd identity, no replay")
+            }
+            Ok(output) => {
+                let answer: String = output.stdout.trim().chars().take(200).collect();
+                tracing::info!(serial, success = output.success, answer = %answer, "adb unroot dispatched once");
+            }
+        }
+        let deadline = tokio::time::Instant::now() + ADB_UNROOT_RETURN_BUDGET;
+        let mut last_uid = None;
+        loop {
+            tokio::time::sleep(ADB_UNROOT_POLL).await;
+            match self.adb_shell_uid(serial).await {
+                Ok(uid) if uid == "2000" => return Ok(AdbUnrootOutcome::Shell),
+                Ok(uid) => last_uid = Some(uid),
+                // The phone is still re-enumerating; unanswered is not an answer.
+                Err(_) => {}
+            }
+            if tokio::time::Instant::now() >= deadline {
+                return Ok(match last_uid.as_deref() {
+                    Some("0") => AdbUnrootOutcome::StillRoot,
+                    Some(_) => AdbUnrootOutcome::UnexpectedUid,
+                    None => AdbUnrootOutcome::NotBack,
+                });
+            }
+        }
     }
 
     /// Before-session reconciliation only: no transport, runner or semantic helper state.
@@ -1785,6 +1922,7 @@ impl AndroidDriver {
             inventory_scan_lock: tokio::sync::Mutex::new(()),
             wifi_ips: Mutex::new(HashMap::new()),
             helper_setup_errors: Mutex::new(HashMap::new()),
+            adb_unroot_boots: Mutex::new(HashMap::new()),
             helper_recovery: Mutex::new(HashMap::new()),
             helper_inventory_snapshot: Mutex::new(None),
             app_descriptions: Mutex::new(HashMap::new()),
@@ -3044,7 +3182,11 @@ impl DeviceDriver for AndroidDriver {
             let _inventory = self.helper_inventory_lock(udid).write_owned().await;
             let helper = self.helpers.lock().get(udid).cloned();
             let result: anyhow::Result<()> = async {
-            anyhow::ensure!(!self.helper_setup_errors.lock().contains_key(udid), crate::riviu_agent::HelperRecoveryRequired);
+            // The latch is fixed vocabulary; carrying it lets publish and job preflight name
+            // the same cause (e.g. `shell_root`) as the roster tile instead of a bare fence.
+            if let Some(latched) = self.helper_setup_errors.lock().get(udid).cloned() {
+                return Err(anyhow!(crate::riviu_agent::HelperRecoveryRequired).context(latched));
+            }
             if let Some(helper) = &helper { helper.require_unfenced()?; }
             anyhow::ensure!(
                 helper.as_ref().is_none_or(|helper| !helper.cleanup_is_pending()),
@@ -3868,7 +4010,7 @@ mod tests {
             let status = driver.cached_agent_status("fixture");
             let public = serde_json::to_string(&status).unwrap();
             assert!(public.contains(&format!("category={category}")));
-            assert_eq!(category == "shell_root", public.contains("`adb -s fixture unroot`"), "{public}");
+            assert_eq!(category == "shell_root", public.contains("tự tắt quyền root của adb"), "{public}");
             assert!(!public.contains("fixture-secret-token"));
             assert!(!public.contains("owner clipboard credential envelope"));
             assert_eq!(status.state, riviu_core::AgentState::RepairRequired);

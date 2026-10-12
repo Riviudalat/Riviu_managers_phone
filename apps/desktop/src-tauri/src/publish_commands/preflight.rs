@@ -414,9 +414,10 @@ pub async fn publish_preflight(
     } else {
         Vec::new()
     };
-    // The one device effect a preflight may cause: superseding a stale helper owner on an
-    // idle phone whose ledger holds nothing uncertain, exactly as the on-connect worker
-    // would. A phone that keeps the operator gate gets its blocking record named below.
+    // The device effects a preflight may cause, exactly as the on-connect worker would, on
+    // an idle phone only: one `adb unroot` per phone boot when adbd runs as root, and
+    // superseding a stale helper owner when its ledger holds nothing uncertain. A phone
+    // that keeps the operator gate gets its blocking record named below.
     let gated =
         crate::agent_commands::reconcile_helpers_for_admission(&state, &request.udids).await;
     let preparation_id = Uuid::new_v4().to_string();

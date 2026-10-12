@@ -211,6 +211,61 @@ pub async fn agent_helper_maintenance_execute(
     Ok(receipt)
 }
 
+/// Owner decision 2026-10-12: a root adbd is repaired automatically, never through a
+/// confirm step. Called under the phone's exclusive Repair lease (so no job of this
+/// controller runs on it) when the phone connects and at job admission. At most one
+/// `adb unroot` per phone boot, logged before the effect; the host adb server is never
+/// touched and nothing is replayed. Returns the operator text when adbd still does not
+/// run as shell; `None` lets the normal path continue, including when the identity is
+/// unreadable (that path reports it).
+pub(crate) async fn auto_unroot_adb(
+    android: &riviu_android_driver::AndroidDriver,
+    db: &riviu_core::db::Database,
+    serial: &str,
+) -> Option<String> {
+    use riviu_android_driver::driver::{AdbRootRepair, AdbUnrootOutcome};
+    let record =
+        |action: &str, message: &str| db.log_op(action, &format!("Máy {serial}: {message}"));
+    let repair = android
+        .repair_root_adb_shell(serial, || {
+            record(
+                "agent.helper.adb_unroot.started",
+                "adb đang chạy quyền root; tự tắt quyền root của adb (adb unroot, một lần cho lần khởi động này); máy mất kết nối vài giây",
+            )
+        })
+        .await;
+    let dispatched = matches!(repair, Ok(AdbRootRepair::Dispatched(_)));
+    let failure = match repair {
+        Ok(AdbRootRepair::NotRoot) => return None,
+        Ok(AdbRootRepair::Dispatched(AdbUnrootOutcome::Shell)) => {
+            if let Err(error) = record("agent.helper.adb_unroot.done", "adb đã chạy bằng tài khoản shell (uid 2000)") {
+                log::error!("could not persist adb unroot result for {serial}: {error:#}");
+            }
+            return None;
+        }
+        Ok(AdbRootRepair::Dispatched(AdbUnrootOutcome::StillRoot) | AdbRootRepair::AlreadyTriedThisBoot) =>
+            "adb trên máy vẫn chạy quyền root sau khi Riviu tự tắt một lần (thường do GenFarmer hoặc ROM bật lại); helper không chạy với root. Tắt GenFarmer trên PC này rồi khởi động lại máy; Riviu tự kiểm tra lại khi máy kết nối lại.",
+        Ok(AdbRootRepair::Dispatched(AdbUnrootOutcome::UnexpectedUid)) =>
+            "Riviu đã tự tắt quyền root của adb nhưng adb của máy không chạy bằng tài khoản shell (uid 2000). Tắt rồi bật lại Gỡ lỗi USB trên máy; Riviu tự kiểm tra lại khi máy kết nối lại.",
+        Ok(AdbRootRepair::Dispatched(AdbUnrootOutcome::NotBack)) =>
+            "Riviu đã tự tắt quyền root của adb nhưng máy chưa kết nối lại trong 45 giây. Kiểm tra cáp và box; Riviu tự kiểm tra lại khi máy hiện lại.",
+        Err(error) => {
+            log::warn!("automatic adb unroot not attempted on {serial}: {error:#}");
+            return None;
+        }
+    };
+    // A repeated check of an already-spent boot logs nothing new.
+    if dispatched {
+        if let Err(error) = record("agent.helper.adb_unroot.failed", failure) {
+            log::error!("could not persist adb unroot result for {serial}: {error:#}");
+        }
+    }
+    log::warn!(
+        "{serial}: adb shell still not uid 2000 after automatic adb unroot; no action replay"
+    );
+    Some(failure.to_owned())
+}
+
 async fn execute_helper_maintenance_admitted(
     control: &DeviceControlPlane,
     db: &std::sync::Arc<riviu_core::db::Database>,
@@ -410,6 +465,11 @@ async fn reconcile_helper_for_admission(
             log::error!("could not persist automatic helper reconcile for {udid}: {error:#}");
         }
     };
+    // A root adbd is repaired first, whatever the ledger holds: `adb unroot` restarts only
+    // the phone's adbd, touches no TikTok state and replays nothing.
+    if let Some(refusal) = auto_unroot_adb(android, db, udid).await {
+        return Some(refusal);
+    }
     match helper_auto_reconcile_blocker(db, udid) {
         Ok(None) => {}
         // Returned, not logged: each caller shows or logs its own refusal, and a
@@ -670,7 +730,7 @@ fn helper_maintenance_execution_error(udid: &str, error: &DeviceControlError) ->
     };
     let device = helper_device_label(udid);
     let refusal = HelperShellIdentityRefused::from_chain_text(cause);
-    let identity_reason = refusal.map(|refusal| refusal.operator_message(&device));
+    let identity_reason = refusal.map(HelperShellIdentityRefused::operator_message);
     let (stage, category, reason) = match cause {
         "helper maintenance binding changed; no replay or retirement"
         | "maintenance active plan changed; no replay or retirement" =>
@@ -680,7 +740,7 @@ fn helper_maintenance_execution_error(udid: &str, error: &DeviceControlError) ->
         _ if refusal.is_some() => (
             "maintenance_execution",
             refusal.map_or("unknown", HelperShellIdentityRefused::category),
-            identity_reason.as_deref().unwrap_or_default(),
+            identity_reason.unwrap_or_default(),
         ),
         _ if is_helper_recovery_required(cause) =>
             ("maintenance_execution", "recovery_required", "Cần đối soát phiên helper đang giữ; chưa nhận phiên thay thế."),
@@ -723,7 +783,7 @@ fn helper_maintenance_prepare_error(error: DeviceControlError) -> CommandError {
                 HelperShellIdentityRefused::Root => "HelperMaintenanceShellRoot",
                 HelperShellIdentityRefused::UnexpectedUid => "HelperMaintenanceShellUid",
                 HelperShellIdentityRefused::AndroidUser => "HelperMaintenanceAndroidUser",
-            }, refusal.category(), refusal.operator_message(&device)),
+            }, refusal.category(), refusal.operator_message().to_owned()),
             None if is_helper_recovery_required(cause) => ("HelperMaintenanceRecoveryRequired", "recovery_required",
                 "Hồ sơ helper trên PC này còn kế hoạch khôi phục dở hoặc không khớp đúng máy; chưa chuẩn bị kế hoạch mới. Mở Chẩn đoán của đúng thiết bị; giữ nguyên dữ liệu phiên, không tự đặt lại helper.".into()),
             None if cause == "helper runtime inventory unavailable" || cause.starts_with("adb shell timed out after ") => ("HelperMaintenanceAdbUnavailable", "adb_unavailable",
@@ -770,7 +830,7 @@ mod tests {
         // typed fences arrive behind context prefixes, never as bare literals.
         let fenced = |refusal| format!("{:#}", anyhow::Error::new(refusal).context(HelperRecoveryRequired));
         for (cause, expected, hint) in [
-            (fenced(HelperShellIdentityRefused::Root), "HelperMaintenanceShellRoot", Some("`adb -s fixture-device unroot`")),
+            (fenced(HelperShellIdentityRefused::Root), "HelperMaintenanceShellRoot", Some("tự tắt quyền root của adb")),
             (format!("{}", HelperShellIdentityRefused::Root), "HelperMaintenanceShellRoot", Some("uid 0")),
             (fenced(HelperShellIdentityRefused::UnexpectedUid), "HelperMaintenanceShellUid", Some("uid 2000")),
             (fenced(HelperShellIdentityRefused::AndroidUser), "HelperMaintenanceAndroidUser", Some("người dùng chính")),

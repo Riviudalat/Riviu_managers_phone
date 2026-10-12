@@ -65,15 +65,15 @@ describe("describeError", () => {
       expect(controlFailure(latched)).toMatchObject({ helper: true, summary: "Helper cần khôi phục" });
     }
   });
-  it("names a root adb shell with the exact unroot command, from the roster latch or the prepare command", () => {
-    const root = "adb shell đang chạy quyền root (uid 0) — helper từ chối root. Chạy `adb -s R58M12AB unroot` hoặc tắt adb root khi khởi động, rồi Khôi phục helper lại.";
+  it("names a root adb shell and its automatic repair, from the roster latch or the prepare command", () => {
+    const root = "adb trên máy đang chạy quyền root (uid 0), thường do GenFarmer hoặc ROM bật; helper không chạy với root. Riviu tự tắt quyền root của adb một lần cho mỗi lần khởi động máy; nếu vẫn thấy lỗi này: tắt GenFarmer trên PC này rồi khởi động lại máy.";
     const latched = `Riviu Helper: runtime qualification failed; recovery required (no action replay); stage=runtime_acquisition; category=shell_root; ${root}`;
     expect(describeError(latched)).toBe(root);
     expect(describeError({ code: "HelperMaintenanceShellRoot", message: root })).toBe(root);
     expect(describeError(describeError(latched))).toBe(root);
     expect(helperRecoveryMessage(latched)).toBe(root);
     expect(describeError("HelperRecoveryRequired: prior owner cleanup unresolved; no claim or action replay: HelperShellRootRefused: adb shell runs as root (uid 0); helper requires shell uid 2000; no root fallback"))
-      .toContain("`adb -s <serial> unroot`");
+      .toBe(root);
   });
   it("keeps an unproved execution's own explanation even when it names a helper category", () => {
     const message = describeError({

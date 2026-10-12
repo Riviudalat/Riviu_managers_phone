@@ -36,8 +36,9 @@ impl std::fmt::Display for HelperRecoveryRequired {
 ///
 /// Owner records, IME journals and maintenance plans are only valid for shell UID 2000 on
 /// Android user 0, so this refuses before any claim, maintenance dispatch or action. A box
-/// that starts adbd as root (`adb root` at boot) lands here as `Root`; the fix is on the
-/// phone (`adb unroot`), never a root fallback. Where the caller already fenced a retained
+/// that starts adbd as root (`adb root` at boot) lands here as `Root`; the app repairs it
+/// with one automatic `adb unroot` per phone boot (`AndroidDriver::repair_root_adb_shell`),
+/// never a root fallback. Where the caller already fenced a retained
 /// owner as recovery-required, the refusal keeps that fence as context.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum HelperShellIdentityRefused {
@@ -76,15 +77,13 @@ impl HelperShellIdentityRefused {
         Self::ALL.into_iter().find(|refusal| text.contains(&format!("{}:", refusal.marker())))
     }
 
-    /// Operator-facing Vietnamese instruction. The serial is reduced to ADB serial characters.
-    pub fn operator_message(self, serial: &str) -> String {
-        let serial: String = serial.chars().take(128)
-            .filter(|c| c.is_ascii_alphanumeric() || matches!(c, '-' | '_' | '.' | ':')).collect();
-        let serial = if serial.is_empty() { "<serial>".to_owned() } else { serial };
+    /// Operator-facing Vietnamese instruction, naming only steps an operator can take from
+    /// the app or the phone (never a hand-typed adb command). It carries no device output.
+    pub fn operator_message(self) -> &'static str {
         match self {
-            Self::Root => format!("adb shell đang chạy quyền root (uid 0) — helper từ chối root. Chạy `adb -s {serial} unroot` hoặc tắt adb root khi khởi động, rồi Khôi phục helper lại."),
-            Self::UnexpectedUid => format!("adb shell không chạy bằng uid 2000 (shell) — helper từ chối. Chạy `adb -s {serial} unroot` hoặc tắt rồi bật lại Gỡ lỗi USB, rồi Khôi phục helper lại."),
-            Self::AndroidUser => "Máy đang ở người dùng Android khác người dùng chính (user 0) — helper chỉ chạy cho người dùng chính. Chuyển về người dùng chính trên máy, rồi Khôi phục helper lại.".to_owned(),
+            Self::Root => "adb trên máy đang chạy quyền root (uid 0), thường do GenFarmer hoặc ROM bật; helper không chạy với root. Riviu tự tắt quyền root của adb một lần cho mỗi lần khởi động máy; nếu vẫn thấy lỗi này: tắt GenFarmer trên PC này rồi khởi động lại máy.",
+            Self::UnexpectedUid => "adb shell của máy không chạy bằng tài khoản shell (uid 2000); helper từ chối. Tắt rồi bật lại Gỡ lỗi USB trên máy, rồi chọn Khôi phục helper lại.",
+            Self::AndroidUser => "Máy đang ở người dùng Android khác người dùng chính (user 0) — helper chỉ chạy cho người dùng chính. Chuyển về người dùng chính trên máy, rồi Khôi phục helper lại.",
         }
     }
 }
@@ -569,6 +568,32 @@ impl HelperClient {
             anyhow::ensure!(self.maintenance_plan.lock().is_some(), "cached helper durable owner missing");
         }
         Ok(guard)
+    }
+
+    /// Name an adbd identity refusal hidden beneath an unclassified recovery fence.
+    ///
+    /// Acquisition settles releases, loads the owner credential or reconnects a cached owner
+    /// before it reaches the identity proof, so a root adbd surfaced only as
+    /// `recovery_required` while maintenance named `shell_root` on the same phone. This is
+    /// read-only (`id -u`, `am get-current-user`). The fence and the original chain stay; an
+    /// unanswered probe keeps the original error.
+    pub(crate) async fn name_identity_refusal(
+        adb: &AdbProgram,
+        serial: &str,
+        error: anyhow::Error,
+    ) -> anyhow::Error {
+        if !error.is::<HelperRecoveryRequired>() || error.is::<HelperShellIdentityRefused>() {
+            return error;
+        }
+        match require_shell_identity(adb, serial)
+            .await
+            .map_err(|probe| probe.downcast::<HelperShellIdentityRefused>())
+        {
+            Err(Ok(refusal)) => anyhow!(refusal)
+                .context(HelperRecoveryRequired)
+                .context(format!("{error:#}")),
+            Ok(()) | Err(Err(_)) => error,
+        }
     }
 
     /// Observation only. The caller supplies the existing effect identity, never a retry ID.
@@ -1184,7 +1209,16 @@ mod tests {
             assert_eq!(HelperShellIdentityRefused::from_chain_text(&text), Some(expected), "{uid}/{user}: {text}");
             assert!(error.is::<HelperRecoveryRequired>(), "retained owner stays fenced: {text}");
         }
-        assert!(HelperShellIdentityRefused::Root.operator_message("R58M&x").contains("`adb -s R58Mx unroot`"));
+        // The operator cannot type adb: the root text names the in-app step instead.
+        for refusal in HelperShellIdentityRefused::ALL {
+            assert!(
+                !refusal.operator_message().contains("adb -s"),
+                "{refusal:?}"
+            );
+        }
+        assert!(HelperShellIdentityRefused::Root
+            .operator_message()
+            .contains("tự tắt quyền root của adb"));
     }
 
 

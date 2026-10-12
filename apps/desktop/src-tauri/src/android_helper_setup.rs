@@ -24,7 +24,7 @@ use super::CommandAdmissionState;
 
 const MAX_CONCURRENT_INSTALLS: usize = 2;
 /// Finite backoff for observation-only preparation refusals on one connection: the
-/// operator may fix the phone (e.g. `adb unroot`) without replugging it. Then terminal.
+/// operator may fix the phone (e.g. turn GenFarmer off) without replugging it. Then terminal.
 const PREPARE_RETRY_DELAYS: [Duration; 3] =
     [Duration::from_secs(30), Duration::from_secs(120), Duration::from_secs(300)];
 
@@ -83,8 +83,12 @@ impl AndroidHelperSetup {
                             auto_apply_baseline(&android, &db, &serial).await;
                             record(&db, "agent.helper.setup.started", &serial,
                                 "Đang chuẩn bị Riviu Helper để điều khiển thiết bị.");
+                            // A root adbd is repaired before preparation (one `adb unroot` per
+                            // phone boot). If it stays root, preparation below refuses with
+                            // `shell_root`, which latches the cause the tile shows.
+                            crate::agent_commands::auto_unroot_adb(&android, &db, &serial).await;
                             let automatic_failure = |error: &anyhow::Error| crate::command_error::CommandError::code(
-                                "HelperAutomaticPreparationFailed", automatic_preparation_message(&serial, error));
+                                "HelperAutomaticPreparationFailed", automatic_preparation_message(error));
                             let result = async {
                                 let pending = crate::agent_commands::helper_maintenance_is_pending(&db, &serial)
                                     .map_err(|error| (SetupStop::PreEffect, error))?;
@@ -191,9 +195,9 @@ fn failure_disposition(stop: SetupStop, code: &str) -> FailureDisposition {
     }
 }
 
-fn automatic_preparation_message(serial: &str, error: &anyhow::Error) -> String {
+fn automatic_preparation_message(error: &anyhow::Error) -> String {
     match error.downcast_ref::<HelperShellIdentityRefused>() {
-        Some(refusal) => refusal.operator_message(serial),
+        Some(refusal) => refusal.operator_message().to_owned(),
         None => "Chưa xác minh được Riviu Helper hoạt động; đã giữ bản ghi để xử lý tiếp.".into(),
     }
 }

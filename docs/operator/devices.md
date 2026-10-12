@@ -167,10 +167,17 @@ mọi máy. **Sửa Riviu Agent** là thao tác riêng: chỉ sửa agent điề
 trên Android), không khôi phục helper. Kết quả đếm máy đã sửa và máy lỗi; máy đã sửa
 agent nhưng helper vẫn lỗi được nêu riêng kèm lời nhắc chọn **Khôi phục helper**.
 
-Nếu adb shell của máy chạy quyền root (uid 0), ví dụ box bật `adb root` khi khởi động,
-helper từ chối và ô máy hiện **Cần xử lý: Cần khôi phục helper** với hướng dẫn chạy
-`adb -s <serial> unroot` hoặc tắt adb root khi khởi động. Máy đang ở người dùng Android
-khác người dùng chính cũng được báo riêng. Helper không có đường lùi chạy bằng root.
+Nếu adb shell của máy chạy quyền root (uid 0), ví dụ GenFarmer hoặc box bật `adb root`,
+app tự sửa, không cần bấm gì: khi máy kết nối (cả lúc mở app) và khi bắt đầu Nuôi, Tương
+tác hay Đăng bài trên máy không có tác vụ nào của app đang chạy, app ghi nhật ký rồi gửi
+lệnh tắt quyền root của adb đúng một lần cho mỗi lần khởi động máy. Lệnh chỉ khởi động lại
+adb trên điện thoại (máy mất kết nối vài giây, như rút cáp), không khởi động lại adb của PC
+và không lặp lại thao tác nào; app chờ tối đa 45 giây đến khi adb chạy bằng tài khoản shell
+(uid 2000) rồi chuẩn bị helper tiếp. Nếu máy vẫn chạy root (GenFarmer hoặc ROM bật lại),
+app không gửi lại lệnh trong lần khởi động đó và ô máy hiện **Cần xử lý: Cần khôi phục
+helper** với lý do adb đang chạy quyền root: tắt GenFarmer trên PC này rồi khởi động lại
+máy; app tự kiểm tra lại khi máy kết nối lại. Máy đang ở người dùng Android khác người dùng
+chính cũng được báo riêng. Helper không có đường lùi chạy bằng root.
 
 Phiên helper đã lỗi có thể được khôi phục khi thao tác cũ đã kết thúc và không còn
 clipboard cần đối soát; chỉ còn bản ghi trong bộ nhớ không có nghĩa máy đang bận.
@@ -194,7 +201,7 @@ chối hoặc bản ghi thao tác cũ chưa đối soát được sẽ hiện tr
 lặp cài liên tục. Kế hoạch khôi phục đã thực thi chỉ được đọc lại kết quả. Lỗi được
 chứng minh trước mọi thao tác trên máy (chuẩn bị kế hoạch khôi phục chỉ đọc, adb shell
 sai quyền trước khi cài hoặc nhận phiên) được tự kiểm tra lại sau 30 giây, 2 phút và
-5 phút rồi dừng, nên sửa máy (như `adb unroot`) không cần cắm lại cáp. Khi việc khôi
+5 phút rồi dừng, nên sửa máy (như tắt GenFarmer) không cần cắm lại cáp. Khi việc khôi
 phục đã bắt đầu thực thi, app không tự thử lại.
 
 Sau khi tắt app giữa chừng, rút cáp hoặc khởi động lại điện thoại, app tự đối soát

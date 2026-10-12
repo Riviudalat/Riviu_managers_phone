@@ -19,21 +19,21 @@ const HELPER_SETUP_LATCH = "Riviu Helper: runtime qualification failed; recovery
  * the prepare command's code, the latched roster category, or the already-described text.
  * The texts match `HelperShellIdentityRefused::operator_message` so describing twice is stable.
  */
-const SHELL_IDENTITY_REFUSALS: { category: string; pattern: RegExp; message: (serial: string) => string }[] = [
+const SHELL_IDENTITY_REFUSALS: { category: string; pattern: RegExp; message: string }[] = [
   {
     category: "shell_root",
-    pattern: /HelperShellRootRefused:|^HelperMaintenanceShellRoot\b|^adb shell đang chạy quyền root \(uid 0\)/,
-    message: serial => `adb shell đang chạy quyền root (uid 0) — helper từ chối root. Chạy \`adb -s ${serial} unroot\` hoặc tắt adb root khi khởi động, rồi Khôi phục helper lại.`,
+    pattern: /HelperShellRootRefused:|^HelperMaintenanceShellRoot\b|^adb trên máy đang chạy quyền root \(uid 0\)/,
+    message: "adb trên máy đang chạy quyền root (uid 0), thường do GenFarmer hoặc ROM bật; helper không chạy với root. Riviu tự tắt quyền root của adb một lần cho mỗi lần khởi động máy; nếu vẫn thấy lỗi này: tắt GenFarmer trên PC này rồi khởi động lại máy.",
   },
   {
     category: "shell_uid",
-    pattern: /HelperShellUidRefused:|^HelperMaintenanceShellUid\b|^adb shell không chạy bằng uid 2000/,
-    message: serial => `adb shell không chạy bằng uid 2000 (shell) — helper từ chối. Chạy \`adb -s ${serial} unroot\` hoặc tắt rồi bật lại Gỡ lỗi USB, rồi Khôi phục helper lại.`,
+    pattern: /HelperShellUidRefused:|^HelperMaintenanceShellUid\b|^adb shell của máy không chạy bằng tài khoản shell/,
+    message: "adb shell của máy không chạy bằng tài khoản shell (uid 2000); helper từ chối. Tắt rồi bật lại Gỡ lỗi USB trên máy, rồi chọn Khôi phục helper lại.",
   },
   {
     category: "android_user",
     pattern: /HelperAndroidUserRefused:|^HelperMaintenanceAndroidUser\b|^Máy đang ở người dùng Android khác người dùng chính/,
-    message: () => "Máy đang ở người dùng Android khác người dùng chính (user 0) — helper chỉ chạy cho người dùng chính. Chuyển về người dùng chính trên máy, rồi Khôi phục helper lại.",
+    message: "Máy đang ở người dùng Android khác người dùng chính (user 0) — helper chỉ chạy cho người dùng chính. Chuyển về người dùng chính trên máy, rồi Khôi phục helper lại.",
   },
 ];
 
@@ -49,7 +49,7 @@ export function helperRecoveryMessage(cause: unknown): string | null {
   const latched = message.includes(HELPER_SETUP_LATCH);
   const category = latched ? /; category=([a-z_]+);/.exec(message)?.[1] : undefined;
   const identity = SHELL_IDENTITY_REFUSALS.find(refusal => refusal.category === category || refusal.pattern.test(message));
-  if (identity) return identity.message(/`adb -s ([^`\s]+) unroot`/.exec(message)?.[1] ?? "<serial>");
+  if (identity) return identity.message;
   return /HelperRecoveryRequired|owner_conflict|helper_recovery_required/.test(message)
     || latched
     || message === HELPER_RECOVERY_MESSAGE ? HELPER_RECOVERY_MESSAGE : null;
