@@ -428,3 +428,24 @@ Trạng thái tính tại commit `2a4190b`. Khi sửa một mục, cập nhật 
 | 13 | `resolve_desc.py --scan` chỉ đọc tag `<node>` | **Đã sửa**: đọc cả tag theo tên class |
 | 14 | Comment test trong `tiktok_drawer.rs` gọi `@2131823091` là "Send" của DM, thật ra là "Reply with a video" | Mở; không cần đọc máy |
 | 15 | REPORT §6 sai: `y76` là Close trên máy, tiêu đề là `ovm` chứ không phải `q62`, bước mật khẩu có `kkz` | **Đã sửa** trong mục 7; bản en cần đọc máy |
+
+## 10. Ngôn ngữ ứng dụng và ngôn ngữ máy
+
+Riviu đọc ngôn ngữ từ cài đặt Android (`am get-config`), không đọc ngôn ngữ riêng của
+TikTok. Máy Riviu 31 (09/10/2026) cho thấy bản cài mới 45.7.3 theo ngôn ngữ hệ thống. Nếu
+người dùng đã đặt **Ngôn ngữ ứng dụng** trong TikTok thì TikTok giữ ngôn ngữ đó dù hệ thống
+là English; trường hợp này **chưa đo** trên máy.
+
+Nhãn đường đổi tay trong TikTok, lấy từ bảng chuỗi APK bằng `find_string.py --locale vi-VN`
+(12/10/2026). Đây là **ứng viên tĩnh**: chưa đo trên máy, không dùng để tap.
+
+| Bước | en (`default`) | vi-VN | String id |
+|---|---|---|---|
+| Menu hồ sơ → | Settings and privacy | Cài đặt và quyền riêng tư | 11 id, ví dụ `0x7f1108d8` (nhiều id cùng nhãn, nhãn không chọn được id) |
+| | Language | Ngôn ngữ | `0x7f113da2` (còn `0x7f111e74`, `0x7f119059` là "Languages") |
+| | App language | Ngôn ngữ ứng dụng | `0x7f11170a`, `0x7f1168b4` |
+| Lựa chọn | English | Tiếng Anh | `0x7f113496`, `0x7f119037` (danh sách ngôn ngữ có thể hiện tên bản ngữ "English"; chưa đo) |
+
+Deep link `snssdk1233://setting` mở "Settings and privacy" (§6). Riviu không dùng đường
+này để đổi ngôn ngữ: lựa chọn của owner 12/10/2026 là đổi ngôn ngữ hệ thống qua Riviu
+Helper 0.8.0 (`systemLocale`), không chạm màn TikTok.

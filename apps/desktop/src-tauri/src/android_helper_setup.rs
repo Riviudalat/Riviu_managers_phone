@@ -121,6 +121,7 @@ impl AndroidHelperSetup {
                                 Ok(()) => {
                                     record(&db, "agent.helper.setup.succeeded", &serial,
                                         "Đã xác minh Riviu Helper hoạt động.");
+                                    auto_switch_system_language(&android, &db, &serial).await;
                                     AttemptOutcome::Finished
                                 }
                                 Err((stop, error)) => {
@@ -225,6 +226,53 @@ async fn auto_apply_baseline(android: &AndroidDriver, db: &Database, serial: &st
     };
     record(db, "device.baseline.auto", serial,
         &riviu_core::device_control::baseline::summarize(&result));
+}
+
+/// "Tự chuyển ngôn ngữ": a phone whose TikTok is the fleet build but whose Android language
+/// is not English is refused for every effect. Under this connection's Repair lease, after the
+/// helper is verified and before the phone is admitted to work, switch the system language to
+/// English once per phone boot. Never fatal; the result goes to the operation log, and a phone
+/// still refused keeps the manual steps in its refusal.
+async fn auto_switch_system_language(android: &AndroidDriver, db: &Database, serial: &str) {
+    use riviu_android_driver::driver::SystemLanguageSwitch;
+    let outcome = android
+        .switch_system_language_to_english(serial, |locale| {
+            db.log_op(
+                "device.language.auto.started",
+                &format!(
+                    "Máy {serial}: TikTok đúng bản đội máy nhưng điện thoại đang dùng ngôn ngữ {locale}; tự chuyển ngôn ngữ điện thoại sang English (một lần cho lần khởi động này)."
+                ),
+            )
+        })
+        .await;
+    let manual = "Đổi tay theo hướng dẫn trong thông báo chặn của máy rồi kiểm tra lại.";
+    let (action, message) = match outcome {
+        // A repeated check of an already-spent boot logs nothing new.
+        Ok(SystemLanguageSwitch::NotNeeded | SystemLanguageSwitch::AlreadyTriedThisBoot) => return,
+        Ok(SystemLanguageSwitch::BootUnproved) => (
+            "device.language.auto.failed",
+            format!(
+                "điện thoại không dùng tiếng Anh nhưng Riviu chưa đọc được mã lần khởi động của máy nên không tự đổi ngôn ngữ (tránh đổi lặp lại). {manual}"
+            ),
+        ),
+        Ok(SystemLanguageSwitch::Switched { before, after }) => (
+            "device.language.auto.done",
+            format!(
+                "đã chuyển ngôn ngữ điện thoại từ {before} sang {after}. Nếu TikTok vẫn hiện tiếng Việt thì TikTok đang đặt ngôn ngữ ứng dụng riêng: vào Hồ sơ → ☰ → Cài đặt và quyền riêng tư → Ngôn ngữ → Ngôn ngữ ứng dụng → English."
+            ),
+        ),
+        Ok(SystemLanguageSwitch::NotEnglish { before, after }) => (
+            "device.language.auto.failed",
+            format!(
+                "đã gửi lệnh chuyển ngôn ngữ nhưng điện thoại vẫn báo {after} (trước đó {before}); Riviu không thử lại trong lần khởi động này. {manual}"
+            ),
+        ),
+        Err(error) => (
+            "device.language.auto.failed",
+            format!("chưa tự chuyển được ngôn ngữ điện thoại sang English: {error:#}. {manual}"),
+        ),
+    };
+    record(db, action, serial, &message);
 }
 
 fn record(db: &Database, action: &str, serial: &str, message: &str) {

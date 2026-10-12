@@ -58,6 +58,24 @@ pub enum AdbRootRepair {
     BootUnproved,
 }
 
+/// Result of [`AndroidDriver::switch_system_language_to_english`].
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum SystemLanguageSwitch {
+    /// TikTok is not refused for its language alone (allowed, or a wrong build); nothing sent.
+    NotNeeded,
+    /// This boot's single switch is already spent; nothing was sent.
+    AlreadyTriedThisBoot,
+    /// The phone's boot id was not proved, so "once per boot" cannot be kept; nothing sent.
+    BootUnproved,
+    /// Sent, and the locale reader now reports English.
+    Switched { before: String, after: String },
+    /// Sent, but the locale reader still does not report English.
+    NotEnglish { before: String, after: String },
+}
+
+/// The helper call that changes the system language; HTTP_TIMEOUT bounds each request too.
+const SYSTEM_LANGUAGE_BUDGET: Duration = Duration::from_secs(20);
+
 /// Upper bound of one durable "unroot spent" marker (serial + boot id).
 const ADB_UNROOT_MARKER_LIMIT: u64 = 1024;
 
@@ -1425,6 +1443,94 @@ impl AndroidDriver {
             .await?;
         anyhow::ensure!(output.exit_code == 0, "id -u unanswered");
         Ok(output.stdout.trim().to_owned())
+    }
+
+    /// Put a phone whose fleet-build TikTok is refused only for its language on English.
+    ///
+    /// The locale every effect gate reads is the Android system locale (`am get-config`, see
+    /// [`adb::parse_locale`]), and TikTok 45.7.3 follows it unless its own app language was
+    /// set. So the switch is the system language, through Riviu Helper's `systemLocale`
+    /// (`CHANGE_CONFIGURATION`, granted here). Once per phone boot, spent durably before the
+    /// call like the automatic `adb unroot`; success only when the same reader reports `en`.
+    /// No TikTok screen is touched, so a TikTok app language set to Vietnamese stays for the
+    /// session-open gate to refuse with the manual steps.
+    pub async fn switch_system_language_to_english(
+        &self,
+        serial: &str,
+        record_intent: impl FnOnce(&str) -> anyhow::Result<()>,
+    ) -> anyhow::Result<SystemLanguageSwitch> {
+        let (package, version, before) = self.tiktok_build(serial).await?;
+        match riviu_core::tiktok_fleet_policy::require_fleet_build(&package, &version, &before) {
+            Err(refusal) if refusal.only_language_differs() => {}
+            _ => return Ok(SystemLanguageSwitch::NotNeeded),
+        }
+        let marker = self
+            .helper_state_dir
+            .as_ref()
+            .context("helper state directory missing; no automatic language switch")?
+            .join("system-language")
+            .join(format!(
+                "{}.json",
+                riviu_core::frame_sha256(serial.as_bytes())
+            ));
+        let boot_id = match self
+            .adb
+            .shell_output(
+                serial,
+                "cat /proc/sys/kernel/random/boot_id",
+                ADB_UNROOT_PROBE_TIMEOUT,
+            )
+            .await
+        {
+            Ok(output) if output.exit_code == 0 => proved_boot_id(&output.stdout),
+            _ => None,
+        };
+        let Some(boot_id) = boot_id else {
+            return Ok(SystemLanguageSwitch::BootUnproved);
+        };
+        if adb_unroot_spent_boot(&marker, serial)?.as_deref() == Some(boot_id.as_str()) {
+            return Ok(SystemLanguageSwitch::AlreadyTriedThisBoot);
+        }
+        let helper = self
+            .helpers
+            .lock()
+            .get(serial)
+            .cloned()
+            .context("Riviu Helper chưa sẵn sàng trên máy; chưa đổi ngôn ngữ")?;
+        record_intent(&before)?;
+        spend_adb_unroot(&marker, serial, &boot_id)?;
+        let grant = self
+            .adb
+            .shell_output(
+                serial,
+                &format!(
+                    "pm grant {} android.permission.CHANGE_CONFIGURATION",
+                    crate::riviu_agent::PACKAGE
+                ),
+                adb::DEFAULT_TIMEOUT,
+            )
+            .await?;
+        anyhow::ensure!(
+            grant.exit_code == 0 && grant.stderr.trim().is_empty(),
+            "Android không cấp quyền đổi ngôn ngữ cho Riviu Helper: {} {}",
+            grant.stdout.trim(),
+            grant.stderr.trim()
+        );
+        let applied =
+            tokio::time::timeout(SYSTEM_LANGUAGE_BUDGET, helper.set_system_locale_english())
+                .await
+                .context("Riviu Helper không trả lời lệnh đổi ngôn ngữ trong 20 giây")??;
+        let (_, _, after) = self.tiktok_build(serial).await?;
+        let english = after
+            .split(['-', '_'])
+            .next()
+            .is_some_and(|language| language.trim().eq_ignore_ascii_case("en"));
+        tracing::info!(serial, %before, %applied, %after, english, "system language switch");
+        Ok(if english {
+            SystemLanguageSwitch::Switched { before, after }
+        } else {
+            SystemLanguageSwitch::NotEnglish { before, after }
+        })
     }
 
     /// Automatic repair of a root adbd (`id -u` == 0): at most one `adb unroot` per phone

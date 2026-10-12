@@ -94,6 +94,15 @@ may. Đọc [WDA safety](docs/agents/02-wda-doc-truoc-khi-sua.md) trước mọi
 - Đăng bài: máy có mã đang khóa bị preflight chặn với mã `device_screen_locked`; máy
   khóa lại giữa chừng trước Post kết thúc **trước khi gửi**, cùng mã, và được phép
   thử lại sau khi mở khóa. Không có Post nào được gửi lại vì lý do này.
+- **Ngôn ngữ điện thoại.** Riviu chỉ điều khiển TikTok tiếng Anh và đọc ngôn ngữ từ cài
+  đặt Android. Máy có TikTok đúng bản đội máy nhưng điện thoại đang dùng ngôn ngữ khác
+  (ví dụ `vi-VN`) bị chặn với thông báo "đúng bản đội máy nhưng đang dùng tiếng Việt",
+  không phải lời khuyên hạ bản. Khi máy kết nối, sau khi Riviu Helper sẵn sàng, Riviu
+  tự chuyển ngôn ngữ điện thoại sang English một lần cho mỗi lần khởi động máy (nhật ký
+  `device.language.auto.*`), rồi đọc lại và chỉ coi là xong khi máy báo `en`. Không đổi
+  được thì thông báo chặn ghi cách đổi tay. Riviu không chạm màn hình TikTok để đổi
+  **Ngôn ngữ ứng dụng** riêng của TikTok; nếu TikTok vẫn hiện tiếng Việt, phiên làm việc
+  từ chối trước thao tác đầu tiên và chỉ đường đổi tay.
 
 Bundled Python, Android tools và giấy phép: [Android tools](sidecars/android/README.md),
 [WDA/runtime](sidecars/wda/README.md), [NOTICE](NOTICE). Máy người dùng không cần

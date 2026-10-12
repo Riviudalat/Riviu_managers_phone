@@ -51,7 +51,14 @@ pub const AGENT_VERSION: &str = "0.5.0";
 /// "can it answer the call I am about to make", and a phone can legitimately carry a newer
 /// APK than this build knows about. A helper missing any of these is reinstalled once — see
 /// [`HelperClient::upgrade_if_stale`].
-const REQUIRED_FEATURES: &[&str] = &["clipboard", "pushMedia", "appLabels", "auth", "launcher"];
+const REQUIRED_FEATURES: &[&str] = &[
+    "clipboard",
+    "pushMedia",
+    "appLabels",
+    "auth",
+    "launcher",
+    "systemLocale",
+];
 
 /// Serials this process has already tried to upgrade, so a stale APK on disk cannot turn
 /// every helper call into another install attempt.
@@ -1197,6 +1204,23 @@ impl HelperClient {
             .await?;
         require_ok(&value, "set mock location")?;
         Ok(())
+    }
+
+    /// Put the phone's system language on English (`en-US` first, other languages kept after
+    /// it) and return the locale the helper reads back. Needs `CHANGE_CONFIGURATION`, which
+    /// the caller grants with `pm grant` first; the helper accepts no other language.
+    pub async fn set_system_locale_english(&self) -> anyhow::Result<String> {
+        let status = self.require_status().await?;
+        anyhow::ensure!(
+            status.features.iter().any(|feature| feature == "systemLocale"),
+            "Riviu Helper {} trên máy chưa có tính năng đổi ngôn ngữ (cần 0.8.0)",
+            status.agent_version
+        );
+        let value = self
+            .post_json("/v1/system/locale", json!({ "languageTag": "en-US" }))
+            .await?;
+        require_ok(&value, "set system locale")?;
+        Ok(value["locale"].as_str().unwrap_or_default().to_owned())
     }
 
     /// Remove the mock-location test providers, so the device returns to its real GPS.

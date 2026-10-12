@@ -119,6 +119,13 @@ Allowlist bản TikTok cho effect nằm ở `riviu_core::tiktok_fleet_policy`
 `system_locales`, rồi `persist.sys.locale`. Khi không đọc được cấu hình mà hai giá trị
 sau khác ngôn ngữ thì locale coi như chưa đọc được: máy Riviu 31 báo
 `persist.sys.locale=en-US`, `system_locales=vi-VN` và TikTok 45.7.3 hiện tiếng Việt.
+Khi package và phiên bản đúng allowlist mà chỉ ngôn ngữ sai hoặc chưa đọc được
+(`BuildNotAllowed::only_language_differs`), lời từ chối nói đúng nguyên nhân và cách đổi
+ngôn ngữ, không bảo hạ bản. Khi máy kết nối, sau khi Riviu Helper được xác minh và dưới
+lease Repair, `AndroidDriver::switch_system_language_to_english` đổi ngôn ngữ hệ thống sang
+`en-US` qua helper `systemLocale` (`CHANGE_CONFIGURATION` cấp bằng `pm grant`), một lần mỗi
+boot id (marker ghi bền trước lệnh, ý định ghi nhật ký trước), rồi đọc lại bằng
+`parse_locale` và chỉ báo xong khi ra `en`. Không có retry trong cùng boot.
 Mọi action trong
 `action_capabilities` là effect, nên bản ngoài allowlist trả `buildNotAllowed` cho tất
 cả action và `require_actions` trả một thông báo duy nhất. Publish preflight thêm issue
