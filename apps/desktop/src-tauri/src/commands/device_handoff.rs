@@ -246,6 +246,11 @@ pub(crate) fn observe_release_plan(
             });
         }
         if let Some(owner) = state.control.current_work_owner(udid) {
+            // Automatic helper setup is self-healing, not work to release: it is never revoked,
+            // and the publish job on this phone waits for it on its own turn.
+            if owner == DeviceWorkOwner::Repair {
+                continue;
+            }
             let owner_kinds: &[&str] = match owner {
                 DeviceWorkOwner::Nurture => &["nurture"],
                 DeviceWorkOwner::Interaction => &["interaction"],
@@ -688,6 +693,13 @@ pub(crate) async fn prepare_publish_devices(
     for udid in &devices {
         state.end_overlay_session(udid).await?;
     }
+    // A phone with nothing to stop that automatic helper setup holds is neither waited for
+    // nor closed here; its publish job takes it after that setup, on its own turn.
+    let planned: HashSet<&str> = plan.needs.iter().map(|row| row.udid.as_str()).collect();
+    let preparing = |udid: &str| {
+        !planned.contains(udid)
+            && state.control.current_work_owner(udid) == Some(DeviceWorkOwner::Repair)
+    };
     let mut waiting = HashSet::new();
     loop {
         waiting.clear();
@@ -702,7 +714,7 @@ pub(crate) async fn prepare_publish_devices(
             }
         }
         for udid in &devices {
-            if state.control.current_work_owner(udid).is_some()
+            if (state.control.current_work_owner(udid).is_some() && !preparing(udid))
                 || state.nurture.list_status().iter().any(|s| s.udid == *udid && s.running) {
                 waiting.insert(udid.clone());
             }
@@ -714,7 +726,12 @@ pub(crate) async fn prepare_publish_devices(
         let stopped = &stopped;
         let waiting = &waiting;
         let timing = timing.phase("total", Some(slot));
+        let preparing = &preparing;
         async move {
+            if preparing(&udid) {
+                return StopDeviceResult { udid, closed: true,
+                    message: "Máy đang tự chuẩn bị Riviu Helper; lượt đăng chạy trên máy này khi chuẩn bị xong".into() };
+            }
             let result = if waiting.contains(&udid) {
                 Err(CommandError::operation("Tác vụ cũ chưa nhả thiết bị; chưa bắt đầu lượt mới"))
             } else {

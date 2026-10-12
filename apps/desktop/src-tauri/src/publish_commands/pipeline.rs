@@ -535,6 +535,15 @@ pub(crate) async fn run_dispatcher(
                                 | riviu_core::DeviceStatus::Connected
                                 | riviu_core::DeviceStatus::Busy
                         )
+                            // A latched helper-setup failure is still on adb, not a lost
+                            // connection: this phone's own transfer prepares its helper
+                            // again under its lease and fails only itself if it cannot.
+                            || (d.status == riviu_core::DeviceStatus::Error
+                                && d.last_error.as_deref().is_some_and(|error| {
+                                    error.starts_with(
+                                        riviu_android_driver::driver::HELPER_SETUP_FAILURE,
+                                    )
+                                }))
                     })
                     .map(|d| d.udid)
                     .collect();

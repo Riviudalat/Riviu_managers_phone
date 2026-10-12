@@ -408,11 +408,15 @@ pub async fn publish_create_campaign(
         })
         .await
         .map_err(err)?;
+    // Automatic helper setup (Repair) needs no handoff: the job waits for it on its own turn.
     let needs_handoff = held
         || !crate::commands::observe_release_needs(&state, &udids)?.is_empty()
-        || udids
-            .iter()
-            .any(|udid| state.control.current_work_owner(udid).is_some());
+        || udids.iter().any(|udid| {
+            state
+                .control
+                .current_work_owner(udid)
+                .is_some_and(|owner| owner != DeviceWorkOwner::Repair)
+        });
     if let Some(handoff) = handoff.as_ref().filter(|_| needs_handoff) {
         for udid in &udids {
             preparation::progress(udid, "preparingDevices", "running", 0, None);

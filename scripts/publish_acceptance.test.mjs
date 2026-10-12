@@ -209,7 +209,8 @@ test('start protocol saves intent before Start and only reads status after lost 
         accountSettled = true;
       }
       const reading = await e.invoke(command, args);
-      if (accountFailure && args.udid === 'phone-b') throw new Error('account read refused');
+      // A read that proves another account refuses Start; an unreadable one no longer does.
+      if (accountFailure && args.udid === 'phone-b') return { ...reading, status: 'mismatch' };
       return reading;
     }
     if (command === 'publish_preflight') {

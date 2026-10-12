@@ -400,15 +400,27 @@ async function summarize(detail, options, invoke, accounts) {
 
 // Admission remains owned by interaction_read_account. Bound concurrent reads to
 // one per unique phone, retain input order, and settle every read before failure.
-async function readStartAccounts(udids, invoke, validate) {
+// With `unread`, a phone whose account cannot be read (read error or status 'unknown') is
+// listed there instead of failing the rest; a reading that proves a mismatch still fails.
+async function readStartAccounts(udids, invoke, validate, unread = null) {
   check(new Set(udids).size === udids.length, 'Duplicate account read device');
   const readings = new Array(udids.length), failures = new Array(udids.length);
   let next = 0;
   await Promise.all(Array.from({ length: Math.min(30, udids.length) }, async () => {
     while (next < udids.length) {
       const index = next++, udid = udids[index];
+      let reading;
+      try { reading = await invoke('interaction_read_account', { udid }); }
+      catch (error) {
+        if (unread) unread.push({ udid, error: String(error) });
+        else failures[index] = { error };
+        continue;
+      }
+      if (unread && reading?.status === 'unknown') {
+        unread.push({ udid, error: 'Không đọc được nick trên Hồ sơ' });
+        continue;
+      }
       try {
-        const reading = await invoke('interaction_read_account', { udid });
         validate(reading, udid);
         readings[index] = reading;
       } catch (error) { failures[index] = { error }; }
@@ -591,8 +603,12 @@ async function runStartProtocol(options, { invoke, sleep, now, file, report, cur
     let intent = startIntent;
     if (!intent) {
       // A phone whose old holder is released at Start cannot open Profile before it; the
-      // engine proves the account on that phone again before any Post.
+      // engine proves the account on that phone again before any Post. The same holds for a
+      // phone whose account cannot be read now: it fails before Post on its own, never
+      // blocking the others. A reading that proves another account still refuses Start.
       const releasedUdids = new Set((approval.approvedRelease ?? []).map(envelope => envelope.split(':')[1]));
+      const unread = [];
+      report.accountReadSkipped = unread;
       await readStartAccounts(options.udids.filter(udid => !releasedUdids.has(udid)), invoke, (reading, udid) => {
         const assigned = handle(approval.metadataAccounts[udid]);
         check(reading?.udid === udid && reading.status === (assigned ? 'matched' : 'unassigned')
@@ -600,7 +616,7 @@ async function runStartProtocol(options, { invoke, sleep, now, file, report, cur
           && handle(reading.observedHandle) === handle(accounts[udid])
           && /^[a-f0-9]{64}$/.test(reading.snapshotSha256 ?? ''),
         `Account preflight did not match approved device identity for ${udid}`);
-      });
+      }, unread);
       intent = { confirmation: options.confirm, requestId: approval.requestId,
         request: approval.request, ...(approval.request.runAt ? { confirmed: true } : {}), approvedInputDigest: approval.inputDigest,
         preparationId: approval.preparationId, approvedRelease: approval.approvedRelease ?? [],

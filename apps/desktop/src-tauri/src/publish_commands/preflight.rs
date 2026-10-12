@@ -39,22 +39,48 @@ where
         .collect()
 }
 
+/// The per-phone note for a Riviu Helper that is not qualified yet (still preparing, or its
+/// last automatic preparation failed). Not a campaign blocker: that phone's own transfer
+/// step prepares and qualifies the helper under its lease (`stage_publish_media`), and only
+/// that phone settles `failed_before_dispatch` if it cannot.
+pub(super) const HELPER_PENDING_NOTE: &str =
+    "Riviu Helper chưa sẵn sàng; máy sẽ tự chuẩn bị khi tới lượt, chưa đăng bài";
+
+/// A readiness refusal that only says the helper is not qualified yet.
+pub(super) fn helper_pending(message: &str) -> bool {
+    message.starts_with(HELPER_PENDING_NOTE)
+        || message.contains(riviu_android_driver::driver::HELPER_SETUP_FAILURE)
+        || message.contains(
+            &riviu_android_driver::riviu_agent::HelperRecoveryRequired.to_string(),
+        )
+}
+
 /// The read-only readiness guard, then the read-only lock-screen probe.
 ///
 /// A phone behind a lock no key can open (proven PIN/password/pattern) is reported here as
 /// `device_screen_locked` instead of failing the foreground proof after the run starts
 /// (2026-10-08: focus=StatusBar, mDreamingLockscreen=true). An unreadable probe is not a lock:
 /// the session-start foreground proof stays the backstop and names the lock itself.
+///
+/// A helper that is not qualified yet still gets the lock probe, so a locked phone keeps its
+/// own blocking reason. While automatic helper setup holds the phone (Repair), the readiness
+/// read is skipped: it would only wait for that preparation's inventory lock.
 async fn readiness_with_lock(control: &DeviceControlPlane, udid: &str) -> Option<String> {
-    if let Err(error) = control.verify_automation_readiness(udid).await {
-        return Some(error.to_string());
-    }
+    let helper = if control.current_work_owner(udid) == Some(DeviceWorkOwner::Repair) {
+        Some(HELPER_PENDING_NOTE.to_owned())
+    } else {
+        match control.verify_automation_readiness(udid).await {
+            Ok(()) => None,
+            Err(error) if helper_pending(&error.to_string()) => Some(error.to_string()),
+            Err(error) => return Some(error.to_string()),
+        }
+    };
     match control.screen_lock_blocker(udid).await {
         Ok(Some(reason)) => Some(format!("{udid}: {reason}")),
-        Ok(None) => None,
+        Ok(None) => helper,
         Err(error) => {
             log::debug!("publish preflight {udid}: lock-screen probe unreadable: {error}");
-            None
+            helper
         }
     }
 }
@@ -121,16 +147,17 @@ async fn observe_preflight_device(
             // cheap read-only readiness guard even while metadata remains cached.
             let mut observation = entry.observation.clone();
             observation.readiness_error = readiness_with_lock(control, udid).await;
+            // A helper still preparing is a note, not a failed phone.
+            let blocking = observation
+                .readiness_error
+                .clone()
+                .filter(|error| !helper_pending(error));
             preparation::progress(
                 udid,
                 "checkingDevices",
-                if observation.readiness_error.is_some() {
-                    "failed"
-                } else {
-                    "running"
-                },
+                if blocking.is_some() { "failed" } else { "running" },
                 4,
-                observation.readiness_error.clone(),
+                blocking,
             );
             return observation;
         }
@@ -166,7 +193,7 @@ async fn observe_preflight_device(
         "checkingDevices",
         "running",
         3,
-        readiness_error.clone(),
+        readiness_error.clone().filter(|error| !helper_pending(error)),
     );
     // A creation boundary always re-proves the installed package/build/locale. UI readiness
     // may reuse stable metadata for five minutes, fenced by input, binding and reconnect.
@@ -196,7 +223,10 @@ async fn observe_preflight_device(
     let error = observation
         .transport_error
         .clone()
-        .or(observation.readiness_error.clone())
+        .or(observation
+            .readiness_error
+            .clone()
+            .filter(|error| !helper_pending(error)))
         .or_else(|| {
             observation
                 .storage
@@ -398,15 +428,13 @@ pub async fn publish_preflight(
     let request_id = request_id.unwrap_or_else(|| Uuid::new_v4().to_string());
     Uuid::parse_str(&request_id).map_err(err)?;
     let acceptance_mode = state.dev_acceptance.active();
-    let start_block = (acceptance_mode
-        && request.udids.iter().any(|udid| {
-            !state
-                .dev_acceptance
-                .allows_publish_dispatch(&request_id, udid)
-        }))
-    .then(|| {
-        "Chế độ nghiệm thu đang bật và lượt này hoặc máy đã chọn chưa được cấp quyền đăng; Bắt đầu sẽ bị từ chối".to_owned()
-    });
+    // Names the scope part that refuses, so it is not mistaken for device readiness.
+    let start_block = state
+        .dev_acceptance
+        .publish_dispatch_refusal(&request_id, &request.udids)
+        .map(|reason| {
+            format!("Chế độ nghiệm thu đang bật và lượt này chưa được cấp quyền đăng: {reason}. Bắt đầu sẽ bị từ chối")
+        });
     // Read-only: preflight never stops, closes or hands off a device. Confirmation
     // authorizes releasing exactly the rows listed here.
     let needs_release = if request.run_at.is_none() {
@@ -493,6 +521,21 @@ pub async fn publish_preflight(
         if releasing {
             refresh_preflight_checks(row);
         }
+        // A phone whose automatic helper reconcile refused stays a note; the refusal is named.
+        if let Some(refusal) = gated.get(&row.udid) {
+            let pending = row.checks.iter_mut().find(|check| {
+                check.id == "helper"
+                    && check
+                        .reason
+                        .as_deref()
+                        .is_some_and(|reason| reason.starts_with(HELPER_PENDING_NOTE))
+            });
+            if let Some(helper) = pending {
+                helper.reason = Some(format!(
+                    "{HELPER_PENDING_NOTE}. Lần tự đối soát gần nhất: {refusal}"
+                ));
+            }
+        }
     }
     // Backend verdict, not a UI hint: a refused start or an unreleasable owner means
     // this preparation cannot execute.
@@ -512,6 +555,13 @@ pub async fn publish_preflight(
 /// Transfer capability alone never qualifies authenticated helper/clipboard runtime.
 fn refresh_preflight_checks(row: &mut riviu_core::PublishPreflightAssignmentReport) {
     let old_link = row.checks.iter().find(|check| check.id == "oldPostLink").cloned();
+    let helper_pending = row.checks.iter().any(|check| {
+        check.id == "helper"
+            && check
+                .reason
+                .as_deref()
+                .is_some_and(|reason| reason.starts_with(HELPER_PENDING_NOTE))
+    });
     row.checks = riviu_core::ui_automation::checks::publish_checks(row);
     if let Some(helper) = row.checks.iter_mut().find(|check| check.id == "helper") {
         helper.label = "Helper và chuyển nội dung".into();
@@ -522,6 +572,8 @@ fn refresh_preflight_checks(row: &mut riviu_core::PublishPreflightAssignmentRepo
         {
             helper.status = riviu_core::ui_automation::CheckStatus::Blocked;
             helper.reason = Some(issue.message.clone());
+        } else if helper_pending && helper.status == riviu_core::ui_automation::CheckStatus::Pass {
+            *helper = helper_pending_check();
         } else if helper.status == riviu_core::ui_automation::CheckStatus::Pass {
             // Native transfer support is not authenticated helper/clipboard proof.
             // The existing leased transfer path qualifies those before its first copy.
@@ -531,6 +583,15 @@ fn refresh_preflight_checks(row: &mut riviu_core::PublishPreflightAssignmentRepo
     }
     if let Some(old_link) = old_link {
         row.checks.push(old_link);
+    }
+}
+
+fn helper_pending_check() -> riviu_core::ui_automation::AutomationCheck {
+    riviu_core::ui_automation::AutomationCheck {
+        id: "helper".into(),
+        label: "Helper và chuyển nội dung".into(),
+        status: riviu_core::ui_automation::CheckStatus::Unknown,
+        reason: Some(HELPER_PENDING_NOTE.into()),
     }
 }
 
@@ -979,14 +1040,18 @@ fn evaluate_device_observation(
         None
     };
 
+    let mut checks = Vec::new();
     let (package_name, version, locale, composer_ok, sound_picker_ok) = if android {
-        if let Some(error) = observed.readiness_error {
-            row_issues.push(preflight_issue(
+        match observed.readiness_error {
+            // A helper not qualified yet is this phone's note, never a campaign blocker.
+            Some(error) if helper_pending(&error) => checks.push(helper_pending_check()),
+            Some(error) => row_issues.push(preflight_issue(
                 readiness_issue_code(&error),
                 udid,
                 &bundle.id,
                 &error,
-            ));
+            )),
+            None => {}
         }
         let observed_build = observed.tiktok_build.map(|(package, version, locale)| {
             let refusal =
@@ -1134,7 +1199,7 @@ fn evaluate_device_observation(
         },
     );
     let row = riviu_core::PublishPreflightAssignmentReport {
-        checks: Vec::new(),
+        checks,
         ordinal: u32::try_from(ordinal)?,
         bundle_id: bundle.id.clone(),
         udid: udid.clone(),

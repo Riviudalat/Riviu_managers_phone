@@ -249,6 +249,18 @@ pub(super) async fn reuse_prepared(
     if sheet.as_ref().ok() != Some(&cached.prepared.report.sheet_delivery) {
         return Ok(None);
     }
+    // A phone whose helper was still preparing is read again in full, so its note stays current.
+    let helper_pending = cached.prepared.report.assignments.iter().any(|row| {
+        row.checks.iter().any(|check| {
+            check.id == "helper"
+                && check.reason.as_deref().is_some_and(|reason| {
+                    reason.starts_with(super::preflight::HELPER_PENDING_NOTE)
+                })
+        })
+    });
+    if helper_pending {
+        return Ok(None);
+    }
     let mut bundles = request
         .bundle_ids
         .iter()
@@ -266,25 +278,25 @@ pub(super) async fn reuse_prepared(
     }
     let work = stream::iter(request.udids.clone().into_iter().map(|udid| async move {
         progress(&udid, "checkingDevices", "running", 0, None);
-        anyhow::ensure!(
-            registry.get(&udid).is_some(),
-            "Máy không còn trong roster: {udid}"
-        );
-        anyhow::ensure!(
-            control.current_work_owner(&udid).is_none(),
-            "Máy đang có chủ mới: {udid}"
-        );
-        control.verify_automation_transport(&udid).await?;
         // Lock/readiness is critical and fresh; parsed package metadata and storage threshold
         // remain reusable for 30 seconds. The dispatcher rechecks again before transfer/Post.
-        control.verify_automation_readiness(&udid).await?;
-        progress(&udid, "checkingDevices", "passed", 4, None);
-        Ok::<_, anyhow::Error>(())
+        // A phone that is not plainly ready (gone, new owner such as helper setup, lock,
+        // transport) goes back to the full builder, which reports it per phone.
+        let ready = registry.get(&udid).is_some()
+            && control.current_work_owner(&udid).is_none()
+            && control.verify_automation_transport(&udid).await.is_ok()
+            && control.verify_automation_readiness(&udid).await.is_ok();
+        if ready {
+            progress(&udid, "checkingDevices", "passed", 4, None);
+        }
+        ready
     }))
     .buffer_unordered(request.udids.len().max(1));
     tokio::pin!(work);
-    while let Some(result) = work.next().await {
-        result?;
+    while let Some(ready) = work.next().await {
+        if !ready {
+            return Ok(None);
+        }
     }
     if guard_fingerprint(db, request).await? != cached.guard_fingerprint {
         return Ok(None);
@@ -297,11 +309,12 @@ pub(super) async fn reuse_prepared(
         }
     }
     let mut prepared = cached.prepared;
-    for udid in &request.udids {
-        anyhow::ensure!(
-            control.current_work_owner(udid).is_none(),
-            "Máy đang có chủ mới: {udid}"
-        );
+    if request
+        .udids
+        .iter()
+        .any(|udid| control.current_work_owner(udid).is_some())
+    {
+        return Ok(None);
     }
     if guard_fingerprint(db, request).await? != cached.guard_fingerprint {
         return Ok(None);
