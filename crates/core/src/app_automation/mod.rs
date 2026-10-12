@@ -322,6 +322,16 @@ mod capability_preflight_tests {
             let refusal = require_actions(&report, &["feed", "like", "photo", "sound"])
                 .unwrap_err()
                 .to_string();
+            if locale == "vi" {
+                // The fleet build in the wrong language names the language, not a downgrade.
+                assert!(
+                    refusal.starts_with(&format!(
+                        "phone: TikTok {package} {version} trên máy đúng bản đội máy nhưng đang dùng tiếng Việt ({locale})"
+                    )) && refusal.contains("Chưa thực hiện thao tác nào."),
+                    "{refusal}"
+                );
+                continue;
+            }
             assert_eq!(
                 refusal,
                 format!(

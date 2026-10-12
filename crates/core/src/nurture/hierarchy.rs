@@ -5548,6 +5548,15 @@ mod tests {
             match HierarchyRun::prepare(&session, (1080.0, 2220.0), &settings).await {
                 Err(refusal @ Unsupported::BuildNotAllowed(_)) => {
                     let message = refusal.message();
+                    if language == "vi" {
+                        assert!(
+                            message.starts_with(&format!(
+                                "failed — TikTok {package} {version} trên máy đúng bản đội máy nhưng đang dùng"
+                            )),
+                            "{message}"
+                        );
+                        continue;
+                    }
                     assert!(
                         message.starts_with("failed — TikTok trên máy đang là"),
                         "{message}"
