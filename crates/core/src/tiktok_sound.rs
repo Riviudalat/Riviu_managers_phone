@@ -2060,7 +2060,9 @@ async fn observe_measured_sound_pool_once(
                 // fallback the root reads in ~2 s, and the XML-only route (shell Hot tap, two
                 // stable pools) selected Hot in 32 s where OCR took 60+ s or timed out. Try it
                 // first; any refusal leaves the attempt to the visual route below.
-                if selection_recovery::measured(plan) {
+                if selection_recovery::measured(plan)
+                    && snapshot::section_tab_readable(session, plan).await
+                {
                     let started = Instant::now();
                     diagnostics.emit("xmlFirst", "start", started, "pending", None);
                     let pool = async {

@@ -613,8 +613,8 @@ async fn stable_visual_pool_remains_provisional_when_hot_xml_is_unreadable() {
     assert_eq!(session.frames.load(Ordering::Relaxed), 2);
     assert_eq!(
         session.reads.load(Ordering::Relaxed),
-        1,
-        "only the initial XML probe; exact spelling is proved later on the editor"
+        2,
+        "the initial XML probe and the XML-first tab check; exact spelling is proved later on the editor"
     );
     assert_eq!(session.taps.load(Ordering::Relaxed), 0);
     assert_eq!(session.backs.load(Ordering::Relaxed), 0);
@@ -1011,7 +1011,8 @@ async fn sheet_resume_fails_closed_when_only_editor_xml_is_visible() {
     assert!(session.frames.load(Ordering::Relaxed) > 2);
     assert_eq!(session.taps.load(Ordering::Relaxed), 0);
     assert_eq!(session.backs.load(Ordering::Relaxed), 1);
-    assert_eq!(session.reads.load(Ordering::Relaxed), 1);
+    // The initial probe and the XML-first tab check; an editor-only tree never starts that route.
+    assert_eq!(session.reads.load(Ordering::Relaxed), 2);
 }
 fn plan() -> SoundPickerPlan {
     SoundPickerPlan::resolve("com.zhiliaoapp.musically", "en", "45.7.3").unwrap()

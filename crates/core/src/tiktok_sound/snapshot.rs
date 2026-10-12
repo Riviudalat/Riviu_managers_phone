@@ -575,6 +575,23 @@ pub(super) async fn observe_direct(
     Ok(None)
 }
 
+/// One bounded read: does the sheet's XML show the measured section tab? The XML-first route
+/// starts only then; a blank or editor-only tree goes straight to the visual route instead of
+/// polling the tab until its window ends.
+pub(super) async fn section_tab_readable(session: &dyn UiSession, plan: SoundPickerPlan) -> bool {
+    let Ok(Ok(source)) = tokio::time::timeout(
+        Duration::from_secs(12),
+        read_sound(session.hierarchy_source_snapshot()),
+    )
+    .await
+    else {
+        return false;
+    };
+    parse(&source.xml, plan)
+        .and_then(|nodes| section_tab(&nodes, plan).map(|_| ()))
+        .is_ok()
+}
+
 /// Image-unavailable path for the measured Global 45.7.3 sheet only.
 /// It never infers a tab or row from a missing screenshot.
 pub(super) async fn select_section_tab_xml_only(
