@@ -28,6 +28,14 @@ một observation/device/app/session epoch và bị bỏ sau mutation hoặc obs
 Legacy Inspector/recording giữ contract cũ. MCP bổ sung begin/end, type/swipe/press,
 wait_for/expect/screenshot qua cùng admission, không gọi ADB riêng.
 
+Lệnh IPC mở phiên thiết bị luôn trả lời trong thời gian hữu hạn và nhả lease/slot khi hết
+hạn. `interaction_read_account` chờ lượt điều khiển tối đa 600 giây, mở phiên tối đa 90
+giây và đọc Hồ sơ tối đa 90 giây. Lệnh chạy trong task riêng có trần tổng, đóng phiên trên
+mọi lối ra và trả `AccountReadTimedOut` bằng tiếng Việt. Một lượt đọc treo không giữ slot
+mà các lượt khác đang chờ. `with_manual_session` (tap/swipe/gõ/Inspector/Local API) giới
+hạn 90 giây cho mở phiên và 90 giây cho thao tác, rồi trả `ManualSessionTimedOut`. Thao
+tác hết hạn có thể đã chạy, nên không tự lặp lại.
+
 `UiSession::observe` giữ missing là unknown. Partial/Unknown không chứng minh
 phần tử vắng mặt. Positive readback chỉ nhận match quan sát duy nhất và thuộc tính
 có thật. Password được che khỏi semantic output. Chế độ

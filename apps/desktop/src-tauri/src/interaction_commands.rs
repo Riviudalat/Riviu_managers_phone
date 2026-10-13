@@ -24,6 +24,9 @@ use riviu_core::interaction_campaign::{
 #[cfg(test)]
 #[path = "interaction_commands/live_canary.rs"]
 mod live_canary;
+#[cfg(test)]
+#[path = "interaction_commands/read_account_deadline_tests.rs"]
+mod read_account_deadline_tests;
 
 pub(crate) mod inspection;
 
@@ -198,29 +201,65 @@ pub async fn interaction_read_account(
     // A stream control window already owns this phone. Borrow its session for this
     // explicit menu action; keep the hold alive until every observation has finished.
     if let Some(hold) = state.overlay_ui_session(&udid).await {
-        let package = state
-            .control
-            .resolve_tiktok_package(&udid)
+        let reading = tokio::time::timeout(inspection::ACCOUNT_READ_DEVICE_BUDGET, async {
+            let package = state.control.resolve_tiktok_package(&udid).await?;
+            let session = hold.session();
+            session.launch_app_foreground(&package).await?;
+            inspection::read_account_from_session(
+                &state.control,
+                &state.db,
+                &udid,
+                session.as_ref(),
+            )
             .await
-            .map_err(interaction_error)?;
-        let session = hold.session();
-        session
-            .launch_app_foreground(&package)
-            .await
-            .map_err(interaction_error)?;
-        let reading = inspection::read_account_from_session(
-            &state.control,
-            &state.db,
-            &udid,
-            session.as_ref(),
-        )
-        .await;
-        drop(hold);
-        return reading.map_err(interaction_error);
-    }
-    inspection::read_account(&state.control, &state.db, &udid)
+        })
         .await
-        .map_err(interaction_error)
+        .unwrap_or_else(|_| {
+            Err(inspection::account_read_timed_out(
+                &udid,
+                &format!(
+                    "đọc nick qua cửa sổ điều khiển quá {} giây",
+                    inspection::ACCOUNT_READ_DEVICE_BUDGET.as_secs()
+                ),
+            ))
+        });
+        drop(hold);
+        return reading.map_err(account_read_error);
+    }
+    read_account_bounded(state.control.clone(), state.db.clone(), udid).await
+}
+
+/// The read runs in its own task so this IPC answers by the ceiling even if a step inside
+/// stops yielding; `read_account` itself closes the session at its own, shorter budgets.
+async fn read_account_bounded(
+    control: Arc<DeviceControlPlane>,
+    db: Arc<riviu_core::db::Database>,
+    udid: String,
+) -> Result<inspection::AccountReading, CommandError> {
+    let ceiling = inspection::ACCOUNT_READ_QUEUE_BUDGET
+        + inspection::ACCOUNT_READ_DEVICE_BUDGET * 2
+        + Duration::from_secs(15);
+    let task_udid = udid.clone();
+    let mut read =
+        tokio::spawn(async move { inspection::read_account(&control, &db, &task_udid).await });
+    match tokio::time::timeout(ceiling, &mut read).await {
+        Ok(Ok(reading)) => reading.map_err(account_read_error),
+        Ok(Err(join)) => Err(interaction_error(join)),
+        Err(_) => {
+            read.abort();
+            Err(account_read_error(inspection::account_read_timed_out(
+                &udid,
+                &format!("đọc nick không xong sau {} giây", ceiling.as_secs()),
+            )))
+        }
+    }
+}
+
+fn account_read_error(error: anyhow::Error) -> CommandError {
+    match error.downcast_ref::<inspection::AccountReadTimedOut>() {
+        Some(timed_out) => CommandError::code("AccountReadTimedOut", timed_out.to_string()),
+        None => interaction_error(error),
+    }
 }
 
 #[tauri::command]

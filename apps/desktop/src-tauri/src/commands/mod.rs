@@ -147,6 +147,24 @@ pub(crate) fn safe_udid_stem(udid: &str) -> String {
         .collect()
 }
 
+/// Budget for one operator gesture or inspector capture, and separately for opening its
+/// session. A tap, a swipe or a before/after capture settles in seconds on the 30-phone
+/// fleet (r108, 13/10/2026); a minute and a half is a stalled phone.
+pub(crate) const MANUAL_SESSION_BUDGET: std::time::Duration = std::time::Duration::from_secs(90);
+
+fn manual_session_timed_out(udid: &str, dispatched: bool) -> CommandError {
+    let budget = MANUAL_SESSION_BUDGET.as_secs();
+    let message = if dispatched {
+        format!(
+            "Máy {udid}: thao tác quá {budget} giây. Thao tác có thể đã chạy hoặc chưa — xem \
+             màn hình máy, không tự lặp lại."
+        )
+    } else {
+        format!("Máy {udid}: mở phiên điều khiển quá {budget} giây; chưa thao tác gì.")
+    };
+    CommandError::code("ManualSessionTimedOut", message)
+}
+
 pub(crate) async fn with_manual_session<F, Fut, T>(
     state: &AppState,
     udid: &str,
@@ -160,21 +178,28 @@ where
     // `hold` stays bound until after `f` completes: it is what stops `end_overlay_session`
     // releasing the lease out from under the work this function is about to do.
     if let Some(hold) = state.overlay_ui_session(udid).await {
-        let result = f(hold.session()).await;
+        let result = tokio::time::timeout(MANUAL_SESSION_BUDGET, f(hold.session())).await;
         drop(hold);
-        return result.map_err(CommandError::operation);
+        return match result {
+            Ok(result) => result.map_err(CommandError::operation),
+            Err(_) => Err(manual_session_timed_out(udid, true)),
+        };
     }
-    let context = state
-        .control
-        .open_manual_session(udid, owner)
-        .await
-        .map_err(CommandError::from)?;
+    // A dropped open releases its lease; nothing was dispatched yet.
+    let context = tokio::time::timeout(
+        MANUAL_SESSION_BUDGET,
+        state.control.open_manual_session(udid, owner),
+    )
+    .await
+    .map_err(|_| manual_session_timed_out(udid, false))?
+    .map_err(CommandError::from)?;
     let session = state
         .control
         .session(&context)
         .map_err(CommandError::from)?;
-    let result = f(session).await;
+    let result = tokio::time::timeout(MANUAL_SESSION_BUDGET, f(session)).await;
     let cleanup = state.control.close_manual_session(context);
+    let result = result.map_err(|_| manual_session_timed_out(udid, true))?;
     let result = result.map_err(CommandError::operation)?;
     cleanup.map_err(CommandError::from)?;
     Ok(result)

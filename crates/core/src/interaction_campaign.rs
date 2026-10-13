@@ -195,16 +195,41 @@ impl InteractionReadSession {
     }
 }
 
+/// Prefix of the driver error [`open_interaction_read_session`] returns when its start budget
+/// runs out, so a caller can tell a stalled start from a refused one.
+pub const READ_SESSION_START_TIMED_OUT: &str = "phiên đọc chưa mở xong";
+
+/// Bounded for an IPC caller that is waiting on it. The wait for a free foreground slot ends
+/// at `queue_deadline` with [`DeviceControlError::CapacityWaitCancelled`], and the session
+/// start, once the slot is held, ends after `start_budget` with a `startInteractionSession`
+/// driver error. Either way the lease and slot are released: a read that stalls must not
+/// hold a slot that every queued read is waiting on (13/10/2026 r108: 26 reads waited 50 min).
 pub async fn open_interaction_read_session(
     control: &DeviceControlPlane,
     udid: &str,
+    queue_deadline: tokio::time::Instant,
+    start_budget: Duration,
 ) -> Result<InteractionReadSession, DeviceControlError> {
     let _idle = control.defer_idle_work(&[udid.to_owned()], DeviceWorkOwner::Interaction);
     let (exclusive, capacity, target_package, kind) =
-        reserve_interaction_slot(control, udid, || false).await?;
-    let context = control
-        .start_interaction_session(exclusive, &target_package, kind)
+        reserve_interaction_slot(control, udid, || {
+            tokio::time::Instant::now() >= queue_deadline
+        })
         .await?;
+    // A dropped start releases its lease; the next start re-proves the stream handoff.
+    let context = tokio::time::timeout(
+        start_budget,
+        control.start_interaction_session(exclusive, &target_package, kind),
+    )
+    .await
+    .map_err(|_| DeviceControlError::Driver {
+        udid: udid.to_owned(),
+        operation: "startInteractionSession",
+        message: format!(
+            "{READ_SESSION_START_TIMED_OUT} sau {} giây; đã nhả máy",
+            start_budget.as_secs()
+        ),
+    })??;
     Ok(InteractionReadSession {
         context,
         target_package,
