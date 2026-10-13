@@ -334,6 +334,8 @@ fn reboot_for_language(android: &AndroidDriver, db: &Database, serial: &str) -> 
 
 /// `ime_unproved`: put the phone back on its only enabled keyboard under this connection's
 /// Repair lease (no tap; `ime set` then read back). True only when the read-back proved it.
+/// Maintenance already restores a keyboard the old owner recorded in its checkpoint, so
+/// this only serves owners whose checkpoint predates that record.
 async fn restore_keyboard_over_helper_ime(android: &AndroidDriver, db: &Database, serial: &str) -> bool {
     record(db, "agent.helper.keyboard.auto.started", serial,
         "bàn phím mặc định còn là bàn phím Riviu Helper của phiên cũ; tự trả về bàn phím duy nhất còn bật trên máy nếu có.");
