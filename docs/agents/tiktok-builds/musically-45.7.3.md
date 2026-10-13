@@ -198,6 +198,14 @@ Hộp "Link email" (tiêu đề `xwe`; APK: `X.0Nct`, `global_email_auth_dialog`
 duy nhất là **Not now**; OK liên kết các địa chỉ email của máy vào tài khoản. Code:
 [`dialogs/catalog.rs`](../../../crates/core/src/app_automation/dialogs/catalog.rs).
 
+Sheet "Get updates sent to your email?" hiện trên feed ngay sau Post (máy
+`ce031713f3d3ec1d0c` ngày 2026-10-12, `ce051715e15b2c2e02` ngày 2026-10-13, en). Sheet này
+**không có No thanks** như bản trong APK: gốc `sjd`, tiêu đề `bob`, thân `bo8`, Button
+không id **Get updates** (đăng ký nhận email, không bao giờ bấm) và nút X tròn `dyc`
+(FrameLayout clickable, không desc; icon `dy6`). Riviu chỉ bấm `dyc`. Khi chưa đóng được,
+sheet che feed nên bước quan sát sau Post không thấy feed và bài thành `uncertain`.
+Fixture thật: `crates/core/fixtures/tiktok-publish/musically-45.7.3-en/real-20261012-email-updates-dialog.xml`.
+
 Hộp "Add to Home screen?" thấy trên máy 40/43/48 ngày 2026-10-10 do chính TikTok gây ra:
 `com.ss.android.ugc.aweme.shortcut.TiktokShortcutManager` (dịch vụ `IShortcutService`) gọi
 `ShortcutManager.requestPinShortcut`, rồi launcher Samsung hiện hộp xác nhận. Hộp này thuộc

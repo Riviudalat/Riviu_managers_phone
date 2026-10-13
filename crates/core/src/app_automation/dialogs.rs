@@ -1795,6 +1795,39 @@ mod tests {
     }
 
     #[test]
+    fn global_email_updates_sheet_acts_only_on_its_close_button() {
+        let source = include_str!(
+            "../../fixtures/tiktok-publish/musically-45.7.3-en/real-20261012-email-updates-dialog.xml"
+        );
+        let labels =
+            crate::tiktok_labels::controls_for("com.zhiliaoapp.musically", "en", "45.7.3").unwrap();
+        let CatalogMatch::Act { entry, button, .. } = catalog_popup(&tree(source.into()), labels)
+        else {
+            panic!("the real email-updates capture must act");
+        };
+        assert_eq!(entry.key, "email_updates_dialog");
+        // The round X, never the "Get updates" subscribe button.
+        assert_eq!(
+            (button.x, button.y, button.width, button.height),
+            (901.0, 1039.0, 137.0, 137.0)
+        );
+        for changed in [
+            source.replace("id/dyc", "id/other"),
+            source.replace("text=\"Get updates\"", "text=\"Continue\""),
+            source.replace(
+                "Get updates sent to your email?",
+                "Get updates sent to your phone?",
+            ),
+            source.replace("id/sjd", "id/other"),
+        ] {
+            assert!(!matches!(
+                catalog_popup(&tree(changed), labels),
+                CatalogMatch::Act { .. }
+            ));
+        }
+    }
+
+    #[test]
     fn global_contact_settings_prompt_only_permits_the_negative_action() {
         let source =
             include_str!("../../fixtures/tiktok-publish/contacts-settings-global45.4.3.fixture");
