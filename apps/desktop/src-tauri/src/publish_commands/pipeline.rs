@@ -382,6 +382,151 @@ impl DispatchCompletions {
     }
 }
 
+/// A roster scan may admit or refuse a queued phone only this long after the scan began.
+/// Chosen, not measured: well inside the 120 s reconnect window, and far beyond a healthy
+/// scan. Past it the dispatcher knows nothing about the phone and leaves its job queued.
+const ROSTER_MAX_AGE: Duration = Duration::from_secs(60);
+const ROSTER_REFRESH_EVERY: Duration = Duration::from_secs(2);
+
+/// What the latest usable roster says about one phone. `Unknown` is not `Offline`: it
+/// starts no reconnect window and fails nothing.
+#[derive(Debug, PartialEq, Eq)]
+enum RosterPresence {
+    Unknown,
+    Unavailable(String),
+    Online,
+    Offline,
+}
+
+struct RosterSnapshot {
+    scanned_at: tokio::time::Instant,
+    online: std::collections::HashSet<String>,
+    unavailable: HashMap<String, String>,
+}
+
+impl RosterSnapshot {
+    fn new(scanned_at: tokio::time::Instant, roster: Vec<riviu_core::DeviceInfo>) -> Self {
+        let unavailable = roster
+            .iter()
+            .filter(|d| {
+                d.status == riviu_core::DeviceStatus::Pairing
+                    || d.last_error
+                        .as_ref()
+                        .is_some_and(|e| e.to_lowercase().contains("unauthorized"))
+            })
+            .map(|d| {
+                (
+                    d.udid.clone(),
+                    d.last_error.clone().unwrap_or_else(|| {
+                        "Thiết bị chưa cho phép gỡ lỗi USB; xác nhận trên điện thoại".into()
+                    }),
+                )
+            })
+            .collect();
+        let online = roster
+            .into_iter()
+            .filter(|d| {
+                matches!(
+                    d.status,
+                    riviu_core::DeviceStatus::Ready
+                        | riviu_core::DeviceStatus::Connected
+                        | riviu_core::DeviceStatus::Busy
+                )
+                    // A latched helper-setup failure is still on adb, not a lost
+                    // connection: this phone's own transfer prepares its helper
+                    // again under its lease and fails only itself if it cannot.
+                    || (d.status == riviu_core::DeviceStatus::Error
+                        && d.last_error.as_deref().is_some_and(|error| {
+                            error.starts_with(riviu_android_driver::driver::HELPER_SETUP_FAILURE)
+                        }))
+            })
+            .map(|d| d.udid)
+            .collect();
+        Self {
+            scanned_at,
+            online,
+            unavailable,
+        }
+    }
+}
+
+type RosterScan =
+    tokio::task::JoinHandle<Result<Vec<riviu_core::DeviceInfo>, riviu_core::DeviceControlError>>;
+
+/// The dispatcher's roster, refreshed by one owned scan task so that a scan waiting on the
+/// inventory lock, the adb queue or a cold probe never holds completion drain or the
+/// dispatch of phones the last scan already proved. A scan is never aborted: it ends on its
+/// own, and on shutdown its handle is dropped, which detaches it. The snapshot only admits
+/// a job to a claim; the worker's lease and its own reads of that exact serial still decide
+/// whether any effect happens.
+#[derive(Default)]
+struct RosterRefresh {
+    snapshot: Option<RosterSnapshot>,
+    scan: Option<(tokio::time::Instant, RosterScan)>,
+    finished_at: Option<tokio::time::Instant>,
+    reported_slow: bool,
+}
+
+impl RosterRefresh {
+    fn start_if_due(&mut self, control: &Arc<DeviceControlPlane>) {
+        if let Some((started, _)) = &self.scan {
+            if !self.reported_slow && started.elapsed() >= ROSTER_MAX_AGE {
+                self.reported_slow = true;
+                log::warn!(
+                    "Đăng bài: danh sách máy chưa quét xong sau {} giây; tạm hoãn giao việc cho máy chưa rõ trạng thái, vẫn thu kết quả máy đang chạy",
+                    started.elapsed().as_secs()
+                );
+            }
+            return;
+        }
+        if self
+            .finished_at
+            .is_some_and(|at| at.elapsed() < ROSTER_REFRESH_EVERY)
+        {
+            return;
+        }
+        let control = control.clone();
+        self.reported_slow = false;
+        self.scan = Some((
+            tokio::time::Instant::now(),
+            tokio::spawn(async move { control.list_devices().await }),
+        ));
+    }
+
+    /// Cancel-safe: a losing `select!` branch leaves the scan in place.
+    async fn finished(&mut self) {
+        let Some((started, scan)) = self.scan.as_mut() else {
+            return std::future::pending().await;
+        };
+        let started = *started;
+        let result = scan.await;
+        self.scan = None;
+        self.finished_at = Some(tokio::time::Instant::now());
+        match result {
+            Ok(Ok(roster)) => self.snapshot = Some(RosterSnapshot::new(started, roster)),
+            Ok(Err(error)) => log::warn!("publish dispatch roster scan failed: {error}"),
+            Err(error) => log::error!("publish dispatch roster scan ended: {error}"),
+        }
+    }
+
+    fn presence(&self, udid: &str) -> RosterPresence {
+        let Some(snapshot) = self
+            .snapshot
+            .as_ref()
+            .filter(|snapshot| snapshot.scanned_at.elapsed() <= ROSTER_MAX_AGE)
+        else {
+            return RosterPresence::Unknown;
+        };
+        if let Some(reason) = snapshot.unavailable.get(udid) {
+            RosterPresence::Unavailable(reason.clone())
+        } else if snapshot.online.contains(udid) {
+            RosterPresence::Online
+        } else {
+            RosterPresence::Offline
+        }
+    }
+}
+
 /// One application dispatcher serves immediate and scheduled campaigns. Queue rows
 /// hold IDs only; media and driver sessions are loaded after per-device admission.
 #[allow(clippy::too_many_arguments)]
@@ -400,15 +545,14 @@ pub(crate) async fn run_dispatcher(
     let mut idle_deferrals = HashMap::new();
     let mut completed = DispatchCompletions::default();
     let mut interval = tokio::time::interval(Duration::from_millis(250));
-    let mut online = std::collections::HashSet::new();
-    let mut unavailable = HashMap::new();
-    let mut roster_at = None;
+    let mut roster = RosterRefresh::default();
     let mut recovery_at = tokio::time::Instant::now();
     interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
     loop {
         tokio::select! {
             _ = interval.tick() => {},
             _ = completed.settle_ready(&db), if db.ensure_publish_recovery_ready().is_ok() => {},
+            _ = roster.finished(), if roster.scan.is_some() => {},
             Some(result) = tasks.join_next_with_id(), if !tasks.is_empty() => {
                 let (id, error) = match result {
                     Ok((id, result)) => (id, result.err()),
@@ -496,59 +640,22 @@ pub(crate) async fn run_dispatcher(
                 .into_iter()
                 .filter(|(campaign, udid)| acceptance.allows_publish_dispatch(campaign, udid))
                 .map(|(_, udid)| udid)
-                .chain(owned.values().map(|job: &riviu_core::db::PublishDispatchJob| job.udid.clone()))
+                .chain(
+                    owned
+                        .values()
+                        .map(|job: &riviu_core::db::PublishDispatchJob| job.udid.clone()),
+                )
                 .collect();
             idle_deferrals.retain(|udid, _| needed.contains(udid));
             for udid in needed {
-                idle_deferrals.entry(udid.clone()).or_insert_with(|| control.defer_idle_work(&[udid], DeviceWorkOwner::Script));
+                idle_deferrals
+                    .entry(udid.clone())
+                    .or_insert_with(|| control.defer_idle_work(&[udid], DeviceWorkOwner::Script));
             }
             if pending.is_empty() {
                 return Ok::<_, anyhow::Error>(());
             }
-            if roster_at
-                .is_none_or(|at: tokio::time::Instant| at.elapsed() >= Duration::from_secs(2))
-            {
-                let roster = control.list_devices().await?;
-                unavailable = roster
-                    .iter()
-                    .filter(|d| {
-                        d.status == riviu_core::DeviceStatus::Pairing
-                            || d.last_error
-                                .as_ref()
-                                .is_some_and(|e| e.to_lowercase().contains("unauthorized"))
-                    })
-                    .map(|d| {
-                        (
-                            d.udid.clone(),
-                            d.last_error.clone().unwrap_or_else(|| {
-                                "Thiết bị chưa cho phép gỡ lỗi USB; xác nhận trên điện thoại".into()
-                            }),
-                        )
-                    })
-                    .collect();
-                online = roster
-                    .into_iter()
-                    .filter(|d| {
-                        matches!(
-                            d.status,
-                            riviu_core::DeviceStatus::Ready
-                                | riviu_core::DeviceStatus::Connected
-                                | riviu_core::DeviceStatus::Busy
-                        )
-                            // A latched helper-setup failure is still on adb, not a lost
-                            // connection: this phone's own transfer prepares its helper
-                            // again under its lease and fails only itself if it cannot.
-                            || (d.status == riviu_core::DeviceStatus::Error
-                                && d.last_error.as_deref().is_some_and(|error| {
-                                    error.starts_with(
-                                        riviu_android_driver::driver::HELPER_SETUP_FAILURE,
-                                    )
-                                }))
-                    })
-                    .map(|d| d.udid)
-                    .collect();
-                roster_at = Some(tokio::time::Instant::now());
-            }
+            roster.start_if_due(&control);
             for job in pending {
                 // Durable claims and the device lease serialize one phone. A slow
                 // sibling must not consume a global publish worker slot.
@@ -557,13 +664,21 @@ pub(crate) async fn run_dispatcher(
                     continue;
                 }
                 db.init_publish_recovery(&job.assignment_id, &job.run.token)?;
-                if let Some(reason) = unavailable.get(&job.udid) {
-                    db.fail_publish_queued_device(&job, reason)?;
-                    continue;
-                }
+                let online = match roster.presence(&job.udid) {
+                    RosterPresence::Unknown => {
+                        db.defer_publish_dispatch(&job, "roster_pending")?;
+                        continue;
+                    }
+                    RosterPresence::Unavailable(reason) => {
+                        db.fail_publish_queued_device(&job, &reason)?;
+                        continue;
+                    }
+                    RosterPresence::Online => true,
+                    RosterPresence::Offline => false,
+                };
                 if !db.admit_publish_reconnect(
                     &job,
-                    online.contains(&job.udid),
+                    online,
                     chrono::Utc::now().timestamp_millis(),
                 )? {
                     continue;
@@ -963,5 +1078,279 @@ mod tests {
             })
             .await;
         assert!(result.is_err());
+    }
+
+    fn roster_row(udid: &str, status: riviu_core::DeviceStatus) -> riviu_core::DeviceInfo {
+        riviu_core::DeviceInfo {
+            udid: udid.to_string(),
+            name: udid.to_string(),
+            model: "fixture".to_string(),
+            platform: riviu_core::DevicePlatform::Android,
+            os_version: "fixture".to_string(),
+            connection: riviu_core::ConnectionKind::Usb,
+            status,
+            battery: None,
+            wda_ready: false,
+            wda_expires_at: None,
+            stream_url: None,
+            tile_stream_state: riviu_core::TileStreamState::default(),
+            last_error: None,
+            wifi_ip: None,
+        }
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn roster_snapshot_is_unknown_when_missing_or_stale_never_offline() {
+        let mut roster = RosterRefresh::default();
+        assert_eq!(roster.presence("phone-a"), RosterPresence::Unknown);
+        let mut pairing = roster_row("phone-p", riviu_core::DeviceStatus::Pairing);
+        pairing.last_error = Some("unauthorized".into());
+        roster.snapshot = Some(RosterSnapshot::new(
+            tokio::time::Instant::now(),
+            vec![
+                roster_row("phone-a", riviu_core::DeviceStatus::Connected),
+                pairing,
+            ],
+        ));
+        assert_eq!(roster.presence("phone-a"), RosterPresence::Online);
+        assert_eq!(roster.presence("phone-gone"), RosterPresence::Offline);
+        assert_eq!(
+            roster.presence("phone-p"),
+            RosterPresence::Unavailable("unauthorized".into())
+        );
+        tokio::time::advance(ROSTER_MAX_AGE + Duration::from_millis(1)).await;
+        // An old scan neither admits a phone nor starts a reconnect window or a refusal.
+        for udid in ["phone-a", "phone-gone", "phone-p"] {
+            assert_eq!(roster.presence(udid), RosterPresence::Unknown, "{udid}");
+        }
+    }
+
+    /// The first scan lists `phone-a` and `phone-b`; `phone-c` is absent, so its job stays
+    /// queued and the dispatcher keeps scanning. Every later scan never returns.
+    struct HungRosterDriver {
+        scans: std::sync::atomic::AtomicUsize,
+        hung: tokio::sync::Notify,
+        gates: HashMap<&'static str, Arc<Semaphore>>,
+    }
+
+    #[async_trait::async_trait]
+    impl riviu_core::driver::DeviceDriver for HungRosterDriver {
+        async fn list_devices(&self) -> anyhow::Result<Vec<riviu_core::DeviceInfo>> {
+            if self.scans.fetch_add(1, std::sync::atomic::Ordering::SeqCst) == 0 {
+                return Ok(["phone-a", "phone-b"]
+                    .map(|udid| roster_row(udid, riviu_core::DeviceStatus::Connected))
+                    .into());
+            }
+            self.hung.notify_one();
+            std::future::pending().await
+        }
+        fn reports_element_bounds(&self, _udid: &str) -> bool {
+            true
+        }
+        /// The worker's first read of its own serial; it waits for the test, then refuses.
+        async fn tiktok_build(&self, udid: &str) -> anyhow::Result<(String, String, String)> {
+            if let Some(gate) = self.gates.get(udid) {
+                let _open = gate.acquire().await?;
+            }
+            anyhow::bail!("fixture: {udid} không đọc được bản TikTok")
+        }
+        async fn refresh_device(&self, _udid: &str) -> anyhow::Result<riviu_core::DeviceInfo> {
+            anyhow::bail!("fixture")
+        }
+        async fn install_app(&self, _udid: &str, _path: &Path) -> anyhow::Result<()> {
+            anyhow::bail!("fixture")
+        }
+        async fn uninstall_app(&self, _udid: &str, _bundle_id: &str) -> anyhow::Result<()> {
+            anyhow::bail!("fixture")
+        }
+        async fn screenshot(&self, _udid: &str, _dest: &Path) -> anyhow::Result<PathBuf> {
+            anyhow::bail!("fixture")
+        }
+        async fn syslog_tail(&self, _udid: &str, _lines: usize) -> anyhow::Result<String> {
+            anyhow::bail!("fixture")
+        }
+        async fn launch_app(&self, _udid: &str, _bundle_id: &str) -> anyhow::Result<()> {
+            anyhow::bail!("fixture")
+        }
+        async fn terminate_app(
+            &self,
+            _udid: &str,
+            _bundle_id: &str,
+        ) -> anyhow::Result<riviu_core::driver::ProcessAbsenceProof> {
+            anyhow::bail!("fixture")
+        }
+        async fn reboot(&self, _udid: &str) -> anyhow::Result<()> {
+            anyhow::bail!("fixture")
+        }
+        async fn start_ui_session(
+            &self,
+            _udid: &str,
+        ) -> anyhow::Result<Box<dyn riviu_core::UiSession>> {
+            anyhow::bail!("fixture")
+        }
+        async fn ensure_stream(&self, _udid: &str) -> anyhow::Result<String> {
+            anyhow::bail!("fixture")
+        }
+        async fn prepare_device(&self, _udid: &str) -> anyhow::Result<()> {
+            anyhow::bail!("fixture")
+        }
+    }
+
+    async fn wait_until(what: &str, done: impl Fn() -> bool) {
+        let deadline = std::time::Instant::now() + Duration::from_secs(10);
+        while !done() {
+            assert!(std::time::Instant::now() < deadline, "timed out: {what}");
+            tokio::time::sleep(Duration::from_millis(50)).await;
+        }
+    }
+
+    #[tokio::test]
+    async fn hung_roster_scan_does_not_hold_completion_or_shutdown() {
+        let path = std::env::temp_dir().join(format!("dispatch-roster-{}.db", Uuid::new_v4()));
+        let db = Arc::new(Database::open(&path).unwrap());
+        let udids = ["phone-a", "phone-b", "phone-c"];
+        let bundles: Vec<_> = (0..udids.len())
+            .map(|i| PublishBundle {
+                id: format!("bundle-{i}"),
+                source_path: "C:/fixture".into(),
+                name: format!("bundle-{i}"),
+                media_kind: riviu_core::PublishMediaKind::Image,
+                images: vec![],
+                video: None,
+                caption_path: "C:/fixture/caption.txt".into(),
+                caption: "fixture caption".into(),
+                caption_sha256: "0".repeat(64),
+                total_bytes: 0,
+                partners: vec![],
+            })
+            .collect();
+        let request = PublishCampaignRequest {
+            sheet_delivery: None,
+            verification_contract_version: Some(1),
+            verification_builds: vec![],
+            request_id: Uuid::new_v4().to_string(),
+            source_root: "C:/fixture".into(),
+            bundle_ids: bundles.iter().map(|bundle| bundle.id.clone()).collect(),
+            udids: udids.map(String::from).into(),
+            run_at: None,
+            visibility: PublishVisibility::Public,
+            cleanup_policy: PublishCleanupPolicy::KeepImportedAssets,
+            network: riviu_core::SocialNetwork::TikTok,
+            sound_policy: riviu_core::PublishSoundPolicy::Default,
+            sheet_enabled: false,
+            execution_confirmed: true,
+            target_snapshot: None,
+            // The fixture phones carry no account metadata, so each was approved without one.
+            approval: Some(riviu_core::PublishApproval {
+                version: 1,
+                input_digest: "0".repeat(64),
+                accounts: udids.map(|udid| (udid.to_owned(), String::new())).into(),
+            }),
+        };
+        let campaign = db.create_publish_campaign(&request, &bundles).unwrap();
+        db.claim_publish_pipeline(&campaign.id).unwrap().unwrap();
+        let gates: HashMap<_, _> = ["phone-a", "phone-b"]
+            .map(|udid| (udid, Arc::new(Semaphore::new(0))))
+            .into();
+        let driver = Arc::new(HungRosterDriver {
+            scans: Default::default(),
+            hung: tokio::sync::Notify::new(),
+            gates: gates.clone(),
+        });
+        let control = Arc::new(DeviceControlPlane::new(
+            driver.clone(),
+            Arc::new(riviu_core::DeviceWorkCoordinator::new()),
+            Arc::new(riviu_core::StreamBudgetManager::new(2).unwrap()),
+        ));
+        let stop = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let mut dispatcher = tokio::spawn(run_dispatcher(
+            control,
+            db.clone(),
+            Arc::new(riviu_core::NullFrameSource),
+            riviu_core::events::EventBus::new(64),
+            "fixture.agent".into(),
+            Arc::new(crate::state::CommandAdmissionState::new(true)),
+            stop.clone(),
+            crate::dev_acceptance::DevAcceptancePolicy::from_parts(false, None, None),
+        ));
+        let conn = rusqlite::Connection::open(&path).unwrap();
+        let job = |udid: &str| -> (String, String, String) {
+            conn.query_row(
+                "SELECT assignment_id,state,attempt_id FROM publish_dispatch_jobs WHERE udid=?1",
+                [udid],
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+            )
+            .unwrap()
+        };
+        wait_until("both listed phones claimed", || {
+            job("phone-a").1 == "running" && job("phone-b").1 == "running"
+        })
+        .await;
+        let (assignment_a, _, attempt_a) = job("phone-a");
+        let (assignment_b, _, attempt_b) = job("phone-b");
+        tokio::time::timeout(Duration::from_secs(10), driver.hung.notified())
+            .await
+            .expect("a later roster scan began and never returns");
+
+        // Phone A's worker finishes while the scan hangs; its claim settles anyway.
+        gates["phone-a"].add_permits(1);
+        wait_until("phone-a completion settled during the hung scan", || {
+            let (_, state, attempt) = job("phone-a");
+            !(state == "running" && attempt == attempt_a)
+        })
+        .await;
+        let (state, intent): (String, Option<String>) = conn
+            .query_row(
+                "SELECT state,effect_intent FROM publish_assignments WHERE id=?1",
+                [&assignment_a],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .unwrap();
+        assert_eq!(state, "failed_before_dispatch");
+        assert_eq!(
+            intent, None,
+            "the listed phone's own read refused it before any effect"
+        );
+        let (state, code): (String, Option<String>) = conn
+            .query_row(
+                "SELECT state,error_code FROM publish_assignments WHERE udid='phone-c'",
+                [],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .unwrap();
+        assert_ne!(state, "failed_before_dispatch", "{code:?}");
+        assert_eq!(job("phone-c").1, "queued");
+
+        // Stopping waits for phone B's own worker, not for the scan, and keeps its claim.
+        stop.store(true, std::sync::atomic::Ordering::Release);
+        tokio::time::sleep(Duration::from_millis(600)).await;
+        assert!(
+            !dispatcher.is_finished(),
+            "shutdown waits for the running worker"
+        );
+        assert_eq!(job("phone-b").1, "running");
+        gates["phone-b"].add_permits(1);
+        tokio::time::timeout(Duration::from_secs(10), &mut dispatcher)
+            .await
+            .expect("shutdown does not wait for the hung scan")
+            .unwrap();
+        assert_eq!(
+            job("phone-b"),
+            (assignment_b.clone(), "running".into(), attempt_b),
+            "the durable claim is kept for startup replay"
+        );
+        let journal = fs::read_dir(path.with_extension("publish-completions"))
+            .unwrap()
+            .map(|entry| fs::read_to_string(entry.unwrap().path()).unwrap())
+            .collect::<Vec<_>>();
+        assert!(
+            journal
+                .iter()
+                .any(|receipt| receipt.contains(&assignment_b)),
+            "phone-b's completion is journaled for replay"
+        );
+        drop(conn);
+        drop(db);
+        let _ = fs::remove_file(path);
     }
 }
