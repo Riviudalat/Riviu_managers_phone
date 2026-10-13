@@ -587,6 +587,7 @@ impl AndroidDriver {
             // handle replaces the private cache it seeds.
             AndroidUiSession::new(agent, self.adb.clone(), udid.to_string(), (0.0, 0.0))
                 .with_instrumentation(self.instrumentation_runtime())
+                .with_capture_owner(self.this.clone())
                 .with_screen_cache(screen)
                 .with_helper(helper)
                 .with_gui_reasoner(self.gui_reasoner.lock().clone())

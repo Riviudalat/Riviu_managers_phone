@@ -243,6 +243,9 @@ pub struct AndroidUiSession {
     /// While `Some(package)`, the agent session has `enableMultiWindows: true` and every full
     /// tree read keeps only that package's windows. See [`UiSession::enable_multi_window_read`].
     multi_window: parking_lot::Mutex<Option<String>>,
+    /// The driver that owns this phone's capture producers, for
+    /// [`UiSession::pause_screen_capture`]. Empty means this session pauses nothing.
+    capture: std::sync::Weak<crate::driver::AndroidDriver>,
 }
 
 impl AndroidUiSession {
@@ -263,6 +266,7 @@ impl AndroidUiSession {
             hierarchy_generation: AtomicU64::new(0),
             instrumentation: None,
             multi_window: parking_lot::Mutex::new(None),
+            capture: std::sync::Weak::new(),
         }
     }
 
@@ -304,6 +308,14 @@ impl AndroidUiSession {
         instrumentation: crate::driver::InstrumentationRuntime,
     ) -> Self {
         self.instrumentation = Some(instrumentation);
+        self
+    }
+
+    pub(crate) fn with_capture_owner(
+        mut self,
+        capture: std::sync::Weak<crate::driver::AndroidDriver>,
+    ) -> Self {
+        self.capture = capture;
         self
     }
 
@@ -696,6 +708,18 @@ impl UiSession for AndroidUiSession {
                 Err(error)
             }
         }
+    }
+    async fn pause_screen_capture(&self, bound: std::time::Duration) -> anyhow::Result<bool> {
+        let Some(driver) = self.capture.upgrade() else {
+            return Ok(false);
+        };
+        driver.pause_capture(&self.serial, bound).await
+    }
+    async fn resume_screen_capture(&self) -> anyhow::Result<()> {
+        let Some(driver) = self.capture.upgrade() else {
+            return Ok(());
+        };
+        driver.resume_capture(&self.serial).await
     }
     fn gui_compatibility_pack(
         &self,

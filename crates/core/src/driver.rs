@@ -982,6 +982,20 @@ pub trait UiSession: Send + Sync {
     async fn restore_single_window_read(&self) -> anyhow::Result<bool> {
         Ok(false)
     }
+    /// Stop this phone's live screen-capture producers (live view, session frame stream) for
+    /// at most `bound`, while an owner reads trees that a running capture blinds. Nothing that
+    /// decides from those frames may run in between; a one-shot screenshot still answers.
+    /// `Ok(false)` means nothing was paused. The owner calls
+    /// [`Self::resume_screen_capture`] on every exit path; past `bound` the live view returns
+    /// on its own even when that resume never comes.
+    async fn pause_screen_capture(&self, _bound: std::time::Duration) -> anyhow::Result<bool> {
+        Ok(false)
+    }
+    /// End a [`Self::pause_screen_capture`]. Idempotent; a session that paused nothing answers
+    /// `Ok(())`.
+    async fn resume_screen_capture(&self) -> anyhow::Result<()> {
+        Ok(())
+    }
     fn gui_compatibility_pack(
         &self,
         _package: &str,

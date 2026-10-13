@@ -2148,6 +2148,12 @@ impl AppState {
                         if android.view_start_in_flight(&device.udid) {
                             continue;
                         }
+                        // A tree reader holds this phone's capture down (the sound sheet). The
+                        // view comes back as a fresh start on the first tick after the pause
+                        // ends or lapses.
+                        if android.capture_paused(&device.udid) {
+                            continue;
+                        }
                         // Reconcile toward the preset the operator asked for, rather than
                         // accepting either one as "running".
                         //
