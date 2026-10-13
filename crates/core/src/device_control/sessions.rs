@@ -41,7 +41,8 @@ impl DeviceControlPlane {
     /// [`Self::start_clean_app_session`] for a route that takes no decision from the stream's
     /// frames: every tap and every proof comes from the hierarchy. The backend may then back
     /// the stream with snapshots when its live capture gives no first frame
-    /// (`DeviceDriver::start_stream_after_session_without_frame_decisions`).
+    /// (`DeviceDriver::start_stream_after_session_without_frame_decisions`), or start it with
+    /// no stream at all when those give nothing either (`frame_source::NO_STREAM_SCHEME`).
     pub async fn start_clean_hierarchy_app_session(
         &self,
         exclusive: DeviceExclusiveContext,

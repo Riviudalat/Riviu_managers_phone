@@ -3167,6 +3167,14 @@ async fn post_one_assignment_owned(
             .await;
             stage_diagnostics = Some(report);
             outcome
+        } else if riviu_core::frame_source::is_no_stream(&context.stream_proof().stream_url) {
+            // The pixel grid decides every tap from frames, and a no-stream session has none.
+            // The strict start keeps it from getting here; refuse before any tap if it does.
+            PostOutcome::NothingPublished(format!(
+                "{}: máy không có hình trực tiếp; đường đăng theo toạ độ cần khung hình nên \
+                 dừng trước Đăng",
+                assignment.udid
+            ))
         } else {
             let mut before_pixel_post = || before_post(None, None);
             Box::pin(post_through_the_pixel_grid(
@@ -3519,8 +3527,9 @@ async fn open_publish_context_until(
         InteractionSessionKind::Ordinary
     };
     // The hierarchy route takes every tap and proof from the element tree, never from a
-    // frame, so a phone whose live capture is dead may stream snapshots instead of failing
-    // here (#28, 13/10/2026). The pixel grid decides from frames and keeps the strict start.
+    // frame, so a phone whose live capture is dead may stream snapshots, or run with no
+    // stream at all, instead of failing here (#28, 13/10/2026). The pixel grid decides from
+    // frames and keeps the strict start.
     let context = if control.reports_element_bounds(exclusive.udid()) {
         control
             .start_clean_hierarchy_app_session(exclusive, capacity, &target_package, kind)
@@ -3531,7 +3540,13 @@ async fn open_publish_context_until(
             .await
     }
     .map_err(anyhow::Error::new)?;
-    if riviu_core::frame_source::is_snapshot_stream(&context.stream_proof().stream_url) {
+    let stream_url = &context.stream_proof().stream_url;
+    if riviu_core::frame_source::is_no_stream(stream_url) {
+        log::warn!(
+            "Máy {udid} không có hình trực tiếp (minicap và ảnh chụp screencap đều không ra \
+             hình); đăng bài chỉ dùng cây giao diện"
+        );
+    } else if riviu_core::frame_source::is_snapshot_stream(stream_url) {
         say_snapshot_stream_once(udid);
     }
     Ok(context)
@@ -3548,7 +3563,9 @@ fn say_snapshot_stream_once(udid: &str) {
         .insert(udid.to_string());
     if first {
         log::warn!(
-            "Máy {udid} không chụp được màn hình liên tục (minicap không ra khung hình);              phiên đăng bài dùng ảnh chụp screencap thay thế. Đăng bài vẫn đọc cây giao diện              như cũ."
+            "Máy {udid} không chụp được màn hình liên tục (minicap không ra khung hình); \
+             phiên đăng bài dùng ảnh chụp screencap thay thế. Đăng bài vẫn đọc cây giao diện \
+             như cũ."
         );
     }
 }

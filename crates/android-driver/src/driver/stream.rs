@@ -81,11 +81,100 @@ const SNAPSHOT_JPEG_QUALITY: u8 = 80;
 const SNAPSHOT_NO_FORWARD: u16 = 0;
 const PNG_SIGNATURE: [u8; 8] = [0x89, b'P', b'N', b'G', 0x0D, 0x0A, 0x1A, 0x0A];
 
+/// What a snapshot start saw inside its first-frame window, logged once when it gives no
+/// picture. #28 (`ce071827e0659c1605`, r101, 13/10/2026) failed with nothing but "no
+/// decodable image in 12s" while the same loop by hand gave a PNG every 2 s, so the next
+/// failure has to say where in the chain it stopped. Times are ms after the spawn.
+#[derive(Default)]
+struct SnapshotTally {
+    bytes: std::sync::atomic::AtomicU64,
+    signatures: std::sync::atomic::AtomicU64,
+    parsed: std::sync::atomic::AtomicU64,
+    decode_errors: std::sync::atomic::AtomicU64,
+    accepted: std::sync::atomic::AtomicU64,
+    detail: parking_lot::Mutex<SnapshotTallyDetail>,
+}
+
+#[derive(Default)]
+struct SnapshotTallyDetail {
+    first_byte_ms: Option<u128>,
+    first_png_ms: Option<u128>,
+    first_accept_ms: Option<u128>,
+    last_decode_error: Option<String>,
+    reader_end: Option<String>,
+}
+
+impl SnapshotTally {
+    fn count(field: &std::sync::atomic::AtomicU64) -> u64 {
+        field.load(std::sync::atomic::Ordering::Relaxed)
+    }
+    fn bump(field: &std::sync::atomic::AtomicU64) {
+        field.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    }
+    /// One Vietnamese sentence an operator can read in the failure line.
+    fn summary(&self, child: &str) -> String {
+        let detail = self.detail.lock();
+        let at =
+            |ms: Option<u128>| ms.map_or_else(|| "chưa có".to_string(), |ms| format!("{ms} ms"));
+        format!(
+            "trong {}s: đọc {} byte (byte đầu: {}), thấy {} chữ ký PNG, tách đủ {} PNG (PNG đầu: {}), \
+             {} lỗi giải mã/JPEG{}, hub nhận {} khung (khung đầu: {}; mọi ảnh của vòng lặp đều chụp \
+             sau lúc gọi nên không ảnh nào bị loại vì chụp trước), bộ đọc: {}, tiến trình adb: {child}",
+            INTERACTION_FIRST_FRAME_TIMEOUT.as_secs(),
+            Self::count(&self.bytes),
+            at(detail.first_byte_ms),
+            Self::count(&self.signatures),
+            Self::count(&self.parsed),
+            at(detail.first_png_ms),
+            Self::count(&self.decode_errors),
+            detail
+                .last_decode_error
+                .as_deref()
+                .map_or_else(String::new, |error| format!(" (lỗi cuối: {error})")),
+            Self::count(&self.accepted),
+            at(detail.first_accept_ms),
+            detail.reader_end.as_deref().unwrap_or("vẫn đang chờ dữ liệu"),
+        )
+    }
+}
+
+/// Counts the bytes the screencap child hands over, under the PNG reader.
+struct CountingReader<R> {
+    inner: R,
+    tally: Arc<SnapshotTally>,
+    started: std::time::Instant,
+}
+
+impl<R: tokio::io::AsyncRead + Unpin> tokio::io::AsyncRead for CountingReader<R> {
+    fn poll_read(
+        mut self: std::pin::Pin<&mut Self>,
+        cx: &mut std::task::Context<'_>,
+        buf: &mut tokio::io::ReadBuf<'_>,
+    ) -> std::task::Poll<std::io::Result<()>> {
+        let before = buf.filled().len();
+        let polled = std::pin::Pin::new(&mut self.inner).poll_read(cx, buf);
+        let read = buf.filled().len().saturating_sub(before) as u64;
+        if read > 0
+            && self
+                .tally
+                .bytes
+                .fetch_add(read, std::sync::atomic::Ordering::Relaxed)
+                == 0
+        {
+            self.tally.detail.lock().first_byte_ms = Some(self.started.elapsed().as_millis());
+        }
+        polled
+    }
+}
+
 /// Read the next whole PNG off a stream of back-to-back `screencap -p` outputs.
 ///
 /// `Ok(None)` is a clean end of stream between images. A PNG ends at its `IEND` chunk, so
 /// no delimiter is needed; bytes before a signature are skipped, up to a bound.
-async fn read_snapshot_png<R>(reader: &mut R) -> anyhow::Result<Option<Vec<u8>>>
+async fn read_snapshot_png<R>(
+    reader: &mut R,
+    tally: &SnapshotTally,
+) -> anyhow::Result<Option<Vec<u8>>>
 where
     R: tokio::io::AsyncRead + Unpin,
 {
@@ -113,6 +202,7 @@ where
             );
         }
     }
+    SnapshotTally::bump(&tally.signatures);
     let mut png = PNG_SIGNATURE.to_vec();
     loop {
         let mut header = [0u8; 8];
@@ -500,7 +590,9 @@ impl AndroidDriver {
     ///
     /// `snapshots_allowed` is set only for a caller that takes no decision from frames. It
     /// changes one thing: when minicap gives no picture at all, the stream falls back to
-    /// `screencap` snapshots at the same generation, under the same first-frame proof.
+    /// `screencap` snapshots at the same generation, under the same first-frame proof, and
+    /// when those give none either the session starts with no stream (`no-stream://`,
+    /// `first_frame_observed: false`).
     pub(super) async fn start_session_stream(
         &self,
         udid: &str,
@@ -533,25 +625,31 @@ impl AndroidDriver {
                 if snapshots_allowed && error.downcast_ref::<MinicapGaveNoPicture>().is_some() =>
             {
                 tracing::warn!(udid, %error, "minicap gave no picture; streaming screencap snapshots");
-                self.spawn_snapshot_producer(udid, reservation.generation())
+                match self
+                    .spawn_snapshot_producer(udid, reservation.generation())
                     .await
-                    .map(|observed| (observed, true))
-                    .map_err(|snapshot| {
-                        anyhow!(
-                            "{error:#}; ảnh chụp screencap thay thế cũng không được: {snapshot:#}"
-                        )
-                    })
+                {
+                    Ok(observed) => Ok((
+                        observed,
+                        Some(riviu_core::frame_source::SNAPSHOT_STREAM_SCHEME),
+                    )),
+                    // Such a caller takes every tap and proof from the hierarchy, so the session
+                    // runs with no stream rather than failing: no producer is registered, nothing
+                    // publishes at this generation and the proof says no frame was observed.
+                    // The stop, pause and cleanup paths already handle a session with no producer.
+                    Err(snapshot) => {
+                        tracing::warn!(udid, %error, %snapshot,
+                            "minicap and screencap gave no picture; session starts with no frame stream");
+                        Ok((false, Some(riviu_core::frame_source::NO_STREAM_SCHEME)))
+                    }
+                }
             }
-            other => other.map(|observed| (observed, false)),
+            other => other.map(|observed| (observed, None)),
         };
         drop(claim);
-        let (first_frame_observed, snapshots) = started?;
+        let (first_frame_observed, scheme) = started?;
         self.interaction.complete_stream(&reservation)?;
-        let scheme = if snapshots {
-            riviu_core::frame_source::SNAPSHOT_STREAM_SCHEME
-        } else {
-            "auto-stream://"
-        };
+        let scheme = scheme.unwrap_or("auto-stream://");
         Ok(riviu_core::StreamStartProof {
             generation: reservation.generation(),
             first_frame_observed,
@@ -591,22 +689,40 @@ impl AndroidDriver {
 
         let (ready_tx, ready_rx) = tokio::sync::oneshot::channel::<()>();
         let udid = serial.to_string();
+        let started = std::time::Instant::now();
+        let tally = Arc::new(SnapshotTally::default());
+        let reader_tally = Arc::clone(&tally);
         let reader = tokio::spawn(async move {
-            let mut stdout = tokio::io::BufReader::new(stdout);
+            let tally = reader_tally;
+            let end = |why: String| {
+                tally.detail.lock().reader_end.get_or_insert(why);
+            };
+            let mut stdout = tokio::io::BufReader::new(CountingReader {
+                inner: stdout,
+                tally: Arc::clone(&tally),
+                started,
+            });
             let mut ready_tx = Some(ready_tx);
             loop {
-                let png = match read_snapshot_png(&mut stdout).await {
+                let png = match read_snapshot_png(&mut stdout, &tally).await {
                     Ok(Some(png)) => png,
                     Ok(None) => {
+                        end("vòng screencap kết thúc".into());
                         tracing::info!(udid, generation, "screencap loop ended");
                         return;
                     }
                     Err(error) => {
+                        end(format!("dừng vì lỗi đọc ({error:#})"));
                         tracing::warn!(udid, generation, %error, "screencap reader stopped");
                         return;
                     }
                 };
+                if SnapshotTally::count(&tally.parsed) == 0 {
+                    tally.detail.lock().first_png_ms = Some(started.elapsed().as_millis());
+                }
+                SnapshotTally::bump(&tally.parsed);
                 let Ok(permit) = FIRST_FRAME_DECODE_SLOTS.clone().acquire_owned().await else {
+                    end("hàng giải mã đã đóng".into());
                     return;
                 };
                 let encoded = tokio::task::spawn_blocking(move || {
@@ -617,25 +733,32 @@ impl AndroidDriver {
                 let jpeg = match encoded {
                     Ok(Ok(jpeg)) => jpeg,
                     Ok(Err(error)) => {
+                        SnapshotTally::bump(&tally.decode_errors);
+                        tally.detail.lock().last_decode_error = Some(format!("{error:#}"));
                         tracing::debug!(udid, generation, %error, "skipping an undecodable capture");
                         continue;
                     }
                     Err(error) => {
+                        end(format!("bộ mã hoá JPEG dừng ({error})"));
                         tracing::warn!(udid, generation, %error, "screencap encoder stopped");
                         return;
                     }
                 };
                 if !sink.publish_if_current(&udid, generation, jpeg) {
+                    end(format!("hub từ chối: thế hệ {generation} đã bị thay"));
                     tracing::info!(udid, generation, "screencap reader superseded; stopping");
                     return;
                 }
+                if SnapshotTally::count(&tally.accepted) == 0 {
+                    tally.detail.lock().first_accept_ms = Some(started.elapsed().as_millis());
+                }
+                SnapshotTally::bump(&tally.accepted);
                 if let Some(sender) = ready_tx.take() {
                     let _ = sender.send(());
                 }
             }
         });
 
-        let started = std::time::Instant::now();
         match tokio::time::timeout(INTERACTION_FIRST_FRAME_TIMEOUT, ready_rx).await {
             Ok(Ok(())) => tracing::info!(
                 serial,
@@ -645,11 +768,17 @@ impl AndroidDriver {
             ),
             _ => {
                 reader.abort();
+                // Whether the child had already gone is part of the explanation, so ask
+                // before killing it.
+                let exited = match child.try_wait() {
+                    Ok(Some(status)) => format!("đã tự thoát ({status})"),
+                    Ok(None) => "vẫn chạy, đã dừng".to_string(),
+                    Err(error) => format!("không đọc được trạng thái ({error})"),
+                };
                 let _ = child.kill().await;
-                anyhow::bail!(
-                    "screencap gave no decodable image in {}s for {serial}",
-                    INTERACTION_FIRST_FRAME_TIMEOUT.as_secs()
-                );
+                let summary = tally.summary(&exited);
+                tracing::warn!(serial, generation, %summary, "screencap fallback gave no picture");
+                anyhow::bail!("screencap gave no decodable image for {serial}; {summary}");
             }
         }
 
