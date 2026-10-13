@@ -999,6 +999,17 @@ pub trait UiSession: Send + Sync {
     async fn resume_screen_capture(&self) -> anyhow::Result<()> {
         Ok(())
     }
+    /// Keep this phone's live view (the desktop tile's encoder) down for at most `bound`
+    /// while an automation job runs on it. The session's own frame stream stays up, so the
+    /// job's reads and evidence captures are unchanged; only the operator's picture pauses.
+    /// Nests with [`Self::pause_screen_capture`]. `Ok(false)` means no view was running.
+    /// The owner calls [`Self::release_live_view`] when the job ends; past `bound` the view
+    /// returns on its own.
+    async fn hold_live_view(&self, _bound: std::time::Duration) -> anyhow::Result<bool> {
+        Ok(false)
+    }
+    /// End a [`Self::hold_live_view`]. Idempotent.
+    fn release_live_view(&self) {}
     fn gui_compatibility_pack(
         &self,
         _package: &str,

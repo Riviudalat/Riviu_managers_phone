@@ -42,6 +42,35 @@ sở hữu inventory/hash; không nhân bản danh sách pin.
 - Đẩy media lúc chuẩn bị Đăng bài (trước mọi Post) gặp `cannot connect to daemon` / `10060`
   thì thử lại đúng lần đẩy đó một lần sau 2 s. Riviu không restart adb-server.
 
+### Giảm tải máy khi Riviu tự động (HX-QUIET)
+
+- Số đo 13–14/10/2026, 30 máy SM-G955F/N Android 9 (`target/device-acceptance/
+  fleet-health-20261014-*.tsv`, `controllers/controller-r105.stdout.txt`): khi 30 máy cùng
+  soạn, UiAutomator2 `/source` p50 6,7 s, p90 12,7 s, max 18,3 s (bình thường <1 s);
+  `surfaceflinger` 61 % CPU; load average 7–8 trên máy 8 nhân; lượt đo tải `adb shell`
+  timeout 2 s; "waited for an adb slot" liên tục (cap 12 slot, `adb.rs`). Host không nghẽn
+  (20 nhân, Riviu ~10 % CPU): nghẽn ở máy và adb server. Trên mỗi máy lúc soạn chạy đồng
+  thời TikTok, UiAutomator2, scrcpy (Tile 480 px/1,2 Mbps/10 fps), có lúc minicap/screencap.
+- Hai cơ chế trong code: (1) job đăng bài giữ view scrcpy của chính máy đó tắt suốt lượt
+  (`QuietView`, `AndroidDriver::hold_view`; tile hiện "Đang đăng bài, tạm dừng hình");
+  (2) một ngân sách `PUBLISH_PHONE_WORK_CAP` = 10 máy cho mọi pha đăng bài trên máy, kể cả
+  quan sát xác minh. Chi tiết ở `docs/development/contracts.md` (tìm "HX-QUIET").
+- Kiểm trên máy thật sau khi đổi: cùng số máy và build TikTok, so với r105 (a) `/source` ms
+  p50/p90 từ log driver, (b) tỉ lệ dòng đăng được ở lượt đầu (không qua recovery), (c)
+  `surfaceflinger` CPU và load average từ lượt đo tải. Phải thấy tile của máy đang đăng dừng
+  ở khung cuối và bật lại sau khi lượt xong; máy rảnh vẫn Tile 480.
+- Tham chiếu GenFarmer 2.6.2: stream mặc định 176 px/25–50 Kbps, High 288 px/1 Mbps, có
+  `autoScreenOff`, `ADB_GLOBAL_CONCURRENCY = 16`. Riviu không hạ Tile xuống dưới 480 px vì
+  176 px bị Redmi API 35 từ chối `MediaCodec.configure` và 320 px ra SPS `avc1.42000D`
+  WebView2 có thể từ chối (`scrcpy.rs`).
+- Đề xuất chưa bật (chỉ ghi để cân nhắc): tắt màn hình vật lý khi máy đang tự động
+  (scrcpy `power_off_on_close`/`SET_DISPLAY_POWER`) để giảm nhiệt và throttle. Rủi ro: trên
+  Android 9 màn hình tắt làm UiAutomator2 `/source` và `screencap` có thể trả cây/ảnh rỗng
+  hoặc đen, `minicap` ngừng ra khung; TikTok có thể tạm dừng video/upload khi màn hình tắt;
+  bật lại màn hình đi qua `KEYCODE_POWER` có thể dựng khóa màn hình (baseline giữ lock
+  screen tắt nhưng phải kiểm). Chỉ thử trên 1–2 máy canary với bằng chứng `/source`,
+  `screencap` và một lượt đăng đầy đủ trước khi xét bật rộng.
+
 ### Sức khỏe máy trước code
 
 Khi chỉ một máy có root không đọc được hoặc tap bị nuốt, so máy đó với một máy cùng

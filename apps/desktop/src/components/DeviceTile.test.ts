@@ -14,6 +14,7 @@ describe("tileStreamStateView", () => {
     ["parked", "Parked"],
     ["stale", "Stale"],
     ["error", "Error"],
+    ["paused", "Đang đăng bài"],
   ] as const)("maps %s to a compact %s label", (state, label) => {
     expect(tileStreamStateView(state, false, false)).toEqual({ state, label });
   });

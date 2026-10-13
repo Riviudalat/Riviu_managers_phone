@@ -618,6 +618,60 @@ async fn require_approval_before_effects(
 /// phones. Each stage gets its own, so a slow approval re-preflight cannot spend the release's.
 const HANDOFF_BUDGET: Duration = Duration::from_secs(125);
 
+/// How long one compose job may keep the phone's live view down before the desktop keeper
+/// starts it again on its own, even if the job never released it (lost task, abort). A lapse
+/// ceiling, not the expected job length: [`QuietView`] releases the hold on every exit of the
+/// compose attempt. Sized from the stage budgets the attempt already carries (app open,
+/// picker, the sound stage with its own pause margin, caption, Post, the 125 s handoff), all
+/// of which end well inside this; past it the picture returns while a job still alive
+/// carries on without it.
+const QUIET_VIEW_BOUND: Duration = Duration::from_secs(20 * 60);
+
+/// HX-QUIET: the phone's live tile stays down for the whole compose attempt, not only the
+/// sound sheet. Measured 13-14/10/2026 on 30 SM-G955F/N, Android 9 (r105): while every
+/// composing phone also ran its tile encoder, UiAutomator2 `/source` took p50 6.7 s, p90
+/// 12.7 s and max 18.3 s against under 1 s idle, `surfaceflinger` sat at 61 % CPU and about a
+/// third of the first attempts timed out in the picker or the sound sheet. The session's own
+/// frame stream stays up, so nothing the attempt reads or proves changes; only the operator's
+/// picture pauses, and the tile says "Đang đăng bài" over its last frame. Release on drop,
+/// which is synchronous, plus [`QUIET_VIEW_BOUND`] in the driver for the case where even
+/// the drop never runs.
+struct QuietView {
+    session: Arc<dyn riviu_core::UiSession>,
+    udid: String,
+}
+
+impl QuietView {
+    async fn hold(session: Arc<dyn riviu_core::UiSession>, udid: &str) -> Self {
+        match session.hold_live_view(QUIET_VIEW_BOUND).await {
+            Ok(true) => log::info!(
+                "Máy {udid}: tạm dừng hình trực tiếp trong lúc đăng bài (tự bật lại khi xong,                  tối đa {} phút)",
+                QUIET_VIEW_BOUND.as_secs() / 60
+            ),
+            Ok(false) => log::info!(
+                "Máy {udid}: giữ hình trực tiếp tắt trong lúc đăng bài (máy chưa có hình                  trực tiếp)"
+            ),
+            Err(error) => log::warn!(
+                "Máy {udid}: không tạm dừng được hình trực tiếp trong lúc đăng bài ({error:#});                  vẫn đăng"
+            ),
+        }
+        Self {
+            session,
+            udid: udid.to_string(),
+        }
+    }
+}
+
+impl Drop for QuietView {
+    fn drop(&mut self) {
+        self.session.release_live_view();
+        log::info!(
+            "Máy {}: trả lại hình trực tiếp sau lượt đăng bài",
+            self.udid
+        );
+    }
+}
+
 /// The selected phones the handoff did not release, with its reason for each. Such a phone
 /// starts failed-before-dispatch and the others go on; nothing was sent to it, so it is
 /// retryable. A missing or duplicated result row, or no phone released at all, still refuses
@@ -3004,6 +3058,9 @@ async fn post_one_assignment_owned(
             ));
         }
     };
+    // Declared after `context` and `session`, so it drops after every exit below has closed
+    // the publish context: the keeper starts the tile again only once the phone is idle.
+    let _quiet_view = QuietView::hold(session.clone(), &assignment.udid).await;
     progress(PublishProgress::AppReady);
     if let Some(refusal) = refuse_when_the_route_authorities_disagree(
         &assignment.udid,

@@ -721,6 +721,17 @@ impl UiSession for AndroidUiSession {
         };
         driver.resume_capture(&self.serial).await
     }
+    async fn hold_live_view(&self, bound: std::time::Duration) -> anyhow::Result<bool> {
+        let Some(driver) = self.capture.upgrade() else {
+            return Ok(false);
+        };
+        driver.hold_view(&self.serial, bound).await
+    }
+    fn release_live_view(&self) {
+        if let Some(driver) = self.capture.upgrade() {
+            driver.release_view(&self.serial);
+        }
+    }
     fn gui_compatibility_pack(
         &self,
         package: &str,

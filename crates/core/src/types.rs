@@ -67,6 +67,9 @@ pub enum TileStreamState {
     Parked,
     Stale,
     Error,
+    /// The live view is held down on purpose while the phone runs a publish job
+    /// (HX-QUIET); the tile keeps its last frame. Not a fault and not "on its way".
+    Paused,
 }
 
 /// Which mobile OS a device runs.

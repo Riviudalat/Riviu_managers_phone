@@ -13,7 +13,7 @@ image: TraceArtifact | null, };
 export type OperationTrace = { runId: string, deviceId: string, sessionId: string | null, observedAt: string, steps: Array<OperationDeviceLogEntry>, artifacts: Array<TraceArtifact>, observations: Array<DeviceTraceStep>, };
 export type ConnectionKind = "usb" | "wifi" | "mock";
 export type DeviceStatus = "disconnected" | "pairing" | "connected" | "preparing" | "ready" | "busy" | "error";
-export type TileStreamState = "live" | "sampling" | "parked" | "stale" | "error";
+export type TileStreamState = "live" | "sampling" | "parked" | "stale" | "error" | "paused";
 export type DevicePlatform = "ios" | "android";
 export type DeviceInfo = { udid: string, name: string, model: string, platform: DevicePlatform,
 /**

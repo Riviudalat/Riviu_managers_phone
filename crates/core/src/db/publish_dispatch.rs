@@ -39,12 +39,27 @@ impl PublishLimits {
     }
 }
 
-/// Phones allowed in the compose stage (observe, sound, compose, Post) at once; the rest wait
-/// queued as `stage_capacity`, before any effect. Measured 2026-10-12 02:28 on the Windows host
-/// with 20 Android phones composing while 20 live tiles streamed: the adb daemon timed out and
-/// the run ended `publish_observation_deadline` x5, `publish_sound_budget_exhausted` x3 and
-/// `device_overloaded` x2.
-pub const PUBLISH_COMPOSE_PHONE_CAP: i64 = 6;
+/// Phones allowed in any publish stage that drives the phone over adb at once: transfer,
+/// compose (observe, sound, compose, Post), phone verify, cleanup and app completion share
+/// this one budget, so ten composing phones and ten verifying phones can never add up to
+/// twenty busy phones. The rest wait queued as `stage_capacity` (dispatch) or as a
+/// `fleetCapacity` verification wait, before any effect. Network metadata reads are not
+/// phone work and keep the configured `verify` limit.
+///
+/// A ceiling, not a target. Measured 13-14/10/2026 on 30 SM-G955F/N, Android 9
+/// (`target/device-acceptance/controllers/controller-r105.stdout.txt`, fleet-health TSVs):
+/// 30 phones composing at once put UiAutomator2 `/source` at p50 6.7 s / p90 12.7 s and
+/// about a third of the first attempts timed out in the picker or sound sheet; the retry
+/// round of 10 phones posted 9 of 10 at the first attempt. The earlier value, 6, came from
+/// 2026-10-12 (20 phones composing with 20 live tiles: adb daemon timeouts) and counted
+/// only compose.
+pub const PUBLISH_PHONE_WORK_CAP: i64 = 10;
+
+/// Which work stages drive the phone over adb and so count against
+/// [`PUBLISH_PHONE_WORK_CAP`]. Everything but the network-only metadata read.
+pub fn is_phone_work_stage(stage: &str) -> bool {
+    stage != "metadata"
+}
 
 /// No timer revokes a live device call. Drop releases exactly this token; startup
 /// recovery clears process claims only after the old process has ended.
@@ -286,6 +301,19 @@ impl Database {
         Ok(limits)
     }
 
+    /// How many phones hold a publish work claim that drives them over adb right now. The
+    /// verification worker reads it to name a `fleetCapacity` wait before it spawns an
+    /// observer that the claim would refuse anyway; the claim stays the authority.
+    pub fn publish_phone_work_in_use(&self) -> anyhow::Result<i64> {
+        let connection = self.dispatch_conn()?;
+        let conn = connection.lock();
+        Ok(conn.query_row(
+            "SELECT COUNT(*) FROM publish_work_claims WHERE stage<>'metadata'",
+            [],
+            |r| r.get(0),
+        )?)
+    }
+
     pub fn try_publish_work(
         &self,
         udid: &str,
@@ -317,8 +345,8 @@ impl Database {
         let connection = self.dispatch_conn()?;
         let mut conn = connection.lock();
         let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
-        // Compose holds at most `PUBLISH_COMPOSE_PHONE_CAP` phones. Network metadata reads use
-        // the configured verify cap, independently of device ownership and transfers.
+        // Every phone stage shares `PUBLISH_PHONE_WORK_CAP`. Network metadata reads use the
+        // configured verify cap, independently of device ownership and transfers.
         anyhow::ensure!(
             matches!(
                 stage,
@@ -327,14 +355,16 @@ impl Database {
             "unknown publish work stage"
         );
         let limits = Self::publish_limits_from_connection(&tx)?;
-        let (transfers, composes, metadata, busy): (i64, i64, i64, i64) = tx.query_row(
-            "SELECT COALESCE(SUM(stage='transfer'),0),COALESCE(SUM(stage='compose'),0),COALESCE(SUM(stage='metadata'),0),
+        let (transfers, phones, metadata, busy): (i64, i64, i64, i64) = tx.query_row(
+            "SELECT COALESCE(SUM(stage='transfer'),0),COALESCE(SUM(stage<>'metadata'),0),COALESCE(SUM(stage='metadata'),0),
              COALESCE(SUM(udid=?1 OR (owner=?2 AND ((?3='metadata' AND stage='verify')
                  OR (?3='verify' AND stage='metadata')))),0) FROM publish_work_claims",
             params![key, owner, stage], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)))?;
-        if busy > 0 || (stage == "transfer" && transfers >= limits.transfer as i64)
-            || (stage == "compose" && composes >= PUBLISH_COMPOSE_PHONE_CAP)
-            || (stage == "metadata" && metadata >= limits.verify as i64) {
+        if busy > 0
+            || (stage == "transfer" && transfers >= limits.transfer as i64)
+            || (is_phone_work_stage(stage) && phones >= PUBLISH_PHONE_WORK_CAP)
+            || (stage == "metadata" && metadata >= limits.verify as i64)
+        {
             return Ok(None);
         }
         let token = Uuid::new_v4().to_string();

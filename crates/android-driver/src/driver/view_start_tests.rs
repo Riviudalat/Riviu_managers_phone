@@ -70,6 +70,71 @@ impl crate::view::ViewSink for CountingSink {
     }
 }
 
+/// HX-QUIET: the publish job holds the view for its whole run; the sound sheet's shorter
+/// pause inside it must neither shorten the hold nor, on its resume, hand the view back.
+#[tokio::test]
+async fn a_job_view_hold_outlives_the_sheet_pause_inside_it() {
+    let adb = GoneAdb::new();
+    let driver = AndroidDriver::with_adb(
+        AdbProgram::at(adb.executable.clone()),
+        adb::AdbOrigin::Configured,
+        &AndroidDriverConfig {
+            automatic_setup_allowed: false,
+            ..Default::default()
+        },
+    );
+    let job = std::time::Duration::from_secs(600);
+    let sheet = std::time::Duration::from_millis(300);
+    assert!(!driver.capture_paused("phone"));
+    // No view runs in this fixture, so nothing is stopped; the hold still stands.
+    assert!(!driver.hold_view("phone", job).await.unwrap());
+    assert!(driver.capture_paused("phone"));
+    assert!(driver.view_held("phone"));
+
+    assert!(!driver.pause_capture("phone", sheet).await.unwrap());
+    driver.resume_capture("phone").await.unwrap();
+    assert!(
+        driver.capture_paused("phone"),
+        "the sheet's resume must not hand the view back while the job holds it"
+    );
+    assert!(driver.view_held("phone"));
+    tokio::time::sleep(sheet + std::time::Duration::from_millis(100)).await;
+    assert!(
+        driver.capture_paused("phone"),
+        "the sheet's shorter bound must not shorten the job's hold"
+    );
+
+    driver.release_view("phone");
+    assert!(!driver.capture_paused("phone"));
+    assert!(!driver.view_held("phone"));
+
+    // A hold whose bound has lapsed no longer keeps the keeper away: the picture returns
+    // even when the job never released.
+    assert!(!driver
+        .hold_view("phone", std::time::Duration::ZERO)
+        .await
+        .unwrap());
+    assert!(!driver.capture_paused("phone"));
+    driver.release_view("phone");
+
+    // The other nesting: a reader's pause taken first keeps its own resume after the job
+    // releases, and the job's release leaves that pause standing.
+    assert!(!driver.pause_capture("phone", job).await.unwrap());
+    assert!(!driver.hold_view("phone", job).await.unwrap());
+    driver.release_view("phone");
+    assert!(
+        driver.capture_paused("phone"),
+        "the reader's pause still stands"
+    );
+    assert!(!driver.view_held("phone"));
+    driver.resume_capture("phone").await.unwrap();
+    assert!(!driver.capture_paused("phone"));
+    assert!(
+        adb.calls().is_empty(),
+        "holding and releasing a view touches no adb"
+    );
+}
+
 #[tokio::test]
 async fn a_phone_that_left_the_bus_costs_one_adb_call_and_is_never_woken() {
     let adb = GoneAdb::new();

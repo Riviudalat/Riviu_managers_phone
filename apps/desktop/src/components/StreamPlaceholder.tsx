@@ -28,6 +28,14 @@ export function StreamPlaceholder({ view, deviceName, onRetry }: Props) {
     );
   }
 
+  if (view.kind === "paused") {
+    return (
+      <div className="dev-phone-paused" role="status" title={view.reason}>
+        {view.reason}
+      </div>
+    );
+  }
+
   return (
     <div className="dev-phone-empty">
       <span>{view.reason}</span>

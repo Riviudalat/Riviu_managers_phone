@@ -380,7 +380,9 @@ fn permits_are_global_across_connections_and_release_by_exact_device() {
         .try_publish_work("t0", "verify", "observer")
         .unwrap()
         .is_none());
-    for n in 0..65 {
+    // Phone observers come out of the same adb budget as transfers and composes
+    // (`PUBLISH_PHONE_WORK_CAP`), so they fill what the four transfers left and no more.
+    for n in 0..(PUBLISH_PHONE_WORK_CAP as usize - 4) {
         permits.push(
             other
                 .try_publish_work(&format!("v{n}"), "verify", "observer")
@@ -388,15 +390,24 @@ fn permits_are_global_across_connections_and_release_by_exact_device() {
                 .unwrap(),
         );
     }
+    assert!(
+        other
+            .try_publish_work("v-late", "verify", "observer")
+            .unwrap()
+            .is_none(),
+        "observers do not stack beyond the shared phone budget"
+    );
     assert!(db
         .try_publish_work("post", "compose", "poster")
         .unwrap()
-        .is_some());
+        .is_none());
     permits.remove(0);
-    assert!(db
+    let post = db
         .try_publish_work("post", "compose", "poster")
         .unwrap()
-        .is_some());
+        .expect("a released transfer admits a compose");
+    drop(post);
+    permits.clear();
     // A durable candidate can read metadata while its physical phone is composing.
     // Both connections use production admission, not a mocked grant.
     let assignment = &assignments[0];
@@ -632,7 +643,7 @@ fn compose_admits_the_phone_cap_and_queues_the_rest_behind_a_held_phone() {
     assert!(db.claim_publish_dispatch(held, 0).unwrap());
     // The held phone takes one compose slot; the cap admits the rest of its width and every
     // other phone gets no permit, so its job stays queued before any effect.
-    let cap = PUBLISH_COMPOSE_PHONE_CAP as usize;
+    let cap = PUBLISH_PHONE_WORK_CAP as usize;
     let mut siblings = Vec::new();
     let mut waiting = Vec::new();
     for job in db.pending_publish_dispatch(128).unwrap() {
@@ -668,6 +679,67 @@ fn compose_admits_the_phone_cap_and_queues_the_rest_behind_a_held_phone() {
         .is_none());
     assert!(db.finish_publish_dispatch(held, None).unwrap());
     drop(held_permit);
+}
+
+/// Verification observers drive the phone over adb like a compose does, so they come out of
+/// the same budget: `PUBLISH_PHONE_WORK_CAP` composing phones plus ten observing phones must
+/// never add up to twenty busy phones (measured 13-14/10/2026, 30 SM-G955F: see the cap).
+#[test]
+fn phone_verify_claims_come_out_of_the_same_budget_as_compose() {
+    let (db, _, campaign, _) = fixture();
+    seed_load(&db, &campaign, 66, 66);
+    db.conn()
+        .unwrap()
+        .execute("UPDATE publish_dispatch_jobs SET phase='compose'", [])
+        .unwrap();
+    let cap = PUBLISH_PHONE_WORK_CAP as usize;
+    let observers: Vec<_> = (0..3)
+        .map(|n| {
+            db.try_publish_work(&format!("observer-{n}"), "verify", &format!("verified-{n}"))
+                .unwrap()
+                .expect("an observer on an idle phone is admitted")
+        })
+        .collect();
+    let mut composing = Vec::new();
+    let mut waiting = Vec::new();
+    for job in db.pending_publish_dispatch(128).unwrap() {
+        match db
+            .try_publish_work(&job.udid, &job.phase, &job.attempt_id)
+            .unwrap()
+        {
+            Some(permit) => composing.push((job, permit)),
+            None => waiting.push(job),
+        }
+    }
+    assert_eq!(
+        composing.len(),
+        cap - observers.len(),
+        "three observing phones leave {} compose slots",
+        cap - observers.len()
+    );
+    assert_eq!(waiting.len(), 66 - (cap - observers.len()));
+    // With every slot taken, a fourth observer waits as well, on a phone nobody else holds.
+    assert!(db
+        .try_publish_work("observer-late", "verify", "verified-late")
+        .unwrap()
+        .is_none());
+    assert_eq!(
+        db.publish_phone_work_in_use().unwrap(),
+        PUBLISH_PHONE_WORK_CAP
+    );
+    // An observer finishing frees a compose slot, and the reverse.
+    drop(observers);
+    let next = &waiting[0];
+    let next_permit = db
+        .try_publish_work(&next.udid, &next.phase, &next.attempt_id)
+        .unwrap()
+        .expect("a released observer slot admits a waiting compose");
+    drop(next_permit);
+    drop(composing);
+    assert!(db
+        .try_publish_work("observer-late", "verify", "verified-late")
+        .unwrap()
+        .is_some());
 }
 
 #[test]

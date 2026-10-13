@@ -12,6 +12,9 @@ export type StreamPlaceholder =
   | { kind: "none" }
   /// The app is bringing the stream up. Nothing for the operator to do but wait.
   | { kind: "loading" }
+  /// The app itself holds the picture down while the phone runs a publish job (HX-QUIET).
+  /// The last frame stays under a label; nothing to retry and nothing on its way.
+  | { kind: "paused"; reason: string }
   /// It is not coming without intervention. `canRetry` is false when retrying provably
   /// cannot help, and then no retry control may be offered — a button that cannot succeed is
   /// worse than no button (AGENTS.md §9.58).
@@ -69,6 +72,14 @@ export function streamPlaceholder(input: StreamPlaceholderInput): StreamPlacehol
       },
       blocksInput,
     };
+  }
+
+  // Held down on purpose, by the publish job on that phone. Measured 13-14/10/2026 on 30
+  // SM-G955F: the tile encoder on a composing phone pushed UiAutomator reads from under 1 s
+  // to 7-18 s, so the job stops the view and the keeper starts it again when the job ends.
+  // Not a failure, so it outranks a stale error and offers no retry.
+  if (input.tileStreamState === "paused") {
+    return { view: { kind: "paused", reason: "Đang đăng bài, tạm dừng hình" }, blocksInput };
   }
 
   const failure = input.lastError || (input.tileStreamState === "error" ? "Stream lỗi." : null);

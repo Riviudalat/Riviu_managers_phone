@@ -20,6 +20,7 @@ const TILE_STREAM_LABELS: Record<TileStreamState, string> = {
   parked: "Parked",
   stale: "Stale",
   error: "Error",
+  paused: "Đang đăng bài",
 };
 
 export function tileStreamStateView(
