@@ -41,6 +41,99 @@ impl std::fmt::Display for NoKeyframeAfterHello {
 
 impl std::error::Error for NoKeyframeAfterHello {}
 
+/// minicap never handed over a decoded picture: it exited, never accepted the connection, or
+/// stayed silent past the first-frame deadline. The failures a snapshot source can stand in
+/// for, as a type, so the fallback never matches on a sentence. A refused screen (asleep,
+/// locked) is not one of them and stays a refusal.
+#[derive(Debug)]
+pub(super) struct MinicapGaveNoPicture {
+    said: String,
+}
+
+impl std::fmt::Display for MinicapGaveNoPicture {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(&self.said)
+    }
+}
+
+impl std::error::Error for MinicapGaveNoPicture {}
+
+/// The device-side loop behind a snapshot stream.
+///
+/// `screencap` renders from the display itself, not through a virtual display, so it still
+/// answers on a phone where minicap, scrcpy and screenrecord all give nothing (#28,
+/// `ce071827e0659c1605`, 13/10/2026). stderr is discarded on the device because `exec-out`
+/// carries both streams on one socket and a warning would land inside a PNG. The loop ends
+/// on the first failed capture, which is what a killed adb client produces (the write gets
+/// EPIPE), so killing the host child leaves nothing running on the phone.
+///
+/// The one-second pause keeps an already loaded phone from capturing back to back. No
+/// caller of a snapshot stream decides from its frames, so it needs no faster cadence.
+const SNAPSHOT_LOOP: &str = "while screencap -p 2>/dev/null; do sleep 1; done";
+/// A full-HD capture is 1-3 MB of PNG; this only stops a corrupt length from allocating
+/// without bound.
+const SNAPSHOT_MAX_PNG_BYTES: usize = 48 * 1024 * 1024;
+/// Bytes skipped looking for the next PNG signature before the stream is declared corrupt.
+const SNAPSHOT_MAX_RESYNC_BYTES: usize = 64 * 1024;
+const SNAPSHOT_JPEG_QUALITY: u8 = 80;
+/// `StreamProducer::host_port` of a snapshot producer, which reads the child's stdout and
+/// holds no forward. No forward is ever on port 0.
+const SNAPSHOT_NO_FORWARD: u16 = 0;
+const PNG_SIGNATURE: [u8; 8] = [0x89, b'P', b'N', b'G', 0x0D, 0x0A, 0x1A, 0x0A];
+
+/// Read the next whole PNG off a stream of back-to-back `screencap -p` outputs.
+///
+/// `Ok(None)` is a clean end of stream between images. A PNG ends at its `IEND` chunk, so
+/// no delimiter is needed; bytes before a signature are skipped, up to a bound.
+async fn read_snapshot_png<R>(reader: &mut R) -> anyhow::Result<Option<Vec<u8>>>
+where
+    R: tokio::io::AsyncRead + Unpin,
+{
+    let mut window = [0u8; 8];
+    let mut filled = 0usize;
+    let mut skipped = 0usize;
+    while filled < 8 || window != PNG_SIGNATURE {
+        let mut byte = [0u8; 1];
+        if reader.read(&mut byte).await? == 0 {
+            if filled == 0 {
+                return Ok(None);
+            }
+            anyhow::bail!("screencap stream ended inside an image");
+        }
+        if filled < 8 {
+            window[filled] = byte[0];
+            filled += 1;
+        } else {
+            window.copy_within(1.., 0);
+            window[7] = byte[0];
+            skipped += 1;
+            anyhow::ensure!(
+                skipped <= SNAPSHOT_MAX_RESYNC_BYTES,
+                "screencap stream carried {skipped} bytes with no PNG signature"
+            );
+        }
+    }
+    let mut png = PNG_SIGNATURE.to_vec();
+    loop {
+        let mut header = [0u8; 8];
+        reader.read_exact(&mut header).await?;
+        let length = u32::from_be_bytes([header[0], header[1], header[2], header[3]]) as usize;
+        // Data plus the CRC.
+        let body = length.saturating_add(4);
+        anyhow::ensure!(
+            png.len().saturating_add(8).saturating_add(body) <= SNAPSHOT_MAX_PNG_BYTES,
+            "screencap PNG is larger than {SNAPSHOT_MAX_PNG_BYTES} bytes"
+        );
+        png.extend_from_slice(&header);
+        let start = png.len();
+        png.resize(start + body, 0);
+        reader.read_exact(&mut png[start..]).await?;
+        if &header[4..8] == b"IEND" {
+            return Ok(Some(png));
+        }
+    }
+}
+
 /// Write one whole control message, or say exactly how much is known about it.
 ///
 /// A lock that is not had within the budget means **nothing was written**, so the caller may
@@ -220,7 +313,10 @@ impl AndroidDriver {
                 crate::frames::remove_forward(&self.adb, serial, host_port)
                     .await
                     .ok();
-                anyhow::bail!("minicap exited before it accepted a connection");
+                return Err(MinicapGaveNoPicture {
+                    said: "minicap exited before it accepted a connection".into(),
+                }
+                .into());
             }
             match crate::frames::MinicapStream::connect(host_port).await {
                 Ok(stream) => {
@@ -236,9 +332,11 @@ impl AndroidDriver {
                 .await
                 .ok();
             let _ = child.kill().await;
-            return Err(
-                last_error.unwrap_or_else(|| anyhow!("minicap never accepted a connection"))
+            let said = last_error.map_or_else(
+                || "minicap never accepted a connection".to_string(),
+                |error| format!("{error:#}"),
             );
+            return Err(MinicapGaveNoPicture { said }.into());
         };
         let banner = stream.banner().clone();
         tracing::info!(
@@ -339,19 +437,22 @@ impl AndroidDriver {
                     crate::frames::remove_forward(&self.adb, serial, host_port)
                         .await
                         .ok();
-                    anyhow::bail!(
-                        "minicap produced no decodable frame in {}s for {serial}: the display may \
-                         not have changed (minicap publishes on change), or the projection is \
-                         wrong. banner {}x{} virtual {}x{} orient {}, host port {host_port}, \
-                         sink generation {}",
-                        INTERACTION_FIRST_FRAME_TIMEOUT.as_secs(),
-                        banner.real_width,
-                        banner.real_height,
-                        banner.virtual_width,
-                        banner.virtual_height,
-                        banner.orientation,
-                        sink.generation(serial)
-                    );
+                    return Err(MinicapGaveNoPicture {
+                        said: format!(
+                            "minicap produced no decodable frame in {}s for {serial}: the display \
+                             may not have changed (minicap publishes on change), or the \
+                             projection is wrong. banner {}x{} virtual {}x{} orient {}, host port \
+                             {host_port}, sink generation {}",
+                            INTERACTION_FIRST_FRAME_TIMEOUT.as_secs(),
+                            banner.real_width,
+                            banner.real_height,
+                            banner.virtual_width,
+                            banner.virtual_height,
+                            banner.orientation,
+                            sink.generation(serial)
+                        ),
+                    }
+                    .into());
                 }
             }
         }
@@ -368,6 +469,175 @@ impl AndroidDriver {
             },
         );
         Ok(first_frame_observed)
+    }
+    /// The interaction stream at the handoff generation, with a proven first frame.
+    ///
+    /// `snapshots_allowed` is set only for a caller that takes no decision from frames. It
+    /// changes one thing: when minicap gives no picture at all, the stream falls back to
+    /// `screencap` snapshots at the same generation, under the same first-frame proof.
+    pub(super) async fn start_session_stream(
+        &self,
+        udid: &str,
+        snapshots_allowed: bool,
+    ) -> anyhow::Result<riviu_core::StreamStartProof> {
+        let sink = self.sink()?;
+        let claim = self.claim_start(udid)?;
+        if self.streams.lock().await.contains_key(udid) {
+            anyhow::bail!(
+                "interaction stream for {udid} requires the old producer to be stopped first"
+            );
+        }
+        let generation = sink.generation(udid);
+        // Catches a drift between the handoff and now, here, with a message naming
+        // the step — rather than letting core report an opaque StopProofMismatch.
+        let reservation = self.interaction.reserve_stream(udid, generation)?;
+
+        let started = match self
+            .spawn_producer(
+                udid,
+                reservation.generation(),
+                StreamReadiness::DecodedFrame,
+            )
+            .await
+        {
+            // minicap left nothing behind and never advanced the generation, so the
+            // snapshot producer starts from exactly the state minicap started from.
+            Err(error)
+                if snapshots_allowed && error.downcast_ref::<MinicapGaveNoPicture>().is_some() =>
+            {
+                tracing::warn!(udid, %error, "minicap gave no picture; streaming screencap snapshots");
+                self.spawn_snapshot_producer(udid, reservation.generation())
+                    .await
+                    .map(|observed| (observed, true))
+                    .map_err(|snapshot| {
+                        anyhow!(
+                            "{error:#}; ảnh chụp screencap thay thế cũng không được: {snapshot:#}"
+                        )
+                    })
+            }
+            other => other.map(|observed| (observed, false)),
+        };
+        drop(claim);
+        let (first_frame_observed, snapshots) = started?;
+        self.interaction.complete_stream(&reservation)?;
+        let scheme = if snapshots {
+            riviu_core::frame_source::SNAPSHOT_STREAM_SCHEME
+        } else {
+            "auto-stream://"
+        };
+        Ok(riviu_core::StreamStartProof {
+            generation: reservation.generation(),
+            first_frame_observed,
+            stream_url: format!("{scheme}{udid}"),
+        })
+    }
+    /// Stream `screencap` snapshots into exactly `generation`, for a caller that takes no
+    /// decision from frames (`start_stream_after_session_without_frame_decisions`).
+    ///
+    /// Same shape and same proof as [`Self::spawn_producer`] with
+    /// [`StreamReadiness::DecodedFrame`]: one child the stop path kills, a reader that stops
+    /// at the first stale generation, and `true` only once a capture started after this call
+    /// decoded and was accepted by the hub. Each frame is a new capture, published in capture
+    /// order; none is older than one capture period, which is why only such a caller gets one.
+    pub(super) async fn spawn_snapshot_producer(
+        &self,
+        serial: &str,
+        generation: u64,
+    ) -> anyhow::Result<bool> {
+        let sink = self.sink()?;
+        let mut command = tokio::process::Command::new(self.adb.path());
+        self.adb.apply_server_for_serial(&mut command, Some(serial));
+        #[cfg(windows)]
+        command.creation_flags(0x0800_0000);
+        let mut child = command
+            .args(["-s", serial, "exec-out", SNAPSHOT_LOOP])
+            .stdin(Stdio::null())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::null())
+            .kill_on_drop(true)
+            .spawn()
+            .context("spawn the screencap loop")?;
+        let Some(stdout) = child.stdout.take() else {
+            let _ = child.kill().await;
+            anyhow::bail!("the screencap loop has no stdout");
+        };
+
+        let (ready_tx, ready_rx) = tokio::sync::oneshot::channel::<()>();
+        let udid = serial.to_string();
+        let reader = tokio::spawn(async move {
+            let mut stdout = tokio::io::BufReader::new(stdout);
+            let mut ready_tx = Some(ready_tx);
+            loop {
+                let png = match read_snapshot_png(&mut stdout).await {
+                    Ok(Some(png)) => png,
+                    Ok(None) => {
+                        tracing::info!(udid, generation, "screencap loop ended");
+                        return;
+                    }
+                    Err(error) => {
+                        tracing::warn!(udid, generation, %error, "screencap reader stopped");
+                        return;
+                    }
+                };
+                let Ok(permit) = FIRST_FRAME_DECODE_SLOTS.clone().acquire_owned().await else {
+                    return;
+                };
+                let encoded = tokio::task::spawn_blocking(move || {
+                    let _permit = permit;
+                    riviu_core::frame_source::png_to_jpeg(&png, SNAPSHOT_JPEG_QUALITY)
+                })
+                .await;
+                let jpeg = match encoded {
+                    Ok(Ok(jpeg)) => jpeg,
+                    Ok(Err(error)) => {
+                        tracing::debug!(udid, generation, %error, "skipping an undecodable capture");
+                        continue;
+                    }
+                    Err(error) => {
+                        tracing::warn!(udid, generation, %error, "screencap encoder stopped");
+                        return;
+                    }
+                };
+                if !sink.publish_if_current(&udid, generation, jpeg) {
+                    tracing::info!(udid, generation, "screencap reader superseded; stopping");
+                    return;
+                }
+                if let Some(sender) = ready_tx.take() {
+                    let _ = sender.send(());
+                }
+            }
+        });
+
+        let started = std::time::Instant::now();
+        match tokio::time::timeout(INTERACTION_FIRST_FRAME_TIMEOUT, ready_rx).await {
+            Ok(Ok(())) => tracing::info!(
+                serial,
+                generation,
+                ms = started.elapsed().as_millis(),
+                "screencap first decoded frame accepted"
+            ),
+            _ => {
+                reader.abort();
+                let _ = child.kill().await;
+                anyhow::bail!(
+                    "screencap gave no decodable image in {}s for {serial}",
+                    INTERACTION_FIRST_FRAME_TIMEOUT.as_secs()
+                );
+            }
+        }
+
+        // Registered last, as in `spawn_producer`, so a failed start leaves nothing behind.
+        self.streams.lock().await.insert(
+            serial.to_string(),
+            StreamProducer {
+                generation,
+                host_port: SNAPSHOT_NO_FORWARD,
+                child,
+                reader,
+                device_pid: 0,
+            },
+        );
+        Ok(true)
     }
     /// What the phone says about its own display, for a caller that needs to explain
     /// itself rather than act.
@@ -463,7 +733,9 @@ impl AndroidDriver {
             tracing::warn!(serial, device_pid=pending.producer.device_pid,
                 stop_id=%pending.marker.stop_id, "owned minicap child exit remains unconfirmed");
         }
-        if !pending.forward_cleanup_attempted {
+        if !pending.forward_cleanup_attempted
+            && pending.producer.host_port != SNAPSHOT_NO_FORWARD
+        {
             pending.forward_cleanup_attempted = true;
             if let Err(error) = crate::frames::remove_forward(
                 &self.adb, serial, pending.producer.host_port,

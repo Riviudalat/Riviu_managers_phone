@@ -459,8 +459,10 @@ impl DeviceControlPlane {
         &self,
         context: UiSessionContext,
         capacity: UiCapacityReservation,
+        frames_drive_decisions: bool,
     ) -> Result<UiWithStreamContext, StreamContextUpgradeFailure> {
-        self.start_reserved_stream_internal(context, capacity).await
+        self.start_reserved_stream_internal(context, capacity, frames_drive_decisions)
+            .await
     }
 
     pub(crate) fn failed_stream_session(

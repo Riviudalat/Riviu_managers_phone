@@ -3518,10 +3518,39 @@ async fn open_publish_context_until(
     } else {
         InteractionSessionKind::Ordinary
     };
-    control
-        .start_clean_app_session(exclusive, capacity, &target_package, kind)
-        .await
-        .map_err(anyhow::Error::new)
+    // The hierarchy route takes every tap and proof from the element tree, never from a
+    // frame, so a phone whose live capture is dead may stream snapshots instead of failing
+    // here (#28, 13/10/2026). The pixel grid decides from frames and keeps the strict start.
+    let context = if control.reports_element_bounds(exclusive.udid()) {
+        control
+            .start_clean_hierarchy_app_session(exclusive, capacity, &target_package, kind)
+            .await
+    } else {
+        control
+            .start_clean_app_session(exclusive, capacity, &target_package, kind)
+            .await
+    }
+    .map_err(anyhow::Error::new)?;
+    if riviu_core::frame_source::is_snapshot_stream(&context.stream_proof().stream_url) {
+        say_snapshot_stream_once(udid);
+    }
+    Ok(context)
+}
+
+/// One Vietnamese line per phone per controller run, so a phone streaming snapshots is
+/// visible without repeating on every assignment.
+fn say_snapshot_stream_once(udid: &str) {
+    static SAID: std::sync::OnceLock<parking_lot::Mutex<std::collections::HashSet<String>>> =
+        std::sync::OnceLock::new();
+    let first = SAID
+        .get_or_init(Default::default)
+        .lock()
+        .insert(udid.to_string());
+    if first {
+        log::warn!(
+            "Máy {udid} không chụp được màn hình liên tục (minicap không ra khung hình);              phiên đăng bài dùng ảnh chụp screencap thay thế. Đăng bài vẫn đọc cây giao diện              như cũ."
+        );
+    }
 }
 
 pub(super) async fn tap_transition(

@@ -34,6 +34,33 @@ impl DeviceControlPlane {
         bundle_id: &str,
         kind: InteractionSessionKind,
     ) -> Result<UiWithStreamContext, DeviceControlError> {
+        self.start_clean_app_session_with(exclusive, capacity, bundle_id, kind, true)
+            .await
+    }
+
+    /// [`Self::start_clean_app_session`] for a route that takes no decision from the stream's
+    /// frames: every tap and every proof comes from the hierarchy. The backend may then back
+    /// the stream with snapshots when its live capture gives no first frame
+    /// (`DeviceDriver::start_stream_after_session_without_frame_decisions`).
+    pub async fn start_clean_hierarchy_app_session(
+        &self,
+        exclusive: DeviceExclusiveContext,
+        capacity: UiCapacityReservation,
+        bundle_id: &str,
+        kind: InteractionSessionKind,
+    ) -> Result<UiWithStreamContext, DeviceControlError> {
+        self.start_clean_app_session_with(exclusive, capacity, bundle_id, kind, false)
+            .await
+    }
+
+    async fn start_clean_app_session_with(
+        &self,
+        exclusive: DeviceExclusiveContext,
+        capacity: UiCapacityReservation,
+        bundle_id: &str,
+        kind: InteractionSessionKind,
+        frames_drive_decisions: bool,
+    ) -> Result<UiWithStreamContext, DeviceControlError> {
         let token = self.validate_interaction_capacity(&exclusive)?;
         if capacity.plane_id != self.plane_id
             || capacity.reservation.as_ref().map(|r| r.token()) != Some(token)
@@ -67,7 +94,10 @@ impl DeviceControlPlane {
                 ));
             }
         };
-        match self.try_start_reserved_stream(session, capacity).await {
+        match self
+            .try_start_reserved_stream(session, capacity, frames_drive_decisions)
+            .await
+        {
             Ok(context) => Ok(context),
             Err(failure) => {
                 let (cleanup, closed) = if let Some(context) = failure.context {

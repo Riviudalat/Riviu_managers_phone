@@ -291,6 +291,15 @@ impl DeviceDriver for MultiplexDriver {
         self.route(udid)?.start_stream_after_session(udid).await
     }
 
+    async fn start_stream_after_session_without_frame_decisions(
+        &self,
+        udid: &str,
+    ) -> anyhow::Result<StreamStartProof> {
+        self.route(udid)?
+            .start_stream_after_session_without_frame_decisions(udid)
+            .await
+    }
+
     async fn confirm_interaction_stream_stopped(
         &self,
         udid: &str,

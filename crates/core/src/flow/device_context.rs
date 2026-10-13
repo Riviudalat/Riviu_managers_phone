@@ -180,7 +180,7 @@ impl FlowDeviceContext {
             });
         };
         let streaming = match control
-            .try_start_reserved_stream(context, reservation)
+            .try_start_reserved_stream(context, reservation, true)
             .await
         {
             Ok(streaming) => streaming,
