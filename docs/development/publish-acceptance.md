@@ -61,7 +61,7 @@ node --test scripts/publish_acceptance.test.mjs
 `--cdp` mặc định `http://127.0.0.1:9277`, chỉ nhận IP loopback/cổng. Nếu có nhiều
 WebView, thêm `--page-url` đúng URL loopback và giữ giá trị ấy ở cả preflight/submit.
 Không truyền lệnh IPC tùy ý. `--wait-seconds` chỉ dành observe (0–86400); poll 5–3600
-giây chỉ đọc metadata, **không đổi nhịp verifier 300 giây**. Observe cần đúng danh sách
+giây chỉ đọc metadata, **không đổi nhịp verifier 120 giây**. Observe cần đúng danh sách
 UDID của toàn campaign; thiếu/dư assignment là scope mismatch, không báo pass.
 
 Lượt mới mặc định dùng giao thức Start; `--protocol legacy` không cho preflight/submit

@@ -519,7 +519,18 @@ async fn set_photo_order(
             "content update --uri {IMAGES_URI}/{} --bind datetaken:l:{taken} --bind date_modified:l:{modified} 2>&1",
             row.id
         );
-        let output = adb.shell(serial, &command).await.context("set photo order")?;
+        // Campaign fff151ba (13/10/2026, 30 phones): two phones lost this step to
+        // `daemon not running … cannot connect to daemon`. Rewriting the same timestamps on
+        // a hidden import is idempotent and the read-back below proves the result.
+        let output = retry_once_after_daemon_returns(
+            adb,
+            serial,
+            "photo order",
+            error_daemon_unreachable,
+            || adb.shell(serial, &command),
+        )
+        .await
+        .context("set photo order")?;
         if let Some(detail) = content_error(&output) {
             anyhow::bail!("photo order update failed for {}: {detail}", row.id);
         }
@@ -1366,19 +1377,17 @@ pub async fn import(
         // ~1.5 s, on Android 8.0 (SM-N950F) it never does. The broadcast fixes the
         // second case — verified by `content query`, **not** by `result=0`, which this
         // repo has a measured case of lying.
-        for name in &names {
-            let _ = adb
-                .shell(
-                    serial,
-                    &format!(
-                        "am broadcast -a android.intent.action.MEDIA_SCANNER_SCAN_FILE \
-                         -d file://{visible}/{name}"
-                    ),
-                )
-                .await;
-        }
+        scan_missing_media(adb, serial, &visible, &names, &rows).await;
         scanned = true;
         rows = poll_media_rows(adb, serial, &visible, names.len()).await?;
+        if rows.len() != names.len() {
+            // Campaign fff151ba (13/10/2026, 30 phones, ce031713f3 SM-G955F Android 9):
+            // 14 of 15 rows after one broadcast round while the shared adb server was
+            // overloaded. One more round for the missing names only, then the same check.
+            await_adb_server(adb, serial).await;
+            scan_missing_media(adb, serial, &visible, &names, &rows).await;
+            rows = poll_media_rows(adb, serial, &visible, names.len()).await?;
+        }
     }
     anyhow::ensure!(
         !rows.is_empty(),
@@ -1604,6 +1613,35 @@ async fn media_rows_under(
 /// A query that *fails* is not "no rows" — it is retried, and if every attempt fails the
 /// error is returned rather than flattened into an empty list, because an empty list is
 /// what the caller reads as "nothing was imported".
+/// Ask the media scanner for every listed file that MediaStore does not show yet.
+async fn scan_missing_media(
+    adb: &AdbProgram,
+    serial: &str,
+    visible: &str,
+    names: &[&str],
+    rows: &[MediaRow],
+) {
+    let root = canonical_media_path(visible);
+    let seen = rows
+        .iter()
+        .map(|row| canonical_media_path(&row.data))
+        .collect::<std::collections::BTreeSet<_>>();
+    for name in names {
+        if seen.contains(&format!("{root}/{name}")) {
+            continue;
+        }
+        let _ = adb
+            .shell(
+                serial,
+                &format!(
+                    "am broadcast -a android.intent.action.MEDIA_SCANNER_SCAN_FILE \
+                     -d file://{visible}/{name}"
+                ),
+            )
+            .await;
+    }
+}
+
 async fn poll_media_rows(
     adb: &AdbProgram,
     serial: &str,
