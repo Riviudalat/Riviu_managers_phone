@@ -204,8 +204,9 @@ impl Database {
                 OR EXISTS(SELECT 1 FROM publish_dispatch_jobs j WHERE j.campaign_id=?1 AND j.started_at_ms IS NOT NULL))
             AND NOT EXISTS(SELECT 1 FROM publish_pipeline_runs r WHERE r.campaign_id=?1)
             AND NOT EXISTS(SELECT 1 FROM publish_assignments a WHERE a.campaign_id=?1 AND a.state IN ('posting','uncertain'))
-            AND EXISTS(SELECT 1 FROM publish_assignments a WHERE a.campaign_id=?1 AND a.effect_intent IS NULL AND a.state IN ('queued','scheduled','ready','imported','failed_before_dispatch'))",
-            params![campaign_id,now,admitted_at.format("%Y-%m-%dT%H:%M:%S").to_string()])?;
+            AND EXISTS(SELECT 1 FROM publish_assignments a WHERE a.campaign_id=?1 AND a.effect_intent IS NULL AND a.state IN ('queued','scheduled','ready','imported','failed_before_dispatch')
+                AND a.error_code IS NOT ?4)",
+            params![campaign_id,now,admitted_at.format("%Y-%m-%dT%H:%M:%S").to_string(),super::PUBLISH_DEVICE_NOT_RELEASED])?;
         if changed == 0 {
             return Ok(None);
         }

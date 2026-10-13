@@ -26,6 +26,10 @@ fn replay_on(
     ))
 }
 
+/// A phone the Start's handoff did not release before dispatch: its row starts
+/// `failed_before_dispatch` with no effect, and only the operator's per-phone retry queues it.
+pub const PUBLISH_DEVICE_NOT_RELEASED: &str = "publish_device_not_released";
+
 impl Database {
     pub fn publication_campaign_id(&self, id: &str) -> anyhow::Result<Option<String>> {
         self.conn()?
@@ -54,6 +58,21 @@ impl Database {
         bundles: &[crate::PublishBundle],
         snapshot: &crate::PublishExecutionSnapshotDraft,
         fingerprint: &str,
+    ) -> anyhow::Result<(crate::PublishCampaignRecord, bool)> {
+        self.create_publish_holding_back(request, bundles, snapshot, fingerprint, &[])
+    }
+
+    /// [`Self::create_publish_with_receipt`] for a Start whose handoff could not release
+    /// `not_released` before dispatch. Those phones' rows are created `failed_before_dispatch`
+    /// ([`PUBLISH_DEVICE_NOT_RELEASED`]) in the same transaction, so the campaign claim never
+    /// queues them and the other phones go on; each is retried by its own pre-Post retry.
+    pub fn create_publish_holding_back(
+        &self,
+        request: &crate::PublishCampaignRequest,
+        bundles: &[crate::PublishBundle],
+        snapshot: &crate::PublishExecutionSnapshotDraft,
+        fingerprint: &str,
+        not_released: &[String],
     ) -> anyhow::Result<(crate::PublishCampaignRecord, bool)> {
         Uuid::parse_str(&request.request_id)?;
         anyhow::ensure!(
@@ -84,6 +103,15 @@ impl Database {
             Uuid::new_v4().to_string()
         };
         Self::insert_publish_campaign(&tx, &id, request, bundles, Some(snapshot))?;
+        let now = Utc::now().to_rfc3339();
+        for udid in not_released {
+            tx.execute(
+                "UPDATE publish_assignments SET state='failed_before_dispatch',error_code=?3,
+                 revision=revision+1,updated_at=?4
+                 WHERE campaign_id=?1 AND udid=?2 AND effect_intent IS NULL",
+                params![id, udid, PUBLISH_DEVICE_NOT_RELEASED, now],
+            )?;
+        }
         tx.execute(
             "INSERT INTO publish_create_requests VALUES(?1,?2,?3,?4)",
             params![request.request_id, id, fingerprint, Utc::now().to_rfc3339()],
@@ -333,5 +361,69 @@ mod tests {
         assert!(reopened
             .replay_publish_create(&request.request_id, &"3".repeat(64))
             .is_err());
+    }
+
+    #[test]
+    fn a_phone_the_start_did_not_release_waits_failed_before_dispatch_for_its_own_retry() {
+        let (db, _, seed, _) = super::super::publish_pipeline::tests::fixture();
+        let mut request = db.publish_campaign_request(&seed).unwrap().unwrap();
+        request.request_id = Uuid::new_v4().to_string();
+        let mut bundles = db.get_publish_campaign(&seed).unwrap().unwrap().bundles;
+        for bundle in &mut bundles {
+            bundle.id = format!("{}:{}", request.request_id, bundle.id);
+        }
+        request.bundle_ids = bundles.iter().map(|b| b.id.clone()).collect();
+        let snapshot = crate::PublishExecutionSnapshotDraft {
+            input_digest: "1".repeat(64),
+            status: crate::PublishExecutionStatus::Partial,
+            retry_scope: crate::PublishRetryScope::FullPipeline,
+            report_json: serde_json::json!({}),
+        };
+        let (campaign, _) = db
+            .create_publish_holding_back(
+                &request,
+                &bundles,
+                &snapshot,
+                &"2".repeat(64),
+                &["b".into()],
+            )
+            .unwrap();
+        let rows = db
+            .get_publish_campaign(&campaign.id)
+            .unwrap()
+            .unwrap()
+            .assignments;
+        let held = rows.iter().find(|a| a.udid == "b").unwrap();
+        assert_eq!(
+            held.state,
+            crate::PublishCampaignState::FailedBeforeDispatch
+        );
+        assert_eq!(
+            held.error_code.as_deref(),
+            Some(PUBLISH_DEVICE_NOT_RELEASED)
+        );
+        assert!(held.effect_intent.is_none());
+        // The Start's campaign claim queues only the released phones.
+        db.claim_publish_pipeline(&campaign.id).unwrap().unwrap();
+        let queued = |udid: &str| -> i64 {
+            db.conn()
+                .unwrap()
+                .query_row(
+                    "SELECT COUNT(*) FROM publish_dispatch_jobs WHERE campaign_id=?1 AND udid=?2 AND state='queued'",
+                    params![campaign.id, udid],
+                    |r| r.get(0),
+                )
+                .unwrap()
+        };
+        assert_eq!((queued("a"), queued("b"), queued("c")), (1, 0, 1));
+        // Nothing was sent to it, so its own pre-Post retry runs while the siblings post.
+        db.claim_publish_assignment_retry_checked(
+            &held.id,
+            db.publish_assignment_revision(&held.id).unwrap(),
+            &Uuid::new_v4().to_string(),
+        )
+        .unwrap()
+        .unwrap();
+        assert_eq!(queued("b"), 1);
     }
 }

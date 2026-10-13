@@ -381,10 +381,12 @@ impl Database {
             })
             .transpose()?
             .flatten();
+        // A phone the Start could not release waits for its own per-phone retry.
         let rows: Vec<(String,String,String,String)> = conn.prepare(
             "SELECT id,publication_id,udid,state FROM publish_assignments WHERE campaign_id=?1
-             AND effect_intent IS NULL AND state IN ('queued','scheduled','ready','imported','failed_before_dispatch')")?
-            .query_map([&run.campaign_id], |r| Ok((r.get(0)?,r.get(1)?,r.get(2)?,r.get(3)?)))?
+             AND effect_intent IS NULL AND state IN ('queued','scheduled','ready','imported','failed_before_dispatch')
+             AND error_code IS NOT ?2")?
+            .query_map(params![&run.campaign_id, super::PUBLISH_DEVICE_NOT_RELEASED], |r| Ok((r.get(0)?,r.get(1)?,r.get(2)?,r.get(3)?)))?
             .collect::<Result<_,_>>()?;
         for (id, publication, udid, state) in rows {
             let attempt = Uuid::new_v4().to_string();

@@ -768,6 +768,19 @@ có versionCode tối thiểu 5 cho launcher; APK, manifest và NOTICE phải kh
 - Handoff chờ dispatch job đang chạy, claim của assignment, device work owner và trạng
   thái Nuôi của máy đã chọn drain hết. Đóng app thật dùng giới hạn chung hai máy và
   deadline hiện có; không tăng giới hạn.
+- Start có hai ngân sách handoff riêng, mỗi cái 125 giây (`HANDOFF_BUDGET`): chờ tới lượt
+  handoff tính từ lúc tiếp nhận; nhả máy tính từ lúc gọi `prepare_publish_devices`, sau
+  preflight duyệt lại. Khi hai bước còn dùng chung một hạn (13/10/2026), preflight duyệt lại
+  30 máy tiêu ~100 giây, nên 6 máy cuối hết hạn ngay khi tới lượt đóng.
+- Máy không nhả được trước dispatch không làm hỏng cả lượt. `unreleased_publish_devices` trả
+  các máy `closed=false` kèm lý do. Preflight sau nhả chỉ bỏ qua issue gắn đúng các máy đó;
+  issue khác vẫn từ chối cả lượt và digest vẫn so trên toàn bộ tập đã duyệt.
+  `create_publish_holding_back` tạo assignment của các máy đó ở `failed_before_dispatch`,
+  `error_code = publish_device_not_released`, trong cùng transaction tạo campaign. Claim
+  campaign (`claim_publish_pipeline`, `enqueue_publish_jobs`) không xếp hàng các hàng này, kể
+  cả khi thử lại toàn campaign; chỉ `publish_retry_assignment` (**Thử lại máy này**) xếp lại và
+  xóa mã. Không máy nào nhả được, hoặc kết quả nhả thiếu/trùng hàng, thì Start vẫn từ chối
+  trước khi tạo campaign. Không force-drop lease, không thu hồi Repair, không gửi lại Post.
 - Closer độc quyền kiểm lại quyền của assignment, đóng app, bỏ context độc quyền rồi lưu
   release proof riêng của assignment. Proof bind lần loại mới nhất, máy, state, revision,
   Post intent và evidence; assignment đổi hoặc resume xác minh tường minh mới hơn làm

@@ -124,7 +124,7 @@ async fn dispatch_recovery_missing_metadata_is_retryable_but_unsupported_locale_
 }
 
 #[test]
-fn new_publish_requires_one_successful_release_for_every_selected_phone() {
+fn a_phone_the_handoff_did_not_release_is_held_back_and_the_others_go_on() {
     use riviu_core::ipc_contract::{OperationStopResult, StopDeviceResult};
     let selected = vec!["phone-a".into(), "phone-b".into()];
     let mut result = OperationStopResult {
@@ -133,7 +133,7 @@ fn new_publish_requires_one_successful_release_for_every_selected_phone() {
         devices: vec![],
         stop_marker: None,
     };
-    assert!(require_released_publish_devices(&selected, &result).is_err());
+    assert!(unreleased_publish_devices(&selected, &result).is_err());
     for id in &selected {
         result.devices.push(StopDeviceResult {
             udid: id.clone(),
@@ -141,12 +141,26 @@ fn new_publish_requires_one_successful_release_for_every_selected_phone() {
             message: "released".into(),
         });
     }
-    assert!(require_released_publish_devices(&selected, &result).is_ok());
+    assert!(unreleased_publish_devices(&selected, &result)
+        .unwrap()
+        .is_empty());
+    // HX-START: one phone past the release deadline no longer fails the other 29.
     result.devices[1].closed = false;
-    assert!(require_released_publish_devices(&selected, &result).is_err());
+    result.devices[1].message = "Đã hết thời gian chờ nhả quyền điều khiển".into();
+    assert_eq!(
+        unreleased_publish_devices(&selected, &result).unwrap(),
+        vec![(
+            "phone-b".to_owned(),
+            "Đã hết thời gian chờ nhả quyền điều khiển".to_owned()
+        )]
+    );
+    // With no phone released there is nothing to publish: the Start refuses as before.
+    result.devices[0].closed = false;
+    assert!(unreleased_publish_devices(&selected, &result).is_err());
+    result.devices[0].closed = true;
     result.devices[1].closed = true;
     result.devices.push(result.devices[1].clone());
-    assert!(require_released_publish_devices(&selected, &result).is_err());
+    assert!(unreleased_publish_devices(&selected, &result).is_err());
 }
 
 #[test]

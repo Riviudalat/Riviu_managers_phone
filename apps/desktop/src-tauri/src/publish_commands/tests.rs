@@ -2706,7 +2706,7 @@ fn new_publications_require_sheet_and_verified_import_cleanup() {
         "prepare_publish_devices(",
         "require_current_preflight_digest(&prepared.report",
         "let approval = prepared.approval();",
-        "create_publish_with_receipt(",
+        "create_publish_holding_back(",
     ];
     for pair in order.windows(2) {
         assert!(
@@ -2716,6 +2716,14 @@ fn new_publications_require_sheet_and_verified_import_cleanup() {
             pair[1]
         );
     }
+    // HX-START: the release budget starts after the approval re-preflight, not at acceptance.
+    let release_call = &create[at("crate::commands::prepare_publish_devices(")..];
+    let release_call = &release_call[..release_call.find(".await?").unwrap()];
+    assert!(
+        release_call.contains("tokio::time::Instant::now() + HANDOFF_BUDGET")
+            && !release_call.contains("handoff_deadline"),
+        "release must not spend the deadline the approval check already used"
+    );
     let approval = code_of("async fn require_approval_before_effects(").join(
         "
 ",
