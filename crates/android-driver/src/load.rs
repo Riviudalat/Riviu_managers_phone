@@ -250,6 +250,22 @@ pub type LoadRebootRepair = Arc<
 /// How long after a gate reboot the gate keeps sampling for a decisive verdict.
 pub const POST_REBOOT_SAMPLE_WINDOW: Duration = Duration::from_secs(60);
 
+/// adb `offline` without a break for this long after a Riviu reboot earns the one per-device
+/// `adb -s <serial> reconnect`. A cap, not measured: on 13/10/2026 an SM-G955F (Android 9)
+/// stayed offline ~20 min after a load reboot until `adb reconnect offline` cleared it.
+pub const OFFLINE_RECONNECT_AFTER_MS: i64 = 60 * 1000;
+
+/// How long after a Riviu reboot an offline phone is still that reboot's business. Not
+/// measured: the reboot deadline plus a margin; later offline is the cable or the operator's.
+pub const OFFLINE_RECONNECT_WINDOW_MS: i64 = 15 * 60 * 1000;
+
+/// Deadline for `adb -s <serial> reconnect`, a host-side transport reset that returns at once.
+pub const OFFLINE_RECONNECT_TIMEOUT: Duration = Duration::from_secs(10);
+
+/// How long the job's reboot path waits for the phone to show `device` again before helper
+/// preparation: the offline cap, then the reconnect and a margin. Not measured.
+pub const POST_REBOOT_ONLINE_WAIT: Duration = Duration::from_secs(100);
+
 #[derive(Default)]
 struct PhoneLoad {
     last: Option<DeviceLoadSample>,
@@ -258,6 +274,10 @@ struct PhoneLoad {
     last_pass_ms: Option<i64>,
     last_cleanup_ms: Option<i64>,
     reboots_ms: Vec<i64>,
+    /// First adb `offline` reading of the current unbroken run, after a Riviu reboot.
+    offline_since_ms: Option<i64>,
+    /// The latest reboot's one `adb reconnect` was spent.
+    reconnect_spent: bool,
 }
 
 /// Per-phone load history shared by the admission gate and the background monitor. In memory:
@@ -430,6 +450,32 @@ impl LoadBook {
         // A rebooted phone takes no job until a fresh sample passes.
         phone.last_pass_ms = None;
         phone.last = None;
+        phone.offline_since_ms = None;
+        phone.reconnect_spent = false;
+    }
+
+    /// One adb state reading of `serial`. True exactly once per Riviu reboot: when the phone
+    /// has read `offline` without a break for [`OFFLINE_RECONNECT_AFTER_MS`] within
+    /// [`OFFLINE_RECONNECT_WINDOW_MS`] of that reboot. The caller then runs the reconnect.
+    pub fn offline_reconnect_due(&self, serial: &str, offline: bool, now: i64) -> bool {
+        let mut phones = self.phones.lock();
+        let Some(phone) = phones.get_mut(serial) else {
+            return false;
+        };
+        let rebooted = phone
+            .reboots_ms
+            .last()
+            .is_some_and(|at| now - at < OFFLINE_RECONNECT_WINDOW_MS);
+        if !offline || !rebooted {
+            phone.offline_since_ms = None;
+            return false;
+        }
+        let since = *phone.offline_since_ms.get_or_insert(now);
+        if phone.reconnect_spent || now - since < OFFLINE_RECONNECT_AFTER_MS {
+            return false;
+        }
+        phone.reconnect_spent = true;
+        true
     }
 
     pub fn snapshot(&self) -> Vec<DeviceLoadState> {

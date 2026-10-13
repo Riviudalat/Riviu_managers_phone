@@ -1175,7 +1175,7 @@ impl AndroidDriver {
                     .journal(serial, "device.load.reboot.failed", &message);
                 anyhow::bail!("{serial}: {message}");
             }
-            let Ok(out) = self
+            let out = match self
                 .adb
                 .shell_output(
                     serial,
@@ -1183,14 +1183,95 @@ impl AndroidDriver {
                     crate::load::BOOT_PROBE_TIMEOUT,
                 )
                 .await
-            else {
-                continue;
+            {
+                Ok(out) => {
+                    self.observe_adb_state_after_reboot(serial, false).await;
+                    out
+                }
+                Err(error) => {
+                    let offline =
+                        adb::classify_fault(&format!("{error:#}")) == adb::AdbFault::Offline;
+                    self.observe_adb_state_after_reboot(serial, offline).await;
+                    continue;
+                }
             };
             if reboot.finished(&crate::load::parse_boot_probe(&out.stdout)) {
                 self.load
                     .journal(serial, "device.load.reboot.done", "đã khởi động xong");
                 return Ok(());
             }
+        }
+    }
+
+    /// Feed one adb state reading of `serial`. When the phone has read `offline` without a
+    /// break past [`crate::load::OFFLINE_RECONNECT_AFTER_MS`] after a Riviu reboot (load,
+    /// language), run that reboot's one `adb -s <serial> reconnect`. Per device: never
+    /// `kill-server` or a fleet-wide `reconnect`. The intent is journaled before the command.
+    pub async fn observe_adb_state_after_reboot(&self, serial: &str, offline: bool) {
+        if !self
+            .load
+            .offline_reconnect_due(serial, offline, crate::load::now_ms())
+        {
+            return;
+        }
+        self.load.journal(
+            serial,
+            "device.load.reconnect",
+            &format!(
+                "adb báo máy offline liên tục hơn {} s sau khi Riviu khởi động lại máy; chạy \
+                 một lần adb -s {serial} reconnect (chỉ máy này, không khởi động lại adb-server)",
+                crate::load::OFFLINE_RECONNECT_AFTER_MS / 1000
+            ),
+        );
+        match self
+            .adb
+            .device(
+                serial,
+                &["reconnect"],
+                crate::load::OFFLINE_RECONNECT_TIMEOUT,
+            )
+            .await
+        {
+            Ok(_) => self.load.journal(
+                serial,
+                "device.load.reconnect.done",
+                "đã gửi reconnect; chờ máy kết nối lại, helper được kiểm tra lại khi máy online",
+            ),
+            Err(error) => self.load.journal(
+                serial,
+                "device.load.reconnect.failed",
+                &format!(
+                    "reconnect thất bại: {error:#}. Rút rồi cắm lại cáp USB của máy này nếu \
+                     máy vẫn offline"
+                ),
+            ),
+        }
+    }
+
+    /// Wait, bounded by [`crate::load::POST_REBOOT_ONLINE_WAIT`], for adb to show `serial` as
+    /// `device` after a Riviu reboot, feeding each reading to
+    /// [`Self::observe_adb_state_after_reboot`]. True once it does. Read-only apart from that
+    /// one reconnect.
+    pub async fn wait_for_adb_online_after_reboot(&self, serial: &str) -> bool {
+        const POLL: Duration = Duration::from_secs(3);
+        const GET_STATE_TIMEOUT: Duration = Duration::from_secs(5);
+        let deadline = std::time::Instant::now() + crate::load::POST_REBOOT_ONLINE_WAIT;
+        loop {
+            let offline = match self
+                .adb
+                .device(serial, &["get-state"], GET_STATE_TIMEOUT)
+                .await
+            {
+                Ok(state) if state.trim() == "device" => return true,
+                Ok(state) => state.trim() == "offline",
+                Err(error) => adb::classify_fault(&format!("{error:#}")) == adb::AdbFault::Offline,
+            };
+            self.observe_adb_state_after_reboot(serial, offline).await;
+            if std::time::Instant::now() >= deadline {
+                tracing::warn!(serial, "phone not online on adb after reboot");
+                return false;
+            }
+            tokio::time::sleep(POLL).await;
         }
     }
 

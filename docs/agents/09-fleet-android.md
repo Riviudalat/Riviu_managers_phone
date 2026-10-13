@@ -92,7 +92,23 @@ Khi chỉ một máy có root không đọc được hoặc tap bị nuốt, so 
 - Sau reboot: kiểm lại auto-rotate (đã bật lại sau reboot) và khóa màn hình. Helper được
   tự đối soát khi máy kết nối lại hoặc ở admission của job (pending → prepare → execute
   dưới lease Repair, không cần nút); "Khôi phục helper" chỉ là đường dự phòng khi kế hoạch
-  tự từ chối.
+  tự từ chối. Mỗi lần máy từ offline/lỗi trở lại `device` mà lỗi helper còn chốt được đối
+  soát lại, tối đa `MAX_RECONNECT_RECONCILES` = 3 lần (chưa đo; helper đạt thì đếm lại)
+  (`android_helper_setup.rs`).
+- Lỗi adb mất máy lúc lấy helper (`device offline`, `device '…' not found`, daemon không
+  kết nối được, timeout: `adb::is_transport_lost`) là lỗi kết nối `category=adb_unreachable`,
+  thử lại được, kể cả khi lỗi mang fence `HelperRecoveryRequired` của lần reconnect owner
+  cũ. Nó không chứng minh gì về owner cũ nên không reclaim; owner chỉ được bỏ khi máy online
+  và `owner_restart_proof` thấy boot id đổi/tiến trình mất.
+- Máy kẹt `offline` sau reboot do Riviu (`issue_load_reboot`: tải, ngôn ngữ). Số đo:
+  13/10/2026 SM-G955F (`ce051715e15b2c2e02`, Android 9) boot xong rồi ~10 s sau báo offline
+  ~20 phút, đến khi chạy tay `adb reconnect offline`. Offline liên tục ≥60 s trong 15 phút
+  sau reboot (cả hai là cap chưa đo) thì Riviu chạy một lần `adb -s <serial> reconnect` cho
+  lần reboot đó: ghi intent `device.load.reconnect` trước, rồi `.done`/`.failed`. Không
+  `kill-server`, không `reconnect` toàn bộ. Nơi đếm: vòng quét roster (chạy cả khi worker
+  nền bị đóng băng), chờ boot, và `wait_for_adb_online_after_reboot` (≤100 s) trong hai
+  đường reboot của `device_load.rs`. Đường của job thử lấy helper thêm một lần khi máy
+  online lại.
 - adbd chạy root (`id -u` = 0, thường do GenFarmer `adb root`) được tự sửa: một
   `adb -s <serial> unroot` mỗi boot id dưới lease Repair, ghi intent trước, chờ ≤45 s
   (chưa đo trên máy). Không restart adb-server của PC; vẫn root thì báo tắt GenFarmer và

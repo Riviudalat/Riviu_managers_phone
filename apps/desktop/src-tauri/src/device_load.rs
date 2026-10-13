@@ -291,6 +291,8 @@ async fn recover_idle(
         android.mark_load_awaiting_operator(udid, &format!("{why}; {error:#}"));
         return;
     }
+    // A phone stuck `offline` gets this reboot's one per-device reconnect (13/10/2026).
+    android.wait_for_adb_online_after_reboot(udid).await;
     reapply_baseline(android, db, udid).await;
     drop(lease);
     // Helper: the phone left adb and came back, so `AndroidHelperSetup` sees a new connection
@@ -336,11 +338,25 @@ pub(super) async fn reboot_for_job(
         .wait_for_load_reboot(udid, &reboot)
         .await
         .map_err(|error| format!("{error:#}"))?;
+    // 13/10/2026: an SM-G955F (Android 9) finished booting, then read `offline` from ~10 s
+    // later until a manual reconnect. Each wait spends the reboot's one per-device reconnect if
+    // the phone stays offline past the cap; it returns at once for a phone that is online.
+    android.wait_for_adb_online_after_reboot(udid).await;
     reapply_baseline(android, db, udid).await;
     // The helper process ended with the boot, and automatic helper setup may be frozen. Bring
     // it back now so a composer opened right after the gate finds it; the transfer step still
-    // qualifies it, and a failure here is left to the job's own step.
-    if let Err(error) = android.prepare_helper_runtime(udid).await {
+    // qualifies it, and a failure here is left to the job's own step. A phone that dropped off
+    // adb meanwhile gets one more try once it is back.
+    let mut prepared = android.prepare_helper_runtime(udid).await;
+    if prepared
+        .as_ref()
+        .is_err_and(riviu_android_driver::adb::is_transport_lost)
+        && android.wait_for_adb_online_after_reboot(udid).await
+    {
+        reapply_baseline(android, db, udid).await;
+        prepared = android.prepare_helper_runtime(udid).await;
+    }
+    if let Err(error) = prepared {
         log::warn!("helper not ready after load reboot of {udid}: {error:#}");
     }
     Ok(())
