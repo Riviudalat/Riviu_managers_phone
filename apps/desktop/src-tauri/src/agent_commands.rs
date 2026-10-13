@@ -780,7 +780,7 @@ fn helper_maintenance_prepare_error(error: DeviceControlError) -> CommandError {
         "HelperMaintenanceRetainedOwnerMissing" => ("HelperMaintenanceRetainedOwnerMissing", "retained_owner_missing",
             "Không có hồ sơ chủ phiên helper được giữ trên PC này; chưa đủ bằng chứng để chuẩn bị khôi phục. Kiểm tra đúng PC và dữ liệu phiên; không tự giành quyền hoặc đặt lại helper.".into()),
         "maintenance cannot guess or restore a lost boot IME" => ("HelperMaintenanceImeUnproved", "ime_unproved",
-            "Bàn phím mặc định của máy vẫn là bàn phím Riviu Helper từ phiên cũ, nên Riviu không biết bàn phím gốc để trả lại và không tự đổi. Trên máy: Cài đặt → Quản lý chung → Danh sách bàn phím và mặc định → Bàn phím mặc định → chọn Bàn phím Samsung (hoặc bàn phím thường dùng). Riviu tự kiểm tra lại trong vài phút; nếu đã quá 7 phút thì rút cáp cắm lại máy.".into()),
+            format!("Máy {device}: bàn phím mặc định vẫn là bàn phím Riviu Helper từ phiên cũ và PC này không còn bản ghi bàn phím gốc của máy (dữ liệu cũ), nên Riviu không tự đổi. Trên PC, xem các bàn phím đang bật: adb -s {device} shell ime list -s, rồi chọn lại bàn phím gốc: adb -s {device} shell ime set <bàn phím gốc> (đa số máy trong đội dùng com.genfarmer.uiautomator/.AdbKeyboard). Hoặc trên máy: Cài đặt → Quản lý chung → Danh sách bàn phím và mặc định → Bàn phím mặc định. Riviu tự kiểm tra lại trong vài phút; nếu đã quá 7 phút thì rút cáp cắm lại máy.")),
         // Typed refusals are checked before the recovery fence they may also carry.
         _ => match HelperShellIdentityRefused::from_chain_text(cause) {
             Some(refusal) => (match refusal {
@@ -824,6 +824,10 @@ mod tests {
             assert_eq!(error.code, expected, "{cause}");
             assert!(!error.message.contains("fixture-secret-token"));
             assert!(!error.message.contains("raw journal"));
+            // Legacy data without a recorded keyboard: the operator gets the phone and the command.
+            if expected == "HelperMaintenanceImeUnproved" {
+                assert!(error.message.contains("adb -s fixture-device shell ime set "), "{}", error.message);
+            }
         }
     }
 

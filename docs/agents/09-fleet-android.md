@@ -95,6 +95,19 @@ Khi chỉ một máy có root không đọc được hoặc tap bị nuốt, so 
   tự từ chối. Mỗi lần máy từ offline/lỗi trở lại `device` mà lỗi helper còn chốt được đối
   soát lại, tối đa `MAX_RECONNECT_RECONCILES` = 3 lần (chưa đo; helper đạt thì đếm lại)
   (`android_helper_setup.rs`).
+- Bàn phím gốc là intent bền: `with_ime_mode` ghi `pending.previousIme` và
+  `helperWasEnabled` vào `ime-checkpoint.json` trước `ime set`. Khi bàn phím mặc định vẫn
+  là `RiviuIme`, maintenance prepare lấy bàn phím gốc từ checkpoint của đúng owner (plan
+  có thêm `imeRestore`), không từ máy và không đoán. Execute ghi intent, trả bàn phím
+  (`ime set`, đọc lại; `ime disable` nếu trước đó helper IME chưa bật) **trước**
+  `force-stop`, vì Android bind lại IME đang chọn và sẽ khởi động lại helper. Job
+  clipboard cũ (helper trả 400 sau khi chạy lại) được lưu vào `maintenance/<id>/` ở trạng
+  thái `archivedUnresolved`, không replay. Với client còn cache, nợ clipboard chỉ mở
+  maintenance khi `owner_restart_proof` chứng minh tiến trình helper đã mất (boot id,
+  vắng tiến trình hoặc pid khác). Không có proof thì vẫn `cleanup_pending`. Checkpoint cũ
+  không có `previousIme` vẫn là `ime_unproved`, và thông báo nêu serial cùng lệnh
+  `adb -s <serial> shell ime set …`. Đường dự phòng "bàn phím duy nhất còn bật" chỉ dành
+  cho dữ liệu đó (13/10/2026: máy 23, 32, 38).
 - Lỗi adb mất máy lúc lấy helper (`device offline`, `device '…' not found`, daemon không
   kết nối được, timeout: `adb::is_transport_lost`) là lỗi kết nối `category=adb_unreachable`,
   thử lại được, kể cả khi lỗi mang fence `HelperRecoveryRequired` của lần reconnect owner

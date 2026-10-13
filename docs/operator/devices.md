@@ -230,6 +230,16 @@ vụ) hoặc helper trên máy vừa chạy lại, phiên helper cũ đã mất 
 phiên đó và nhận phiên mới ngay, kể cả khi máy đang trong tác vụ. Nhật ký ghi "tự đối soát
 helper: tiến trình giữ phiên cũ đã mất …".
 
+Nếu phiên cũ đang dán chữ qua clipboard thì bàn phím mặc định còn là bàn phím Riviu
+Helper. Khi helper đã chạy lại, nó không còn biết thao tác đó. Trước khi đổi bàn phím,
+Riviu đã ghi bàn phím gốc của máy, nên lúc tự đối soát app trả máy về đúng bàn phím đó
+(thường là `com.genfarmer.uiautomator/.AdbKeyboard`) rồi mới dừng helper cũ và nhận
+phiên mới. Thao tác cũ vẫn được giữ là chưa rõ và không được gửi lại. Chỉ khi PC không có
+bản ghi bàn phím gốc (dữ liệu từ bản cài cũ) và máy bật nhiều bàn phím, ô máy mới báo
+`ime_unproved`. Thông báo nêu đúng máy và lệnh cần chạy trên PC: xem bàn phím bằng
+`adb -s <mã máy> shell ime list -s`, rồi chọn lại bằng
+`adb -s <mã máy> shell ime set <bàn phím gốc>`. App tự kiểm tra lại sau vài phút.
+
 Lỗi chuẩn bị helper phân biệt `runtime_acquisition` (nhận phiên runtime) và
 `clipboard_qualification` (xác minh clipboard). Thông báo chỉ dùng các nhóm nguyên
 nhân cố định: `shell_root`, `shell_uid`, `android_user`, `clipboard_not_qualified`,

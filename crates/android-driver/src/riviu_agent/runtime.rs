@@ -603,6 +603,47 @@ async fn maintenance_process(adb: &AdbProgram, serial: &str) -> anyhow::Result<S
     Ok(pids.to_owned())
 }
 
+/// The keyboard the retained owner recorded in its durable checkpoint before it selected the
+/// helper IME, bound to that owner. `None` when no valid record exists (older data).
+fn recorded_ime_restore(state: &Path, serial: &str, owner_id: &str) -> Option<Value> {
+    let checkpoint = pending_checkpoint(state, serial).ok()??;
+    if checkpoint["ownerId"].as_str() != Some(owner_id) { return None; }
+    let pending = &checkpoint["pending"];
+    let previous = pending["previousIme"].as_str()
+        .filter(|ime| validate_ime_id(ime).is_ok() && *ime != IME_ID)?;
+    let was_enabled = pending["helperWasEnabled"].as_bool()?;
+    Some(json!({"previousIme":previous,"helperWasEnabled":was_enabled}))
+}
+
+/// Once the recorded keyboard is back, a fresh observation reads it as the boot IME and no
+/// longer derives the restore; the plan's restore is the only permitted carry-over.
+fn carry_ime_restore(observed: &mut Value, plan: &Value) {
+    if let (Some(restore), Some(map)) = (plan.get("imeRestore"), observed.as_object_mut()) {
+        if !map.contains_key("imeRestore") && map.get("bootIme") == plan.get("bootIme") {
+            map.insert("imeRestore".into(), restore.clone());
+        }
+    }
+}
+
+/// Select the recorded keyboard again and, when the helper IME was not enabled before the old
+/// owner switched, disable it. Idempotent for a reconciliation that already restored it.
+async fn restore_recorded_ime(adb: &AdbProgram, serial: &str, restore: &Value) -> anyhow::Result<()> {
+    let previous = restore["previousIme"].as_str().context("maintenance IME restore target missing")?;
+    anyhow::ensure!(validate_ime_id(previous).is_ok() && previous != IME_ID, "maintenance IME restore target invalid");
+    let was_enabled = restore["helperWasEnabled"].as_bool().context("maintenance IME prior enablement missing")?;
+    let current = current_ime(adb, serial).await?;
+    if current == IME_ID { set_ime(adb, serial, previous).await?; }
+    else { anyhow::ensure!(current == previous, "maintenance IME changed outside the old owner; preserved"); }
+    anyhow::ensure!(current_ime(adb, serial).await? == previous, "maintenance IME restore unverified");
+    if !was_enabled {
+        adb.shell(serial, &format!("ime disable {IME_ID}")).await?;
+        let enabled = adb.shell(serial, "settings get secure enabled_input_methods").await?;
+        anyhow::ensure!(!enabled.trim().split(':').any(|entry| entry.split(';').next() == Some(IME_ID)),
+            "maintenance IME enablement restore unverified");
+    }
+    Ok(())
+}
+
 fn finish_maintenance(state: &Path, archive: &Path, plan: &Value) -> anyhow::Result<()> {
     let owner_id = plan["oldOwnerId"].as_str().context("maintenance owner missing")?;
     owner_credential_name(plan["serial"].as_str().context("maintenance serial missing")?, owner_id)?;
@@ -689,18 +730,29 @@ impl HelperClient {
             && (self.maintenance_plan.lock().is_some()
                 || self.retained_failure.load(std::sync::atomic::Ordering::Acquire)),
             "live helper owner must settle normally");
-        anyhow::ensure!(!self.cleanup_is_pending(), "helper clipboard/baseline cleanup unresolved");
         let owner = self.canary.as_ref().context("cached maintenance owner missing")?;
         let state = state_path(root.context("helper state directory missing")?, &self.serial)?;
         anyhow::ensure!(owner.report == state, "cached helper state binding changed");
+        let mut durable_settled = true;
         if let Some(bytes) = journal_bytes(&state.join("ime-checkpoint.json"))? {
             let saved: Value = serde_json::from_slice(&bytes)?;
             anyhow::ensure!(saved["serial"] == self.serial && saved["androidUser"] == 0
                 && saved["ownerId"] == owner.owner_id && saved["serviceInstance"] == owner.instance
-                && saved["generation"] == owner.generation
-                && saved.get("pending").is_some_and(Value::is_null)
-                && saved.get("baseline").is_some_and(Value::is_null),
+                && saved["generation"] == owner.generation,
                 "helper durable clipboard cleanup unresolved");
+            durable_settled = saved.get("pending").is_some_and(Value::is_null)
+                && saved.get("baseline").is_some_and(Value::is_null);
+        }
+        if self.cleanup_is_pending() || !durable_settled {
+            // A clipboard job or snapshot lives only in the helper process that took it. When
+            // that process is proven gone the obligation can never settle; maintenance archives
+            // it unresolved and replays nothing. Without proof the fence stays.
+            let proved = match owner_record(&state, &self.serial) {
+                Ok(record) => owner_restart_proof(&self.adb, &self.serial, &state, &record).await,
+                Err(_) => None,
+            };
+            anyhow::ensure!(proved.is_some(), if self.cleanup_is_pending() { "helper clipboard/baseline cleanup unresolved" }
+                else { "helper durable clipboard cleanup unresolved" });
         }
         // The original record must match this client, not merely the requested serial.
         // After a settled receipt retires it, only the already sealed same-plan retry
@@ -778,9 +830,17 @@ impl HelperClient {
         anyhow::ensure!(installed_hash.len() == 64 && installed_hash.bytes().all(|b| b.is_ascii_hexdigit())
             && (record["apkSha256"].as_str() == Some(installed_hash.as_str()) || installed_hash == bundled_hash),
             "maintenance helper APK provenance changed");
-        let boot_ime = current_ime(adb, serial).await?;
-        validate_ime_id(&boot_ime)?;
-        anyhow::ensure!(boot_ime != IME_ID, "maintenance cannot guess or restore a lost boot IME");
+        let current = current_ime(adb, serial).await?;
+        validate_ime_id(&current)?;
+        // A helper IME left selected by the old owner is handed back only to the keyboard that
+        // owner wrote down before switching (`with_ime_mode`), never to a guess.
+        let (boot_ime, ime_restore) = if current == IME_ID {
+            let restore = recorded_ime_restore(&state, serial, owner_id)
+                .ok_or_else(|| anyhow!("maintenance cannot guess or restore a lost boot IME"))?;
+            (restore["previousIme"].as_str().context("recorded boot IME missing")?.to_owned(), Some(restore))
+        } else {
+            (current, None)
+        };
         let boot_id = checked_shell(adb, serial, "cat /proc/sys/kernel/random/boot_id").await?.trim().to_owned();
         anyhow::ensure!(!boot_id.is_empty() && boot_id.len() <= 128, "maintenance boot identity missing");
         let process = maintenance_process(adb, serial).await?;
@@ -789,13 +849,16 @@ impl HelperClient {
             let bytes = journal_bytes(&state.join(&name))?;
             journals.insert(name, bytes.as_ref().map(|b| json!(riviu_core::frame_sha256(b))).unwrap_or(Value::Null));
         }
-        Ok(json!({"schema":1,"maintenanceId":maintenance_id,"serial":serial,"androidUser":0,
+        let mut plan = json!({"schema":1,"maintenanceId":maintenance_id,"serial":serial,"androidUser":0,
             "bundledApkSha256":bundled_hash,"installedApkSha256":installed_hash,"installedApkPath":installed_path,
             "packageUid":uid,"packageVersion":version,"certificateSha256":CERT_SHA256,
             "oldOwnerId":owner_id,"oldServiceInstance":record["serviceInstance"],"oldOwnerGeneration":record["ownerGeneration"],
             "oldClaimNonce":record["nonce"],"journalHashes":journals,"bootIme":boot_ime,"bootId":boot_id,
             "observedProcess":process,"effectIntent":effect_intent,"disposition":"operatorAuthorizedSupersession",
-            "exactReleaseProved":false,"clipboardRestorationProved":false}))
+            "exactReleaseProved":false,"clipboardRestorationProved":false});
+        // Absent unless needed, so a plan prepared by an older build still binds.
+        if let Some(restore) = ime_restore { plan["imeRestore"] = restore; }
+        Ok(plan)
     }
 
     /// Exact-plan maintenance only, authorized by operator confirmation or automatic setup policy.
@@ -828,6 +891,7 @@ impl HelperClient {
                 "maintenance active plan changed; no replay or retirement");
         }
         let mut observed = Self::observe_maintenance(adb, serial, apk, root, id, plan["effectIntent"].clone()).await?;
+        carry_ime_restore(&mut observed, &plan);
         if reconciling || observation_only {
             anyhow::ensure!(observed["observedProcess"] == "", "maintenance effect unresolved; process present; no replay");
             // Process disappearance is the only permitted change; retain the original plan verbatim.
@@ -861,12 +925,19 @@ impl HelperClient {
             file.sync_all()?;
             drop(file);
         }
+        // The boot keyboard goes back before the stop: Android may rebind a selected IME and
+        // restart the helper process the stop must prove gone. The manual fix on 13/10/2026
+        // (SM-G955N/F) used the same order and settled with the process absent.
+        if let Some(restore) = plan.get("imeRestore") {
+            restore_recorded_ime(adb, serial, restore).await?;
+        }
         // An active intent never grants replay authority, even if the earlier dispatch is unknown.
         let stop_dispatched = !reconciling && !observation_only && !plan["observedProcess"].as_str().context("process binding missing")?.is_empty();
         if stop_dispatched {
             checked_shell(adb, serial, "am force-stop --user 0 com.riviu.agent").await?;
         }
         let mut settled = Self::observe_maintenance(adb, serial, apk, root, id, plan["effectIntent"].clone()).await?;
+        carry_ime_restore(&mut settled, &plan);
         anyhow::ensure!(settled["observedProcess"] == "", "superseded helper process still present");
         settled["observedProcess"] = plan["observedProcess"].clone();
         anyhow::ensure!(settled == plan, "maintenance binding changed; settlement unresolved");
@@ -875,6 +946,7 @@ impl HelperClient {
             else if stop_dispatched { "dispatched" } else { "alreadyAbsent" };
         let receipt = json!({"state":"superseded","plan":plan,"exactReleaseProved":false,
             "clipboardRestorationProved":false,"oldObligations":"archivedUnresolved","packageProcessAbsent":true,
+            "bootImeRestored":plan.get("imeRestore").is_some(),
             "stopDispatchedThisAttempt":stop_dispatched,"stopDisposition":stop_disposition});
         durable_json(&receipt_path, &receipt)?;
         finish_maintenance(&state, &archive, &plan)?;
@@ -1477,6 +1549,143 @@ mod tests {
         std::fs::remove_dir_all(&root).unwrap();
         assert!(failures.is_empty(), "open_session must fence retained lifecycle errors: {failures:?}");
     }
+    const FIXTURE_KEYBOARD: &str = "com.genfarmer.uiautomator/.AdbKeyboard";
+
+    /// Fixture adb for one Android 9 phone with the helper installed. The default and enabled
+    /// IMEs live in `ime.txt`/`enabled.txt`, the helper pid in `pid.txt` (absent: no process);
+    /// any other command is logged to `unexpected.txt` and exits 97.
+    fn maintenance_adb(root: &Path, apk_sha256: &str) -> AdbProgram {
+        #[cfg(windows)]
+        let path = {
+            let path = root.join("maintenance-adb.cmd");
+            std::fs::write(&path, format!(concat!(
+                "@echo off\r\n",
+                "set \"c=%~4\"\r\n",
+                "set \"d=%~dp0\"\r\n",
+                "if \"%c%\"==\"id -u\" (echo 2000& exit /b 0)\r\n",
+                "if \"%c%\"==\"am get-current-user\" (echo 0& exit /b 0)\r\n",
+                "if \"%c%\"==\"dumpsys package com.riviu.agent\" (echo userId=10123& echo versionCode=9& exit /b 0)\r\n",
+                "if \"%c%\"==\"pm path com.riviu.agent\" (echo package:/data/app/com.riviu.agent-1/base.apk& exit /b 0)\r\n",
+                "if \"%c%\"==\"sha256sum '/data/app/com.riviu.agent-1/base.apk'\" (echo {hash}  base.apk& exit /b 0)\r\n",
+                "if \"%c%\"==\"cat /proc/sys/kernel/random/boot_id\" (echo fixture-boot& exit /b 0)\r\n",
+                "if \"%c%\"==\"pidof com.riviu.agent\" if exist \"%d%pid.txt\" (type \"%d%pid.txt\"& exit /b 0) else (exit /b 1)\r\n",
+                "if \"%c%\"==\"settings get secure default_input_method\" (type \"%d%ime.txt\"& exit /b 0)\r\n",
+                "if \"%c%\"==\"settings get secure enabled_input_methods\" (type \"%d%enabled.txt\"& exit /b 0)\r\n",
+                "if \"%c:~0,8%\"==\"ime set \" (>\"%d%ime.txt\" echo %c:~8%& exit /b 0)\r\n",
+                "if \"%c%\"==\"ime disable com.riviu.agent/.RiviuIme\" (>\"%d%enabled.txt\" echo {keyboard}& exit /b 0)\r\n",
+                ">>\"%d%unexpected.txt\" echo %c%\r\n",
+                "exit /b 97\r\n"), hash = apk_sha256, keyboard = FIXTURE_KEYBOARD)).unwrap();
+            path
+        };
+        #[cfg(not(windows))]
+        let path = {
+            use std::os::unix::fs::PermissionsExt;
+            let path = root.join("maintenance-adb");
+            std::fs::write(&path, format!(concat!(
+                "#!/bin/sh\n",
+                "d=$(dirname \"$0\")\n",
+                "case \"$4\" in\n",
+                "'id -u') echo 2000 ;;\n",
+                "'am get-current-user') echo 0 ;;\n",
+                "'dumpsys package com.riviu.agent') echo userId=10123; echo versionCode=9 ;;\n",
+                "'pm path com.riviu.agent') echo package:/data/app/com.riviu.agent-1/base.apk ;;\n",
+                "\"sha256sum '/data/app/com.riviu.agent-1/base.apk'\") echo '{hash}  base.apk' ;;\n",
+                "'cat /proc/sys/kernel/random/boot_id') echo fixture-boot ;;\n",
+                "'pidof com.riviu.agent') [ -f \"$d/pid.txt\" ] || exit 1; cat \"$d/pid.txt\" ;;\n",
+                "'settings get secure default_input_method') cat \"$d/ime.txt\" ;;\n",
+                "'settings get secure enabled_input_methods') cat \"$d/enabled.txt\" ;;\n",
+                "'ime set '*) echo \"${{4#ime set }}\" > \"$d/ime.txt\" ;;\n",
+                "'ime disable com.riviu.agent/.RiviuIme') echo '{keyboard}' > \"$d/enabled.txt\" ;;\n",
+                "*) echo \"$4\" >> \"$d/unexpected.txt\"; exit 97 ;;\n",
+                "esac\n"), hash = apk_sha256, keyboard = FIXTURE_KEYBOARD)).unwrap();
+            std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o700)).unwrap();
+            path
+        };
+        AdbProgram::at(path)
+    }
+
+    /// 13/10/2026, phones 32 (SM-G955N) and 38 (SM-G955F): a clipboard job the restarted helper
+    /// no longer knew left the Riviu IME selected. Maintenance refused (`ime_unproved`) although
+    /// the checkpoint recorded the keyboard from before the switch; it must hand that one back.
+    #[tokio::test]
+    async fn maintenance_hands_back_the_recorded_keyboard_left_behind_the_helper_ime() {
+        let serial = "fixture-recorded-ime";
+        let root = std::env::temp_dir().join(format!("helper-recorded-ime-{}", uuid::Uuid::new_v4()));
+        let state = state_path(&root, serial).unwrap();
+        std::fs::create_dir_all(&state).unwrap();
+        let apk = root.join("helper.apk");
+        std::fs::write(&apk, b"fixture-apk-not-for-device").unwrap();
+        let adb = maintenance_adb(&root, &riviu_core::frame_sha256(b"fixture-apk-not-for-device"));
+        std::fs::write(root.join("ime.txt"), format!("{IME_ID}\n")).unwrap();
+        std::fs::write(root.join("enabled.txt"), format!("{FIXTURE_KEYBOARD}:{IME_ID}\n")).unwrap();
+        let owner_id = "fixture_owner_0123456789";
+        std::fs::write(state.join("runtime-owner.json"), serde_json::to_vec(&json!({
+            "serial":serial,"androidUser":0,"state":"claimPending","ownerId":owner_id,
+            "apkSha256":riviu_core::frame_sha256(b"fixture-apk-not-for-device"),
+            "serviceInstance":"fixture_instance_012345","ownerGeneration":"fixture_generation_012345"})).unwrap()).unwrap();
+        let checkpoint = |pending: Value| serde_json::to_vec(&json!({"serial":serial,"androidUser":0,
+            "ownerId":owner_id,"serviceInstance":"fixture_instance_012345","generation":"fixture_generation_012345",
+            "pending":pending,"baseline":null})).unwrap();
+        let prepare = || HelperClient::prepare_maintenance(&adb, serial, Some(&apk), Some(&root),
+            "fixture_maintenance_1234", json!({"operation":"fixture"}));
+        // Older data without the record: still refused, nothing guessed or changed.
+        std::fs::write(state.join("ime-checkpoint.json"), checkpoint(json!({"phase":"submissionPending"}))).unwrap();
+        let refused = prepare().await.expect_err("no recorded keyboard must stay unproved");
+        assert_eq!(format!("{refused:#}"), "maintenance cannot guess or restore a lost boot IME");
+        std::fs::write(state.join("ime-checkpoint.json"), checkpoint(json!({"previousIme":FIXTURE_KEYBOARD,
+            "helperWasEnabled":false,"phase":"submissionPending","serviceInstance":"fixture_instance_012345",
+            "operationId":"fixture-operation"}))).unwrap();
+        let plan = prepare().await.expect("the recorded keyboard proves the boot IME");
+        assert_eq!(plan["bootIme"], FIXTURE_KEYBOARD);
+        assert_eq!(plan["imeRestore"], json!({"previousIme":FIXTURE_KEYBOARD,"helperWasEnabled":false}));
+        let receipt = HelperClient::execute_maintenance(&adb, serial, Some(&apk), Some(&root), plan, true, false).await
+            .expect("recorded keyboard restore and supersession");
+        let ime = std::fs::read_to_string(root.join("ime.txt")).unwrap();
+        let enabled = std::fs::read_to_string(root.join("enabled.txt")).unwrap();
+        let unexpected = root.join("unexpected.txt").exists();
+        let archived = state.join("maintenance/fixture_maintenance_1234/ime-checkpoint.json").exists();
+        let retained = state.join("ime-checkpoint.json").exists();
+        std::fs::remove_dir_all(&root).unwrap();
+        assert_eq!(receipt["state"], "superseded");
+        assert_eq!(receipt["bootImeRestored"], true);
+        assert_eq!(receipt["oldObligations"], "archivedUnresolved");
+        assert_eq!(ime.trim(), FIXTURE_KEYBOARD);
+        assert!(!enabled.contains(IME_ID), "{enabled}");
+        assert!(archived && !retained, "the old clipboard obligation is archived, not settled");
+        assert!(!unexpected, "no command outside the fixture contract");
+    }
+
+    /// The cached owner of a clipboard job keeps maintenance fenced until its helper process
+    /// is proven gone; then the job can never settle and maintenance may archive it.
+    #[tokio::test]
+    async fn cached_cleanup_debt_opens_maintenance_only_when_the_helper_process_is_gone() {
+        let serial = "fixture-cached-debt";
+        let root = std::env::temp_dir().join(format!("helper-cached-debt-{}", uuid::Uuid::new_v4()));
+        let state = state_path(&root, serial).unwrap();
+        std::fs::create_dir_all(&state).unwrap();
+        let adb = maintenance_adb(&root, &"0".repeat(64));
+        std::fs::write(root.join("pid.txt"), "4242\n").unwrap();
+        let owner = CanaryOwner { owner_id: "fixture_owner_0123456789".into(), instance: "fixture_instance_012345".into(),
+            generation: "fixture_generation_012345".into(), socket: String::new(), nonce: "fixture_nonce".into(),
+            uid: 10123, apk_path: String::new(), report: state.clone() };
+        let mut client = HelperClient::at(adb, serial, 1).unwrap();
+        client.canary = Some(owner);
+        client.production_runtime = true;
+        client.retained_failure.store(true, std::sync::atomic::Ordering::Release);
+        *client.pending_clipboard.lock() = Some(json!({"previousIme":FIXTURE_KEYBOARD,"helperWasEnabled":true,"phase":"submissionPending"}));
+        let mut outcomes = Vec::new();
+        for helper_pid in ["4242", "4141"] {
+            std::fs::write(state.join("runtime-owner.json"), serde_json::to_vec(&json!({
+                "serial":serial,"androidUser":0,"state":"claimPending","ownerId":"fixture_owner_0123456789",
+                "serviceInstance":"fixture_instance_012345","ownerGeneration":"fixture_generation_012345",
+                "bootId":"fixture-boot","helperPid":helper_pid})).unwrap()).unwrap();
+            outcomes.push(client.lock_cached_maintenance(Some(&root)).await.map(drop).map_err(|error| format!("{error:#}")));
+        }
+        std::fs::remove_dir_all(&root).unwrap();
+        assert_eq!(outcomes[0], Err("helper clipboard/baseline cleanup unresolved".into()), "same helper process keeps the fence");
+        assert_eq!(outcomes[1], Ok(()), "a restarted helper process can never settle the old job");
+    }
+
     #[test]
     fn pending_cleanup_admission_rejects_foreign_and_oversized_records() {
         let root = std::env::temp_dir().join(format!("helper-admission-{}", uuid::Uuid::new_v4()));
