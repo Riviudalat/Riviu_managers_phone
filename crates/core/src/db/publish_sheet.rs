@@ -685,6 +685,10 @@ pub(super) fn queue_sheet_row(
 
 #[cfg(test)]
 mod tests {
+    use super::super::publish_verification::{
+        VERIFICATION_CHECK_SECONDS as CHECK_SECONDS,
+        VERIFICATION_NO_PROGRESS_LIMIT as NO_PROGRESS_LIMIT,
+    };
     use super::*;
     use crate::publish::{
         PublishBundle, PublishCampaignRequest, PublishCleanupPolicy, PublishImage,
@@ -954,8 +958,9 @@ mod tests {
                     DateTime::parse_from_rfc3339(status["checkedAt"].as_str().unwrap()).unwrap();
                 let next =
                     DateTime::parse_from_rfc3339(status["nextCheckAt"].as_str().unwrap()).unwrap();
-                assert_eq!((next - checked).num_seconds(), 300);
-                assert!(!automatic.is_due((checked + chrono::Duration::seconds(299)).into()));
+                assert_eq!((next - checked).num_seconds(), CHECK_SECONDS);
+                assert!(!automatic
+                    .is_due((checked + chrono::Duration::seconds(CHECK_SECONDS - 1)).into()));
                 assert!(automatic.is_due(next.into()));
             } else {
                 assert_eq!(status["cause"], "metadataRetryBudgetExhausted");
@@ -1035,7 +1040,7 @@ mod tests {
     }
 
     #[test]
-    fn invalid_metadata_candidates_do_not_extend_three_observation_phone_budget() {
+    fn invalid_metadata_candidates_do_not_extend_no_progress_phone_budget() {
         for invalid in ["malformed", "rejected", "differentOwner"] {
             let (db, path, campaign, assignment, intent, pending) = pending_metadata_fixture();
             let mut value = serde_json::to_value(&pending).unwrap();
@@ -1049,7 +1054,7 @@ mod tests {
                 }
                 _ => unreachable!(),
             }
-            for attempt in 1..=3 {
+            for attempt in 1..=NO_PROGRESS_LIMIT {
                 value["captured"]["metadata"]["attempts"] = serde_json::json!(attempt);
                 let diagnostic = serde_json::json!({"stage":"candidatePublicMetadata","pendingMetadataCandidate":value,"reasonCode":"metadataUnavailable"});
                 let row = db
@@ -1080,7 +1085,7 @@ mod tests {
                 "{invalid}"
             );
             assert_eq!(
-                evidence["verificationBudget"]["noProgressObservations"], 3,
+                evidence["verificationBudget"]["noProgressObservations"], NO_PROGRESS_LIMIT,
                 "{invalid}"
             );
             assert!(evidence["verificationStatus"]["nextCheckAt"].is_null());
@@ -1105,7 +1110,7 @@ mod tests {
     }
 
     #[test]
-    fn periodic_verification_keeps_old_submissions_and_restarts_at_five_minutes() {
+    fn periodic_verification_keeps_old_submissions_and_restarts_at_check_interval() {
         for scheduled in [false, true] {
             let (db, path, campaign, assignment, intent) = review_fixture(24 * 60);
             if scheduled {
@@ -1125,8 +1130,8 @@ mod tests {
             let status = &e["verificationStatus"];
             let checked =
                 DateTime::parse_from_rfc3339(status["checkedAt"].as_str().unwrap()).unwrap();
-            assert!(!row.is_due((checked + chrono::Duration::seconds(299)).into()));
-            assert!(row.is_due((checked + chrono::Duration::seconds(300)).into()));
+            assert!(!row.is_due((checked + chrono::Duration::seconds(CHECK_SECONDS - 1)).into()));
+            assert!(row.is_due((checked + chrono::Duration::seconds(CHECK_SECONDS)).into()));
             assert!(status["deadlineAt"].is_null());
             assert_eq!(row.effect_intent.as_deref(), Some(intent.as_str()));
             assert!(!db
@@ -1154,7 +1159,7 @@ mod tests {
     }
 
     #[test]
-    fn android_scheduled_verification_starts_after_submit_then_waits_five_minutes() {
+    fn android_scheduled_verification_starts_after_submit_then_waits_check_interval() {
         let (db, path, campaign, assignment, intent) = review_fixture(0);
         mark_scheduled(&db, &campaign);
         let mut intent: serde_json::Value = serde_json::from_str(&intent).unwrap();
@@ -1189,8 +1194,8 @@ mod tests {
         )
         .unwrap()
         .with_timezone(&Utc);
-        assert!(!row.is_due(checked + chrono::Duration::seconds(299)));
-        assert!(row.is_due(checked + chrono::Duration::seconds(300)));
+        assert!(!row.is_due(checked + chrono::Duration::seconds(CHECK_SECONDS - 1)));
+        assert!(row.is_due(checked + chrono::Duration::seconds(CHECK_SECONDS)));
         assert!(!db
             .claim_publish_assignment_for_posting(&assignment, &intent.to_string())
             .unwrap());
@@ -1203,10 +1208,13 @@ mod tests {
         let (db, path, campaign, assignment, intent) = review_fixture(60);
         mark_scheduled(&db, &campaign);
         assert!(db.expire_due_publish_verifications().unwrap().is_empty());
-        for (code, delay) in [
-            ("linkUnavailable", 300),
-            ("readFailed", 300),
-        ] {
+        // Every observation but the last before the restart, alternating the two no-progress codes.
+        for observation in 1..NO_PROGRESS_LIMIT {
+            let code = if observation % 2 == 1 {
+                "linkUnavailable"
+            } else {
+                "readFailed"
+            };
             let candidate = db.pending_publish_verifications(10).unwrap().remove(0);
             assert!(db
                 .record_publish_verification_observation(
@@ -1223,7 +1231,7 @@ mod tests {
                 DateTime::parse_from_rfc3339(status["checkedAt"].as_str().unwrap()).unwrap();
             let next =
                 DateTime::parse_from_rfc3339(status["nextCheckAt"].as_str().unwrap()).unwrap();
-            assert_eq!((next - checked).num_seconds(), delay);
+            assert_eq!((next - checked).num_seconds(), CHECK_SECONDS);
             assert!(status["reviewAfterMinutes"].is_null());
             assert!(!row.is_due(checked.into()));
             assert!(row.is_due(next.into()));
@@ -1244,7 +1252,7 @@ mod tests {
         let evidence: serde_json::Value = serde_json::from_str(review.assignments[0].evidence_json.as_deref().unwrap()).unwrap();
         assert_eq!(evidence["verificationStatus"]["state"], "needsReview");
         assert!(evidence["verificationStatus"]["nextCheckAt"].is_null());
-        assert_eq!(evidence["verificationBudget"]["noProgressObservations"], 3);
+        assert_eq!(evidence["verificationBudget"]["noProgressObservations"], NO_PROGRESS_LIMIT);
         let row = db.publish_verifications_for_campaign(&campaign, 10).unwrap().remove(0);
         let url = "https://www.tiktok.com/@fixture/photo/1234567890123456789";
         let evidence = serde_json::json!({"postUrl":url,"publicationVerified":true}).to_string();
@@ -1459,9 +1467,9 @@ mod tests {
     }
 
     #[test]
-    fn verification_five_minute_cadence_survives_read_failures_and_restart() {
+    fn verification_cadence_survives_read_failures_and_restart() {
         let (db, path, campaign, _, intent) = review_fixture(1);
-        for seconds in [300, 300] {
+        for _ in 1..NO_PROGRESS_LIMIT {
             let candidate = db.pending_publish_verifications(10).unwrap().remove(0);
             assert!(db
                 .record_publish_verification_observation(
@@ -1478,7 +1486,7 @@ mod tests {
                 DateTime::parse_from_rfc3339(status["checkedAt"].as_str().unwrap()).unwrap();
             let next =
                 DateTime::parse_from_rfc3339(status["nextCheckAt"].as_str().unwrap()).unwrap();
-            assert_eq!((next - checked).num_seconds(), seconds);
+            assert_eq!((next - checked).num_seconds(), CHECK_SECONDS);
             assert!(!candidate.is_due(checked.into()));
             assert!(candidate.is_due(next.into()));
         }
@@ -1496,7 +1504,7 @@ mod tests {
         );
         let evidence: serde_json::Value =
             serde_json::from_str(detail.assignments[0].evidence_json.as_deref().unwrap()).unwrap();
-        assert_eq!(evidence["verificationStatus"]["attempts"], 3);
+        assert_eq!(evidence["verificationStatus"]["attempts"], NO_PROGRESS_LIMIT);
         assert_eq!(evidence["verificationStatus"]["readFailures"], 0);
         assert_eq!(
             evidence["verificationStatus"]["reasonCode"],
@@ -1508,7 +1516,7 @@ mod tests {
             .is_none());
         assert_eq!(evidence["verificationStatus"]["state"], "needsReview");
         assert!(evidence["verificationStatus"]["nextCheckAt"].is_null());
-        assert_eq!(evidence["verificationBudget"]["noProgressObservations"], 3);
+        assert_eq!(evidence["verificationBudget"]["noProgressObservations"], NO_PROGRESS_LIMIT);
         assert!(db.pending_publish_verifications(10).unwrap().is_empty());
         drop(db);
         let reopened = Database::open(&path).unwrap();
