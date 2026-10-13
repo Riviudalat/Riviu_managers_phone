@@ -206,6 +206,18 @@ không id **Get updates** (đăng ký nhận email, không bao giờ bấm) và 
 sheet che feed nên bước quan sát sau Post không thấy feed và bài thành `uncertain`.
 Fixture thật: `crates/core/fixtures/tiktok-publish/musically-45.7.3-en/real-20261012-email-updates-dialog.xml`.
 
+Banner "Continue editing this post?" hiện đè lên đỉnh trang Profile sau khi phiên soạn bài
+bị gián đoạn (máy `ce051715e15b2c2e02` / @lch.trnh.slay ngày 2026-10-13, en). Banner gồm
+thumbnail nháp, nút **Save draft** và nút **Edit**. **Save draft** giữ nháp cục bộ mà không
+mở lại trình soạn; **Edit** mở trình soạn với nội dung nháp cũ (sai nội dung nếu đang đăng
+bài mới). Banner này làm đọc cây giao diện trang Profile xuất hiện hai nút android.widget.Button
+có text "Edit" (một của Profile, một của banner), khiến bước chứng minh tài khoản trước Đăng
+thất bại với `account_unreadable` trên tài khoản không có bio và không có video riêng tư.
+Catalog popup `continue_editing_banner` (Shadow) nhận ra banner này và ghi log; code chứng
+minh tài khoản xử lý thêm trường hợp `edits == 2` từ 45.7.3 build này. Khi có dump XML, bổ
+sung id container và nút dismiss vào catalog để chuyển sang Act. Thao tác operator: vào trang
+Profile, bấm **Save draft**, rồi Thử lại trong controller.
+
 Hộp "Add to Home screen?" thấy trên máy 40/43/48 ngày 2026-10-10 do chính TikTok gây ra:
 `com.ss.android.ugc.aweme.shortcut.TiktokShortcutManager` (dịch vụ `IShortcutService`) gọi
 `ShortcutManager.requestPinShortcut`, rồi launcher Samsung hiện hộp xác nhận. Hộp này thuộc

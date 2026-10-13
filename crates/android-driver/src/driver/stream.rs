@@ -625,10 +625,23 @@ impl AndroidDriver {
                 if snapshots_allowed && error.downcast_ref::<MinicapGaveNoPicture>().is_some() =>
             {
                 tracing::warn!(udid, %error, "minicap gave no picture; streaming screencap snapshots");
-                match self
+                let snapshot_result = self
                     .spawn_snapshot_producer(udid, reservation.generation())
-                    .await
-                {
+                    .await;
+                // #28 (SM-G955F Android 9, r101) and #37 (SM-G955F Android 9, r105):
+                // screencap produced 0 bytes immediately after a minicap kill while the
+                // same command by hand succeeded minutes later. SurfaceFlinger may hold
+                // the killed minicap's virtual display in-flight for several hundred
+                // milliseconds. If the first attempt failed, wait and try once more before
+                // giving up; a second failure goes to no-stream.
+                let snapshot_result = if snapshot_result.is_err() {
+                    tokio::time::sleep(Duration::from_millis(800)).await;
+                    self.spawn_snapshot_producer(udid, reservation.generation())
+                        .await
+                } else {
+                    snapshot_result
+                };
+                match snapshot_result {
                     Ok(observed) => Ok((
                         observed,
                         Some(riviu_core::frame_source::SNAPSHOT_STREAM_SCHEME),
