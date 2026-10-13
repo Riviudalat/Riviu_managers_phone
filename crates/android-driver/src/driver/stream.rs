@@ -434,6 +434,8 @@ impl AndroidDriver {
                 _ => {
                     reader.abort();
                     let _ = child.kill().await;
+                    self.stop_minicap_left_on_device(serial, banner.pid, &options.socket)
+                        .await;
                     crate::frames::remove_forward(&self.adb, serial, host_port)
                         .await
                         .ok();
@@ -470,6 +472,30 @@ impl AndroidDriver {
         );
         Ok(first_frame_observed)
     }
+    /// Kill the device-side minicap of a start that gave no picture.
+    ///
+    /// Killing the host `adb shell` client is not enough here: without a pty adbd signals
+    /// nothing to the remote command, and a minicap that publishes no frame writes nothing
+    /// that could fail with EPIPE. It stays on the phone with its virtual display, so the
+    /// screencap fallback started right after it competes with a wedged capture on a
+    /// phone that is already struggling (#28, `ce071827e0659c1605`, 13/10/2026: the
+    /// fallback produced no image in 12 s, while the same loop on the idle phone gave a PNG
+    /// every 2 s). The pid comes from the banner, and the kill is guarded on our socket name
+    /// in its command line so a reused pid is never touched. SIGKILL, because a process
+    /// blocked in the capture path need not honour SIGTERM. Best effort: the fallback's own
+    /// first-frame proof still decides.
+    async fn stop_minicap_left_on_device(&self, serial: &str, pid: u32, socket: &str) {
+        if pid == 0 {
+            return;
+        }
+        let script = format!(
+            "if grep -qF '{socket}' /proc/{pid}/cmdline 2>/dev/null;              then kill -9 {pid} && echo killed; else echo gone; fi"
+        );
+        match self.adb.shell(serial, &script).await {
+            Ok(said) => tracing::info!(serial, pid, said = said.trim(), "stale minicap stopped"),
+            Err(error) => tracing::warn!(serial, pid, %error, "stale minicap stop unconfirmed"),
+        }
+    }
     /// The interaction stream at the handoff generation, with a proven first frame.
     ///
     /// `snapshots_allowed` is set only for a caller that takes no decision from frames. It
@@ -500,8 +526,9 @@ impl AndroidDriver {
             )
             .await
         {
-            // minicap left nothing behind and never advanced the generation, so the
-            // snapshot producer starts from exactly the state minicap started from.
+            // minicap's failed start removed its forward and its device process and never
+            // advanced the generation, so the snapshot producer starts from exactly the
+            // state minicap started from.
             Err(error)
                 if snapshots_allowed && error.downcast_ref::<MinicapGaveNoPicture>().is_some() =>
             {
