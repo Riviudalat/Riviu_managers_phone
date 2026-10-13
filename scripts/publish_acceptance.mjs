@@ -428,7 +428,9 @@ async function readStartAccounts(udids, invoke, validate, unread = null) {
   check(new Set(udids).size === udids.length, 'Duplicate account read device');
   const readings = new Array(udids.length), failures = new Array(udids.length);
   let next = 0;
-  await Promise.all(Array.from({ length: Math.min(30, udids.length) }, async () => {
+  // The controller opens 2 interaction UI slots at a time; 30 concurrent reads left ~28 IPC
+  // calls pending for minutes and froze the controller's IPC on 14/10/2026 (HX-IPCHANG).
+  await Promise.all(Array.from({ length: Math.min(2, udids.length) }, async () => {
     while (next < udids.length) {
       const index = next++, udid = udids[index];
       let reading;
