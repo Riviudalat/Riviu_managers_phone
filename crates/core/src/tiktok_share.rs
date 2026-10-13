@@ -218,14 +218,14 @@ pub fn looks_like_a_post_link(value: &str) -> bool {
         return false;
     }
     let on_tiktok = host == "tiktok.com" || host.ends_with(".tiktok.com");
-    if !on_tiktok {
+    if !on_tiktok && !is_short_link_host(&host) {
         return false;
     }
     let segments: Vec<&str> = parsed
         .path_segments()
         .map(|parts| parts.filter(|part| !part.is_empty()).collect())
         .unwrap_or_default();
-    if matches!(host.as_str(), "vt.tiktok.com" | "vm.tiktok.com") {
+    if is_short_link_host(&host) {
         // The share sheet's short form. Opaque by design — the post id is on the far side of
         // a redirect — so the most that can be checked is that it addresses something.
         return !segments.is_empty();
@@ -235,6 +235,16 @@ pub fn looks_like_a_post_link(value: &str) -> bool {
     segments
         .windows(2)
         .any(|pair| matches!(pair[0], "video" | "photo") && !pair[1].is_empty())
+}
+
+/// Hosts of the share sheet's opaque short links. `tt.site/t/<code>/` measured 13/10/2026:
+/// 45.7.3 on ce031713b0, ce04171415 and ce11171beb copied it, and it 301s to
+/// `www.tiktok.com/@handle/photo/<id>`.
+pub fn is_short_link_host(host: &str) -> bool {
+    matches!(
+        host,
+        "vt.tiktok.com" | "vm.tiktok.com" | "tt.site" | "www.tt.site"
+    )
 }
 
 /// Resolve only TikTok HTTPS redirects; retain the canonical post path, not tracking data.
@@ -263,6 +273,8 @@ pub async fn resolve_canonical_post_link(value: &str) -> anyhow::Result<String> 
                             | "m.tiktok.com"
                             | "vt.tiktok.com"
                             | "vm.tiktok.com"
+                            | "tt.site"
+                            | "www.tt.site"
                     )
                 )
                 && url.port_or_known_default() == Some(443),
@@ -272,7 +284,7 @@ pub async fn resolve_canonical_post_link(value: &str) -> anyhow::Result<String> 
             return Ok(link);
         }
         anyhow::ensure!(
-            matches!(url.host_str(), Some("vt.tiktok.com" | "vm.tiktok.com")),
+            url.host_str().is_some_and(is_short_link_host),
             "TikTok redirect did not identify a post"
         );
         let response = tokio::time::timeout_at(deadline, client.get(url.clone()).send())
@@ -2591,6 +2603,9 @@ mod tests {
             // The short form the share sheet produces on some builds.
             "https://vt.tiktok.com/ZS1abc/",
             "https://vm.tiktok.com/ZS1abc/",
+            // 45.7.3 copied this form on three phones on 13/10/2026.
+            "https://www.tt.site/t/ZSbKCPcoE/",
+            "https://tt.site/t/ZSbKCPcoE/",
         ] {
             assert!(looks_like_a_post_link(good), "{good} should be a post link");
         }
@@ -2614,6 +2629,8 @@ mod tests {
             "https://tiktok.com@evil.com/@a/video/1",
             // A short link with nothing after the host addresses no post.
             "https://vt.tiktok.com/",
+            "https://www.tt.site/",
+            "https://tt.site.example.net/t/ZSbKCPcoE/",
             // Not a web scheme.
             "javascript:alert(1)",
         ] {

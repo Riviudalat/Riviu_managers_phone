@@ -97,6 +97,8 @@ fn trusted(url: &Url) -> bool {
                     | "m.tiktok.com"
                     | "vt.tiktok.com"
                     | "vm.tiktok.com"
+                    | "tt.site"
+                    | "www.tt.site"
             )
         )
 }
@@ -124,7 +126,8 @@ pub async fn resolve(value: &str) -> anyhow::Result<SharedCommentLink> {
             return Ok(link);
         }
         ensure!(
-            matches!(url.host_str(), Some("vt.tiktok.com" | "vm.tiktok.com")),
+            url.host_str()
+                .is_some_and(crate::tiktok_share::is_short_link_host),
             "Link does not identify a comment"
         );
         let response = tokio::time::timeout_at(end, client.get(url.clone()).send())

@@ -288,6 +288,10 @@ Hệ quả cho code:
   khoảng một phút sau. Ngay bên trái Copy link là **Repost**. Mở bài đích theo id; share
   sheet chỉ là đường dự phòng một lần khi trang chi tiết không được chứng minh, và
   evidence ghi `copyLinkCountsAsShare`.
+- **Copy link có thể trả link rút gọn `https://www.tt.site/t/<code>/`** (đo 13/10/2026 trên
+  ce031713b0, ce04171415, ce11171beb), bên cạnh `vt.tiktok.com`. Link này 301 về
+  `www.tiktok.com/@handle/photo/<id>`. Mọi nơi nhận link rút gọn dùng chung
+  `tiktok_share::is_short_link_host`; chỉ đích `tiktok.com` sau redirect mới là proof.
 - **Biến thể trình xem feed chưa giải thích được.** Bảng router của APK
   (`SmartRouter$$Mapping`) ánh xạ `//aweme/detail` và `//aweme/detaillist` thẳng tới
   `DetailActivity`; research không tìm thấy cờ thí nghiệm hay interceptor nào chuyển route

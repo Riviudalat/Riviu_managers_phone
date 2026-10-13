@@ -106,10 +106,8 @@ fn parse_one(original: &str) -> Result<ResolvedTikTokTarget, LinkErrorCode> {
         return Err(LinkErrorCode::CustomPortNotAllowed);
     }
     let host = url.host_str().ok_or(LinkErrorCode::UnsupportedHost)?;
-    let host_is_tiktok = matches!(
-        host,
-        "tiktok.com" | "www.tiktok.com" | "m.tiktok.com" | "vm.tiktok.com" | "vt.tiktok.com"
-    );
+    let host_is_tiktok = matches!(host, "tiktok.com" | "www.tiktok.com" | "m.tiktok.com")
+        || crate::tiktok_share::is_short_link_host(host);
     if !host_is_tiktok {
         return Err(LinkErrorCode::UnsupportedHost);
     }
@@ -123,7 +121,7 @@ fn parse_one(original: &str) -> Result<ResolvedTikTokTarget, LinkErrorCode> {
                 .collect()
         })
         .unwrap_or_default();
-    if matches!(host, "vt.tiktok.com" | "vm.tiktok.com")
+    if crate::tiktok_share::is_short_link_host(host)
         || segments.first().map(String::as_str) == Some("t")
     {
         return Err(LinkErrorCode::UnresolvedShortLink);
