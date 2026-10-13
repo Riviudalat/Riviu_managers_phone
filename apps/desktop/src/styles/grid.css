@@ -707,6 +707,23 @@ button.linkish,
   color: var(--rv-status-attention-text);
   font-weight: 600;
 }
+/* The publish job holds this phone's view down (HX-QUIET): a band over the last frame,
+   not a scrim over it, so the operator still sees where the phone was. */
+.dev-phone-paused {
+  position: absolute;
+  left: 0;
+  right: 0;
+  bottom: 0;
+  z-index: 2;
+  padding: 2px 4px;
+  background: var(--rv-stage-scrim);
+  color: var(--rv-text-inverse);
+  font-size: var(--rv-font-caption);
+  font-weight: 700;
+  text-align: center;
+  pointer-events: none;
+}
+
 .dev-phone-stale {
   position: absolute;
   inset: 0;

@@ -70,7 +70,9 @@ pub use google_connection::{
     GoogleSheetConnection, GOOGLE_CONNECTION_SETTING, GOOGLE_MIGRATION_SETTING,
     SHEET_PROVIDER_SETTING,
 };
-pub use publish_dispatch::{PublishDispatchJob, PublishLimits, PublishWorkPermit};
+pub use publish_dispatch::{
+    PublishDispatchJob, PublishLimits, PublishWorkPermit, PUBLISH_PHONE_WORK_CAP,
+};
 pub use publish_pipeline::{PublishPipelineRun, PublishPreparationOwner};
 mod publish_cleanup;
 mod publish_create;

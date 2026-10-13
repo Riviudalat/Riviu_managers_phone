@@ -10,6 +10,9 @@ pub(crate) enum VerificationWait {
     DevicePreparing,
     DeviceBusy,
     DeviceError,
+    /// Every adb phone-work slot (`PUBLISH_PHONE_WORK_CAP`) is taken by transfers, composes
+    /// or other observers. The phone itself is warm; the read waits for a slot.
+    FleetCapacity,
 }
 
 impl VerificationWait {
@@ -21,6 +24,7 @@ impl VerificationWait {
             Self::DevicePreparing => "devicePreparing",
             Self::DeviceBusy => "deviceBusy",
             Self::DeviceError => "deviceError",
+            Self::FleetCapacity => "fleetCapacity",
         }
     }
 
@@ -36,6 +40,9 @@ impl VerificationWait {
             Self::DevicePreparing => "Máy đang chuẩn bị kết nối — app tự kiểm tra khi máy sẵn sàng",
             Self::DeviceBusy => "Máy đang làm việc khác — app tự kiểm tra khi máy rảnh",
             Self::DeviceError => "Máy đang báo lỗi kết nối — kiểm tra cáp USB rồi cắm lại máy",
+            Self::FleetCapacity => {
+                "Đã đủ số máy làm việc với adb cùng lúc (chuyển media, soạn, kiểm tra) — app tự kiểm tra khi có lượt"
+            }
         }
     }
 
@@ -74,27 +81,36 @@ impl VerificationQueue {
         row: &riviu_core::db::PendingPublishVerification,
         device: Option<&riviu_core::DeviceInfo>,
         phone_busy: bool,
+        fleet_full: bool,
     ) -> anyhow::Result<bool> {
         Ok(match row.retained_metadata_candidate() {
             // Admit only to persist a controlled terminal diagnostic, without IO.
             Err(_) => true,
             Ok(Some(_)) => row.automatic_metadata_observation_allowed(chrono::Utc::now()),
-            Ok(None) => Self::phone_wait(device, phone_busy).is_none_or(VerificationWait::admits),
+            Ok(None) => Self::phone_wait(device, phone_busy, fleet_full)
+                .is_none_or(VerificationWait::admits),
         })
     }
 
     /// What holds a phone-path observation, or `None` when the phone is warm. The same
     /// predicate gates the worker (through `admits`) and names the wait to the operator.
+    /// `fleet_full`: every shared adb phone-work slot is taken (`PUBLISH_PHONE_WORK_CAP`),
+    /// which holds a warm phone too, since the claim would refuse the observer anyway.
     pub fn phone_wait(
         device: Option<&riviu_core::DeviceInfo>,
         phone_busy: bool,
+        fleet_full: bool,
     ) -> Option<VerificationWait> {
         use riviu_core::{DevicePlatform, DeviceStatus};
         let Some(device) = device else {
             return Some(VerificationWait::DeviceOffline);
         };
         if Self::device_can_observe(device) {
-            return phone_busy.then_some(VerificationWait::DeviceBusy);
+            return if phone_busy {
+                Some(VerificationWait::DeviceBusy)
+            } else {
+                fleet_full.then_some(VerificationWait::FleetCapacity)
+            };
         }
         Some(match device.status {
             DeviceStatus::Disconnected => VerificationWait::DeviceOffline,
@@ -197,25 +213,46 @@ mod tests {
             assignment_id:"assignment".into(),campaign_id:"campaign".into(),bundle_id:"bundle".into(),
             udid:"phone".into(),scheduled:false,revision:1,effect_intent:Some(intent),evidence_json:None,stop_marker:None,
         };
-        assert!(!VerificationQueue::can_observe(&row, None, false).unwrap());
-        assert!(!VerificationQueue::can_observe(&row, Some(&device), true).unwrap());
+        assert!(!VerificationQueue::can_observe(&row, None, false, false).unwrap());
+        assert!(!VerificationQueue::can_observe(&row, Some(&device), true, false).unwrap());
+        // A warm phone still waits while every shared adb slot is taken, and says why.
+        assert!(VerificationQueue::can_observe(&row, Some(&device), false, false).unwrap());
+        assert!(!VerificationQueue::can_observe(&row, Some(&device), false, true).unwrap());
+        assert_eq!(
+            VerificationQueue::phone_wait(Some(&device), false, true),
+            Some(VerificationWait::FleetCapacity)
+        );
+        assert_eq!(
+            VerificationQueue::phone_wait(Some(&device), true, true),
+            Some(VerificationWait::DeviceBusy),
+            "the phone's own work names the wait before the fleet budget"
+        );
         row.evidence_json = Some(evidence.to_string());
-        assert!(VerificationQueue::can_observe(&row, None, true).unwrap(), "offline/busy phone does not block metadata");
+        assert!(
+            VerificationQueue::can_observe(&row, None, true, true).unwrap(),
+            "offline/busy phone or a full fleet does not block metadata"
+        );
         assert_ne!(VerificationQueue::observer_key(&row).unwrap(), row.udid);
         for (field, value) in [("schemaVersion", serde_json::json!(2)), ("captured", serde_json::Value::Null)] {
             let mut invalid = evidence.clone();
             invalid["verificationDiagnostic"]["pendingMetadataCandidate"][field] = value;
             row.evidence_json = Some(invalid.to_string());
-            assert!(VerificationQueue::can_observe(&row, Some(&device), false).unwrap(), "invalid candidate must reach diagnostic commit, never phone fallback");
+            assert!(
+                VerificationQueue::can_observe(&row, Some(&device), false, false).unwrap(),
+                "invalid candidate must reach diagnostic commit, never phone fallback"
+            );
         }
         row.evidence_json = Some(evidence.to_string().replace("unavailable", "rejected"));
-        assert!(VerificationQueue::can_observe(&row, Some(&device), false).unwrap(), "Rejected rechecks the same candidate within budget");
+        assert!(
+            VerificationQueue::can_observe(&row, Some(&device), false, false).unwrap(),
+            "Rejected rechecks the same candidate within budget"
+        );
         let mut exhausted = evidence.clone();
         exhausted["verificationBudget"] = serde_json::json!({"metadataObservations":12});
         row.evidence_json = Some(exhausted.to_string());
-        assert!(!VerificationQueue::can_observe(&row, None, false).unwrap());
+        assert!(!VerificationQueue::can_observe(&row, None, false, false).unwrap());
         row.evidence_json = Some(evidence.to_string());
-        assert!(VerificationQueue::can_observe(&row, None, false).unwrap());
+        assert!(VerificationQueue::can_observe(&row, None, false, false).unwrap());
     }
 
     #[tokio::test(start_paused = true)]

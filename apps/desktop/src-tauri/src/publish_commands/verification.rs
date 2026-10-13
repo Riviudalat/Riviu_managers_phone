@@ -147,9 +147,14 @@ pub fn publish_recovery_capabilities(
                     row.is_due(now) && matches!(row.retained_metadata_candidate(), Ok(None))
                 })
                 .and_then(|row| {
+                    let fleet_full = state
+                        .db
+                        .publish_phone_work_in_use()
+                        .is_ok_and(|used| used >= riviu_core::db::PUBLISH_PHONE_WORK_CAP);
                     let wait = VerificationQueue::phone_wait(
                         state.registry.get(&row.udid).as_ref(),
                         state.control.current_work_owner(&row.udid).is_some(),
+                        fleet_full,
                     );
                     // On an admitted phone, the last session-open failure is the cause.
                     let session = wait

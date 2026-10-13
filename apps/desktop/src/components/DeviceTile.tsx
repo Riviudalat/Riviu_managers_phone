@@ -155,7 +155,8 @@ function DeviceTileInner({
       <div className="dev-phone-screen" role="gridcell">
         <PhoneCanvas udid={device.udid} surfaceId="tile" />
         {focused && <div className="dev-phone-focused-message" role="status">Đang điều khiển</div>}
-        {freshness.state === "stale" && <div className="dev-phone-stale" aria-hidden="true">Hình cũ</div>}
+        {/* A frame the publish job froze on purpose is not "old": the paused band says why. */}
+        {freshness.state === "stale" && view.kind !== "paused" && <div className="dev-phone-stale" aria-hidden="true">Hình cũ</div>}
         {!focused && <StreamPlaceholder
           view={view}
           deviceName={displayName}

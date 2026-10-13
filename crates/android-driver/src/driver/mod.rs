@@ -517,11 +517,17 @@ impl Default for AndroidDriverConfig {
 
 /// One running minicap feed, owned so a second `ensure_stream` reuses it and a
 /// stop can prove the child is gone.
-/// A capture pause on one serial: when it lapses, and the session frame stream it took down,
-/// if any, so the resume can bring it back at the same generation.
+/// A capture pause on one serial: when it lapses, who holds it, and the session frame stream
+/// a tree reader took down, if any, so the resume can bring it back at the same generation.
+/// A tree reader's pause ([`AndroidDriver::pause_capture`]) and an automation job's view hold
+/// ([`AndroidDriver::hold_view`]) share one entry: `until` is the later of the two bounds, the
+/// reader's resume restores only the session stream while the job still holds, and the job's
+/// release leaves a standing reader's pause in place. The entry goes when neither holds.
 struct CapturePause {
     until: std::time::Instant,
     suspended: Option<SuspendedStream>,
+    reader_hold: bool,
+    job_hold: bool,
 }
 
 #[derive(Clone, Copy)]

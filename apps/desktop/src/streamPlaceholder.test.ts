@@ -44,6 +44,17 @@ describe("stream placeholder", () => {
     expect(streamPlaceholder({ ...live, decodeFailed: true }).view.kind).toBe("failed");
   });
 
+  it("labels a view the publish job holds down, over the last frame, with no retry", () => {
+    const { view, blocksInput } = streamPlaceholder({
+      ...live,
+      hasView: false,
+      tileStreamState: "paused",
+      lastError: "Stream lỗi cũ",
+    });
+    expect(view).toEqual({ kind: "paused", reason: "Đang đăng bài, tạm dừng hình" });
+    expect(blocksInput).toBe(false);
+  });
+
   it("offers a retry for a failure that a retry could plausibly clear", () => {
     const { view } = streamPlaceholder({
       ...live,

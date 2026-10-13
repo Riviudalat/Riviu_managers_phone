@@ -1287,12 +1287,20 @@ hiện cần kiểm tra; người vận hành chủ động yêu cầu đọc l�
 
 
 Điều phối Đăng bài dùng `publish_dispatch_jobs` trong SQLite (migration41), cùng
-claim độc quyền theo thiết bị và giới hạn riêng cho chuyển media. Pha `compose` (quan sát,
-chọn nhạc, soạn, Post) giữ tối đa `PUBLISH_COMPOSE_PHONE_CAP` = 6 máy trong toàn ứng dụng
-(đo 2026-10-12 trên host Windows: 20 máy Android soạn cùng lúc với 20 tile live làm adb
-daemon timeout, ra `publish_observation_deadline`, `publish_sound_budget_exhausted`,
-`device_overloaded`). Job vượt trần ở lại `queued` với lý do `stage_capacity`, trước mọi
-effect và intent. Xác minh, cleanup và hoàn tất ứng dụng không dùng trần số máy. Worker chỉ tạo task sau admission;
+claim độc quyền theo thiết bị và giới hạn riêng cho chuyển media. Mọi pha điều khiển máy
+qua adb (`transfer`, `compose` gồm quan sát, chọn nhạc, soạn, Post; `verify` trên máy;
+`cleanup`; `appCompletion`) chia chung một ngân sách `PUBLISH_PHONE_WORK_CAP` = 10 máy trong
+toàn ứng dụng (`crates/core/src/db/publish_dispatch.rs`); chỉ lượt đọc metadata mạng
+(`metadata`) đứng ngoài. Đây là trần, không phải mục tiêu, và là số đo 13–14/10/2026 trên
+30 máy SM-G955F/N Android 9 (`target/device-acceptance/controllers/controller-r105.stdout.txt`):
+30 máy cùng soạn làm UiAutomator2 `/source` p50 6,7 s, p90 12,7 s, max 18,3 s (bình thường
+dưới 1 s), ~1/3 dòng hỏng lượt đầu ở picker/bảng nhạc; vòng retry 10 máy đăng ngay 9/10.
+Trần cũ 6 (đo 2026-10-12: 20 máy soạn với 20 tile live làm adb daemon timeout) chỉ đếm
+compose, nên 6 máy soạn cộng quan sát xác minh không giới hạn vẫn thành 20–30 máy bận.
+Job compose/transfer vượt trần ở lại `queued` với lý do `stage_capacity`, trước mọi effect và
+intent; quan sát xác minh trên máy vượt trần chờ với lý do `fleetCapacity`
+(`VerificationWait::FleetCapacity`, worker đọc `publish_phone_work_in_use` mỗi tick nhưng
+claim trong SQLite mới là nơi quyết định). Worker chỉ tạo task sau admission;
 media được tải theo bài đã nhận, hàng chờ chỉ giữ ID. `publish_attempts` giữ lịch
 sử lần thử; `publication_id` được backfill bằng assignment ID và bất biến, không
 nhóm lại dữ liệu cũ theo caption, thư mục hoặc tên máy. Intent và revision của
@@ -1300,7 +1308,29 @@ pipeline vẫn kiểm tại nút Đăng. Worker đã lỗi sau effect chỉ chuy
 
 `publish_get_limits`/`publish_set_limits` nhận `{transfer,compose,verify,deviceTotal}`,
 lưu ở `publish.dispatch.limits` theo database máy chủ, mỗi giá trị từ 1 đến 64.
-Giữ cả bốn trường để tương thích dữ liệu cũ. Admission dùng `transfer` cho lượt chuyển media, `verify` làm trần số lượt đọc metadata mạng đồng thời, và trần cứng `PUBLISH_COMPOSE_PHONE_CAP` = 6 cho pha compose (không đọc từ trường `compose`); `deviceTotal` không tác động admission.
+Giữ cả bốn trường để tương thích dữ liệu cũ. Admission dùng `transfer` cho lượt chuyển media (vẫn nằm trong ngân sách máy chung), `verify` làm trần số lượt đọc metadata mạng đồng thời, và trần cứng `PUBLISH_PHONE_WORK_CAP` = 10 cho mọi pha trên máy (không đọc từ trường `compose`); `deviceTotal` không tác động admission.
+
+**HX-QUIET: hình trực tiếp dừng suốt lượt đăng của một máy.** Từ lúc job compose có phiên
+trên máy (`QuietView` trong `publish_commands/execution.rs`, ngay sau `streaming_session`)
+tới khi phiên đóng, view scrcpy của chính máy đó dừng (`UiSession::hold_live_view` →
+`AndroidDriver::hold_view`); luồng khung hình của phiên (minicap/screencap) vẫn chạy nên mọi
+lần đọc và bằng chứng của lượt đăng không đổi. Tile hiện khung hình cuối với nhãn
+"Đang đăng bài, tạm dừng hình" (`TileStreamState::Paused`, keeper trong `state.rs` đặt khi
+`capture_paused`), không phải lỗi, không có nút thử lại. Máy khác không bị ảnh hưởng. Kết
+thúc lượt (mọi nhánh, kể cả lỗi) `release_live_view` chạy trong `Drop`, keeper bật lại view ở
+tick kế tiếp; job chết mà không release thì hold tự hết sau `QUIET_VIEW_BOUND` = 20 phút
+(trần an toàn, không phải thời lượng kỳ vọng). Tạm dừng của bước nhạc (HX-PAUSE 0.2.87,
+`pause_capture`/`resume_capture`) lồng bên trong: bound là giá trị lớn hơn của hai bên, resume
+của bước nhạc chỉ trả lại luồng của phiên khi job còn giữ view, release của job giữ nguyên
+tạm dừng của bước nhạc nếu còn. Số đo gốc: 13–14/10/2026, 30 máy soạn với tile 480 px/1,2 Mbps/
+10 fps mỗi máy, `surfaceflinger` 61 % CPU, load average 7–8 trên máy 8 nhân, `/source` p90
+12,7 s; HX-PAUSE đã cho thấy dừng capture đưa `/source` từ timeout về 8–11 s trên hai máy
+mù bảng nhạc. Quan sát xác minh không giữ view (lượt ngắn, dừng/bật lại scrcpy tốn ~11 s
+hình đen mỗi lần); preset "quiet" cho máy đang tự động chưa cần sau thay đổi này và
+bị ràng buộc bởi sàn 480 px đã đo (`scrcpy.rs`: 176 px bị Redmi API 35 từ chối
+`MediaCodec.configure`, 320 px ra `avc1.42000D` WebView2 có thể từ chối). Cách kiểm trên
+máy thật: so `/source` ms (p50/p90) và tỉ lệ dòng đăng được ở lượt đầu giữa r105 và đợt
+sau cùng số máy, cùng build TikTok.
 Giảm `transfer` chặn cấp lượt chuyển mới đến khi số đang chạy xuống mức mới,
 không cắt request đang thực hiện. Phân trang candidate chỉ phân chia lượt quét,
 không giới hạn tổng worker. Foreground stream tăng theo số máy đã phát hiện;

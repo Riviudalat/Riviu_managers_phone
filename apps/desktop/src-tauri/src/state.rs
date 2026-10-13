@@ -1805,6 +1805,9 @@ impl AppState {
                         )
                     });
                     failed_until.retain(|_, until| *until > Instant::now());
+                    // One adb budget for transfers, composes and phone observers
+                    // (`PUBLISH_PHONE_WORK_CAP`). Read once per tick; the claim decides.
+                    let mut phone_slots_in_use = db.publish_phone_work_in_use().unwrap_or(0);
                     // Rotate the inspected device page, including offline phones, so a
                     // large disconnected prefix cannot conceal later due publications.
                     if let Err(error) = db.rotate_publish_devices(
@@ -1838,11 +1841,14 @@ impl AppState {
                         let device = registry.get(&row.udid);
                         let phone_busy = control.current_work_owner(&row.udid).is_some();
                         let phone_path = matches!(row.retained_metadata_candidate(), Ok(None));
+                        let fleet_full =
+                            phone_slots_in_use >= riviu_core::db::PUBLISH_PHONE_WORK_CAP;
                         let wait = phone_path
                             .then(|| {
                                 crate::publish_commands::VerificationQueue::phone_wait(
                                     device.as_ref(),
                                     phone_busy,
+                                    fleet_full,
                                 )
                             })
                             .flatten();
@@ -1869,6 +1875,7 @@ impl AppState {
                                 &row,
                                 device.as_ref(),
                                 phone_busy,
+                                fleet_full,
                             )
                             .unwrap_or(false)
                             || failed_until.contains_key(&observer_key)
@@ -1881,6 +1888,11 @@ impl AppState {
                         };
                         if wait.is_some_and(|wait| wait.admits()) {
                             cold.insert(observer_key.clone());
+                        }
+                        if phone_path {
+                            // Counted as taken from here, so one tick cannot spawn more
+                            // phone observers than the budget has room for.
+                            phone_slots_in_use += 1;
                         }
                         let (control, db, events) = (control.clone(), db.clone(), events.clone());
                         let queued_acceptance = acceptance.clone();
@@ -2148,10 +2160,19 @@ impl AppState {
                         if android.view_start_in_flight(&device.udid) {
                             continue;
                         }
-                        // A tree reader holds this phone's capture down (the sound sheet). The
-                        // view comes back as a fresh start on the first tick after the pause
-                        // ends or lapses.
+                        // A publish job holds this phone's view down for its whole run, or a
+                        // tree reader holds the capture down (the sound sheet). The view comes
+                        // back as a fresh start on the first tick after the hold ends or
+                        // lapses. The tile says so over its last frame instead of "loading".
                         if android.capture_paused(&device.udid) {
+                            if device.tile_stream_state != riviu_core::TileStreamState::Paused {
+                                set_stream_state(
+                                    &registry,
+                                    &device.udid,
+                                    riviu_core::TileStreamState::Paused,
+                                    None,
+                                );
+                            }
                             continue;
                         }
                         // Reconcile toward the preset the operator asked for, rather than

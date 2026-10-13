@@ -1026,8 +1026,10 @@ impl AndroidDriver {
     /// the iOS path follows.
     pub(super) async fn ensure_minicap_locked(&self, serial: &str) -> anyhow::Result<()> {
         let sink = self.sink()?;
+        // Only a tree reader's pause holds the session stream; a job's view hold leaves it
+        // alone, so a session restarted mid-job gets its frames back.
         anyhow::ensure!(
-            !self.capture_paused(serial),
+            !self.session_capture_paused(serial),
             "luồng hình của máy {serial} đang tạm dừng khi đọc bảng nhạc"
         );
         let claim = self.claim_start(serial)?;
@@ -1126,7 +1128,7 @@ impl AndroidDriver {
         let sink = self.view_sink()?;
         anyhow::ensure!(
             !self.capture_paused(serial),
-            "hình trực tiếp của máy {serial} đang tạm dừng khi đọc bảng nhạc"
+            "hình trực tiếp của máy {serial} đang tạm dừng trong lúc máy tự động (đọc bảng nhạc hoặc đăng bài)"
         );
         let claim = self.claim_view_start(serial)?;
         self.desired_presets
@@ -1239,14 +1241,22 @@ impl AndroidDriver {
         // which is the same insert.
         self.take_and_stop_view(serial).await
     }
-    /// Whether a tree reader holds this serial's live capture paused right now. A pause past
-    /// its bound has lapsed and answers `false`, so the desktop keeper starts the view again
-    /// even when the owner's resume never came.
+    /// Whether a tree reader or an automation job holds this serial's live view down right
+    /// now. A pause past its bound has lapsed and answers `false`, so the desktop keeper
+    /// starts the view again even when the owner's resume or release never came.
     pub fn capture_paused(&self, serial: &str) -> bool {
         self.capture_pauses
             .lock()
             .get(serial)
             .is_some_and(|pause| std::time::Instant::now() < pause.until)
+    }
+    /// Whether a tree reader holds this serial's session frame stream down right now. A
+    /// job's view hold ([`Self::hold_view`]) does not count: it stops only the view.
+    fn session_capture_paused(&self, serial: &str) -> bool {
+        self.capture_pauses
+            .lock()
+            .get(serial)
+            .is_some_and(|pause| pause.reader_hold && std::time::Instant::now() < pause.until)
     }
     /// Stop this serial's live view and its session frame stream for at most `bound`.
     ///
@@ -1264,15 +1274,19 @@ impl AndroidDriver {
     /// `Ok(true)` when something was running and is now stopped.
     pub async fn pause_capture(&self, serial: &str, bound: Duration) -> anyhow::Result<bool> {
         let until = std::time::Instant::now() + bound;
-        // Registered before anything stops, so the keeper starts nothing in between.
-        self.capture_pauses
-            .lock()
-            .entry(serial.to_owned())
-            .or_insert(CapturePause {
+        // Registered before anything stops, so the keeper starts nothing in between. A job
+        // holding the view for longer keeps its later bound.
+        {
+            let mut pauses = self.capture_pauses.lock();
+            let pause = pauses.entry(serial.to_owned()).or_insert(CapturePause {
                 until,
                 suspended: None,
-            })
-            .until = until;
+                reader_hold: false,
+                job_hold: false,
+            });
+            pause.until = pause.until.max(until);
+            pause.reader_hold = true;
+        }
         let view = self.views.lock().await.contains_key(serial);
         if view && !self.take_and_stop_view(serial).await {
             tracing::warn!(serial, "live view stop unconfirmed while pausing capture");
@@ -1287,16 +1301,34 @@ impl AndroidDriver {
             boundMs = bound.as_millis() as u64, "live capture paused for a tree reader");
         Ok(view || suspended.is_some())
     }
-    /// End [`Self::pause_capture`]. The live view is left to the keeper's next tick. The
-    /// session stream comes back at the generation it was taken down at, and only when that
-    /// generation is still current with no other producer, start or stop on this serial: a
-    /// session that ended in between keeps its stop proof and nothing is started.
+    /// End [`Self::pause_capture`]. The live view is left to the keeper's next tick, unless
+    /// an automation job still holds it ([`Self::hold_view`]): then only the session stream
+    /// returns and the view stays down until the job releases it. The session stream comes
+    /// back at the generation it was taken down at, and only when that generation is still
+    /// current with no other producer, start or stop on this serial: a session that ended in
+    /// between keeps its stop proof and nothing is started.
     pub async fn resume_capture(&self, serial: &str) -> anyhow::Result<()> {
-        let Some(pause) = self.capture_pauses.lock().remove(serial) else {
-            return Ok(());
+        let pause = {
+            let mut pauses = self.capture_pauses.lock();
+            match pauses.get_mut(serial) {
+                None => return Ok(()),
+                Some(pause) if pause.job_hold => {
+                    pause.reader_hold = false;
+                    CapturePause {
+                        until: pause.until,
+                        suspended: pause.suspended.take(),
+                        reader_hold: false,
+                        job_hold: true,
+                    }
+                }
+                Some(_) => match pauses.remove(serial) {
+                    Some(pause) => pause,
+                    None => return Ok(()),
+                },
+            }
         };
         let Some(stream) = pause.suspended else {
-            tracing::info!(serial, "live capture resumed");
+            tracing::info!(serial, viewHeld = pause.job_hold, "live capture resumed");
             return Ok(());
         };
         let sink = self.sink()?;
@@ -1320,6 +1352,77 @@ impl AndroidDriver {
             .map(|_| tracing::info!(serial, generation = stream.generation,
                 snapshots = stream.snapshots, "live capture resumed"))
             .with_context(|| format!("khởi động lại luồng hình của máy {serial} sau khi tạm dừng"))
+    }
+    /// Keep this serial's live view (scrcpy encoder) down for at most `bound` while an
+    /// automation job runs on the phone. The session frame stream is left alone: the job's
+    /// own reads and evidence captures keep using it.
+    ///
+    /// Measured 13-14/10/2026 on 30 SM-G955F/N, Android 9 (`target/device-acceptance/
+    /// controllers/controller-r105.stdout.txt`): with every composing phone also encoding
+    /// its live tile, UiAutomator2 `/source` took p50 6.7 s, p90 12.7 s, max 18.3 s against
+    /// under 1 s when idle, `surfaceflinger` sat at 61 % CPU and about a third of the first
+    /// attempts timed out in the picker or sound sheet. HX-PAUSE (0.2.87) already showed
+    /// that taking the capture down brings the reads back, so a publish job now holds the
+    /// view for its whole run instead of only the sound sheet.
+    ///
+    /// Nests with [`Self::pause_capture`]: a tree reader inside the job may still suspend
+    /// the session stream, and its resume gives back only that stream. The keeper starts
+    /// nothing while the hold stands, and starts the view again as a fresh start on its
+    /// first tick after [`Self::release_view`] or after `bound` lapses, so a job that dies
+    /// without releasing costs at most `bound` of missing picture. Taking a hold twice
+    /// extends it. `Ok(true)` when a view was running and is now stopped.
+    pub async fn hold_view(&self, serial: &str, bound: Duration) -> anyhow::Result<bool> {
+        let until = std::time::Instant::now() + bound;
+        {
+            let mut pauses = self.capture_pauses.lock();
+            let pause = pauses.entry(serial.to_owned()).or_insert(CapturePause {
+                until,
+                suspended: None,
+                reader_hold: false,
+                job_hold: false,
+            });
+            pause.until = pause.until.max(until);
+            pause.job_hold = true;
+        }
+        let view = self.views.lock().await.contains_key(serial);
+        if view && !self.take_and_stop_view(serial).await {
+            tracing::warn!(
+                serial,
+                "live view stop unconfirmed while holding it for a job"
+            );
+        }
+        tracing::info!(
+            serial,
+            view,
+            boundMs = bound.as_millis() as u64,
+            "live view held down for an automation job"
+        );
+        Ok(view)
+    }
+    /// End [`Self::hold_view`]. The view is left to the keeper's next tick. A tree reader's
+    /// pause still in progress on this serial keeps its entry and its own resume.
+    pub fn release_view(&self, serial: &str) {
+        let mut pauses = self.capture_pauses.lock();
+        let Some(pause) = pauses.get_mut(serial) else {
+            return;
+        };
+        pause.job_hold = false;
+        let reader_pause = pause.reader_hold;
+        if !reader_pause {
+            pauses.remove(serial);
+        }
+        tracing::info!(
+            serial,
+            readerPause = reader_pause,
+            "live view released by its job"
+        );
+    }
+    /// Whether an automation job holds this serial's live view down right now.
+    pub fn view_held(&self, serial: &str) -> bool {
+        self.capture_pauses
+            .lock()
+            .get(serial)
+            .is_some_and(|pause| pause.job_hold && std::time::Instant::now() < pause.until)
     }
     /// Take the session frame stream down without advancing its generation. Refuses (`None`)
     /// while a start or an owned stop is in flight on this serial; those keep their own proof.
