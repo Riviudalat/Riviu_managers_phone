@@ -380,8 +380,8 @@ campaign và toàn bộ máy nằm trong scope mới được clock production n
 giờ. Các lịch khác, Nuôi và Điều phối vẫn đóng băng, không sửa lịch đã lưu.
 
 Verifier nền chỉ nhận bài đến hạn khi có `publishVerification` hợp lệ cho đúng
-campaign và serial. Nó dùng nhịp 5 phút, ngân sách 3 lần tìm bài không tiến triển
-và ngân sách riêng 12 lần metadata chưa sẵn sàng của candidate đã ràng buộc;
+campaign và serial. Nó kiểm lại khoảng 2 phút sau lượt trước; dừng sau 8 lượt liên tiếp không có bằng chứng mới
+khi tìm bài, và có ngân sách riêng 12 lần metadata chưa sẵn sàng của candidate đã ràng buộc;
 không tự mở lại bài cần review. Truy vấn và cập nhật lượt thiết bị giới hạn trong
 scope. Cleanup nền cần riêng `publishCleanup` và chỉ dọn bản chuyển đã có proof
 canonical qua kiểm revision/lease hiện có. Thiếu hoặc đổi scope thì không nhận
@@ -878,14 +878,14 @@ Cleanup media chạy worker riêng; một máy đọc chậm không chặn dispa
 Candidates được phân trang hữu hạn, ưu tiên bài tới hạn và luân phiên giữa các máy.
 Nhãn thời gian own-post chấp nhận EN và VI (`N phút trước` / `vừa xong`).
 `evidence.verificationStatus` giữ reasonCode, attempts, readFailures, checkedAt và
-nextCheckAt. Bài còn thiếu link được kiểm sau300giây tính từ cuối lượt trước khi còn
-ngân sách. `verificationBudget` version1 lưu fingerprint gắn immutable intent,
+nextCheckAt. Bài còn thiếu link được kiểm lại khoảng 2 phút (120 giây) sau cuối lượt trước khi còn
+ngân sách; đây không phải hạn tổng và không mở lại TikTok mỗi 2 phút. `verificationBudget` version1 lưu fingerprint gắn immutable intent,
 publicationStage, observations và noProgressObservations trong cùng CAS với kết quả.
 Candidate metadata đúng schema/assignment/intent/bundle/account/caption/time được
 kiểm qua mạng với `metadataObservations`, tối đa `metadataLimit=12` mỗi đợt xác minh.
 Các lượt này giữ nguyên bộ đếm tìm bài; lỗi đọc thông thường giữ bộ đếm metadata.
 Hết giới hạn metadata lưu cause `metadataRetryBudgetExhausted` và giữ candidate.
-Sau3lượt liên tiếp không có bằng chứng mới của đúng bài, lưu needsReview với cause
+Sau 8 lượt liên tiếp không có bằng chứng mới của đúng bài, lưu needsReview với cause
 `verificationNoProgress`, nextCheckAt=null và giữ intent/media/khoản thiếu Sheet.
 Lỗi đọc/transport, processing và tìm kiếm đều tiêu ngân sách hữu hạn này; offline/busy
 chưa được quan sát không tính là một lượt. Lượt cũ chưa có budget bắt đầu từ lần quan
@@ -969,7 +969,7 @@ và bật dọn bản chuyển; UI không nhận lựa chọn tắt hai nghĩa v
 Sheet/dọn media của chiến dịch cũ bất biến theo snapshot đã lưu, không áp mặc định
 mới hồi tố. Không xóa tệp nguồn trên desktop; lỗi dọn được thử lại độc lập qua
 restart, không phát lại Post.
-Worker lưu `nextCheckAt` bằng thời điểm kết thúc quan sát cộng 300 giây cho bài
+Worker lưu `nextCheckAt` bằng thời điểm kết thúc quan sát cộng 120 giây cho bài
 còn ngân sách, kể cả lỗi đọc. Mỗi lần quan sát có deadline và lease riêng. Restart
 giữ mốc gửi, lần kiểm tiếp, fingerprint và số lượt không tiến triển; needsReview
 không được background tự mở lại. Nhật ký verifying chỉ nói kiểm thao tác Đăng đã có;
@@ -992,7 +992,7 @@ vẫn chờ quan sát; không chuyển lỗi, không Post lại. Khi được ph
 trình, mở lại và kiểm tiến trình đang
 chạy trước Copy. Cùng lease giữ suốt chu kỳ; kiểm revision/stop trước và sau các await,
 không đóng máy còn bài khác đang giữ. Proof restart ghi vào `verificationDiagnostic.appRestart`.
-Android hẹn giờ bắt đầu kiểm khi phiên đăng nhả máy; lỗi restart cũng giữ nhịp 300 giây.
+Android hẹn giờ bắt đầu kiểm khi phiên đăng nhả máy; lỗi restart cũng giữ nhịp 120 giây.
 Unknown receipt và iOS giữ đường đọc không restart. LinkAndSheet không quay lại Post.
 Riêng Global 45.7.3/en, receipt `post_uncertain` chỉ được restart một lần cho đúng intent
 khi lượt Copy trước đó đã ghi `tiktokProcessing` trên bài ứng viên, tài khoản trước Post đã
@@ -1073,7 +1073,7 @@ Resume giữ campaign cancelled, publication/effect intent, jobs và đích Shee
 ban đầu. Cause `verificationNoProgress` và `metadataRetryBudgetExhausted` cho phép resume rõ ràng; các review
 khác không được nới. Transaction lưu status/budget/review-before-stop cũ trong
 `verificationBeforeResume` rồi mở budget mới; gọi lặp/ACK replay không reset.
-Worker hiện có dùng `nextCheckAt = checkedAt + 300 giây` khi còn ngân sách; ba lượt
+Worker hiện có dùng `nextCheckAt = checkedAt + 120 giây` khi còn ngân sách; 8 lượt
 không tiến triển liên tiếp ở bước tìm bài, hoặc 12 lượt metadata chưa sẵn sàng, lại needsReview.
 Confirmed resume đặt lại cả hai ngân sách nhưng không đổi candidate, thời điểm capture hay metadata attempt.
 **Kiểm tra liên kết** một lần có thể
@@ -1271,7 +1271,7 @@ pipeline vẫn kiểm tại nút Đăng. Worker đã lỗi sau effect chỉ chuy
 
 `publish_get_limits`/`publish_set_limits` nhận `{transfer,compose,verify,deviceTotal}`,
 lưu ở `publish.dispatch.limits` theo database máy chủ, mỗi giá trị từ 1 đến 64.
-Giữ cả bốn trường để tương thích dữ liệu cũ; chỉ `transfer` tác động admission (trần compose là hằng số ở trên, không đọc từ trường `compose`).
+Giữ cả bốn trường để tương thích dữ liệu cũ. Admission dùng `transfer` cho lượt chuyển media, `verify` làm trần số lượt đọc metadata mạng đồng thời, và trần cứng `PUBLISH_COMPOSE_PHONE_CAP` = 6 cho pha compose (không đọc từ trường `compose`); `deviceTotal` không tác động admission.
 Giảm `transfer` chặn cấp lượt chuyển mới đến khi số đang chạy xuống mức mới,
 không cắt request đang thực hiện. Phân trang candidate chỉ phân chia lượt quét,
 không giới hạn tổng worker. Foreground stream tăng theo số máy đã phát hiện;

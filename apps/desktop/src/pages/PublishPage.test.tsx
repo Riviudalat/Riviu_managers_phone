@@ -1102,7 +1102,11 @@ describe("publish campaign monitoring", () => {
     expect(executeCampaign).not.toHaveBeenCalled();
   });
 
-  it("shows periodic scheduled link checks without treating the waiting post as failure", async () => {
+  it.each([
+    { checkIntervalSeconds: 300, budget: undefined, schedule: /Kiểm tra mỗi 5 phút; dừng sau 3 lượt liên tiếp/ },
+    { checkIntervalSeconds: 120, budget: { version: 1, limit: 8, noProgressObservations: 2 },
+      schedule: /Kiểm tra mỗi 2 phút; dừng sau 8 lượt liên tiếp không có bằng chứng mới \(2\/8\)/ },
+  ])("shows periodic scheduled link checks every $checkIntervalSeconds s without treating the waiting post as failure", async ({ checkIntervalSeconds, budget, schedule }) => {
     const campaign = {
       id: "submitted-pending", requestId: "request", sourceRoot: "C:/fixture", runAt: "2026-09-09T07:00:00",
       state: "verifying", visibility: "public", cleanupPolicy: "keepImportedAssets",
@@ -1115,7 +1119,7 @@ describe("publish campaign monitoring", () => {
       campaign, bundles: [], events: [], assignments: [{
         id: "assignment", campaignId: campaign.id, bundleId: "bundle", ordinal: 0,
         udid: "PHONE-A", state: "verifying", errorCode: "post_verification_pending",
-        evidenceJson: JSON.stringify({ post: { state: "submitted" }, verificationStatus: { state: "pending", reason: "TikTok đang xử lý", checkedAt: "2026-09-09T00:40:00Z", nextCheckAt: "2026-09-09T00:45:00Z", reviewAfterMinutes: null, checkIntervalSeconds: 300 }, cleanup: { state: "kept", appCleanup: { state: "leftRunning" } } }),
+        evidenceJson: JSON.stringify({ post: { state: "submitted" }, verificationStatus: { state: "pending", reason: "TikTok đang xử lý", checkedAt: "2026-09-09T00:40:00Z", nextCheckAt: "2026-09-09T00:45:00Z", reviewAfterMinutes: null, checkIntervalSeconds }, verificationBudget: budget, cleanup: { state: "kept", appCleanup: { state: "leftRunning" } } }),
       }],
     } as never);
     vi.mocked(publishReconcile).mockResolvedValueOnce({
@@ -1136,7 +1140,7 @@ describe("publish campaign monitoring", () => {
     expect(screen.queryByRole("button", { name: "Chạy lại từ đầu" })).toBeNull();
     expect(within(panel).getByText(/TikTok đang xử lý/)).toBeVisible();
     expect(within(panel).getByText(/Kiểm tra tiếp:/)).toBeVisible();
-    expect(within(panel).getByText(/Kiểm tra mỗi 5 phút; dừng sau 3 lượt liên tiếp/)).toBeVisible();
+    expect(within(panel).getByText(schedule)).toBeVisible();
     expect(within(panel).queryByText(/Ngân sách tự kiểm:/)).toBeNull();
     expect(executeCampaign).not.toHaveBeenCalled();
   });

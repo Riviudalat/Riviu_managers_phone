@@ -216,8 +216,8 @@ const UPLOAD_IDLE_AFTER_MINUTES: i64 = 240;
 const SCHEDULED_FIRST_CHECK_SECONDS: i64 = 120;
 // Owner 13/10/2026: re-check a posted link every 2 minutes instead of 5. The no-progress
 // limit grows from 3 to 8 so the total wait stays about the same (15 -> 16 minutes).
-const VERIFICATION_CHECK_SECONDS: i64 = 120;
-const VERIFICATION_NO_PROGRESS_LIMIT: u64 = 8;
+pub(super) const VERIFICATION_CHECK_SECONDS: i64 = 120;
+pub(super) const VERIFICATION_NO_PROGRESS_LIMIT: u64 = 8;
 const VERIFICATION_NO_PROGRESS_CAUSE: &str = "verificationNoProgress";
 const METADATA_RETRY_LIMIT: u64 = 12;
 const METADATA_RETRY_CAUSE: &str = "metadataRetryBudgetExhausted";

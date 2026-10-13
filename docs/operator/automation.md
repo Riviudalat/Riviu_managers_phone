@@ -102,7 +102,7 @@ Khi bắt đầu phiên mới, Nuôi/Tương tác/Đăng bài lấy quyền sử
 có kiểm chứng trước khi mở lại. Chỉ mở tab không làm việc này. Không xóa dữ liệu/cache,
 không đăng xuất, không tắt app khác. Kết thúc công việc thì tắt TikTok và đóng stream;
 riêng bài đã gửi giữ nội dung đã chuyển. Khi xác minh link, Android chỉ tắt/mở lại
-TikTok sau khi đã thấy đúng bài xuất bản và màn không có tải lên; kiểm lặp sau 5 phút khi còn ngân sách; 3 lượt không tiến triển thì cần kiểm tra. Máy còn bài đang tải hoặc chưa rõ kết quả Đăng
+TikTok sau khi đã thấy đúng bài xuất bản và màn không có tải lên; kiểm lại khoảng 2 phút sau lượt trước khi còn ngân sách; 8 lượt liên tiếp không có bằng chứng mới thì cần kiểm tra. Máy còn bài đang tải hoặc chưa rõ kết quả Đăng
 chưa bắt đầu phiên tự động mới có bước tắt TikTok. Riêng bản ghi đã có `Posted`, đã
 dừng tự xác minh và không có pipeline hoạt động: sau ít nhất 4 giờ kể từ cập nhật cuối,
 việc thiếu link chuyển thành lưu ý **Liên kết bài cũ**, không giữ máy mãi. Bài cũ vẫn
