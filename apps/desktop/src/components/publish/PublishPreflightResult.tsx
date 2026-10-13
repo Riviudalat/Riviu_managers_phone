@@ -1,5 +1,6 @@
 import { useState } from "react";
 import { googleSheetsReleaseForeignLock } from "../../api";
+import { describeError } from "../../describeError";
 import type {
   PublishExecutionIssue,
   PublishPreflightReport,
@@ -207,7 +208,7 @@ function ReleaseForeignLock({ busy, onDone }: { busy: boolean; onDone: () => voi
       await googleSheetsReleaseForeignLock();
       onDone();
     } catch (cause) {
-      setError(cause instanceof Error ? cause.message : String(cause));
+      setError(describeError(cause));
     } finally {
       setPending(false);
     }
