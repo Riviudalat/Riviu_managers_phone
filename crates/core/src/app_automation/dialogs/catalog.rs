@@ -177,17 +177,28 @@ pub(super) const CATALOG: &[CatalogPopup] = &[
         spent: "bảng lịch sử xem bài vẫn còn sau một lần bấm Not now — không bấm lại, cần người vận hành kiểm tra",
         shadow: "[chạy bóng] nhận ra bảng \"See who viewed your posts\" (chỉ có trong APK) — khi được bật sẽ bấm \"Not now\"; lần này Riviu không bấm, cần người vận hành",
     },
-    // APK only: email opt-in. No thanks (0x7f110400) declines; the other button subscribes.
+    // Proven: crates/core/fixtures/tiktok-publish/musically-45.7.3-en/
+    // real-20261012-email-updates-dialog.xml, a real Global 45.7.3/en capture on the feed
+    // right after Post (ce031713f3d3ec1d0c, 12/10/2026; seen again on ce051715e15b2c2e02,
+    // 13/10/2026). The sheet has no "No thanks": title bob, body bo8, the id-less Button
+    // "Get updates" subscribes and is never pressed. The round close dyc (no desc) declines.
     CatalogPopup {
         key: "email_updates_dialog",
-        mode: PopupMode::Shadow,
+        mode: PopupMode::Act,
         class: PopupClass::Dismissable,
-        container: DIALOG,
-        anchors: &[text("Get updates sent to your email?")],
-        dismiss: Some(button("No thanks")),
-        acted: "đóng hộp thoại nhận email cập nhật (bấm No thanks); chờ đọc lại màn hình",
-        spent: "hộp thoại nhận email vẫn còn sau một lần bấm No thanks — không bấm lại, cần người vận hành kiểm tra",
-        shadow: "[chạy bóng] nhận ra hộp thoại \"Get updates sent to your email?\" (chỉ có trong APK) — khi được bật sẽ bấm \"No thanks\"; lần này Riviu không bấm, cần người vận hành",
+        container: id("sjd"),
+        anchors: &[
+            id_text("bob", "Get updates sent to your email?"),
+            id_text(
+                "bo8",
+                "You will also be sent trending content, newsletters, promotions, account updates and more. You can unsubscribe at anytime.",
+            ),
+            button("Get updates"),
+        ],
+        dismiss: Some(part(Some("dyc"), Some("android.widget.FrameLayout"), None, None)),
+        acted: "đóng hộp thoại nhận email cập nhật (bấm nút X, không bấm Get updates); chờ đọc lại màn hình",
+        spent: "hộp thoại nhận email vẫn còn sau một lần bấm nút X — không bấm lại, cần người vận hành kiểm tra",
+        shadow: "[chạy bóng] nhận ra hộp thoại \"Get updates sent to your email?\" — khi được bật sẽ bấm nút X; lần này Riviu không bấm, cần người vận hành",
     },
     // APK only: in-app location ask before the OS prompt. Continue requests the permission.
     CatalogPopup {
