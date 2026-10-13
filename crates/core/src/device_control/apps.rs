@@ -158,6 +158,29 @@ impl DeviceControlPlane {
             .await
             .map_err(|error| driver_error(lease.udid(), "cleanupPublishMedia", error))
     }
+    /// Read-only inventory of Riviu-named publish media on the phone, under the
+    /// exclusive lease so no import can land between the listing and a deletion.
+    pub async fn list_publish_media_leftovers(
+        &self,
+        context: &DeviceExclusiveContext,
+    ) -> Result<crate::PublishMediaLeftovers, DeviceControlError> {
+        let lease = self.validate_exclusive(context)?;
+        self.driver
+            .list_publish_media_leftovers(lease.udid())
+            .await
+            .map_err(|error| driver_error(lease.udid(), "listPublishMediaLeftovers", error))
+    }
+    pub async fn cleanup_publish_stage(
+        &self,
+        context: &DeviceExclusiveContext,
+        scope: &str,
+    ) -> Result<serde_json::Value, DeviceControlError> {
+        let lease = self.validate_exclusive(context)?;
+        self.driver
+            .cleanup_publish_stage(lease.udid(), scope)
+            .await
+            .map_err(|error| driver_error(lease.udid(), "cleanupPublishStage", error))
+    }
     /// Remove native publish assets while the foreground UI context still owns
     /// the live Agent relay. Closing the stream first can make the sidecar
     /// recycle the XCTest process before this sessionless route is sent.

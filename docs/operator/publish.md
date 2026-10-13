@@ -203,6 +203,13 @@ Nhật ký **Kiểm tra liên kết lần N** là kiểm thao tác đã có, kh�
 xác minh xong được gửi Sheet ngay. Chỉ sau khi bài và liên kết chính tắc được xác
 minh, app mới xóa bản media đã nhập vào điện thoại; ảnh/video nguồn trên PC không
 bị xóa. Lỗi dọn media được theo dõi riêng và không biến thành yêu cầu Đăng lại.
+Lượt dọn xoá cả album `Pictures/riviu-…` (kèm dòng MediaStore) lẫn thư mục staging ẩn
+`Pictures/.riviu-publish/…` cùng scope. Media của bài dừng trước Đăng, bị hủy hoặc lỡ
+giờ không thuộc nghĩa vụ này; app tự quét khi máy rảnh (không có nút): mỗi máy khoảng
+10 phút một lượt, chỉ khi không còn lượt đăng, Nuôi, Tương tác, Flow hay job nào trên
+máy, chỉ xoá thư mục do Riviu đặt tên mà không còn bài đang sống, tối đa 8 thư mục mỗi
+lượt, mỗi lần xoá có intent/receipt riêng. Media của bài đang `verifying`/`uncertain`
+hoặc bài đã đăng mà chưa có proof dọn không bao giờ bị quét.
 Không đăng lại bài để lấy link. Không restart khi máy đang bận, tác vụ đã dừng
 hoặc link đã xác minh.
 Tắt/mở lỗi cũng giữ bài và chờ lần kiểm kế tiếp.
@@ -476,8 +483,9 @@ Capability phải đọc từ backend trên đúng máy/package/build/locale. C�
 không là chứng nhận cho bản TikTok khác. Giao diện hỗ trợ không đồng nghĩa live Post đã đạt.
 
 **Tiếp theo:** retry chỉ phạm vi metadata/outbox
-còn thiếu; không mở lại full pipeline cho bài đã đăng. Cleanup là tập effect cụ thể,
-không phải xoá tùy ý theo tên thư mục.
+còn thiếu; không mở lại full pipeline cho bài đã đăng. Cleanup của bài đã xác minh là
+tập effect cụ thể theo `importId`; quét media sót chỉ chạm thư mục Riviu tự đặt tên
+(`riviu-*`, `.riviu-publish/*`) không còn bài đang sống, không xoá tùy ý thư mục khác.
 
 ### Tiếp tục xác minh bài đã gửi sau khi Dừng
 

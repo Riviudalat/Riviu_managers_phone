@@ -33,6 +33,8 @@ pub(crate) use verification::{
 };
 pub(crate) use verification_queue::{VerificationQueue, COLD_RETRY as VERIFICATION_COLD_RETRY};
 mod verified_cleanup;
+mod media_sweep;
+pub(crate) use media_sweep::OrphanMediaSweep;
 /// Batched read for the device picker. No phone access and no state mutation.
 #[tauri::command]
 pub async fn publish_device_guards(

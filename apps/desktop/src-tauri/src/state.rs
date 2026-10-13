@@ -2676,6 +2676,90 @@ impl AppState {
             );
         }
 
+        // Orphaned publish media sweep. Deletes `riviu-*` albums and `.riviu-publish/*`
+        // staging scopes whose assignment is terminal (failed before Post, cancelled,
+        // missed) or whose verified cleanup already proved its own import, a bounded
+        // number per visit, under the same idle lease rules as the popup sweep. Off under
+        // a dev-acceptance scope: that scope names campaigns, and the sweep by design
+        // reaches directories no campaign in the scope owns.
+        if !self.dev_acceptance.automatic_device_workers_frozen() && !self.dev_acceptance.active() {
+            crate::publish_commands::OrphanMediaSweep::spawn(
+                self.control.clone(),
+                self.db.clone(),
+                self.registry.clone(),
+                self.command_admission.clone(),
+                self.background_stop.clone(),
+            );
+        }
+
+        // Retention for `artifacts/traces`. Nothing else ever removed a trace; measured
+        // 14/10/2026 at 53.2 GB on the operator host. Runs of campaigns with an open
+        // outcome (posting, verifying, uncertain, needsReview) are protected by folder
+        // id; the rest go by age, then by total size, oldest first. The first pass waits
+        // three minutes so startup sessions do not compete with disk I/O.
+        {
+            let db = self.db.clone();
+            let root = self.artifacts_dir.join("traces");
+            let stop = self.background_stop.clone();
+            tauri::async_runtime::spawn(async move {
+                let mut interval = tokio::time::interval_at(
+                    tokio::time::Instant::now() + Duration::from_secs(3 * 60),
+                    Duration::from_secs(6 * 60 * 60),
+                );
+                interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+                loop {
+                    interval.tick().await;
+                    if stop.load(Ordering::Acquire) {
+                        break;
+                    }
+                    let protected = match db.publish_campaigns_with_open_outcomes() {
+                        Ok(ids) => ids
+                            .iter()
+                            .map(|id| riviu_core::ui_automation::trace::run_folder_id(id))
+                            .collect::<std::collections::HashSet<_>>(),
+                        Err(error) => {
+                            log::warn!(
+                                "dọn trace: chưa đọc được bài còn dở, bỏ qua lượt này: {error:#}"
+                            );
+                            continue;
+                        }
+                    };
+                    let root = root.clone();
+                    let pruned = tokio::task::spawn_blocking(move || {
+                        riviu_core::ui_automation::trace_retention::prune_trace_runs(
+                            &root,
+                            &protected,
+                            riviu_core::ui_automation::trace_retention::TraceRetentionPolicy::DEFAULT,
+                            std::time::SystemTime::now(),
+                        )
+                    })
+                    .await;
+                    match pruned {
+                        Ok(Ok(report)) => {
+                            let line = format!(
+                                "dọn trace: quét {} run, giữ {} run còn dở, xoá {} run ({} MB), còn {} MB",
+                                report.scanned_runs,
+                                report.protected_runs,
+                                report.removed_runs,
+                                report.removed_bytes / (1024 * 1024),
+                                report.kept_bytes / (1024 * 1024)
+                            );
+                            if report.removed_runs > 0 || !report.failures.is_empty() {
+                                log::info!("{line}");
+                            } else {
+                                log::debug!("{line}");
+                            }
+                            for (path, error) in report.failures.iter().take(5) {
+                                log::warn!("dọn trace: {}: {error}", path.display());
+                            }
+                        }
+                        Ok(Err(error)) => log::warn!("dọn trace: {error:#}"),
+                        Err(error) => log::warn!("dọn trace: tác vụ nền dừng: {error}"),
+                    }
+                }
+            });
+        }
+
         // Local schedule runner
         let db = self.db.clone();
         let jobs = self.jobs.clone();

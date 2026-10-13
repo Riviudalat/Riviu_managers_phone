@@ -341,6 +341,12 @@ const MIGRATIONS: &[Migration] = &[
         apply: apply_migration_51,
         rebuilds_tables: false,
     },
+    Migration {
+        version: 52,
+        name: "publish-media-sweeps",
+        apply: apply_migration_52,
+        rebuilds_tables: false,
+    },
 ];
 
 /// The device list the operator approved when a schedule was saved. A due run whose target
@@ -364,6 +370,26 @@ SET approved_udids_json=(
     AND json_array_length(r.target_json,'$.udids')>0
 );
 "#,
+    )?;
+    Ok(())
+}
+
+/// Intent and receipt for every directory the orphan publish-media sweep deletes on a
+/// phone. One row per attempt: `claimed` before the phone is touched, then `cleaned` or
+/// `failed` with the backend's readback. Names are the phone-side basenames the backend
+/// itself created; the row never carries a secret or a source path.
+fn apply_migration_52(tx: &Transaction<'_>) -> anyhow::Result<()> {
+    tx.execute_batch(
+        "CREATE TABLE publish_media_sweeps (
+          id TEXT PRIMARY KEY,
+          udid TEXT NOT NULL,
+          kind TEXT NOT NULL CHECK(kind IN ('album','stage')),
+          name TEXT NOT NULL,
+          state TEXT NOT NULL CHECK(state IN ('claimed','cleaned','failed')),
+          claimed_at_ms INTEGER NOT NULL,
+          finished_at_ms INTEGER,
+          proof_json TEXT);
+        CREATE INDEX publish_media_sweeps_device ON publish_media_sweeps(udid,claimed_at_ms);",
     )?;
     Ok(())
 }

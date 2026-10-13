@@ -172,6 +172,18 @@ impl MediaPullReport {
     }
 }
 
+/// Riviu-named publish media still on a phone, as the backend lists it.
+///
+/// `albums` are visible import ids (`riviu-<scope>-<hash>`), `stages` are hidden
+/// staging scopes that never became an album. Both carry only names the backend would
+/// accept back in a cleanup call; anything else on the phone is not reported, so a
+/// caller cannot be talked into deleting a directory this project did not create.
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct PublishMediaLeftovers {
+    pub albums: Vec<String>,
+    pub stages: Vec<String>,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum GuardedClipboardOperation {
     Set {
@@ -816,6 +828,24 @@ pub trait DeviceDriver: Send + Sync {
         _import_id: &str,
     ) -> anyhow::Result<serde_json::Value> {
         unsupported("cleanupPublishMedia")
+    }
+    /// What this project's publish path has left on the phone: visible albums and
+    /// hidden staging scopes, by the names the backend itself created. Read-only; the
+    /// caller decides which names no longer have a living assignment.
+    async fn list_publish_media_leftovers(
+        &self,
+        _udid: &str,
+    ) -> anyhow::Result<PublishMediaLeftovers> {
+        unsupported("listPublishMediaLeftovers")
+    }
+    /// Remove one hidden staging scope that never became an album. Backends that
+    /// stage and import in one step have nothing to remove and keep the refusal.
+    async fn cleanup_publish_stage(
+        &self,
+        _udid: &str,
+        _scope: &str,
+    ) -> anyhow::Result<serde_json::Value> {
+        unsupported("cleanupPublishStage")
     }
     /// Copy the phone's own photos and videos off it, into `dest_dir`.
     ///

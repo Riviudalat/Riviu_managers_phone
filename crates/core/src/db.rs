@@ -77,6 +77,10 @@ pub use publish_pipeline::{PublishPipelineRun, PublishPreparationOwner};
 mod publish_cleanup;
 mod publish_create;
 pub use publish_create::PUBLISH_DEVICE_NOT_RELEASED;
+mod publish_media_sweep;
+pub use publish_media_sweep::{
+    publish_album_scope, publish_device_scope, PublishMediaSweepClaim, PublishMediaSweepKind,
+};
 mod publish_start;
 pub use publish_start::{PublishExcludeReceipt, PublishStartError, PublishStartReceipt};
 mod publish_report;

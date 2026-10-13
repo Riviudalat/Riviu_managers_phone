@@ -94,6 +94,7 @@ pub use driver::{
     ui_error_kind, AppProcessState, DeviceDriver, ElementBox, ElementQuery,
     GuardedClipboardOperation, GuardedClipboardOutput, GuardedClipboardProgress,
     GuardedClipboardTransition, HierarchySourceSnapshot, MediaPullReport, ProcessAbsenceProof,
+    PublishMediaLeftovers,
     UiError, UiErrorKind, UiSession, UnsupportedCapability,
 };
 pub use events::{AppEvent, EventBus};
