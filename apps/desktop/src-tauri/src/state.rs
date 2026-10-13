@@ -1683,6 +1683,14 @@ impl AppState {
                 self.background_stop.clone(),
             );
             crate::orchestration_commands::resume_orchestration_runs(app.clone(), self);
+            if let Some(android) = self.android.clone() {
+                crate::adb_server_recovery::spawn(
+                    android,
+                    self.db.clone(),
+                    self.command_admission.clone(),
+                    self.background_stop.clone(),
+                );
+            }
         }
         crate::orchestration_commands::start_automation_schedule_runner(app.clone(), self);
 
@@ -2101,8 +2109,8 @@ impl AppState {
                     let Ok(_admitted) = command_admission.ensure_accepting_work() else {
                         return;
                     };
-                    // Read-only: what the inventory poll saw happen to the ADB server. Riviu
-                    // never restarts it; the operator is told who did and what to expect.
+                    // What happened to the ADB server: another tool's restart seen by the
+                    // inventory poll, or Riviu's own bounded restart (adb_server_recovery).
                     for notice in android.drain_adb_server_notices() {
                         log::warn!("{}", notice.message);
                         events.emit(riviu_core::AppEvent::AdbServerNotice {
@@ -2110,6 +2118,7 @@ impl AppState {
                             change: match notice.change {
                                 riviu_android_driver::AdbServerChange::Lost => "lost",
                                 riviu_android_driver::AdbServerChange::Returned => "returned",
+                                riviu_android_driver::AdbServerChange::Restarted => "restarted",
                             }
                             .to_string(),
                             transports: u32::try_from(notice.transports).unwrap_or(u32::MAX),

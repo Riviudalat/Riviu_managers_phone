@@ -6,6 +6,7 @@ mod no_public_publish;
 mod no_public_interaction;
 mod no_public;
 mod accept_loop;
+mod adb_server_recovery;
 mod agent_commands;
 mod agent_quarantine_commands;
 /// Public so the live harness binaries resolve the agent exactly as the app

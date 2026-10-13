@@ -392,6 +392,50 @@ async fn enter_adb_slot(serial: Option<&str>, what: &str, lane: AdbLane) -> AdbS
     }
 }
 
+/// What [`AdbProgram::recover_hung_server`] did.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ServerRecovery {
+    /// Too few phones failed host-side to suspect the server.
+    NotSuspected,
+    /// Suspected, but the server answered its roster: the phones were slow, not the server.
+    Answered,
+    /// Hung, but a Post/Send is between intent and receipt; listed as `kind:udid`.
+    Deferred(String),
+    /// Hung, but the cooldown or hourly cap holds.
+    Refused(crate::adb_server::RestartRefusal),
+    Restarted {
+        port: u16,
+    },
+    Failed(String),
+}
+
+/// A listener accepts on `127.0.0.1:<port>`. A hung server still accepts (the OS queues the
+/// connection), so this tells "process still there" apart from "server answers".
+async fn port_open(port: u16) -> bool {
+    matches!(
+        tokio::time::timeout(
+            Duration::from_millis(500),
+            tokio::net::TcpStream::connect((std::net::Ipv4Addr::LOCALHOST, port)),
+        )
+        .await,
+        Ok(Ok(_))
+    )
+}
+
+/// Wait, bounded, until nothing listens on `port` any more.
+async fn port_released(port: u16, within: Duration) -> bool {
+    let deadline = Instant::now() + within;
+    loop {
+        if !port_open(port).await {
+            return true;
+        }
+        if Instant::now() >= deadline {
+            return false;
+        }
+        tokio::time::sleep(Duration::from_millis(250)).await;
+    }
+}
+
 #[derive(Debug, Clone)]
 pub struct AdbProgram {
     path: PathBuf,
@@ -670,6 +714,278 @@ impl AdbProgram {
             .is_some_and(|watch| watch.lock().holding_starts(std::time::Instant::now()))
     }
 
+    /// Feed one failed call to the hang detector when it is the server's, not the phone's.
+    fn note_failure(&self, serial: Option<&str>, failure: &str) {
+        if let (Some(serial), Some(watch)) = (serial, &self.server_watch) {
+            if crate::adb_server::host_side_fault(failure) {
+                watch.lock().note_host_fault(serial, Instant::now());
+            }
+        }
+    }
+
+    /// Enough phones failed host-side recently that [`Self::recover_hung_server`] should
+    /// probe the server. Cheap: no adb traffic.
+    pub fn server_hang_suspected(&self) -> bool {
+        self.server_watch
+            .as_ref()
+            .is_some_and(|watch| watch.lock().hang_suspected(Instant::now()))
+    }
+
+    /// `adb -P <port> <args>` with this client, outside the adb queue on purpose: when the
+    /// server is hung, every slot may be held by a call that is waiting on it.
+    fn server_command(&self, port: u16, args: &[&str]) -> Command {
+        let mut command = Command::new(&self.path);
+        command
+            .env_remove("ADB_SERVER_SOCKET")
+            .env("ANDROID_ADB_SERVER_PORT", port.to_string())
+            .arg("-P")
+            .arg(port.to_string())
+            .args(args)
+            .stdin(Stdio::null())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .kill_on_drop(true);
+        #[cfg(windows)]
+        command.creation_flags(0x0800_0000);
+        command
+    }
+
+    /// `kill-server`, then `start-server`, with the adb Riviu drives (bundled in a packaged
+    /// build, [`AdbResolutionPolicy`] in development). A server that ignores `kill-server`
+    /// is ended by the pid listening on the port, never by image name. Returns the roster
+    /// of the new server. Every forward, stream and UiAutomator session made through the
+    /// old server is gone afterwards; their owners treat that as a transport fault.
+    pub(crate) async fn restart_server(&self, port: u16) -> anyhow::Result<String> {
+        const KILL_TIMEOUT: Duration = Duration::from_secs(10);
+        const RELEASE_WAIT: Duration = Duration::from_secs(5);
+        const START_TIMEOUT: Duration = Duration::from_secs(30);
+        let kill = tokio::time::timeout(
+            KILL_TIMEOUT,
+            self.server_command(port, &["kill-server"]).output(),
+        )
+        .await;
+        let mut notes = Vec::new();
+        match kill {
+            Ok(Ok(output)) if output.status.success() => {}
+            Ok(Ok(output)) => notes.push(format!(
+                "kill-server: {}",
+                String::from_utf8_lossy(&output.stderr).trim()
+            )),
+            Ok(Err(error)) => notes.push(format!("kill-server: {error}")),
+            Err(_) => notes.push(format!("kill-server timed out after {KILL_TIMEOUT:?}")),
+        }
+        if !port_released(port, RELEASE_WAIT).await {
+            let pid = crate::adb_server::listening_pid(port).await.with_context(|| {
+                format!("ADB server cổng {port} không tắt và không tìm được tiến trình giữ cổng ({})", notes.join("; "))
+            })?;
+            crate::adb_server::terminate(pid)
+                .await
+                .with_context(|| format!("không tắt được tiến trình ADB server pid {pid}"))?;
+            anyhow::ensure!(
+                port_released(port, RELEASE_WAIT).await,
+                "ADB server cổng {port} vẫn giữ cổng sau khi tắt pid {pid}"
+            );
+        }
+        let start = tokio::time::timeout(
+            START_TIMEOUT,
+            self.server_command(port, &["start-server"]).output(),
+        )
+        .await
+        .map_err(|_| anyhow!("adb start-server timed out after {START_TIMEOUT:?}"))?
+        .context("run adb start-server")?;
+        anyhow::ensure!(
+            start.status.success(),
+            "adb start-server failed: {}",
+            String::from_utf8_lossy(&start.stderr).trim()
+        );
+        crate::adb_server::probe(port)
+            .await
+            .with_context(|| format!("ADB server cổng {port} chưa trả lời sau start-server"))
+    }
+
+    /// Detect, confirm and repair a hung adb server, within the restart budget.
+    ///
+    /// Order: a suspicion from [`Self::server_hang_suspected`]; the budget; a roster probe
+    /// that must go unanswered; `safe_boundary` (no Post/Send between intent and receipt);
+    /// then the intent is journaled before `kill-server` and the receipt after. Nothing is
+    /// replayed: callers see only the transport fault the restart causes.
+    pub async fn recover_hung_server<J, S>(&self, journal: J, safe_boundary: S) -> ServerRecovery
+    where
+        J: Fn(&str, &str),
+        S: FnOnce() -> Result<(), String>,
+    {
+        let Some(watch) = &self.server_watch else {
+            return ServerRecovery::NotSuspected;
+        };
+        let serials = {
+            let mut watch = watch.lock();
+            if !watch.hang_suspected(Instant::now()) {
+                return ServerRecovery::NotSuspected;
+            }
+            if let Some(refusal) = watch.restart_refusal(Instant::now()) {
+                return ServerRecovery::Refused(refusal);
+            }
+            watch.hang_serials()
+        };
+        let port = self.hang_port(&serials);
+        if crate::adb_server::probe(port).await.is_some() {
+            watch.lock().clear_hang();
+            tracing::info!(
+                port,
+                phones = serials.len(),
+                "adb failures on several phones, but the server answers its roster; not restarting"
+            );
+            return ServerRecovery::Answered;
+        }
+        if let Err(blockers) = safe_boundary() {
+            return ServerRecovery::Deferred(blockers);
+        }
+        if let Err(refusal) = watch.lock().begin_restart(Instant::now()) {
+            return ServerRecovery::Refused(refusal);
+        }
+        journal(
+            "adb.server.restart",
+            &format!(
+                "ADB server cổng {port} không trả lời (lỗi phía máy tính trên {} máy trong {} giây: {}); \
+                 Riviu khởi động lại ADB server bằng {} (kill-server rồi start-server). Thao tác \
+                 chưa xác nhận sẽ không tự gửi lại",
+                serials.len(),
+                crate::adb_server::HANG_WINDOW.as_secs(),
+                serials.join(", "),
+                self.path.display()
+            ),
+        );
+        let started = Instant::now();
+        match self.restart_server(port).await {
+            Ok(roster) => {
+                let message = format!(
+                    "Riviu đã khởi động lại ADB server cổng {port} vì nó bị treo ({} giây). \
+                     Stream và phiên điều khiển đang tự nối lại; thao tác đang dở chưa được \
+                     xác nhận sẽ không tự gửi lại",
+                    started.elapsed().as_secs()
+                );
+                journal("adb.server.restart.done", &message);
+                watch
+                    .lock()
+                    .end_restart(port, Some(&roster), message, Instant::now());
+                ServerRecovery::Restarted { port }
+            }
+            Err(error) => {
+                let message = format!(
+                    "Riviu không khởi động lại được ADB server cổng {port}: {error:#}. Đóng phần \
+                     mềm khác đang dùng ADB rồi mở lại Riviu nếu máy vẫn không phản hồi"
+                );
+                journal("adb.server.restart.failed", &message);
+                watch
+                    .lock()
+                    .end_restart(port, None, message.clone(), Instant::now());
+                ServerRecovery::Failed(message)
+            }
+        }
+    }
+
+    /// The port most of the failing phones are routed to.
+    fn hang_port(&self, serials: &[String]) -> u16 {
+        let mut votes: HashMap<u16, usize> = HashMap::new();
+        for serial in serials {
+            if let Some(port) = self.server_port_for(Some(serial)) {
+                *votes.entry(port).or_default() += 1;
+            }
+        }
+        votes
+            .into_iter()
+            .max_by_key(|(port, count)| (*count, std::cmp::Reverse(*port)))
+            .map(|(port, _)| port)
+            .or(self.server_port)
+            .unwrap_or(5037)
+    }
+
+    /// At controller start, before any job: a server of a different adb build than this
+    /// client is replaced with ours instead of kept "from existing transport inventory".
+    /// r107 (14/10/2026) ran Riviu's 37.0.x client against GenFarmer's 34.0.5 server.
+    /// Unknown server identity keeps the server and says so.
+    pub(crate) async fn replace_foreign_server_at_bootstrap(
+        &self,
+        port: u16,
+        client_version: &str,
+    ) {
+        let Some(ours) = crate::adb_server::parse_adb_build(client_version) else {
+            return;
+        };
+        if !port_open(port).await {
+            return;
+        }
+        let Some(pid) = crate::adb_server::listening_pid(port).await else {
+            tracing::info!(
+                port,
+                "không xác định được tiến trình ADB server; giữ server đang chạy"
+            );
+            return;
+        };
+        let Some(image) = crate::adb_server::process_image(pid).await else {
+            tracing::info!(
+                port,
+                pid,
+                "không đọc được đường dẫn ADB server; giữ server đang chạy"
+            );
+            return;
+        };
+        let mut version = Command::new(&image);
+        version
+            .arg("version")
+            .stdin(Stdio::null())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .kill_on_drop(true);
+        #[cfg(windows)]
+        version.creation_flags(0x0800_0000);
+        let theirs = tokio::time::timeout(Duration::from_secs(10), version.output())
+            .await
+            .ok()
+            .and_then(Result::ok)
+            .map(|output| String::from_utf8_lossy(&output.stdout).into_owned());
+        let theirs = theirs
+            .as_deref()
+            .and_then(crate::adb_server::parse_adb_build);
+        if theirs == Some(ours) {
+            return;
+        }
+        tracing::warn!(
+            port,
+            pid,
+            server = %image.display(),
+            server_version = theirs.unwrap_or("không rõ"),
+            client = %self.path.display(),
+            client_version = ours,
+            "ADB server đang chạy khác phiên bản với adb của Riviu; khởi động lại server bằng adb của Riviu trước khi nhận việc"
+        );
+        let Some(watch) = &self.server_watch else {
+            return;
+        };
+        if watch.lock().begin_restart(Instant::now()).is_err() {
+            return;
+        }
+        let (roster, message) = match self.restart_server(port).await {
+            Ok(roster) => (
+                Some(roster),
+                format!(
+                    "Lúc khởi động, ADB server cổng {port} là bản {} ({}); Riviu đã thay bằng \
+                     adb của mình (bản {ours}) trước khi nhận việc",
+                    theirs.unwrap_or("không rõ"),
+                    image.display()
+                ),
+            ),
+            Err(error) => (
+                None,
+                format!("Lúc khởi động, Riviu không thay được ADB server cổng {port} khác phiên bản: {error:#}"),
+            ),
+        };
+        tracing::warn!(port, "{message}");
+        watch
+            .lock()
+            .end_restart(port, roster.as_deref(), message, Instant::now());
+    }
+
     /// The server port this serial's adb calls are pinned to, when Riviu pinned one.
     pub(crate) fn server_port_for(&self, serial: Option<&str>) -> Option<u16> {
         serial
@@ -735,9 +1051,14 @@ impl AdbProgram {
             Err(_) => slot.exec.timed_out(),
             Ok(_) => slot.exec.failed(),
         }
-        let output = output
-            .map_err(|_| anyhow!("adb {} timed out after {:?}", args.join(" "), timeout))?
-            .with_context(|| format!("run adb {}", args.join(" ")))?;
+        let output = match output {
+            Ok(output) => output.with_context(|| format!("run adb {}", args.join(" ")))?,
+            Err(_) => {
+                let message = format!("adb {} timed out after {:?}", args.join(" "), timeout);
+                self.note_failure(serial, &message);
+                return Err(anyhow!(message));
+            }
+        };
         if output.status.success() {
             return Ok(output.stdout);
         }
@@ -747,6 +1068,7 @@ impl AdbProgram {
         } else {
             stderr
         };
+        self.note_failure(serial, &detail);
         Err(anyhow!("adb {} failed: {detail}", args.join(" ")))
     }
 
@@ -778,14 +1100,24 @@ impl AdbProgram {
             Err(_) => slot.exec.timed_out(),
             Ok(Err(_)) => slot.exec.failed(),
         }
-        let output = output
-            .map_err(|_| anyhow!("adb shell timed out after {timeout:?}"))?
-            .context("run adb shell")?;
-        Ok(ShellOutput {
+        let output = match output {
+            Ok(output) => output.context("run adb shell")?,
+            Err(_) => {
+                let message = format!("adb shell timed out after {timeout:?}");
+                self.note_failure(Some(serial), &message);
+                return Err(anyhow!(message));
+            }
+        };
+        let output = ShellOutput {
             exit_code: output.status.code().unwrap_or(-1),
             stdout: String::from_utf8_lossy(&output.stdout).into_owned(),
             stderr: String::from_utf8_lossy(&output.stderr).into_owned(),
-        })
+        };
+        if output.exit_code != 0 {
+            // The script's own stderr is an answer; only the client's own complaint counts.
+            self.note_failure(Some(serial), &output.stderr);
+        }
+        Ok(output)
     }
 
     /// Bounded secret stdin transport. Errors never include payload or child output.
@@ -1060,12 +1392,17 @@ impl AdbProgram {
             Ok(_) => slot.exec.failed(),
         }
         let output = output
-            .map_err(|_| AdbEffectFailure::AfterSpawn {
-                detail: format!("adb {verb} timed out after {timeout:?}"),
+            .map_err(|_| {
+                let detail = format!("adb {verb} timed out after {timeout:?}");
+                self.note_failure(Some(serial), &detail);
+                AdbEffectFailure::AfterSpawn { detail }
             })?
             .map_err(|error| AdbEffectFailure::AfterSpawn {
                 detail: format!("wait for adb {verb}: {error}"),
             })?;
+        if !output.status.success() {
+            self.note_failure(Some(serial), &String::from_utf8_lossy(&output.stderr));
+        }
         Ok(AdbEffectOutput {
             success: output.status.success(),
             exit_code: output.status.code(),
@@ -2814,6 +3151,126 @@ pub fn classify_ls_output(stdout: &str, stderr: &str, exit_code: i32) -> LsOutco
 
 #[cfg(test)]
 mod tests {
+    /// HX-ADB end to end against a fixture adb and a fake server: deferred at an effect
+    /// boundary, then journaled `kill-server` + `start-server` on the hung port with Riviu's
+    /// own binary, then held by the cooldown without probing again.
+    #[tokio::test]
+    async fn a_hung_server_is_restarted_by_riviu_adb_only_at_a_safe_boundary() {
+        use super::*;
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        let root = std::env::temp_dir().join(format!("riviu-adb-restart-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir(&root).unwrap();
+        let port = std::net::TcpListener::bind("127.0.0.1:0")
+            .unwrap()
+            .local_addr()
+            .unwrap()
+            .port();
+        #[cfg(windows)]
+        let executable = {
+            let path = root.join("fake-adb.cmd");
+            std::fs::write(
+                &path,
+                concat!(
+                    "@echo off\r\n>>\"%~dp0calls.txt\" echo %3\r\n",
+                    "if \"%3\"==\"kill-server\" type nul >\"%~dp0killed.txt\"\r\n",
+                    "if \"%3\"==\"start-server\" type nul >\"%~dp0started.txt\"\r\nexit /b 0\r\n",
+                ),
+            )
+            .unwrap();
+            path
+        };
+        #[cfg(not(windows))]
+        let executable = {
+            use std::os::unix::fs::PermissionsExt;
+            let path = root.join("fake-adb");
+            std::fs::write(&path, "#!/bin/sh\nd=$(dirname -- \"$0\")\necho \"$3\" >>\"$d/calls.txt\"\n[ \"$3\" = kill-server ] && touch \"$d/killed.txt\"\n[ \"$3\" = start-server ] && touch \"$d/started.txt\"\nexit 0\n").unwrap();
+            std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o700)).unwrap();
+            path
+        };
+        // Hung: accepts and never answers, until kill-server; then answers an empty roster.
+        let (killed, started) = (root.join("killed.txt"), root.join("started.txt"));
+        let server = tokio::spawn(async move {
+            let hung = tokio::net::TcpListener::bind(("127.0.0.1", port))
+                .await
+                .unwrap();
+            let mut held = Vec::new();
+            while !killed.exists() {
+                if let Ok(Ok((socket, _))) =
+                    tokio::time::timeout(Duration::from_millis(50), hung.accept()).await
+                {
+                    held.push(socket);
+                }
+            }
+            drop((hung, held));
+            while !started.exists() {
+                tokio::time::sleep(Duration::from_millis(50)).await;
+            }
+            let up = tokio::net::TcpListener::bind(("127.0.0.1", port))
+                .await
+                .unwrap();
+            loop {
+                let (mut socket, _) = up.accept().await.unwrap();
+                let mut request = [0u8; 18];
+                let _ = socket.read_exact(&mut request).await;
+                let _ = socket.write_all(b"OKAY0000").await;
+            }
+        });
+        let adb = AdbProgram::at(executable)
+            .with_server_port(Some(port))
+            .with_server_discovery();
+        let hang = |adb: &AdbProgram| {
+            let now = Instant::now();
+            let mut watch = adb.server_watch.as_ref().unwrap().lock();
+            for serial in ["phone-a", "phone-b", "phone-c"] {
+                watch.note_host_fault(serial, now);
+            }
+        };
+        let journal = parking_lot::Mutex::new(Vec::<String>::new());
+        let record = |action: &str, _: &str| journal.lock().push(action.to_string());
+
+        hang(&adb);
+        assert!(adb.server_hang_suspected());
+        let deferred = adb
+            .recover_hung_server(record, || Err("publish:phone-b".into()))
+            .await;
+        assert_eq!(deferred, ServerRecovery::Deferred("publish:phone-b".into()));
+        assert!(
+            !root.join("calls.txt").exists(),
+            "nothing is killed mid-effect"
+        );
+
+        let restarted = adb.recover_hung_server(record, || Ok(())).await;
+        assert_eq!(restarted, ServerRecovery::Restarted { port });
+        assert_eq!(
+            *journal.lock(),
+            ["adb.server.restart", "adb.server.restart.done"]
+        );
+        let calls = std::fs::read_to_string(root.join("calls.txt")).unwrap();
+        assert_eq!(
+            calls.split_whitespace().collect::<Vec<_>>(),
+            ["kill-server", "start-server"]
+        );
+        assert!(
+            !adb.server_hang_suspected(),
+            "the restart clears the suspicion"
+        );
+        let notices = adb.drain_server_notices();
+        assert_eq!(notices.len(), 1);
+        assert_eq!(notices[0].change, crate::AdbServerChange::Restarted);
+
+        hang(&adb);
+        let held = adb.recover_hung_server(record, || Ok(())).await;
+        assert!(
+            matches!(
+                held,
+                ServerRecovery::Refused(crate::adb_server::RestartRefusal::Cooldown { .. })
+            ),
+            "{held:?}"
+        );
+        server.abort();
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
     #[tokio::test]
     async fn secret_stdin_transport_closes_eof_without_logging_payload() {
         let root = std::env::temp_dir().join(format!("riviu-stdin-eof-{}", uuid::Uuid::new_v4()));

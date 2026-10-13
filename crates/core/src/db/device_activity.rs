@@ -19,7 +19,43 @@ pub struct DeviceActivityProgress {
     pub updated_at: String,
 }
 
+/// How long an effect row may sit between its intent and its settlement before it no longer
+/// holds back an adb server restart. A cap, not a measurement: a worker that died mid-effect
+/// leaves its row behind, and that row must not block recovery of a hung server forever.
+pub const ADB_RESTART_EFFECT_WINDOW_MINUTES: i64 = 10;
+
 impl Database {
+    /// Phones whose Post/Send/Flow effect has crossed its intent and not yet settled, as
+    /// `kind:udid`. Restarting the adb server drops every forward and session, so the
+    /// restart waits while any of these is non-empty. Rows older than
+    /// [`ADB_RESTART_EFFECT_WINDOW_MINUTES`] are left to their own recovery.
+    pub fn adb_restart_blockers(&self, now: DateTime<Utc>) -> anyhow::Result<Vec<String>> {
+        let conn = self.conn()?;
+        let mut statement = conn.prepare(
+            "SELECT 'publish:'||udid FROM publish_assignments
+               WHERE state='posting' AND effect_intent IS NOT NULL
+                 AND julianday(updated_at)>=julianday(?1)-?2/1440.0
+             UNION ALL
+             SELECT 'interaction:'||actor_udid FROM interaction_assignments
+               WHERE state='sending' AND julianday(updated_at)>=julianday(?1)-?2/1440.0
+             UNION ALL
+             SELECT 'action:'||device_udid FROM tiktok_action_runs
+               WHERE state='armed' AND julianday(updated_at)>=julianday(?1)-?2/1440.0
+             UNION ALL
+             SELECT 'flow:'||d.udid FROM flow_node_attempts a
+               JOIN flow_device_runs d ON d.id=a.device_run_id
+               WHERE a.side_effect_class='externalEffect'
+                 AND a.state IN ('intentCommitted','effectDispatched')
+                 AND julianday(a.updated_at)>=julianday(?1)-?2/1440.0
+             LIMIT 100",
+        )?;
+        let rows = statement.query_map(
+            params![now.to_rfc3339(), ADB_RESTART_EFFECT_WINDOW_MINUTES],
+            |row| row.get::<_, String>(0),
+        )?;
+        Ok(rows.collect::<rusqlite::Result<Vec<_>>>()?)
+    }
+
     /// Read fresh progress for uniquely attributable active work in one batch.
     pub fn device_activity_progress(
         &self,
@@ -113,6 +149,47 @@ impl Database {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn adb_restart_waits_only_for_fresh_unsettled_effects() {
+        let path = std::env::temp_dir().join(format!("adb-restart-gate-{}.sqlite", Uuid::new_v4()));
+        let db = Database::open(&path).unwrap();
+        let conn = db.conn().unwrap();
+        conn.execute_batch("INSERT INTO publish_campaigns
+            (id,request_id,source_root,request_json,state,created_at,updated_at)
+            VALUES ('campaign','request','fixture','{}','posting','2026-10-14T03:00:00Z','2026-10-14T03:00:00Z');
+            INSERT INTO publish_bundles
+            (id,campaign_id,ordinal,name,source_path,caption,caption_sha256,manifest_json,created_at)
+            VALUES ('b0','campaign',0,'fixture','fixture','caption',
+            'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa','{}','2026-10-14T03:00:00Z'),
+                   ('b1','campaign',1,'fixture','fixture','caption',
+            'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa','{}','2026-10-14T03:00:00Z'),
+                   ('b2','campaign',2,'fixture','fixture','caption',
+            'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa','{}','2026-10-14T03:00:00Z');
+            INSERT INTO publish_assignments
+            (id,campaign_id,bundle_id,ordinal,udid,state,effect_intent,created_at,updated_at)
+            VALUES ('composing','campaign','b0',0,'phone-a','posting',NULL,'2026-10-14T03:00:00Z','2026-10-14T03:19:00Z'),
+                   ('tapped','campaign','b1',1,'phone-b','posting','{\"effectIntent\":\"post\"}','2026-10-14T03:00:00Z','2026-10-14T03:19:00.123456789+00:00'),
+                   ('abandoned','campaign','b2',2,'phone-c','posting','{\"effectIntent\":\"post\"}','2026-10-14T03:00:00Z','2026-10-14T02:00:00Z');").unwrap();
+        let now = "2026-10-14T03:20:00Z".parse().unwrap();
+        assert_eq!(
+            db.adb_restart_blockers(now).unwrap(),
+            ["publish:phone-b"],
+            "composing before the Post claim and a stale abandoned claim do not hold the restart"
+        );
+        conn.execute(
+            "UPDATE publish_assignments SET state='verifying' WHERE id='tapped'",
+            [],
+        )
+        .unwrap();
+        assert!(
+            db.adb_restart_blockers(now).unwrap().is_empty(),
+            "verification only reads"
+        );
+        drop(conn);
+        drop(db);
+        std::fs::remove_file(path).unwrap();
+    }
 
     #[test]
     fn device_activity_binds_current_source_and_clears_terminal_or_stale_progress() {

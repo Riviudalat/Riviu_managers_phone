@@ -5,7 +5,8 @@ description: >
   Flow) theo vòng preflight → chạy → theo dõi → thu bằng chứng → khôi phục → ghi kết quả.
   Kiểm từng máy trước khi chạy, một controller duy nhất, không replay Post/Send/Sheet chưa
   rõ, chụp màn hình/hierarchy trước khi phiên đóng app. Không tự mở controller, kill
-  adb-server, reboot máy còn effect chưa rõ hay chạy tương tác công khai ngoài phạm vi duyệt.
+  adb-server khi controller chạy, reboot máy còn effect chưa rõ hay chạy tương tác công khai
+  ngoài phạm vi duyệt.
 metadata:
   version: "1.2.0"
   origin: local
@@ -27,8 +28,9 @@ sang `riviu-device-diagnostics`. Vòng sửa lỗi trọn gói (spec → worker 
   chưa thoát: chờ, không kill.
 - Mở controller mới: `launch.py <label> <scope.json> --build <build>`. Nó từ chối khi đã có
   `riviu*.exe`, cổng CDP bận hay exe khác bản ghi build, và backup DB chỉ đọc trước khi mở.
-- Không mở app thứ hai, GenFarmer hay Appium cạnh nó; không kill/restart adb-server, không
-  force-drop lease.
+- Không mở app thứ hai, GenFarmer hay Appium cạnh nó; không force-drop lease. adb-server treo
+  thì controller tự khởi động lại có giới hạn (HX-ADB, nhật ký `adb.server.restart*`); không
+  kill/restart tay khi controller đang chạy, chỉ khi đã đóng controller.
 - Không chạy `uiautomator dump` hay probe ngoài trong khi controller chạy: nó tranh
   UiAutomation với session của Riviu. Screencap thì được.
 
@@ -127,8 +129,8 @@ Mỗi mục dưới đây từng làm mất 20–60 phút. Đọc trước khi m
   gốc>` (đội máy dùng `com.genfarmer.uiautomator/.AdbKeyboard`) → `agent_helper_maintenance_prepare`
   → `execute` (confirmed, qualifyReplacement); receipt `superseded` +
   `packageProcessAbsent:true` là xong.
-- Máy kẹt `offline` sau reboot do Riviu: từ `6c5572fb` tự `adb -s <serial> reconnect`. Không
-  bao giờ `reconnect` toàn bộ hay `kill-server`.
+- Máy kẹt `offline` sau reboot do Riviu: từ `6c5572fb` tự `adb -s <serial> reconnect`. Một máy
+  offline không phải lý do `reconnect` toàn bộ hay `kill-server`.
 - Popup mới sau Post (email updates, "Continue editing this post?"): chụp màn hình vào
   `target/apply-apk-20261009/`, giao worker có `riviu-tiktok-apk` thêm vào catalog
   (Shadow → Act khi có dump thật). Không tự bấm nút có cam kết.
