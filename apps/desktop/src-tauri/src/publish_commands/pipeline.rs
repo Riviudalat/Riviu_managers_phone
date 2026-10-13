@@ -383,9 +383,12 @@ impl DispatchCompletions {
 }
 
 /// A roster scan may admit or refuse a queued phone only this long after the scan began.
-/// Chosen, not measured: well inside the 120 s reconnect window, and far beyond a healthy
-/// scan. Past it the dispatcher knows nothing about the phone and leaves its job queued.
-const ROSTER_MAX_AGE: Duration = Duration::from_secs(60);
+/// Measured on 14/10/2026 (r110, 28 Samsung phones, one adb 37.0.1 server): one full
+/// `list_devices` took ~150-180 s, so 60 s left every snapshot stale on arrival and no job
+/// was ever dispatched (all 28 `roster_pending` for 20 min). 300 s covers that scan with a
+/// margin. A stale-looking phone is still gated by its worker's lease and exact-serial
+/// reads, so the snapshot only decides whether to try.
+const ROSTER_MAX_AGE: Duration = Duration::from_secs(300);
 const ROSTER_REFRESH_EVERY: Duration = Duration::from_secs(2);
 
 /// What the latest usable roster says about one phone. `Unknown` is not `Offline`: it
