@@ -168,20 +168,107 @@ async fn labels(control: &DeviceControlPlane, udid: &str) -> anyhow::Result<TikT
         .ok_or_else(|| anyhow::anyhow!("Chưa đo bản TikTok trên máy này"))
 }
 
+/// How long one phone's account read may run once it holds a foreground slot, for each of
+/// its two phases (open the session; reach Profile and read the header). Measured 13/10/2026
+/// on r108 (30 Android phones, two slots): reads settled in pairs every 25–50 s, so 90 s per
+/// phase is a stalled phone, not a slow one.
+pub(crate) const ACCOUNT_READ_DEVICE_BUDGET: Duration = Duration::from_secs(90);
+/// How long a read may queue behind other phones' reads for a foreground slot. Thirty phones
+/// at two slots and ~30 s each is ~7.5 min.
+pub(crate) const ACCOUNT_READ_QUEUE_BUDGET: Duration = Duration::from_secs(600);
+
+/// An account read that ran out of its budget. The phone was released; nothing was read.
+#[derive(Debug)]
+pub(crate) struct AccountReadTimedOut(pub(crate) String);
+
+impl std::fmt::Display for AccountReadTimedOut {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(&self.0)
+    }
+}
+
+impl std::error::Error for AccountReadTimedOut {}
+
+pub(crate) fn account_read_timed_out(udid: &str, phase: &str) -> anyhow::Error {
+    anyhow::Error::new(AccountReadTimedOut(format!(
+        "Máy {udid}: {phase}; đã nhả máy, chưa đọc được nick. Kiểm tra máy rồi đọc lại."
+    )))
+}
+
+/// Every wait in here is bounded, and the session is closed on every exit: a stalled phone
+/// costs its caller [`ACCOUNT_READ_QUEUE_BUDGET`] + 2 × [`ACCOUNT_READ_DEVICE_BUDGET`] at
+/// most, and never holds its lease or foreground slot past that (13/10/2026 r108: two reads
+/// that never finished held both slots, and 26 queued reads waited on them for 50 minutes).
 pub(super) async fn read_account(
     control: &DeviceControlPlane,
     db: &riviu_core::db::Database,
     udid: &str,
 ) -> anyhow::Result<AccountReading> {
+    let queue_deadline = tokio::time::Instant::now() + ACCOUNT_READ_QUEUE_BUDGET;
     // No frame stream: this read is the hierarchy and nothing else, and a phone whose screen
     // capture gives no frame must still prove its account (see `open_interaction_read_session`).
-    let device =
-        riviu_core::interaction_campaign::open_interaction_read_session(control, udid).await?;
-    let result = async {
+    // The open bounds its queue and its start itself; this outer limit covers the steps
+    // before the queue (package resolution, lease) and anything that slips past both.
+    let opened = tokio::time::timeout_at(
+        queue_deadline + ACCOUNT_READ_DEVICE_BUDGET,
+        riviu_core::interaction_campaign::open_interaction_read_session(
+            control,
+            udid,
+            queue_deadline,
+            ACCOUNT_READ_DEVICE_BUDGET,
+        ),
+    )
+    .await;
+    let device = match opened {
+        Ok(Ok(device)) => device,
+        Ok(Err(riviu_core::DeviceControlError::CapacityWaitCancelled)) => {
+            return Err(account_read_timed_out(
+                udid,
+                &format!(
+                    "chờ lượt điều khiển quá {} giây vì các máy khác đang giữ lượt",
+                    ACCOUNT_READ_QUEUE_BUDGET.as_secs()
+                ),
+            ))
+        }
+        Ok(Err(riviu_core::DeviceControlError::Driver { message, .. }))
+            if message
+                .starts_with(riviu_core::interaction_campaign::READ_SESSION_START_TIMED_OUT) =>
+        {
+            return Err(account_read_timed_out(
+                udid,
+                &format!(
+                    "mở phiên đọc nick quá {} giây",
+                    ACCOUNT_READ_DEVICE_BUDGET.as_secs()
+                ),
+            ))
+        }
+        Ok(Err(error)) => return Err(error.into()),
+        // Dropping the open releases its lease and slot; the next session start re-proves
+        // the stream handoff, so a half-started session leaves nothing behind.
+        Err(_) => {
+            return Err(account_read_timed_out(
+                udid,
+                &format!(
+                    "chưa mở được phiên đọc nick sau {} giây",
+                    (ACCOUNT_READ_QUEUE_BUDGET + ACCOUNT_READ_DEVICE_BUDGET).as_secs()
+                ),
+            ))
+        }
+    };
+    let result = tokio::time::timeout(ACCOUNT_READ_DEVICE_BUDGET, async {
         let session = device.session(control)?;
         read_account_from_session(control, db, udid, session.as_ref()).await
-    }
-    .await;
+    })
+    .await
+    .unwrap_or_else(|_| {
+        Err(account_read_timed_out(
+            udid,
+            &format!(
+                "đọc nick trên Hồ sơ quá {} giây",
+                ACCOUNT_READ_DEVICE_BUDGET.as_secs()
+            ),
+        ))
+    });
     let closed = device.close(control);
     let reading = result?;
     closed?;
