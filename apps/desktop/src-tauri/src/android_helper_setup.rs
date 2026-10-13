@@ -30,6 +30,10 @@ const MAX_CONCURRENT_PREPARATIONS: usize = 10;
 /// operator may fix the phone (e.g. turn GenFarmer off) without replugging it. Then terminal.
 const PREPARE_RETRY_DELAYS: [Duration; 3] =
     [Duration::from_secs(30), Duration::from_secs(120), Duration::from_secs(300)];
+/// Reconnections of one phone that re-run the automatic reconcile while its helper failure is
+/// still latched (offline/error back to device). Not measured: it bounds a flapping cable.
+/// A qualified helper resets it; past it the phone waits for job admission or the operator.
+const MAX_RECONNECT_RECONCILES: u32 = 3;
 
 pub(super) struct AndroidHelperSetup {
     control: Arc<DeviceControlPlane>,
@@ -102,12 +106,15 @@ impl AndroidHelperSetup {
                                         // phone; checked first because it may also carry the fence.
                                         Err(error) if error.is::<HelperShellIdentityRefused>() =>
                                             return Err((SetupStop::PreEffect, automatic_failure(&error))),
-                                        Err(error) if error.is::<riviu_android_driver::riviu_agent::HelperRecoveryRequired>() => {}
                                         // The phone dropped off adb mid-preparation (install or
                                         // identity read unanswered): helper setup is not an action
                                         // effect, and the retry resumes or fences the owner itself.
-                                        Err(error) if adb_transport_lost(&error) =>
+                                        // Checked before the fence: a retained-owner reconnect that
+                                        // failed on `device offline` also carries it, and proves
+                                        // nothing about the old owner (13/10/2026, SM-G955F).
+                                        Err(error) if riviu_android_driver::adb::is_transport_lost(&error) =>
                                             return Err((SetupStop::PreEffect, automatic_failure(&error))),
+                                        Err(error) if error.is::<riviu_android_driver::riviu_agent::HelperRecoveryRequired>() => {}
                                         Err(error) => return Err((SetupStop::Terminal, automatic_failure(&error))),
                                     }
                                 }
@@ -204,19 +211,6 @@ fn failure_disposition(stop: SetupStop, code: &str) -> FailureDisposition {
         FailureDisposition::RetryPrepare
     } else {
         FailureDisposition::Terminal
-    }
-}
-
-/// adb lost the phone itself (gone, offline, transport reset, unanswered), as opposed to
-/// a refusal the phone answered. Retried on `PREPARE_RETRY_DELAYS`, so a wrong match costs
-/// at most three bounded re-checks.
-fn adb_transport_lost(error: &anyhow::Error) -> bool {
-    use riviu_android_driver::adb::{classify_fault, AdbFault};
-    let text = format!("{error:#}");
-    match classify_fault(&text) {
-        AdbFault::Offline | AdbFault::Transient | AdbFault::Timeout => true,
-        AdbFault::UnknownDevice => text.contains("error: device '") || text.contains("no devices/emulators found"),
-        AdbFault::Unauthorized | AdbFault::Terminal => false,
     }
 }
 
@@ -423,6 +417,8 @@ struct SetupQueue {
     connections: HashMap<String, Connection>,
     recovery: HashMap<String, HelperRecoveryGeneration>,
     next_generation: u64,
+    /// Reconnections per phone that re-armed a latched failure; see `MAX_RECONNECT_RECONCILES`.
+    reconnect_reconciles: HashMap<String, u32>,
     tasks: JoinSet<AttemptOutcome>,
     tickets: HashMap<Id, Ticket>,
     stopped: bool,
@@ -456,11 +452,22 @@ impl SetupQueue {
         for serial in connected {
             if !self.connections.contains_key(serial) {
                 self.next_generation += 1;
+                // A phone back from offline/error with its failure still latched gets the
+                // reconcile again (13/10/2026: offline after a load reboot), a bounded number
+                // of times.
+                let spent = self.recovery.contains_key(serial) && {
+                    let count = self.reconnect_reconciles.entry(serial.to_string()).or_default();
+                    *count = count.saturating_add(1);
+                    *count > MAX_RECONNECT_RECONCILES
+                };
+                if spent {
+                    log::warn!("{serial}: helper reconcile on reconnect skipped after {MAX_RECONNECT_RECONCILES} reconnects");
+                }
                 self.connections.insert(
                     serial.to_string(),
                     Connection {
                         generation: self.next_generation,
-                        finished: false,
+                        finished: spent,
                         recovery_generation: self.recovery.get(serial).copied(),
                         deferred: 0,
                         prepare_retries: 0,
@@ -538,7 +545,10 @@ impl SetupQueue {
         if let Some(connection) = self.connections.get_mut(&ticket.serial) {
             if connection.generation == ticket.generation {
                 match outcome {
-                    AttemptOutcome::Finished => connection.finished = true,
+                    AttemptOutcome::Finished => {
+                        connection.finished = true;
+                        self.reconnect_reconciles.remove(&ticket.serial);
+                    }
                     AttemptOutcome::Failed(generation) => {
                         connection.finished = true;
                         // The attempt itself can first observe failure. Consume that
@@ -890,8 +900,26 @@ mod tests {
         queue.tick(&online, |_| true, |_| async { panic!("must not retry") });
         assert!(queue.tasks.is_empty());
         queue.tick(&[], |_| true, |_| async { panic!("no devices") });
-        queue.tick(&online, |_| true, |_| async { AttemptOutcome::Finished });
+        queue.tick(&online, |_| true, |_| async { AttemptOutcome::Failed(None) });
         assert_eq!(queue.tasks.len(), 1);
+        complete_ready(&mut queue).await;
+        // With the failure latched (offline after a reboot, 13/10/2026), each reconnect re-runs
+        // the reconcile, up to the cap; a qualified helper resets the count.
+        queue.recovery.insert("a".into(), HelperRecoveryGeneration(1));
+        let offline = [phone("a", DeviceStatus::Disconnected)];
+        queue.tick(&offline, |_| true, |_| async { panic!("offline") });
+        queue.tick(&online, |_| true, |_| async { AttemptOutcome::Finished });
+        complete_ready(&mut queue).await;
+        assert!(!queue.reconnect_reconciles.contains_key("a"), "a qualified helper resets the count");
+        for _ in 0..MAX_RECONNECT_RECONCILES {
+            queue.tick(&offline, |_| true, |_| async { panic!("offline") });
+            queue.tick(&online, |_| true, |_| async { AttemptOutcome::Failed(Some(HelperRecoveryGeneration(1))) });
+            assert_eq!(queue.tasks.len(), 1);
+            complete_ready(&mut queue).await;
+        }
+        queue.tick(&offline, |_| true, |_| async { panic!("offline") });
+        queue.tick(&online, |_| true, |_| async { panic!("reconnect reconciles exhausted") });
+        assert!(queue.tasks.is_empty());
         queue.drain().await;
     }
 

@@ -1406,6 +1406,21 @@ pub fn classify_fault(message: &str) -> AdbFault {
     AdbFault::Terminal
 }
 
+/// adb lost the phone itself (offline, gone from this serial, daemon unreachable, transport
+/// reset, unanswered), as opposed to a refusal the phone answered. A connection fault, worth
+/// a later attempt once the roster shows the phone online again; never proof about the
+/// helper owner, so it never authorizes a reclaim either.
+pub fn is_transport_lost(error: &anyhow::Error) -> bool {
+    let text = format!("{error:#}");
+    match classify_fault(&text) {
+        AdbFault::Offline | AdbFault::Transient | AdbFault::Timeout => true,
+        AdbFault::UnknownDevice => {
+            text.contains("error: device '") || text.contains("no devices/emulators found")
+        }
+        AdbFault::Unauthorized | AdbFault::Terminal => false,
+    }
+}
+
 /// One `adb devices -l` reading, with whether it settled.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct DeviceListReading {

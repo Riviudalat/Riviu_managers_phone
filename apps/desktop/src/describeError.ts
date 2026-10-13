@@ -11,6 +11,9 @@ const GENERIC_CODES = new Set(["OperationFailed"]);
 
 const HELPER_RECOVERY_MESSAGE = "Helper còn giữ phiên cũ hoặc đang thuộc phiên khác; chưa thể xác minh điều khiển. Chọn Khôi phục helper trên đúng máy để xem và xác nhận kế hoạch. Không tự giành quyền hoặc gửi lại thao tác.";
 
+/** The `adb_unreachable` latch reason in android-driver: a connection fault, not an owner to recover. */
+const ADB_UNREACHABLE_MESSAGE = "Mất kết nối ADB với máy (offline hoặc không thấy máy); tự kiểm tra lại khi máy kết nối lại, chưa nhận phiên thay thế.";
+
 /** `HELPER_SETUP_FAILURE` in android-driver: the roster's latched automatic-setup failure. */
 const HELPER_SETUP_LATCH = "Riviu Helper: runtime qualification failed; recovery required";
 
@@ -50,6 +53,7 @@ export function helperRecoveryMessage(cause: unknown): string | null {
   const category = latched ? /; category=([a-z_]+);/.exec(message)?.[1] : undefined;
   const identity = SHELL_IDENTITY_REFUSALS.find(refusal => refusal.category === category || refusal.pattern.test(message));
   if (identity) return identity.message;
+  if (category === "adb_unreachable") return ADB_UNREACHABLE_MESSAGE;
   return /HelperRecoveryRequired|owner_conflict|helper_recovery_required/.test(message)
     || latched
     || message === HELPER_RECOVERY_MESSAGE ? HELPER_RECOVERY_MESSAGE : null;

@@ -1455,6 +1455,10 @@ impl AndroidDriver {
             (refusal.category(), refusal.operator_message().to_owned())
         } else if error.is::<crate::riviu_agent::HelperClipboardNotQualified>() {
             ("clipboard_not_qualified", "Chưa xác minh được clipboard; giữ phiên hiện tại và kiểm tra chẩn đoán của máy.".to_owned())
+        } else if adb::is_transport_lost(error) {
+            // Before the fence it may carry: `device offline` says nothing about the old owner
+            // (13/10/2026, SM-G955F offline after a load reboot was shown as recovery_required).
+            ("adb_unreachable", "Mất kết nối ADB với máy (offline hoặc không thấy máy); tự kiểm tra lại khi máy kết nối lại, chưa nhận phiên thay thế.".to_owned())
         } else if error.is::<crate::riviu_agent::HelperRecoveryRequired>() {
             ("recovery_required", "Cần đối soát phiên helper đang giữ; chưa nhận phiên thay thế.".to_owned())
         } else {
@@ -4347,6 +4351,11 @@ mod tests {
             // A root adbd also carries the retained-owner fence; its own category wins.
             (anyhow::Error::new(crate::riviu_agent::HelperShellIdentityRefused::Root)
                 .context(crate::riviu_agent::HelperRecoveryRequired), "shell_root"),
+            // A retained-owner reconnect on an offline phone also carries the fence, but proves
+            // nothing about the old owner: a connection fault (13/10/2026, after a load reboot).
+            (anyhow!("adb -s fixture forward tcp:0 tcp:17980 failed: adb.exe: device offline")
+                .context(crate::riviu_agent::HelperRecoveryRequired)
+                .context("retained helper reconnect unresolved; no reclaim"), "adb_unreachable"),
         ] {
             let cause = cause.context("fixture-secret-token owner clipboard credential envelope");
             driver.record_helper_runtime_failure("fixture", "clipboard_qualification", &cause);

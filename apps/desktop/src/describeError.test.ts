@@ -64,6 +64,10 @@ describe("describeError", () => {
       expect(helperRecoveryMessage(latched)).toContain("Khôi phục helper");
       expect(controlFailure(latched)).toMatchObject({ helper: true, summary: "Helper cần khôi phục" });
     }
+    // A phone offline on adb is a connection fault, not an owner to recover by hand.
+    const offline = "Mất kết nối ADB với máy (offline hoặc không thấy máy); tự kiểm tra lại khi máy kết nối lại, chưa nhận phiên thay thế.";
+    expect(helperRecoveryMessage(`Riviu Helper: runtime qualification failed; recovery required (no action replay); stage=runtime_acquisition; category=adb_unreachable; ${offline}`))
+      .toBe(offline);
   });
   it("names a root adb shell and its automatic repair, from the roster latch or the prepare command", () => {
     const root = "adb trên máy đang chạy quyền root (uid 0), thường do GenFarmer hoặc ROM bật; helper không chạy với root. Riviu tự tắt quyền root của adb một lần cho mỗi lần khởi động máy; nếu vẫn thấy lỗi này: tắt GenFarmer trên PC này rồi khởi động lại máy.";

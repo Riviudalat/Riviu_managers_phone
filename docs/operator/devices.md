@@ -110,6 +110,12 @@ bắt đầu bằng "máy quá tải". Mỗi bước dưới đây được ghi 
   chưa rõ hoặc đang chạy trên máy đó, và tối đa một lần mỗi 6 giờ. Khi máy rảnh, Riviu cũng
   tự làm việc này. Sau khi khởi động lại, Riviu áp lại **Cài đặt máy** và chuẩn bị lại helper.
   Máy chỉ nhận việc mới khi một lần đo mới đạt.
+- Có máy khởi động xong nhưng ADB báo **offline** mãi. Nếu sau khi Riviu tự khởi động lại
+  (vì quá tải hoặc để đổi ngôn ngữ) máy offline liên tục quá 60 giây, Riviu tự chạy một
+  lần `adb -s <mã máy> reconnect`. Lệnh này chỉ áp dụng cho đúng máy đó, không khởi động lại
+  ADB của PC, và được ghi vào Nhật ký hoạt động. Máy online lại thì helper được tự kiểm tra
+  lại. Nếu máy vẫn offline, rút rồi cắm lại cáp USB của máy đó. Trong lúc máy offline, ô máy
+  báo **Mất kết nối ADB với máy**, không báo cần khôi phục helper.
 - Vẫn quá tải sau đó thì máy không nhận bài đăng: bài báo **trước khi gửi** với mã
   `device_overloaded`, không chờ năm phút ở bảng nhạc rồi mới lỗi. Bấm đăng lại sau khi
   máy đã hồi phục là an toàn.

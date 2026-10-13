@@ -164,6 +164,15 @@ impl AndroidDriver {
     {
         let started = std::time::Instant::now();
         let lines = reading.devices;
+        // A phone stuck `offline` after a Riviu reboot gets that reboot's one per-device
+        // reconnect from here too, also while the automatic workers are frozen (13/10/2026).
+        for line in &lines {
+            self.observe_adb_state_after_reboot(
+                &line.serial,
+                line.state == AdbDeviceState::Offline,
+            )
+            .await;
+        }
         let serial_order: HashMap<_, _> = lines
             .iter()
             .enumerate()
