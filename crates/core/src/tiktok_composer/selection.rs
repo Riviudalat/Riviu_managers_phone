@@ -2543,8 +2543,10 @@ mod tests {
                 }
             }
             assert_eq!(*session.swipes.lock(), 0);
+            // One readback window plus the arm and settle pauses; r105's 18.3 s read and the
+            // read-timeout case both end inside it.
             assert!(
-                start.elapsed() < Duration::from_secs(14),
+                start.elapsed() < TAP_READBACK_WINDOW + Duration::from_secs(2),
                 "partial-tree recovery must be bounded"
             );
         }
