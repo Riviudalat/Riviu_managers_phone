@@ -61,6 +61,8 @@ và bàn giao lệnh/gate chưa chạy. Harness nối app cũng thuộc quyền 
 submit có phone/network; publish_sheet_check có thể lưu cấu hình, không là read-only.
 Không tăng timeout, force-drop lease, xóa helper owner/journal chưa đối soát hoặc
 replay Post/Send/Sheet request chưa rõ. Chỉ drain/nhả owner đã chứng minh an toàn.
+adb-server treo do controller tự khởi động lại có giới hạn ([HX-ADB](09-fleet-android.md#adb-server-treo-hx-adb));
+agent không tự kill/restart server khi controller đang chạy, chỉ khi không có controller.
 
 ### Start, dev scope và rotation
 

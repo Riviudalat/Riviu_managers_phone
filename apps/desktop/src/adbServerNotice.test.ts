@@ -20,4 +20,9 @@ describe("adbServerNotice", () => {
     const toast = adbServerToast({ type: "adbServerNotice", port: 5037, change: "returned", transports: 30, message: "ok" });
     expect(toast).toEqual({ kind: "info", title: "ADB đã chạy lại (cổng 5037)", detail: "ok" });
   });
+
+  it("names Riviu's own restart instead of blaming another tool", () => {
+    const toast = adbServerToast({ type: "adbServerNotice", port: 5037, change: "restarted", transports: 30, message: "treo" });
+    expect(toast).toEqual({ kind: "warn", title: "Riviu đã khởi động lại ADB (cổng 5037)", detail: "treo" });
+  });
 });

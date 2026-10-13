@@ -16,8 +16,9 @@ sở hữu inventory/hash; không nhân bản danh sách pin.
   Không chọn package đầu tiên khi focus mơ hồ.
 - Override size thắng Physical nếu có. Byte output/PNG magic không đi qua decoder text.
 - Retry ADB opt-in theo idempotency, không phát lại input/install/launch mất ACK.
-- Không kill adb-server. Discovery/route5037/5038 theo serial; scan lỗi không là roster
-  rỗng đáng tin. Một backend lỗi không được xóa thiết bị của backend kia.
+- adb-server chỉ được khởi động lại theo mục "ADB server treo (HX-ADB)" bên dưới; người
+  vận hành chỉ restart tay khi không có controller chạy. Discovery/route5037/5038 theo
+  serial; scan lỗi không là roster rỗng đáng tin. Một backend lỗi không được xóa thiết bị của backend kia.
 - Script ngoài controller (`scripts/device-acceptance/`) phải gọi đúng adb mà controller
   dùng (`RIVIU_ADB_PATH`, rồi PATH). Gọi adb client khác version sẽ restart adb-server
   dưới controller.
@@ -40,7 +41,7 @@ sở hữu inventory/hash; không nhân bản danh sách pin.
   Bỏ qua lỗi "not a changeable permission"/"has not requested". Không bao giờ revoke hay
   `pm clear`.
 - Đẩy media lúc chuẩn bị Đăng bài (trước mọi Post) gặp `cannot connect to daemon` / `10060`
-  thì thử lại đúng lần đẩy đó một lần sau 2 s. Riviu không restart adb-server.
+  thì thử lại đúng lần đẩy đó một lần sau 2 s. Server treo hẳn thì theo HX-ADB bên dưới.
 
 ### Giảm tải máy khi Riviu tự động (HX-QUIET)
 
@@ -100,6 +101,42 @@ Code: `crates/android-driver/src/telemetry.rs`, `enter_adb_slot` trong `adb.rs`,
   máy. `adb.exec`/`agent GET /source` cao khi các hàng đợi thấp → máy chậm; kiểm tải/
   hierarchy trên canary (mục "Sức khỏe máy trước code").
 - Chưa có số đo đợt chạy nào bằng bản này; ngưỡng ô histogram và cap 64 series chưa đo.
+
+### ADB server treo (HX-ADB)
+
+Chủ sở hữu bỏ quy tắc "không kill adb-server" ngày 14/10/2026. Bằng chứng r107 (`fd05d8ee`,
+30 máy trên adb 34.0.5 của GenFarmer, client Riviu 37.x): năm máy hết hạn quan sát trong 8 s,
+`adb shell timed out after 2s`, `could not read ok from ADB Server` khi tiến trình server vẫn
+sống; vài phút sau `adb shell echo` lại 230–290 ms.
+
+- Phát hiện (`adb_server.rs`): lỗi phía máy tính (`could not read ok`, `cannot connect to
+  daemon`, `daemon not running`, `failed to start daemon`, `timed out after`) trên ≥3 máy khác
+  nhau trong 20 s. Một máy offline/chậm chỉ lỗi trên serial của nó nên không tính. Nghi ngờ
+  chưa đủ: ba lần đọc `host:devices-l` cách nhau 1 s đều không trả lời mới gọi là treo.
+- Khởi động lại (`AdbProgram::recover_hung_server`, chạy bởi
+  `apps/desktop/src-tauri/src/adb_server_recovery.rs` mỗi 5 s, không chạy khi worker tự động
+  bị đóng băng): `kill-server` rồi `start-server` bằng chính adb Riviu đang dùng (bundled ở
+  bản đóng gói), cùng cổng `-P`. Server bỏ qua `kill-server` thì chỉ tắt pid đang nghe cổng
+  đó (`netstat`), không tắt theo tên `adb.exe`. Cooldown 45 s (như GenFarmer
+  `MIN_MS_BETWEEN_KILLS`), tối đa 4 lần mỗi giờ (cap chưa đo). Nhật ký: intent
+  `adb.server.restart` trước lệnh, rồi `.done`/`.failed`; `.deferred`/`.refused` ghi một
+  lần mỗi đợt.
+- Ranh giới an toàn (`Database::adb_restart_blockers`): chờ khi còn publish `posting` có
+  `effect_intent` (đã claim Post), interaction `sending`, action `armed`, hoặc Flow
+  `externalEffect` ở `intentCommitted`/`effectDispatched`, cập nhật trong 10 phút (cap: dòng
+  cũ hơn là worker đã chết, không được chặn mãi). Đọc sổ lỗi = chờ. Sheet là HTTP, không đi
+  qua adb, nên restart không cắt được lần ghi Sheet.
+- Sau restart: mọi forward/stream/UiAutomator session cũ mất. Đó là lỗi transport như khi
+  phần mềm khác restart server: helper nối lại forward (`reconnect_runtime`, `agent_ready`),
+  view keeper mở lại stream, không phát lại thao tác; xác minh chỉ đọc lại. Trong lúc restart
+  inventory không báo "phần mềm khác", background start chờ; UI nhận
+  `adbServerNotice` `restarted`.
+- Lúc khởi động controller (`replace_foreign_server_at_bootstrap`, trước mọi job): server
+  đang chạy khác bản `Version` với client (đọc đường dẫn tiến trình nghe cổng rồi chạy
+  `<server> version`) thì ghi cảnh báo và thay bằng adb của Riviu, thay vì giữ "selected from
+  existing transport inventory". Không xác định được server thì giữ nguyên và ghi log.
+- Cổng tường minh (`RIVIU_ADB_SERVER_PORT`, `ADB_SERVER_SOCKET`, ...) không có watch nên
+  không tự restart.
 
 ### Sức khỏe máy trước code
 
@@ -176,14 +213,14 @@ Khi chỉ một máy có root không đọc được hoặc tap bị nuốt, so 
   13/10/2026 SM-G955F (`ce051715e15b2c2e02`, Android 9) boot xong rồi ~10 s sau báo offline
   ~20 phút, đến khi chạy tay `adb reconnect offline`. Offline liên tục ≥60 s trong 15 phút
   sau reboot (cả hai là cap chưa đo) thì Riviu chạy một lần `adb -s <serial> reconnect` cho
-  lần reboot đó: ghi intent `device.load.reconnect` trước, rồi `.done`/`.failed`. Không
-  `kill-server`, không `reconnect` toàn bộ. Nơi đếm: vòng quét roster (chạy cả khi worker
+  lần reboot đó: ghi intent `device.load.reconnect` trước, rồi `.done`/`.failed`. Một máy
+  offline không bao giờ là lý do `kill-server` hay `reconnect` toàn bộ. Nơi đếm: vòng quét roster (chạy cả khi worker
   nền bị đóng băng), chờ boot, và `wait_for_adb_online_after_reboot` (≤100 s) trong hai
   đường reboot của `device_load.rs`. Đường của job thử lấy helper thêm một lần khi máy
   online lại.
 - adbd chạy root (`id -u` = 0, thường do GenFarmer `adb root`) được tự sửa: một
   `adb -s <serial> unroot` mỗi boot id dưới lease Repair, ghi intent trước, chờ ≤45 s
-  (chưa đo trên máy). Không restart adb-server của PC; vẫn root thì báo tắt GenFarmer và
+  (chưa đo trên máy). Root không phải lý do restart adb-server; vẫn root thì báo tắt GenFarmer và
   khởi động lại máy. Lúc nhận phiên, `recovery_required` trên máy root từng che
   `shell_root` (bản 0.2.82, PC thứ hai, 12/10/2026).
 

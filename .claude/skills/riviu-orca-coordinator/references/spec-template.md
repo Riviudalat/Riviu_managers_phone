@@ -31,7 +31,7 @@ Phần dưới là nội dung tái dùng; chép vào common của run rồi ch�
 
 ## Devices and machine
 - Do NOT touch adb or phones; do not start the Riviu controller, GenFarmer or Appium.
-- Never kill or restart the adb server.
+- Never kill or restart the adb server yourself; the controller's HX-ADB recovery owns that.
 - Cargo: one command at a time; never `cargo clean`, never override `--target-dir`; no
   parallel cargo inside your worker (the host is low on memory).
 - Python is `py -3.12`.

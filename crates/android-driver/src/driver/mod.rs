@@ -1812,8 +1812,7 @@ impl AndroidDriver {
         self.adb_origin.label()
     }
 
-    /// ADB server outages and returns seen by inventory since the last call. Read-only:
-    /// nothing here starts, stops or reconnects a server.
+    /// ADB server outages, returns and Riviu's own restarts since the last call.
     pub fn drain_adb_server_notices(&self) -> Vec<crate::AdbServerNotice> {
         self.adb.drain_server_notices()
     }
@@ -1821,6 +1820,24 @@ impl AndroidDriver {
     /// True while a server that carried phones is silent. See [`AdbProgram::server_outage`].
     pub fn adb_server_outage(&self) -> bool {
         self.adb.server_outage()
+    }
+
+    /// Several phones failed host-side recently. See [`AdbProgram::server_hang_suspected`].
+    pub fn adb_server_hang_suspected(&self) -> bool {
+        self.adb.server_hang_suspected()
+    }
+
+    /// Bounded self-repair of a hung adb server. See [`AdbProgram::recover_hung_server`].
+    pub async fn recover_hung_adb_server<J, S>(
+        &self,
+        journal: J,
+        safe_boundary: S,
+    ) -> crate::ServerRecovery
+    where
+        J: Fn(&str, &str),
+        S: FnOnce() -> Result<(), String>,
+    {
+        self.adb.recover_hung_server(journal, safe_boundary).await
     }
 
     /// Read `adb version` without targeting a device. Failure is an unanswered diagnostic
@@ -4052,8 +4069,12 @@ pub async fn detect_driver(config: &AndroidDriverConfig) -> Result<Arc<AndroidDr
             adb.with_server_discovery()
         };
         match adb.run(&["version"], Duration::from_secs(10)).await {
-            Ok(_) => {
-                return Ok(AndroidDriver::with_adb(adb, candidate.origin, config).shared())
+            Ok(version) => {
+                if let (Some(port), false) = (server_port, crate::adb_server::explicit_endpoint()) {
+                    adb.replace_foreign_server_at_bootstrap(port, &version)
+                        .await;
+                }
+                return Ok(AndroidDriver::with_adb(adb, candidate.origin, config).shared());
             }
             Err(error) => refusals.push(format!(
                 "{} ({}): {error}",

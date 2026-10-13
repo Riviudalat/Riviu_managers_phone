@@ -2742,7 +2742,7 @@ export type AppEvent =
   | { type: "publishUpdated"; campaignId: string; revision: number }
   | { type: "wdaExpiryWarning"; udid: string; daysRemaining: number }
   | { type: "nurtureStatus"; status: NurtureSessionStatus }
-  | { type: "adbServerNotice"; port: number; change: "lost" | "returned"; transports: number; message: string };
+  | { type: "adbServerNotice"; port: number; change: "lost" | "returned" | "restarted"; transports: number; message: string };
 
 /**
  * Narrow an untyped payload off the Tauri channel.

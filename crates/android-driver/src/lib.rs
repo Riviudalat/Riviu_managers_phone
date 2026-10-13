@@ -45,8 +45,8 @@ pub mod session;
 mod telemetry;
 pub mod view;
 
-pub use adb::{AdbCandidate, AdbOrigin, AdbProgram};
-pub use adb_server::{AdbServerChange, AdbServerNotice};
+pub use adb::{AdbCandidate, AdbOrigin, AdbProgram, ServerRecovery};
+pub use adb_server::{AdbServerChange, AdbServerNotice, RestartRefusal};
 pub use agent::{AgentClient, Locator, Rect};
 pub use driver::{create_driver, detect_driver, AndroidDriver, AndroidDriverConfig};
 pub use frames::{MinicapBanner, MinicapOptions, MinicapStream, Projection};

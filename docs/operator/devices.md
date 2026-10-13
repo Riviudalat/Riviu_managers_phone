@@ -44,11 +44,18 @@ chia giữa hai server vẫn hiện đủ trong một lưới. Có thể giới 
 `RIVIU_ADB_SERVER_PORT`.
 Nếu phần mềm khác (GenFarmer, scrcpy, Android Studio) khởi động lại ADB, mọi ô stream
 tắt cùng lúc. Nhật ký hoạt động báo **ADB bị phần mềm khác khởi động lại · N máy**, rồi
-**ADB đã chạy lại** khi server trả lời lại. Riviu không tự tắt ADB và không gửi lại thao
-tác chưa xác nhận. Stream tự mở lại sau tối đa 15 giây chờ, mỗi máy lỗi được thử lại
+**ADB đã chạy lại** khi server trả lời lại. Riviu không gửi lại thao tác chưa xác nhận. Stream tự mở lại sau tối đa 15 giây chờ, mỗi máy lỗi được thử lại
 giãn dần tới 30 giây. Muốn tách hẳn khỏi công cụ khác, đặt `RIVIU_ADB_SERVER_PORT` sang
 một cổng riêng trước khi mở Riviu. Hai server cùng tranh cổng USB của điện thoại, nên
 công cụ kia có thể không còn thấy máy; cần kiểm tra trên dàn máy thật trước khi dùng.
+
+Khi ADB server bị treo (nhiều máy cùng báo lỗi kết nối ADB và server không trả lời),
+Riviu tự khởi động lại ADB bằng adb của mình, nhưng chờ các máy đang ở giữa Đăng/Gửi xong
+trước, cách nhau ít nhất 45 giây và tối đa 4 lần mỗi giờ. Nhật ký hoạt động ghi **Riviu đã
+khởi động lại ADB**; stream và phiên điều khiển tự nối lại, thao tác chưa xác nhận không
+được gửi lại. Lúc mở Riviu, nếu ADB đang chạy là bản của phần mềm khác (ví dụ GenFarmer)
+khác phiên bản với adb của Riviu, Riviu thay bằng adb của mình trước khi nhận việc. Muốn
+tự khởi động lại ADB bằng tay, đóng Riviu trước.
 
 Cửa sổ điện thoại có màn hình bên trái, bảng lệnh bên phải, phím điều hướng cố định
 phía dưới. Chỉ có một cửa sổ phóng to: chọn máy B khi A đang mở sẽ chuyển sang B

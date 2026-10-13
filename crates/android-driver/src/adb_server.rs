@@ -1,5 +1,8 @@
-//! Read-only discovery of an already running local ADB server. Never starts,
-//! kills, reconnects or changes an existing server during discovery.
+//! Discovery of the local ADB server, and its bounded recovery.
+//!
+//! Discovery is read-only. Since 14/10/2026 (owner decision, HX-ADB) Riviu may restart a
+//! server that has stopped answering, but only through [`ServerWatch::begin_restart`]: a hang
+//! seen on several phones, confirmed by a roster probe, outside a cooldown and an hourly cap.
 use anyhow::{ensure, Context};
 use std::time::Duration;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
@@ -68,13 +71,15 @@ pub(crate) fn merge_rosters(
 /// What happened to an ADB server Riviu was using, from Riviu's own roster reads.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum AdbServerChange {
-    /// A server that carried phones stopped answering. Riviu never runs `kill-server`
-    /// (contracts.md), so the cause is outside this process: another tool's adb of a
-    /// different build replaced it, or the server crashed.
+    /// A server that carried phones stopped answering while Riviu was not restarting it:
+    /// another tool's adb of a different build replaced it, or the server crashed.
     Lost,
     /// The port answers again after [`Self::Lost`]. Transports and forwards made through
     /// the old server are gone; scrcpy/minicap readers and agents must reconnect.
     Returned,
+    /// Riviu itself restarted a hung server ([`ServerWatch::begin_restart`]). Same
+    /// consequences as [`Self::Returned`]; never reported as another tool's restart.
+    Restarted,
 }
 
 /// One operator-facing notice. Text is Vietnamese because it is shown as-is.
@@ -111,19 +116,253 @@ const MAX_PENDING_NOTICES: usize = 16;
 /// backoff takes over.
 pub const OUTAGE_START_HOLD: std::time::Duration = std::time::Duration::from_secs(15);
 
-/// Read-only watch over the servers [`crate::AdbProgram::inventory_read`] already polls.
+/// Watch over the servers [`crate::AdbProgram::inventory_read`] already polls, plus the
+/// host-side failures of ordinary adb calls.
 ///
-/// It only interprets reads that happen anyway, so it adds no adb traffic and can never
-/// start, stop or reconnect anything. A port that never carried a phone is not reported:
-/// a missing companion server on 5038 is the normal state of most machines.
+/// It only interprets what happens anyway, so it adds no adb traffic and itself starts,
+/// stops or reconnects nothing; the restart it budgets is run by
+/// [`crate::AdbProgram::restart_server`]. A port that never carried a phone is not
+/// reported: a missing companion server on 5038 is the normal state of most machines.
 #[derive(Debug, Default)]
 pub struct ServerWatch {
     ports: std::collections::HashMap<u16, PortSeen>,
     pending: std::collections::VecDeque<AdbServerNotice>,
+    hang: HangDetector,
+    restarts: RestartBudget,
+    /// When Riviu began restarting a server. Inventory reads during it are not an outage.
+    restarting: Option<std::time::Instant>,
+}
+
+/// Host-side adb failures: the client got no answer from its server, or the call outlived
+/// its deadline. Phone-side answers (offline, unauthorized, not found) are not counted.
+pub(crate) fn host_side_fault(message: &str) -> bool {
+    let text = message.to_ascii_lowercase();
+    [
+        "could not read ok from adb server",
+        "cannot connect to daemon",
+        "daemon not running",
+        "failed to start daemon",
+        "timed out after",
+    ]
+    .iter()
+    .any(|marker| text.contains(marker))
+}
+
+/// A server is suspected hung once this many **different** phones have had a host-side
+/// failure inside [`HANG_WINDOW`]. One slow or offline phone fails on its own serial only.
+///
+/// Caps from r107 (14/10/2026, 30 phones on GenFarmer's adb 34.0.5 server): five phones hit
+/// their observation deadline within 8 s and four within the same second, next to
+/// `adb shell timed out after 2s` and two `could not read ok from ADB Server`; minutes later
+/// `adb shell echo` answered in 230–290 ms again. The suspicion alone never restarts
+/// anything: a roster probe must also go unanswered.
+pub const HANG_MIN_PHONES: usize = 3;
+pub const HANG_WINDOW: std::time::Duration = std::time::Duration::from_secs(20);
+/// Bounds memory when every phone fails at once; far above [`HANG_MIN_PHONES`].
+const HANG_MAX_SAMPLES: usize = 64;
+
+/// Minimum spacing between two restarts. GenFarmer's `AdbHangRecoveryService` uses the same
+/// `MIN_MS_BETWEEN_KILLS = 45000`; a server needs that long to re-enumerate 30 phones.
+pub const RESTART_COOLDOWN: std::time::Duration = std::time::Duration::from_secs(45);
+/// Restarts allowed in any rolling hour. A cap, not a measurement: past it the host has a
+/// problem a restart does not fix, and the operator is told instead.
+pub const MAX_RESTARTS_PER_HOUR: usize = 4;
+const RESTART_BUDGET_WINDOW: std::time::Duration = std::time::Duration::from_secs(3600);
+/// A restart that never reported its end stops counting as in progress after this long, so
+/// a cancelled recovery cannot hold background starts forever.
+const RESTART_MAX_DURATION: std::time::Duration = std::time::Duration::from_secs(90);
+
+#[derive(Debug, Default)]
+struct HangDetector {
+    failures: std::collections::VecDeque<(std::time::Instant, String)>,
+}
+
+impl HangDetector {
+    fn record(&mut self, serial: &str, now: std::time::Instant) {
+        self.prune(now);
+        if self.failures.len() == HANG_MAX_SAMPLES {
+            self.failures.pop_front();
+        }
+        self.failures.push_back((now, serial.to_string()));
+    }
+
+    fn prune(&mut self, now: std::time::Instant) {
+        while self
+            .failures
+            .front()
+            .is_some_and(|(at, _)| now.saturating_duration_since(*at) > HANG_WINDOW)
+        {
+            self.failures.pop_front();
+        }
+    }
+
+    fn phones(&mut self, now: std::time::Instant) -> usize {
+        self.prune(now);
+        self.failures
+            .iter()
+            .map(|(_, serial)| serial.as_str())
+            .collect::<std::collections::HashSet<_>>()
+            .len()
+    }
+}
+
+#[derive(Debug, Default)]
+struct RestartBudget {
+    history: std::collections::VecDeque<std::time::Instant>,
+}
+
+/// Why a suspected hang did not lead to a restart now.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RestartRefusal {
+    Cooldown { remaining: std::time::Duration },
+    HourlyCap,
+    InProgress,
+}
+
+impl RestartRefusal {
+    pub fn message(self) -> String {
+        match self {
+            Self::Cooldown { remaining } => format!(
+                "ADB vừa được khởi động lại; chờ thêm {} giây trước lần sau",
+                remaining.as_secs().max(1)
+            ),
+            Self::HourlyCap => format!(
+                "đã khởi động lại ADB {MAX_RESTARTS_PER_HOUR} lần trong một giờ; Riviu không \
+                 tự khởi động lại nữa. Kiểm tra cáp/hub USB và phần mềm khác đang dùng ADB"
+            ),
+            Self::InProgress => "đang khởi động lại ADB".to_string(),
+        }
+    }
+}
+
+impl RestartBudget {
+    fn refusal(&mut self, now: std::time::Instant) -> Option<RestartRefusal> {
+        while self
+            .history
+            .front()
+            .is_some_and(|at| now.saturating_duration_since(*at) >= RESTART_BUDGET_WINDOW)
+        {
+            self.history.pop_front();
+        }
+        if let Some(last) = self.history.back() {
+            let since = now.saturating_duration_since(*last);
+            if since < RESTART_COOLDOWN {
+                return Some(RestartRefusal::Cooldown {
+                    remaining: RESTART_COOLDOWN - since,
+                });
+            }
+        }
+        (self.history.len() >= MAX_RESTARTS_PER_HOUR).then_some(RestartRefusal::HourlyCap)
+    }
 }
 
 impl ServerWatch {
+    /// One host-side adb failure on `serial`. See [`host_side_fault`].
+    pub fn note_host_fault(&mut self, serial: &str, now: std::time::Instant) {
+        if !self.restart_in_progress(now) {
+            self.hang.record(serial, now);
+        }
+    }
+
+    /// Enough different phones failed host-side inside [`HANG_WINDOW`] to probe the server.
+    pub fn hang_suspected(&mut self, now: std::time::Instant) -> bool {
+        !self.restart_in_progress(now) && self.hang.phones(now) >= HANG_MIN_PHONES
+    }
+
+    /// The phones behind the current suspicion, for the journal and the port choice.
+    pub fn hang_serials(&mut self) -> Vec<String> {
+        let mut serials: Vec<String> = self
+            .hang
+            .failures
+            .iter()
+            .map(|(_, serial)| serial.clone())
+            .collect();
+        serials.sort();
+        serials.dedup();
+        serials
+    }
+
+    /// Why a restart could not begin now, without claiming the budget.
+    pub fn restart_refusal(&mut self, now: std::time::Instant) -> Option<RestartRefusal> {
+        if self.restart_in_progress(now) {
+            return Some(RestartRefusal::InProgress);
+        }
+        self.restarts.refusal(now)
+    }
+
+    /// The probe answered: the failures were the phones', not the server's.
+    pub fn clear_hang(&mut self) {
+        self.hang.failures.clear();
+    }
+
+    /// Claim the restart budget. On `Ok` the caller must run the restart and then call
+    /// [`Self::end_restart`]; until then inventory gaps are not reported as an outage.
+    pub fn begin_restart(&mut self, now: std::time::Instant) -> Result<(), RestartRefusal> {
+        if self.restart_in_progress(now) {
+            return Err(RestartRefusal::InProgress);
+        }
+        if let Some(refusal) = self.restarts.refusal(now) {
+            return Err(refusal);
+        }
+        self.restarts.history.push_back(now);
+        self.restarting = Some(now);
+        Ok(())
+    }
+
+    /// Close a restart begun by [`Self::begin_restart`] and queue its operator notice.
+    pub fn end_restart(
+        &mut self,
+        port: u16,
+        roster: Option<&str>,
+        message: String,
+        now: std::time::Instant,
+    ) {
+        let started = self.restarting.take().unwrap_or(now);
+        self.hang.failures.clear();
+        let transports = match self.ports.get(&port) {
+            Some(PortSeen::Up { transports })
+            | Some(PortSeen::Suspect { transports, .. })
+            | Some(PortSeen::Down { transports, .. }) => *transports,
+            None => 0,
+        };
+        match roster {
+            Some(text) => {
+                self.ports.insert(
+                    port,
+                    PortSeen::Up {
+                        transports: count_transports(text),
+                    },
+                );
+            }
+            None => {
+                self.ports.insert(
+                    port,
+                    PortSeen::Down {
+                        since: now,
+                        transports,
+                    },
+                );
+            }
+        }
+        self.push(AdbServerNotice {
+            port,
+            change: AdbServerChange::Restarted,
+            transports,
+            down_for: Some(now.saturating_duration_since(started)),
+            message,
+        });
+    }
+
+    fn restart_in_progress(&self, now: std::time::Instant) -> bool {
+        self.restarting
+            .is_some_and(|since| now.saturating_duration_since(since) < RESTART_MAX_DURATION)
+    }
+
     pub fn observe(&mut self, port: u16, roster: Option<&str>, now: std::time::Instant) {
+        if roster.is_none() && self.restart_in_progress(now) {
+            // Riviu's own kill-server: not another tool's outage, and end_restart reports it.
+            return;
+        }
         let previous = self.ports.get(&port).copied();
         let next = match (roster, previous) {
             (Some(text), Some(PortSeen::Down { since, transports })) => {
@@ -168,8 +407,10 @@ impl ServerWatch {
     }
 
     /// True for at most [`OUTAGE_START_HOLD`] after a populated server went away.
+    /// Also true while Riviu restarts a server: a client spawned then would auto-start one.
     pub fn holding_starts(&self, now: std::time::Instant) -> bool {
-        self.ports.values().any(|seen| match seen {
+        self.restart_in_progress(now)
+            || self.ports.values().any(|seen| match seen {
             PortSeen::Down { since, .. } => now.saturating_duration_since(*since) < OUTAGE_START_HOLD,
             PortSeen::Up { .. } | PortSeen::Suspect { .. } => false,
         })
@@ -213,6 +454,133 @@ fn select_port(primary: Option<&str>, alternate: Option<&str>) -> u16 {
     } else {
         5037
     }
+}
+
+/// The pid listening on `127.0.0.1:<port>` in `netstat -ano -p tcp` output.
+pub(crate) fn parse_listening_pid(netstat: &str, port: u16) -> Option<u32> {
+    let suffix = format!(":{port}");
+    netstat.lines().find_map(|line| {
+        let fields: Vec<&str> = line.split_whitespace().collect();
+        match fields.as_slice() {
+            [proto, local, _, state, pid]
+                if proto.eq_ignore_ascii_case("tcp")
+                    && local.ends_with(&suffix)
+                    && state.eq_ignore_ascii_case("listening") =>
+            {
+                pid.parse().ok().filter(|pid| *pid > 0)
+            }
+            _ => None,
+        }
+    })
+}
+
+/// The `Version x.y.z` line of `adb version`, which names the build rather than the protocol.
+/// Two builds answer the same `host:version` (41), so only this tells 34.0.5 from 37.0.1.
+pub(crate) fn parse_adb_build(version: &str) -> Option<&str> {
+    version
+        .lines()
+        .find_map(|line| line.trim().strip_prefix("Version "))
+        .map(str::trim)
+        .filter(|build| !build.is_empty())
+}
+
+/// Run one host tool with a deadline and return stdout. Not adb: `netstat`, `powershell`,
+/// `taskkill`, so it is outside the adb queue.
+#[cfg(windows)]
+async fn host_tool(program: &str, args: &[&str], timeout: Duration) -> anyhow::Result<String> {
+    let mut command = tokio::process::Command::new(program);
+    command
+        .args(args)
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped())
+        .kill_on_drop(true)
+        .creation_flags(0x0800_0000);
+    let output = tokio::time::timeout(timeout, command.output())
+        .await
+        .with_context(|| format!("{program} timed out after {timeout:?}"))?
+        .with_context(|| format!("run {program}"))?;
+    ensure!(
+        output.status.success(),
+        "{program} failed: {}",
+        String::from_utf8_lossy(&output.stderr).trim()
+    );
+    Ok(String::from_utf8_lossy(&output.stdout).into_owned())
+}
+
+/// The process listening on the adb server port, if the host can say.
+#[cfg(windows)]
+pub(crate) async fn listening_pid(port: u16) -> Option<u32> {
+    let netstat = host_tool(
+        "netstat.exe",
+        &["-ano", "-p", "tcp"],
+        Duration::from_secs(10),
+    )
+    .await
+    .ok()?;
+    parse_listening_pid(&netstat, port)
+}
+
+#[cfg(not(windows))]
+pub(crate) async fn listening_pid(_port: u16) -> Option<u32> {
+    None
+}
+
+/// The executable of `pid`. `Win32_Process.ExecutablePath`, because `tasklist` gives only
+/// the image name and every adb is `adb.exe`.
+#[cfg(windows)]
+pub(crate) async fn process_image(pid: u32) -> Option<std::path::PathBuf> {
+    let script =
+        format!("(Get-CimInstance Win32_Process -Filter 'ProcessId={pid}').ExecutablePath");
+    let path = host_tool(
+        "powershell.exe",
+        &["-NoProfile", "-NonInteractive", "-Command", &script],
+        Duration::from_secs(15),
+    )
+    .await
+    .ok()?;
+    let path = path.trim();
+    (!path.is_empty()).then(|| std::path::PathBuf::from(path))
+}
+
+#[cfg(not(windows))]
+pub(crate) async fn process_image(_pid: u32) -> Option<std::path::PathBuf> {
+    None
+}
+
+/// End a server that ignored `kill-server`. Only the pid that listens on the port.
+#[cfg(windows)]
+pub(crate) async fn terminate(pid: u32) -> anyhow::Result<()> {
+    host_tool(
+        "taskkill.exe",
+        &["/F", "/PID", &pid.to_string()],
+        Duration::from_secs(10),
+    )
+    .await
+    .map(|_| ())
+}
+
+#[cfg(not(windows))]
+pub(crate) async fn terminate(pid: u32) -> anyhow::Result<()> {
+    anyhow::bail!("terminating adb server pid {pid} is only implemented on Windows")
+}
+
+/// Roster probes that must all go unanswered before a suspected hang is called one. A loaded
+/// server can miss one 600 ms read (see [`PortSeen::Suspect`]); three a second apart cannot.
+const HANG_PROBES: usize = 3;
+const HANG_PROBE_SPACING: Duration = Duration::from_secs(1);
+
+/// The roster of `port` if any of [`HANG_PROBES`] reads answers, else `None` (hung or gone).
+pub(crate) async fn probe(port: u16) -> Option<String> {
+    for attempt in 0..HANG_PROBES {
+        if attempt > 0 {
+            tokio::time::sleep(HANG_PROBE_SPACING).await;
+        }
+        if let Ok(text) = roster(port).await {
+            return Some(text);
+        }
+    }
+    None
 }
 
 /// Respect explicit endpoint settings. Otherwise retain the standard server if
@@ -301,6 +669,74 @@ mod tests {
         assert_eq!(back[0].change, AdbServerChange::Returned);
         assert_eq!(back[0].down_for, Some(std::time::Duration::from_secs(68)));
         assert!(watch.drain().is_empty());
+    }
+
+    #[test]
+    fn a_hang_needs_several_phones_inside_the_window_and_restarts_are_budgeted() {
+        let start = std::time::Instant::now();
+        let at = |seconds: u64| start + std::time::Duration::from_secs(seconds);
+        let mut watch = ServerWatch::default();
+        for second in 0..10 {
+            watch.note_host_fault("slow-phone", at(second));
+        }
+        watch.note_host_fault("phone-b", at(10));
+        assert!(
+            !watch.hang_suspected(at(10)),
+            "one phone failing repeatedly is that phone"
+        );
+        watch.note_host_fault("phone-c", at(11));
+        assert!(watch.hang_suspected(at(11)));
+        assert!(
+            !watch.hang_suspected(at(11) + HANG_WINDOW),
+            "failures older than the window no longer count"
+        );
+        assert!(host_side_fault(
+            "adb: error: could not read ok from ADB Server"
+        ));
+        assert!(host_side_fault("adb shell timed out after 2s"));
+        assert!(!host_side_fault("adb: device offline"));
+        assert!(!host_side_fault("error: device unauthorized."));
+
+        assert_eq!(watch.begin_restart(at(100)), Ok(()));
+        assert_eq!(
+            watch.begin_restart(at(101)),
+            Err(RestartRefusal::InProgress)
+        );
+        watch.end_restart(5037, Some("phone device\n"), "ok".into(), at(110));
+        assert_eq!(watch.drain()[0].change, AdbServerChange::Restarted);
+        assert_eq!(
+            watch.begin_restart(at(120)),
+            Err(RestartRefusal::Cooldown {
+                remaining: std::time::Duration::from_secs(25)
+            })
+        );
+        for restart in 1..MAX_RESTARTS_PER_HOUR as u64 {
+            let when = at(100) + RESTART_COOLDOWN * restart as u32;
+            assert_eq!(watch.begin_restart(when), Ok(()));
+            watch.end_restart(5037, None, "failed".into(), when);
+        }
+        let past_cooldown = at(100) + RESTART_COOLDOWN * MAX_RESTARTS_PER_HOUR as u32;
+        assert_eq!(
+            watch.begin_restart(past_cooldown),
+            Err(RestartRefusal::HourlyCap)
+        );
+        assert_eq!(
+            watch.begin_restart(at(100) + RESTART_BUDGET_WINDOW),
+            Ok(()),
+            "the cap rolls"
+        );
+    }
+
+    #[test]
+    fn the_server_process_and_build_are_read_from_host_tools() {
+        let netstat = "\r\nActive Connections\r\n\r\n  Proto  Local Address          Foreign Address        State           PID\r\n  TCP    127.0.0.1:15037        0.0.0.0:0              LISTENING       4\r\n  TCP    127.0.0.1:5037         127.0.0.1:61000        ESTABLISHED     17576\r\n  TCP    127.0.0.1:5037         0.0.0.0:0              LISTENING       17576\r\n";
+        assert_eq!(parse_listening_pid(netstat, 5037), Some(17576));
+        assert_eq!(parse_listening_pid(netstat, 5038), None);
+        let genfarmer = "Android Debug Bridge version 1.0.41\nVersion 34.0.5-10900879\nInstalled as C:\\Users\\x\\.genfarmer\\adb.exe\n";
+        let riviu = "Android Debug Bridge version 1.0.41\r\nVersion 37.0.1-14910828\r\n";
+        assert_eq!(parse_adb_build(genfarmer), Some("34.0.5-10900879"));
+        assert_eq!(parse_adb_build(riviu), Some("37.0.1-14910828"));
+        assert_eq!(parse_adb_build("no version here"), None);
     }
 
     #[test]

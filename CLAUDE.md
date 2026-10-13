@@ -106,7 +106,8 @@ Three more rules:
 - **One owner per phone.** The UI, Local API, Riviu MCP adapter and Inspector v2 all go through the same admission and control-plane leases. The Local API reuses the commands' `commands::with_manual_session` path and has no route of its own.
   - The Local API listens on loopback `127.0.0.1:22222`. It is off by default and requires a bearer token.
   - The Riviu MCP adapter is `scripts/riviu_agent_mcp.mjs`.
-  - To get around "busy", never add a second driver, controller or scheduler, kill adb-server or force-drop leases.
+  - To get around "busy", never add a second driver, controller or scheduler or force-drop leases.
+  - A hung adb server is restarted only by the controller's bounded recovery (`apps/desktop/src-tauri/src/adb_server_recovery.rs`, see `docs/agents/09-fleet-android.md`). By hand, restart it only while no controller runs.
 - **Intent before effect.** SQLite records the intent and receipt (revision/CAS) before any device or network effect. Never hold a transaction across HTTP or device I/O. Secrets go in the OS credential store, not SQLite.
 - **ACK is not proof.** Publish states are separate layers:
   - Submitted
