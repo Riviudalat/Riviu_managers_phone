@@ -2455,7 +2455,7 @@ pub(super) async fn capture_confirmed_assignment_link(
             super::verification_restart::authorize_restart(db, assignment, observer)
         }).await.map_err(|error| anyhow::Error::new(super::verification::VerificationObservation {
             code: "readFailed",
-            reason: format!("Chưa mở lại TikTok để lấy link: {error}; thử lại sau 5 phút"),
+            reason: format!("Chưa mở lại TikTok để lấy link: {error}; thử lại sau 2 phút"),
             diagnostic: Some(serde_json::json!({"appRestart":{"state":"failed","package":package,"error":error.to_string()}})),
         }))?.or(restart_refusal) };
         let restart_proof = restart_proof.map(|mut proof| {
@@ -4545,7 +4545,7 @@ pub(super) async fn capture_or_defer_submission(
 ) -> PostOutcome {
     if defer {
         evidence["linkCaptureReason"] = serde_json::json!(
-            "Đã gửi bài; bộ xác minh sẽ kiểm tra liên kết riêng và thử lại sau 5 phút nếu TikTok còn xử lý"
+            "Đã gửi bài; bộ xác minh sẽ kiểm tra liên kết riêng và thử lại sau 2 phút nếu TikTok còn xử lý"
         );
         evidence["publicationVerified"] = serde_json::json!(false);
         return PostOutcome::Submitted(evidence);

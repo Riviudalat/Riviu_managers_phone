@@ -28,7 +28,7 @@ impl VerificationWait {
         match self {
             Self::DeviceOffline => "Máy chưa kết nối — cắm lại máy để app tự kiểm tra bài đã gửi",
             Self::HelperNotReady => {
-                "Helper trên máy chưa chạy — app tự mở helper để kiểm tra; chưa mở được thì tự thử lại sau 5 phút"
+                "Helper trên máy chưa chạy — app tự mở helper để kiểm tra; chưa mở được thì tự thử lại sau 2 phút"
             }
             Self::AgentNotReady => {
                 "Riviu Agent trên iPhone chưa sẵn sàng — app tự kiểm tra khi agent chạy lại; nếu kéo dài, xem máy này trong Cần xử lý"
@@ -47,7 +47,7 @@ impl VerificationWait {
 }
 
 /// A cold admission whose session could not open retries at the observation cadence.
-pub(crate) const COLD_RETRY: std::time::Duration = std::time::Duration::from_secs(300);
+pub(crate) const COLD_RETRY: std::time::Duration = std::time::Duration::from_secs(120);
 
 /// One observer per phone or retained metadata assignment; rows remain durable.
 pub(crate) struct VerificationQueue {

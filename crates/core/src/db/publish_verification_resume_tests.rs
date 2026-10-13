@@ -721,7 +721,7 @@ fn resumed_verified_post_does_not_resurrect_superseded_sheet_or_cancelled_campai
             .unwrap(),
     )
     .unwrap();
-    assert_eq!((due - checked).num_seconds(), 300);
+    assert_eq!((due - checked).num_seconds(), 120);
     let url = "https://www.tiktok.com/@fixture.account/photo/7400000000000000001";
     assert!(db
         .record_verified_publish_with_sheet_row(
@@ -822,7 +822,7 @@ fn explicit_legacy_check_resumes_only_its_publication_after_restart_without_post
             .unwrap(),
     )
     .unwrap();
-    assert_eq!((due - checked).num_seconds(), 300);
+    assert_eq!((due - checked).num_seconds(), 120);
     assert!(!rows[0].is_due(checked.with_timezone(&Utc)));
     assert!(rows[0].is_due(due.with_timezone(&Utc)));
     assert!(db.claim_publish_pipeline(&campaign).unwrap().is_none());

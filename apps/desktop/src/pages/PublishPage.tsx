@@ -151,8 +151,14 @@ function verificationSchedule(evidenceJson?: string | null): string | null {
       ? "Tự kiểm tra đã dừng · chọn Kiểm tra liên kết"
       : null;
     const recoveryBudget = value?.verificationBudget;
-    const budget = status?.checkIntervalSeconds === 300
-      ? `Kiểm tra mỗi 5 phút; dừng sau 3 lượt liên tiếp không có bằng chứng mới${recoveryBudget?.version === 1 && typeof recoveryBudget.noProgressObservations === "number" ? ` (${recoveryBudget.noProgressObservations}/3)` : ""}`
+    // The interval and the no-progress limit come from the stored status and budget, so a link
+    // checked before 0.2.88 (5 min / 3 rounds) still reads truthfully next to new ones (2 min / 8).
+    const interval = typeof status?.checkIntervalSeconds === "number" && status.checkIntervalSeconds > 0
+      ? Math.round(status.checkIntervalSeconds / 60) : null;
+    const limit = typeof recoveryBudget?.limit === "number" ? recoveryBudget.limit
+      : status?.checkIntervalSeconds === 300 ? 3 : 8;
+    const budget = interval
+      ? `Kiểm tra mỗi ${interval} phút; dừng sau ${limit} lượt liên tiếp không có bằng chứng mới${recoveryBudget?.version === 1 && typeof recoveryBudget.noProgressObservations === "number" ? ` (${recoveryBudget.noProgressObservations}/${limit})` : ""}`
       : null;
     const reasonCode = typeof status?.reasonCode === "string" ? status.reasonCode : null;
     const attempts = typeof status?.attempts === "number" ? `Đã kiểm: ${status.attempts} lượt` : null;
@@ -1320,7 +1326,7 @@ export function PublishPage({
     try {
       const confirmed = await requestConfirm({
         title: "Tiếp tục xác minh bài đã gửi?",
-        message: "Chỉ kiểm tra bài cũ trên máy này và thử lại mỗi 5 phút khi chưa có link. Không đăng lại, không tiếp tục các bài chưa gửi. Quyền đăng bài mới chỉ mở khi có đủ bằng chứng máy đã an toàn.",
+        message: "Chỉ kiểm tra bài cũ trên máy này và thử lại mỗi 2 phút khi chưa có link. Không đăng lại, không tiếp tục các bài chưa gửi. Quyền đăng bài mới chỉ mở khi có đủ bằng chứng máy đã an toàn.",
         confirmLabel: "Tiếp tục xác minh", cancelLabel: "Huỷ",
       });
       if (!confirmed) return;
@@ -1332,7 +1338,7 @@ export function PublishPage({
       setNotice({ tone: refused ? "warning" : "info", text: recoveryReason(result.reason) || (refused
         ? "Trạng thái bài đã thay đổi hoặc chưa đủ điều kiện xác minh; không khởi động lại Post."
         : result.state === "alreadyVerified" ? "Bài đã có link; không thực hiện lại Post. Cột Kết quả cho biết đã xác minh chưa."
-          : "Đã nhận yêu cầu xác minh bài đã gửi. Khi chưa có link, hệ thống thử lại mỗi 5 phút; không đăng lại.") });
+          : "Đã nhận yêu cầu xác minh bài đã gửi. Khi chưa có link, hệ thống thử lại mỗi 2 phút; không đăng lại.") });
     } catch (error) { setNotice({ tone: "error", text: describeError(error) }); }
     finally { publishInFlight.current = false; setBusy(false); }
   };

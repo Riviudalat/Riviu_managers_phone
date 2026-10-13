@@ -279,12 +279,12 @@ impl VerificationReason {
             Self::CopyBudgetExhausted => "Đã dùng hết ngân sách sao chép của lượt kiểm tra; chưa xác minh liên kết, không sao chép thêm trong lượt này.",
             Self::ClipboardUnwritable => "Chưa ghi và đọc lại được giá trị kiểm chứng clipboard; chưa bấm Sao chép liên kết.",
             Self::ClipboardUnreadable => "Không đọc được clipboard sau thao tác; chưa xác nhận đã sao chép liên kết.",
-            Self::ClipboardUnchanged => "Đã mở đúng nội dung và bấm Sao chép liên kết nhưng TikTok chưa trả link; tự kiểm tra lại sau 5 phút.",
-            Self::Processing => "TikTok báo bài đang được xử lý; chưa trả liên kết. Tự kiểm tra lại sau 5 phút.",
+            Self::ClipboardUnchanged => "Đã mở đúng nội dung và bấm Sao chép liên kết nhưng TikTok chưa trả link; tự kiểm tra lại sau 2 phút.",
+            Self::Processing => "TikTok báo bài đang được xử lý; chưa trả liên kết. Tự kiểm tra lại sau 2 phút.",
             Self::ClipboardNotPostLink => "Clipboard đã đổi nhưng nội dung không phải liên kết bài TikTok hợp lệ.",
             Self::RedirectFailed => "Đã sao chép liên kết nhưng chưa chuẩn hóa được đường dẫn đến bài TikTok.",
             Self::MultipleMatchingPosts => "Có nhiều bài cùng khớp caption và thời gian trong lưới hồ sơ; chưa chọn liên kết để tránh gán nhầm lượt đăng.",
-            Self::AmbiguityScanIncomplete => "Đã thấy một bài khớp caption và thời gian nhưng hết thời gian rà các bài còn lại để loại trừ bài trùng; chưa xác minh liên kết, tự kiểm tra lại sau 5 phút, không đăng lại.",
+            Self::AmbiguityScanIncomplete => "Đã thấy một bài khớp caption và thời gian nhưng hết thời gian rà các bài còn lại để loại trừ bài trùng; chưa xác minh liên kết, tự kiểm tra lại sau 2 phút, không đăng lại.",
         }
     }
 }

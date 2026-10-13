@@ -163,7 +163,7 @@ impl LinkCapture {
                 "TikTok chưa trả liên kết sau khi bấm sao chép; sẽ kiểm tra lại sau".into()
             }
             Self::Processing(_) => {
-                "TikTok báo bài đang được xử lý; chưa trả liên kết. Tự kiểm tra lại sau 5 phút."
+                "TikTok báo bài đang được xử lý; chưa trả liên kết. Tự kiểm tra lại sau 2 phút."
                     .into()
             }
             Self::CopyBudgetExhausted => {

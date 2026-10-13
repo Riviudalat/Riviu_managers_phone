@@ -214,8 +214,10 @@ fn may_verify(state: &str, intent: Option<&str>, evidence: Option<&str>) -> bool
 // Upload-idle proof is independent of the bounded missing-link observation budget.
 const UPLOAD_IDLE_AFTER_MINUTES: i64 = 240;
 const SCHEDULED_FIRST_CHECK_SECONDS: i64 = 120;
-const VERIFICATION_CHECK_SECONDS: i64 = 300;
-const VERIFICATION_NO_PROGRESS_LIMIT: u64 = 3;
+// Owner 13/10/2026: re-check a posted link every 2 minutes instead of 5. The no-progress
+// limit grows from 3 to 8 so the total wait stays about the same (15 -> 16 minutes).
+const VERIFICATION_CHECK_SECONDS: i64 = 120;
+const VERIFICATION_NO_PROGRESS_LIMIT: u64 = 8;
 const VERIFICATION_NO_PROGRESS_CAUSE: &str = "verificationNoProgress";
 const METADATA_RETRY_LIMIT: u64 = 12;
 const METADATA_RETRY_CAUSE: &str = "metadataRetryBudgetExhausted";
@@ -1244,7 +1246,7 @@ impl Database {
         let mut evidence: serde_json::Value = serde_json::from_str(evidence_json)?;
         evidence["verificationStatus"] = serde_json::json!({
             "state":"pending",
-            "reason":"Đã gửi bài hẹn giờ; Android mở lại TikTok để lấy link, nếu chưa được sẽ thử lại sau 5 phút",
+            "reason":"Đã gửi bài hẹn giờ; Android mở lại TikTok để lấy link, nếu chưa được sẽ thử lại sau 2 phút",
             "cause":"deferredScheduledLink", "attempts":0, "readFailures":0,
             "checkIntervalSeconds":VERIFICATION_CHECK_SECONDS, "reviewAfterMinutes":null, "deadlineAt":null, "nextCheckAt":first_scheduled_check(intent.as_deref()).map(|at|at.to_rfc3339()),
         });
@@ -1555,7 +1557,7 @@ impl Database {
                 continue;
             }
             let reason = if reopen {
-                "Tiếp tục tự kiểm tra liên kết mỗi 5 phút; bài đã gửi chưa được xác minh"
+                "Tiếp tục tự kiểm tra liên kết mỗi 2 phút; bài đã gửi chưa được xác minh"
             } else {
                 LEGACY_IDENTITY_REVIEW_REASON
             };
