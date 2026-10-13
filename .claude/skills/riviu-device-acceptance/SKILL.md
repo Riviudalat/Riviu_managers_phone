@@ -112,6 +112,10 @@ Mỗi mục dưới đây từng làm mất 20–60 phút. Đọc trước khi m
   (`?mode=ro`) để theo dõi, `py -3.12 -I -X utf8` để in tiếng Việt.
 - IPC tới controller có thể treo >2 phút khi 30 máy đang soạn: bọc `timeout 90`; trạng thái
   thì lấy từ DB, không từ IPC.
+- **Không chạy `run-publish.py` bên trong Monitor/watch có hạn.** Watch hết hạn (30 phút)
+  giết cả cây tiến trình, kể cả runner đang ở giữa submit (14/10, r108: preflight 6 phút +
+  submit bị giết, may là trước khi Start được gửi). Chạy runner bằng tác vụ nền độc lập;
+  Monitor chỉ đọc file/DB.
 
 ### Khôi phục không chạm máy
 
