@@ -510,6 +510,12 @@ qua Post. Khi backend báo pipeline còn chạy, máy bận hoặc chưa đọc 
 lại, nút bị khoá kèm lý do; chờ/đọc lại chi tiết, không tạo campaign khác để né guard.
 Thao tác này khác tiếp tục xác minh, kiểm tra link và ghi lại Sheet.
 
+Khi xác nhận đăng, app nhả các máy còn việc cũ đã liệt kê trong hộp xem lại. Máy nào không
+nhả kịp (máy chậm, việc cũ chưa trả máy) không làm hỏng cả lượt: máy đó thành **Dừng trước
+khi đăng** với lý do chưa nhả được máy, chưa có gì được gửi lên máy, còn các máy khác vẫn
+đăng. Khi máy rảnh, bấm **Thử lại máy này**; thử lại toàn lượt không chạy máy này. Nếu không
+máy nào nhả được thì lượt bị từ chối như trước và chưa tạo chiến dịch.
+
 Mỗi lần chạy mới trước Post, từ **Thử lại máy này** hoặc tự phục hồi trong ngân
 sách, có thể chọn bất kỳ bài nhạc nào trong tab Hot đang hiện (TikTok SEA: Recommended). Lựa chọn mới
 có thể thay nhạc đã xác minh ở lần chạy trước; lựa chọn cũ vẫn được lưu trong lịch

@@ -361,7 +361,7 @@ pub async fn publish_create_campaign(
         })
         .await
         .map_err(err)?;
-    let handoff_deadline = tokio::time::Instant::now() + Duration::from_secs(125);
+    let handoff_deadline = tokio::time::Instant::now() + HANDOFF_BUDGET;
     let releasing = confirmed && run_at.is_none();
     let handoff = if releasing {
         Some(crate::commands::wait_manual_handoff_until(handoff_deadline).await?)
@@ -417,10 +417,14 @@ pub async fn publish_create_campaign(
                 .current_work_owner(udid)
                 .is_some_and(|owner| owner != DeviceWorkOwner::Repair)
         });
+    let mut not_released = Vec::new();
     if let Some(handoff) = handoff.as_ref().filter(|_| needs_handoff) {
         for udid in &udids {
             preparation::progress(udid, "preparingDevices", "running", 0, None);
         }
+        // Release has its own budget from here. The approval re-preflight above probes every
+        // phone; on 30 phones it once took ~100 s of a shared deadline, and the last closes
+        // then failed at once with "hết thời gian chờ nhả quyền" (HX-START, 13/10/2026).
         let result = crate::commands::prepare_publish_devices(
             &app,
             &state,
@@ -428,10 +432,14 @@ pub async fn publish_create_campaign(
             &approved_release,
             Some(account_lock.owner.generation()),
             handoff,
-            handoff_deadline,
+            tokio::time::Instant::now() + HANDOFF_BUDGET,
         )
         .await?;
-        require_released_publish_devices(&udids, &result).map_err(err)?;
+        not_released = unreleased_publish_devices(&udids, &result).map_err(err)?;
+        for (udid, message) in &not_released {
+            log::warn!("Đăng bài: chưa nhả được máy {udid} trước khi gửi lệnh ({message}); máy này chờ Thử lại, các máy khác vẫn đăng");
+            preparation::progress(udid, "preparingDevices", "failed", 0, Some(message.clone()));
+        }
     }
     preparation::stage(&state.db, "checkingDevices")
         .await
@@ -444,16 +452,24 @@ pub async fn publish_create_campaign(
     )
     .await
     .map_err(err)?;
-    if !prepared.report.can_execute {
+    // A phone that was not released is still held, so its readiness issue is expected; it is
+    // created failed-before-dispatch below. Any other issue still refuses the whole Start.
+    let refusals: Vec<&str> = prepared
+        .report
+        .issues
+        .iter()
+        .filter(|issue| {
+            !issue
+                .udid
+                .as_ref()
+                .is_some_and(|udid| not_released.iter().any(|(held, _)| held == udid))
+        })
+        .map(|issue| issue.message.as_str())
+        .collect();
+    if !prepared.report.can_execute && !refusals.is_empty() {
         return Err(err(format!(
             "preflight từ chối chiến dịch: {}",
-            prepared
-                .report
-                .issues
-                .iter()
-                .map(|issue| issue.message.as_str())
-                .collect::<Vec<_>>()
-                .join("; ")
+            refusals.join("; ")
         )));
     }
     require_current_preflight_digest(&prepared.report, &approved_input_digest).map_err(err)?;
@@ -526,11 +542,13 @@ pub async fn publish_create_campaign(
         retry_scope: riviu_core::PublishRetryScope::FullPipeline,
         report_json: serde_json::to_value(&prepared.report).map_err(err)?,
     };
-    match state.db.create_publish_with_receipt(
+    let held_back: Vec<String> = not_released.into_iter().map(|(udid, _)| udid).collect();
+    match state.db.create_publish_holding_back(
         &request,
         &managed,
         &initial_snapshot,
         &request_fingerprint,
+        &held_back,
     ) {
         Ok((campaign, created)) => {
             if !created {
@@ -596,11 +614,20 @@ async fn require_approval_before_effects(
     Ok(())
 }
 
-pub(super) fn require_released_publish_devices(
+/// Budget for each handoff stage of a Start: waiting for the handoff turn, then releasing the
+/// phones. Each stage gets its own, so a slow approval re-preflight cannot spend the release's.
+const HANDOFF_BUDGET: Duration = Duration::from_secs(125);
+
+/// The selected phones the handoff did not release, with its reason for each. Such a phone
+/// starts failed-before-dispatch and the others go on; nothing was sent to it, so it is
+/// retryable. A missing or duplicated result row, or no phone released at all, still refuses
+/// the whole Start before any campaign exists.
+pub(super) fn unreleased_publish_devices(
     udids: &[String],
     result: &riviu_core::ipc_contract::OperationStopResult,
-) -> anyhow::Result<()> {
+) -> anyhow::Result<Vec<(String, String)>> {
     anyhow::ensure!(!udids.is_empty(), "Chưa chọn máy đăng bài");
+    let mut unreleased = Vec::new();
     for udid in udids {
         let rows: Vec<_> = result
             .devices
@@ -610,9 +637,17 @@ pub(super) fn require_released_publish_devices(
         let [row] = rows.as_slice() else {
             anyhow::bail!("{udid}: chưa có kết quả nhả máy duy nhất; chưa đăng bài mới");
         };
-        anyhow::ensure!(row.closed, "{udid}: {}", row.message);
+        if !row.closed {
+            unreleased.push((udid.clone(), row.message.clone()));
+        }
     }
-    Ok(())
+    if let Some((udid, message)) = unreleased
+        .first()
+        .filter(|_| unreleased.len() == udids.len())
+    {
+        anyhow::bail!("{udid}: {message}");
+    }
+    Ok(unreleased)
 }
 
 /// Apply the editor's caption snapshot to the selected manifest before its managed copy.
