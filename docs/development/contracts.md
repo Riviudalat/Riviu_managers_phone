@@ -1326,6 +1326,18 @@ sử lần thử; `publication_id` được backfill bằng assignment ID và b�
 nhóm lại dữ liệu cũ theo caption, thư mục hoặc tên máy. Intent và revision của
 pipeline vẫn kiểm tại nút Đăng. Worker đã lỗi sau effect chỉ chuyển sang xác minh.
 
+Dispatcher không chờ quét danh sách máy (`publish_commands/pipeline.rs`, `RosterRefresh`).
+Mỗi lượt quét `list_devices` chạy trong một task riêng, tối đa một lượt cùng lúc, cách nhau
+ít nhất 2 giây khi còn job chờ; vòng chính vẫn thu kết quả worker, ghi completion và giao
+việc trong lúc quét chờ khóa inventory, hàng đợi adb hay probe chậm. Lượt quét không bị
+timeout cắt; khi tắt app handle bị bỏ (task tự kết thúc) và shutdown chỉ chờ worker đang
+giữ máy, rồi ghi journal completion như cũ. Kết quả quét chỉ dùng được trong
+`ROSTER_MAX_AGE` = 60 giây tính từ lúc bắt đầu quét (chọn, chưa đo). Chưa có kết quả hoặc
+kết quả quá hạn nghĩa là *chưa biết*: job ở lại `queued` với lý do `roster_pending`, không
+mở cửa sổ reconnect 2 phút, không đánh lỗi `unauthorized`, không coi cả đội là offline.
+Danh sách máy chỉ cho phép nhận claim; lease của worker và các lần đọc đúng serial đó
+(build TikTok, tải máy dưới lease) vẫn quyết định có effect hay không.
+
 `publish_get_limits`/`publish_set_limits` nhận `{transfer,compose,verify,deviceTotal}`,
 lưu ở `publish.dispatch.limits` theo database máy chủ, mỗi giá trị từ 1 đến 64.
 Giữ cả bốn trường để tương thích dữ liệu cũ. Admission dùng `transfer` cho lượt chuyển media (vẫn nằm trong ngân sách máy chung), `verify` làm trần số lượt đọc metadata mạng đồng thời, và trần cứng `PUBLISH_PHONE_WORK_CAP` = 10 cho mọi pha trên máy (không đọc từ trường `compose`); `deviceTotal` không tác động admission.
