@@ -947,7 +947,11 @@ impl AdbProgram {
         let theirs = theirs
             .as_deref()
             .and_then(crate::adb_server::parse_adb_build);
-        if theirs == Some(ours) {
+        // Same major release talks the same server protocol: a 37.0.0 client (scrcpy on PATH in
+        // development) against the bundled 37.0.1 server is not foreign. Replacing it anyway
+        // killed the live server under a running controller on 14/10/2026 05:11 local.
+        let major = |build: &str| build.split('.').next().map(str::to_owned);
+        if theirs.is_some_and(|theirs| major(theirs) == major(ours)) {
             return;
         }
         tracing::warn!(
