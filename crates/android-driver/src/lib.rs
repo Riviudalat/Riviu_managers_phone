@@ -42,6 +42,7 @@ pub mod publish;
 pub mod riviu_agent;
 pub mod scrcpy;
 pub mod session;
+mod telemetry;
 pub mod view;
 
 pub use adb::{AdbCandidate, AdbOrigin, AdbProgram};

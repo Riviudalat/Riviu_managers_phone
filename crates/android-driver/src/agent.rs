@@ -377,6 +377,15 @@ fn slow_call_budget(route: &str) -> Duration {
     SLOW_AGENT_CALL
 }
 
+/// A transport failure counts as a timeout when the client's own deadline fired.
+fn call_failed(call: &mut crate::telemetry::CallTimer, error: &reqwest::Error) {
+    if error.is_timeout() {
+        call.timed_out();
+    } else {
+        call.failed();
+    }
+}
+
 #[derive(Clone)]
 pub struct AgentClient {
     http: reqwest::Client,
@@ -759,6 +768,7 @@ impl AgentClient {
         self.refuse_if_sealed(suffix)?;
         let remaining = deadline.saturating_duration_since(std::time::Instant::now());
         anyhow::ensure!(!remaining.is_zero(), "observation_deadline_exceeded");
+        let route = format!("{method} {suffix}");
         let mut request = self
             .http
             .request(method, self.url(suffix))
@@ -768,6 +778,14 @@ impl AgentClient {
         }
         let mut trace = riviu_core::tiktok_composer::StageDiagnosticOperation::start(
             suffix, &self.session_identity(), Some(tokio::time::Instant::from_std(deadline)));
+        let mut call = crate::telemetry::CallTimer::start(
+            crate::telemetry::AGENT,
+            &route,
+            Some(slow_call_budget(suffix)),
+        );
+        // Set once the whole body is in: from then on an error is the server's answer
+        // (stale tree, HTTP status), not a transport failure, and counts by its latency.
+        let body_received = std::sync::atomic::AtomicBool::new(false);
         let read = async {
             tracing::debug!(serial = %self.serial, transport = "http", route = suffix,
                 "observation read command");
@@ -792,6 +810,7 @@ impl AgentClient {
                 );
                 bytes.extend_from_slice(&chunk);
             }
+            body_received.store(true, std::sync::atomic::Ordering::Relaxed);
             let value: Value =
                 serde_json::from_slice(&bytes).context("observation_invalid_json")?;
             let message = value.pointer("/value/message").and_then(Value::as_str);
@@ -826,7 +845,23 @@ impl AgentClient {
         };
         let result = tokio::time::timeout_at(tokio::time::Instant::from_std(deadline), read)
             .await
-            .map_err(|_| observation_deadline_error())?;
+            .map_err(|_| {
+                call.timed_out();
+                observation_deadline_error()
+            })?;
+        match &result {
+            Ok(_) => call.answered(),
+            Err(_) if body_received.load(std::sync::atomic::Ordering::Relaxed) => {
+                call.answered()
+            }
+            Err(error) if error.to_string().contains("observation_deadline_exceeded") => {
+                call.timed_out()
+            }
+            Err(error) => match error.downcast_ref::<reqwest::Error>() {
+                Some(error) => call_failed(&mut call, error),
+                None => call.failed(),
+            },
+        }
         trace.finish(if result.is_ok() { "completed" } else { "error" });
         result
     }
@@ -942,6 +977,12 @@ impl AgentClient {
         let mut trace = riviu_core::tiktok_composer::StageDiagnosticOperation::start(
             suffix, &self.session_identity(), request_timeout.map(|timeout| tokio::time::Instant::now() + timeout));
         let started = std::time::Instant::now();
+        // Every call, not only the slow ones: percentiles of warnings are the tail's.
+        let mut call = crate::telemetry::CallTimer::start(
+            crate::telemetry::AGENT,
+            &format!("{method} {suffix}"),
+            Some(slow_call_budget(suffix)),
+        );
         let request_failure = |phase, source: reqwest::Error| {
             let failure = AgentRequestFailure {
                 serial: self.serial.clone(),
@@ -972,7 +1013,11 @@ impl AgentClient {
         let response = request
             .send()
             .await
-            .map_err(|error| { trace.finish("transportError"); request_failure("response_headers", error) })?;
+            .map_err(|error| {
+                trace.finish("transportError");
+                call_failed(&mut call, &error);
+                request_failure("response_headers", error)
+            })?;
         let status = response.status();
         trace.finish("headersReceived");
         // Read as bytes and decode UTF-8 ourselves. The server answers without a
@@ -981,7 +1026,12 @@ impl AgentClient {
         let bytes = response
             .bytes()
             .await
-            .map_err(|error| { trace.finish("transportError"); request_failure("response_body", error) })?;
+            .map_err(|error| {
+                trace.finish("transportError");
+                call_failed(&mut call, &error);
+                request_failure("response_body", error)
+            })?;
+        call.answered();
         let elapsed = started.elapsed();
         if cfg!(debug_assertions) && std::env::var("RIVIU_PUBLISH_REHEARSAL").as_deref() == Ok("1")
         {

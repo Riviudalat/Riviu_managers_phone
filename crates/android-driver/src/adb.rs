@@ -208,10 +208,84 @@ pub async fn hold_device_queue(serial: &str) -> AdbDeviceHold {
 }
 
 /// Everything one adb call holds while it runs. Dropping it releases all of them.
+///
+/// Field order is drop order: the execution timer records before the permits are released.
 struct AdbSlot {
+    /// Times execution from the moment every permit is held. A call that drops the slot
+    /// without ending it -- its future was cancelled -- counts as cancelled.
+    exec: crate::telemetry::CallTimer,
+    #[cfg_attr(not(test), allow(dead_code))]
+    waits: AdbWaits,
     _device: Option<tokio::sync::OwnedSemaphorePermit>,
     _transfer: Option<tokio::sync::SemaphorePermit<'static>>,
     _global: tokio::sync::SemaphorePermit<'static>,
+}
+
+/// How long one call waited at each of the three levels, measured separately.
+///
+/// **One timer over all three used to be labelled as the global cap.** 3 438 warnings in the
+/// r105 log read "the host is running its cap", yet the time could equally have been spent
+/// behind another call to the same phone or behind four transfers (review F4, 14/10/2026).
+/// Those have opposite fixes, so each level is its own number.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+struct AdbWaits {
+    serial_queue: Duration,
+    transfer_cap: Duration,
+    global_slot: Duration,
+}
+
+/// The level a wait mostly went to.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum AdbWaitLane {
+    SerialQueue,
+    TransferCap,
+    GlobalSlot,
+}
+
+impl AdbWaits {
+    fn total(&self) -> Duration {
+        self.serial_queue + self.transfer_cap + self.global_slot
+    }
+
+    /// The largest of the three. Ties go to the more specific level, the order they are taken.
+    fn dominant(&self) -> AdbWaitLane {
+        let mut lane = AdbWaitLane::SerialQueue;
+        let mut longest = self.serial_queue;
+        if self.transfer_cap > longest {
+            lane = AdbWaitLane::TransferCap;
+            longest = self.transfer_cap;
+        }
+        if self.global_slot > longest {
+            lane = AdbWaitLane::GlobalSlot;
+        }
+        lane
+    }
+}
+
+impl AdbWaitLane {
+    /// Stable, greppable name; the same one the per-minute summary prints.
+    fn key(self) -> &'static str {
+        match self {
+            Self::SerialQueue => crate::telemetry::ADB_SERIAL_QUEUE,
+            Self::TransferCap => crate::telemetry::ADB_TRANSFER_CAP,
+            Self::GlobalSlot => crate::telemetry::ADB_GLOBAL_SLOT,
+        }
+    }
+
+    /// What the operator reads. Only the global slot is the host running its cap.
+    fn message(self) -> &'static str {
+        match self {
+            Self::SerialQueue => {
+                "lệnh adb chờ hàng đợi riêng của máy này (một lệnh adb khác cho cùng máy đang chạy); không phải host hết slot"
+            }
+            Self::TransferCap => {
+                "lệnh adb chờ slot chuyển tệp; host đang chạy đủ số pull/push cùng lúc"
+            }
+            Self::GlobalSlot => {
+                "lệnh adb chờ slot chung; host đang chạy đủ số lệnh adb cùng lúc"
+            }
+        }
+    }
 }
 
 /// Wait for everything this call needs, and say so if the wait was long.
@@ -222,7 +296,8 @@ struct AdbSlot {
 /// starvation this is meant to prevent rather than cause. A fixed order is also what makes the
 /// three levels deadlock-free.
 async fn enter_adb_slot(serial: Option<&str>, what: &str, lane: AdbLane) -> AdbSlot {
-    let waiting_since = Instant::now();
+    let mut waits = AdbWaits::default();
+    let mut stage_started = Instant::now();
 
     let device = match serial {
         Some(serial) => {
@@ -243,7 +318,17 @@ async fn enter_adb_slot(serial: Option<&str>, what: &str, lane: AdbLane) -> AdbS
         }
         None => None,
     };
+    if device.is_some() {
+        waits.serial_queue = stage_started.elapsed();
+        crate::telemetry::record(
+            crate::telemetry::ADB_SERIAL_QUEUE,
+            "",
+            waits.serial_queue,
+            crate::telemetry::Outcome::Ok,
+        );
+    }
 
+    stage_started = Instant::now();
     let transfer = match lane {
         AdbLane::Transfer => Some(
             adb_transfer_slots()
@@ -253,27 +338,54 @@ async fn enter_adb_slot(serial: Option<&str>, what: &str, lane: AdbLane) -> AdbS
         ),
         AdbLane::Interactive => None,
     };
+    if transfer.is_some() {
+        waits.transfer_cap = stage_started.elapsed();
+        crate::telemetry::record(
+            crate::telemetry::ADB_TRANSFER_CAP,
+            "",
+            waits.transfer_cap,
+            crate::telemetry::Outcome::Ok,
+        );
+    }
 
+    stage_started = Instant::now();
     let global = adb_slots()
         .acquire()
         .await
         .expect("the adb slot semaphore is never closed");
+    waits.global_slot = stage_started.elapsed();
+    crate::telemetry::record(
+        crate::telemetry::ADB_GLOBAL_SLOT,
+        "",
+        waits.global_slot,
+        crate::telemetry::Outcome::Ok,
+    );
 
-    let waited = waiting_since.elapsed();
+    let waited = waits.total();
     if waited >= ADB_SLOW_WAIT {
         // Printed rather than merely endured. A queue nobody can see is indistinguishable
-        // from a slow device, and those two have opposite fixes.
+        // from a slow device, and those two have opposite fixes -- and so are the three
+        // levels from each other, which is why the line names the one that took the time.
+        let wait_lane = waits.dominant();
         tracing::warn!(
+            lane = wait_lane.key(),
             waited_ms = waited.as_millis() as u64,
-            limit = ADB_MAX_CONCURRENT,
-            transfers = ADB_MAX_TRANSFERS,
+            serial_queue_ms = waits.serial_queue.as_millis() as u64,
+            transfer_cap_ms = waits.transfer_cap.as_millis() as u64,
+            global_slot_ms = waits.global_slot.as_millis() as u64,
+            global_in_use = ADB_MAX_CONCURRENT.saturating_sub(adb_slots().available_permits()),
+            global_limit = ADB_MAX_CONCURRENT,
+            transfers_in_use = ADB_MAX_TRANSFERS.saturating_sub(adb_transfer_slots().available_permits()),
             command = what,
             serial = serial.unwrap_or("-"),
-            "waited for an adb slot; the host is running its cap of concurrent adb calls"
+            "{}",
+            wait_lane.message()
         );
     }
 
     AdbSlot {
+        exec: crate::telemetry::CallTimer::start(crate::telemetry::ADB_EXEC, what, None),
+        waits,
         _device: device,
         _transfer: transfer,
         _global: global,
@@ -616,9 +728,14 @@ impl AdbProgram {
         // The timeout starts AFTER the slot is acquired, deliberately. Counting queue time
         // against a command's own deadline would make a busy host look like a broken phone,
         // and the caller's timeouts are sized on what the device takes to answer.
-        let _slot = enter_adb_slot(serial, verb.unwrap_or("adb"), adb_lane(verb)).await;
-        let output = tokio::time::timeout(timeout, command.output())
-            .await
+        let mut slot = enter_adb_slot(serial, verb.unwrap_or("adb"), adb_lane(verb)).await;
+        let output = tokio::time::timeout(timeout, command.output()).await;
+        match &output {
+            Ok(Ok(output)) if output.status.success() => slot.exec.answered(),
+            Err(_) => slot.exec.timed_out(),
+            Ok(_) => slot.exec.failed(),
+        }
+        let output = output
             .map_err(|_| anyhow!("adb {} timed out after {:?}", args.join(" "), timeout))?
             .with_context(|| format!("run adb {}", args.join(" ")))?;
         if output.status.success() {
@@ -653,9 +770,15 @@ impl AdbProgram {
         validate_serial(serial)?;
         let mut command = self.command(Some(serial));
         command.args(["-s", serial, "shell", script]);
-        let _slot = enter_adb_slot(Some(serial), "shell", AdbLane::Interactive).await;
-        let output = tokio::time::timeout(timeout, command.output())
-            .await
+        let mut slot = enter_adb_slot(Some(serial), "shell", AdbLane::Interactive).await;
+        let output = tokio::time::timeout(timeout, command.output()).await;
+        // A non-zero exit is an answer here, see above; only a dead call is a failure.
+        match &output {
+            Ok(Ok(_)) => slot.exec.answered(),
+            Err(_) => slot.exec.timed_out(),
+            Ok(Err(_)) => slot.exec.failed(),
+        }
+        let output = output
             .map_err(|_| anyhow!("adb shell timed out after {timeout:?}"))?
             .context("run adb shell")?;
         Ok(ShellOutput {
@@ -672,7 +795,7 @@ impl AdbProgram {
         use tokio::io::{AsyncReadExt, AsyncWriteExt};
         validate_serial(serial)?;
         anyhow::ensure!(payload.len() <= 4100, "bootstrap input exceeds limit");
-        let _slot = enter_adb_slot(Some(serial), "shell", AdbLane::Interactive).await;
+        let mut slot = enter_adb_slot(Some(serial), "shell", AdbLane::Interactive).await;
         let mut command = self.command(Some(serial));
         command.args(["-s", serial, "shell", "-T", script]);
         command.stdin(Stdio::piped());
@@ -720,8 +843,16 @@ impl AdbProgram {
             Ok::<_, anyhow::Error>(reply)
         };
         match tokio::time::timeout(timeout, exchange).await {
-            Ok(result) => result,
+            Ok(result) => {
+                if result.is_ok() {
+                    slot.exec.answered();
+                } else {
+                    slot.exec.failed();
+                }
+                result
+            }
             Err(_) => {
+                slot.exec.timed_out();
                 let _ = child.kill().await;
                 let _ = child.wait().await;
                 anyhow::bail!("helper bootstrap deadline exhausted; reconcile owner before retry")
@@ -912,17 +1043,23 @@ impl AdbProgram {
         command.args(["-s", serial]);
         command.args(args);
         let verb = args.first().copied().unwrap_or("adb");
-        let _slot = enter_adb_slot(Some(serial), verb, adb_lane(Some(verb))).await;
+        let mut slot = enter_adb_slot(Some(serial), verb, adb_lane(Some(verb))).await;
         if !before_spawn() {
             return Err(AdbEffectFailure::CancelledBeforeSpawn);
         }
-        let child = command
-            .spawn()
-            .map_err(|error| AdbEffectFailure::BeforeSpawn {
+        let child = command.spawn().map_err(|error| {
+            slot.exec.failed();
+            AdbEffectFailure::BeforeSpawn {
                 detail: format!("spawn adb {verb}: {error}"),
-            })?;
-        let output = tokio::time::timeout(timeout, child.wait_with_output())
-            .await
+            }
+        })?;
+        let output = tokio::time::timeout(timeout, child.wait_with_output()).await;
+        match &output {
+            Ok(Ok(output)) if output.status.success() => slot.exec.answered(),
+            Err(_) => slot.exec.timed_out(),
+            Ok(_) => slot.exec.failed(),
+        }
+        let output = output
             .map_err(|_| AdbEffectFailure::AfterSpawn {
                 detail: format!("adb {verb} timed out after {timeout:?}"),
             })?
@@ -3557,6 +3694,42 @@ drwxr-xr-x  32 root   root       788 2009-01-01 07:00 ..\n";
             queue.available_permits(),
             1,
             "and open again the moment it finishes"
+        );
+    }
+
+    /// A wait behind another call to the same phone is reported as that phone's queue.
+    ///
+    /// Regression for review F4 (14/10/2026): one timer over all three levels was labelled
+    /// "the host is running its cap", so a busy phone read as a saturated host.
+    #[tokio::test]
+    async fn a_wait_behind_the_same_phone_is_labelled_as_its_queue_not_the_host_cap() {
+        let _serial = slot_tests_run_one_at_a_time().lock().await;
+        let serial = "queue-test-lane-label";
+        let held = enter_adb_slot(Some(serial), "shell", AdbLane::Interactive).await;
+        let second = tokio::spawn(async move {
+            enter_adb_slot(Some(serial), "shell", AdbLane::Interactive)
+                .await
+                .waits
+        });
+        tokio::time::sleep(ADB_SLOW_WAIT + Duration::from_millis(100)).await;
+        drop(held);
+        let waits = second.await.expect("the second call completes");
+
+        assert!(waits.serial_queue >= ADB_SLOW_WAIT, "{waits:?}");
+        assert!(waits.global_slot < waits.serial_queue, "{waits:?}");
+        assert_eq!(waits.transfer_cap, Duration::ZERO);
+        assert_eq!(waits.dominant(), AdbWaitLane::SerialQueue);
+        assert_eq!(waits.dominant().key(), "adb.serial_queue");
+        assert!(!AdbWaitLane::SerialQueue.message().contains("host đang chạy"));
+        assert!(AdbWaitLane::GlobalSlot.message().contains("host đang chạy"));
+        assert_eq!(
+            AdbWaits {
+                serial_queue: Duration::from_millis(10),
+                transfer_cap: Duration::from_millis(900),
+                global_slot: Duration::from_millis(20),
+            }
+            .dominant(),
+            AdbWaitLane::TransferCap
         );
     }
 
