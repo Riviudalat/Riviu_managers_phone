@@ -318,7 +318,18 @@ fn global_profile_from_snapshot_with_id(
             && selected_profiles == 1
             && private_tabs == 1
             && private_locks == 1
-            && favorites_tabs == 1))
+            && favorites_tabs == 1)
+        // Draft recovery banner on 45.7.3/en ("Continue editing this post?") at the top
+        // of the profile page adds a second "Edit" Button (android.widget.Button, text
+        // "Edit"), making edits == 2 and breaking the first condition. The selected
+        // own-profile tab (nrb, selected_profiles == 1) and the Profile menu button
+        // (menus == 1) together prove the right page.
+        // ce051715e15b2c2e02 / @lch.trnh.slay, 13/10/2026 (r105).
+        || (resource_version == Some("45.7.3")
+            && username_id == "s0v"
+            && edits == 2
+            && menus == 1
+            && selected_profiles == 1))
         .then(|| single_username(&usernames))
         .flatten())
 }
