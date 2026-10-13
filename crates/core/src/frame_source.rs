@@ -142,6 +142,19 @@ pub fn is_snapshot_stream(stream_url: &str) -> bool {
     stream_url.starts_with(SNAPSHOT_STREAM_SCHEME)
 }
 
+/// The `stream_url` scheme of a session that runs with **no** frame stream at all.
+///
+/// Only [`crate::DeviceDriver::start_stream_after_session_without_frame_decisions`] may
+/// return it, and only when neither the live capture nor the snapshot fallback gave a picture.
+/// Its proof always carries `first_frame_observed: false` and no producer publishes at its
+/// generation, so a caller that reads the hub sees no frame, never a stand-in for one. The
+/// control plane accepts it only for a hierarchy session.
+pub const NO_STREAM_SCHEME: &str = "no-stream://";
+
+pub fn is_no_stream(stream_url: &str) -> bool {
+    stream_url.starts_with(NO_STREAM_SCHEME)
+}
+
 /// Re-encode a PNG capture as the JPEG every hub consumer expects.
 ///
 /// Decoding is the proof that the capture is an image, the same claim [`decodes_as_jpeg`]

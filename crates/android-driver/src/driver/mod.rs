@@ -3921,8 +3921,9 @@ impl DeviceDriver for AndroidDriver {
     }
 
     /// The same start, except that a phone whose minicap gives no picture streams
-    /// `screencap` snapshots instead of failing the session (#28, 13/10/2026). Only a
-    /// caller that decides nothing from frames reaches this; see the trait.
+    /// `screencap` snapshots instead of failing the session (#28, 13/10/2026), and with no
+    /// stream at all when those fail too. Only a caller that decides nothing from frames
+    /// reaches this; see the trait.
     async fn start_stream_after_session_without_frame_decisions(
         &self,
         udid: &str,

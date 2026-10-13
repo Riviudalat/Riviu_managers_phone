@@ -615,7 +615,14 @@ impl DeviceControlPlane {
                 },
             });
         }
-        if !proof.first_frame_observed {
+        // A no-stream proof is accepted only for a hierarchy session, and only as what it
+        // says: no frame was observed. Any other proof still needs its first frame.
+        let accepted = if crate::frame_source::is_no_stream(&proof.stream_url) {
+            !frames_drive_decisions && !proof.first_frame_observed
+        } else {
+            proof.first_frame_observed
+        };
+        if !accepted {
             let error = DeviceControlError::FirstFrameMissing { udid: udid.clone() };
             return Err(StreamContextUpgradeFailure {
                 context: None,

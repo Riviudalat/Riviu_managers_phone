@@ -459,6 +459,9 @@ pub trait DeviceDriver: Send + Sync {
     /// Such a caller tolerates a slower snapshot source, so a backend whose live capture gives
     /// no first frame may fall back to one instead of failing the session. The proof keeps its
     /// meaning: a decoded frame captured after this call reached the hub at this generation.
+    /// When the fallback gives no picture either, the backend may start the session with no
+    /// stream: `first_frame_observed: false` and a
+    /// [`crate::frame_source::NO_STREAM_SCHEME`] url, with no producer at the generation.
     /// The default is the strict start.
     async fn start_stream_after_session_without_frame_decisions(
         &self,
