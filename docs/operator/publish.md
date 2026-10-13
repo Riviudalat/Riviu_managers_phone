@@ -292,7 +292,9 @@ thử mới để chọn trong Hot. Bảng nhạc đã đo của TikTok SEA (`co
 
 Lỗi tạm thời trước Đăng được **tự thử lại tối đa 3 lần ngoài lần chạy đầu**, chờ lần
 lượt 2, 5 và 10 giây. Chưa thấy nút mở soạn bài, màn camera, lối vào thư viện hoặc
-bộ chọn ảnh trong thời hạn hiện có cũng dùng ngân sách này. Nếu có nhiều mục cùng
+bộ chọn ảnh trong thời hạn hiện có cũng dùng ngân sách này. Khi nhiều máy cùng chạy, mỗi lần
+đọc màn hình có thể mất 10–18 giây, nên mỗi bước mở soạn bài/thư viện được chờ tới 16 giây
+và mỗi ảnh vừa chọn được chờ đọc lại tới 20 giây trước khi tính là lỗi. Nếu có nhiều mục cùng
 khớp khiến đích bấm mơ hồ, app dừng trước Đăng, không tự chọn hoặc thử tiếp.
 Nếu agent Android không đọc được cây UI hoặc không trả `/status`,
 lượt kế tiếp chờ ít nhất đến hết khoảng phục hồi của phiên (tối đa khoảng 65 giây),
