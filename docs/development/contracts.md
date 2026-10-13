@@ -441,6 +441,14 @@ Một worker ghi và hàng đợi 64 bản ghi tách I/O đĩa khỏi deadline �
 ghi hoặc đầy hàng đợi làm export báo trace chưa đủ. Export và shutdown có flush.
 `operation_trace_export` kiểm scope thiết bị và hash, lưu bundle ở
 `artifacts/trace-exports` để không bị reconcile artifact Flow cách ly khi restart.
+Retention `artifacts/traces` (`ui_automation/trace_retention.rs`): worker nền chạy 3
+phút sau khởi động rồi mỗi 6 giờ, xoá thật thư mục run (không qua Recycle Bin) có
+tệp mới nhất quá 7 ngày, rồi xoá run cũ nhất cho tới khi tổng dưới 20 GiB; hai trần
+này là đề xuất 14/10/2026 trước tồn 53 GB, chưa đo theo nhu cầu chẩn đoán. Run mới
+hơn 24 giờ không bao giờ bị xoá vì dung lượng. Run của campaign còn bài
+`posting`/`verifying`/`uncertain` hoặc `needsReview` được bảo vệ theo
+`run_folder_id(campaign_id)`; `.staging`, `.quarantine` và tên không phải run id
+không bị chạm.
 `cargo run --locked -p riviu-core --example trace_replay -- TRACE_JSON` chỉ đọc
 timeline/XML bằng fake driver; không kết nối điện thoại hay phát lại public effect.
 
@@ -977,7 +985,19 @@ chiến dịch Đăng ngay/Hẹn giờ mới yêu cầu đích Google Sheet đư
 và bật dọn bản chuyển; UI không nhận lựa chọn tắt hai nghĩa vụ này. Chính sách
 Sheet/dọn media của chiến dịch cũ bất biến theo snapshot đã lưu, không áp mặc định
 mới hồi tố. Không xóa tệp nguồn trên desktop; lỗi dọn được thử lại độc lập qua
-restart, không phát lại Post.
+restart, không phát lại Post. Driver Android `cleanup` xoá album, dòng MediaStore theo
+`_id` và thư mục staging `.riviu-publish/<scope>` suy từ chính `importId`
+(`riviu-<scope>-<12 hex>`); id không đúng hình dạng này bị từ chối.
+Worker dọn chỉ nhận bài `succeeded`, nên bài `failed_before_dispatch`/`cancelled`/
+`missed` để lại media (đo 14/10/2026: 12–30 thư mục mỗi máy). `publish_commands/
+media_sweep.rs` quét sót khi máy rảnh: cổng `app_completion_block_reason` + claim
+`cleanup` + lease `IdleSweep` không chờ, giữ stream; liệt kê qua driver
+(`list_publish_media_leftovers`, chỉ trả tên hợp lệ shell-id đúng hình dạng Riviu);
+scope còn sống = assignment chưa terminal hoặc `succeeded` chưa có proof dọn
+(`live_publish_media_scopes`); mỗi lượt xoá tối đa 8 thư mục, mỗi máy 10 phút một
+lượt, 2 máy mỗi tick; mỗi thư mục có intent `claimed` rồi receipt `cleaned`/`failed`
+trong `publish_media_sweeps`, tên lỗi hoặc claim mất receipt được bỏ qua 24 giờ.
+Không chạy dưới scope dev-acceptance; không mở phiên UI, không đóng app.
 Worker lưu `nextCheckAt` bằng thời điểm kết thúc quan sát cộng 120 giây cho bài
 còn ngân sách, kể cả lỗi đọc. Mỗi lần quan sát có deadline và lease riêng. Restart
 giữ mốc gửi, lần kiểm tiếp, fingerprint và số lượt không tiến triển; needsReview

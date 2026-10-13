@@ -71,6 +71,11 @@ mới vẫn dừng. Sau khi bảo trì có biên nhận, đóng ứng dụng l�
   Không copy `riviu.db` đang chạy mà bỏ `-wal` rồi coi là backup đầy đủ.
 - Giữ media staging và artifacts cần cho các receipt chưa chốt; giữ source nội dung
   riêng. Kiểm hash/kích thước và thử mở bản sao offline, không trên controller thật.
+- `artifacts/traces` (ảnh và hierarchy từng bước) tự được dọn: run quá 7 ngày bị xoá
+  thật, và khi tổng vượt 20 GiB app xoá run cũ nhất trước; run của bài còn dở
+  (`verifying`/`uncertain`/cần review) được giữ. Hai trần này chưa đo theo nhu cầu
+  chẩn đoán. Cần giữ trace lâu hơn thì xuất bằng `operation_trace_export` sang
+  `artifacts/trace-exports`, nơi không bị dọn.
 - Backup chứa dữ liệu tài khoản/nội dung: lưu ở nơi có kiểm soát truy cập, không commit
   vào Git hoặc gửi dịch vụ ngoài. Credential OS không nằm đầy đủ trong backup DB.
 

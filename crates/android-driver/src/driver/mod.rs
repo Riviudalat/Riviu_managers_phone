@@ -3334,6 +3334,21 @@ impl DeviceDriver for AndroidDriver {
         crate::publish::cleanup(&self.adb, udid, import_id).await
     }
 
+    async fn list_publish_media_leftovers(
+        &self,
+        udid: &str,
+    ) -> anyhow::Result<riviu_core::PublishMediaLeftovers> {
+        crate::publish::list_leftovers(&self.adb, udid).await
+    }
+
+    async fn cleanup_publish_stage(
+        &self,
+        udid: &str,
+        scope: &str,
+    ) -> anyhow::Result<serde_json::Value> {
+        crate::publish::cleanup_stage(&self.adb, udid, scope).await
+    }
+
     async fn pull_media(
         &self,
         udid: &str,

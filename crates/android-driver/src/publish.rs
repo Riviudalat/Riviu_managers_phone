@@ -1560,6 +1560,19 @@ pub async fn cleanup(adb: &AdbProgram, serial: &str, import_id: &str) -> anyhow:
     adb.shell(serial, &format!("rm -rf {visible}"))
         .await
         .context("remove the imported directory")?;
+    // The hidden staging directory of the same scope goes with it. `import` moves the
+    // files out and `rmdir`s it, but a stage that never reached `import` (session refused,
+    // account unproven, sound budget exhausted) or whose `mv` was cut short leaves
+    // `.riviu-publish/<scope>` behind, and nothing else ever names that directory again.
+    // Measured 14/10/2026 on the 30-phone fleet after the a62c6b72 wave: 12–30 leftover
+    // `riviu-*` / `.riviu-publish/*` entries per phone with every campaign set to delete
+    // after verification.
+    let stage_scope = stage_scope_of_import(id);
+    if let Some(scope) = stage_scope {
+        adb.shell(serial, &format!("rm -rf {}", stage_dir(scope)))
+            .await
+            .context("remove the staging directory of the same scope")?;
+    }
     // And the hidden staging root, but only when nothing else is staged in it:
     // `rmdir` refuses a non-empty directory, which is exactly the check wanted here —
     // another campaign may be mid-stage, and `rm -rf` would take it with us.
@@ -1577,11 +1590,103 @@ pub async fn cleanup(adb: &AdbProgram, serial: &str, import_id: &str) -> anyhow:
         "importId": id,
         "state": "cleaned",
         "files": rows.len(),
+        "stageScope": stage_scope,
         "mediaRefs": rows.iter().map(|row| json!({
             "collection": row.collection.evidence_name(),
             "id": row.id,
             "path": row.data,
         })).collect::<Vec<_>>(),
+    }))
+}
+
+/// The staging scope an import id was derived from: `riviu-<scope>-<12 hex>` → `<scope>`.
+///
+/// [`import_id`] appends exactly twelve hex characters of the manifest hash, so the scope
+/// is everything between the prefix and that suffix. Anything that does not have this
+/// shape is not an id this module produced and gets `None`, never a guess.
+pub fn stage_scope_of_import(import_id: &str) -> Option<&str> {
+    let rest = import_id.strip_prefix("riviu-")?;
+    let (scope, hash) = rest.rsplit_once('-')?;
+    if hash.len() != 12 || !hash.bytes().all(|b| b.is_ascii_hexdigit()) || scope.is_empty() {
+        return None;
+    }
+    validate_shell_id(scope).ok()?;
+    Some(scope)
+}
+
+/// What Riviu's publish path has left on the phone: visible albums under `Pictures/`
+/// whose basename starts with `riviu-`, and hidden staging scopes under
+/// `Pictures/.riviu-publish/`. Names that would not pass [`validate_shell_id`] are
+/// dropped rather than reported, because every name returned here may later be handed
+/// to `rm -rf` by the sweep.
+///
+/// A listing error is an error, not an empty inventory: "nothing left" and "could not
+/// look" must stay distinguishable to the caller, the same rule as `media_rows_under`.
+pub async fn list_leftovers(
+    adb: &AdbProgram,
+    serial: &str,
+) -> anyhow::Result<riviu_core::PublishMediaLeftovers> {
+    let albums = adb
+        .shell(serial, &format!("ls -1 {IMPORT_PARENT} 2>/dev/null; true"))
+        .await
+        .context("list the Pictures directory")?;
+    let stages = adb
+        .shell(serial, &format!("ls -1 {STAGE_ROOT} 2>/dev/null; true"))
+        .await
+        .context("list the hidden staging root")?;
+    Ok(riviu_core::PublishMediaLeftovers {
+        albums: leftover_names(&albums, true),
+        stages: leftover_names(&stages, false),
+    })
+}
+
+fn leftover_names(listing: &str, albums: bool) -> Vec<String> {
+    let mut names: Vec<String> = listing
+        .lines()
+        .map(str::trim)
+        .filter(|line| !line.is_empty() && validate_shell_id(line).is_ok())
+        .filter(|line| {
+            if albums {
+                stage_scope_of_import(line).is_some()
+            } else {
+                !line.starts_with('.')
+            }
+        })
+        .map(str::to_owned)
+        .collect();
+    names.sort_unstable();
+    names.dedup();
+    names
+}
+
+/// Remove one hidden staging scope that never reached `import`, and read back that it
+/// is gone. Takes the scope name as [`list_leftovers`] reported it; the same shell-id
+/// gate as `cleanup` applies, and the path is always built under [`STAGE_ROOT`].
+pub async fn cleanup_stage(adb: &AdbProgram, serial: &str, scope: &str) -> anyhow::Result<Value> {
+    let scope = validate_shell_id(scope)?;
+    anyhow::ensure!(
+        !scope.starts_with('.') && !scope.contains('/'),
+        "refusing to clean up staging scope {scope:?}: not a scope this project created"
+    );
+    let directory = stage_dir(scope);
+    adb.shell(serial, &format!("rm -rf {directory}"))
+        .await
+        .context("remove the staging directory")?;
+    let _ = adb
+        .shell(serial, &format!("rmdir {STAGE_ROOT} 2>/dev/null; true"))
+        .await;
+    let left = adb
+        .shell(serial, &format!("ls -d {directory} 2>/dev/null; true"))
+        .await
+        .context("read back the staging directory")?;
+    anyhow::ensure!(
+        left.trim().is_empty(),
+        "{directory} still exists after cleanup"
+    );
+    Ok(json!({
+        "stageScope": scope,
+        "state": "cleaned",
+        "path": directory,
     }))
 }
 
@@ -2314,6 +2419,55 @@ mod tests {
         }
         // And every id this module hands out does pass it.
         assert!(import_id("req-7:bundle-3", &"a".repeat(64)).starts_with("riviu-"));
+    }
+
+    #[test]
+    fn cleanup_derives_the_staging_scope_only_from_ids_this_module_produced() {
+        // Fleet snapshot 14/10/2026: the staging directory of a scope outlived its album,
+        // so `cleanup` must name it from the import id alone. The scope is everything
+        // between the prefix and the twelve-hex-digit manifest suffix, and nothing else.
+        let id = import_id(
+            "a62c6b72-de17-41c2-885f-4c586f835bed-28",
+            &"915e4170286a".repeat(6),
+        );
+        assert_eq!(
+            stage_scope_of_import(&id),
+            Some("a62c6b72-de17-41c2-885f-4c586f835bed-28")
+        );
+        assert_eq!(
+            stage_scope_of_import("riviu-req1-aaaaaaaaaaaa"),
+            Some("req1")
+        );
+        for foreign in [
+            "riviufarm-shot",
+            "riviu-",
+            "riviu-aaaaaaaaaaaa",
+            "riviu-req-notahexsuffix",
+            "riviu-req-aaaaaaaaaaa",
+            "riviu-req-aaaaaaaaaaaaa",
+            "riviu-..-aaaaaaaaaaaa",
+            "Camera",
+        ] {
+            assert_eq!(stage_scope_of_import(foreign), None, "{foreign}");
+        }
+    }
+
+    #[test]
+    fn leftover_listing_keeps_only_names_the_sweep_may_delete() {
+        let pictures = "Camera\nScreenshots\nriviu-req1-aaaaaaaaaaaa\n.riviu-publish\n\
+                        riviufarm-shot.png\nriviu-x;rm -rf y\nriviu-req2-bbbbbbbbbbbb\n\
+                        riviu-req1-aaaaaaaaaaaa\n";
+        assert_eq!(
+            leftover_names(pictures, true),
+            vec!["riviu-req1-aaaaaaaaaaaa", "riviu-req2-bbbbbbbbbbbb"]
+        );
+        let stages = "a62c6b72-de17-41c2-885f-4c586f835bed-16\n.hidden\n..\nbad name\n\
+                      a62c6b72-de17-41c2-885f-4c586f835bed-16\n";
+        assert_eq!(
+            leftover_names(stages, false),
+            vec!["a62c6b72-de17-41c2-885f-4c586f835bed-16"]
+        );
+        assert!(leftover_names("", true).is_empty());
     }
 
     #[test]

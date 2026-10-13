@@ -109,6 +109,12 @@ fn path_id(identity: &str) -> Uuid {
     Uuid::from_bytes(bytes)
 }
 
+/// The folder name under the trace root that a run id (for publish, the campaign id)
+/// maps to. Retention protects runs by this id without opening their files.
+pub fn run_folder_id(run_id: &str) -> Uuid {
+    path_id(run_id)
+}
+
 impl TraceRecorder {
     pub fn new(root: impl AsRef<Path>, frames: Arc<dyn FrameSource>) -> anyhow::Result<Self> {
         let store = FlowArtifactStore::new(root.as_ref())?;

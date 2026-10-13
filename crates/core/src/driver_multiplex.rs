@@ -587,6 +587,21 @@ impl DeviceDriver for MultiplexDriver {
             .await
     }
 
+    async fn list_publish_media_leftovers(
+        &self,
+        udid: &str,
+    ) -> anyhow::Result<crate::PublishMediaLeftovers> {
+        self.route(udid)?.list_publish_media_leftovers(udid).await
+    }
+
+    async fn cleanup_publish_stage(
+        &self,
+        udid: &str,
+        scope: &str,
+    ) -> anyhow::Result<serde_json::Value> {
+        self.route(udid)?.cleanup_publish_stage(udid, scope).await
+    }
+
     async fn uninstall_app(&self, udid: &str, bundle_id: &str) -> anyhow::Result<()> {
         self.route(udid)?.uninstall_app(udid, bundle_id).await
     }

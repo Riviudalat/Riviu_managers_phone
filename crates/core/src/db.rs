@@ -74,6 +74,10 @@ pub use publish_dispatch::{PublishDispatchJob, PublishLimits, PublishWorkPermit}
 pub use publish_pipeline::{PublishPipelineRun, PublishPreparationOwner};
 mod publish_cleanup;
 mod publish_create;
+mod publish_media_sweep;
+pub use publish_media_sweep::{
+    publish_album_scope, publish_device_scope, PublishMediaSweepClaim, PublishMediaSweepKind,
+};
 mod publish_start;
 pub use publish_start::{PublishExcludeReceipt, PublishStartError, PublishStartReceipt};
 mod publish_report;
