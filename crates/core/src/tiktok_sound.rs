@@ -44,7 +44,13 @@ mod selection_recovery_tests;
 mod snapshot;
 mod visual;
 
-const READBACK_WINDOW: Duration = Duration::from_secs(8);
+// One sheet/editor readback. 8 s sat below one loaded `/source`: run r105 (`a62c6b72`,
+// 13/10/2026, ~30 phones on 12 adb slots) completed reads at p50 6.7 s / p90 12.7 s / max
+// 18.3 s, and `phase="editorReadback"` ended with `remainingPhaseMs=0` while the sound budget
+// still had 254 s (controller-r105.stdout.txt:1954, :2112); r106 then failed the same way on
+// five phones (`sound_load_timeout`). 20 s holds the longest completed read, like the picker's
+// `TAP_READBACK_WINDOW`; the outer `SOUND_WINDOW` still caps the phase.
+const READBACK_WINDOW: Duration = Duration::from_secs(20);
 const POLL: Duration = Duration::from_millis(250);
 const SOUND_WINDOW: Duration = Duration::from_secs(180);
 // #23/#28 (Global 45.7.3/en, 2026-10-08 20:34-20:50): every pinned /source on the sheet waited
