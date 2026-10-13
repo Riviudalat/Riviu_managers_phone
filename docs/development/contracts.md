@@ -97,6 +97,13 @@ một lần: 1,5 lần thời gian chuẩn bị đo được của cùng phiên,
 16 giây. Thiếu dữ liệu, mơ hồ hoặc hết hạn vẫn là lỗi thử lại trước Post: chưa có intent
 và không bấm Đăng.
 
+Mỗi lần chờ trên đường tới màn camera (nút Create, màn camera sau khi bấm, nút chụp, lối
+vào thư viện và lần đọc lại để lối vào đứng yên) có cửa sổ 16 giây, vừa hai lần đọc p99 đo
+ở r91/r93. Toàn bước thư viện vẫn nằm trong tổng 49 giây cũ. Sau mỗi lần chạm ô ảnh, picker
+có 20 giây cho lần đọc lại hoàn tất đầu tiên: r105 có `/source` hoàn tất dài tới 18,3 giây
+khi khoảng 30 máy dùng chung 12 slot adb. Tổng thời gian chọn n ảnh tối đa là n cửa sổ như
+vậy. Cửa sổ dài hơn chỉ cho lần đọc đang chạy được xong, không cấp thêm lần chạm nào.
+
 Dispatcher giữ completion receipt đến khi SQLite xác nhận cùng
 assignment/campaign/run/attempt/device/phase/revision. Journal cạnh DB lưu receipt
 trước settlement; khôi phục journal trước orphan sweep, chỉ chuyển trạng thái DB,

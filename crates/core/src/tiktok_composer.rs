@@ -94,14 +94,23 @@ use anyhow::Context;
 
 /// How long the composer may take to appear after its tab is tapped.
 pub const COMPOSER_WINDOW: Duration = Duration::from_millis(8_000);
-/// Each single-target read on the camera screen (shutter, then gallery entry) inside the
-/// enclosing gallery budget, which stays `COMPOSER_WINDOW * 2 + 33 s`.
+/// Each single-target wait on the way to and on the camera screen: the Create opener, the
+/// shutter after Create, then shutter, gallery entry and the entry's settled re-read inside
+/// the enclosing gallery budget, which stays `COMPOSER_WINDOW * 2 + 33 s`.
 ///
 /// Measured over 1,878 `/source` reads in runs r91/r93 (2026-10-12, 20+ phones): p90
 /// 2.8-3.3 s, p99 7.3-11.1 s. On `ce0417141550322202` (r93) a popup check plus one 5.7 s read
 /// used up an 8 s window, and the attempt ended `publish_observation_deadline` with 41 s of
 /// the gallery budget unused. Two p99 reads fit in 16 s.
-const GALLERY_STEP_WINDOW: Duration = Duration::from_secs(16);
+///
+/// Run r105 (`a62c6b72`, 13/10/2026, Global 45.7.3, ~30 phones sharing the 12 adb slots)
+/// failed the same way on the two waits that still had shorter windows. The entry re-read had
+/// 3 s for a 350 ms pause plus one foreground probe and `/source`; those reads took 2.6-3.2 s
+/// (`ce091719bd91891505` waited 1.7-1.9 s for adb slots), and `ce091719bd91891505`,
+/// `ce031713d903001b01` and `ce0417141550322202` ended there with 41-43 s of gallery budget
+/// left. The opener had 8 s, and on `ce011711c354be2005` its popup
+/// check `/source` alone ran 6.7 s before the Create locate could start.
+const CAMERA_STEP_WINDOW: Duration = Duration::from_secs(16);
 /// How long the picker may take after the gallery entry is tapped.
 ///
 /// Longer than the composer's own window on purpose: the picker enumerates the device's
@@ -1372,7 +1381,7 @@ impl<'a, P: TapPlanner> Composer<'a, P> {
     async fn open(&mut self, stop: &AtomicBool) -> anyhow::Result<bool> {
         let Some(opener) = self
             .await_navigation_target(
-                crate::tiktok_sound::phase_deadline(COMPOSER_WINDOW),
+                crate::tiktok_sound::phase_deadline(CAMERA_STEP_WINDOW),
                 self.plan.open,
                 stop,
                 Some("composer_opener_unavailable"),
@@ -1384,7 +1393,7 @@ impl<'a, P: TapPlanner> Composer<'a, P> {
         self.tap_inside(&opener).await?;
         Ok(self
             .await_navigation_target(
-                crate::tiktok_sound::phase_deadline(COMPOSER_WINDOW),
+                crate::tiktok_sound::phase_deadline(CAMERA_STEP_WINDOW),
                 self.plan.shutter,
                 stop,
                 Some("composer_camera_unavailable"),
@@ -1412,7 +1421,7 @@ impl<'a, P: TapPlanner> Composer<'a, P> {
         stop: &AtomicBool,
     ) -> anyhow::Result<bool> {
         // Preserve the previous enclosing ceiling (8 + 8 + 30 + 3 seconds); every strategy
-        // consumes this one gallery budget, each camera-screen read within GALLERY_STEP_WINDOW.
+        // consumes this one gallery budget, each camera-screen read within CAMERA_STEP_WINDOW.
         let deadline =
             crate::tiktok_sound::phase_deadline(COMPOSER_WINDOW * 2 + Duration::from_secs(33));
         let epoch = self.session.gui_session_epoch();
@@ -1420,7 +1429,7 @@ impl<'a, P: TapPlanner> Composer<'a, P> {
         gallery.finish("errorOrInterrupted");
         let Some(shutter) = self
             .await_navigation_target(
-                deadline.min(Instant::now() + GALLERY_STEP_WINDOW),
+                deadline.min(Instant::now() + CAMERA_STEP_WINDOW),
                 self.plan.shutter,
                 stop,
                 Some("composer_camera_unavailable"),
@@ -1442,7 +1451,7 @@ impl<'a, P: TapPlanner> Composer<'a, P> {
             }
             let entry = self
                 .await_navigation_target(
-                    deadline.min(Instant::now() + GALLERY_STEP_WINDOW),
+                    deadline.min(Instant::now() + CAMERA_STEP_WINDOW),
                     entry_query,
                     stop,
                     None,
@@ -1539,7 +1548,8 @@ impl<'a, P: TapPlanner> Composer<'a, P> {
                 event.operation = "galleryStabilization".into();
             }
             let mut stable = entry;
-            let end = deadline.min(Instant::now() + Duration::from_secs(3));
+            // One pause plus one full re-read; CAMERA_STEP_WINDOW records the 3 s that failed.
+            let end = deadline.min(Instant::now() + CAMERA_STEP_WINDOW);
             loop {
                 sleep(
                     Duration::from_millis(350).min(end.saturating_duration_since(Instant::now())),
@@ -7901,6 +7911,54 @@ mod tests {
             ComposerVerdict::Stopped,
             "the measured id is the only thing that opens this layout's picker"
         );
+    }
+
+    /// **A loaded host's camera reads still reach the picker.**
+    ///
+    /// Run r105 (13/10/2026, ~30 phones on 12 adb slots): one camera-screen read took
+    /// 2.6-3.2 s, which left no room for the 350 ms pause plus one re-read in the old 3 s
+    /// entry stabilization, and the opener's popup check plus Create locate took 6.7 + 2.5 s
+    /// against an 8 s window. Both ended `publish_observation_deadline` with most of the
+    /// gallery budget unused. 9.2 s stays under the measured 11.1 s p99 read.
+    #[tokio::test(start_paused = true)]
+    async fn measured_slow_camera_reads_still_open_the_picker() {
+        let labels = every_publish_control_measured_with_gallery_id();
+        let plan = ComposerPlan::resolve(&labels).expect("the fixture is complete");
+        let shutter = labelled("Record video", 375.0, 1545.0, 330.0, 330.0);
+        let entry_box = labelled("", 0.0, 1891.0, 179.0, 179.0);
+        for read in [Duration::from_millis(2_900), Duration::from_millis(9_200)] {
+            let session = FakeSession {
+                locate_delay: read,
+                ..FakeSession::with(vec![
+                    feed(),
+                    scene(
+                        vec![
+                            ("fixture-shutter", shutter.clone()),
+                            ("fixture-gallery-entry", entry_box.clone()),
+                        ],
+                        None,
+                    )
+                    .leaving_by(entry_box.clone()),
+                    picker("All", Some("fixture-album-menu")),
+                ])
+            };
+            let stop = AtomicBool::new(false);
+            let mut composer =
+                Composer::new(&session, plan, |element: &ElementBox| element.centre());
+            assert!(
+                composer.open(&stop).await.expect("opener read fits its window"),
+                "camera did not open; read={read:?}"
+            );
+            assert!(
+                composer
+                    .tap_gallery_entry(screen(), &stop)
+                    .await
+                    .expect("entry re-read fits its window"),
+                "gallery entry was not tapped; read={read:?}"
+            );
+            assert_eq!(*session.at.lock(), 2, "picker not reached; read={read:?}");
+            assert_eq!(session.taps.lock().len(), 2, "Create and the entry only");
+        }
     }
 
     /// **A Back that opens the exit sheet is answered with Discard, not with more Backs.**

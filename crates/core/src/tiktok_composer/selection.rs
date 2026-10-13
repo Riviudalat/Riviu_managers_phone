@@ -1,6 +1,16 @@
 //! A thumbnail opens preview; the measured corner button selects the photo.
 use super::*;
 
+/// How long one cell tap may wait for its first completed picker readback.
+///
+/// The former `ARM_WINDOW + 8 s` (12 s) was sized from one 5,151 ms Trill read (28/09/2026).
+/// Run r105 (`a62c6b72`, 13/10/2026, Global 45.7.3, ~30 phones) logged completed `/source`
+/// reads up to 18,319 ms (of 41 reads over 5 s: p50 6.7 s, p90 12.7 s; r103b max 13.6 s), and
+/// `ce051715e9f964e10d` lost its 15-photo walk when the read after one cell tap was still
+/// running at 12 s. 20 s holds the longest completed read; `n` photos still cap the walk at
+/// `n` of these windows.
+const TAP_READBACK_WINDOW: Duration = Duration::from_secs(20);
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub enum SelectionStage {
@@ -1080,8 +1090,7 @@ impl<P: TapPlanner> Composer<'_, P> {
                 // four verified selections, a 5151ms read had no album or
                 // controls. Missing evidence permits one observation window,
                 // never another tap; explicit album contradictions still stop.
-                let hard_deadline =
-                    crate::tiktok_sound::phase_deadline(ARM_WINDOW + Duration::from_secs(8));
+                let hard_deadline = crate::tiktok_sound::phase_deadline(TAP_READBACK_WINDOW);
                 let mut recovering_partial = false;
                 let mut readback_completed = false;
                 current = loop {
@@ -2387,6 +2396,7 @@ mod tests {
     async fn partial_tree_after_fifth_tap_recovers_only_exact_order_without_replaying_tap() {
         for mode in [
             "recovers",
+            "r105-slow-read",
             "wrong-album",
             "dropped-tap",
             "never-recovers",
@@ -2396,10 +2406,10 @@ mod tests {
         ] {
             let mut session = Picker::new((mode == "dropped-tap").then_some(4));
             session.total = 8;
-            *session.partial_after_fifth.lock() = Some(if mode == "read-timeout" {
-                ARM_WINDOW + Duration::from_secs(9)
-            } else {
-                Duration::from_millis(5151)
+            *session.partial_after_fifth.lock() = Some(match mode {
+                "read-timeout" => TAP_READBACK_WINDOW + Duration::from_secs(1),
+                "r105-slow-read" => Duration::from_millis(18_319),
+                _ => Duration::from_millis(5151),
             });
             session.wrong_after_fifth = mode == "wrong-album";
             session.partial_forever = mode == "never-recovers";
@@ -2451,11 +2461,11 @@ mod tests {
                 assert_eq!(diagnostic.last_completed_snapshot, diagnostic.last_verified_snapshot);
                 assert_eq!(session.taps.lock().len(), 5, "never replay the uncertain fifth tap");
                 assert_eq!(*session.swipes.lock(), 0);
-                assert_eq!(start.elapsed(), ARM_WINDOW + Duration::from_secs(8));
+                assert_eq!(start.elapsed(), TAP_READBACK_WINDOW);
                 continue;
             }
             let result = result.unwrap();
-            if mode == "recovers" {
+            if matches!(mode, "recovers" | "r105-slow-read") {
                 assert!(
                     matches!(
                         result,
