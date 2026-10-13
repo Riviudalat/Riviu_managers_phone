@@ -221,6 +221,38 @@ pub(super) const VERIFICATION_NO_PROGRESS_LIMIT: u64 = 8;
 const VERIFICATION_NO_PROGRESS_CAUSE: &str = "verificationNoProgress";
 const METADATA_RETRY_LIMIT: u64 = 12;
 const METADATA_RETRY_CAUSE: &str = "metadataRetryBudgetExhausted";
+// Phone 23 (ce031713cd92d90701, SM-G955F, TikTok 45.7.3 en), campaign fff151ba, 13/10/2026:
+// Copy link still showed "Post is being processed" 36+ minutes after Post. A cap, not a target.
+pub(super) const PROCESSING_WAIT_MINUTES: i64 = 60;
+const PROCESSING_WAIT_CAUSE: &str = "processingWaitExhausted";
+
+/// Copy returned no link while TikTok still holds the upload: the processing notice, or an
+/// unchanged clipboard on a pass whose restart guard found the upload not proven settled.
+/// Waiting on TikTok is not a lack of progress until the processing wait runs out.
+fn processing_pending(reason_code: &str, diagnostic: Option<&serde_json::Value>) -> bool {
+    reason_code == "tiktokProcessing"
+        || (reason_code == "clipboardUnchanged"
+            && diagnostic.is_some_and(|d| d["appRestart"]["reason"] == "uploadNotProvenSettled"))
+}
+
+/// Measured from Post, or from the operator's resume, which opens a fresh wait.
+fn processing_wait_until(
+    budget: &serde_json::Value,
+    intent: Option<&str>,
+) -> Option<DateTime<Utc>> {
+    let started = budget["processingWaitFrom"]
+        .as_str()
+        .map(str::to_owned)
+        .or_else(|| {
+            intent
+                .and_then(|raw| serde_json::from_str::<serde_json::Value>(raw).ok())
+                .and_then(|value| value["submittedAt"].as_str().map(str::to_owned))
+        })?;
+    let started = DateTime::parse_from_rfc3339(&started)
+        .ok()?
+        .with_timezone(&Utc);
+    Some(started + chrono::Duration::minutes(PROCESSING_WAIT_MINUTES))
+}
 
 fn new_verification_budget(intent: Option<&str>) -> serde_json::Value {
     use sha2::Digest;
@@ -291,6 +323,7 @@ fn advance_verification_budget(
     intent: Option<&str>,
     diagnostic: Option<&serde_json::Value>,
     exempt: bool,
+    processing_wait: bool,
 ) -> serde_json::Value {
     use sha2::Digest;
     let initial = new_verification_budget(intent);
@@ -315,7 +348,7 @@ fn advance_verification_budget(
     let prior_no_progress = prior["noProgressObservations"].as_u64().unwrap_or(0);
     let no_progress = if stage > previous_stage {
         0
-    } else if exempt {
+    } else if exempt || processing_wait {
         prior_no_progress
     } else {
         prior_no_progress.saturating_add(1)
@@ -339,10 +372,15 @@ fn advance_verification_budget(
         "metadataObservations":prior["metadataObservations"].as_u64().unwrap_or(0),
         "metadataLimit":METADATA_RETRY_LIMIT,
         "limit":VERIFICATION_NO_PROGRESS_LIMIT,
-        "lastObservationExempt":exempt && stage == previous_stage,
+        // A processing wait leaves the every-other exemption where it was.
+        "lastObservationExempt":(exempt || (processing_wait && prior["lastObservationExempt"] == true))
+            && stage == previous_stage,
     });
     if !proven_candidate_url.is_null() {
         budget["provenCandidateUrl"] = proven_candidate_url;
+    }
+    if prior["processingWaitFrom"].is_string() {
+        budget["processingWaitFrom"] = prior["processingWaitFrom"].clone();
     }
     budget
 }
@@ -562,9 +600,11 @@ fn explicit_non_stop_review(evidence: Option<&str>) -> bool {
                 && review["cause"] != "operatorStopped"
                 && review["cause"] != "verificationDeadline"
                 && review["cause"] != VERIFICATION_NO_PROGRESS_CAUSE
+                && review["cause"] != PROCESSING_WAIT_CAUSE
                 && review["cause"] != METADATA_RETRY_CAUSE)
                 || v.get("verificationReviewBeforeStop")
                     .is_some_and(|prior| prior["cause"] != VERIFICATION_NO_PROGRESS_CAUSE
+                        && prior["cause"] != PROCESSING_WAIT_CAUSE
                         && prior["cause"] != METADATA_RETRY_CAUSE)
         })
 }
@@ -805,6 +845,8 @@ impl Database {
             "reviewBeforeStop":evidence["verificationReviewBeforeStop"],"resumedAt":now,
         });
         let mut budget = new_verification_budget(candidate.effect_intent.as_deref());
+        // Resume opens a fresh processing wait rather than one already spent since Post.
+        budget["processingWaitFrom"] = serde_json::json!(now);
         // The proof frontier belongs to the exact intent, not to the budget: keep it so a
         // stage-2 post still earns its restart after resume. Only the counters reset.
         let prior = &evidence["verificationBudget"];
@@ -1681,6 +1723,12 @@ impl Database {
             );
         let prior_review = needs_review(prior.as_deref())
             && !obsolete_deadline_review(intent.as_deref(), prior.as_deref());
+        let processing_until = processing_pending(reason_code, diagnostic)
+            .then(|| processing_wait_until(&evidence["verificationBudget"], intent.as_deref()))
+            .flatten();
+        let processing_wait = processing_until.is_some_and(|until| checked < until);
+        let processing_exhausted =
+            !prior_review && processing_until.is_some_and(|until| checked >= until);
         let budget = if prior_review {
             // A one-shot manual check can settle proof, but cannot renew automatic work.
             evidence["verificationBudget"].clone()
@@ -1695,14 +1743,20 @@ impl Database {
             budget["observations"] = serde_json::json!(budget["observations"].as_u64().unwrap_or(0).saturating_add(1));
             budget
         } else {
-            advance_verification_budget(&evidence, intent.as_deref(), diagnostic, exempt)
+            advance_verification_budget(
+                &evidence,
+                intent.as_deref(),
+                diagnostic,
+                exempt,
+                processing_wait,
+            )
         };
         let metadata_exhausted = budget["metadataObservations"].as_u64().unwrap_or(0) >= METADATA_RETRY_LIMIT;
         let budget_exhausted = metadata_exhausted || budget["noProgressObservations"].as_u64().unwrap_or(0)
             >= VERIFICATION_NO_PROGRESS_LIMIT;
         evidence["verificationBudget"] = budget;
         let review = identity_missing || legacy_review || prior_review || budget_exhausted
-            || reason_code == "metadataCandidateInvalid";
+            || processing_exhausted || reason_code == "metadataCandidateInvalid";
         if manual
             && legacy
             && !review
@@ -1732,6 +1786,8 @@ impl Database {
                 .unwrap_or(observation_reason.clone())
         } else if metadata_exhausted && !legacy_review {
             format!("Đã giữ liên kết ứng viên; tự kiểm tra dữ liệu công khai đã dừng sau {METADATA_RETRY_LIMIT} lượt chưa xác minh được. {observation_reason} Xác nhận Tiếp tục xác minh bài đã gửi để mở ngân sách mới, không đăng lại.")
+        } else if processing_exhausted && !legacy_review {
+            format!("TikTok vẫn chưa trả link sau {PROCESSING_WAIT_MINUTES} phút chờ xử lý bài ({reason_code}). {observation_reason} Cần kiểm tra; xác nhận Tiếp tục xác minh bài đã gửi để chờ thêm, không đăng lại.")
         } else if budget_exhausted && !legacy_review {
             format!("Tự kiểm tra đã dừng sau {VERIFICATION_NO_PROGRESS_LIMIT} lượt liên tiếp không có bằng chứng mới của đúng bài ({reason_code}). {observation_reason} Cần kiểm tra; xác nhận Tiếp tục xác minh bài đã gửi để mở ngân sách mới, không đăng lại.")
         } else {
@@ -1768,6 +1824,8 @@ impl Database {
             reason_code
         } else if metadata_exhausted {
             METADATA_RETRY_CAUSE
+        } else if processing_exhausted {
+            PROCESSING_WAIT_CAUSE
         } else if budget_exhausted {
             VERIFICATION_NO_PROGRESS_CAUSE
         } else {

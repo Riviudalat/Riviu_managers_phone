@@ -26,6 +26,7 @@ tra khi máy offline, chưa sẵn sàng hoặc đang bận tác vụ khác. Lư�
 khi đến lịch và còn ngân sách; link chỉ được ghi Sheet sau khi xác minh đúng tài khoản,
 nội dung và thời điểm bài đăng.
 Lỗi tìm bài hoặc thao tác điện thoại vẫn dừng sau 8 lượt liên tiếp không có bằng chứng mới.
+Riêng lượt TikTok còn đang xử lý bài thì dùng hạn chờ 60 phút (xem bên dưới).
 Hết giới hạn riêng của metadata, chọn **Tiếp tục xác minh bài đã gửi** để mở đợt
 kiểm tra mới. Link và định danh bài cũ được giữ nguyên; thao tác Đăng không lặp lại.
 
@@ -219,8 +220,14 @@ Bài đã gửi nhưng chưa có link, kể cả **đăng ngay**,
 được kiểm tra lại khoảng 2 phút sau lượt trước khi còn ngân sách. Với bước tìm bài trên điện thoại,
 sau **8 lần kiểm liên tiếp không có
 bằng chứng mới của đúng bài**, app chuyển **Cần kiểm tra**, bỏ lịch kiểm tiếp và
-hiển thị lý do; không coi là Đăng thất bại và không đăng lại. Lỗi đọc/kết nối hoặc
-TikTok vẫn xử lý cũng không được thử mãi. Caption của bài khác, giờ kiểm mới và số
+hiển thị lý do; không coi là Đăng thất bại và không đăng lại. Lỗi đọc/kết nối
+cũng không được thử mãi.
+Lượt bấm Sao chép liên kết mà TikTok chưa trả link trong lúc bài còn đang xử lý
+(app đọc được “Post is being processed”, hoặc app chưa chứng minh được bài đã tải lên
+xong) **không tính** vào 8 lần đó. App vẫn kiểm lại mỗi khoảng 2 phút, tối đa
+**60 phút** tính từ lúc Đăng; ngày 13/10/2026 TikTok đã giữ một bài ảnh hơn 36 phút.
+Hết 60 phút mà TikTok vẫn chưa trả link thì bài chuyển **Cần kiểm tra**; chọn
+**Tiếp tục xác minh bài đã gửi** để chờ thêm, không đăng lại. Caption của bài khác, giờ kiểm mới và số
 ảnh đọc tăng không tính là tiến triển. Chỉ caption đầy đủ đúng bài, rồi caption và
 thời gian cùng bài khớp lần đầu mới mở thêm ngân sách chờ; chưa thay xác minh link.
 Link ứng viên đã lưu đúng định danh có ngân sách riêng tối đa 12 lượt chờ dữ liệu
@@ -464,7 +471,8 @@ không phải xoá tùy ý theo tên thư mục.
 ### Tiếp tục xác minh bài đã gửi sau khi Dừng
 
 Trong **Theo dõi → Chi tiết máy**, bài thuộc chiến dịch đã Dừng hoặc đã dừng tự
-kiểm vì 8 lượt không tiến triển hoặc hết 12 lượt metadata có thể hiện
+kiểm vì 8 lượt không tiến triển, hết 60 phút chờ TikTok xử lý bài hoặc hết 12 lượt
+metadata có thể hiện
 **Tiếp tục xác minh bài đã gửi** khi
 backend xác nhận còn đủ identity của lần Đăng. Chỉ xác nhận này mở ngân sách mới;
 refresh, khởi động lại app hoặc Kiểm tra liên kết thất bại không tự mở lại.
@@ -477,7 +485,7 @@ khi tiếp tục xác minh. Không mở lại observer trong khi lệnh đóng p
 
 Nhận yêu cầu không có nghĩa đã lấy được link. App dùng worker hiện có để kiểm tra
 lại khoảng 2 phút sau cuối lần kiểm trước: 8 lượt tìm bài liên tiếp không có
-bằng chứng mới, hoặc tối đa 12 lượt chờ dữ liệu công khai của link đã giữ. Bộ đếm
+bằng chứng mới, 60 phút chờ TikTok xử lý tính từ lúc tiếp tục, hoặc tối đa 12 lượt chờ dữ liệu công khai của link đã giữ. Bộ đếm
 được giữ qua restart. Lượt cần đọc điện thoại chờ máy sẵn sàng/rảnh; link ứng viên
 đã giữ vẫn được kiểm qua mạng khi máy offline/bận. Campaign vẫn có thể mang nhãn
 **Đã huỷ** dù một bài trong đó đang

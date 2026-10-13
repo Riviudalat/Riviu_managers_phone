@@ -131,8 +131,13 @@ pub(super) async fn observe_frames(
                     "com.ss.android.ugc.trill" => "38.3.2",
                     _ => return false,
                 };
+                // The expanded photo viewer renders too few labels for `observed_language`,
+                // so Android falls back to the system tag `en-US`. Phone 23, campaign
+                // fff151ba, 13/10/2026: a raw compare dropped this ROI for 8 passes.
                 session.app_version(&package).await.as_deref() == Some(expected)
-                    && session.ui_language().await.as_deref() == Some("en")
+                    && session.ui_language().await.is_some_and(|locale| {
+                        crate::tiktok_labels::normalise_language(&locale) == "en"
+                    })
             },
         )
         .await
@@ -274,7 +279,8 @@ mod tests {
             Some("45.7.3".into())
         }
         async fn ui_language(&self) -> Option<String> {
-            Some("en".into())
+            // The system fallback the expanded photo viewer actually yields.
+            Some("en-US".into())
         }
         fn gui_reasoner(&self) -> Option<crate::ui_automation::SharedReasoner> {
             Some(self.0.clone())

@@ -686,7 +686,7 @@ pub(super) fn queue_sheet_row(
 #[cfg(test)]
 mod tests {
     use super::super::publish_verification::{
-        VERIFICATION_CHECK_SECONDS as CHECK_SECONDS,
+        PROCESSING_WAIT_MINUTES, VERIFICATION_CHECK_SECONDS as CHECK_SECONDS,
         VERIFICATION_NO_PROGRESS_LIMIT as NO_PROGRESS_LIMIT,
     };
     use super::*;
@@ -1263,6 +1263,101 @@ mod tests {
             .record_verified_publish_with_sheet_row(&row, &evidence, url, "bot", &[])
             .unwrap());
         assert_eq!(db.pending_publish_sheet_rows(10).unwrap().len(), 1);
+        drop(db);
+        std::fs::remove_file(path).unwrap();
+    }
+
+    #[test]
+    fn processing_copy_waits_from_submission_instead_of_the_no_progress_limit() {
+        // Phone 23, campaign fff151ba, 13/10/2026: TikTok refused Copy link with
+        // "Post is being processed" for 36+ minutes; 8 two-minute passes parked it.
+        let unsettled = serde_json::json!({"appRestart":{"state":"keptRunning","reason":"uploadNotProvenSettled"}});
+        let (db, path, campaign, _, _) = review_fixture(30);
+        for (code, diagnostic) in [
+            ("clipboardUnchanged", Some(&unsettled)),
+            ("tiktokProcessing", None),
+        ]
+        .into_iter()
+        .cycle()
+        .take(NO_PROGRESS_LIMIT as usize + 2)
+        {
+            let candidate = db.pending_publish_verifications(10).unwrap().remove(0);
+            assert!(db
+                .record_publish_verification_diagnostic(
+                    &candidate,
+                    "TikTok is still processing",
+                    code,
+                    diagnostic
+                )
+                .unwrap());
+        }
+        let evidence = |db: &Database| -> serde_json::Value {
+            let detail = db.get_publish_campaign(&campaign).unwrap().unwrap();
+            serde_json::from_str(detail.assignments[0].evidence_json.as_deref().unwrap()).unwrap()
+        };
+        let e = evidence(&db);
+        assert_eq!(e["verificationStatus"]["state"], "pending");
+        assert_eq!(e["verificationBudget"]["noProgressObservations"], 0);
+        // An unchanged clipboard without the unsettled-upload guard is still no progress.
+        let candidate = db.pending_publish_verifications(10).unwrap().remove(0);
+        assert!(db
+            .record_publish_verification_observation(&candidate, "no link", "clipboardUnchanged")
+            .unwrap());
+        assert_eq!(
+            evidence(&db)["verificationBudget"]["noProgressObservations"],
+            1
+        );
+        drop(db);
+        std::fs::remove_file(path).unwrap();
+
+        // Past the processing wait, the same observation parks for review at once.
+        let (db, path, campaign, assignment, intent) = review_fixture(PROCESSING_WAIT_MINUTES + 1);
+        let candidate = db.pending_publish_verifications(10).unwrap().remove(0);
+        assert!(db
+            .record_publish_verification_diagnostic(
+                &candidate,
+                "TikTok is still processing",
+                "clipboardUnchanged",
+                Some(&unsettled)
+            )
+            .unwrap());
+        let detail = db.get_publish_campaign(&campaign).unwrap().unwrap();
+        let e: serde_json::Value =
+            serde_json::from_str(detail.assignments[0].evidence_json.as_deref().unwrap()).unwrap();
+        assert_eq!(e["verificationStatus"]["state"], "needsReview");
+        assert_eq!(e["verificationStatus"]["cause"], "processingWaitExhausted");
+        assert!(e["verificationStatus"]["nextCheckAt"].is_null());
+        assert!(!db
+            .claim_publish_assignment_for_posting(&assignment, &intent)
+            .unwrap());
+        // Resume opens a fresh wait instead of one already spent since Post.
+        let parked = db
+            .publish_verifications_for_campaign(&campaign, 10)
+            .unwrap()
+            .remove(0);
+        assert_eq!(
+            db.resume_publish_verification(&assignment, true, parked.revision)
+                .unwrap()
+                .state,
+            super::super::publish_verification::PublishResumeVerificationState::Accepted
+        );
+        let resumed = db
+            .pending_current_publish_verifications(10)
+            .unwrap()
+            .remove(0);
+        assert!(db
+            .record_publish_verification_diagnostic(
+                &resumed,
+                "TikTok is still processing",
+                "tiktokProcessing",
+                None
+            )
+            .unwrap());
+        let detail = db.get_publish_campaign(&campaign).unwrap().unwrap();
+        let e: serde_json::Value =
+            serde_json::from_str(detail.assignments[0].evidence_json.as_deref().unwrap()).unwrap();
+        assert_eq!(e["verificationStatus"]["state"], "pending");
+        assert_eq!(e["verificationBudget"]["noProgressObservations"], 0);
         drop(db);
         std::fs::remove_file(path).unwrap();
     }

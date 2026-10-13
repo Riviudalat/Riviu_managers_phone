@@ -381,7 +381,7 @@ giờ. Các lịch khác, Nuôi và Điều phối vẫn đóng băng, không s�
 
 Verifier nền chỉ nhận bài đến hạn khi có `publishVerification` hợp lệ cho đúng
 campaign và serial. Nó kiểm lại khoảng 2 phút sau lượt trước; dừng sau 8 lượt liên tiếp không có bằng chứng mới
-khi tìm bài, và có ngân sách riêng 12 lần metadata chưa sẵn sàng của candidate đã ràng buộc;
+khi tìm bài (lượt TikTok còn xử lý bài theo dõi bằng hạn 60 phút riêng), và có ngân sách riêng 12 lần metadata chưa sẵn sàng của candidate đã ràng buộc;
 không tự mở lại bài cần review. Truy vấn và cập nhật lượt thiết bị giới hạn trong
 scope. Cleanup nền cần riêng `publishCleanup` và chỉ dọn bản chuyển đã có proof
 canonical qua kiểm revision/lease hiện có. Thiếu hoặc đổi scope thì không nhận
@@ -887,9 +887,18 @@ Các lượt này giữ nguyên bộ đếm tìm bài; lỗi đọc thông thư�
 Hết giới hạn metadata lưu cause `metadataRetryBudgetExhausted` và giữ candidate.
 Sau 8 lượt liên tiếp không có bằng chứng mới của đúng bài, lưu needsReview với cause
 `verificationNoProgress`, nextCheckAt=null và giữ intent/media/khoản thiếu Sheet.
-Lỗi đọc/transport, processing và tìm kiếm đều tiêu ngân sách hữu hạn này; offline/busy
+Lỗi đọc/transport và tìm kiếm đều tiêu ngân sách hữu hạn này; offline/busy
 chưa được quan sát không tính là một lượt. Lượt cũ chưa có budget bắt đầu từ lần quan
 sát đầu của contract mới, không lấy attempts lịch sử làm số lượt không tiến triển.
+Lượt Copy không ra link vì TikTok còn giữ upload không tính vào 8 lượt: reasonCode
+`tiktokProcessing`, hoặc `clipboardUnchanged` khi chẩn đoán cùng lượt ghi
+`appRestart.reason = uploadNotProvenSettled`. Các lượt này chờ trong hạn
+`PROCESSING_WAIT_MINUTES = 60` tính từ `submittedAt` (hoặc từ resume, lưu ở
+`verificationBudget.processingWaitFrom`). Đây là trần, không phải mục tiêu: máy 23
+(ce031713cd92d90701, SM-G955F, Global 45.7.3 en) ngày 13/10/2026 còn báo “Post is
+being processed” sau hơn 36 phút. Hết hạn, lượt như vậy lưu needsReview ngay với cause
+`processingWaitExhausted`. Không đăng lại, không restart TikTok khi upload chưa settled,
+và toast không phải proof. `clipboardUnchanged` không kèm chẩn đoán đó vẫn tính vào 8 lượt.
 Stop chờ primitive đã được cấp quyền hoàn tất, không huỷ giữa khôi phục IME.
 AccessibilityReadUnavailable chỉ dành read-only sau Android recovery; sound observer
 cho một lần đọc bổ sung/phase trong ngân sách và xóa snapshot cũ trước readback.
@@ -1070,12 +1079,12 @@ vẫn kiểm quyền tại transaction; capability chỉ hướng dẫn UI, khô
 vượt điều kiện khi trạng thái đã đổi.
 
 Resume giữ campaign cancelled, publication/effect intent, jobs và đích Sheet/epoch
-ban đầu. Cause `verificationNoProgress` và `metadataRetryBudgetExhausted` cho phép resume rõ ràng; các review
+ban đầu. Cause `verificationNoProgress`, `processingWaitExhausted` và `metadataRetryBudgetExhausted` cho phép resume rõ ràng; các review
 khác không được nới. Transaction lưu status/budget/review-before-stop cũ trong
 `verificationBeforeResume` rồi mở budget mới; gọi lặp/ACK replay không reset.
 Worker hiện có dùng `nextCheckAt = checkedAt + 120 giây` khi còn ngân sách; 8 lượt
 không tiến triển liên tiếp ở bước tìm bài, hoặc 12 lượt metadata chưa sẵn sàng, lại needsReview.
-Confirmed resume đặt lại cả hai ngân sách nhưng không đổi candidate, thời điểm capture hay metadata attempt.
+Confirmed resume đặt lại cả hai ngân sách và mở hạn chờ xử lý 60 phút mới, nhưng không đổi candidate, thời điểm capture hay metadata attempt.
 **Kiểm tra liên kết** một lần có thể
 chốt canonical nhưng thất bại không reset budget hoặc mở lại review đã dừng.
 **Kiểm tra liên kết** gọi `publish_check_links`, không
