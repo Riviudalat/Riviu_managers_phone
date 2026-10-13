@@ -1270,6 +1270,15 @@ impl SoundPickerPlan {
     pub(crate) fn picks_from_hot(self) -> bool {
         self.section_label == "Hot"
     }
+    /// Exactly the measured Global 45.7.3/en plan, whose every-window tree never holds the
+    /// sheet: `enableMultiWindows: true` on the open sheet returned no TikTok window at all
+    /// (15-23 KB, no Hot, no tab) on `ce051715e9f964e10d` and `ce031713d903001b01`, Android 9,
+    /// 13/10/2026 (`target/sound-probe-20261013/blind/`). A dynamic plan is not this build.
+    fn every_window_read_blind(self) -> bool {
+        MEASURED_SOUND_PICKERS
+            .iter()
+            .any(|entry| entry.version == "45.7.3" && entry.language == "en" && entry.plan == self)
+    }
     pub(crate) fn post_back_query(self) -> Option<ElementQuery<'static>> {
         self.post_back_id.map(ElementQuery::ResourceIdSuffix)
     }
@@ -1840,6 +1849,10 @@ async fn reread_through_every_window(
             )),
         );
     };
+    if plan.every_window_read_blind() {
+        note("skipped", "Bản TikTok Global 45.7.3/en không có cửa sổ TikTok nào khi đọc qua mọi cửa sổ (đo 13/10/2026); bỏ qua enableMultiWindows".into());
+        return None;
+    }
     if !session.can_read_multi_window() {
         note("unsupported", "Phiên này không đọc được cây giao diện qua mọi cửa sổ; chuyển sang khởi động lại UiAutomator".into());
         return None;
@@ -1925,6 +1938,11 @@ async fn reread_through_every_window(
                     "chuyển sang khởi động lại UiAutomator"
                 }
             ));
+            // The switch bought nothing; the next route reads active-window trees again now,
+            // not when the stage ends. A restore that cannot be proven ends the attempt.
+            if let Err(restore) = end_multi_window_read(session).await {
+                return Some(Err(restore));
+            }
             None
         }
         Err(error) => {
@@ -1940,6 +1958,97 @@ fn multi_window_switches() -> u32 {
     SOUND_BUDGET
         .try_with(|budget| budget.route.multi_window_switches.load(Ordering::Relaxed))
         .unwrap_or(0)
+}
+
+/// Past the sound stage's own deadline, how long a capture pause may still hold before the
+/// live view returns by itself.
+const CAPTURE_PAUSE_MARGIN: Duration = Duration::from_secs(30);
+/// How long the stage waits for the session frame stream to come back after the pause.
+const CAPTURE_RESUME_BUDGET: Duration = Duration::from_secs(30);
+
+/// Take this phone's live capture down for the whole sound stage, before the sheet is first
+/// read. On Global 45.7.3/en, Android 9 (13/10/2026, `target/sound-probe-20261013/blind/`) a
+/// running capture blinded UiAutomator2 `/source` on the open sheet within seconds (10.5-40 s
+/// timeouts, "waiting for root") and every read answered in 0.9-2.9 s once it stopped. The
+/// stage decides nothing from stream frames: its visual route captures with `screencap`.
+/// `true` when a pause was taken; the stage then calls [`resume_capture_after_sound_stage`].
+pub(crate) async fn pause_capture_for_sound_stage(
+    session: &dyn UiSession,
+    deadline: Instant,
+) -> bool {
+    let bound = deadline.saturating_duration_since(Instant::now()) + CAPTURE_PAUSE_MARGIN;
+    let serial = session
+        .gui_scope()
+        .map(|scope| scope.device_id)
+        .unwrap_or_default();
+    match session.pause_screen_capture(bound).await {
+        Ok(paused) => {
+            if paused {
+                tracing::info!(serial = %serial, boundMs = bound.as_millis() as u64,
+                    "sound stage paused the phone's live capture");
+                crate::publish_recovery::note_read(
+                    "sound",
+                    "capturePause",
+                    1,
+                    "paused",
+                    Some(&format!(
+                        "Tạm dừng hình trực tiếp của máy {serial} khi đọc bảng nhạc (tối đa {} giây)",
+                        bound.as_secs()
+                    )),
+                );
+            }
+            paused
+        }
+        Err(error) => {
+            tracing::warn!(serial = %serial, error = %format!("{error:#}"),
+                "sound stage could not pause the phone's live capture");
+            crate::publish_recovery::note_read(
+                "sound",
+                "capturePause",
+                1,
+                "failed",
+                Some(&format!(
+                    "Không tạm dừng được hình trực tiếp của máy {serial} khi đọc bảng nhạc: {error:#}"
+                )),
+            );
+            false
+        }
+    }
+}
+
+/// End the sound stage's capture pause, on every exit of the stage. Bounded: a resume that
+/// does not finish in [`CAPTURE_RESUME_BUDGET`] is abandoned, and the live view returns
+/// through the desktop keeper either way. Never an error for the stage: nothing after the
+/// sheet decides from stream frames.
+pub(crate) async fn resume_capture_after_sound_stage(session: &dyn UiSession, paused: bool) {
+    if !paused {
+        return;
+    }
+    let serial = session
+        .gui_scope()
+        .map(|scope| scope.device_id)
+        .unwrap_or_default();
+    let resumed =
+        tokio::time::timeout(CAPTURE_RESUME_BUDGET, session.resume_screen_capture()).await;
+    let (outcome, detail) = match resumed {
+        Ok(Ok(())) => (
+            "resumed",
+            format!("Đã bật lại hình trực tiếp của máy {serial} sau bước nhạc"),
+        ),
+        Ok(Err(error)) => (
+            "failed",
+            format!("Không bật lại được luồng hình của máy {serial} sau bước nhạc: {error:#}; hình trực tiếp vẫn tự bật lại"),
+        ),
+        Err(_) => (
+            "timeout",
+            format!(
+                "Bật lại luồng hình của máy {serial} quá {} giây; hình trực tiếp vẫn tự bật lại",
+                CAPTURE_RESUME_BUDGET.as_secs()
+            ),
+        ),
+    };
+    tracing::info!(serial = %serial, outcome, "sound stage capture pause ended");
+    crate::publish_recovery::note_read("sound", "capturePause", 1, outcome, Some(&detail));
 }
 
 /// Return the session to active-window reads when the sound stage ends, whatever the stage

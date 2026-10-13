@@ -517,6 +517,19 @@ impl Default for AndroidDriverConfig {
 
 /// One running minicap feed, owned so a second `ensure_stream` reuses it and a
 /// stop can prove the child is gone.
+/// A capture pause on one serial: when it lapses, and the session frame stream it took down,
+/// if any, so the resume can bring it back at the same generation.
+struct CapturePause {
+    until: std::time::Instant,
+    suspended: Option<SuspendedStream>,
+}
+
+#[derive(Clone, Copy)]
+struct SuspendedStream {
+    generation: u64,
+    snapshots: bool,
+}
+
 struct StreamProducer {
     /// The hub generation this producer publishes into. A producer whose
     /// generation is stale must die rather than publish (`FrameSink`).
@@ -1173,6 +1186,12 @@ pub struct AndroidDriver {
     /// serial -> the scrcpy view we started for it. Held only across map
     /// access, same rule as [`Self::streams`].
     views: tokio::sync::Mutex<HashMap<String, ViewProducer>>,
+    /// serial -> a capture pause taken by a tree reader (see
+    /// [`AndroidDriver::pause_capture`]). Lapses on its own at `until`.
+    capture_pauses: Mutex<HashMap<String, CapturePause>>,
+    /// This driver's own shared handle, for the sessions it hands out. Empty for a driver
+    /// that was never shared through [`AndroidDriver::shared`]; such sessions pause nothing.
+    this: std::sync::Weak<AndroidDriver>,
     /// Preset each serial was last *asked* for, which is not the same as the one running.
     ///
     /// Separate from `views` on purpose: the watchdog restarts a dead producer, and at that
@@ -1366,6 +1385,13 @@ impl AndroidDriver {
             recorder.flush_run(run_id, device_id).await?;
         }
         Ok(())
+    }
+    /// Share the driver, so the sessions it hands out can reach its capture producers.
+    pub fn shared(mut self) -> Arc<Self> {
+        Arc::new_cyclic(|this| {
+            self.this = this.clone();
+            self
+        })
     }
     pub fn new(config: &AndroidDriverConfig) -> anyhow::Result<Self> {
         let (adb, origin) = AdbProgram::resolve_for_policy(
@@ -2222,6 +2248,8 @@ impl AndroidDriver {
             pending_stream_stops: Mutex::new(HashMap::new()),
             completed_stream_stops: Mutex::new(HashMap::new()),
             views: tokio::sync::Mutex::new(HashMap::new()),
+            capture_pauses: Mutex::new(HashMap::new()),
+            this: std::sync::Weak::new(),
             desired_presets: parking_lot::Mutex::new(HashMap::new()),
             view_encoders: Mutex::new(HashMap::new()),
             view_starting: Mutex::new(HashSet::new()),
@@ -3962,7 +3990,7 @@ impl DeviceDriver for AndroidDriver {
 
 /// Wrapper so the composition root can hold the driver as a trait object.
 pub fn create_driver(config: &AndroidDriverConfig) -> anyhow::Result<Arc<dyn DeviceDriver>> {
-    Ok(Arc::new(AndroidDriver::new(config)?))
+    Ok(AndroidDriver::new(config)?.shared())
 }
 
 /// Build the driver only when `adb` is actually usable on this host.
@@ -3999,11 +4027,7 @@ pub async fn detect_driver(config: &AndroidDriverConfig) -> Result<Arc<AndroidDr
         };
         match adb.run(&["version"], Duration::from_secs(10)).await {
             Ok(_) => {
-                return Ok(Arc::new(AndroidDriver::with_adb(
-                    adb,
-                    candidate.origin,
-                    config,
-                )))
+                return Ok(AndroidDriver::with_adb(adb, candidate.origin, config).shared())
             }
             Err(error) => refusals.push(format!(
                 "{} ({}): {error}",

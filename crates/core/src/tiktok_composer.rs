@@ -4579,6 +4579,9 @@ where
         let mut sound_trace = StageDiagnosticOperation::start("soundStage", &sound_epoch, Some(sound_deadline));
         let mut stage_epoch = sound_epoch.clone();
         let mut sound_evidence = crate::tiktok_sound::SoundStageEvidence::default();
+        // A running capture blinds the sheet's tree reads, so it is down for the whole stage.
+        let capture_paused =
+            crate::tiktok_sound::pause_capture_for_sound_stage(session, sound_deadline).await;
         let chosen = crate::tiktok_sound::with_deadline_budget(stop, sound_deadline, async {
             sound_evidence = crate::tiktok_sound::SoundStageEvidence::capture();
             let deadline = sound_deadline;
@@ -4780,6 +4783,7 @@ where
             Ok(()) => chosen,
             Err(restore) => chosen.and_then(|_| Err(restore)),
         };
+        crate::tiktok_sound::resume_capture_after_sound_stage(session, capture_paused).await;
         sound_trace.finish(if chosen.is_ok() { "confirmed" } else { "error" });
         drop(sound_trace);
         let chosen = chosen.map_err(|error| {

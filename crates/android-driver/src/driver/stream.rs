@@ -857,6 +857,10 @@ impl AndroidDriver {
     /// the iOS path follows.
     pub(super) async fn ensure_minicap_locked(&self, serial: &str) -> anyhow::Result<()> {
         let sink = self.sink()?;
+        anyhow::ensure!(
+            !self.capture_paused(serial),
+            "luồng hình của máy {serial} đang tạm dừng khi đọc bảng nhạc"
+        );
         let claim = self.claim_start(serial)?;
 
         let reusable = {
@@ -951,6 +955,10 @@ impl AndroidDriver {
         preset: crate::scrcpy::ViewPreset,
     ) -> anyhow::Result<u64> {
         let sink = self.view_sink()?;
+        anyhow::ensure!(
+            !self.capture_paused(serial),
+            "hình trực tiếp của máy {serial} đang tạm dừng khi đọc bảng nhạc"
+        );
         let claim = self.claim_view_start(serial)?;
         self.desired_presets
             .lock()
@@ -1061,6 +1069,119 @@ impl AndroidDriver {
         // lifetime. It is overwritten, never cleared: closing the overlay asks for `tile`,
         // which is the same insert.
         self.take_and_stop_view(serial).await
+    }
+    /// Whether a tree reader holds this serial's live capture paused right now. A pause past
+    /// its bound has lapsed and answers `false`, so the desktop keeper starts the view again
+    /// even when the owner's resume never came.
+    pub fn capture_paused(&self, serial: &str) -> bool {
+        self.capture_pauses
+            .lock()
+            .get(serial)
+            .is_some_and(|pause| std::time::Instant::now() < pause.until)
+    }
+    /// Stop this serial's live view and its session frame stream for at most `bound`.
+    ///
+    /// Measured 13/10/2026 on Global 45.7.3/en, Android 9, sound sheet open, no controller
+    /// (`target/sound-probe-20261013/blind/`): with `screenrecord` running (the virtual display
+    /// and encoder path scrcpy uses) UiAutomator2 `/source` on `ce051715e9f964e10d` gave four
+    /// reads, then a 40 s timeout and "waiting for root"; on `ce031713d903001b01` four of six
+    /// reads failed after 10.5 s. Without capture, and right after it stopped, every read
+    /// answered in 0.9-2.9 s. So a tree reader on such a sheet takes the capture down first.
+    ///
+    /// The view is only stopped: while paused the keeper and [`Self::start_view_stream`] start
+    /// none, and once the pause ends or lapses the keeper starts it as a fresh start. The
+    /// session stream keeps its generation, so frames, the stop proof and the session's
+    /// cleanup are unchanged; [`Self::resume_capture`] brings it back at that generation.
+    /// `Ok(true)` when something was running and is now stopped.
+    pub async fn pause_capture(&self, serial: &str, bound: Duration) -> anyhow::Result<bool> {
+        let until = std::time::Instant::now() + bound;
+        // Registered before anything stops, so the keeper starts nothing in between.
+        self.capture_pauses
+            .lock()
+            .entry(serial.to_owned())
+            .or_insert(CapturePause {
+                until,
+                suspended: None,
+            })
+            .until = until;
+        let view = self.views.lock().await.contains_key(serial);
+        if view && !self.take_and_stop_view(serial).await {
+            tracing::warn!(serial, "live view stop unconfirmed while pausing capture");
+        }
+        let suspended = self.suspend_session_stream(serial).await;
+        if let Some(stream) = suspended {
+            if let Some(pause) = self.capture_pauses.lock().get_mut(serial) {
+                pause.suspended.get_or_insert(stream);
+            }
+        }
+        tracing::info!(serial, view, sessionStream = suspended.is_some(),
+            boundMs = bound.as_millis() as u64, "live capture paused for a tree reader");
+        Ok(view || suspended.is_some())
+    }
+    /// End [`Self::pause_capture`]. The live view is left to the keeper's next tick. The
+    /// session stream comes back at the generation it was taken down at, and only when that
+    /// generation is still current with no other producer, start or stop on this serial: a
+    /// session that ended in between keeps its stop proof and nothing is started.
+    pub async fn resume_capture(&self, serial: &str) -> anyhow::Result<()> {
+        let Some(pause) = self.capture_pauses.lock().remove(serial) else {
+            return Ok(());
+        };
+        let Some(stream) = pause.suspended else {
+            tracing::info!(serial, "live capture resumed");
+            return Ok(());
+        };
+        let sink = self.sink()?;
+        let claim = self.claim_start(serial)?;
+        if sink.generation(serial) != stream.generation
+            || self.pending_stream_stops.lock().contains_key(serial)
+            || self.streams.lock().await.contains_key(serial)
+        {
+            tracing::info!(serial, generation = stream.generation,
+                "session stream superseded while capture was paused; not restarted");
+            return Ok(());
+        }
+        let started = if stream.snapshots {
+            self.spawn_snapshot_producer(serial, stream.generation).await
+        } else {
+            self.spawn_producer(serial, stream.generation, StreamReadiness::BestEffort)
+                .await
+        };
+        drop(claim);
+        started
+            .map(|_| tracing::info!(serial, generation = stream.generation,
+                snapshots = stream.snapshots, "live capture resumed"))
+            .with_context(|| format!("khởi động lại luồng hình của máy {serial} sau khi tạm dừng"))
+    }
+    /// Take the session frame stream down without advancing its generation. Refuses (`None`)
+    /// while a start or an owned stop is in flight on this serial; those keep their own proof.
+    async fn suspend_session_stream(&self, serial: &str) -> Option<SuspendedStream> {
+        if self.starting.lock().contains(serial)
+            || self.pending_stream_stops.lock().contains_key(serial)
+        {
+            return None;
+        }
+        let mut producer = self.streams.lock().await.remove(serial)?;
+        producer.reader.abort();
+        let _ = producer.child.start_kill();
+        let exited = matches!(
+            tokio::time::timeout(CHILD_EXIT_TIMEOUT, producer.child.wait()).await,
+            Ok(Ok(_))
+        );
+        if !exited {
+            tracing::warn!(serial, "paused session stream child exit unconfirmed");
+        }
+        let snapshots = producer.host_port == SNAPSHOT_NO_FORWARD;
+        if !snapshots {
+            if let Err(error) =
+                crate::frames::remove_forward(&self.adb, serial, producer.host_port).await
+            {
+                tracing::warn!(serial, %error, "paused session stream forward removal unconfirmed");
+            }
+        }
+        Some(SuspendedStream {
+            generation: producer.generation,
+            snapshots,
+        })
     }
     /// What this serial should be restarted at. `Tile` for anything never asked for, which
     /// is the pre-existing behaviour for every device the operator has not opened.
