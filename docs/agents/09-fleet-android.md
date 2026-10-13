@@ -48,8 +48,9 @@ sở hữu inventory/hash; không nhân bản danh sách pin.
   fleet-health-20261014-*.tsv`, `controllers/controller-r105.stdout.txt`): khi 30 máy cùng
   soạn, UiAutomator2 `/source` p50 6,7 s, p90 12,7 s, max 18,3 s (bình thường <1 s);
   `surfaceflinger` 61 % CPU; load average 7–8 trên máy 8 nhân; lượt đo tải `adb shell`
-  timeout 2 s; "waited for an adb slot" liên tục (cap 12 slot, `adb.rs`). Host không nghẽn
-  (20 nhân, Riviu ~10 % CPU): nghẽn ở máy và adb server. Trên mỗi máy lúc soạn chạy đồng
+  timeout 2 s; "waited for an adb slot" liên tục (cap 12 slot, `adb.rs`; nhãn cũ gộp ba
+  tầng chờ, xem mục HX-TELEMETRY). Host không nghẽn (20 nhân, Riviu ~10 % CPU): nghẽn ở
+  máy và adb server. Trên mỗi máy lúc soạn chạy đồng
   thời TikTok, UiAutomator2, scrcpy (Tile 480 px/1,2 Mbps/10 fps), có lúc minicap/screencap.
 - Hai cơ chế trong code: (1) job đăng bài giữ view scrcpy của chính máy đó tắt suốt lượt
   (`QuietView`, `AndroidDriver::hold_view`; tile hiện "Đang đăng bài, tạm dừng hình");
@@ -70,6 +71,35 @@ sở hữu inventory/hash; không nhân bản danh sách pin.
   bật lại màn hình đi qua `KEYCODE_POWER` có thể dựng khóa màn hình (baseline giữ lock
   screen tắt nhưng phải kiểm). Chỉ thử trên 1–2 máy canary với bằng chứng `/source`,
   `screencap` và một lượt đăng đầy đủ trước khi xét bật rộng.
+
+### Đọc số liệu chờ adb/agent (HX-TELEMETRY)
+
+Mục đích: tách host nghẽn (hàng đợi adb trên PC) khỏi máy chậm (lệnh chạy lâu trên máy).
+Code: `crates/android-driver/src/telemetry.rs`, `enter_adb_slot` trong `adb.rs`,
+`send_once_with_timeout`/`observation_request` trong `agent.rs`.
+
+- Mỗi lệnh adb đi qua ba tầng theo thứ tự, mỗi tầng đo riêng: `adb.serial_queue` (hàng
+  đợi riêng của máy, một lệnh mỗi lúc), `adb.transfer_cap` (chỉ pull/push, tối đa 4),
+  `adb.global_slot` (cap chung 12). Sau đó `adb.exec <verb>` là thời gian chạy thật, tính từ
+  lúc giữ đủ slot.
+- Agent: mọi call theo route `agent <METHOD> <route>`, không chỉ call chậm. UUID/số trong
+  route thành `:id`; không ghi serial, payload, URL hay session. Kết quả: `ok`, `chậm`
+  (quá ngân sách warning của route: 5 s cho cây, 500 ms cho thao tác), `hết_giờ`, `lỗi`
+  (transport/spawn/adb exit ≠ 0), `hủy` (future bị bỏ giữa chừng).
+- Dòng INFO "Độ trễ adb/agent N s gần nhất …" in mỗi ~60 s khi có lưu lượng: mỗi series
+  `n`, `p50≤`, `p90≤` (cận trên ô histogram, không vượt max), `max` đúng, và số kết quả
+  khác `ok`. Cửa sổ reset sau mỗi dòng, nên so đợt bằng cách so các dòng cùng giờ chạy.
+  Tối đa 64 series mỗi cửa sổ; tên mới sau đó gộp vào `(khác)`.
+- Warning chờ ≥500 ms ghi `lane=` (tầng chiếm nhiều thời gian nhất), `serial_queue_ms`,
+  `transfer_cap_ms`, `global_slot_ms`, `global_in_use`, `transfers_in_use`. Chỉ
+  `lane=adb.global_slot` mới là "host đang chạy đủ số lệnh adb cùng lúc". Log trước bản
+  này ghi "waited for an adb slot; the host is running its cap" cho tổng ba tầng, nên số
+  3.438 warning của r105 không chứng minh cap 12 đầy.
+- Cách đọc: `adb.global_slot` p90 cao → host/adb server nghẽn, hạ admission trước, không
+  tăng cap mù. `adb.serial_queue` cao mà `global_slot` thấp → nhiều lệnh dồn vào cùng
+  máy. `adb.exec`/`agent GET /source` cao khi các hàng đợi thấp → máy chậm; kiểm tải/
+  hierarchy trên canary (mục "Sức khỏe máy trước code").
+- Chưa có số đo đợt chạy nào bằng bản này; ngưỡng ô histogram và cap 64 series chưa đo.
 
 ### Sức khỏe máy trước code
 
