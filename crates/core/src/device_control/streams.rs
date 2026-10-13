@@ -438,14 +438,17 @@ impl DeviceControlPlane {
         context: UiSessionContext,
         capacity: UiCapacityReservation,
     ) -> Result<UiWithStreamContext, DeviceControlError> {
-        self.start_reserved_stream_internal(context, capacity)
+        self.start_reserved_stream_internal(context, capacity, true)
             .await
             .map_err(|failure| failure.error)
     }
     pub async fn start_reserved_stream_or_quarantine(
         &self, context: UiSessionContext, capacity: UiCapacityReservation,
     ) -> Result<UiWithStreamContext, DeviceControlError> {
-        match self.start_reserved_stream_internal(context, capacity).await {
+        match self
+            .start_reserved_stream_internal(context, capacity, true)
+            .await
+        {
             Ok(context) => Ok(context),
             Err(mut failure) => {
                 if let Some(context) = failure.context.take() {
@@ -461,10 +464,13 @@ impl DeviceControlPlane {
         }
     }
 
+    /// `frames_drive_decisions` is false only for a caller that takes no decision from the
+    /// stream's frames (`DeviceDriver::start_stream_after_session_without_frame_decisions`).
     pub(super) async fn start_reserved_stream_internal(
         &self,
         mut context: UiSessionContext,
         mut capacity: UiCapacityReservation,
+        frames_drive_decisions: bool,
     ) -> Result<UiWithStreamContext, StreamContextUpgradeFailure> {
         let lease = match self.validate_session(&context) {
             Ok(lease) => lease,
@@ -565,7 +571,14 @@ impl DeviceControlPlane {
             cleanup: cleanup.clone(),
         };
 
-        let proof = match self.driver.start_stream_after_session(&udid).await {
+        let started = if frames_drive_decisions {
+            self.driver.start_stream_after_session(&udid).await
+        } else {
+            self.driver
+                .start_stream_after_session_without_frame_decisions(&udid)
+                .await
+        };
+        let proof = match started {
             Ok(proof) => proof,
             Err(error) => {
                 if let Ok(handoff) = self.driver.confirm_interaction_stream_stopped(&udid).await {

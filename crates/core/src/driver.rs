@@ -452,6 +452,20 @@ pub trait DeviceDriver: Send + Sync {
     async fn start_stream_after_session(&self, _udid: &str) -> anyhow::Result<StreamStartProof> {
         unsupported("startStreamAfterSession")
     }
+    /// [`Self::start_stream_after_session`] for a caller that takes **no decision** from the
+    /// stream's frames: no tap, no change proof, no evidence. Android publish is that caller,
+    /// because its route reads the hierarchy for every tap and every proof.
+    ///
+    /// Such a caller tolerates a slower snapshot source, so a backend whose live capture gives
+    /// no first frame may fall back to one instead of failing the session. The proof keeps its
+    /// meaning: a decoded frame captured after this call reached the hub at this generation.
+    /// The default is the strict start.
+    async fn start_stream_after_session_without_frame_decisions(
+        &self,
+        udid: &str,
+    ) -> anyhow::Result<StreamStartProof> {
+        self.start_stream_after_session(udid).await
+    }
     /// Confirms that the per-device driver owns no MJPEG producer and records
     /// the current generation as the session handoff point. This must not stop
     /// or start a producer.

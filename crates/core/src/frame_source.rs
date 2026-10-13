@@ -131,6 +131,38 @@ pub fn decodes_as_jpeg(bytes: &[u8]) -> bool {
     bytes.starts_with(&[0xFF, 0xD8, 0xFF]) && image::load_from_memory(bytes).is_ok()
 }
 
+/// The `stream_url` scheme of a stream backed by periodic snapshots instead of a live capture.
+///
+/// Such a stream exists only behind
+/// [`crate::DeviceDriver::start_stream_after_session_without_frame_decisions`]: its frames are
+/// fresh captures, but up to one capture period old, so nothing may decide from them.
+pub const SNAPSHOT_STREAM_SCHEME: &str = "snapshot-stream://";
+
+pub fn is_snapshot_stream(stream_url: &str) -> bool {
+    stream_url.starts_with(SNAPSHOT_STREAM_SCHEME)
+}
+
+/// Re-encode a PNG capture as the JPEG every hub consumer expects.
+///
+/// Decoding is the proof that the capture is an image, the same claim [`decodes_as_jpeg`]
+/// makes for a minicap frame.
+pub fn png_to_jpeg(png: &[u8], quality: u8) -> anyhow::Result<Vec<u8>> {
+    anyhow::ensure!(
+        png.starts_with(&[0x89, b'P', b'N', b'G']),
+        "capture of {} bytes is not a PNG",
+        png.len()
+    );
+    let image = image::load_from_memory_with_format(png, image::ImageFormat::Png)?.to_rgb8();
+    let mut jpeg = Vec::new();
+    image::codecs::jpeg::JpegEncoder::new_with_quality(&mut jpeg, quality).encode(
+        image.as_raw(),
+        image.width(),
+        image.height(),
+        image::ExtendedColorType::Rgb8,
+    )?;
+    Ok(jpeg)
+}
+
 /// A source that never produces frames — used when no stream is available so
 /// callers can degrade instead of branching on `Option<Arc<dyn FrameSource>>`.
 pub struct NullFrameSource;

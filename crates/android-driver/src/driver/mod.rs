@@ -3889,33 +3889,17 @@ impl DeviceDriver for AndroidDriver {
         &self,
         udid: &str,
     ) -> anyhow::Result<riviu_core::StreamStartProof> {
-        let sink = self.sink()?;
-        let claim = self.claim_start(udid)?;
-        if self.streams.lock().await.contains_key(udid) {
-            anyhow::bail!(
-                "interaction stream for {udid} requires the old producer to be stopped first"
-            );
-        }
-        let generation = sink.generation(udid);
-        // Catches a drift between the handoff and now, here, with a message naming
-        // the step — rather than letting core report an opaque StopProofMismatch.
-        let reservation = self.interaction.reserve_stream(udid, generation)?;
+        self.start_session_stream(udid, false).await
+    }
 
-        let started = self
-            .spawn_producer(
-                udid,
-                reservation.generation(),
-                StreamReadiness::DecodedFrame,
-            )
-            .await;
-        drop(claim);
-        let first_frame_observed = started?;
-        self.interaction.complete_stream(&reservation)?;
-        Ok(riviu_core::StreamStartProof {
-            generation: reservation.generation(),
-            first_frame_observed,
-            stream_url: format!("auto-stream://{udid}"),
-        })
+    /// The same start, except that a phone whose minicap gives no picture streams
+    /// `screencap` snapshots instead of failing the session (#28, 13/10/2026). Only a
+    /// caller that decides nothing from frames reaches this; see the trait.
+    async fn start_stream_after_session_without_frame_decisions(
+        &self,
+        udid: &str,
+    ) -> anyhow::Result<riviu_core::StreamStartProof> {
+        self.start_session_stream(udid, true).await
     }
 
     /// Destructive stop: the producer dies and the tile's cached frame goes with it.
