@@ -7,7 +7,7 @@ description: >
   vite/Playwright của worker còn giữ thư mục) và đưa "Bài học cho docs" vào owner doc.
   Không push, merge hay release khi người dùng chưa duyệt; không xóa vĩnh viễn worktree.
 metadata:
-  version: "1.0.0"
+  version: "1.1.0"
   origin: local
   project: riviu-manager
 ---
@@ -38,6 +38,28 @@ Skill này là trình tự của coordinator; cú pháp CLI chính chủ ở ski
    `docs(...)`. Không viết changelog.
 
 Chi tiết lệnh, timeout và các ca lỗi: [vòng đời worker](references/lifecycle.md).
+
+## Liên lạc với worker: ca đã mất giờ (13/10/2026)
+
+- **`question` phải trả bằng `reply --id <msg_id>`.** Worker gọi `orchestration ask` chặn cho
+  tới khi có reply đúng id; `send --to dispatch:<id>` không mở khóa nó. HX-START chờ 1 giờ vì
+  lỗi này.
+- Worker tự poll `check --terminal term_<…>` thì gửi tới `term_<…>` (lấy từ `from_handle` của
+  tin nó gửi). Không chắc thì gửi cả hai handle.
+- **Không bắt worker chờ "tin tiếp theo của coordinator".** Giao điều kiện tự kiểm: "chạy
+  cargo khi không còn `rustc.exe`/`cargo.exe` 60 s", "khi `git log main..cattfan/<x>` có
+  commit". Một vòng tin đi-về mất 10–30 phút vì worker ngủ giữa các lần poll.
+- Chỉ một build Rust tại một thời điểm khi controller nghiệm thu đang chạy (WebView 3 GB,
+  máy 32 GB). Xếp thứ tự worker rõ trong tin.
+- Không chạy `check --wait` dài ở nền khi RAM căng: hệ thống giết tiến trình nền và bạn mất
+  thông báo. Poll bằng `check` không chờ; worker im lặng thì `worker-show --dispatch`
+  (`attention.requiresAction:true`, `categories:["input"]` = đang chờ gì đó) rồi
+  `worker-read --dispatch` đọc đuôi transcript để biết nó chờ cái gì.
+- Output JSON của `orca` có BOM: Python đọc bằng `utf-8-sig`/`lstrip('﻿')`.
+- Worktree bị tiến trình giữ ("being used by another process"): để đó, thử lại sau; không
+  xóa cưỡng bức, không `git worktree remove --force`.
+- Worker không chạm điện thoại; mọi việc trên máy do coordinator làm, với bằng chứng (ảnh,
+  log, serial, giờ) ghi vào spec cho worker.
 
 ## Dừng lại hỏi người dùng khi
 

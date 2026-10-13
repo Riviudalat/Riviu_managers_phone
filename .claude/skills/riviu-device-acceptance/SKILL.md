@@ -7,7 +7,7 @@ description: >
   rõ, chụp màn hình/hierarchy trước khi phiên đóng app. Không tự mở controller, kill
   adb-server, reboot máy còn effect chưa rõ hay chạy tương tác công khai ngoài phạm vi duyệt.
 metadata:
-  version: "1.1.0"
+  version: "1.2.0"
   origin: local
   project: riviu-manager
 ---
@@ -87,3 +87,61 @@ Mỗi nghĩa vụ (máy × việc) đúng một trạng thái:
 
 ACK, screenshot hay HTTP 200 đơn lẻ không đủ cho `verified`. Bàn giao ghi lệnh thật, exit,
 serial-keyed outcome và phần chưa kiểm.
+
+## 7. Ca đã gặp (tuần 7–13/10/2026) và cách tránh
+
+Mỗi mục dưới đây từng làm mất 20–60 phút. Đọc trước khi mở controller.
+
+### Scope và report dir của runner
+
+- **Preflight cần scope ở trạng thái inactive:** `campaignIds: []` và `capabilities` vắng
+  (hoặc toàn `false`). Scope có `campaignIds`/`capabilities: true` của đợt trước thì preflight
+  từ chối ngay ("cần campaignIds rỗng", "chỉ nhận capability false hoặc absent").
+- **Controller ghim scope lúc mở.** Một lượt Start thất bại để lại scope active với requestId
+  chết; sửa file về inactive **chưa đủ**, controller vẫn chặn ("file phạm vi … đã khác lúc mở
+  controller"). Phải: sửa file → `close.mjs` → `launch.py` lại.
+- **Mỗi lần chạy lại dùng `--report-dir` mới** (`publish`, `publish2`, …). File
+  `preflight-request.json` của lần hỏng làm lần sau chết với "--dev-scope đã đổi sau
+  preflight"; nếu phải dùng lại thư mục thì đưa file đó vào Recycle Bin.
+- **Template bundle = đúng tập đã quét.** Mỗi máy một thư mục bundle riêng trong `--source`;
+  một thư mục không gánh được hai máy (`bundleIdsMatchTemplate:false`). Chạy
+  `inspect-source.mjs` hai lần: lần đầu lấy id, lần hai khớp.
+- Submit trả `pendingDeadline` (exit 2) là bình thường. Observe chết với
+  `page.evaluate: Target page … closed` chỉ là mất CDP, chiến dịch vẫn chạy: đọc DB
+  (`publish_assignments`, `publish_sheet_outbox`, `publish_dispatch_jobs`) chỉ đọc
+  (`?mode=ro`) để theo dõi, `py -3.12 -I -X utf8` để in tiếng Việt.
+- IPC tới controller có thể treo >2 phút khi 30 máy đang soạn: bọc `timeout 90`; trạng thái
+  thì lấy từ DB, không từ IPC.
+
+### Khôi phục không chạm máy
+
+- Dòng `uncertain`/`needsReview` (`processingWaitExhausted`, `clipboardUnchanged`…):
+  `publish_recovery_capabilities` → `publish_resume_verification
+  {assignmentId, confirmed:true, expectedRevision}`. Không bao giờ retry các dòng này.
+- Dòng `failed_before_dispatch`: `retry-publish.mjs <campaign> <vị trí 1-based trong
+  scope.deviceIds,…> <label> --scope … --out …`. Recovery tự thử 3 lần trước; chỉ retry tay
+  khi job đã `compose:finished` mà dòng vẫn failed.
+- Helper báo `recovery_required`/`HelperMaintenanceCleanupPending` sau khi controller khởi
+  động lại, bàn phím mặc định là `com.riviu.agent/.RiviuIme`: từ `bc3139c2` maintenance tự
+  trả bàn phím đã ghi. Dữ liệu cũ không có bản ghi: `adb -s <serial> shell ime set <bàn phím
+  gốc>` (đội máy dùng `com.genfarmer.uiautomator/.AdbKeyboard`) → `agent_helper_maintenance_prepare`
+  → `execute` (confirmed, qualifyReplacement); receipt `superseded` +
+  `packageProcessAbsent:true` là xong.
+- Máy kẹt `offline` sau reboot do Riviu: từ `6c5572fb` tự `adb -s <serial> reconnect`. Không
+  bao giờ `reconnect` toàn bộ hay `kill-server`.
+- Popup mới sau Post (email updates, "Continue editing this post?"): chụp màn hình vào
+  `target/apply-apk-20261009/`, giao worker có `riviu-tiktok-apk` thêm vào catalog
+  (Shadow → Act khi có dump thật). Không tự bấm nút có cam kết.
+
+### Tải khi chạy 30 máy
+
+- 30 máy soạn bài cùng lúc, có stream hình trực tiếp: `/source` 5–18 s (bình thường <1 s),
+  `surfaceflinger ≥60%` CPU, load average 7–8 trên SM-G955F; ~1/3 dòng hỏng lượt đầu
+  (chọn ảnh/nhạc quá hạn) rồi recovery tự đăng được. Máy tính host không nghẽn (Riviu ~10%
+  CPU). Khi chưa có cap đồng thời trong code: chạy theo đợt ≤10 máy hoặc chấp nhận một
+  vòng retry.
+- WebView của controller lên 3 GB sau vài giờ; đóng controller giữa các đợt bằng `close.mjs`.
+- Chỉ một build Rust tại một thời điểm trên máy 32 GB khi controller đang chạy; build thứ hai
+  bị hệ điều hành giết.
+- Đợt tham chiếu: `fff151ba` 30/30, `a62c6b72` 29/30 lên Sheet
+  (`target/apply-apk-20261009/OPEN-ISSUES-publish-20261013.md`).
