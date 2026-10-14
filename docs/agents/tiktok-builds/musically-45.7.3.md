@@ -365,8 +365,14 @@ Máy 36 (`ce04171435f104080c`, SM-G955F, @dongchoinoinoi_dalat), campaign r115 `
 | 8 | oEmbed (`/oembed?url=…/video/<id>`) | `author_unique_id` khớp, `title` = caption, `embed_product_id` = id |
 
 - Bước 4–5 đã lưu thành Flow **"Copy link bài đang mở (TikTok 45.7.3 en)"** (Inspector →
-  Lưu thành Flow). Bước 1–3 không lưu được thành Flow: Inspector cần phần tử kết quả mới
-  xuất hiện sau mỗi lần bấm (tải lại Profile không đổi gì) và ô lưới không có selector.
+  Lưu thành Flow). Lúc đo, bước 1–3 không lưu được thành Flow (ô lưới không có selector,
+  tải lại Profile không làm hiện phần tử mới). Inspector bản sau thêm "ô thứ N trong lưới",
+  kết quả "màn hình giữ nguyên" có lựa chọn rõ, bước vuốt và nút Flow "Đọc clipboard"; ghi
+  trọn luồng bằng UI trên máy thật chưa thử.
+- Bảng Chia sẻ có hai dạng, cùng `fl4` "Bottom sheet" > header `ti2` (`tv_title` "Send to",
+  `lpe` Search, `l86` Close). Dòng Copy link `dka` chỉ có ở dạng đầy đủ (bài của mình mở từ
+  Profile). Dạng "Send to" (máy 44, Share trên feed) chỉ có Cast/Pin/Create group/Captions/
+  Playback speed/Privacy settings: đóng bằng `l86`, không bấm ô nào khác.
 - Feed sau Post đang phát đúng bài của mình (tên, "Xs ago", caption, nút quảng bá). Đây là
   đường ngắn hơn đi qua Profile nếu code chứng minh đủ các dấu hiệu đó trước khi bấm Share;
   chưa dùng trong code (`execution.rs` vẫn đi Profile vì Share trên feed có thể thuộc bài

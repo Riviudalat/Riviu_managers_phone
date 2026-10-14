@@ -21,8 +21,12 @@ nguyên bài dự kiến, retry lấy link hoặc ghi Sheet không gửi bài l�
 
 Khi đã lưu liên kết ứng viên đúng lượt đăng nhưng dữ liệu công khai của TikTok
 chưa sẵn sàng, app dùng lại link và tự kiểm tra qua mạng mỗi 2 phút, tối đa 12 lượt
-trong một đợt xác minh. Giai đoạn này không mở lại điện thoại để Copy và vẫn kiểm
-tra khi máy offline, chưa sẵn sàng hoặc đang bận tác vụ khác. Lượt tự động chỉ chạy
+trong một đợt xác minh. Các lần gọi kiểm tra công khai của TikTok đi lần lượt, cách
+nhau ít nhất 5 giây và tự lùi khi TikTok giới hạn tần suất; lượt TikTok không trả lời
+(hết giờ, 429/503) không tính vào 12 lượt mà được chờ tối đa 120 phút. Khi TikTok không
+trả lời và máy đang rảnh, app chứng minh bài ngay trên Hồ sơ của chính tài khoản (đúng
+caption, thời gian, Copy link) và chỉ nhận đúng bài của liên kết ứng viên; máy offline,
+chưa sẵn sàng hoặc đang bận thì chỉ kiểm qua mạng như trước. Lượt tự động chỉ chạy
 khi đến lịch và còn ngân sách; link chỉ được ghi Sheet sau khi xác minh đúng tài khoản,
 nội dung và thời điểm bài đăng.
 Lỗi tìm bài hoặc thao tác điện thoại vẫn dừng sau 8 lượt liên tiếp không có bằng chứng mới.
@@ -241,7 +245,8 @@ Hết 60 phút mà TikTok vẫn chưa trả link thì bài chuyển **Cần ki�
 ảnh đọc tăng không tính là tiến triển. Chỉ caption đầy đủ đúng bài, rồi caption và
 thời gian cùng bài khớp lần đầu mới mở thêm ngân sách chờ; chưa thay xác minh link.
 Link ứng viên đã lưu đúng định danh có ngân sách riêng tối đa 12 lượt chờ dữ liệu
-công khai; các lượt này dùng lại link và không tính vào 8 lượt thao tác điện thoại.
+công khai (lượt TikTok không trả lời giới hạn theo 120 phút, không theo số lượt); các
+lượt này dùng lại link và không tính vào 8 lượt thao tác điện thoại.
 Mở lại app giữ mốc Đăng, lần kiểm tiếp và bộ đếm. Lượt cần quan sát điện thoại
 chờ máy sẵn sàng/rảnh; lượt kiểm metadata của link đã giữ không phải chờ máy.
 Bài cũ chưa có bộ đếm bắt đầu từ lượt quan sát đầu của bản mới.
@@ -491,8 +496,8 @@ tập effect cụ thể theo `importId`; quét media sót chỉ chạm thư mụ
 ### Tiếp tục xác minh bài đã gửi sau khi Dừng
 
 Trong **Theo dõi → Chi tiết máy**, bài thuộc chiến dịch đã Dừng hoặc đã dừng tự
-kiểm vì 8 lượt không tiến triển, hết 60 phút chờ TikTok xử lý bài hoặc hết 12 lượt
-metadata có thể hiện
+kiểm vì 8 lượt không tiến triển, hết 60 phút chờ TikTok xử lý bài, hết 12 lượt
+metadata hoặc TikTok không trả lời kiểm tra công khai suốt 120 phút có thể hiện
 **Tiếp tục xác minh bài đã gửi** khi
 backend xác nhận còn đủ identity của lần Đăng. Chỉ xác nhận này mở ngân sách mới;
 refresh, khởi động lại app hoặc Kiểm tra liên kết thất bại không tự mở lại.
@@ -609,7 +614,10 @@ Canary Rust cũ chỉ dùng cô lập để khảo sát/rehearsal, Sheet tắt v
 Riviu trên cùng điện thoại hoặc nhập DB thử vào dữ liệu đang vận hành.
 
 Khi đã giữ được liên kết ứng viên của đúng bài đã gửi, lượt xác minh tiếp theo
-chỉ kiểm tra dữ liệu công khai qua mạng, không mở điện thoại để tìm link khác.
+kiểm tra dữ liệu công khai qua mạng trước. Chỉ khi TikTok không trả lời và máy rảnh,
+app mới mở Hồ sơ của chính tài khoản và chỉ nhận link có đúng ID bài của ứng viên;
+không tìm hay nhận link bài khác. Bảng Chia sẻ dạng "Send to" (không có Copy link) do
+app để lại được đóng bằng nút Close, không bấm ô liên hệ hay ứng dụng nào.
 Ứng viên không còn khớp lượt Đăng được giữ để kiểm tra, không chuyển sang thao tác
 điện thoại. TikTok chưa cung cấp đủ dữ liệu thì app giữ
 bài chờ kiểm tra; liên kết ứng viên chưa được ghi là bài thành công hoặc ghi
