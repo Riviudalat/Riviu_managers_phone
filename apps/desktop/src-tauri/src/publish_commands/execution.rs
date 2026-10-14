@@ -708,7 +708,61 @@ pub fn publish_get(
     state: State<'_, AppState>,
     campaign_id: String,
 ) -> Result<Option<PublishCampaignDetail>, CommandError> {
-    state.db.get_publish_campaign(&campaign_id).map_err(err)
+    let mut detail = state.db.get_publish_campaign(&campaign_id).map_err(err)?;
+    for assignment in detail
+        .iter_mut()
+        .flat_map(|detail| detail.assignments.iter_mut())
+    {
+        if let Some(raw) = assignment.evidence_json.as_deref() {
+            assignment.evidence_json = Some(evidence_for_view(raw));
+        }
+    }
+    Ok(detail)
+}
+
+/// Assignment evidence as the publish views read it.
+///
+/// Measured 15/10/2026 over the 110 rows of the six newest campaigns: `stageDiagnostics` (every
+/// read and tap of the last attempt) was 55% of the 16.9 MB and the `priorEvidenceJson` chain of
+/// earlier attempts 42%, so one 20-row `publish_get` was 3.2 MB while the monitor and attention
+/// queue re-read campaigns every few seconds. No view reads either key; both stay in SQLite and
+/// in `publish_attempts`. Earlier attempts keep only their `nativeImport`, which the acceptance
+/// harness follows to the import id. Unparseable evidence is returned as stored.
+pub(super) fn evidence_for_view(raw: &str) -> String {
+    let Ok(mut value) = serde_json::from_str::<serde_json::Value>(raw) else {
+        return raw.to_owned();
+    };
+    if let Some(map) = value.as_object_mut() {
+        map.remove("stageDiagnostics");
+        if let Some(prior) = map
+            .remove("priorEvidenceJson")
+            .and_then(|prior| prior_for_view(prior, 0))
+        {
+            map.insert("priorEvidenceJson".into(), prior);
+        }
+    }
+    value.to_string()
+}
+
+fn prior_for_view(prior: serde_json::Value, depth: usize) -> Option<serde_json::Value> {
+    let prior = match prior {
+        serde_json::Value::String(raw) => serde_json::from_str(&raw).ok()?,
+        other => other,
+    };
+    let mut kept = serde_json::Map::new();
+    if let Some(native) = prior.get("nativeImport") {
+        kept.insert("nativeImport".into(), native.clone());
+    }
+    if depth < 3 {
+        if let Some(older) = prior
+            .get("priorEvidenceJson")
+            .cloned()
+            .and_then(|older| prior_for_view(older, depth + 1))
+        {
+            kept.insert("priorEvidenceJson".into(), older);
+        }
+    }
+    (!kept.is_empty()).then_some(serde_json::Value::Object(kept))
 }
 
 #[tauri::command]

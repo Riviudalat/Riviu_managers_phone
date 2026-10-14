@@ -1,6 +1,25 @@
 use super::*;
 use riviu_core::tiktok_share::{LinkCapture, OwnPostLink};
 
+/// The views get state and proof without the bulk; the harness still finds the prior import.
+#[test]
+fn view_evidence_drops_stage_diagnostics_and_keeps_only_prior_imports() {
+    let older = serde_json::json!({"nativeImport": {"importId": "imp-1"}, "stageDiagnostics": {"entries": [1, 2, 3]}});
+    let prior = serde_json::json!({"message": "observe [timeout]", "stageDiagnostics": {"entries": [4]},
+        "priorEvidenceJson": older.to_string()});
+    let raw = serde_json::json!({"verificationStatus": {"state": "pending"}, "stageDiagnostics": {"entries": [5]},
+        "priorEvidenceJson": prior.to_string()}).to_string();
+    let view: serde_json::Value = serde_json::from_str(&evidence_for_view(&raw)).unwrap();
+    assert_eq!(view["verificationStatus"]["state"], "pending");
+    assert!(view.get("stageDiagnostics").is_none());
+    assert!(view["priorEvidenceJson"].get("message").is_none());
+    assert_eq!(
+        view["priorEvidenceJson"]["priorEvidenceJson"]["nativeImport"]["importId"],
+        "imp-1"
+    );
+    assert_eq!(evidence_for_view("not json"), "not json");
+}
+
 struct MetadataSession {
     language: Option<&'static str>,
     version: Option<&'static str>,

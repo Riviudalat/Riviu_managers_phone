@@ -125,7 +125,13 @@ về nút đã mở). Đóng là trở lại đủ ô. Hai tab:
   tuổi được đọc một lần mỗi phiên bản; lượt nào đang có Chưa rõ/lỗi Sheet vào sổ "chưa kết luận"
   (nhớ trên máy, qua khởi động lại) và luôn được đọc, ngoài mọi ngân sách, tới khi một lần đọc thành
   công không còn mục nào — chỉ lúc đó mới rời sổ. Tuổi, ngân sách hay lượt mới không bao giờ đẩy nó
-  ra. Đọc lỗi giữ các mục của lần đọc thành công trước, kèm thông báo lỗi, và số thành ≥N. **Theo
+  ra. Lượt đăng đang chạy đọc lại mỗi 2 giây; lượt đăng đã xong đọc lại khi backend báo
+  `publishUpdated` cho đúng lượt đó (tối đa một lần mỗi 10 giây, kèm một lần đọc cuối nhịp) và
+  mỗi 2 phút làm lưới an toàn. Đo 15/10/2026: 59 lượt còn mục chưa kết luận, đọc mỗi 10 giây (mỗi
+  lần `publish_get` 3 MB + một lượt quét xác minh) giữ controller ở 2 nhân lúc rảnh và tới 13 nhân
+  lúc đỉnh. `publish_get` trả bằng chứng gọn cho view: bỏ `stageDiagnostics`, chuỗi lượt trước chỉ
+  giữ `nativeImport`; bản đầy đủ vẫn ở SQLite và `publish_attempts`. Đọc lỗi giữ các mục của lần
+  đọc thành công trước, kèm thông báo lỗi, và số thành ≥N. **Theo
   dõi** ghim đúng lượt đó (kể cả lượt chỉ tìm thấy qua đọc mọi tuổi) vào tab Đang chạy. Mỗi lượt đăng có tổng ba
   số riêng (`PublishRunOutcomeTotals`), nên chi tiết chiến dịch, hàng đợi và Lượt chạy cùng số.
   Dòng bài dùng `PostOutcomeLayers`; lỗi Sheet vẫn giữ link. **Chưa rõ và lỗi Sheet ở lại tới khi có
