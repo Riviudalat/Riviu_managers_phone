@@ -221,6 +221,12 @@ pub(super) const VERIFICATION_NO_PROGRESS_LIMIT: u64 = 8;
 const VERIFICATION_NO_PROGRESS_CAUSE: &str = "verificationNoProgress";
 const METADATA_RETRY_LIMIT: u64 = 12;
 const METADATA_RETRY_CAUSE: &str = "metadataRetryBudgetExhausted";
+// 14/10/2026 13:45-14:10, one host and 20 phones: oEmbed hung 15-20 s or answered 429/503
+// while TikTok's other pages answered at once, and r112-r115 took up to 46 minutes from Post
+// to Sheet. Unanswered public checks retry on the 2-minute cadence for this long from the
+// first one instead of spending METADATA_RETRY_LIMIT. A cap, not a target.
+pub(super) const METADATA_UNREACHABLE_MINUTES: i64 = 120;
+const METADATA_UNREACHABLE_CAUSE: &str = "publicMetadataUnreachable";
 // Phone 23 (ce031713cd92d90701, SM-G955F, TikTok 45.7.3 en), campaign fff151ba, 13/10/2026:
 // Copy link still showed "Post is being processed" 36+ minutes after Post. A cap, not a target.
 pub(super) const PROCESSING_WAIT_MINUTES: i64 = 60;
@@ -382,6 +388,10 @@ fn advance_verification_budget(
     if prior["processingWaitFrom"].is_string() {
         budget["processingWaitFrom"] = prior["processingWaitFrom"].clone();
     }
+    if prior["metadataUnreachableSince"].is_string() {
+        budget["metadataUnreachableSince"] = prior["metadataUnreachableSince"].clone();
+        budget["metadataUnreachableObservations"] = prior["metadataUnreachableObservations"].clone();
+    }
     budget
 }
 
@@ -400,6 +410,24 @@ pub fn publish_upload_settled(intent: Option<&str>, evidence: Option<&str>) -> b
         && budget["publicationStage"]
             .as_u64()
             .is_some_and(|stage| stage >= 2)
+}
+
+/// TikTok's public check did not answer: no response (timeout, connect failure or the
+/// host's own oEmbed pacing), 429 or 5xx, or a cut-off, oversized or unreadable body.
+/// A mismatch is Rejected and any other 4xx is an answer; both keep their budgets.
+fn public_check_unanswered(attempt: &crate::publish_submission::MetadataAttempt) -> bool {
+    use crate::publish_submission::{MetadataAttemptState, MetadataDiagnostic};
+    matches!(attempt.state, MetadataAttemptState::Unavailable)
+        && match attempt.stage {
+            MetadataDiagnostic::Request
+            | MetadataDiagnostic::BodyRead
+            | MetadataDiagnostic::BodyLimit
+            | MetadataDiagnostic::ResponseParse => true,
+            MetadataDiagnostic::HttpStatus => attempt
+                .http_status
+                .is_some_and(|status| status == 429 || (500..600).contains(&status)),
+            _ => false,
+        }
 }
 
 /// A copied candidate permits bounded network reads, never publication or Sheet authority.
@@ -601,11 +629,13 @@ fn explicit_non_stop_review(evidence: Option<&str>) -> bool {
                 && review["cause"] != "verificationDeadline"
                 && review["cause"] != VERIFICATION_NO_PROGRESS_CAUSE
                 && review["cause"] != PROCESSING_WAIT_CAUSE
-                && review["cause"] != METADATA_RETRY_CAUSE)
+                && review["cause"] != METADATA_RETRY_CAUSE
+                && review["cause"] != METADATA_UNREACHABLE_CAUSE)
                 || v.get("verificationReviewBeforeStop")
                     .is_some_and(|prior| prior["cause"] != VERIFICATION_NO_PROGRESS_CAUSE
                         && prior["cause"] != PROCESSING_WAIT_CAUSE
-                        && prior["cause"] != METADATA_RETRY_CAUSE)
+                        && prior["cause"] != METADATA_RETRY_CAUSE
+                        && prior["cause"] != METADATA_UNREACHABLE_CAUSE)
         })
 }
 
@@ -1699,6 +1729,10 @@ impl Database {
             evidence["priorEvidenceJson"] = serde_json::to_value(&prior)?;
         }
         let metadata_observation = retained_metadata_observation(&transaction,candidate,diagnostic)?;
+        let metadata_unanswered = metadata_observation && diagnostic
+            .and_then(|d| d.get("pendingMetadataCandidate"))
+            .and_then(|value| serde_json::from_value::<crate::publish_submission::PendingMetadataCandidate>(value.clone()).ok())
+            .is_some_and(|pending| public_check_unanswered(&pending.captured.metadata));
         // Judged against the previous pass's diagnostic, before this one replaces it.
         let exempt = exempt_from_no_progress(&evidence, reason_code, diagnostic);
         if let Some(diagnostic) = diagnostic {
@@ -1738,7 +1772,15 @@ impl Database {
             let mut budget = if prior["version"] == 1 && prior["intentSha256"] == initial["intentSha256"] {
                 prior.clone()
             } else { initial };
-            budget["metadataObservations"] = serde_json::json!(budget["metadataObservations"].as_u64().unwrap_or(0).saturating_add(1));
+            if metadata_unanswered {
+                // TikTok throttling is not a failed proof: bounded by elapsed time below.
+                budget["metadataUnreachableObservations"] = serde_json::json!(budget["metadataUnreachableObservations"].as_u64().unwrap_or(0).saturating_add(1));
+                if !budget["metadataUnreachableSince"].is_string() {
+                    budget["metadataUnreachableSince"] = serde_json::json!(checked.to_rfc3339());
+                }
+            } else {
+                budget["metadataObservations"] = serde_json::json!(budget["metadataObservations"].as_u64().unwrap_or(0).saturating_add(1));
+            }
             budget["metadataLimit"] = serde_json::json!(METADATA_RETRY_LIMIT);
             budget["observations"] = serde_json::json!(budget["observations"].as_u64().unwrap_or(0).saturating_add(1));
             budget
@@ -1752,7 +1794,12 @@ impl Database {
             )
         };
         let metadata_exhausted = budget["metadataObservations"].as_u64().unwrap_or(0) >= METADATA_RETRY_LIMIT;
-        let budget_exhausted = metadata_exhausted || budget["noProgressObservations"].as_u64().unwrap_or(0)
+        let metadata_unreachable = !prior_review
+            && metadata_unanswered
+            && budget["metadataUnreachableSince"].as_str()
+                .and_then(|since| DateTime::parse_from_rfc3339(since).ok())
+                .is_some_and(|since| checked >= since.with_timezone(&Utc) + chrono::Duration::minutes(METADATA_UNREACHABLE_MINUTES));
+        let budget_exhausted = metadata_exhausted || metadata_unreachable || budget["noProgressObservations"].as_u64().unwrap_or(0)
             >= VERIFICATION_NO_PROGRESS_LIMIT;
         evidence["verificationBudget"] = budget;
         let review = identity_missing || legacy_review || prior_review || budget_exhausted
@@ -1786,6 +1833,8 @@ impl Database {
                 .unwrap_or(observation_reason.clone())
         } else if metadata_exhausted && !legacy_review {
             format!("Đã giữ liên kết ứng viên; tự kiểm tra dữ liệu công khai đã dừng sau {METADATA_RETRY_LIMIT} lượt chưa xác minh được. {observation_reason} Xác nhận Tiếp tục xác minh bài đã gửi để mở ngân sách mới, không đăng lại.")
+        } else if metadata_unreachable && !legacy_review {
+            format!("Đã giữ liên kết ứng viên; kiểm tra công khai của TikTok không phản hồi suốt {METADATA_UNREACHABLE_MINUTES} phút (TikTok giới hạn tần suất hoặc lỗi máy chủ), dữ liệu bài chưa bị từ chối. {observation_reason} Không đăng lại; xác nhận Tiếp tục xác minh bài đã gửi để thử lại.")
         } else if processing_exhausted && !legacy_review {
             format!("TikTok vẫn chưa trả link sau {PROCESSING_WAIT_MINUTES} phút chờ xử lý bài ({reason_code}). {observation_reason} Cần kiểm tra; xác nhận Tiếp tục xác minh bài đã gửi để chờ thêm, không đăng lại.")
         } else if budget_exhausted && !legacy_review {
@@ -1824,6 +1873,8 @@ impl Database {
             reason_code
         } else if metadata_exhausted {
             METADATA_RETRY_CAUSE
+        } else if metadata_unreachable {
+            METADATA_UNREACHABLE_CAUSE
         } else if processing_exhausted {
             PROCESSING_WAIT_CAUSE
         } else if budget_exhausted {
