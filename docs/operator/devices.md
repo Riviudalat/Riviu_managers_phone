@@ -331,6 +331,21 @@ tác. Khi đang ghi, sau mỗi bấm hãy chọn phần tử chỉ xuất hiện
 **Dùng làm kết quả của bước vừa bấm**; app không tự lấy một node mới sau 350 ms để
 gọi là thành công. **Dừng ghi** rồi **Lưu thành Flow**. Mở Flow thiết bị để chỉnh và
 chạy. Phiên còn bước chờ xác minh không được lưu.
+
+Phần tử không có thuộc tính riêng nhưng giống hệt các phần tử cùng loại trong một khung
+cuộn (ô lưới hồ sơ TikTok `emr`) được chọn theo thứ tự: bảng thuộc tính ghi rõ, ví dụ
+`emr · ô thứ 1 trong lưới`, và nút ghi **Bấm ô thứ 1 trong lưới**. Lúc bấm, app đọc lại
+cây giao diện; khung cuộn không còn là một khung duy nhất hoặc có ít hơn N phần tử thì
+dừng, không đoán. Bước làm mới (bấm lại tab, kéo xuống) giữ nguyên màn hình: chọn một
+phần tử vẫn còn rồi bấm **Bước này làm mới, màn hình giữ nguyên — dùng phần tử vẫn còn
+làm kết quả**; Flow kiểm phần tử đó còn hiển thị sau thao tác. Nút mặc định vẫn đòi phần
+tử mới xuất hiện. **Vuốt** gửi một lần vuốt theo hướng và quãng (tỷ lệ màn hình); khi
+đang ghi, chọn kết quả như bước bấm. Khi đang ghi còn có **Ghi dấu clipboard** (ghi một
+dấu riêng vào clipboard, đặt trước bước mở bảng chia sẻ) và **Ghi bước đọc clipboard vào
+biến …** (đọc ngay, hiện nội dung một lần để kiểm bằng mắt, không lưu nội dung vào phiên
+ghi). Clipboard vẫn còn dấu nghĩa là bước sao chép chưa có hiệu lực: bước đọc báo lỗi,
+không ghi. Ví dụ lấy link bài vừa đăng: Profile → kéo xuống làm mới → ô thứ 1 → Ghi
+dấu clipboard → Share → Copy link → đọc clipboard vào biến `link`.
 Macro tọa độ bên dưới vẫn dùng cho thao tác cử chỉ; Flow Inspector tìm lại phần tử.
 
 Agent có thể dùng MCP Riviu khi Local API được bật và token được cung cấp qua

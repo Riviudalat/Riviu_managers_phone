@@ -17,6 +17,7 @@ pub use data::{validate_flow_variable_name, FlowCompareOperator};
 pub(crate) use device_context::*;
 pub use evidence::*;
 pub(crate) use executor::*;
+pub use extended::{clipboard_sentinel, is_clipboard_sentinel, CLIPBOARD_SENTINEL_PREFIX};
 pub use model::*;
 pub use runtime::*;
 
@@ -99,6 +100,7 @@ mod tests {
                 ActionKind::HttpRequest,
                 ActionKind::SheetRead,
                 ActionKind::SheetWrite,
+                ActionKind::ReadClipboard,
             ]
         );
         assert!(catalog.iter().all(|entry| !matches!(
@@ -156,6 +158,7 @@ mod tests {
             description_prefix: None,
             scope: None,
             action_target: None,
+            ordinal: None,
         };
         let evidence = EvidenceSpec::ElementVisible {
             selector: Box::new(selector.clone()),
@@ -497,7 +500,10 @@ mod tests {
                 "Swipe",
                 ActionCategory::Input,
                 5_000,
-                vec![EvidenceKind::FrameDigestChanged],
+                vec![
+                    EvidenceKind::FrameDigestChanged,
+                    EvidenceKind::ElementVisible,
+                ],
             ),
             (
                 ActionKind::AutoSwipe,

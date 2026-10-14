@@ -603,15 +603,23 @@ UI và `scripts/riviu_agent_mcp.mjs` gọi cùng observe/tap/record qua Tauri ho
 `POST /v1/inspector/{observe,tap,record,recording}`. MCP dùng URL loopback và token
 API hiện có, không mở ADB server hoặc phiên driver thứ hai. Mỗi thao tác giải lại
 selector duy nhất theo package; schema selector v2 hỗ trợ prefix, scope ancestor và
-clickable ancestor có định danh/độ sâu/geometry hữu hạn. Schema v1 thiếu các trường mới
-vẫn khớp exact như cũ. Recorder ghi intent trước tap, lưu ảnh/cây trước và sau. Nó
-không tự chọn node mới sau delay: UI gọi `inspector_confirm_postcondition` với selector
-người dùng chọn; backend kiểm selector đó chỉ có ở snapshot sau. Bước chưa xác minh giữ
-unverified và không xuất Flow tự chạy.
-Flow tap dạng `selector` có hậu điều kiện `elementVisible`, được kiểm cả compiler,
-runtime và ledger. Ledger nhận baseline `none` chỉ khi cấu hình là tap phần tử và
-hậu điều kiện là `elementVisible` trong cùng package; tap theo ảnh vẫn giữ baseline
-ảnh/generation. Cả kết quả đạt và không đạt đều phải khớp selector đã biên dịch.
+clickable ancestor có định danh/độ sâu/geometry hữu hạn, và `ordinal` (thứ tự 1-based
+trong khung `scope` đặt tên). Ordinal chỉ được đề xuất khi không có selector thuộc tính
+duy nhất, người dùng phải chọn; lúc chạy nó đọc cây mới và từ chối khi các match nằm ở
+nhiều khung hoặc ít hơn N. Schema v1 thiếu các trường mới vẫn khớp exact như cũ.
+Recorder ghi intent trước tap/vuốt, lưu ảnh/cây trước và sau. Nó không tự chọn node mới
+sau delay: UI gọi `inspector_confirm_postcondition` với selector người dùng chọn;
+backend mặc định kiểm selector đó chỉ có ở snapshot sau. `sameScreen` (bước làm mới tại
+chỗ) chỉ được bật bằng lựa chọn riêng và chỉ đòi selector còn ở snapshot sau. Bước chưa
+xác minh giữ unverified và không xuất Flow tự chạy. Bước clipboard của recorder đọc/ghi
+qua cùng helper với `device_get_clipboard`; nội dung đọc chỉ trả về UI, không lưu vào
+phiên ghi.
+Flow tap dạng `selector` và Swipe dạng `fromFraction`/`toFraction` có hậu điều kiện
+`elementVisible`, được kiểm cả compiler, runtime và ledger. Ledger nhận baseline `none`
+chỉ khi cấu hình là tap phần tử (cùng package) hoặc swipe tỷ lệ và hậu điều kiện là
+`elementVisible`; tap/vuốt theo ảnh vẫn giữ baseline ảnh/generation. `ReadClipboard`
+chế độ `arm` ghi sentinel `riviu-clipboard-sentinel-<attempt>`; chế độ `read` từ chối giá
+trị còn tiền tố sentinel (`ClipboardUnchanged`) thay vì ghi biến. Cả kết quả đạt và không đạt đều phải khớp selector đã biên dịch.
 ElementVisible chỉ chứng minh UI; không thay proof nghiệp vụ
 Đăng/Gửi, canonical link hoặc tài khoản. Dữ liệu quan sát nằm trong artifacts/inspector.
 

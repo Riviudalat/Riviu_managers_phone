@@ -101,6 +101,8 @@ function titleFor(name: string): string {
     profileId: "Mã hồ sơ",
     format: "Định dạng",
     from: "Từ điểm",
+    fromFraction: "Từ điểm (tỷ lệ màn hình)",
+    toFraction: "Đến điểm (tỷ lệ màn hình)",
     imageHeight: "Chiều cao ảnh",
     imageWidth: "Chiều rộng ảnh",
     label: "Nhãn",
@@ -843,8 +845,64 @@ export function FlowInspector({
       const selector = node.config.selector;
       return <fieldset className="flow-field-group"><legend>Phần tử đã bắt thuộc tính</legend>
         {([['package','Ứng dụng'],['description','Mô tả'],['text','Chữ'],['resourceId','ID'],['className','Loại']] as const).map(([field,label]) => <label className="flow-field" key={field}><span>{label}</span><input value={typeof selector[field]==='string'?selector[field]:''} onChange={event=>{const next={...selector};if(event.target.value)next[field]=event.target.value;else delete next[field];commitConfig({selector:next});}}/></label>)}
-        <p>Tìm lại đúng một phần tử trên giao diện hiện tại trước khi bấm.</p><FieldIssues issues={nodeIssues}/>
+        {typeof selector.ordinal === "number"
+          ? <p>Chọn theo thứ tự: phần tử thứ {selector.ordinal} trong khung cuộn. Đọc lại giao diện ngay trước khi bấm; thiếu phần tử thứ {selector.ordinal} thì dừng, không đoán.</p>
+          : <p>Tìm lại đúng một phần tử trên giao diện hiện tại trước khi bấm.</p>}
+        <FieldIssues issues={nodeIssues}/>
       </fieldset>;
+    }
+
+    if (node.kind === "readClipboard") {
+      const arm = node.config.mode === "arm";
+      return <>
+        <div role="group" aria-label="Cách dùng clipboard" className="flow-segmented-control">
+          <button type="button" aria-pressed={arm} onClick={() => commitConfig({ mode: "arm" })}>Ghi dấu trước</button>
+          <button type="button" aria-pressed={!arm} onClick={() => commitConfig({
+            mode: "read",
+            name: typeof node.config.name === "string" && node.config.name ? node.config.name : "clipboardText",
+          })}>Đọc vào biến</button>
+        </div>
+        {arm
+          ? <p>Ghi một dấu riêng vào clipboard. Đặt bước này trước các bước sao chép; bước đọc phía sau báo lỗi nếu clipboard vẫn còn dấu này.</p>
+          : <SchemaField name="name" schema={{ type: "string", title: "Biến lưu nội dung", maxLength: 64 }} value={node.config.name}
+            issues={issuesForField(nodeIssues, "name")} onChange={(value) => updateConfigField("name", value)} />}
+        <p>Dùng trên Android qua Riviu Helper.</p>
+        <FieldIssues issues={issuesForField(nodeIssues, "mode")} />
+      </>;
+    }
+
+    if (node.kind === "swipe") {
+      const fractionMode = isJsonObject(node.config.fromFraction) || isJsonObject(node.config.toFraction);
+      const durationMs = typeof node.config.durationMs === "number" ? node.config.durationMs : 280;
+      const fractionSchema = (name: string): JsonSchema => ({
+        type: "object",
+        title: titleFor(name),
+        properties: {
+          x: { type: "number", title: "Ngang (0–1)", minimum: 0, maximum: 1 },
+          y: { type: "number", title: "Dọc (0–1)", minimum: 0, maximum: 1 },
+        },
+      });
+      return <>
+        <div role="group" aria-label="Kiểu điểm vuốt" className="flow-segmented-control">
+          <button type="button" aria-pressed={!fractionMode} onClick={() => commitConfig({
+            from: coordinateToJson(coordinateFromValue(node.config.from)),
+            to: coordinateToJson(coordinateFromValue(node.config.to)),
+            durationMs,
+          })}>Toạ độ</button>
+          <button type="button" aria-pressed={fractionMode} onClick={() => commitConfig({
+            fromFraction: { x: 0.5, y: 0.7 },
+            toFraction: { x: 0.5, y: 0.3 },
+            durationMs,
+          })}>Tỷ lệ màn hình</button>
+        </div>
+        {fractionMode
+          ? (["fromFraction", "toFraction"] as const).map((name) => <SchemaField key={name} name={name} schema={fractionSchema(name)}
+            value={node.config[name]} issues={issuesForField(nodeIssues, name)} onChange={(value) => updateConfigField(name, value)} />)
+          : (["from", "to"] as const).map((name) => renderCoordinate(name, node.config[name], (value) =>
+            updateConfigField(name, coordinateToJson(value))))}
+        <SchemaField name="durationMs" schema={schema.properties?.durationMs ?? { type: "integer", minimum: 1, maximum: 5000 }}
+          value={node.config.durationMs} issues={issuesForField(nodeIssues, "durationMs")} onChange={(value) => updateConfigField("durationMs", value)} />
+      </>;
     }
 
     if (["fileRead", "fileWrite", "httpRequest", "sheetRead", "sheetWrite"].includes(node.kind)) {

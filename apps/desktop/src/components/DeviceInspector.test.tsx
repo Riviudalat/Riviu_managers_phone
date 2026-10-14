@@ -15,6 +15,8 @@ vi.mock("../inspectorApi", () => ({
   inspectorRecord: vi.fn(),
   inspectorRecording: vi.fn(),
   inspectorConfirmPostcondition: vi.fn(),
+  inspectorSwipe: vi.fn(),
+  inspectorRecordClipboard: vi.fn(),
 }));
 vi.mock("../api", () => ({ flowSaveRevision: vi.fn() }));
 
@@ -111,4 +113,26 @@ it("selects the smallest element on the screenshot and copies the exact XML", as
 
   fireEvent.click(screen.getByRole("button", { name: "Sao chép XML" }));
   expect(writeText).toHaveBeenCalledWith(snapshot.hierarchyXml);
+});
+
+it("offers a grid tile by position and accepts a kept element only through the refresh choice", async () => {
+  const grid = { maxDepth: 1, resourceId: "app.fixture:id/hoo", className: "android.widget.GridView" };
+  const tile = { package: "app.fixture", resourceId: "app.fixture:id/emr", className: "android.widget.FrameLayout", schemaVersion: 2, scope: grid, ordinal: 1 };
+  vi.mocked(inspectorObserve).mockResolvedValue({
+    ...snapshot,
+    elements: [
+      ...snapshot.elements,
+      { index: 3, parent: null, text: "", description: "", resourceId: "app.fixture:id/emr", className: "android.widget.FrameLayout", x: 0, y: 876, width: 358, height: 477, enabled: true, clickable: true, selector: null, ordinalSelector: tile },
+    ],
+  });
+  render(<DeviceInspector udid="phone-a" onClose={vi.fn()}/>);
+  fireEvent.click(await screen.findByRole("treeitem", { name: /app.fixture:id\/emr/ }));
+  expect(screen.getByText("Không có thuộc tính riêng; chọn theo thứ tự: emr · ô thứ 1 trong lưới")).toBeInTheDocument();
+  // A step is still waiting for its result, so the tile cannot be tapped yet.
+  expect(screen.getByRole("button", { name: "Bấm ô thứ 1 trong lưới và kiểm tra kết quả" })).toBeDisabled();
+
+  fireEvent.click(screen.getByRole("treeitem", { name: /Profile/ }));
+  fireEvent.click(screen.getByRole("button", { name: "Bước này làm mới, màn hình giữ nguyên — dùng phần tử vẫn còn làm kết quả" }));
+  await waitFor(() => expect(inspectorConfirmPostcondition).toHaveBeenCalledWith("phone-a", "after", profileSelector, true));
+  expect(inspectorConfirmPostcondition).toHaveBeenCalledTimes(1);
 });

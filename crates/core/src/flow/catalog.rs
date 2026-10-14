@@ -141,6 +141,7 @@ pub fn config_schema(kind: ActionKind) -> Value {
                     "textPrefix":{"type":["string","null"],"maxLength":2048},
                     "descriptionPrefix":{"type":["string","null"],"maxLength":2048},
                     "scope": selector_ancestor_schema(),
+                    "ordinal":{"type":["integer","null"],"minimum":1,"maximum":100},
                     "actionTarget": {"type":["object","null"],"additionalProperties":false,"required":["kind","ancestor"],"properties":{
                         "kind":{"type":"string","enum":["clickableAncestor"]},
                         "ancestor":selector_ancestor_schema()
@@ -156,12 +157,18 @@ pub fn config_schema(kind: ActionKind) -> Value {
         ActionKind::Swipe => serde_json::json!({
             "type": "object",
             "additionalProperties": false,
-            "required": ["from", "to", "durationMs"],
+            "required": ["durationMs"],
             "properties": {
                 "from": coordinate_schema(),
                 "to": coordinate_schema(),
+                "fromFraction": normalized_point_schema(),
+                "toFraction": normalized_point_schema(),
                 "durationMs": { "type": "integer", "minimum": 1, "maximum": 5000 }
-            }
+            },
+            "oneOf": [
+                { "required": ["from", "to"] },
+                { "required": ["fromFraction", "toFraction"] }
+            ]
         }),
         ActionKind::AutoSwipe => serde_json::json!({
             "type": "object",
@@ -268,6 +275,10 @@ pub fn config_schema(kind: ActionKind) -> Value {
         ActionKind::Transform => {
             serde_json::json!({"type":"object","additionalProperties":false,"required":["name","source","operation"],"properties":{"name":{"type":"string","maxLength":64},"source":{"type":"string","maxLength":64},"operation":{"type":"string","enum":["trim","lowercase","uppercase","splitLines","firstLine","jsonGet","replace","regexExtract","joinLines"]},"path":{"type":"string"},"value":{"type":"string"},"pattern":{"type":"string"}}})
         }
+        ActionKind::ReadClipboard => serde_json::json!({
+            "type":"object", "additionalProperties":false, "required":["mode"],
+            "properties":{"mode":{"type":"string","enum":["arm","read"]},"name":{"type":"string","maxLength":64}}
+        }),
         ActionKind::RawHttp | ActionKind::RawWda | ActionKind::Shell => Value::Null,
     }
 }
@@ -280,6 +291,8 @@ pub fn required_capabilities(kind: ActionKind) -> Vec<String> {
         | ActionKind::SetVariable
         | ActionKind::IfValue
         | ActionKind::Log => &[],
+        // The helper clipboard is probed by the read itself; a phone without it refuses there.
+        ActionKind::ReadClipboard => &[],
         ActionKind::Transform
         | ActionKind::Join
         | ActionKind::CopyVariable
@@ -364,7 +377,12 @@ pub fn contracts(
             ReconciliationPolicy::None,
             RetryPolicy::BeforeDispatchOnly,
         ),
-        ActionKind::AssertVisible | ActionKind::ReadText | ActionKind::IfVisible => (
+        // `arm` overwrites only the phone clipboard with a sentinel: it publishes nothing and a
+        // replay is harmless, so the node is classed with the other reads.
+        ActionKind::AssertVisible
+        | ActionKind::ReadText
+        | ActionKind::IfVisible
+        | ActionKind::ReadClipboard => (
             ResourceClass::UiSession,
             SideEffectClass::None,
             EvidenceRequirement::None,
@@ -457,6 +475,7 @@ pub fn release_one_catalog() -> Vec<ActionDefinition> {
         ActionKind::HttpRequest,
         ActionKind::SheetRead,
         ActionKind::SheetWrite,
+        ActionKind::ReadClipboard,
     ]
     .into_iter()
     .map(action_definition)
@@ -553,6 +572,7 @@ fn label(kind: ActionKind) -> &'static str {
         ActionKind::RawHttp => "Raw HTTP",
         ActionKind::RawWda => "Raw WDA",
         ActionKind::Shell => "Shell",
+        ActionKind::ReadClipboard => "Read Clipboard",
     }
 }
 
@@ -577,6 +597,7 @@ fn category(kind: ActionKind) -> ActionCategory {
         | ActionKind::ReadText
         | ActionKind::IfValue
         | ActionKind::Log
+        | ActionKind::ReadClipboard
         | ActionKind::RawHttp
         | ActionKind::RawWda
         | ActionKind::Shell => ActionCategory::Control,
@@ -611,7 +632,12 @@ fn allowed_evidence(kind: ActionKind) -> Vec<EvidenceKind> {
             EvidenceKind::ElementVisible,
         ],
         ActionKind::TapVision => vec![EvidenceKind::FrameRegionChanged],
-        ActionKind::Swipe | ActionKind::AutoSwipe => vec![EvidenceKind::FrameDigestChanged],
+        // A recorded (fractional) swipe proves itself like a recorded tap, by its result element.
+        ActionKind::Swipe => vec![
+            EvidenceKind::FrameDigestChanged,
+            EvidenceKind::ElementVisible,
+        ],
+        ActionKind::AutoSwipe => vec![EvidenceKind::FrameDigestChanged],
         ActionKind::TypeText => vec![EvidenceKind::TextReadBackEquals],
         ActionKind::Screenshot => vec![EvidenceKind::ArtifactDecodedAndHashed],
         ActionKind::Start
@@ -624,6 +650,7 @@ fn allowed_evidence(kind: ActionKind) -> Vec<EvidenceKind> {
         | ActionKind::ReadText
         | ActionKind::IfValue
         | ActionKind::Log
+        | ActionKind::ReadClipboard
         | ActionKind::RawHttp
         | ActionKind::RawWda
         | ActionKind::Shell => Vec::new(),
@@ -659,6 +686,8 @@ fn default_timeout_ms(kind: ActionKind) -> u32 {
         | ActionKind::IfVision
         | ActionKind::ReadText
         | ActionKind::IfVisible => 4_000,
+        // The helper settles one clipboard job within 12 s; leave room to switch input methods.
+        ActionKind::ReadClipboard => 20_000,
         ActionKind::RawHttp | ActionKind::RawWda | ActionKind::Shell => 10_000,
     }
 }

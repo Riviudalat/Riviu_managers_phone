@@ -4,6 +4,8 @@ use serde::{Deserialize, Serialize};
 
 const SEMANTIC_SELECTOR_SCHEMA_VERSION: u32 = 2;
 const MAX_ANCESTOR_DEPTH: u8 = 4;
+/// A cap, not a target: one screen of a grid or list holds far fewer siblings.
+const MAX_ORDINAL: u32 = 100;
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
@@ -97,6 +99,12 @@ pub struct ElementSelector {
     pub scope: Option<AncestorConstraint>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub action_target: Option<ElementActionTarget>,
+    /// 1-based position among this selector's visible matches, in document order, inside the
+    /// one container `scope` names. For siblings that share every attribute (a profile grid's
+    /// `emr` tiles); resolved on a fresh tree at action time and refused, never guessed, when
+    /// the container is ambiguous or holds fewer matches. Version 2 only.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub ordinal: Option<u32>,
 }
 impl ElementSelector {
     pub fn validate(&self) -> anyhow::Result<()> {
@@ -104,16 +112,24 @@ impl ElementSelector {
             !self.package.trim().is_empty() && self.package.len() <= 256,
             "selector_package_invalid"
         );
+        // A position inside a named container identifies an element even when its only own
+        // attribute is the class every sibling shares.
+        let positional_class = self.ordinal.is_some()
+            && self
+                .class_name
+                .as_ref()
+                .is_some_and(|s| !s.trim().is_empty());
         anyhow::ensure!(
-            [
-                &self.text,
-                &self.description,
-                &self.resource_id,
-                &self.text_prefix,
-                &self.description_prefix,
-            ]
-            .iter()
-            .any(|v| v.as_ref().is_some_and(|s| !s.trim().is_empty())),
+            positional_class
+                || [
+                    &self.text,
+                    &self.description,
+                    &self.resource_id,
+                    &self.text_prefix,
+                    &self.description_prefix,
+                ]
+                .iter()
+                .any(|v| v.as_ref().is_some_and(|s| !s.trim().is_empty())),
             "selector_identity_missing"
         );
         for value in [
@@ -135,7 +151,8 @@ impl ElementSelector {
         let uses_v2 = self.text_prefix.is_some()
             || self.description_prefix.is_some()
             || self.scope.is_some()
-            || self.action_target.is_some();
+            || self.action_target.is_some()
+            || self.ordinal.is_some();
         anyhow::ensure!(
             (!uses_v2 && self.schema_version.is_none())
                 || (uses_v2 && self.schema_version == Some(SEMANTIC_SELECTOR_SCHEMA_VERSION)),
@@ -154,6 +171,13 @@ impl ElementSelector {
         }
         if let Some(ElementActionTarget::ClickableAncestor { ancestor }) = &self.action_target {
             ancestor.validate()?;
+        }
+        if let Some(ordinal) = self.ordinal {
+            anyhow::ensure!(
+                (1..=MAX_ORDINAL).contains(&ordinal),
+                "selector_ordinal_invalid"
+            );
+            anyhow::ensure!(self.scope.is_some(), "selector_ordinal_scope_missing");
         }
         Ok(())
     }
@@ -244,21 +268,56 @@ fn safe_action_ancestor(
     Some(action_index)
 }
 
+/// The `ordinal`-th match, only while every match sits in one container instance: two
+/// containers answering to the same scope would make "the first tile" a guess.
+fn ordinal_match(
+    tree: &Tree,
+    matches: &[usize],
+    scope: &AncestorConstraint,
+    ordinal: u32,
+) -> anyhow::Result<usize> {
+    let containers = matches
+        .iter()
+        .map(|index| matching_ancestor(tree, *index, scope))
+        .collect::<std::collections::BTreeSet<_>>();
+    anyhow::ensure!(
+        containers.len() <= 1,
+        "inspector_ordinal_container_ambiguous: found {} containers",
+        containers.len()
+    );
+    usize::try_from(ordinal)
+        .ok()
+        .and_then(|ordinal| ordinal.checked_sub(1))
+        .and_then(|position| matches.get(position).copied())
+        .ok_or_else(|| {
+            anyhow::anyhow!(
+                "inspector_ordinal_out_of_range: wanted {ordinal}, found {}",
+                matches.len()
+            )
+        })
+}
+
 pub fn resolve_unique_in_tree(
     tree: &Tree,
     selector: &ElementSelector,
 ) -> anyhow::Result<(usize, crate::ElementBox)> {
     selector.validate()?;
     let matches = selector.matches(tree);
-    let [anchor_index] = matches.as_slice() else {
-        anyhow::bail!("inspector_match_count: expected 1, found {}", matches.len());
+    let anchor_index = match (selector.ordinal, &selector.scope) {
+        (Some(ordinal), Some(scope)) => ordinal_match(tree, &matches, scope, ordinal)?,
+        _ => {
+            let [anchor_index] = matches.as_slice() else {
+                anyhow::bail!("inspector_match_count: expected 1, found {}", matches.len());
+            };
+            *anchor_index
+        }
     };
     let action_index = match &selector.action_target {
         Some(ElementActionTarget::ClickableAncestor { ancestor }) => {
-            safe_action_ancestor(tree, *anchor_index, ancestor)
+            safe_action_ancestor(tree, anchor_index, ancestor)
                 .ok_or_else(|| anyhow::anyhow!("inspector_action_relation_not_satisfied"))?
         }
-        None => *anchor_index,
+        None => anchor_index,
     };
     let rect = tree.nodes[action_index]
         .rect()
@@ -338,6 +397,7 @@ pub fn selector_for_node(tree: &Tree, index: usize, package: &str) -> Option<Ele
         description_prefix,
         scope: None,
         action_target,
+        ordinal: None,
     };
     if selector.validate().is_err() {
         return None;
@@ -367,6 +427,60 @@ pub fn selector_for_node(tree: &Tree, index: usize, package: &str) -> Option<Ele
         }
     }
     (selector.matches(tree) == vec![index]).then_some(selector)
+}
+
+/// A positional selector for an element no attribute singles out: its place among the visible
+/// matches of its resource-id (or class) inside its nearest scrollable ancestor. Offered beside
+/// [`selector_for_node`], never in its place; the operator chooses it explicitly.
+pub fn ordinal_selector_for_node(
+    tree: &Tree,
+    index: usize,
+    package: &str,
+) -> Option<ElementSelector> {
+    let node = tree.nodes.get(index)?;
+    let non_empty = |value: &str| (!value.trim().is_empty()).then(|| value.to_owned());
+    let mut current = node.parent;
+    let mut scope = None;
+    for depth in 1..=MAX_ANCESTOR_DEPTH {
+        let ancestor_index = current?;
+        let ancestor = tree.nodes.get(ancestor_index)?;
+        if ancestor.attr("scrollable") == "true" {
+            scope = Some(AncestorConstraint {
+                max_depth: depth,
+                resource_id: non_empty(ancestor.attr("resource-id")),
+                resource_id_suffix: None,
+                class_name: non_empty(ancestor.attr("class")),
+            });
+            break;
+        }
+        current = ancestor.parent;
+    }
+    let mut selector = ElementSelector {
+        package: package.to_owned(),
+        text: None,
+        description: None,
+        resource_id: non_empty(node.attr("resource-id")),
+        class_name: non_empty(node.attr("class")),
+        schema_version: Some(SEMANTIC_SELECTOR_SCHEMA_VERSION),
+        text_prefix: None,
+        description_prefix: None,
+        scope: Some(scope?),
+        action_target: relation_for_node(tree, index),
+        ordinal: Some(1),
+    };
+    selector.validate().ok()?;
+    let matches = selector.matches(tree);
+    // A lone match is what attribute selectors are for; position adds nothing but fragility.
+    if matches.len() < 2 {
+        return None;
+    }
+    let position = matches.iter().position(|candidate| *candidate == index)?;
+    selector.ordinal = Some(u32::try_from(position + 1).ok()?);
+    let scope = selector.scope.as_ref()?;
+    let ordinal = selector.ordinal?;
+    (ordinal_match(tree, &matches, scope, ordinal).ok()? == index
+        && resolve_unique_in_tree(tree, &selector).is_ok())
+    .then_some(selector)
 }
 
 pub async fn resolve_unique(
@@ -404,6 +518,7 @@ mod tests {
             description_prefix: None,
             scope: None,
             action_target: None,
+            ordinal: None,
         };
         assert_eq!(selector.matches(&tree), vec![1]);
         selector.text = None;
@@ -459,5 +574,53 @@ mod tests {
         })
         .unwrap();
         assert!(selector_for_node(&tree, 3, "app").is_none());
+    }
+
+    /// Measured on phone 36 (TikTok 45.7.3/en, 14/10/2026): the profile grid's nine `emr`
+    /// tiles share every attribute, and a tenth `emr` sits outside the grid in the top bar.
+    #[test]
+    fn ordinal_selector_resolves_the_nth_profile_tile_and_refuses_past_the_count() {
+        let tree = Tree::parse(crate::HierarchySourceSnapshot {
+            generation: 1,
+            xml: include_str!("../../fixtures/inspector/musically-45.7.3-en-profile-grid.xml")
+                .into(),
+        })
+        .unwrap();
+        let package = "com.zhiliaoapp.musically";
+        let tiles = tree
+            .nodes
+            .iter()
+            .enumerate()
+            .filter(|(_, node)| {
+                node.attr("resource-id") == "com.zhiliaoapp.musically:id/emr"
+                    && node.attr("clickable") == "true"
+            })
+            .map(|(index, _)| index)
+            .collect::<Vec<_>>();
+        assert_eq!(tiles.len(), 9);
+        assert!(selector_for_node(&tree, tiles[0], package).is_none());
+
+        let first = ordinal_selector_for_node(&tree, tiles[0], package).unwrap();
+        assert_eq!(first.ordinal, Some(1));
+        let (index, rect) = resolve_unique_in_tree(&tree, &first).unwrap();
+        assert_eq!(index, tiles[0]);
+        assert_eq!((rect.x, rect.y), (0.0, 876.0));
+        let third = ElementSelector {
+            ordinal: Some(3),
+            ..first.clone()
+        };
+        assert_eq!(resolve_unique_in_tree(&tree, &third).unwrap().0, tiles[2]);
+
+        let past = ElementSelector {
+            ordinal: Some(10),
+            ..first
+        };
+        let refusal = resolve_unique_in_tree(&tree, &past)
+            .unwrap_err()
+            .to_string();
+        assert!(
+            refusal.starts_with("inspector_ordinal_out_of_range"),
+            "{refusal}"
+        );
     }
 }
