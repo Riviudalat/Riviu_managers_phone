@@ -2949,7 +2949,13 @@ impl<'a, P: TapPlanner> Composer<'a, P> {
         // propagates the first error, which this used to swallow with `.ok().flatten()` — so a
         // single transient agent failure on the first poll turned a live post into
         // `PostNotConfirmed`, permanently unclaimable, twenty seconds early.
-        let back_on_the_feed = self.await_feed(POST_CONFIRM_WINDOW, stop).await;
+        // Sized like the pre-Post steps: r117 phones 36/47 and r122 phone 39 (14-15/10/2026,
+        // 20 phones) read `/source` in 16-30 s and `/element` in 13 s while the upload
+        // started, so the fixed 20 s held one read and left a live post `uncertain`. A wider
+        // wait only observes longer; an expired one still ends `PostNotConfirmed`.
+        let back_on_the_feed = self
+            .await_feed(read_window("postConfirm", POST_CONFIRM_WINDOW, 3), stop)
+            .await;
         self.record_post_outcome_notice().await;
         Ok(if back_on_the_feed {
             self.emit_progress(PublishProgress::PostSubmitted);
