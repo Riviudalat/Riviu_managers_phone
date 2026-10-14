@@ -44,6 +44,11 @@ use crate::types::{
     StreamHandoffProof, StreamStartProof,
 };
 
+/// A backend listing at least this slow is logged with its time. Chosen, not measured: r110
+/// (14/10/2026, 28 phones) saw publish scans of 145-180 s while the background scan of the
+/// same fleet, iOS sidecar `list` and Android inventory together, took ~3.8 s.
+const SLOW_BACKEND_LISTING: std::time::Duration = std::time::Duration::from_secs(5);
+
 /// A backend plus how its last listing went.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct BackendHealth {
@@ -156,8 +161,27 @@ impl DeviceDriver for MultiplexDriver {
         let mut routes = HashMap::new();
         let mut health = Vec::with_capacity(self.backends.len());
         let mut failures = 0usize;
-        for (index, backend) in self.backends.iter().enumerate() {
-            match backend.driver.list_devices().await {
+        // Side by side: a slow iOS sidecar `list` must not hold the Android roster back.
+        let started = std::time::Instant::now();
+        let mut listings = Vec::with_capacity(self.backends.len());
+        for backend in &self.backends {
+            listings.push(async move {
+                let listing = backend.driver.list_devices().await;
+                (listing, started.elapsed())
+            });
+        }
+        let listings = futures_util::future::join_all(listings).await;
+        for (index, (backend, (listing, elapsed))) in self.backends.iter().zip(listings).enumerate()
+        {
+            if elapsed >= SLOW_BACKEND_LISTING {
+                tracing::info!(
+                    backend = %backend.name,
+                    elapsed_ms = elapsed.as_millis() as u64,
+                    ok = listing.is_ok(),
+                    "liệt kê máy của một backend chậm"
+                );
+            }
+            match listing {
                 Ok(listed) => {
                     for device in &listed {
                         routes.insert(device.udid.clone(), index);
@@ -688,6 +712,8 @@ mod tests {
         checked_installs: Arc<parking_lot::Mutex<Vec<String>>>,
         unplugged: std::sync::atomic::AtomicBool,
         owned_stops: std::sync::atomic::AtomicUsize,
+        /// How long a listing takes, so concurrency across backends can be measured.
+        listing_delay: std::time::Duration,
     }
 
     impl StubDriver {
@@ -699,6 +725,7 @@ mod tests {
                 checked_installs: Arc::new(parking_lot::Mutex::new(Vec::new())),
                 unplugged: Default::default(),
                 owned_stops: Default::default(),
+                listing_delay: std::time::Duration::ZERO,
             })
         }
 
@@ -710,6 +737,7 @@ mod tests {
                 checked_installs: Arc::new(parking_lot::Mutex::new(Vec::new())),
                 unplugged: Default::default(),
                 owned_stops: Default::default(),
+                listing_delay: std::time::Duration::ZERO,
             })
         }
     }
@@ -736,6 +764,7 @@ mod tests {
     #[async_trait]
     impl DeviceDriver for StubDriver {
         async fn list_devices(&self) -> anyhow::Result<Vec<DeviceInfo>> {
+            tokio::time::sleep(self.listing_delay).await;
             if self.fail_listing {
                 anyhow::bail!("backend is down");
             }
@@ -952,6 +981,35 @@ mod tests {
         );
     }
 
+    #[tokio::test(start_paused = true)]
+    async fn backends_are_listed_side_by_side() {
+        let slow = |udid: &str| -> Arc<dyn DeviceDriver> {
+            Arc::new(StubDriver {
+                udids: vec![udid.to_string()],
+                text_comments: false,
+                fail_listing: false,
+                checked_installs: Arc::new(parking_lot::Mutex::new(Vec::new())),
+                unplugged: Default::default(),
+                owned_stops: Default::default(),
+                listing_delay: std::time::Duration::from_secs(3),
+            })
+        };
+        let driver = MultiplexDriver::new(vec![
+            ("ios".to_string(), slow("ios-a")),
+            ("android".to_string(), slow("droid-a")),
+        ]);
+        let started = tokio::time::Instant::now();
+        let devices = driver.list_devices().await.expect("list");
+
+        assert_eq!(
+            devices.iter().map(|d| d.udid.as_str()).collect::<Vec<_>>(),
+            ["ios-a", "droid-a"],
+            "backend order is kept"
+        );
+        // One after another this is 6 s: the iOS sidecar would hold the Android roster back.
+        assert_eq!(started.elapsed(), std::time::Duration::from_secs(3));
+    }
+
     #[tokio::test]
     async fn checked_app_install_reaches_the_owning_backend() {
         let log = Arc::new(parking_lot::Mutex::new(Vec::new()));
@@ -962,6 +1020,7 @@ mod tests {
             checked_installs: Arc::clone(&log),
             unplugged: Default::default(),
             owned_stops: Default::default(),
+            listing_delay: std::time::Duration::ZERO,
         });
         let driver = MultiplexDriver::new(vec![("android".to_string(), android)]);
         driver.list_devices().await.expect("list");
@@ -1034,6 +1093,7 @@ mod tests {
             checked_installs: Arc::new(parking_lot::Mutex::new(Vec::new())),
             unplugged: Default::default(),
             owned_stops: Default::default(),
+            listing_delay: std::time::Duration::ZERO,
         });
         let backend: Arc<dyn DeviceDriver> = android.clone();
         let driver = MultiplexDriver::new(vec![("android".to_string(), backend)]);

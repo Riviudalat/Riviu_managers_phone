@@ -2680,6 +2680,7 @@ impl DeviceDriver for AndroidDriver {
         // pre-lock snapshot. Successful enrichment from the prior caller is reused.
         let started = std::time::Instant::now();
         let _inventory_scan = self.inventory_scan_lock.lock().await;
+        let lock_wait = started.elapsed();
         // Read until two consecutive `adb devices` agree. A single reading is
         // not evidence: a server that is restarting answers one call and reports
         // a different fleet on the next, and `DeviceRegistry::upsert_many`
@@ -2730,7 +2731,10 @@ impl DeviceDriver for AndroidDriver {
                 "adb device list never settled; using the last reading"
             );
         }
-        Ok(self.inventory_from_reading(reading, probe_device).await)
+        let clock = helper_setup::InventoryScanClock { started, lock_wait };
+        Ok(self
+            .inventory_from_reading(clock, reading, probe_device)
+            .await)
     }
 
     async fn refresh_device(&self, udid: &str) -> anyhow::Result<DeviceInfo> {

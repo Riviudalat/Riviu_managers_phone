@@ -1334,13 +1334,21 @@ sử lần thử; `publication_id` được backfill bằng assignment ID và b�
 nhóm lại dữ liệu cũ theo caption, thư mục hoặc tên máy. Intent và revision của
 pipeline vẫn kiểm tại nút Đăng. Worker đã lỗi sau effect chỉ chuyển sang xác minh.
 
-Dispatcher không chờ quét danh sách máy (`publish_commands/pipeline.rs`, `RosterRefresh`).
-Mỗi lượt quét `list_devices` chạy trong một task riêng, tối đa một lượt cùng lúc, cách nhau
-ít nhất 2 giây khi còn job chờ; vòng chính vẫn thu kết quả worker, ghi completion và giao
-việc trong lúc quét chờ khóa inventory, hàng đợi adb hay probe chậm. Lượt quét không bị
-timeout cắt; khi tắt app handle bị bỏ (task tự kết thúc) và shutdown chỉ chờ worker đang
-giữ máy, rồi ghi journal completion như cũ. Kết quả quét chỉ dùng được trong
-`ROSTER_MAX_AGE` = 60 giây tính từ lúc bắt đầu quét (chọn, chưa đo). Chưa có kết quả hoặc
+Dispatcher không tự quét danh sách máy (`publish_commands/pipeline.rs`, `RosterRefresh`). Nó
+đọc kết quả thô của lượt quét nền (`state.rs`, ~3 giây một lượt, `DeviceRegistry::record_scan`
+lưu danh sách đúng như driver trả, trước khi gộp vào tile hay đổi trạng thái), nên đội máy
+không bị quét hai lần và vòng chính không bao giờ chờ khóa inventory, hàng đợi adb hay probe
+chậm; shutdown chỉ chờ worker đang giữ máy, rồi ghi journal completion như cũ. r110
+(14/10/2026, 28 máy): lượt quét riêng của dispatcher tới tay sau 145–180 giây trong khi quét
+nền cùng đội máy chỉ ~3,8 giây (nguyên nhân chưa xác định), nên cả 28 job nằm
+`roster_pending` 20 phút. Lượt quét nền liệt kê backend iOS và Android song song; backend liệt
+kê từ 5 giây trở lên ghi "liệt kê máy của một backend chậm". Sidecar iOS `list` sạch mà không
+có iPhone thì 30 giây sau mới chạy lại (iPhone mới cắm hiện trong tối đa 30 giây). Dòng
+"Android inventory metadata enrichment" có `scan_elapsed_ms`, `lock_wait_ms`, `largest`.
+Inventory Android dùng lại model/OS/pin 60 giây mỗi máy (r111: mức 15 giây chiếm ~110/160
+lệnh `adb shell` mỗi phút của đội 28 máy rảnh) và hỏi `/status` của agent tối đa 8 máy cùng
+lúc. Kết quả quét chỉ dùng được trong `ROSTER_MAX_AGE` = 300 giây tính từ lúc lượt quét bắt
+đầu (biên an toàn, không phải thời gian đo được); quá hạn ghi một cảnh báo. Chưa có kết quả hoặc
 kết quả quá hạn nghĩa là *chưa biết*: job ở lại `queued` với lý do `roster_pending`, không
 mở cửa sổ reconnect 2 phút, không đánh lỗi `unauthorized`, không coi cả đội là offline.
 Danh sách máy chỉ cho phép nhận claim; lease của worker và các lần đọc đúng serial đó

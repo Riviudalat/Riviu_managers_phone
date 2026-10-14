@@ -509,7 +509,16 @@ pub struct PmdIosDriver {
     /// installed Apple Devices just now" becomes visible without restarting the app.
     /// Cleared on the first listing that succeeds, so a fixed machine stops nagging.
     last_list_error: Arc<Mutex<Option<String>>>,
+    /// When a clean listing last found no iPhone; see [`IOS_EMPTY_RELIST`].
+    empty_listed_at: Arc<Mutex<Option<std::time::Instant>>>,
 }
+
+/// After a clean listing with no iPhone, the sidecar `list` is not run again for this long.
+/// Chosen, not measured: the Android roster scan runs every ~3 s, and spawning Python with
+/// pymobiledevice3 for an all-Android farm on each one is host load for no answer. A newly
+/// plugged iPhone shows up within this. A failed or error-carrying listing is retried on the
+/// next scan as before.
+const IOS_EMPTY_RELIST: Duration = Duration::from_secs(30);
 
 impl PmdIosDriver {
     pub async fn probe(config: &DriverConfig) -> anyhow::Result<Self> {
@@ -605,6 +614,7 @@ impl PmdIosDriver {
             verified_app_termination,
             boot_degraded_reason,
             last_list_error: Arc::new(Mutex::new(None)),
+            empty_listed_at: Arc::new(Mutex::new(None)),
             streams: StreamHub::new(),
             wda_host: "127.0.0.1".into(),
             profile,
@@ -2931,9 +2941,17 @@ impl DeviceDriver for PmdIosDriver {
         if self.sidecar.is_none() {
             return Ok(Vec::new());
         }
+        if self
+            .empty_listed_at
+            .lock()
+            .is_some_and(|at| at.elapsed() < IOS_EMPTY_RELIST)
+        {
+            return Ok(Vec::new());
+        }
         let value = match self.run_json(&["list"]).await {
             Ok(v) => v,
             Err(error) => {
+                *self.empty_listed_at.lock() = None;
                 // A transient sidecar failure must not silently read as an empty
                 // fleet. Surface it, then degrade to empty so the UI stays alive.
                 //
@@ -3027,6 +3045,8 @@ impl DeviceDriver for PmdIosDriver {
                     wifi_ip: None,
             });
         }
+        *self.empty_listed_at.lock() =
+            (out.is_empty() && payload_error.is_none()).then(std::time::Instant::now);
         Ok(out)
     }
 

@@ -3483,6 +3483,7 @@ dependencies = [
  "anyhow",
  "async-trait",
  "chrono",
+ "futures-util",
  "parking_lot",
  "rand 0.8.7",
  "reqwest 0.12.28",
