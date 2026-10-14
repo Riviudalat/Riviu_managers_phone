@@ -345,6 +345,33 @@ Hệ quả cho code:
 - Các activity chồng lên nhau trong cùng một task TikTok. Back từ Home có thể rơi vào một
   trang cũ.
 
+### Lấy link bài vừa đăng bằng tay (đo 14/10/2026, máy 36)
+
+Máy 36 (`ce04171435f104080c`, SM-G955F, @dongchoinoinoi_dalat), campaign r115 `21c2c7b5`, bài
+đã gửi khoảng 10 phút, job soạn đã hoãn lấy link cho bộ xác minh. Làm qua controller
+(Inspector + `device_tap`, cùng lease), ảnh và XML từng bước ở
+`target/apply-apk-20261009/linkflow-p36-20261014/` (ngoài Git).
+
+| Bước | Màn hình / thao tác | Phần tử đo được |
+|---|---|---|
+| 0 | Ngay sau Post TikTok mở feed **Friends** đang phát **chính bài vừa đăng**: tên tài khoản, "Photo · 2s ago", đúng caption, nút quảng bá "Spend … get … views" (chỉ có trên bài của mình) | `title` = tên hiển thị, `desc` = caption, Share `content-desc="Share video.  shares"` |
+| 1 | Bấm tab Profile | `nrb` `content-desc="Profile"`; kết quả: `s0v` "@handle" |
+| 2 | Bấm Profile lần nữa để tải lại; lưới trả về bài mới ở ô đầu (3 lượt xem) | ô lưới `emr`/`cover` **không có selector duy nhất** (mọi ô giống nhau) |
+| 3 | Mở ô đầu: `device_tap` (179, 1114) trên 1080x2220 | trình xem: `title`, `zm7` "Photo", `zwj` "· 10m ago", `desc` caption, `bj1` Back |
+| 4 | Bấm Share | `content-desc="Share video.  shares"` (Button); sheet có **Edit post / Pin / Privacy settings** = bài của mình |
+| 5 | Ghi sentinel vào clipboard (`device_set_clipboard`), bấm **Copy link** | `content-desc="Copy link"` (nhãn `ut0`); sheet đóng, trình xem trở lại |
+| 6 | Đọc clipboard (`device_get_clipboard`) | `https://vt.tiktok.com/ZSgJBTM6A/` (khác sentinel) |
+| 7 | Redirect HTTPS 301 | `https://www.tiktok.com/@dongchoinoinoi_dalat/photo/7696402901803158805` |
+| 8 | oEmbed (`/oembed?url=…/video/<id>`) | `author_unique_id` khớp, `title` = caption, `embed_product_id` = id |
+
+- Bước 4–5 đã lưu thành Flow **"Copy link bài đang mở (TikTok 45.7.3 en)"** (Inspector →
+  Lưu thành Flow). Bước 1–3 không lưu được thành Flow: Inspector cần phần tử kết quả mới
+  xuất hiện sau mỗi lần bấm (tải lại Profile không đổi gì) và ô lưới không có selector.
+- Feed sau Post đang phát đúng bài của mình (tên, "Xs ago", caption, nút quảng bá). Đây là
+  đường ngắn hơn đi qua Profile nếu code chứng minh đủ các dấu hiệu đó trước khi bấm Share;
+  chưa dùng trong code (`execution.rs` vẫn đi Profile vì Share trên feed có thể thuộc bài
+  người khác).
+
 ### Đường nhạc qua link: music/detail → Use sound
 
 Đo trên máy #46 (en, 2026-10-09) bằng các dump của probe share/deep link: trang nhạc
