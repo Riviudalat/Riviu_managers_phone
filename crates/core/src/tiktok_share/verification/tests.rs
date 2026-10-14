@@ -1960,10 +1960,16 @@ impl Linkflow {
             "feed" => LINKFLOW_FEED.into(),
             "profile" => LINKFLOW_PROFILE.into(),
             "share" => LINKFLOW_SHARE.into(),
+            // r120 phone 47: an older post whose caption opens like the submission's.
+            "expanded" if *self.tile.lock() != 1 => {
+                LINKFLOW_EXPANDED.replacen("#budgetdalat", "#dalatcuoituan", 1)
+            }
             "expanded" => LINKFLOW_EXPANDED.into(),
             _ => {
                 let folded = caption_attribute(LINKFLOW_POST);
-                let shown = if *self.tile.lock() != 1 || *self.stale_grid.lock() {
+                let tile = *self.tile.lock();
+                let older_folded = self.folded.is_some() && tile == 2;
+                let shown = if (tile != 1 || *self.stale_grid.lock()) && !older_folded {
                     "Một bài cũ hơn của tài khoản, caption khác hẳn lượt vừa đăng"
                 } else if *self.expanded.lock() {
                     caption_attribute(LINKFLOW_FEED)
@@ -1972,10 +1978,10 @@ impl Linkflow {
                 };
                 let post = LINKFLOW_POST.replacen(folded, shown, 1);
                 // r119 phone 46: the route reached the post 1h-2h after Post.
-                if self.folded.is_some() {
-                    post.replacen("· 10m ago", "· 1h ago", 1)
-                } else {
-                    post
+                match (self.folded.is_some(), older_folded) {
+                    (true, true) => post.replacen("· 10m ago", "· 15h ago", 1),
+                    (true, false) => post.replacen("· 10m ago", "· 1h ago", 1),
+                    _ => post,
                 }
             }
         }
@@ -2166,11 +2172,12 @@ async fn retained_candidate_without_public_metadata_is_proven_on_the_own_profile
     );
 }
 
-/// r117-r119 (14/10/2026): a 207-character caption folds to 150 on the own tile viewer, and
+/// r117-r120 (14/10/2026): a 207-character caption folds to 150 on the own tile viewer, and
 /// tapping it opens the expanded photo page (rey caption, red Share, no time label); 90
 /// minutes after Post the viewer reads "· 1h ago", which cannot place the post after the
 /// submission. The viewer's folded caption and time, the expanded page's exact caption and
-/// the copied post ID, allocated inside the submission window, prove it together.
+/// the copied post ID, allocated inside the submission window, prove it together. The next
+/// tile, an older post folding to the same opening, settles as a mismatch on its page.
 #[tokio::test(start_paused = true)]
 async fn folded_caption_is_proven_across_the_tile_viewer_and_its_expanded_page() {
     let plan = PublishVerificationPlan::for_build(PACKAGE, "en", "45.7.3").unwrap();

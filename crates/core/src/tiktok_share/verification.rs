@@ -859,11 +859,21 @@ struct Capture<'a> {
 ///
 /// Either way Copy link must give the own account and a post ID allocated inside the
 /// recorded preparation window (`photo_proof::validate_photo_identity`).
+/// How a time label placed the post relative to the submission.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum TileTime {
+    /// The whole rounded interval lies after the submission.
+    Exact,
+    /// An hour or day label that does not exclude the submission; the post ID must prove it.
+    Coarse,
+}
+
 #[derive(Debug, Default)]
 struct DeviceProof {
-    /// The tile viewer whose own caption this pass tapped showed a folded prefix of the
-    /// submitted caption and a time label that matches or does not exclude the submission.
-    tile_time_matched: bool,
+    /// The time verdict of the tile viewer whose folded caption this pass tapped. An older
+    /// post folds to the same prefix when captions share their opening (r120, phone 47:
+    /// tiles 2, 3 and 5), so the expanded page settles it instead of leaving it unresolved.
+    tile_time: Option<Result<TileTime, VerificationReason>>,
     /// The current post surface is that tap's expanded photo page with the exact caption.
     expanded_page: bool,
     /// The time label did not exclude the submission without proving it; the copied post
@@ -1425,14 +1435,7 @@ impl Capture<'_> {
             }
             if !self.caption_expanded {
                 // The folded tile viewer is the only snapshot with this post's time label.
-                if let [time] = times.as_slice() {
-                    let (text, now) = (tree.nodes[*time].attr("text"), chrono::Utc::now());
-                    let submitted = &self.identity.submitted_at;
-                    let exact = relative_post_time_matches(text, submitted, now);
-                    let coarse = relative_post_time_consistent(text, submitted, now);
-                    self.device.tile_time_matched = exact || coarse;
-                    self.device.id_time_required = !exact && coarse;
-                }
+                self.device.tile_time = Some(self.time_proof(tree, &times));
             }
             return Err(VerificationReason::CaptionTruncated);
         }
@@ -1440,7 +1443,20 @@ impl Capture<'_> {
             .publication_evidence
             .get_or_insert_with(Default::default)
             .caption_matched = true;
-        let [time] = times.as_slice() else {
+        match self.time_proof(tree, &times)? {
+            TileTime::Exact => {
+                self.diagnostic
+                    .publication_evidence
+                    .get_or_insert_with(Default::default)
+                    .submission_time_matched = true;
+            }
+            TileTime::Coarse => self.device.id_time_required = true,
+        }
+        Ok(())
+    }
+
+    fn time_proof(&mut self, tree: &Tree, times: &[usize]) -> Result<TileTime, VerificationReason> {
+        let [time] = times else {
             return Err(if times.is_empty() {
                 VerificationReason::TimestampMissing
             } else {
@@ -1451,11 +1467,7 @@ impl Capture<'_> {
         self.diagnostic.time_label = Some(text.chars().take(80).collect());
         let now = chrono::Utc::now();
         if relative_post_time_matches(text, &self.identity.submitted_at, now) {
-            self.diagnostic
-                .publication_evidence
-                .get_or_insert_with(Default::default)
-                .submission_time_matched = true;
-            return Ok(());
+            return Ok(TileTime::Exact);
         }
         if relative_post_age(text).is_none() {
             return Err(VerificationReason::TimestampUnmeasured);
@@ -1464,8 +1476,7 @@ impl Capture<'_> {
             return Err(VerificationReason::SubmissionTimeAmbiguous);
         }
         if relative_post_time_consistent(text, &self.identity.submitted_at, now) {
-            self.device.id_time_required = true;
-            return Ok(());
+            return Ok(TileTime::Coarse);
         }
         Err(VerificationReason::SubmissionTooOld)
     }
@@ -1492,8 +1503,8 @@ impl Capture<'_> {
     }
 
     /// The second snapshot of the folded-caption proof (`DeviceProof`): this pass tapped
-    /// the folded caption of a tile viewer whose time matched, and this is the measured
-    /// expanded photo page with the exact submitted caption.
+    /// the folded caption of a tile viewer, and this is the measured expanded photo page.
+    /// Another caption is a mismatch; the submitted caption still needs that viewer's time.
     fn expanded_caption_proof(&mut self, tree: &Tree) -> Result<(), VerificationReason> {
         let labels = &self.plan.labels;
         let measured = labels.package() == "com.zhiliaoapp.musically"
@@ -1501,7 +1512,6 @@ impl Capture<'_> {
             && labels.language() == "en";
         if !measured
             || !self.caption_expanded
-            || !self.device.tile_time_matched
             || !super::photo_proof::expanded_photo_surface(tree, labels.package(), "45.7.3")
         {
             return Err(VerificationReason::CaptionMissing);
@@ -1522,12 +1532,17 @@ impl Capture<'_> {
         if normalize(tree.nodes[*caption].attr("text")) != normalize(self.caption) {
             return Err(VerificationReason::CaptionMismatch);
         }
+        let time = self
+            .device
+            .tile_time
+            .unwrap_or(Err(VerificationReason::TimestampMissing))?;
+        self.device.id_time_required = time == TileTime::Coarse;
         let evidence = self
             .diagnostic
             .publication_evidence
             .get_or_insert_with(Default::default);
         evidence.caption_matched = true;
-        evidence.submission_time_matched = !self.device.id_time_required;
+        evidence.submission_time_matched = time == TileTime::Exact;
         self.device.expanded_page = true;
         Ok(())
     }
