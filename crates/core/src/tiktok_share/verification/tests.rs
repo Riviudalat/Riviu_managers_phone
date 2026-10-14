@@ -144,7 +144,7 @@ fn short_ellipsized_caption_requests_expansion_without_accepting_a_prefix() {
         public_link: None,
         trace_nonce: [0; 16],
         metadata: Default::default(),
-        folded: Default::default(),
+        device: Default::default(),
         diagnostic: VerificationDiagnostic {
             captured_metadata_candidate: None,
             publication_evidence: None,
@@ -237,7 +237,7 @@ async fn earlier_copied_photo_is_a_rejected_old_candidate_not_an_unresolved_capt
         public_link: None,
         trace_nonce: [0; 16],
         metadata: Default::default(),
-        folded: Default::default(),
+        device: Default::default(),
         diagnostic: VerificationDiagnostic {
             captured_metadata_candidate: None,
             publication_evidence: None,
@@ -382,7 +382,7 @@ async fn comments_recovery_observes_post_before_grid_and_never_backs_from_compos
             public_link: None,
             trace_nonce: [0; 16],
             metadata: Default::default(),
-            folded: Default::default(),
+            device: Default::default(),
             diagnostic: VerificationDiagnostic {
             captured_metadata_candidate: None,
                 publication_evidence: None,
@@ -1010,7 +1010,7 @@ async fn global_photo_tile_evidence(
         public_link: None,
         trace_nonce: [0; 16],
         metadata: Default::default(),
-        folded: Default::default(),
+        device: Default::default(),
         diagnostic: VerificationDiagnostic {
             captured_metadata_candidate: None,
             publication_evidence: None,
@@ -1784,7 +1784,7 @@ fn a_changed_post_snapshot_cannot_combine_prior_caption_with_new_time() {
         public_link: None,
         trace_nonce: [0; 16],
         metadata: Default::default(),
-        folded: Default::default(),
+        device: Default::default(),
         diagnostic: VerificationDiagnostic {
             captured_metadata_candidate: None,
             publication_evidence: None,
@@ -1970,7 +1970,13 @@ impl Linkflow {
                 } else {
                     folded
                 };
-                LINKFLOW_POST.replacen(folded, shown, 1)
+                let post = LINKFLOW_POST.replacen(folded, shown, 1);
+                // r119 phone 46: the route reached the post 1h-2h after Post.
+                if self.folded.is_some() {
+                    post.replacen("· 10m ago", "· 1h ago", 1)
+                } else {
+                    post
+                }
             }
         }
     }
@@ -2160,14 +2166,20 @@ async fn retained_candidate_without_public_metadata_is_proven_on_the_own_profile
     );
 }
 
-/// r117 phone 47 (14/10/2026): a 207-character caption folds to 150 on the own tile viewer,
-/// and tapping it opens the expanded photo page (rey caption, red Share, no time label). The
-/// tile viewer's time and the expanded page's exact caption prove it together; Copy link on
-/// that page gives the own account and a post ID allocated after the submission was prepared.
+/// r117-r119 (14/10/2026): a 207-character caption folds to 150 on the own tile viewer, and
+/// tapping it opens the expanded photo page (rey caption, red Share, no time label); 90
+/// minutes after Post the viewer reads "· 1h ago", which cannot place the post after the
+/// submission. The viewer's folded caption and time, the expanded page's exact caption and
+/// the copied post ID, allocated inside the submission window, prove it together.
 #[tokio::test(start_paused = true)]
 async fn folded_caption_is_proven_across_the_tile_viewer_and_its_expanded_page() {
     let plan = PublishVerificationPlan::for_build(PACKAGE, "en", "45.7.3").unwrap();
-    let allocated = (chrono::Utc::now() - chrono::Duration::minutes(11)).timestamp() as u64;
+    let submitted = chrono::Utc::now() - chrono::Duration::minutes(90);
+    let identity = SubmissionIdentity {
+        submitted_at: submitted.to_rfc3339(),
+        ..linkflow_identity()
+    };
+    let allocated = (submitted + chrono::Duration::minutes(1)).timestamp() as u64;
     let link = format!(
         "https://www.tiktok.com/@dongchoinoinoi_dalat/photo/{}",
         (allocated << 32) | 0x5a17
@@ -2177,7 +2189,7 @@ async fn folded_caption_is_proven_across_the_tile_viewer_and_its_expanded_page()
         &session,
         &plan,
         LINKFLOW_CAPTION,
-        &linkflow_identity(),
+        &identity,
         &[],
         &link,
     )

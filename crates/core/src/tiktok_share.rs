@@ -1567,6 +1567,30 @@ fn relative_post_time_matches(
     submitted <= now && oldest_creation >= submitted
 }
 
+/// An hour or day label that does not exclude this submission: the post may have been
+/// created after it. Never proof alone; the copied post ID must then prove the time
+/// (`photo_proof::validate_photo_identity`). r119 14/10/2026, phone 46: the own-Profile
+/// route reached posts 1h-2h after Post, whose "· 1h ago" no rounded interval can place
+/// after the submission.
+fn relative_post_time_consistent(
+    text: &str,
+    submitted_at: &str,
+    now: chrono::DateTime<chrono::Utc>,
+) -> bool {
+    let Ok(submitted) = chrono::DateTime::parse_from_rfc3339(submitted_at) else {
+        return false;
+    };
+    let Some((age, precision)) = relative_post_age(text) else {
+        return false;
+    };
+    let Some(youngest_creation) =
+        chrono::Duration::try_seconds(age).and_then(|age| now.checked_sub_signed(age))
+    else {
+        return false;
+    };
+    precision > 60 && submitted <= now && youngest_creation >= submitted
+}
+
 /// A matching newborn post can have only a few valid seconds per minute. Fixed retries
 /// miss that window forever. Wait on that same page, then read BOTH caption and time anew.
 fn submission_time_recheck_delay(

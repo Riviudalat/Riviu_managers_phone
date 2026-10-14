@@ -988,7 +988,12 @@ Share, không có nhãn thời gian), nên không ảnh chụp nào có đủ ca
 proof nối hai ảnh chụp bằng chính lần bấm đó: trình xem ô có phần đầu caption khớp và nhãn
 thời gian trong khung Đăng, rồi trang mở rộng có caption khớp chính xác. Copy link trên trang
 đó vẫn phải ra đúng tài khoản, và ID bài phải được cấp trong khung chuẩn bị đã ghi
-(`validate_photo_identity`).
+(`validate_photo_identity`). Nhãn theo giờ/ngày ("· 1h ago", đo r119 máy 46 khi lộ trình máy
+tới bài 1–2 giờ sau Đăng) không đặt được cả khoảng làm tròn sau lần Đăng; khi nhãn không loại
+trừ lần Đăng (thời điểm tạo muộn nhất có thể không trước `submittedAt`) thì chỉ cho phép Copy,
+và cùng phép kiểm ID đó mới chứng minh thời gian. Nhãn phút giữ quy tắc cũ. Trước khi duyệt lưới,
+mỗi lượt bấm lại tab Profile một lần để TikTok tải lại lưới (r118 máy 47: 90 phút sau Đăng ô
+mới nhất vẫn là bài 12 giờ trước), chờ lưới đổi tối đa 5 giây rồi chứng minh lại tài khoản.
 Bảng Chia sẻ Global45.7.3/en (đo 14/10/2026, máy 36 và 44) có `Bottom sheet` với header
 `tv_title` "Send to" và `l86` "Close"; biến thể "Send to" không có dòng Copy link. Bảng do
 lượt này mở mà không có Copy link được đóng bằng Close rồi đọc lại; bảng còn mở từ lượt

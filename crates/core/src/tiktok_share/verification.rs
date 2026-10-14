@@ -842,23 +842,33 @@ struct Capture<'a> {
     public_link: Option<String>,
     trace_nonce: [u8; 16],
     metadata: MetadataRoute,
-    folded: FoldedCaption,
+    device: DeviceProof,
 }
 
-/// Global45.7.3/en own-photo tile viewer with a long caption, measured r117 14/10/2026 on
-/// phone 47 (`ce051715ab9fee2002`, SM-G955F): `desc` shows 150 of the 207 characters and
-/// tapping it opens the expanded photo page, which carries the complete caption (`rey`) and
-/// Share (`red`) but no time label, so no single snapshot holds caption and time. The proof
-/// then spans the two snapshots joined by that tap: the tile viewer's folded caption and
-/// submission time, then the expanded page's exact caption. Copy link must still give the own
-/// account and a post ID allocated inside the recorded preparation window.
+/// Own-Profile proof state of the tile this pass opened, for the two measured cases where
+/// one snapshot cannot hold caption and time, both closed by the copied post ID.
+///
+/// Folded caption, Global45.7.3/en, measured r117 14/10/2026 on phone 47
+/// (`ce051715ab9fee2002`, SM-G955F): `desc` shows 150 of the 207 characters and tapping it
+/// opens the expanded photo page, which carries the complete caption (`rey`) and Share
+/// (`red`) but no time label. The proof then spans the two snapshots joined by that tap: the
+/// tile viewer's folded caption and time, then the expanded page's exact caption.
+///
+/// Coarse time, r119 14/10/2026 on phone 46: an hour or day label ("· 1h ago") cannot place
+/// its rounded interval after the submission, so it only must not exclude it.
+///
+/// Either way Copy link must give the own account and a post ID allocated inside the
+/// recorded preparation window (`photo_proof::validate_photo_identity`).
 #[derive(Debug, Default)]
-struct FoldedCaption {
+struct DeviceProof {
     /// The tile viewer whose own caption this pass tapped showed a folded prefix of the
-    /// submitted caption and a time label inside the submission window.
+    /// submitted caption and a time label that matches or does not exclude the submission.
     tile_time_matched: bool,
     /// The current post surface is that tap's expanded photo page with the exact caption.
     expanded_page: bool,
+    /// The time label did not exclude the submission without proving it; the copied post
+    /// ID must.
+    id_time_required: bool,
 }
 
 /// What this pass knows about TikTok's public metadata for the submission.
@@ -1415,12 +1425,14 @@ impl Capture<'_> {
             }
             if !self.caption_expanded {
                 // The folded tile viewer is the only snapshot with this post's time label.
-                self.folded.tile_time_matched = matches!(times.as_slice(), [time]
-                if relative_post_time_matches(
-                    tree.nodes[*time].attr("text"),
-                    &self.identity.submitted_at,
-                    chrono::Utc::now(),
-                ));
+                if let [time] = times.as_slice() {
+                    let (text, now) = (tree.nodes[*time].attr("text"), chrono::Utc::now());
+                    let submitted = &self.identity.submitted_at;
+                    let exact = relative_post_time_matches(text, submitted, now);
+                    let coarse = relative_post_time_consistent(text, submitted, now);
+                    self.device.tile_time_matched = exact || coarse;
+                    self.device.id_time_required = !exact && coarse;
+                }
             }
             return Err(VerificationReason::CaptionTruncated);
         }
@@ -1451,6 +1463,10 @@ impl Capture<'_> {
         if submission_time_recheck_delay(text, &self.identity.submitted_at, now).is_some() {
             return Err(VerificationReason::SubmissionTimeAmbiguous);
         }
+        if relative_post_time_consistent(text, &self.identity.submitted_at, now) {
+            self.device.id_time_required = true;
+            return Ok(());
+        }
         Err(VerificationReason::SubmissionTooOld)
     }
 
@@ -1475,7 +1491,7 @@ impl Capture<'_> {
             .collect()
     }
 
-    /// The second snapshot of the folded-caption proof (`FoldedCaption`): this pass tapped
+    /// The second snapshot of the folded-caption proof (`DeviceProof`): this pass tapped
     /// the folded caption of a tile viewer whose time matched, and this is the measured
     /// expanded photo page with the exact submitted caption.
     fn expanded_caption_proof(&mut self, tree: &Tree) -> Result<(), VerificationReason> {
@@ -1485,7 +1501,7 @@ impl Capture<'_> {
             && labels.language() == "en";
         if !measured
             || !self.caption_expanded
-            || !self.folded.tile_time_matched
+            || !self.device.tile_time_matched
             || !super::photo_proof::expanded_photo_surface(tree, labels.package(), "45.7.3")
         {
             return Err(VerificationReason::CaptionMissing);
@@ -1511,8 +1527,8 @@ impl Capture<'_> {
             .publication_evidence
             .get_or_insert_with(Default::default);
         evidence.caption_matched = true;
-        evidence.submission_time_matched = true;
-        self.folded.expanded_page = true;
+        evidence.submission_time_matched = !self.device.id_time_required;
+        self.device.expanded_page = true;
         Ok(())
     }
 
@@ -1660,7 +1676,7 @@ impl Capture<'_> {
             return Err(VerificationReason::ClipboardUnwritable);
         }
         let fresh = self.read().await?;
-        let share = if self.folded.expanded_page {
+        let share = if self.device.expanded_page {
             self.expanded_caption_proof(&fresh)?;
             let (_, share_id) =
                 super::photo_proof::viewer_controls(self.plan.labels.package(), "45.7.3")
@@ -1685,7 +1701,7 @@ impl Capture<'_> {
                 )
                 .ok_or(VerificationReason::ShareUnavailable)?
         };
-        let winning_proof = self.diagnostic.clone();
+        let mut winning_proof = self.diagnostic.clone();
         self.session
             .tap(share.centre())
             .await
@@ -1728,13 +1744,19 @@ impl Capture<'_> {
                     if self.other_publication_urls.contains(&canonical) {
                         return Err(VerificationReason::OtherPublication);
                     }
-                    // The folded-caption proof read its time on another snapshot, so the
-                    // post ID must also have been allocated inside this submission's window.
-                    if self.folded.expanded_page
-                        && super::photo_proof::validate_photo_identity(&canonical, self.identity)
+                    // A folded caption read its time on another snapshot and a coarse label
+                    // did not prove it: the post ID must have been allocated inside this
+                    // submission's window (`DeviceProof`).
+                    if self.device.expanded_page || self.device.id_time_required {
+                        if super::photo_proof::validate_photo_identity(&canonical, self.identity)
                             .is_err()
-                    {
-                        return Err(VerificationReason::SubmissionTooOld);
+                        {
+                            return Err(VerificationReason::SubmissionTooOld);
+                        }
+                        winning_proof
+                            .publication_evidence
+                            .get_or_insert_with(Default::default)
+                            .submission_time_matched = true;
                     }
                     return Ok((canonical, winning_proof));
                 }
@@ -2031,7 +2053,7 @@ impl Capture<'_> {
                 }
                 self.diagnostic.stage = "postProof";
                 self.caption_expanded = false;
-                self.folded = FoldedCaption::default();
+                self.device = DeviceProof::default();
                 self.public_link = None;
                 self.session
                     .tap(tile.centre())
@@ -2358,7 +2380,7 @@ async fn capture_with(
             retained_post_id,
             unavailable_here: false,
         },
-        folded: FoldedCaption::default(),
+        device: DeviceProof::default(),
         diagnostic: VerificationDiagnostic {
             captured_metadata_candidate: None,
             publication_evidence: None,
