@@ -269,6 +269,17 @@ pub fn describe(error: &anyhow::Error) -> RecoveryFailure {
     if let Some(classified) = error.downcast_ref::<ClassifiedRecoveryError>() {
         return classified.0.clone();
     }
+    // Android refused an injected event of a navigation gesture (r123/r124 phone 37,
+    // 15/10/2026: `/actions` 400 "Unable to perform W3C actions" while the pre-Post account
+    // read moved to the Profile). The Post tap never reaches here: the composer turns its
+    // failure into PostNotConfirmed, and the intent gate still refuses any retry after Post.
+    if error.chain().any(|cause| cause.is::<crate::driver::GestureCancelled>()) {
+        return RecoveryFailure::new(
+            "gesture_cancelled",
+            FailureKind::Retryable,
+            format!("{error:#}"),
+        );
+    }
     if error.is::<crate::tiktok_sound::SoundNetworkUnavailable>() {
         return RecoveryFailure::new(
             "sound_network_unavailable",
@@ -612,6 +623,13 @@ mod tests {
         let open_failure = session_open_adb_daemon_failure(&session_open).unwrap();
         assert_eq!(open_failure.kind, FailureKind::Retryable);
         assert_eq!(open_failure.code, "adb_daemon_start_failed");
+        // r124 phone 37: a navigation gesture Android cancelled before Post.
+        let cancelled = anyhow::Error::new(crate::driver::GestureCancelled {
+            message: "agent /actions lỗi 400 Bad Request: Unable to perform W3C actions.".into(),
+        })
+        .context("navigate own profile");
+        assert_eq!(describe(&cancelled).kind, FailureKind::Retryable);
+        assert_eq!(describe(&cancelled).code, "gesture_cancelled");
         assert!(session_open_adb_daemon_failure(&anyhow::anyhow!(
             "device unauthorized: {session_open}"
         ))

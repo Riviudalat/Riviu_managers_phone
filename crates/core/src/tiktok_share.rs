@@ -542,11 +542,11 @@ async fn observe_publish_account_inner(
             }
         }
         if tokio::time::Instant::now() >= deadline {
-            return Err(crate::tiktok_account::AccountDiagnostic::new(
-                crate::tiktok_account::AccountState::Unreadable,
+            // r123/r124 (15/10/2026, 20 phones): Profile reads of 10-30 s ran this window out
+            // with nothing posted; that is a slow read, not an unreadable account.
+            return Err(crate::tiktok_account::AccountDiagnostic::profile_not_read_in_time(
                 *labels,
-                None,
-                "Chưa chứng minh được tài khoản sở hữu trước Đăng.",
+                "Chưa chứng minh được tài khoản sở hữu trước Đăng trong thời gian chờ (máy đọc màn hình chậm); chưa bấm Đăng.",
             )
             .into_error());
         }

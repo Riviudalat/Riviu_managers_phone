@@ -83,6 +83,18 @@ impl AccountDiagnostic {
         };
         Some(RecoveryFailure::new(code, kind, self.message.clone()))
     }
+    /// The own Profile header was not read before the account window closed. Nothing was
+    /// posted, so the bounded pre-Post budget may try again from nothing; a header that was
+    /// read and differs stays a terminal [`AccountState::Mismatch`].
+    pub fn profile_not_read_in_time(labels: TikTokControls, message: impl Into<String>) -> Self {
+        let mut diagnostic = Self::new(AccountState::TransportReadFailed, labels, None, message);
+        diagnostic.transport_failure = Some(crate::publish_recovery::RecoveryFailure::new(
+            "account_profile_slow",
+            crate::publish_recovery::FailureKind::Retryable,
+            diagnostic.message.clone(),
+        ));
+        diagnostic
+    }
     pub fn read_failed(labels: TikTokControls, error: &anyhow::Error) -> Self {
         let failure = crate::publish_recovery::describe(error);
         let mut diagnostic = Self::new(
