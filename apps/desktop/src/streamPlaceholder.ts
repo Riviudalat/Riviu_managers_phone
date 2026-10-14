@@ -12,7 +12,7 @@ export type StreamPlaceholder =
   | { kind: "none" }
   /// The app is bringing the stream up. Nothing for the operator to do but wait.
   | { kind: "loading" }
-  /// The app itself holds the picture down while the phone runs a publish job (HX-QUIET).
+  /// The app itself holds the picture down while the phone reads the sound sheet (HX-PAUSE).
   /// The last frame stays under a label; nothing to retry and nothing on its way.
   | { kind: "paused"; reason: string }
   /// It is not coming without intervention. `canRetry` is false when retrying provably

@@ -53,10 +53,12 @@ sở hữu inventory/hash; không nhân bản danh sách pin.
   tầng chờ, xem mục HX-TELEMETRY). Host không nghẽn (20 nhân, Riviu ~10 % CPU): nghẽn ở
   máy và adb server. Trên mỗi máy lúc soạn chạy đồng
   thời TikTok, UiAutomator2, scrcpy (Tile 480 px/1,2 Mbps/10 fps), có lúc minicap/screencap.
-- Hai cơ chế trong code: (1) job đăng bài giữ view scrcpy của chính máy đó tắt suốt lượt
-  (`QuietView`, `AndroidDriver::hold_view`; tile hiện "Đang đăng bài, tạm dừng hình");
-  (2) một ngân sách `PUBLISH_PHONE_WORK_CAP` = 10 máy cho mọi pha đăng bài trên máy, kể cả
-  quan sát xác minh. Chi tiết ở `docs/development/contracts.md` (tìm "HX-QUIET").
+- Trong code: một ngân sách `PUBLISH_PHONE_WORK_CAP` = 10 máy cho mọi pha đăng bài trên
+  máy, kể cả quan sát xác minh. Giữ view scrcpy tắt suốt lượt đăng (`QuietView`) đã gỡ
+  14/10/2026: nó làm `/source` chậm gấp đôi ở mọi pha trừ bảng nhạc (xem
+  `docs/development/contracts.md`, "Hình trực tiếp trong lúc đăng"). Con số 6,7 s/12,7 s ở
+  trên là nhãn chờ gộp ba tầng adb, không phải thời gian đọc của agent; chẩn đoán từng lượt
+  của r105 cho `/source` p50 0,83 s, p90 1,9 s.
 - Kiểm trên máy thật sau khi đổi: cùng số máy và build TikTok, so với r105 (a) `/source` ms
   p50/p90 từ log driver, (b) tỉ lệ dòng đăng được ở lượt đầu (không qua recovery), (c)
   `surfaceflinger` CPU và load average từ lượt đo tải. Phải thấy tile của máy đang đăng dừng

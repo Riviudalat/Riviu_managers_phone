@@ -166,10 +166,8 @@ chuyển nội dung trước Đăng. Theo dõi tự đọc lại kết quả m�
 làm việc với adb (chuyển media, soạn, chọn nhạc, bấm Đăng, kiểm tra bài đã gửi); máy
 còn lại hiện **Chờ lượt** và chưa bị chạm, không bị tính lỗi. Đây là trần đo ngày
 13–14/10/2026 trên 30 máy (30 máy cùng soạn hỏng ~1/3 lượt đầu, 10 máy đăng ngay 9/10),
-không phải số máy app cố chạy đủ. Trong lúc một máy đang đăng, ô hình của máy đó dừng ở
-khung cuối với nhãn **Đang đăng bài, tạm dừng hình** để máy đỡ tải; hình tự bật lại khi
-lượt đăng xong (tối đa 20 phút nếu lượt đăng bị ngắt giữa chừng), các máy khác không bị
-ảnh hưởng. Một máy lỗi
+không phải số máy app cố chạy đủ. Trong lúc máy đọc bảng nhạc, ô hình của máy đó dừng ở khung cuối với nhãn **Đang đăng bài,
+tạm dừng hình**; hình tự bật lại khi xong bước nhạc, các máy khác không bị ảnh hưởng. Một máy lỗi
 không dừng cả nhóm. Chi tiết hiển thị đồng thời các máy đang tải, chờ đăng, đang
 gửi và chờ liên kết. Hủy chặn các bài chưa bấm Đăng; bài đã gửi vẫn được xác minh.
 Trước nút Đăng, Riviu kiểm tra clipboard của Helper rồi khôi phục nội dung ban đầu.

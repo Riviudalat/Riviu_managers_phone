@@ -1369,27 +1369,13 @@ Danh sách máy chỉ cho phép nhận claim; lease của worker và các lần 
 lưu ở `publish.dispatch.limits` theo database máy chủ, mỗi giá trị từ 1 đến 64.
 Giữ cả bốn trường để tương thích dữ liệu cũ. Admission dùng `transfer` cho lượt chuyển media (vẫn nằm trong ngân sách máy chung), `verify` làm trần số lượt đọc metadata mạng đồng thời, và trần cứng `PUBLISH_PHONE_WORK_CAP` = 10 cho mọi pha trên máy (không đọc từ trường `compose`); `deviceTotal` không tác động admission.
 
-**HX-QUIET: hình trực tiếp dừng suốt lượt đăng của một máy.** Từ lúc job compose có phiên
-trên máy (`QuietView` trong `publish_commands/execution.rs`, ngay sau `streaming_session`)
-tới khi phiên đóng, view scrcpy của chính máy đó dừng (`UiSession::hold_live_view` →
-`AndroidDriver::hold_view`); luồng khung hình của phiên (minicap/screencap) vẫn chạy nên mọi
-lần đọc và bằng chứng của lượt đăng không đổi. Tile hiện khung hình cuối với nhãn
-"Đang đăng bài, tạm dừng hình" (`TileStreamState::Paused`, keeper trong `state.rs` đặt khi
-`capture_paused`), không phải lỗi, không có nút thử lại. Máy khác không bị ảnh hưởng. Kết
-thúc lượt (mọi nhánh, kể cả lỗi) `release_live_view` chạy trong `Drop`, keeper bật lại view ở
-tick kế tiếp; job chết mà không release thì hold tự hết sau `QUIET_VIEW_BOUND` = 20 phút
-(trần an toàn, không phải thời lượng kỳ vọng). Tạm dừng của bước nhạc (HX-PAUSE 0.2.87,
-`pause_capture`/`resume_capture`) lồng bên trong: bound là giá trị lớn hơn của hai bên, resume
-của bước nhạc chỉ trả lại luồng của phiên khi job còn giữ view, release của job giữ nguyên
-tạm dừng của bước nhạc nếu còn. Số đo gốc: 13–14/10/2026, 30 máy soạn với tile 480 px/1,2 Mbps/
-10 fps mỗi máy, `surfaceflinger` 61 % CPU, load average 7–8 trên máy 8 nhân, `/source` p90
-12,7 s; HX-PAUSE đã cho thấy dừng capture đưa `/source` từ timeout về 8–11 s trên hai máy
-mù bảng nhạc. Quan sát xác minh không giữ view (lượt ngắn, dừng/bật lại scrcpy tốn ~11 s
-hình đen mỗi lần); preset "quiet" cho máy đang tự động chưa cần sau thay đổi này và
-bị ràng buộc bởi sàn 480 px đã đo (`scrcpy.rs`: 176 px bị Redmi API 35 từ chối
-`MediaCodec.configure`, 320 px ra `avc1.42000D` WebView2 có thể từ chối). Cách kiểm trên
-máy thật: so `/source` ms (p50/p90) và tỉ lệ dòng đăng được ở lượt đầu giữa r105 và đợt
-sau cùng số máy, cùng build TikTok.
+**Hình trực tiếp trong lúc đăng.** View scrcpy của máy đang đăng vẫn chạy suốt lượt; chỉ
+bước đọc bảng nhạc tạm dừng luồng (HX-PAUSE, `pause_capture`/`resume_capture`), khi đó tile
+hiện "Đang đăng bài, tạm dừng hình". Không giữ view tắt cả lượt: HX-QUIET (`547afdfd`) làm
+thế và trung vị `/source` theo pha (chẩn đoán của các bài thành công, SM-G955F/N Android 9)
+tăng gấp đôi ngay hôm đó: thư viện 0,55 → 1,2–1,3 s, chọn ảnh 1,2 → 2,5–2,7 s, đọc tài khoản
+0,65 → 1,1 s (r103b/r105/r106 so với r107–r113, 13–14/10/2026); bảng nhạc, nơi cả hai đều tạm
+dừng, giữ ~1,0 s. Đã gỡ 14/10/2026.
 Giảm `transfer` chặn cấp lượt chuyển mới đến khi số đang chạy xuống mức mới,
 không cắt request đang thực hiện. Phân trang candidate chỉ phân chia lượt quét,
 không giới hạn tổng worker. Foreground stream tăng theo số máy đã phát hiện;
