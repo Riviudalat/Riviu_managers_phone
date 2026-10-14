@@ -875,6 +875,33 @@ struct MetadataRoute {
     unavailable_here: bool,
 }
 
+/// Longest wait for the reloaded Profile grid to differ from the cached one. A cap: a pass
+/// that still reads the old grid tries again on the next 2-minute check.
+const PROFILE_RELOAD_WINDOW: Duration = Duration::from_secs(5);
+
+/// The visible grid: each text inside a post tile (view counts, badges) with its position.
+/// A reload that brings a new post or fresh counters changes it.
+fn grid_signature(tree: &Tree, plan: &PublishVerificationPlan) -> Vec<String> {
+    let package = plan.labels.package();
+    let tiles = tree.grid(plan);
+    tree.nodes
+        .iter()
+        .filter(|node| node.visible(package) && !node.attr("text").is_empty())
+        .filter_map(|node| {
+            let rect = node.rect()?;
+            tiles
+                .iter()
+                .any(|tile| {
+                    rect.x >= tile.x
+                        && rect.y >= tile.y
+                        && rect.x + rect.width <= tile.x + tile.width
+                        && rect.y + rect.height <= tile.y + tile.height
+                })
+                .then(|| format!("{}:{}:{}", rect.x, rect.y, node.attr("text")))
+        })
+        .collect()
+}
+
 fn post_id(canonical: &str) -> Option<&str> {
     canonical.rsplit('/').next().filter(|id| !id.is_empty())
 }
@@ -1389,11 +1416,11 @@ impl Capture<'_> {
             if !self.caption_expanded {
                 // The folded tile viewer is the only snapshot with this post's time label.
                 self.folded.tile_time_matched = matches!(times.as_slice(), [time]
-                    if relative_post_time_matches(
-                        tree.nodes[*time].attr("text"),
-                        &self.identity.submitted_at,
-                        chrono::Utc::now(),
-                    ));
+                if relative_post_time_matches(
+                    tree.nodes[*time].attr("text"),
+                    &self.identity.submitted_at,
+                    chrono::Utc::now(),
+                ));
             }
             return Err(VerificationReason::CaptionTruncated);
         }
@@ -1892,6 +1919,36 @@ impl Capture<'_> {
         }
         self.diagnostic.stage = "profile";
         let mut tree = self.profile(false).await?;
+        // TikTok keeps the Profile grid it last loaded. r118 14/10/2026, phone 47
+        // (ce051715ab9fee2002, Global45.7.3/en): 90 minutes after Post the newest tile was a
+        // 12-hour-old post, so every own-Profile proof ran out of tiles. Re-selecting the
+        // Profile tab reloads it (measured by hand on phone 36: counters 0→3, the new post
+        // first). Once per pass, the bottom-navigation Profile control only, then the
+        // account is proven again on the reloaded grid.
+        let before = grid_signature(&tree, self.plan);
+        if let Some(tab) = tree.control(
+            self.plan.labels.package(),
+            self.plan.labels.label(TikTokControl::ProfileTab),
+        ) {
+            if self.expired() {
+                return Err(VerificationReason::SearchBudgetExhausted);
+            }
+            self.diagnostic.stage = "profileReload";
+            self.session
+                .tap(tab.centre())
+                .await
+                .map_err(|_| VerificationReason::ReadFailed)?;
+            self.diagnostic.navigation_actions += 1;
+            let start = Instant::now();
+            while start.elapsed() < PROFILE_RELOAD_WINDOW {
+                tokio::time::sleep(POLL).await;
+                if grid_signature(&self.read().await?, self.plan) != before {
+                    break;
+                }
+            }
+            self.diagnostic.stage = "profile";
+            tree = self.profile(true).await?;
+        }
         // Trill38.3.2/en, SM-G955U1 (19/09): suggestions can push the entire
         // Videos grid under bottom navigation. Account proof above is mandatory.
         // Collapse only the measured suggestions group, once, then prove the

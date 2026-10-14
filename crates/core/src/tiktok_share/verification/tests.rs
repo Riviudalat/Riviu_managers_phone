@@ -1919,6 +1919,9 @@ struct Linkflow {
     /// The link Copy returns when the folded caption opens the expanded photo page, as it
     /// did on r117 phone 47, instead of unfolding in place.
     folded: Option<String>,
+    /// The grid still shows what it last loaded, as on r118 phone 47: until the Profile tab
+    /// is selected again, the newest tile is an older post and the submission is not shown.
+    stale_grid: Mutex<bool>,
 }
 
 impl Linkflow {
@@ -1931,12 +1934,14 @@ impl Linkflow {
             clipboard: Mutex::new(b"prior clipboard".to_vec()),
             actions: Mutex::new(Vec::new()),
             folded: None,
+            stale_grid: Mutex::new(false),
         }
     }
 
     fn folded(link: String) -> Self {
         Self {
             folded: Some(link),
+            stale_grid: Mutex::new(true),
             ..Self::new()
         }
     }
@@ -1958,7 +1963,7 @@ impl Linkflow {
             "expanded" => LINKFLOW_EXPANDED.into(),
             _ => {
                 let folded = caption_attribute(LINKFLOW_POST);
-                let shown = if *self.tile.lock() != 1 {
+                let shown = if *self.tile.lock() != 1 || *self.stale_grid.lock() {
                     "Một bài cũ hơn của tài khoản, caption khác hẳn lượt vừa đăng"
                 } else if *self.expanded.lock() {
                     caption_attribute(LINKFLOW_FEED)
@@ -2014,6 +2019,11 @@ impl UiSession for Linkflow {
             "feed" if within(&point, [864.0, 1965.0, 1080.0, 2094.0]) => {
                 *page = "profile";
                 "profileTab"
+            }
+            // nrb "Profile" again: the grid reloads.
+            "profile" if within(&point, [864.0, 1965.0, 1080.0, 2094.0]) => {
+                *self.stale_grid.lock() = false;
+                "profileReload"
             }
             // The three-column emr/cover grid above the bottom navigation.
             "profile" if within(&point, [0.0, 876.0, 1080.0, 1964.0]) => {
@@ -2137,9 +2147,10 @@ async fn retained_candidate_without_public_metadata_is_proven_on_the_own_profile
     assert_eq!(captured.diagnostic.stage, "verified");
     assert_eq!(captured.diagnostic.copy_attempts, 1);
     assert_eq!(
-        actions[..6],
+        actions[..7],
         [
             "profileTab",
+            "profileReload",
             "tile",
             "expandCaption",
             "share",
@@ -2179,8 +2190,15 @@ async fn folded_caption_is_proven_across_the_tile_viewer_and_its_expanded_page()
         captured.diagnostic
     );
     assert_eq!(
-        actions[..5],
-        ["profileTab", "tile", "openExpanded", "share", "copyLink"]
+        actions[..6],
+        [
+            "profileTab",
+            "profileReload",
+            "tile",
+            "openExpanded",
+            "share",
+            "copyLink"
+        ]
     );
 }
 
