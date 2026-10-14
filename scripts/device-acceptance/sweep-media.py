@@ -8,11 +8,11 @@ rows left behind. Measured 14/10/2026 (r112, 20 SM-G955F/N): 16-31 `riviu-*` alb
 phone, and TikTok's picker spent up to 12 s on one album-row lookup in that list until the
 step's window closed (`selecting_album`, phones 35/41/42).
 
-Same rule and the same effect as the controller: an album `Pictures/riviu-<campaign>-<n>-<hash>`
-or stage `Pictures/.riviu-publish/<campaign>-<n>` is kept while its assignment on that phone
-is live (`Database::live_publish_media_scopes`): any state other than succeeded / failed before
-dispatch / cancelled / missed, or succeeded without a cleanup proof. The rest go the way
-`android-driver/src/publish.rs::cleanup` removes them: MediaStore rows by `_id`, then
+Same rule as the controller: an album `Pictures/riviu-<campaign>-<n>-<hash>` or stage
+`Pictures/.riviu-publish/<campaign>-<n>` is kept while its assignment on that phone is live
+(`Database::live_publish_media_scopes`): any state other than succeeded / failed before
+dispatch / cancelled / missed, or succeeded without a cleanup proof. The rest go in the order
+`android-driver/src/publish.rs::cleanup` uses: MediaStore rows of exactly that directory, then
 `rm -rf`, then a readback. Names that are not Riviu's are never touched.
 
 Read-only by default (lists what would go). `--apply` deletes and refuses while any riviu*.exe
@@ -28,6 +28,7 @@ import re
 import sqlite3
 import subprocess
 import sys
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
@@ -36,6 +37,9 @@ from _common import OUT_ROOT, CONFIG, check_label, default_db_path, number_of  #
 UUID = r'[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}'
 ALBUM = re.compile(rf'^riviu-({UUID}-\d+)-[0-9a-f]{{12}}$')
 STAGE = re.compile(rf'^({UUID}-\d+)$')
+# Phones swept side by side. One at a time took ~5 min a phone (r113 prep, 14/10/2026).
+# Chosen, not measured: well under the controller's 12 adb slots.
+PHONES_AT_ONCE = 8
 LIVE_SCOPES = """
 SELECT a.campaign_id || '-' || a.ordinal FROM publish_assignments a
 WHERE a.udid=?1 AND (
@@ -64,15 +68,50 @@ def controller_running() -> bool:
     return count != '0'
 
 
-def media_rows(serial: str, album: str) -> list[tuple[str, str]]:
-    """(collection, _id) of every MediaStore row inside one album directory."""
-    rows = []
-    for collection in ('images', 'video'):
-        listed = shell(serial, f"content query --uri content://media/external/{collection}/media "
-                               f"--projection _id:_data --where \"_data LIKE '/storage/emulated/0/Pictures/{album}/%'\"")
-        for match in re.finditer(r'_id=(\d+), _data=/storage/emulated/0/Pictures/' + re.escape(album) + '/', listed):
-            rows.append((collection, match.group(1)))
-    return rows
+def album_where(album: str) -> str:
+    # `album` matched ALBUM, so it holds only [0-9a-z-]: no LIKE wildcard and no quote.
+    return f"\"_data LIKE '/storage/emulated/0/Pictures/{album}/%'\""
+
+
+def media_row_count(serial: str, album: str) -> int:
+    listed = ''.join(shell(serial, f'content query --uri content://media/external/{collection}/media '
+                                   f'--projection _id --where {album_where(album)}')
+                     for collection in ('images', 'video'))
+    return len(re.findall(r'_id=\d+', listed))
+
+
+def sweep_phone(serial: str, live: set[str], apply: bool) -> tuple[list[str], str, int]:
+    """One phone: report lines, a summary sentence and the number of failed deletions."""
+    lines: list[str] = []
+    failures = 0
+    albums = [(m.group(0), m.group(1)) for m in map(ALBUM.match, shell(serial, 'ls /sdcard/Pictures').split()) if m]
+    stages = [n for n in shell(serial, 'ls /sdcard/Pictures/.riviu-publish 2>/dev/null').split() if STAGE.match(n)]
+    gone = 0
+    for name, scope in albums:
+        if scope in live:
+            lines.append(f'{serial}\talbum\t{name}\tkeptLive')
+            continue
+        result = 'wouldDelete'
+        if apply:
+            for collection in ('images', 'video'):
+                shell(serial, f'content delete --uri content://media/external/{collection}/media --where {album_where(name)}')
+            shell(serial, f'rm -rf /sdcard/Pictures/{name}')
+            left = media_row_count(serial, name) or name in shell(serial, 'ls /sdcard/Pictures').split()
+            result = 'failed' if left else 'deleted'
+            failures += bool(left)
+        gone += result != 'failed'
+        lines.append(f'{serial}\talbum\t{name}\t{result}')
+    for name in stages:
+        if name in live:
+            continue
+        result = 'wouldDelete'
+        if apply:
+            shell(serial, f'rm -rf /sdcard/Pictures/.riviu-publish/{name}')
+            result = 'deleted'
+        lines.append(f'{serial}\tstage\t{name}\t{result}')
+    summary = (f'{number_of(serial)}: {len(albums)} album, {"xóa" if apply else "sẽ xóa"} {gone}, '
+               f'giữ {len(albums) - gone} (còn việc), stage {len(stages)}')
+    return lines, summary, failures
 
 
 def main() -> int:
@@ -86,40 +125,17 @@ def main() -> int:
     if args.apply and controller_running():
         raise SystemExit('đang có riviu*.exe chạy; đóng controller bằng close.mjs trước khi xóa media')
     db = sqlite3.connect(f'file:{default_db_path()}?mode=ro', uri=True)
+    live = {serial: {row[0] for row in db.execute(LIVE_SCOPES, (serial,))} for serial in serials}
     report = OUT_ROOT / f'sweep-media-{label}.tsv'
     report.parent.mkdir(parents=True, exist_ok=True)
     failures = 0
-    with report.open('x', encoding='utf-8') as out:
+    with report.open('x', encoding='utf-8') as out, ThreadPoolExecutor(max_workers=PHONES_AT_ONCE) as pool:
         out.write('serial\tkind\tname\tresult\n')
-        for serial in serials:
-            live = {row[0] for row in db.execute(LIVE_SCOPES, (serial,))}
-            albums = [(m.group(0), m.group(1)) for m in map(ALBUM.match, shell(serial, 'ls /sdcard/Pictures').split()) if m]
-            stages = [n for n in shell(serial, 'ls /sdcard/Pictures/.riviu-publish 2>/dev/null').split() if STAGE.match(n)]
-            gone = 0
-            for name, scope in albums:
-                if scope in live:
-                    out.write(f'{serial}\talbum\t{name}\tkeptLive\n')
-                    continue
-                result = 'wouldDelete'
-                if args.apply:
-                    for collection, row_id in media_rows(serial, name):
-                        shell(serial, f'content delete --uri content://media/external/{collection}/media/{row_id}')
-                    shell(serial, f'rm -rf /sdcard/Pictures/{name}')
-                    left = media_rows(serial, name) or name in shell(serial, 'ls /sdcard/Pictures').split()
-                    result = 'failed' if left else 'deleted'
-                    failures += bool(left)
-                gone += result != 'failed'
-                out.write(f'{serial}\talbum\t{name}\t{result}\n')
-            for name in stages:
-                if name in live:
-                    continue
-                result = 'wouldDelete'
-                if args.apply:
-                    shell(serial, f'rm -rf /sdcard/Pictures/.riviu-publish/{name}')
-                    result = 'deleted'
-                out.write(f'{serial}\tstage\t{name}\t{result}\n')
-            print(f'{number_of(serial)}: {len(albums)} album, {"xóa" if args.apply else "sẽ xóa"} {gone}, '
-                  f'giữ {len(albums) - gone} (còn việc), stage {len(stages)}', flush=True)
+        for lines, summary, failed in pool.map(lambda serial: sweep_phone(serial, live[serial], args.apply), serials):
+            out.write(''.join(line + '\n' for line in lines))
+            out.flush()
+            print(summary, flush=True)
+            failures += failed
     print(f'Báo cáo: {report}')
     return 1 if failures else 0
 
