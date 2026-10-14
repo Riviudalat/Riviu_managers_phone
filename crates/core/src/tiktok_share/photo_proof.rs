@@ -316,7 +316,10 @@ fn validate_public_metadata(
     Ok(())
 }
 
-fn viewer_controls(package: &str, version: &str) -> anyhow::Result<(&'static str, &'static str)> {
+pub(super) fn viewer_controls(
+    package: &str,
+    version: &str,
+) -> anyhow::Result<(&'static str, &'static str)> {
     match (package, version) {
         ("com.ss.android.ugc.trill", _) => Ok((":id/m3q", ":id/m3h")),
         // SM-G955N Android9/en-US, 18/09/2026: second restart canary;

@@ -982,6 +982,13 @@ lấy claim `verify` của máy (loại trừ observer metadata của cùng bài
 và chỉ nhận link đúng content ID của candidate. Không chứng minh được thì ghi lượt metadata
 như cũ, kèm `phoneRoute` trong chẩn đoán; máy bận/offline chỉ tra mạng; candidate bị metadata
 từ chối không đi đường máy.
+Caption dài trên trình xem mở từ ô Hồ sơ Global45.7.3/en bị gập (đo r117 14/10/2026, máy 47:
+`desc` hiện 150/207 ký tự) và bấm vào nó mở trang ảnh mở rộng (`rey` caption đầy đủ, `red`
+Share, không có nhãn thời gian), nên không ảnh chụp nào có đủ caption và thời gian. Khi đó
+proof nối hai ảnh chụp bằng chính lần bấm đó: trình xem ô có phần đầu caption khớp và nhãn
+thời gian trong khung Đăng, rồi trang mở rộng có caption khớp chính xác. Copy link trên trang
+đó vẫn phải ra đúng tài khoản, và ID bài phải được cấp trong khung chuẩn bị đã ghi
+(`validate_photo_identity`).
 Bảng Chia sẻ Global45.7.3/en (đo 14/10/2026, máy 36 và 44) có `Bottom sheet` với header
 `tv_title` "Send to" và `l86` "Close"; biến thể "Send to" không có dòng Copy link. Bảng do
 lượt này mở mà không có Copy link được đóng bằng Close rồi đọc lại; bảng còn mở từ lượt

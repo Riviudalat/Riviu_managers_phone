@@ -842,6 +842,23 @@ struct Capture<'a> {
     public_link: Option<String>,
     trace_nonce: [u8; 16],
     metadata: MetadataRoute,
+    folded: FoldedCaption,
+}
+
+/// Global45.7.3/en own-photo tile viewer with a long caption, measured r117 14/10/2026 on
+/// phone 47 (`ce051715ab9fee2002`, SM-G955F): `desc` shows 150 of the 207 characters and
+/// tapping it opens the expanded photo page, which carries the complete caption (`rey`) and
+/// Share (`red`) but no time label, so no single snapshot holds caption and time. The proof
+/// then spans the two snapshots joined by that tap: the tile viewer's folded caption and
+/// submission time, then the expanded page's exact caption. Copy link must still give the own
+/// account and a post ID allocated inside the recorded preparation window.
+#[derive(Debug, Default)]
+struct FoldedCaption {
+    /// The tile viewer whose own caption this pass tapped showed a folded prefix of the
+    /// submitted caption and a time label inside the submission window.
+    tile_time_matched: bool,
+    /// The current post surface is that tap's expanded photo page with the exact caption.
+    expanded_page: bool,
 }
 
 /// What this pass knows about TikTok's public metadata for the submission.
@@ -1307,24 +1324,7 @@ impl Capture<'_> {
             self.plan.labels.package(),
             ElementQuery::ResourceIdSuffix(self.plan.caption_id),
         );
-        let mut times = tree.matching(
-            self.plan.labels.package(),
-            ElementQuery::ResourceIdSuffix(self.plan.time_id),
-        );
-        if times.is_empty() && self.plan.labels.adaptive() {
-            times = tree
-                .nodes
-                .iter()
-                .enumerate()
-                .filter(|(i, n)| {
-                    n.visible(self.plan.labels.package())
-                        && tree.ancestors_visible(*i)
-                        && n.rect().is_some()
-                        && relative_post_age(n.attr("text")).is_some()
-                })
-                .map(|(i, _)| i)
-                .collect();
-        }
+        let times = self.time_nodes(tree);
         self.diagnostic.caption_candidates = captions.len();
         self.diagnostic.time_candidates = times.len();
         if self.trace_enabled() {
@@ -1383,13 +1383,19 @@ impl Capture<'_> {
                 .is_some_and(|prefix| {
                     prefix.chars().count() >= 20 && normalize(self.caption).starts_with(prefix)
                 });
-            return Err(
-                if visible_caption_matches(expansion_visible, self.caption) || short_prefix {
-                    VerificationReason::CaptionTruncated
-                } else {
-                    VerificationReason::CaptionMismatch
-                },
-            );
+            if !(visible_caption_matches(expansion_visible, self.caption) || short_prefix) {
+                return Err(VerificationReason::CaptionMismatch);
+            }
+            if !self.caption_expanded {
+                // The folded tile viewer is the only snapshot with this post's time label.
+                self.folded.tile_time_matched = matches!(times.as_slice(), [time]
+                    if relative_post_time_matches(
+                        tree.nodes[*time].attr("text"),
+                        &self.identity.submitted_at,
+                        chrono::Utc::now(),
+                    ));
+            }
+            return Err(VerificationReason::CaptionTruncated);
         }
         self.diagnostic
             .publication_evidence
@@ -1421,11 +1427,79 @@ impl Capture<'_> {
         Err(VerificationReason::SubmissionTooOld)
     }
 
+    fn time_nodes(&self, tree: &Tree) -> Vec<usize> {
+        let times = tree.matching(
+            self.plan.labels.package(),
+            ElementQuery::ResourceIdSuffix(self.plan.time_id),
+        );
+        if !times.is_empty() || !self.plan.labels.adaptive() {
+            return times;
+        }
+        tree.nodes
+            .iter()
+            .enumerate()
+            .filter(|(i, n)| {
+                n.visible(self.plan.labels.package())
+                    && tree.ancestors_visible(*i)
+                    && n.rect().is_some()
+                    && relative_post_age(n.attr("text")).is_some()
+            })
+            .map(|(i, _)| i)
+            .collect()
+    }
+
+    /// The second snapshot of the folded-caption proof (`FoldedCaption`): this pass tapped
+    /// the folded caption of a tile viewer whose time matched, and this is the measured
+    /// expanded photo page with the exact submitted caption.
+    fn expanded_caption_proof(&mut self, tree: &Tree) -> Result<(), VerificationReason> {
+        let labels = &self.plan.labels;
+        let measured = labels.package() == "com.zhiliaoapp.musically"
+            && labels.resource_version() == Some("45.7.3")
+            && labels.language() == "en";
+        if !measured
+            || !self.caption_expanded
+            || !self.folded.tile_time_matched
+            || !super::photo_proof::expanded_photo_surface(tree, labels.package(), "45.7.3")
+        {
+            return Err(VerificationReason::CaptionMissing);
+        }
+        let (caption_id, _) = super::photo_proof::viewer_controls(labels.package(), "45.7.3")
+            .map_err(|_| VerificationReason::CaptionMissing)?;
+        let captions = tree.matching(labels.package(), ElementQuery::ResourceIdSuffix(caption_id));
+        let [caption] = captions.as_slice() else {
+            return Err(VerificationReason::CaptionAmbiguous);
+        };
+        let normalize = |value: &str| {
+            value
+                .trim_matches(['\u{200e}', '\u{200f}'])
+                .split_whitespace()
+                .collect::<Vec<_>>()
+                .join(" ")
+        };
+        if normalize(tree.nodes[*caption].attr("text")) != normalize(self.caption) {
+            return Err(VerificationReason::CaptionMismatch);
+        }
+        let evidence = self
+            .diagnostic
+            .publication_evidence
+            .get_or_insert_with(Default::default);
+        evidence.caption_matched = true;
+        evidence.submission_time_matched = true;
+        self.folded.expanded_page = true;
+        Ok(())
+    }
+
     async fn prove_post(&mut self) -> Result<Tree, VerificationReason> {
         let start = Instant::now();
         loop {
             let tree = self.read().await?;
-            let proof = self.post_proof(&tree);
+            let mut proof = self.post_proof(&tree);
+            if matches!(proof, Err(VerificationReason::CaptionMissing)) && self.caption_expanded {
+                match self.expanded_caption_proof(&tree) {
+                    Err(VerificationReason::CaptionMissing) => {}
+                    other => proof = other,
+                }
+            }
             if let Err(reason) = proof {
                 self.mark_candidate(reason);
             }
@@ -1559,14 +1633,32 @@ impl Capture<'_> {
             return Err(VerificationReason::ClipboardUnwritable);
         }
         let fresh = self.read().await?;
-        self.post_proof(&fresh)?;
-        let winning_proof = self.diagnostic.clone();
-        let share = fresh
-            .control(
+        let share = if self.folded.expanded_page {
+            self.expanded_caption_proof(&fresh)?;
+            let (_, share_id) =
+                super::photo_proof::viewer_controls(self.plan.labels.package(), "45.7.3")
+                    .map_err(|_| VerificationReason::ShareUnavailable)?;
+            let shares = fresh.matching(
                 self.plan.labels.package(),
-                self.plan.labels.label(TikTokControl::Share),
-            )
-            .ok_or(VerificationReason::ShareUnavailable)?;
+                ElementQuery::ResourceIdSuffix(share_id),
+            );
+            let [share] = shares.as_slice() else {
+                return Err(VerificationReason::ShareUnavailable);
+            };
+            fresh.nodes[*share]
+                .rect()
+                .filter(|rect| rect.enabled && rect.clickable)
+                .ok_or(VerificationReason::ShareUnavailable)?
+        } else {
+            self.post_proof(&fresh)?;
+            fresh
+                .control(
+                    self.plan.labels.package(),
+                    self.plan.labels.label(TikTokControl::Share),
+                )
+                .ok_or(VerificationReason::ShareUnavailable)?
+        };
+        let winning_proof = self.diagnostic.clone();
         self.session
             .tap(share.centre())
             .await
@@ -1608,6 +1700,14 @@ impl Capture<'_> {
                     }
                     if self.other_publication_urls.contains(&canonical) {
                         return Err(VerificationReason::OtherPublication);
+                    }
+                    // The folded-caption proof read its time on another snapshot, so the
+                    // post ID must also have been allocated inside this submission's window.
+                    if self.folded.expanded_page
+                        && super::photo_proof::validate_photo_identity(&canonical, self.identity)
+                            .is_err()
+                    {
+                        return Err(VerificationReason::SubmissionTooOld);
                     }
                     return Ok((canonical, winning_proof));
                 }
@@ -1874,6 +1974,7 @@ impl Capture<'_> {
                 }
                 self.diagnostic.stage = "postProof";
                 self.caption_expanded = false;
+                self.folded = FoldedCaption::default();
                 self.public_link = None;
                 self.session
                     .tap(tile.centre())
@@ -2200,6 +2301,7 @@ async fn capture_with(
             retained_post_id,
             unavailable_here: false,
         },
+        folded: FoldedCaption::default(),
         diagnostic: VerificationDiagnostic {
             captured_metadata_candidate: None,
             publication_evidence: None,

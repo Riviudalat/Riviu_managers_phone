@@ -57,6 +57,18 @@
         "contact tiles of the share sheet's tqg list: text and content-desc -> 'Liên hệ N'"
       ],
       "tool": "Riviu inspector_observe through the long-lived UiAutomator2 session (controller r115, same lease as device_tap)"
+    },
+    {
+      "file": "real-20261014-linkflow-p47-expanded.xml",
+      "sha256": "2f4948382ee5ae3c9cb108a310df7186cd4871ddbd690d26372c9b4ddb810ec9",
+      "source": "target/apply-apk-20261009/linkflow-p47-20261014/p47-expanded-c676daae.xml (controller trace c676daae, run r117 79e5cc6f)",
+      "sourceSha256": "e5f597507ac85860d2ebc7b79d70e7889e4622b9b67bd109d70ba66b4f9941b9",
+      "screen": "Riviu #47 (SM-G955F ce051715ab9fee2002): own Profile tile viewer whose desc folded 150 of 207 caption characters, after the verifier tapped desc: expanded photo page with jf_ display name, rey complete caption, red 'Share', Like/Comments, no time label",
+      "sanitized": [
+        "jf_ display name -> phone 36's display name from real-20261014-linkflow-p36-post.xml",
+        "rey caption -> the Linkflow test caption (phone 36's post)"
+      ],
+      "tool": "Riviu verifier hierarchy trace through the long-lived UiAutomator2 session (controller r117, phone route of a retained candidate)"
     }
   ]
 }

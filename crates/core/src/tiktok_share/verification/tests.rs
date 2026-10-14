@@ -144,6 +144,7 @@ fn short_ellipsized_caption_requests_expansion_without_accepting_a_prefix() {
         public_link: None,
         trace_nonce: [0; 16],
         metadata: Default::default(),
+        folded: Default::default(),
         diagnostic: VerificationDiagnostic {
             captured_metadata_candidate: None,
             publication_evidence: None,
@@ -236,6 +237,7 @@ async fn earlier_copied_photo_is_a_rejected_old_candidate_not_an_unresolved_capt
         public_link: None,
         trace_nonce: [0; 16],
         metadata: Default::default(),
+        folded: Default::default(),
         diagnostic: VerificationDiagnostic {
             captured_metadata_candidate: None,
             publication_evidence: None,
@@ -380,6 +382,7 @@ async fn comments_recovery_observes_post_before_grid_and_never_backs_from_compos
             public_link: None,
             trace_nonce: [0; 16],
             metadata: Default::default(),
+            folded: Default::default(),
             diagnostic: VerificationDiagnostic {
             captured_metadata_candidate: None,
                 publication_evidence: None,
@@ -1007,6 +1010,7 @@ async fn global_photo_tile_evidence(
         public_link: None,
         trace_nonce: [0; 16],
         metadata: Default::default(),
+        folded: Default::default(),
         diagnostic: VerificationDiagnostic {
             captured_metadata_candidate: None,
             publication_evidence: None,
@@ -1780,6 +1784,7 @@ fn a_changed_post_snapshot_cannot_combine_prior_caption_with_new_time() {
         public_link: None,
         trace_nonce: [0; 16],
         metadata: Default::default(),
+        folded: Default::default(),
         diagnostic: VerificationDiagnostic {
             captured_metadata_candidate: None,
             publication_evidence: None,
@@ -1869,6 +1874,11 @@ const LINKFLOW_POST: &str = include_str!(
 const LINKFLOW_SHARE: &str = include_str!(
     "../../../fixtures/tiktok-publish/musically-45.7.3-en/real-20261014-linkflow-p36-share.xml"
 );
+/// r117 phone 47's expanded photo page (rey caption, red Share, no time label), with phone
+/// 36's display name and the Linkflow caption.
+const LINKFLOW_EXPANDED: &str = include_str!(
+    "../../../fixtures/tiktok-publish/musically-45.7.3-en/real-20261014-linkflow-p47-expanded.xml"
+);
 /// Where phone 36's copied `vt.tiktok.com` link redirected (14/10/2026).
 const LINKFLOW_URL: &str =
     "https://www.tiktok.com/@dongchoinoinoi_dalat/photo/7696402901803158805";
@@ -1906,6 +1916,9 @@ struct Linkflow {
     generation: AtomicU64,
     clipboard: Mutex<Vec<u8>>,
     actions: Mutex<Vec<&'static str>>,
+    /// The link Copy returns when the folded caption opens the expanded photo page, as it
+    /// did on r117 phone 47, instead of unfolding in place.
+    folded: Option<String>,
 }
 
 impl Linkflow {
@@ -1917,6 +1930,23 @@ impl Linkflow {
             generation: AtomicU64::new(0),
             clipboard: Mutex::new(b"prior clipboard".to_vec()),
             actions: Mutex::new(Vec::new()),
+            folded: None,
+        }
+    }
+
+    fn folded(link: String) -> Self {
+        Self {
+            folded: Some(link),
+            ..Self::new()
+        }
+    }
+
+    /// The post surface a Share sheet or Copy returns to.
+    fn surface(&self) -> &'static str {
+        if self.folded.is_some() {
+            "expanded"
+        } else {
+            "post"
         }
     }
 
@@ -1925,6 +1955,7 @@ impl Linkflow {
             "feed" => LINKFLOW_FEED.into(),
             "profile" => LINKFLOW_PROFILE.into(),
             "share" => LINKFLOW_SHARE.into(),
+            "expanded" => LINKFLOW_EXPANDED.into(),
             _ => {
                 let folded = caption_attribute(LINKFLOW_POST);
                 let shown = if *self.tile.lock() != 1 {
@@ -1993,9 +2024,18 @@ impl UiSession for Linkflow {
                 "tile"
             }
             // desc: folded with a trailing ellipsis and itself clickable.
+            "post" if within(&point, [32.0, 1695.0, 870.0, 1945.0]) && self.folded.is_some() => {
+                *page = "expanded";
+                "openExpanded"
+            }
             "post" if within(&point, [32.0, 1695.0, 870.0, 1945.0]) => {
                 *self.expanded.lock() = true;
                 "expandCaption"
+            }
+            // red "Share" on the expanded photo page.
+            "expanded" if within(&point, [959.0, 1982.0, 1027.0, 2050.0]) => {
+                *page = "share";
+                "share"
             }
             // fpv "Share video.  shares".
             "post" if within(&point, [912.0, 1682.0, 1080.0, 1808.0]) => {
@@ -2004,8 +2044,9 @@ impl UiSession for Linkflow {
             }
             // The Copy link row; the sheet closes itself and the viewer returns.
             "share" if within(&point, [24.0, 1589.0, 192.0, 1810.0]) => {
-                *self.clipboard.lock() = LINKFLOW_URL.as_bytes().to_vec();
-                *page = "post";
+                let link = self.folded.as_deref().unwrap_or(LINKFLOW_URL);
+                *self.clipboard.lock() = link.as_bytes().to_vec();
+                *page = self.surface();
                 "copyLink"
             }
             other => anyhow::bail!("unexpected tap on {other}"),
@@ -2020,7 +2061,8 @@ impl UiSession for Linkflow {
         let mut page = self.page.lock();
         *page = match *page {
             "post" => "profile",
-            "share" => "post",
+            "expanded" => "post",
+            "share" => self.surface(),
             other => anyhow::bail!("unproved Back on {other}"),
         };
         self.actions.lock().push("back");
@@ -2104,6 +2146,41 @@ async fn retained_candidate_without_public_metadata_is_proven_on_the_own_profile
             "copyLink",
             "back"
         ]
+    );
+}
+
+/// r117 phone 47 (14/10/2026): a 207-character caption folds to 150 on the own tile viewer,
+/// and tapping it opens the expanded photo page (rey caption, red Share, no time label). The
+/// tile viewer's time and the expanded page's exact caption prove it together; Copy link on
+/// that page gives the own account and a post ID allocated after the submission was prepared.
+#[tokio::test(start_paused = true)]
+async fn folded_caption_is_proven_across_the_tile_viewer_and_its_expanded_page() {
+    let plan = PublishVerificationPlan::for_build(PACKAGE, "en", "45.7.3").unwrap();
+    let allocated = (chrono::Utc::now() - chrono::Duration::minutes(11)).timestamp() as u64;
+    let link = format!(
+        "https://www.tiktok.com/@dongchoinoinoi_dalat/photo/{}",
+        (allocated << 32) | 0x5a17
+    );
+    let session = Linkflow::folded(link.clone());
+    let captured = capture_retained_candidate_link(
+        &session,
+        &plan,
+        LINKFLOW_CAPTION,
+        &linkflow_identity(),
+        &[],
+        &link,
+    )
+    .await;
+    let actions = session.actions.lock();
+    assert_eq!(
+        captured.outcome,
+        OwnPostLink::Captured(link),
+        "{actions:?} {:?}",
+        captured.diagnostic
+    );
+    assert_eq!(
+        actions[..5],
+        ["profileTab", "tile", "openExpanded", "share", "copyLink"]
     );
 }
 
