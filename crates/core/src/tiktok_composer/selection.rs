@@ -972,7 +972,12 @@ impl<P: TapPlanner> Composer<'_, P> {
         let session = self.session;
         let epoch = session.gui_session_epoch();
         let album_query = self.plan.album_menu;
-        let initial_deadline = crate::tiktok_sound::phase_deadline(PICKER_WINDOW);
+        // Sized once per walk for this phone's measured reads; never extended per poll.
+        let initial_deadline =
+            crate::tiktok_sound::phase_deadline(read_window("selectionInitial", PICKER_WINDOW, 4));
+        let arm_window = read_window("selectionArm", ARM_WINDOW, 2);
+        let tap_readback_window = read_window("selectionTapReadback", TAP_READBACK_WINDOW, 5);
+        let scroll_window = read_window("selectionScroll", PICKER_WINDOW, 4);
         let initial = loop {
             match trace.read(session, controls, album_query, album, initial_deadline, stop, &epoch)
             .await
@@ -1085,12 +1090,12 @@ impl<P: TapPlanner> Composer<'_, P> {
                 trace.reason(SelectionReason::TapFailed);
                 self.tap_inside(row).await?;
                 let expected = count + 1;
-                let mut deadline = crate::tiktok_sound::phase_deadline(ARM_WINDOW);
+                let mut deadline = crate::tiktok_sound::phase_deadline(arm_window);
                 // Trill 38.3.2, ce031713dd735a1103, 28/09/2026: after
                 // four verified selections, a 5151ms read had no album or
                 // controls. Missing evidence permits one observation window,
                 // never another tap; explicit album contradictions still stop.
-                let hard_deadline = crate::tiktok_sound::phase_deadline(TAP_READBACK_WINDOW);
+                let hard_deadline = crate::tiktok_sound::phase_deadline(tap_readback_window);
                 let mut recovering_partial = false;
                 let mut readback_completed = false;
                 current = loop {
@@ -1220,7 +1225,7 @@ impl<P: TapPlanner> Composer<'_, P> {
                 scrolls += 1;
                 trace.diagnostic.scroll_count = scrolls;
                 trace.diagnostic.stage = SelectionStage::ScrollReadback;
-                let scroll_deadline = crate::tiktok_sound::phase_deadline(PICKER_WINDOW);
+                let scroll_deadline = crate::tiktok_sound::phase_deadline(scroll_window);
                 let observed = loop {
                     let read = trace.read(session, controls, album_query, album, scroll_deadline, stop, &epoch)
                     .await;

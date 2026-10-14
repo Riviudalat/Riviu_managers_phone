@@ -377,6 +377,14 @@ fn slow_call_budget(route: &str) -> Duration {
     SLOW_AGENT_CALL
 }
 
+/// A completed tree read sizes this phone's pre-Post read windows
+/// ([`riviu_core::read_latency::window`]); other routes and unanswered reads do not.
+fn note_tree_read(serial: &str, suffix: &str, elapsed: Duration) {
+    if suffix == "/source" {
+        riviu_core::read_latency::record_tree_read(serial, elapsed);
+    }
+}
+
 /// A transport failure counts as a timeout when the client's own deadline fired.
 fn call_failed(call: &mut crate::telemetry::CallTimer, error: &reqwest::Error) {
     if error.is_timeout() {
@@ -783,6 +791,7 @@ impl AgentClient {
             &route,
             Some(slow_call_budget(suffix)),
         );
+        let started = std::time::Instant::now();
         // Set once the whole body is in: from then on an error is the server's answer
         // (stale tree, HTTP status), not a transport failure, and counts by its latency.
         let body_received = std::sync::atomic::AtomicBool::new(false);
@@ -849,6 +858,9 @@ impl AgentClient {
                 call.timed_out();
                 observation_deadline_error()
             })?;
+        if body_received.load(std::sync::atomic::Ordering::Relaxed) {
+            note_tree_read(&self.serial, suffix, started.elapsed());
+        }
         match &result {
             Ok(_) => call.answered(),
             Err(_) if body_received.load(std::sync::atomic::Ordering::Relaxed) => {
@@ -1033,6 +1045,7 @@ impl AgentClient {
             })?;
         call.answered();
         let elapsed = started.elapsed();
+        note_tree_read(&self.serial, suffix, elapsed);
         if cfg!(debug_assertions) && std::env::var("RIVIU_PUBLISH_REHEARSAL").as_deref() == Ok("1")
         {
             tracing::info!(serial=%self.serial,route=suffix,ms=elapsed.as_millis() as u64,"publish benchmark agent latency");

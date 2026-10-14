@@ -29,7 +29,7 @@ pub(crate) async fn inspect_editor_and_caption(
     let ElementQuery::ResourceIdSuffix(caption_suffix) = caption_query else {
         return Ok((inspect(session, plan, expected_title, false).await?, None));
     };
-    let deadline = phase_deadline(READBACK_WINDOW);
+    let deadline = phase_deadline(readback_window("soundEditorCaption"));
     clear_sound_popup(session, deadline, Some(plan.package)).await?;
     let mut cursor = Cursor::default();
     let Some(snapshot) = observation::observe(
@@ -144,7 +144,7 @@ pub(crate) async fn inspect(
 ) -> anyhow::Result<EditorState> {
     let expected = expected_title.trim();
     anyhow::ensure!(!expected.is_empty(), "selected sound title is empty");
-    let deadline = phase_deadline(READBACK_WINDOW);
+    let deadline = phase_deadline(readback_window("soundEditorReadback"));
     let mut cursor = Cursor::default();
     let mut suffixes = vec![plan.current_title_id];
     if plan.dynamic {

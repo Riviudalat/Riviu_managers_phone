@@ -42,6 +42,7 @@ pub mod publish_recovery;
 pub mod publish_runtime;
 pub mod publish_sheet;
 pub mod publish_submission;
+pub mod read_latency;
 pub mod registry;
 pub mod screen;
 pub mod screen_match;

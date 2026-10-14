@@ -112,6 +112,17 @@ có 20 giây cho lần đọc lại hoàn tất đầu tiên: r105 có `/source`
 khi khoảng 30 máy dùng chung 12 slot adb. Tổng thời gian chọn n ảnh tối đa là n cửa sổ như
 vậy. Cửa sổ dài hơn chỉ cho lần đọc đang chạy được xong, không cấp thêm lần chạm nào.
 
+Các cửa sổ trên là mức nền đo khi máy rảnh. Mỗi bước quan sát trước Post (camera, thư viện,
+picker, album, chọn ảnh, bước chỉnh sửa, điều hướng và nhập caption, đọc lại nhạc) tính cửa sổ
+một lần khi bắt đầu bằng `read_latency::window`:
+`clamp(max(nền, số_lần_đọc × q90 + 2 s), nền, min(4 × nền, 90 s))`, với q90 lấy từ tối đa 32
+lần `GET /source` hoàn tất của chính máy đó (serial) trong 10 phút gần nhất, cần ít nhất 5 lần;
+thiếu số đo thì giữ nền. Không gia hạn sau mỗi lần poll, và mọi cửa sổ vẫn bị chặn bởi ngân
+sách chung của giai đoạn (`phase_deadline`), nên không vượt ngân sách nhạc/compose. Cửa sổ
+không áp cho bằng chứng tươi trước Post (deadline đọc lại cuối 12–16 giây ở trên vẫn là trần
+của mọi lần đọc bên trong), cho bước bấm/effect hay cho chờ về feed sau Post. Hết cửa sổ vẫn
+trả cùng mã lỗi như trước; nới cửa sổ không bao giờ biến màn chưa đọc thành quyền bấm.
+
 Dispatcher giữ completion receipt đến khi SQLite xác nhận cùng
 assignment/campaign/run/attempt/device/phase/revision. Journal cạnh DB lưu receipt
 trước settlement; khôi phục journal trước orphan sweep, chỉ chuyển trạng thái DB,

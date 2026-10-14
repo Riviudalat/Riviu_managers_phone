@@ -102,6 +102,29 @@ Code: `crates/android-driver/src/telemetry.rs`, `enter_adb_slot` trong `adb.rs`,
   hierarchy trên canary (mục "Sức khỏe máy trước code").
 - Chưa có số đo đợt chạy nào bằng bản này; ngưỡng ô histogram và cap 64 series chưa đo.
 
+### Cửa sổ chờ đọc theo độ trễ máy (HX-WINDOWS)
+
+Bằng chứng: r111 (`9e5e7340`, 14/10/2026, 28 máy, cap 10 việc, QuietView) chỉ 2/68 lượt
+soạn tới Post trong 23 phút đầu; hầu hết dừng `publish_observation_deadline` ở
+transfer/media/device/prePost, trong khi `agent GET /source` p50 1,5 s, p90 3–8 s, max 14–17 s
+và `adb.global_slot` p90 ≤ 750 ms. Một bước cần 3–6 lần đọc nên không vừa cửa sổ 2–10 s đo lúc
+máy rảnh. Code: `crates/core/src/read_latency.rs`; ghi số đo ở `note_tree_read` trong
+`crates/android-driver/src/agent.rs`.
+
+- Mỗi `GET /source` hoàn tất được ghi theo serial (tối đa 128 máy × 32 lần, bỏ lần cũ hơn
+  10 phút). Lần đọc hết giờ hoặc bị hủy không được ghi: nó đo deadline, không đo máy.
+- Bước quan sát trước Post tính cửa sổ một lần lúc bắt đầu, theo công thức trong
+  [hợp đồng](../development/contracts.md) (nền, số lần đọc dự kiến của bước, q90 của máy, trần
+  `min(4 × nền, 90 s)`). Serial lấy từ ngữ cảnh stage diagnostics của lượt Đăng; ngoài lượt
+  Đăng (rehearsal, test) dùng nền.
+- Khi cửa sổ được nới, log INFO "Nới cửa sổ chờ đọc màn hình theo độ trễ đo được của máy"
+  với `serial`, `step`, `base_ms`, `q90_ms`, `reads`, `window_ms`. Số trong log là cửa sổ của
+  bước; deadline thật vẫn là min với ngân sách giai đoạn (ví dụ ngân sách nhạc hoặc deadline
+  đọc lại cuối trước Post).
+- Không đổi: bằng chứng tươi trước Post (12–16 s), bước bấm/effect, chờ feed sau Post, ngân
+  sách nhạc 180/300 s. Số lần đọc dự kiến của từng bước và lề 2 s **chưa đo**; kiểm lại bằng
+  dòng INFO trên và HX-TELEMETRY ở đợt chạy kế tiếp (cùng số máy/cap) trước khi chỉnh.
+
 ### ADB server treo (HX-ADB)
 
 Chủ sở hữu bỏ quy tắc "không kill adb-server" ngày 14/10/2026. Bằng chứng r107 (`fd05d8ee`,
