@@ -106,7 +106,8 @@ pub(crate) fn validate_data_output(
             "literal variable result does not match its compiled writer",
         ),
         CompiledActionConfig::ReadText { name, .. }
-        | CompiledActionConfig::CopyVariable { name, .. } => (
+        | CompiledActionConfig::CopyVariable { name, .. }
+        | CompiledActionConfig::ReadClipboard { name } => (
             text("kind") == Some("flowVariable")
                 && text("name") == Some(name)
                 && text("value").is_some_and(|v| v.chars().count() <= 4096)

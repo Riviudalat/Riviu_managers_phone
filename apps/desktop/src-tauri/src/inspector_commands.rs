@@ -4,10 +4,10 @@ use crate::{command_error::CommandError, commands::with_manual_session, state::A
 use base64::{engine::general_purpose::STANDARD, Engine};
 use riviu_core::{
     ui_automation::{
-        inspector::{resolve_unique, ElementSelector},
+        inspector::{ordinal_selector_for_node, resolve_unique, ElementSelector},
         tree::Tree,
     },
-    DeviceWorkOwner,
+    AutoSwipePoint, DeviceWorkOwner, SwipeGesture, TapPoint,
 };
 pub use semantic::SemanticRequest;
 
@@ -58,6 +58,10 @@ pub struct InspectorElement {
     #[serde(default)]
     pub password: Option<bool>,
     pub selector: Option<ElementSelector>,
+    /// Offered only when `selector` is absent: "the Nth sibling in its scrollable container".
+    /// The operator has to choose it; it is never used on their behalf.
+    #[serde(default)]
+    pub ordinal_selector: Option<ElementSelector>,
 }
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -76,16 +80,91 @@ pub struct InspectorSnapshot {
     pub hierarchy_xml: String,
     pub elements: Vec<InspectorElement>,
 }
+/// One recorded step. A tap carries `selector`, a swipe `swipe`, a clipboard step `clipboard`;
+/// recordings written before swipes and clipboard steps existed always carry `selector`.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct RecordedStep {
-    pub selector: ElementSelector,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub selector: Option<ElementSelector>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub swipe: Option<RecordedSwipe>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub clipboard: Option<RecordedClipboard>,
     pub before_id: String,
     pub after_id: String,
     pub verified: bool,
     #[serde(default)]
     pub expected: Option<ElementSelector>,
+    /// The operator chose a result element that was already on screen, because the step
+    /// refreshes in place. Only ever set by that explicit choice.
+    #[serde(default)]
+    pub same_screen: bool,
     pub error: Option<String>,
+}
+
+/// A swipe in screen fractions, so it replays on any resolution of the same layout.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct RecordedSwipe {
+    pub from: AutoSwipePoint,
+    pub to: AutoSwipePoint,
+    pub duration_ms: u64,
+}
+
+impl RecordedSwipe {
+    fn validate(&self) -> Result<(), CommandError> {
+        let points = [self.from.x, self.from.y, self.to.x, self.to.y];
+        if !points
+            .iter()
+            .all(|value| value.is_finite() && (0.0..=1.0).contains(value))
+        {
+            return Err(CommandError::invalid_argument(
+                "Điểm vuốt phải nằm trong màn hình (tỷ lệ từ 0 đến 1)",
+            ));
+        }
+        if (self.to.x - self.from.x).hypot(self.to.y - self.from.y) < 0.05 {
+            return Err(CommandError::invalid_argument("Quãng vuốt quá ngắn"));
+        }
+        if !(100..=2_000).contains(&self.duration_ms) {
+            return Err(CommandError::invalid_argument(
+                "Thời lượng vuốt phải từ 100 đến 2000 ms",
+            ));
+        }
+        Ok(())
+    }
+
+    fn gesture(&self, width: f64, height: f64) -> SwipeGesture {
+        SwipeGesture {
+            from: TapPoint {
+                x: self.from.x * width,
+                y: self.from.y * height,
+            },
+            to: TapPoint {
+                x: self.to.x * width,
+                y: self.to.y * height,
+            },
+            duration_ms: self.duration_ms,
+        }
+    }
+}
+
+/// A clipboard step. `arm` writes a unique sentinel before the steps that should replace it;
+/// `read` copies the clipboard into a Flow variable and refuses a value that is still a sentinel.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(tag = "mode", rename_all = "camelCase")]
+pub enum RecordedClipboard {
+    Arm,
+    Read { name: String },
+}
+
+/// The step plus what the read saw. The value is shown once and never stored with the recording:
+/// a clipboard can hold anything the operator copied.
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct InspectorClipboardStep {
+    pub recording: InspectorRecording,
+    pub preview: Option<String>,
 }
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -153,6 +232,10 @@ fn element_from_tree(tree: &Tree, index: usize, package: &str) -> Option<Inspect
     }
     let rect = node.rect()?;
     let selector = riviu_core::ui_automation::inspector::selector_for_node(tree, index, package);
+    let ordinal_selector = selector
+        .is_none()
+        .then(|| ordinal_selector_for_node(tree, index, package))
+        .flatten();
     Some(InspectorElement {
         index,
         parent: node.parent,
@@ -176,6 +259,7 @@ fn element_from_tree(tree: &Tree, index: usize, package: &str) -> Option<Inspect
         long_clickable: xml_bool(node.attr("long-clickable")),
         password: xml_bool(node.attr("password")),
         selector,
+        ordinal_selector,
     })
 }
 fn save_observation(state: &AppState, snapshot: &InspectorSnapshot) -> Result<(), CommandError> {
@@ -277,14 +361,118 @@ pub async fn inspector_tap(
 }
 
 #[tauri::command]
+pub async fn inspector_swipe(
+    state: State<'_, AppState>,
+    udid: String,
+    swipe: RecordedSwipe,
+) -> Result<InspectorSnapshot, CommandError> {
+    let _admission = state.ensure_accepting_work()?;
+    swipe.validate()?;
+    act(&state, udid, RecordedAction::Swipe(swipe)).await
+}
+
+/// `same_screen` is the operator's explicit "this step refreshes in place" choice; without it
+/// the result element must be new on screen.
+#[tauri::command]
 pub fn inspector_confirm_postcondition(
     state: State<'_, AppState>,
     udid: String,
     snapshot_id: String,
     expected: ElementSelector,
+    same_screen: Option<bool>,
 ) -> Result<InspectorRecording, CommandError> {
     let _admission = state.ensure_accepting_work()?;
-    confirm_postcondition(&state, &udid, &snapshot_id, expected)
+    confirm_postcondition(
+        &state,
+        &udid,
+        &snapshot_id,
+        expected,
+        same_screen.unwrap_or(false),
+    )
+}
+
+#[tauri::command]
+pub async fn inspector_record_clipboard(
+    state: State<'_, AppState>,
+    udid: String,
+    step: RecordedClipboard,
+) -> Result<InspectorClipboardStep, CommandError> {
+    let _admission = state.ensure_accepting_work()?;
+    record_clipboard(&state, udid, step).await
+}
+
+async fn record_clipboard(
+    state: &AppState,
+    udid: String,
+    step: RecordedClipboard,
+) -> Result<InspectorClipboardStep, CommandError> {
+    let _admission = state.ensure_accepting_work()?;
+    if let RecordedClipboard::Read { name } = &step {
+        riviu_core::validate_flow_variable_name(name).map_err(|_| {
+            CommandError::invalid_argument(
+                "Tên biến chỉ gồm chữ không dấu, số và dấu _, bắt đầu bằng chữ (tối đa 64 ký tự)",
+            )
+        })?;
+    }
+    semantic::invalidate(&udid).await;
+    let _lock = RECORD_LOCK.lock().await;
+    let mut record = recording(state, &udid)?
+        .filter(|r| r.active)
+        .ok_or_else(|| err("Chưa bắt đầu ghi; bấm Bắt đầu ghi trước"))?;
+    if record.steps.len() >= 100 {
+        return Err(err("Phiên ghi đã đủ 100 bước; dừng và lưu trước"));
+    }
+    let action = step.clone();
+    let preview = with_manual_session(
+        state,
+        &udid,
+        DeviceWorkOwner::ManualControl,
+        move |session| async move {
+            match action {
+                RecordedClipboard::Arm => {
+                    let sentinel = riviu_core::clipboard_sentinel(uuid::Uuid::new_v4());
+                    session
+                        .set_clipboard("plaintext", sentinel.as_bytes())
+                        .await?;
+                    Ok(None)
+                }
+                RecordedClipboard::Read { .. } => {
+                    let (_, bytes) = session
+                        .get_clipboard(riviu_core::MAX_INTERACTION_CLIPBOARD_BYTES)
+                        .await?;
+                    Ok(Some(String::from_utf8_lossy(&bytes).into_owned()))
+                }
+            }
+        },
+    )
+    .await?;
+    if preview
+        .as_deref()
+        .is_some_and(riviu_core::is_clipboard_sentinel)
+    {
+        return Err(err(
+            "Clipboard vẫn là dấu Riviu đã ghi: bước sao chép chưa có hiệu lực. Bấm sao chép lại rồi đọc lại.",
+        ));
+    }
+    record.steps.push(RecordedStep {
+        selector: None,
+        swipe: None,
+        clipboard: Some(step),
+        before_id: String::new(),
+        after_id: String::new(),
+        verified: true,
+        expected: None,
+        same_screen: false,
+        error: None,
+    });
+    state
+        .db
+        .set_setting(&key(&udid), &serde_json::to_string(&record).map_err(err)?)
+        .map_err(err)?;
+    Ok(InspectorClipboardStep {
+        recording: record,
+        preview: preview.map(|value| value.chars().take(300).collect()),
+    })
 }
 
 fn read_observation(state: &AppState, id: &str) -> Result<InspectorSnapshot, CommandError> {
@@ -309,6 +497,7 @@ fn confirm_postcondition(
     udid: &str,
     snapshot_id: &str,
     expected: ElementSelector,
+    same_screen: bool,
 ) -> Result<InspectorRecording, CommandError> {
     expected.validate().map_err(err)?;
     let mut record = recording(state, udid)?.ok_or_else(|| err("Chưa có phiên ghi"))?;
@@ -332,12 +521,15 @@ fn confirm_postcondition(
     if before.udid != udid || after.udid != udid || after.package != expected.package {
         return Err(err("Bằng chứng không thuộc đúng máy hoặc ứng dụng"));
     }
-    if !postcondition_appeared(&before.elements, &after.elements, &expected) {
-        return Err(err(
-            "Phần tử kết quả phải xuất hiện sau thao tác và chưa có trong màn hình trước đó",
-        ));
+    if !postcondition_holds(&before.elements, &after.elements, &expected, same_screen) {
+        return Err(err(if same_screen {
+            "Phần tử kết quả phải còn trên màn hình sau thao tác"
+        } else {
+            "Phần tử kết quả phải xuất hiện sau thao tác và chưa có trong màn hình trước đó"
+        }));
     }
     step.expected = Some(expected);
+    step.same_screen = same_screen;
     step.verified = true;
     step.error = None;
     state
@@ -347,28 +539,75 @@ fn confirm_postcondition(
     Ok(record)
 }
 
-fn postcondition_appeared(
+/// The result element must be on the after-screen. By default it must also be new; a step that
+/// refreshes in place keeps its elements, so only the operator's explicit `same_screen` choice
+/// accepts one that was already there.
+fn postcondition_holds(
     before: &[InspectorElement],
     after: &[InspectorElement],
     expected: &ElementSelector,
+    same_screen: bool,
 ) -> bool {
-    after
-        .iter()
-        .any(|element| element.selector.as_ref() == Some(expected))
-        && !before
-            .iter()
-            .any(|element| element.selector.as_ref() == Some(expected))
+    let present = |elements: &[InspectorElement]| {
+        elements.iter().any(|element| {
+            element.selector.as_ref() == Some(expected)
+                || element.ordinal_selector.as_ref() == Some(expected)
+        })
+    };
+    present(after) && (same_screen || !present(before))
 }
+
+enum Gesture {
+    Tap(TapPoint),
+    Swipe(SwipeGesture),
+}
+
+#[derive(Clone)]
+enum RecordedAction {
+    Tap(Box<ElementSelector>),
+    Swipe(RecordedSwipe),
+}
+
+impl RecordedAction {
+    fn step(&self) -> RecordedStep {
+        let (selector, swipe) = match self {
+            Self::Tap(selector) => (Some(ElementSelector::clone(selector)), None),
+            Self::Swipe(swipe) => (None, Some(swipe.clone())),
+        };
+        RecordedStep {
+            selector,
+            swipe,
+            clipboard: None,
+            before_id: String::new(),
+            after_id: String::new(),
+            verified: false,
+            expected: None,
+            same_screen: false,
+            error: None,
+        }
+    }
+}
+
 pub async fn tap(
     state: &AppState,
     udid: String,
     selector: ElementSelector,
 ) -> Result<InspectorSnapshot, CommandError> {
+    act(state, udid, RecordedAction::Tap(Box::new(selector))).await
+}
+
+/// One device action between two captures. While recording, the step is persisted before the
+/// action leaves and is never verified by the action alone: the operator names its result.
+async fn act(
+    state: &AppState,
+    udid: String,
+    action: RecordedAction,
+) -> Result<InspectorSnapshot, CommandError> {
     let _admission = state.ensure_accepting_work()?;
     semantic::invalidate(&udid).await;
     let _lock = RECORD_LOCK.lock().await;
     let id = udid.clone();
-    let selected = selector.clone();
+    let selected = action.clone();
     let mut record = recording(state, &udid)?.filter(|r| r.active);
     if record.as_ref().is_some_and(|r| r.steps.len() >= 100) {
         return Err(err("Phiên ghi đã đủ 100 bước; dừng và lưu trước"));
@@ -376,7 +615,6 @@ pub async fn tap(
     let artifact_dir = state.artifacts_dir.join("inspector");
     let record_key = key(&udid);
     let db = state.db.clone();
-    let intent_selector = selector.clone();
     let mut pending_record = record.clone();
     let (before, after, action_error) = with_manual_session(
         state,
@@ -384,10 +622,19 @@ pub async fn tap(
         DeviceWorkOwner::ManualControl,
         move |session| async move {
             let before = capture(session.as_ref(), &id).await?;
-            let target = resolve_unique(session.as_ref(), &selected).await?;
-            anyhow::ensure!(target.clickable, "inspector_element_not_clickable");
+            let gesture = match &selected {
+                RecordedAction::Tap(selector) => {
+                    let target = resolve_unique(session.as_ref(), selector).await?;
+                    anyhow::ensure!(target.clickable, "inspector_element_not_clickable");
+                    Gesture::Tap(target.centre())
+                }
+                RecordedAction::Swipe(swipe) => {
+                    let (width, height) = session.window_size().await?;
+                    Gesture::Swipe(swipe.gesture(width, height))
+                }
+            };
             // Persist intent before dispatch: a failed screenshot or process exit after
-            // the tap must leave an unverified step instead of silently dropping it.
+            // the action must leave an unverified step instead of silently dropping it.
             std::fs::create_dir_all(&artifact_dir)?;
             std::fs::write(
                 artifact_dir.join(format!("{}.json", before.id)),
@@ -395,20 +642,18 @@ pub async fn tap(
             )?;
             if let Some(pending) = pending_record.as_mut() {
                 pending.steps.push(RecordedStep {
-                    selector: intent_selector,
                     before_id: before.id.clone(),
-                    after_id: String::new(),
-                    verified: false,
-                    expected: None,
                     error: Some("Chờ xác minh thao tác".into()),
+                    ..selected.step()
                 });
                 db.set_setting(&record_key, &serde_json::to_string(pending)?)?;
             }
-            let error = session
-                .tap(target.centre())
-                .await
-                .err()
-                .map(|e| e.to_string());
+            let error = match gesture {
+                Gesture::Tap(point) => session.tap(point).await,
+                Gesture::Swipe(gesture) => session.swipe(gesture).await,
+            }
+            .err()
+            .map(|e| e.to_string());
             tokio::time::sleep(std::time::Duration::from_millis(350)).await;
             let after = capture(session.as_ref(), &id).await?;
             Ok((before, after, error))
@@ -420,12 +665,10 @@ pub async fn tap(
     let verified = record.is_none() && action_error.is_none();
     if let Some(record) = record.as_mut() {
         record.steps.push(RecordedStep {
-            selector,
             before_id: before.id,
             after_id: after.id.clone(),
-            verified: false,
-            expected: None,
             error: action_error.or_else(|| Some("Chờ chọn phần tử kết quả".into())),
+            ..action.step()
         });
         state
             .db
@@ -434,7 +677,7 @@ pub async fn tap(
     }
     if record.is_none() && !verified {
         return Err(err(
-            "Đã thử bấm nhưng driver chưa xác nhận thao tác; không tự bấm lại.",
+            "Đã thử thao tác nhưng driver chưa xác nhận; không tự làm lại.",
         ));
     }
     Ok(after)
@@ -456,6 +699,7 @@ mod tests {
             description_prefix: None,
             scope: None,
             action_target: None,
+            ordinal: None,
         }
     }
 
@@ -483,6 +727,7 @@ mod tests {
             long_clickable: None,
             password: None,
             selector: Some(selector),
+            ordinal_selector: None,
         }
     }
 
@@ -539,22 +784,34 @@ mod tests {
     }
 
     #[test]
-    fn recorder_requires_an_explicit_new_postcondition() {
+    fn recorder_requires_an_explicit_new_postcondition_unless_the_step_refreshes_in_place() {
         let expected = selector("Profile");
-        assert!(postcondition_appeared(
+        assert!(postcondition_holds(
             &[element(1, selector("Home"))],
             &[element(2, expected.clone())],
             &expected,
+            false,
         ));
-        assert!(!postcondition_appeared(
+        // A refresh keeps its elements: the strict default refuses, the explicit choice accepts.
+        assert!(!postcondition_holds(
             &[element(1, expected.clone())],
             &[element(2, expected.clone())],
             &expected,
+            false,
         ));
-        assert!(!postcondition_appeared(
-            &[element(1, selector("Home"))],
-            &[element(2, selector("Inbox"))],
+        assert!(postcondition_holds(
+            &[element(1, expected.clone())],
+            &[element(2, expected.clone())],
             &expected,
+            true,
         ));
+        for same_screen in [false, true] {
+            assert!(!postcondition_holds(
+                &[element(1, expected.clone())],
+                &[element(2, selector("Inbox"))],
+                &expected,
+                same_screen,
+            ));
+        }
     }
 }

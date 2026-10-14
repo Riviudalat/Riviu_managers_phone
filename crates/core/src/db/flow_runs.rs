@@ -2013,18 +2013,25 @@ fn validate_canonical_input(
 
 fn attempt_evidence_requirement(identity: &AttemptIdentity) -> anyhow::Result<EvidenceRequirement> {
     if let Some(EvidenceSpec::ElementVisible { selector }) = &identity.node.postcondition {
-        let CompiledActionConfig::Tap {
-            target: crate::CompiledTapTarget::Element { selector: target },
-        } = &identity.node.config
-        else {
-            bail!("element evidence requires a compiled element tap");
-        };
         selector.validate()?;
-        target.validate()?;
-        ensure!(
-            identity.action_kind == crate::ActionKind::Tap && selector.package == target.package,
-            "element evidence must stay within its target app"
-        );
+        match &identity.node.config {
+            CompiledActionConfig::Tap {
+                target: crate::CompiledTapTarget::Element { selector: target },
+            } => {
+                target.validate()?;
+                ensure!(
+                    identity.action_kind == crate::ActionKind::Tap
+                        && selector.package == target.package,
+                    "element evidence must stay within its target app"
+                );
+            }
+            // A recorded swipe has no target element; its result element is the whole proof.
+            CompiledActionConfig::SwipeFraction { .. } => ensure!(
+                identity.action_kind == crate::ActionKind::Swipe,
+                "element evidence must stay with its recorded swipe"
+            ),
+            _ => bail!("element evidence requires a compiled element tap or recorded swipe"),
+        }
         // This postcondition reads a fresh hierarchy. It carries no image baseline;
         // frame-based taps continue to bind their committed image and generation.
         return Ok(EvidenceRequirement::None);
@@ -5794,6 +5801,7 @@ mod tests {
                 description_prefix: None,
                 scope: None,
                 action_target: None,
+                ordinal: None,
             };
             let (database, path, run_id, attempt_id, node) = attempt_fixture(
                 ActionKind::Tap,

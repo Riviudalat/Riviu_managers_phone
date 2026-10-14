@@ -596,7 +596,8 @@ impl Builder {
                         | ActionKind::FileWrite
                         | ActionKind::HttpRequest
                         | ActionKind::SheetRead
-                        | ActionKind::SheetWrite => &["name"][..],
+                        | ActionKind::SheetWrite
+                        | ActionKind::ReadClipboard => &["name"][..],
                         ActionKind::CopyVariable | ActionKind::Transform => &["name", "source"][..],
                         ActionKind::Log => &["variable"][..],
                         _ => &[][..],

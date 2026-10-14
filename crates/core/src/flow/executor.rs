@@ -21,7 +21,7 @@ use crate::db::{AttemptTransitionPatch, Database};
 use crate::{
     AgentState, AgentStatus, ContextReleaseProof, DeviceCapabilitySnapshot, DeviceControlError,
     DeviceControlPlane, DeviceWorkOwner, GenerationFrameSource, InteractionSessionKind,
-    ProcessAbsenceProof, TapPoint, UiCapacityReservation,
+    ProcessAbsenceProof, SwipeGesture, TapPoint, UiCapacityReservation,
 };
 
 /// How long a node waits for the phone to *prove* what it did.
@@ -1598,6 +1598,57 @@ impl FlowExecutor {
                     serde_json::json!({"kind":"flowVariable","name":name,"value":value}),
                 ))
             }
+            (ActionKind::ReadClipboard, CompiledActionConfig::ArmClipboard) => {
+                let session = context
+                    .session(&self.deps.control)
+                    .map_err(FlowExecutionError::device)?;
+                // Unique per attempt, so a later read can never mistake an older run's
+                // leftover for a fresh copy.
+                session
+                    .set_clipboard(
+                        "plaintext",
+                        super::clipboard_sentinel(attempt_id).as_bytes(),
+                    )
+                    .await
+                    .map_err(FlowExecutionError::other)?;
+                Ok(ActionOutput::None)
+            }
+            (ActionKind::ReadClipboard, CompiledActionConfig::ReadClipboard { name }) => {
+                let session = context
+                    .session(&self.deps.control)
+                    .map_err(FlowExecutionError::device)?;
+                let deadline = tokio::time::Instant::now() + Duration::from_secs(20);
+                let (_, bytes) = self
+                    .read_ui(session.as_ref(), "readClipboard", deadline, |_| {
+                        session.get_clipboard(crate::MAX_INTERACTION_CLIPBOARD_BYTES)
+                    })
+                    .await?;
+                let value = String::from_utf8(bytes).map_err(|_| {
+                    ActionDispatchFailure::deterministic_read(FlowExecutionError::new(
+                        "ClipboardNotText",
+                        "Clipboard không chứa văn bản UTF-8",
+                    ))
+                })?;
+                if super::is_clipboard_sentinel(&value) {
+                    return Err(ActionDispatchFailure::deterministic_read(
+                        FlowExecutionError::new(
+                            "ClipboardUnchanged",
+                            "Clipboard vẫn là dấu Riviu đã ghi: bước sao chép chưa có hiệu lực",
+                        ),
+                    ));
+                }
+                if value.chars().count() > 4096 {
+                    return Err(ActionDispatchFailure::deterministic_read(
+                        FlowExecutionError::new(
+                            "ValueTooLarge",
+                            "Nội dung clipboard dài quá 4096 ký tự",
+                        ),
+                    ));
+                }
+                Ok(ActionOutput::Data(
+                    serde_json::json!({"kind":"flowVariable","name":name,"value":value}),
+                ))
+            }
             (
                 ActionKind::IfValue,
                 CompiledActionConfig::IfValue {
@@ -1803,6 +1854,37 @@ impl FlowExecutor {
                         f64::from(from.image_height),
                         *duration_ms,
                     )
+                    .await
+                    .map_err(FlowExecutionError::other)?;
+                Ok(ActionOutput::None)
+            }
+            (
+                ActionKind::Swipe,
+                CompiledActionConfig::SwipeFraction {
+                    from,
+                    to,
+                    duration_ms,
+                },
+            ) => {
+                let session = context
+                    .session(&self.deps.control)
+                    .map_err(FlowExecutionError::device)?;
+                // Measured before anything leaves: no size, no gesture.
+                let (width, height) = session.window_size().await.map_err(|e| {
+                    ActionDispatchFailure::non_delivery(FlowExecutionError::other(e))
+                })?;
+                session
+                    .swipe(SwipeGesture {
+                        from: TapPoint {
+                            x: from.x * width,
+                            y: from.y * height,
+                        },
+                        to: TapPoint {
+                            x: to.x * width,
+                            y: to.y * height,
+                        },
+                        duration_ms: *duration_ms,
+                    })
                     .await
                     .map_err(FlowExecutionError::other)?;
                 Ok(ActionOutput::None)
@@ -2823,7 +2905,10 @@ fn compiled_config_matches(node: &CompiledFlowNode) -> bool {
         }
         ActionKind::Wait => matches!(node.config, CompiledActionConfig::Wait { .. }),
         ActionKind::Tap => matches!(node.config, CompiledActionConfig::Tap { .. }),
-        ActionKind::Swipe => matches!(node.config, CompiledActionConfig::Swipe { .. }),
+        ActionKind::Swipe => matches!(
+            node.config,
+            CompiledActionConfig::Swipe { .. } | CompiledActionConfig::SwipeFraction { .. }
+        ),
         ActionKind::AutoSwipe => matches!(node.config, CompiledActionConfig::AutoSwipe { .. }),
         ActionKind::TypeText => matches!(node.config, CompiledActionConfig::TypeText { .. }),
         ActionKind::Screenshot => matches!(node.config, CompiledActionConfig::Screenshot { .. }),
@@ -2848,6 +2933,10 @@ fn compiled_config_matches(node: &CompiledFlowNode) -> bool {
         ActionKind::SetVariable => matches!(node.config, CompiledActionConfig::SetVariable { .. }),
         ActionKind::IfValue => matches!(node.config, CompiledActionConfig::IfValue { .. }),
         ActionKind::Log => matches!(node.config, CompiledActionConfig::Log { .. }),
+        ActionKind::ReadClipboard => matches!(
+            node.config,
+            CompiledActionConfig::ArmClipboard | CompiledActionConfig::ReadClipboard { .. }
+        ),
         // The compiler refuses these outright ("raw actions are not enabled"), so no compiled
         // plan carries them; one that does is corrupt no matter what config it claims.
         ActionKind::RawHttp | ActionKind::RawWda | ActionKind::Shell => false,

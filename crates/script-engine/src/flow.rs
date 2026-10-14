@@ -88,8 +88,15 @@ struct TapConfig {
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 struct SwipeConfig {
-    from: ImageCoordinateTarget,
-    to: ImageCoordinateTarget,
+    #[serde(default)]
+    from: Option<ImageCoordinateTarget>,
+    #[serde(default)]
+    to: Option<ImageCoordinateTarget>,
+    /// Screen fractions, as the Inspector records a swipe; the alternative to `from`/`to`.
+    #[serde(default)]
+    from_fraction: Option<AutoSwipePoint>,
+    #[serde(default)]
+    to_fraction: Option<AutoSwipePoint>,
     duration_ms: u64,
 }
 
@@ -757,14 +764,35 @@ fn compile_config(kind: ActionKind, value: &Value) -> Result<CompiledActionConfi
         }
         ActionKind::Swipe => {
             let config = decode::<SwipeConfig>(value)?;
-            validate_coordinate("from", &config.from)?;
-            validate_coordinate("to", &config.to)?;
             validate_u64("durationMs", config.duration_ms, 1, 5_000)?;
-            Ok(CompiledActionConfig::Swipe {
-                from: config.from,
-                to: config.to,
-                duration_ms: config.duration_ms,
-            })
+            match (
+                config.from,
+                config.to,
+                config.from_fraction,
+                config.to_fraction,
+            ) {
+                (Some(from), Some(to), None, None) => {
+                    validate_coordinate("from", &from)?;
+                    validate_coordinate("to", &to)?;
+                    Ok(CompiledActionConfig::Swipe {
+                        from,
+                        to,
+                        duration_ms: config.duration_ms,
+                    })
+                }
+                (None, None, Some(from), Some(to)) => {
+                    validate_auto_swipe_point("fromFraction", from)?;
+                    validate_auto_swipe_point("toFraction", to)?;
+                    Ok(CompiledActionConfig::SwipeFraction {
+                        from,
+                        to,
+                        duration_ms: config.duration_ms,
+                    })
+                }
+                _ => Err(ConfigError::invalid(
+                    "Swipe requires either from/to or fromFraction/toFraction",
+                )),
+            }
         }
         ActionKind::AutoSwipe => {
             let config = decode::<AutoSwipeConfig>(value)?;
@@ -948,6 +976,20 @@ fn compile_config(kind: ActionKind, value: &Value) -> Result<CompiledActionConfi
                 name: c.name,
                 source: c.source,
             })
+        }
+        ActionKind::ReadClipboard => {
+            use riviu_core::flow::extended::{ClipboardMode, ReadClipboardConfig};
+            let c = decode::<ReadClipboardConfig>(value)?;
+            c.validate().map_err(ConfigError::invalid)?;
+            match (c.mode, c.name) {
+                (ClipboardMode::Read, Some(name)) => {
+                    Ok(CompiledActionConfig::ReadClipboard { name })
+                }
+                (ClipboardMode::Arm, None) => Ok(CompiledActionConfig::ArmClipboard),
+                _ => Err(ConfigError::invalid(
+                    "clipboard read needs a variable name and arm takes none",
+                )),
+            }
         }
         ActionKind::OcrReadText => {
             let c = decode::<riviu_core::flow::extended::OcrReadConfig>(value)?;
@@ -1215,6 +1257,11 @@ fn validate_evidence(
             CompiledActionConfig::Tap {
                 target: CompiledTapTarget::Element { .. },
             },
+            EvidenceSpec::ElementVisible { .. },
+        )
+        | (
+            ActionKind::Swipe,
+            CompiledActionConfig::SwipeFraction { .. },
             EvidenceSpec::ElementVisible { .. },
         ) => true,
         (ActionKind::Screenshot, _, EvidenceSpec::ArtifactDecodedAndHashed)
@@ -3277,7 +3324,7 @@ mod tests {
                 node.postcondition = Some(EvidenceSpec::ArtifactDecodedAndHashed);
                 linear_document(vec![start(), launch("com.apple.Preferences"), node, end()])
             }
-            ActionKind::AssertVisible | ActionKind::ReadText => {
+            ActionKind::AssertVisible | ActionKind::ReadText | ActionKind::ReadClipboard => {
                 linear_document(vec![start(), launch("com.apple.Preferences"), node, end()])
             }
             ActionKind::TapVision => {

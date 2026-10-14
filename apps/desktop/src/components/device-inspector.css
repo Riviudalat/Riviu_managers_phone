@@ -8,6 +8,11 @@
 .inspector-toolbar { display: flex; gap: 7px; flex-wrap: wrap; }
 .inspector-toolbar input { flex: 1; min-width: 120px; }
 .inspector-toolbar button { display: flex; align-items: center; gap: 6px; }
+.inspector-recorder-tools { display: flex; flex-direction: column; gap: 8px; padding: 10px 12px; border-top: 1px solid var(--line); }
+.inspector-recorder-tools > [role="group"] { display: flex; gap: 7px; flex-wrap: wrap; align-items: center; }
+.inspector-recorder-tools select, .inspector-recorder-tools input { min-width: 0; max-width: 100%; }
+.inspector-recorder-tools button { display: flex; align-items: center; gap: 6px; }
+.inspector-recorder-tools p { margin: 0; overflow-wrap: anywhere; color: var(--text-2); font-size: var(--text-xs); }
 .inspector-body {
   display: grid;
   grid-template-columns: minmax(220px, .9fr) minmax(260px, 1fr) minmax(320px, 1.18fr);

@@ -665,6 +665,8 @@ pub fn run() {
             inspector_commands::inspector_v2,
             inspector_commands::inspector_tap,
             inspector_commands::inspector_confirm_postcondition,
+            inspector_commands::inspector_swipe,
+            inspector_commands::inspector_record_clipboard,
             inspector_commands::inspector_record,
             inspector_commands::inspector_recording,
             flow_commands::flow_read_artifact,

@@ -152,6 +152,8 @@ pub enum ActionKind {
     RawHttp,
     RawWda,
     Shell,
+    /// Appended, not inserted: the derived order of the earlier kinds stays as it was.
+    ReadClipboard,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
@@ -778,6 +780,19 @@ pub enum CompiledActionConfig {
         threshold: f64,
         /// Optional search region (screen fractions) to speed up and disambiguate.
         region: Option<VisionRegion>,
+    },
+    /// A `Swipe` in screen fractions, as the Inspector records it. It binds no stream frame or
+    /// geometry profile, so it replays on any resolution of the same layout.
+    SwipeFraction {
+        from: AutoSwipePoint,
+        to: AutoSwipePoint,
+        duration_ms: u64,
+    },
+    /// `ReadClipboard` in `arm` mode: write a unique sentinel the later copy must replace.
+    ArmClipboard,
+    /// `ReadClipboard` in `read` mode.
+    ReadClipboard {
+        name: String,
     },
 }
 

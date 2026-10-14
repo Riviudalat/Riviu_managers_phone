@@ -1,18 +1,20 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
-import { ChevronDown, ChevronRight, ChevronUp, Circle, Copy, RefreshCw, Save, Scan, Square, X } from "lucide-react";
+import { ChevronDown, ChevronRight, ChevronUp, Circle, ClipboardPaste, Copy, MoveVertical, RefreshCw, Save, Scan, Square, X } from "lucide-react";
 import { createPortal } from "react-dom";
 
 import {
   inspectorConfirmPostcondition,
   inspectorObserve,
   inspectorRecord,
+  inspectorRecordClipboard,
   inspectorRecording,
+  inspectorSwipe,
   inspectorTap,
 } from "../inspectorApi";
-import type { InspectorElement, InspectorRecording, InspectorSnapshot } from "../inspectorApi";
+import type { InspectorClipboard, InspectorElement, InspectorRecording, InspectorSnapshot, InspectorSwipe } from "../inspectorApi";
+import type { FlowNode, InspectorElementSelector, JsonObject } from "../types";
 import { flowSaveRevision } from "../api";
 import { createFlowNode, newFlowDocument } from "../flow/model";
-import type { JsonObject } from "../types";
 import { describeError } from "../describeError";
 import { useClosingTransition } from "./useClosingTransition";
 import { useModalFocus } from "./useModalFocus";
@@ -24,6 +26,35 @@ function elementLabel(element: InspectorElement) {
 
 function describeBoolean(value: boolean | null | undefined) {
   return value == null ? "—" : value ? "true" : "false";
+}
+
+/** "emr · ô thứ 1 trong lưới": the short id, the position and what kind of container holds it. */
+function describeOrdinal(selector: InspectorElementSelector) {
+  const identity = (selector.resourceId || selector.className || "").split(/[/.]/).at(-1) ?? "";
+  const container = selector.scope?.className ?? "";
+  const place = /Grid/.test(container) ? `ô thứ ${selector.ordinal} trong lưới`
+    : /List|Recycler/.test(container) ? `mục thứ ${selector.ordinal} trong danh sách`
+      : `phần tử thứ ${selector.ordinal} trong khung cuộn`;
+  return { label: `${identity} · ${place}`, place };
+}
+
+type SwipeDirection = "down" | "up" | "left" | "right";
+const SWIPE_DIRECTIONS: [SwipeDirection, string][] = [
+  ["down", "Kéo xuống (làm mới)"],
+  ["up", "Vuốt lên (cuộn xuống)"],
+  ["left", "Vuốt sang trái"],
+  ["right", "Vuốt sang phải"],
+];
+
+/** Screen fractions from a direction and a distance; the start leaves room for the longest pull. */
+function swipeFor(direction: SwipeDirection, distance: number): InspectorSwipe {
+  const durationMs = 400;
+  switch (direction) {
+    case "down": return { from: { x: 0.5, y: 0.3 }, to: { x: 0.5, y: 0.3 + distance }, durationMs };
+    case "up": return { from: { x: 0.5, y: 0.75 }, to: { x: 0.5, y: 0.75 - distance }, durationMs };
+    case "left": return { from: { x: 0.8, y: 0.5 }, to: { x: 0.8 - distance, y: 0.5 }, durationMs };
+    case "right": return { from: { x: 0.2, y: 0.5 }, to: { x: 0.2 + distance, y: 0.5 }, durationMs };
+  }
 }
 
 export function DeviceInspector({ udid, onClose }: { udid: string; onClose: () => void }) {
@@ -39,6 +70,10 @@ export function DeviceInspector({ udid, onClose }: { udid: string; onClose: () =
   const [error, setError] = useState("");
   const [name, setName] = useState("Quy trình mới");
   const [saved, setSaved] = useState("");
+  const [swipeDirection, setSwipeDirection] = useState<SwipeDirection>("down");
+  const [swipeDistance, setSwipeDistance] = useState(0.4);
+  const [clipboardName, setClipboardName] = useState("link");
+  const [clipboardPreview, setClipboardPreview] = useState<string | null>(null);
   const treeRef = useRef<HTMLDivElement>(null);
 
   const refreshRecord = useCallback(async () => setRecord(await inspectorRecording(udid)), [udid]);
@@ -81,6 +116,8 @@ export function DeviceInspector({ udid, onClose }: { udid: string; onClose: () =
   useEffect(() => {
     if (selected !== null && !query.trim()) treeRef.current?.querySelector<HTMLElement>(`[data-element-index="${selected}"]`)?.scrollIntoView?.({ block: "nearest" });
   }, [selected, query, collapsed]);
+  const chosenSelector = element?.selector ?? element?.ordinalSelector ?? null;
+  const ordinal = !element?.selector && element?.ordinalSelector ? describeOrdinal(element.ordinalSelector) : null;
   const pending = record?.steps.at(-1);
   const awaitingPostcondition = Boolean(
     pending && !pending.verified && pending.afterId === snapshot?.id && pending.error === "Chờ chọn phần tử kết quả",
@@ -157,16 +194,37 @@ export function DeviceInspector({ udid, onClose }: { udid: string; onClose: () =
     catch (reason) { setError(describeError(reason)); }
   };
   const tap = async () => {
-    if (!element?.selector) return;
-    setBusy(true); setError("");
-    try { setSnapshot(await inspectorTap(udid, element.selector)); setSelected(null); }
+    if (!chosenSelector) return;
+    setBusy(true); setError(""); setClipboardPreview(null);
+    try { setSnapshot(await inspectorTap(udid, chosenSelector)); setSelected(null); }
     catch (reason) { setError(describeError(reason)); }
     finally { await refreshRecord(); setBusy(false); }
   };
-  const confirmPostcondition = async () => {
-    if (!snapshot || !element?.selector || !awaitingPostcondition) return;
+  const swipe = async () => {
+    setBusy(true); setError(""); setClipboardPreview(null);
+    try { setSnapshot(await inspectorSwipe(udid, swipeFor(swipeDirection, swipeDistance))); setSelected(null); }
+    catch (reason) { setError(describeError(reason)); }
+    finally { await refreshRecord(); setBusy(false); }
+  };
+  // Same-screen is the operator's explicit "this step refreshes in place"; the default stays strict.
+  const confirmPostcondition = async (sameScreen: boolean) => {
+    if (!snapshot || !chosenSelector || !awaitingPostcondition) return;
     setBusy(true); setError("");
-    try { setRecord(await inspectorConfirmPostcondition(udid, snapshot.id, element.selector)); }
+    try {
+      setRecord(sameScreen
+        ? await inspectorConfirmPostcondition(udid, snapshot.id, chosenSelector, true)
+        : await inspectorConfirmPostcondition(udid, snapshot.id, chosenSelector));
+    }
+    catch (reason) { setError(describeError(reason)); }
+    finally { setBusy(false); }
+  };
+  const recordClipboard = async (step: InspectorClipboard) => {
+    setBusy(true); setError(""); setClipboardPreview(null);
+    try {
+      const result = await inspectorRecordClipboard(udid, step);
+      setRecord(result.recording);
+      if (step.mode === "read") setClipboardPreview(result.preview ?? "");
+    }
     catch (reason) { setError(describeError(reason)); }
     finally { setBusy(false); }
   };
@@ -174,21 +232,40 @@ export function DeviceInspector({ udid, onClose }: { udid: string; onClose: () =
     if (!record || record.active || !record.steps.length) return;
     setBusy(true); setError("");
     try {
-      if (record.steps.some((step) => !step.verified || !step.expected)) throw Error("Có bước chưa xác minh phần tử kết quả.");
+      if (record.steps.some((step) => !step.verified || (!step.clipboard && !step.expected))) throw Error("Có bước chưa xác minh phần tử kết quả.");
+      const bundleId = record.steps.map((step) => step.selector?.package ?? step.expected?.package).find(Boolean);
+      if (!bundleId) throw Error("Cần ít nhất một bước bấm hoặc vuốt đã xác minh để biết ứng dụng.");
       const doc = newFlowDocument(record.name);
       const start = doc.nodes.find((node) => node.kind === "start")!;
       const end = doc.nodes.find((node) => node.kind === "end")!;
       const launch = createFlowNode("launchApp", { x: 220, y: 100 });
-      launch.config = { bundleId: record.steps[0].selector.package };
-      launch.postcondition = { kind: "activeAppEquals", bundleId: record.steps[0].selector.package };
-      const taps = record.steps.map((step, index) => {
-        const node = createFlowNode("tap", { x: 440 + index * 220, y: 100 });
+      launch.config = { bundleId };
+      launch.postcondition = { kind: "activeAppEquals", bundleId };
+      const steps = record.steps.map((step, index): FlowNode => {
+        const position = { x: 440 + index * 220, y: 100 };
+        if (step.clipboard) {
+          const node = createFlowNode("readClipboard", position);
+          node.config = step.clipboard.mode === "arm" ? { mode: "arm" } : { mode: "read", name: step.clipboard.name };
+          return node;
+        }
+        if (step.swipe) {
+          const node = createFlowNode("swipe", position);
+          node.config = {
+            fromFraction: { x: step.swipe.from.x, y: step.swipe.from.y },
+            toFraction: { x: step.swipe.to.x, y: step.swipe.to.y },
+            durationMs: step.swipe.durationMs,
+          };
+          node.postcondition = { kind: "elementVisible", selector: step.expected! };
+          return node;
+        }
+        if (!step.selector) throw Error("Có bước ghi không rõ thao tác; hãy ghi lại phiên này.");
+        const node = createFlowNode("tap", position);
         node.config = { selector: step.selector as unknown as JsonObject };
         node.postcondition = { kind: "elementVisible", selector: step.expected! };
         return node;
       });
-      end.position = { x: 440 + taps.length * 220, y: 100 };
-      doc.nodes = [start, launch, ...taps, end];
+      end.position = { x: 440 + steps.length * 220, y: 100 };
+      doc.nodes = [start, launch, ...steps, end];
       doc.edges = doc.nodes.slice(0, -1).map((node, index) => ({ id: crypto.randomUUID(), sourceNodeId: node.id, sourcePort: "flow", targetNodeId: doc.nodes[index + 1].id, targetPort: "flow" }));
       const revision = await flowSaveRevision(doc, null);
       setSaved(`Đã lưu Flow “${revision.document.name}”. Mở Flow thiết bị để chỉnh và chạy.`);
@@ -196,7 +273,7 @@ export function DeviceInspector({ udid, onClose }: { udid: string; onClose: () =
     finally { setBusy(false); }
   };
 
-  const actionable = Boolean(element?.clickable || element?.selector?.actionTarget);
+  const actionable = Boolean(element?.clickable || chosenSelector?.actionTarget);
   const properties: [string, string][] = element ? [
     ["index", String(element.index)],
     ["text", element.text],
@@ -235,14 +312,32 @@ export function DeviceInspector({ udid, onClose }: { udid: string; onClose: () =
               {element ? properties.map(([label, value]) => <tr key={label}><th scope="row">{label}</th><td title={value}>{value || "—"}</td></tr>) : <tr><td colSpan={2}>Chưa chọn phần tử.</td></tr>}
             </tbody></table>
             {element && <div className="inspector-actions">
-              <p>{element.selector ? "Tìm đúng một phần tử bằng thuộc tính" : "Chưa có quy tắc tìm duy nhất; phần tử này chỉ dùng để quan sát."}</p>
+              <p>{element.selector ? "Tìm đúng một phần tử bằng thuộc tính" : ordinal ? `Không có thuộc tính riêng; chọn theo thứ tự: ${ordinal.label}` : "Chưa có quy tắc tìm duy nhất; phần tử này chỉ dùng để quan sát."}</p>
               <div className="inspector-action-buttons">
                 {element.parent !== null && hierarchy.byIndex.has(element.parent) && <button type="button" onClick={() => selectElement(element.parent)}><ChevronUp size={15}/>Chọn phần tử cha</button>}
-                <button type="button" className="primary" disabled={busy || !actionable || !element.selector || awaitingPostcondition} onClick={() => void tap()}>{record?.active ? "Bấm và kiểm tra kết quả" : "Bấm phần tử"}</button>
-                {awaitingPostcondition && <button type="button" className="primary" disabled={busy || !element.selector} onClick={() => void confirmPostcondition()}>Dùng làm kết quả của bước vừa bấm</button>}
+                <button type="button" className="primary" disabled={busy || !actionable || !chosenSelector || awaitingPostcondition} onClick={() => void tap()}>{ordinal ? `Bấm ${ordinal.place}${record?.active ? " và kiểm tra kết quả" : ""}` : record?.active ? "Bấm và kiểm tra kết quả" : "Bấm phần tử"}</button>
+                {awaitingPostcondition && <button type="button" className="primary" disabled={busy || !chosenSelector} onClick={() => void confirmPostcondition(false)}>Dùng làm kết quả của bước vừa bấm</button>}
+                {awaitingPostcondition && <button type="button" disabled={busy || !chosenSelector} onClick={() => void confirmPostcondition(true)}>Bước này làm mới, màn hình giữ nguyên — dùng phần tử vẫn còn làm kết quả</button>}
               </div>
-              <details><summary>Selector</summary><pre>{JSON.stringify(element.selector, null, 2)}</pre></details>
+              <details><summary>Selector</summary><pre>{JSON.stringify(chosenSelector, null, 2)}</pre></details>
             </div>}
+            <div className="inspector-recorder-tools">
+              <div role="group" aria-label="Ghi bước vuốt">
+                <select aria-label="Hướng vuốt" value={swipeDirection} onChange={(event) => setSwipeDirection(event.target.value as SwipeDirection)}>
+                  {SWIPE_DIRECTIONS.map(([value, label]) => <option key={value} value={value}>{label}</option>)}
+                </select>
+                <select aria-label="Quãng vuốt" value={swipeDistance} onChange={(event) => setSwipeDistance(Number(event.target.value))}>
+                  {[0.25, 0.4, 0.6].map((value) => <option key={value} value={value}>{Math.round(value * 100)}% màn hình</option>)}
+                </select>
+                <button type="button" disabled={busy || awaitingPostcondition} onClick={() => void swipe()}><MoveVertical size={15}/>{record?.active ? "Vuốt và kiểm tra kết quả" : "Vuốt"}</button>
+              </div>
+              {record?.active && <div role="group" aria-label="Ghi bước clipboard">
+                <button type="button" disabled={busy || awaitingPostcondition} title="Ghi một dấu riêng vào clipboard trước các bước sao chép" onClick={() => void recordClipboard({ mode: "arm" })}>Ghi dấu clipboard</button>
+                <input aria-label="Tên biến clipboard" value={clipboardName} maxLength={64} onChange={(event) => setClipboardName(event.target.value)}/>
+                <button type="button" disabled={busy || awaitingPostcondition || !clipboardName.trim()} onClick={() => void recordClipboard({ mode: "read", name: clipboardName.trim() })}><ClipboardPaste size={15}/>Ghi bước đọc clipboard vào biến {clipboardName.trim() || "…"}</button>
+              </div>}
+              {clipboardPreview !== null && <p role="status" aria-label="Clipboard vừa đọc">Clipboard vừa đọc: {clipboardPreview || "(trống)"}</p>}
+            </div>
           </div>
         </section>
         <section className="inspector-tree-pane" aria-label="Cây giao diện">
@@ -259,6 +354,6 @@ export function DeviceInspector({ udid, onClose }: { udid: string; onClose: () =
           {snapshot?.hierarchyXml && <div className="inspector-xml-tools"><button type="button" onClick={() => void navigator.clipboard.writeText(snapshot.hierarchyXml ?? "").catch((reason) => setError(describeError(reason)))}><Copy size={14}/>Sao chép XML</button><details><summary>XML giao diện</summary><pre className="inspector-xml">{snapshot.hierarchyXml}</pre></details></div>}
         </section>
       </div>
-      <footer>{busy ? "Đang thao tác…" : `${record?.steps.length ?? 0} bước đã ghi`} · {record?.active ? "Đang ghi" : "Đã dừng"}<span>{awaitingPostcondition ? "Chọn phần tử chỉ xuất hiện sau bước vừa bấm để xác minh." : "Chọn phần tử chỉ xem thuộc tính; bấm là thao tác riêng."}</span></footer>
+      <footer>{busy ? "Đang thao tác…" : `${record?.steps.length ?? 0} bước đã ghi`} · {record?.active ? "Đang ghi" : "Đã dừng"}<span>{awaitingPostcondition ? "Chọn phần tử chỉ xuất hiện sau bước vừa làm để xác minh; bước làm mới thì chọn phần tử vẫn còn." : "Chọn phần tử chỉ xem thuộc tính; bấm là thao tác riêng."}</span></footer>
     </div></div>, document.body);
 }

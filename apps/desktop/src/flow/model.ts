@@ -55,6 +55,8 @@ export function defaultConfigForAction(kind: ActionKind): JsonObject {
       return { locator: { strategy: "accessibilityId", value: "" } };
     case "readText":
       return { name: "observedText", locator: { strategy: "accessibilityId", value: "" } };
+    case "readClipboard":
+      return { mode: "read", name: "clipboardText" };
     case "setVariable":
       return { name: "message", value: "" };
     case "ifValue":

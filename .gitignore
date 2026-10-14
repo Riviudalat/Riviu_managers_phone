@@ -180,6 +180,8 @@ docs/re/riviu-agent/**/*.framed
 !crates/core/fixtures/tiktok-publish/picker-11-initial-musically-45.7.3-en.xml
 !crates/core/fixtures/tiktok-publish/picker-11-nine-musically-45.7.3-en.xml
 !crates/core/fixtures/tiktok-publish/picker-11-autoscroll-musically-45.7.3-en.xml
+# Phone 36 profile grid (14/10/2026), handle and display name replaced; Inspector ordinal selector.
+!crates/core/fixtures/inspector/musically-45.7.3-en-profile-grid.xml
 
 # Local screenshots, UI mockups and browser-session traces are archived under target/.
 /.playwright-cli/

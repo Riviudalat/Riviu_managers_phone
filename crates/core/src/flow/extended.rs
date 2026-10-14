@@ -1,6 +1,51 @@
 //! Pure configuration for product-owned Flow extensions.
 use serde::{Deserialize, Serialize};
 
+/// Every sentinel Riviu writes into a phone clipboard starts with this. The publish share
+/// capture writes the same shape, so a Flow read refuses either kind of leftover.
+pub const CLIPBOARD_SENTINEL_PREFIX: &str = "riviu-clipboard-sentinel-";
+
+/// A value nothing else would put in a clipboard, unique per write.
+pub fn clipboard_sentinel(id: uuid::Uuid) -> String {
+    format!("{CLIPBOARD_SENTINEL_PREFIX}{id}")
+}
+
+/// The clipboard still holds a Riviu sentinel: the copy meant to replace it did not land.
+pub fn is_clipboard_sentinel(value: &str) -> bool {
+    value.trim().starts_with(CLIPBOARD_SENTINEL_PREFIX)
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub enum ClipboardMode {
+    /// Write a unique sentinel before the steps that should replace it.
+    Arm,
+    /// Copy the clipboard into a variable; a value that is still a sentinel is a failure.
+    Read,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct ReadClipboardConfig {
+    pub mode: ClipboardMode,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub name: Option<String>,
+}
+impl ReadClipboardConfig {
+    pub fn validate(&self) -> Result<(), String> {
+        match (self.mode, &self.name) {
+            (ClipboardMode::Read, Some(name)) => {
+                super::validate_flow_variable_name(name).map_err(str::to_owned)
+            }
+            (ClipboardMode::Read, None) => {
+                Err("reading the clipboard needs a variable name".into())
+            }
+            (ClipboardMode::Arm, None) => Ok(()),
+            (ClipboardMode::Arm, Some(_)) => Err("arming the clipboard writes no variable".into()),
+        }
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct TransformConfig {
@@ -147,7 +192,8 @@ pub fn output_variable(config: &super::CompiledActionConfig) -> Option<&str> {
         C::SetVariable { name, .. }
         | C::ReadText { name, .. }
         | C::CopyVariable { name, .. }
-        | C::OcrReadText { name, .. } => Some(name),
+        | C::OcrReadText { name, .. }
+        | C::ReadClipboard { name } => Some(name),
         C::FileRead(c) => Some(&c.name),
         C::Transform(c) => Some(&c.name),
         C::FileWrite(c) => Some(&c.name),

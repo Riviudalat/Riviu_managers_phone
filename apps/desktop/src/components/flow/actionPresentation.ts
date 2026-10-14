@@ -3,6 +3,7 @@ import {
   Camera,
   CirclePlay,
   CircleStop,
+  ClipboardPaste,
   Crosshair,
   GitBranch,
   House,
@@ -64,6 +65,7 @@ export const ACTION_PRESENTATION: Partial<
   httpRequest: { label: "Gọi HTTP", icon: Rocket },
   sheetRead: { label: "Đọc ô Sheet", icon: ScanSearch },
   sheetWrite: { label: "Ghi ô Sheet", icon: Keyboard },
+  readClipboard: { label: "Đọc clipboard", icon: ClipboardPaste },
 };
 
 export function summarizeAction(kind: ActionKind, config: JsonObject): string {
@@ -80,17 +82,26 @@ export function summarizeAction(kind: ActionKind, config: JsonObject): string {
     case "tap": {
       if(config.selector && typeof config.selector==='object' && !Array.isArray(config.selector)) {
         const s=config.selector;
-        return String(s.description || s.text || s.resourceId || "Phần tử đã chọn");
+        const label = String(s.description || s.text || s.resourceId || s.className || "Phần tử đã chọn");
+        return typeof s.ordinal === "number" ? `${label} · thứ ${s.ordinal}` : label;
       }
       const coordinates = [objectNumber(config.point, "x"), objectNumber(config.point, "y")]
         .filter((value): value is number => value !== null)
         .join(", ");
       return text("accessibilityId") || coordinates;
     }
-    case "swipe":
-      return `Vuốt${
+    case "swipe": {
+      const from = [objectNumber(config.fromFraction, "x"), objectNumber(config.fromFraction, "y")];
+      const to = [objectNumber(config.toFraction, "x"), objectNumber(config.toFraction, "y")];
+      const fraction = [...from, ...to].every((value) => value !== null)
+        ? ` ${from.map((value) => Math.round(value! * 100)).join(",")}% → ${to.map((value) => Math.round(value! * 100)).join(",")}%`
+        : "";
+      return `Vuốt${fraction}${
         typeof config.durationMs === "number" ? ` ${config.durationMs} ms` : ""
       }`;
+    }
+    case "readClipboard":
+      return config.mode === "arm" ? "Ghi dấu trước khi sao chép" : `vào biến ${text("name")}`;
     case "autoSwipe":
       return typeof config.count === "number"
         ? `${config.count} lần`

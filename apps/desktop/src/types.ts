@@ -1917,7 +1917,8 @@ export type ActionKind =
   | "sheetWrite"
   | "rawHttp"
   | "rawWda"
-  | "shell";
+  | "shell"
+  | "readClipboard";
 
 export type ActionCategory = "control" | "app" | "input" | "timing" | "evidence";
 export type ResourceClass = "pureDesktop" | "bridge" | "uiSession" | "uiWithStream";
@@ -2026,6 +2027,8 @@ export interface InspectorElementSelector {
   descriptionPrefix?:string|null;
   scope?:InspectorAncestorConstraint|null;
   actionTarget?:{kind:"clickableAncestor";ancestor:InspectorAncestorConstraint}|null;
+  /** 1-based position among the visible matches inside the container `scope` names. */
+  ordinal?:number|null;
 }
 
 export type EvidenceSpec =
@@ -2112,7 +2115,15 @@ export type CompiledActionConfig =
       templatePngBase64: string;
       threshold: number;
       region: VisionRegion | null;
-    };
+    }
+  | {
+      kind: "swipeFraction";
+      from: { x: number; y: number };
+      to: { x: number; y: number };
+      durationMs: number;
+    }
+  | { kind: "armClipboard" }
+  | { kind: "readClipboard"; name: string };
 
 export interface VisionRegion {
   x0: number;

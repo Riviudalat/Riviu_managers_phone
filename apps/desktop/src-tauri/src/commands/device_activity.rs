@@ -162,6 +162,7 @@ fn safe_step(row: &DeviceActivityProgress) -> Option<&'static str> {
             "home" => "Đang về màn hình chính",
             "screenshot" => "Đang chụp màn hình",
             "readText" | "ocrReadText" => "Đang đọc màn hình",
+            "readClipboard" => "Đang xử lý clipboard",
             "assertVisible" | "ifVisible" | "ifVision" => "Đang kiểm tra màn hình",
             _ => return None,
         };

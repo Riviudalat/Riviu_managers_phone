@@ -45,6 +45,14 @@ của bước so sánh phải được nối. Lịch sử hiển thị giá tr�
 Flow có thao tác UI vẫn cần **Mở ứng dụng** làm bước thao tác đầu tiên. Nếu thấy
 phần tử hiện dùng cây đầy đủ trên Android; máy thiếu khả năng này báo rõ trước khi đọc.
 
+**Đọc clipboard** (Android, qua Riviu Helper) có hai cách dùng. **Ghi dấu trước** ghi
+một dấu riêng của lượt chạy vào clipboard; đặt bước này trước các bước sao chép.
+**Đọc vào biến** chép clipboard vào biến; nếu clipboard vẫn là dấu Riviu thì bước sao
+chép chưa có hiệu lực và bước đọc thất bại, không đoán. Nội dung tối đa 4.096 ký tự,
+giữ nguyên như trên máy (dùng **Xử lý dữ liệu** để bỏ khoảng trắng). Bước **Vuốt** có
+thể dùng tỷ lệ màn hình thay cho tọa độ trên ảnh; bước vuốt ghi từ Inspector dùng cách
+này và kiểm kết quả bằng phần tử như bước bấm.
+
 Chọn bước **Đọc tệp**, **Ghi tệp**, **Gọi HTTP**, **Đọc ô Sheet** hoặc
 **Ghi ô Sheet** rồi mở **Kết nối dữ liệu: tệp, HTTP và Google Sheet** trong bảng
 thuộc tính để nhập tệp hoặc lưu token. Tệp nằm trong `flow-data` của Riviu; đường

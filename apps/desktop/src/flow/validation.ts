@@ -53,6 +53,7 @@ const ACTION_KIND_MEMBERS: Record<ActionKind, true> = {
   rawHttp: true,
   rawWda: true,
   shell: true,
+  readClipboard: true,
 };
 
 const ACTION_KINDS = new Set<ActionKind>(Object.keys(ACTION_KIND_MEMBERS) as ActionKind[]);
