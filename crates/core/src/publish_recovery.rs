@@ -390,6 +390,10 @@ pub fn classify(message: &str) -> FailureKind {
         "màn đăng không mở",
         "không thấy ô caption ở màn cuối",
         "chưa xác nhận tải nhạc",
+        // Picker selection not read back after a tap (r116, 14/10/2026: 3/10 phones once the
+        // read grace let the last read finish): nothing was posted and a fresh attempt
+        // rebuilds the picker. Its sentence once said "đã dừng", which read as a Stop.
+        "chưa xác nhận chọn đủ ảnh",
     ]
     .iter()
     .any(|x| s.contains(x))
@@ -591,6 +595,10 @@ mod tests {
         }
         assert_eq!(
             classify("TikTok báo mạng không ổn định khi tải danh sách nhạc"),
+            FailureKind::Retryable
+        );
+        assert_eq!(
+            classify("chưa xác nhận chọn đủ ảnh trong thư mục; chưa bấm Đăng"),
             FailureKind::Retryable
         );
         for msg in [

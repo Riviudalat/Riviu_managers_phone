@@ -315,7 +315,7 @@ impl ComposerVerdict {
                  nên đây không còn là ca lật nhầm trạng thái; màn hình này đáng được dump.)"
             }
             Self::NotEnoughSelected => {
-                "chưa xác nhận chọn đủ ảnh trong thư mục; đã dừng trước khi đăng"
+                "chưa xác nhận chọn đủ ảnh trong thư mục; chưa bấm Đăng"
             }
             Self::EditStepDidNotOpen => "bấm Tiếp mà bước chỉnh sửa không mở",
             Self::PostScreenDidNotOpen => "bấm Tiếp ở bước chỉnh sửa mà màn đăng không mở",
