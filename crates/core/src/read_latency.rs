@@ -131,11 +131,12 @@ fn book() -> &'static parking_lot::Mutex<Book> {
     BOOK.get_or_init(|| parking_lot::Mutex::new(Book::default()))
 }
 
-/// Count one completed tree read (`GET /source`, or a `POST /element`/`/elements` find) on
-/// `serial`.
+/// Count one tree read (`GET /source`, or a `POST /element`/`/elements` find) on `serial`.
 ///
-/// Only reads that came back: a read cut off by its own deadline measured the deadline, not
-/// the phone, and a cancelled one measured nothing.
+/// Completed reads, plus reads cut off after at least five seconds as a lower bound (the
+/// Android agent's `UnansweredTreeRead`): r122/r123 (15/10/2026) showed every 12-30 s read
+/// ending interrupted, which left the book holding only fast reads. A read cut off sooner
+/// measured its deadline, not the phone, and is not counted.
 pub fn record_tree_read(serial: &str, elapsed: Duration) {
     if serial.is_empty() {
         return;

@@ -392,6 +392,47 @@ fn note_tree_read(serial: &str, suffix: &str, elapsed: Duration) {
     }
 }
 
+/// A tree read that never came back, dropped by its caller's deadline or lost to the
+/// transport, still proves the phone took at least that long.
+///
+/// r122/r123 (15/10/2026, 20 phones): on the camera and editor screens `/source` ran 12-30 s
+/// and every such read ended interrupted, so the book held only the fast reads, each retry
+/// got the same base window and failed at the same read. Counting the cut-off as a lower
+/// bound lets the next window widen; only past [`SLOW_TREE_READ`], because a read cut short
+/// near its deadline says nothing about the phone.
+struct UnansweredTreeRead<'a> {
+    serial: &'a str,
+    suffix: &'a str,
+    started: std::time::Instant,
+    answered: bool,
+}
+
+impl<'a> UnansweredTreeRead<'a> {
+    fn start(serial: &'a str, suffix: &'a str) -> Self {
+        Self {
+            serial,
+            suffix,
+            started: std::time::Instant::now(),
+            answered: false,
+        }
+    }
+
+    /// Records the completed read; the drop then records nothing.
+    fn answered(&mut self) {
+        self.answered = true;
+        note_tree_read(self.serial, self.suffix, self.started.elapsed());
+    }
+}
+
+impl Drop for UnansweredTreeRead<'_> {
+    fn drop(&mut self) {
+        let elapsed = self.started.elapsed();
+        if !self.answered && elapsed >= SLOW_TREE_READ {
+            note_tree_read(self.serial, self.suffix, elapsed);
+        }
+    }
+}
+
 /// A transport failure counts as a timeout when the client's own deadline fired.
 fn call_failed(call: &mut crate::telemetry::CallTimer, error: &reqwest::Error) {
     if error.is_timeout() {
@@ -798,7 +839,7 @@ impl AgentClient {
             &route,
             Some(slow_call_budget(suffix)),
         );
-        let started = std::time::Instant::now();
+        let mut unanswered = UnansweredTreeRead::start(&self.serial, suffix);
         // Set once the whole body is in: from then on an error is the server's answer
         // (stale tree, HTTP status), not a transport failure, and counts by its latency.
         let body_received = std::sync::atomic::AtomicBool::new(false);
@@ -866,7 +907,7 @@ impl AgentClient {
                 observation_deadline_error()
             })?;
         if body_received.load(std::sync::atomic::Ordering::Relaxed) {
-            note_tree_read(&self.serial, suffix, started.elapsed());
+            unanswered.answered();
         }
         match &result {
             Ok(_) => call.answered(),
@@ -996,6 +1037,7 @@ impl AgentClient {
         let mut trace = riviu_core::tiktok_composer::StageDiagnosticOperation::start(
             suffix, &self.session_identity(), request_timeout.map(|timeout| tokio::time::Instant::now() + timeout));
         let started = std::time::Instant::now();
+        let mut unanswered = UnansweredTreeRead::start(&self.serial, suffix);
         // Every call, not only the slow ones: percentiles of warnings are the tail's.
         let mut call = crate::telemetry::CallTimer::start(
             crate::telemetry::AGENT,
@@ -1052,7 +1094,7 @@ impl AgentClient {
             })?;
         call.answered();
         let elapsed = started.elapsed();
-        note_tree_read(&self.serial, suffix, elapsed);
+        unanswered.answered();
         if cfg!(debug_assertions) && std::env::var("RIVIU_PUBLISH_REHEARSAL").as_deref() == Ok("1")
         {
             tracing::info!(serial=%self.serial,route=suffix,ms=elapsed.as_millis() as u64,"publish benchmark agent latency");
