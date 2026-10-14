@@ -9,12 +9,16 @@
 //! 750 ms at p90 (`controller-r111.stdout.txt`, `riviu_android_driver::telemetry`). A step
 //! that needs three to six reads cannot finish inside 8-10 s when one read takes 1.5-3 s.
 //!
-//! **What it does.** The Android agent client records every completed `/source` read against
-//! the phone's serial ([`record_tree_read`]). [`window`] is computed once when a step starts:
+//! **What it does.** The Android agent client records every completed `/source` read and
+//! `/element`/`/elements` find against the phone's serial ([`record_tree_read`]); r112/r113
+//! (14/10/2026) showed steps dying on a slow find as often as on a slow `/source`. [`window`]
+//! is computed once when a step starts:
 //! `clamp(max(base, reads × q90 + margin), base, ceiling)`, with the ceiling at most four
 //! times the base and never above [`WINDOW_CEILING`]. Every caller still bounds the result by
 //! the enclosing sound/compose budget (`phase_deadline`), so a wider step never outlives the
-//! stage it belongs to. The window is never extended while the step runs.
+//! stage it belongs to. The window is never extended while the step runs; only the one read
+//! still in flight when it closes may be finished by the read grace
+//! ([`crate::ui_automation::runtime::READ_GRACE`]).
 //!
 //! **What it never does.** It is for reads that wait for a screen. It never sizes the fresh
 //! proof before Post (`final_reproof_window`), a gesture or an effect, and it never turns an
@@ -125,7 +129,8 @@ fn book() -> &'static parking_lot::Mutex<Book> {
     BOOK.get_or_init(|| parking_lot::Mutex::new(Book::default()))
 }
 
-/// Count one completed tree read (`GET /source`) on `serial`.
+/// Count one completed tree read (`GET /source`, or a `POST /element`/`/elements` find) on
+/// `serial`.
 ///
 /// Only reads that came back: a read cut off by its own deadline measured the deadline, not
 /// the phone, and a cancelled one measured nothing.

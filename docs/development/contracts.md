@@ -116,12 +116,25 @@ Các cửa sổ trên là mức nền đo khi máy rảnh. Mỗi bước quan s�
 picker, album, chọn ảnh, bước chỉnh sửa, điều hướng và nhập caption, đọc lại nhạc) tính cửa sổ
 một lần khi bắt đầu bằng `read_latency::window`:
 `clamp(max(nền, số_lần_đọc × q90 + 2 s), nền, min(4 × nền, 90 s))`, với q90 lấy từ tối đa 32
-lần `GET /source` hoàn tất của chính máy đó (serial) trong 10 phút gần nhất, cần ít nhất 5 lần;
+lần đọc cây hoàn tất (`GET /source` và lệnh tìm `POST /element`/`/elements`) của chính máy đó
+(serial) trong 10 phút gần nhất, cần ít nhất 5 lần;
 thiếu số đo thì giữ nền. Không gia hạn sau mỗi lần poll, và mọi cửa sổ vẫn bị chặn bởi ngân
 sách chung của giai đoạn (`phase_deadline`), nên không vượt ngân sách nhạc/compose. Cửa sổ
 không áp cho bằng chứng tươi trước Post (deadline đọc lại cuối 12–16 giây ở trên vẫn là trần
 của mọi lần đọc bên trong), cho bước bấm/effect hay cho chờ về feed sau Post. Hết cửa sổ vẫn
 trả cùng mã lỗi như trước; nới cửa sổ không bao giờ biến màn chưa đọc thành quyền bấm.
+
+Ân hạn đọc (`READ_GRACE` = 15 giây, `ui_automation/runtime.rs`): trên đường Đăng thật, khi cửa
+sổ của một bước quan sát trước Post hết mà đúng một lần đọc còn đang chạy, bộ bọc đọc
+(`read_before_deadline`, `tiktok_composer::observation::read`) chờ tiếp chính lần đọc đó tối đa
+15 giây rồi bước xét điều kiện một lần với kết quả ấy; chưa đạt thì kết thúc với cùng mã lỗi
+như trước. Một lần locate (tìm rồi đọc khung/thuộc tính) tính là một lần đọc. Sau cửa sổ không
+bắt đầu lần đọc mới và không poll lại. Ân hạn dừng ngay khi Stop và không bao giờ vượt ngân sách
+nhạc đang bao bước (mọi `with_*_budget` là trần; chính ngân sách hết thì không có ân hạn). Không
+áp cho thao tác bấm/gõ/vuốt/back (vẫn xả hết và đối soát như cũ), cho đọc popup (đọc xong vẫn
+cần thêm lần đọc của bước nên vô ích), cho bằng chứng tươi trước Post và mọi thứ sau Post
+(`close_read_grace` trước `final_reproof_window`). Kết quả nhận trong ân hạn là bằng chứng tươi
+như mọi lần đọc; kiểm epoch/generation trước khi bấm vẫn áp dụng.
 
 Dispatcher giữ completion receipt đến khi SQLite xác nhận cùng
 assignment/campaign/run/attempt/device/phase/revision. Journal cạnh DB lưu receipt

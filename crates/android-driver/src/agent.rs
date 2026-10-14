@@ -379,8 +379,15 @@ fn slow_call_budget(route: &str) -> Duration {
 
 /// A completed tree read sizes this phone's pre-Post read windows
 /// ([`riviu_core::read_latency::window`]); other routes and unanswered reads do not.
+///
+/// The `/element` and `/elements` finds count too: in r112/r113 (14/10/2026) the steps that
+/// died on a stall were waiting on a find as often as on `/source` (`/element` p90 8.5-8.9 s,
+/// `/elements` max 8.8-9.1 s in the stalled minutes), and a book of `/source` alone never
+/// widened them. Attribute and rect reads (`/element/<id>/…`) stay out: three or four follow
+/// every find at ~40 ms each, and they would crowd the book's recent reads and pull its q90
+/// below what a step's reads cost.
 fn note_tree_read(serial: &str, suffix: &str, elapsed: Duration) {
-    if suffix == "/source" {
+    if matches!(suffix, "/source" | "/element" | "/elements") {
         riviu_core::read_latency::record_tree_read(serial, elapsed);
     }
 }

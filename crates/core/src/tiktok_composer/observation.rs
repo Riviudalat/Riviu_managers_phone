@@ -76,36 +76,82 @@ pub(crate) fn android(package: &str) -> bool {
     )
 }
 
-pub(crate) fn check(deadline: Instant, stop: Option<&AtomicBool>) -> anyhow::Result<()> {
+/// The publish walk's read grace: never past the enclosing sound budget, logged with the
+/// phone and the progress step the stage diagnostics carry.
+pub(crate) const READ_GRACE_HOOKS: crate::ui_automation::runtime::ReadGraceHooks =
+    crate::ui_automation::runtime::ReadGraceHooks {
+        outer_deadline: crate::tiktok_sound::budget_deadline,
+        serial: stage_udid,
+        step: stage_phase,
+    };
+
+fn check_stop_and_budget(stop: Option<&AtomicBool>) -> anyhow::Result<()> {
     anyhow::ensure!(
         !stop.is_some_and(|flag| flag.load(Ordering::Relaxed)),
         "publish observation stopped"
     );
-    crate::tiktok_sound::check_wait()?;
-    if Instant::now() >= deadline {
+    crate::tiktok_sound::check_wait()
+}
+
+/// A window the read grace just answered stays usable while the step judges that answer
+/// ([`crate::ui_automation::runtime::window_open`]); [`read`] still starts nothing in it.
+pub(crate) fn check(deadline: Instant, stop: Option<&AtomicBool>) -> anyhow::Result<()> {
+    check_stop_and_budget(stop)?;
+    if !crate::ui_automation::runtime::window_open(deadline) {
         return Err(crate::publish_recovery::observation_deadline());
     }
     Ok(())
 }
 
 /// Only read futures belong here. Gestures must run to completion.
+///
+/// A read still running when `deadline` passes gets the scope's read grace
+/// ([`crate::ui_automation::runtime::await_in_flight`]), inside the sound budget and Stop.
 pub(crate) async fn read<T>(
     deadline: Instant,
     stop: Option<&AtomicBool>,
     work: impl std::future::Future<Output = anyhow::Result<T>>,
 ) -> anyhow::Result<T> {
     check(deadline, stop)?;
-    let task = tokio::time::timeout_at(deadline, work);
-    tokio::pin!(task);
+    if !crate::ui_automation::runtime::begin_read(deadline) {
+        return Err(crate::publish_recovery::observation_deadline());
+    }
+    tokio::pin!(work);
     let mut poll = tokio::time::interval(Duration::from_millis(50));
-    let value = loop {
+    let finished = loop {
         tokio::select! {
-            result = &mut task => break result,
+            biased;
+            result = &mut work => break Some(result),
+            _ = tokio::time::sleep_until(deadline) => break None,
             _ = poll.tick() => check(deadline, stop)?,
         }
     };
+    let value = match finished {
+        Some(value) => value,
+        None => {
+            check_stop_and_budget(stop)?;
+            let stopped = || {
+                stop.is_some_and(|flag| flag.load(Ordering::Relaxed))
+                    || crate::tiktok_sound::check_wait().is_err()
+            };
+            // Boxed like `read_before_deadline`'s: rare, and kept out of every caller's state.
+            match Box::pin(crate::ui_automation::runtime::await_in_flight(
+                work.as_mut(),
+                deadline,
+                stopped,
+            ))
+            .await
+            {
+                Some(value) => value,
+                None => {
+                    check_stop_and_budget(stop)?;
+                    return Err(crate::publish_recovery::observation_deadline());
+                }
+            }
+        }
+    };
     check(deadline, stop)?;
-    value.map_err(|_| crate::publish_recovery::observation_deadline())?
+    value
 }
 
 /// None means the capability explicitly reported Unsupported, never empty evidence.

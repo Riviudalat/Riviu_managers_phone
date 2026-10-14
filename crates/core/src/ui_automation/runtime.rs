@@ -4,7 +4,9 @@ use super::{model::*, resolver, tree::Tree};
 use base64::Engine;
 use sha2::{Digest, Sha256};
 use std::future::Future;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::pin::Pin;
+use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
+use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 /// A read can be abandoned without making a statement about the device's UI state.
@@ -17,6 +19,10 @@ pub enum ReadWaitResult<T> {
 
 /// Bound a read by the caller's existing deadline and Stop flag. Read errors stay errors.
 /// Never wrap a dispatched gesture: an uncertain effect must drain and be reconciled.
+///
+/// Inside [`with_read_grace`], a read still running when `deadline` passes is awaited for up
+/// to [`READ_GRACE`] more ([`await_in_flight`]) and its result is returned for the caller to
+/// judge once. No read starts after `deadline`, grace or not ([`begin_read`]).
 pub async fn read_before_deadline<T>(
     read: impl Future<Output = anyhow::Result<T>>,
     deadline: tokio::time::Instant,
@@ -25,7 +31,7 @@ pub async fn read_before_deadline<T>(
     if stop.load(Ordering::Relaxed) {
         return Ok(ReadWaitResult::Cancelled);
     }
-    if tokio::time::Instant::now() >= deadline {
+    if !begin_read(deadline) {
         return Ok(ReadWaitResult::DeadlineExceeded);
     }
     let cancelled = async {
@@ -33,21 +39,295 @@ pub async fn read_before_deadline<T>(
             tokio::time::sleep(Duration::from_millis(50)).await;
         }
     };
+    tokio::pin!(read);
     let result = tokio::select! {
         biased;
         _ = cancelled => return Ok(ReadWaitResult::Cancelled),
-        _ = tokio::time::sleep_until(deadline) => return Ok(ReadWaitResult::DeadlineExceeded),
-        result = read => result,
+        _ = tokio::time::sleep_until(deadline) => None,
+        result = &mut read => Some(result),
+    };
+    let result = match result {
+        Some(result) => result,
+        // The window closed with this read in flight. Boxed: it is rare, and every
+        // deadline-bounded read embeds this future in its caller's state.
+        None => match Box::pin(await_in_flight(read.as_mut(), deadline, || {
+            stop.load(Ordering::Relaxed)
+        }))
+        .await
+        {
+            Some(result) => result,
+            None if stop.load(Ordering::Relaxed) => return Ok(ReadWaitResult::Cancelled),
+            None => return Ok(ReadWaitResult::DeadlineExceeded),
+        },
     };
     // Synchronous decoding or an immediately ready read can finish before the select
     // polls its timers again. Guard errors too, so Stop cannot become a retry trigger.
     if stop.load(Ordering::Relaxed) {
         return Ok(ReadWaitResult::Cancelled);
     }
-    if tokio::time::Instant::now() >= deadline {
+    if !window_open(deadline) {
         return Ok(ReadWaitResult::DeadlineExceeded);
     }
     result.map(ReadWaitResult::Ready)
+}
+
+/// How long a pre-Post observation step keeps awaiting the one read still running when its
+/// window closes, before it judges that read's result once.
+///
+/// Measured on 20 SM-G955F/N (Android 9, TikTok 45.7.3/en, QuietView, adaptive windows), runs
+/// r112 (`25672a42`) and r113 (`204867f9`), 14/10/2026. The agent's routes are normally quick
+/// (`/element*` p50 <= 50 ms, `/source` p50 ~1.5 s), but a phone stalls in bursts in which every
+/// route is slow at once (`/source` max 14.9-18.8 s, `/actions` max 20.8-28 s in the same
+/// minute). Ten of r112's twelve failed compose attempts with stage diagnostics ended on a read
+/// the step deadline cut off after 7.7-13.4 s, and each cut threw the whole attempt away
+/// (requeue, TikTok restart, media re-staged, back at the same step 2-3 minutes later). 15 s
+/// covers those cut-offs. It is finite and never outlives an enclosing budget or Stop.
+pub const READ_GRACE: Duration = Duration::from_secs(15);
+
+/// How often a grace re-checks Stop; the same cadence as [`read_before_deadline`].
+const GRACE_STOP_POLL: Duration = Duration::from_millis(50);
+
+/// What the read wrappers need from a scope that opts into [`READ_GRACE`]. Plain function
+/// pointers keep this module free of publish types: the installer owns its budgets and labels.
+#[derive(Clone, Copy)]
+pub struct ReadGraceHooks {
+    /// The enclosing budget, if any. A grace ends at it and never starts once it has passed.
+    pub outer_deadline: fn() -> Option<tokio::time::Instant>,
+    /// The phone and the step, for the log line only.
+    pub serial: fn() -> Option<String>,
+    pub step: fn() -> Option<String>,
+}
+
+struct ReadGraceScope {
+    hooks: ReadGraceHooks,
+    /// Set by [`close_read_grace`]; never cleared for the rest of the scope.
+    closed: AtomicBool,
+    /// Held by [`suppress_read_grace`] guards.
+    suppressed: AtomicU32,
+    /// The window whose in-flight read the grace finished, until the next read starts.
+    answered: parking_lot::Mutex<Option<AnsweredWindow>>,
+}
+
+struct AnsweredWindow {
+    window_end: tokio::time::Instant,
+    overrun: Duration,
+    serial: Option<String>,
+    step: Option<String>,
+}
+
+tokio::task_local! {
+    static READ_GRACE_SCOPE: Arc<ReadGraceScope>;
+}
+
+impl ReadGraceScope {
+    fn bound(&self, window_end: tokio::time::Instant) -> Option<tokio::time::Instant> {
+        if self.closed.load(Ordering::Relaxed) || self.suppressed.load(Ordering::Relaxed) > 0 {
+            return None;
+        }
+        let mut bound = window_end.checked_add(READ_GRACE)?;
+        if let Some(outer) = (self.hooks.outer_deadline)() {
+            bound = bound.min(outer);
+        }
+        (bound > tokio::time::Instant::now()).then_some(bound)
+    }
+
+    fn answer(&self, window_end: tokio::time::Instant) {
+        let mut answered = self.answered.lock();
+        // A wrapper nested in another with the same deadline finishes the same read.
+        if answered
+            .as_ref()
+            .is_some_and(|answered| answered.window_end == window_end)
+        {
+            return;
+        }
+        let previous = answered.replace(AnsweredWindow {
+            window_end,
+            overrun: tokio::time::Instant::now().saturating_duration_since(window_end),
+            serial: (self.hooks.serial)(),
+            step: (self.hooks.step)(),
+        });
+        drop(answered);
+        if let Some(previous) = previous {
+            previous.log(false);
+        }
+    }
+
+    /// Log the grace that answered the last window, if any: `satisfied` when the walk went on
+    /// past that step (its next read opened in a live window, or the fresh proof began).
+    fn settle(&self, satisfied: bool) {
+        let answered = self.answered.lock().take();
+        if let Some(answered) = answered {
+            answered.log(satisfied);
+        }
+    }
+}
+
+impl Drop for ReadGraceScope {
+    /// The attempt ended before the walk took another read, so the step did not go on.
+    fn drop(&mut self) {
+        self.settle(false);
+    }
+}
+
+impl AnsweredWindow {
+    fn log(&self, satisfied: bool) {
+        log_grace(
+            self.serial.as_deref(),
+            self.step.as_deref(),
+            self.overrun,
+            true,
+            satisfied,
+        );
+    }
+}
+
+fn log_grace(
+    serial: Option<&str>,
+    step: Option<&str>,
+    overrun: Duration,
+    completed: bool,
+    satisfied: bool,
+) {
+    tracing::info!(
+        serial = serial.unwrap_or("?"),
+        step = step.unwrap_or("?"),
+        window_overrun_ms = overrun.as_millis().min(u128::from(u64::MAX)) as u64,
+        completed,
+        satisfied,
+        "Hết cửa sổ bước khi lần đọc màn hình còn đang chạy; đã chờ thêm lần đọc đó (ân hạn đọc)"
+    );
+}
+
+/// Run `work` with [`READ_GRACE`] for its deadline-bounded reads. Nested calls share the
+/// outermost scope, so a [`close_read_grace`] anywhere inside holds until that scope ends.
+pub async fn with_read_grace<T>(hooks: ReadGraceHooks, work: impl Future<Output = T>) -> T {
+    if READ_GRACE_SCOPE.try_with(|_| ()).is_ok() {
+        return work.await;
+    }
+    let scope = Arc::new(ReadGraceScope {
+        hooks,
+        closed: AtomicBool::new(false),
+        suppressed: AtomicU32::new(0),
+        answered: parking_lot::Mutex::new(None),
+    });
+    READ_GRACE_SCOPE.scope(scope, work).await
+}
+
+/// End the grace for the rest of the enclosing scope: the fresh pre-Post proof and everything
+/// after Post are never graced. A grace that answered the last window led the walk this far.
+pub fn close_read_grace() {
+    let _ = READ_GRACE_SCOPE.try_with(|scope| {
+        scope.closed.store(true, Ordering::Relaxed);
+        scope.settle(true);
+    });
+}
+
+/// No [`READ_GRACE`] while the returned guard lives: for reads whose result can never finish the
+/// step once its window has closed, such as a popup check, which needs further reads before the
+/// step's own. A guard rather than a wrapping future, so a large read future is never moved.
+#[must_use = "the grace is suppressed only while the guard lives"]
+pub fn suppress_read_grace() -> ReadGraceSuppressed {
+    ReadGraceSuppressed(
+        READ_GRACE_SCOPE
+            .try_with(|scope| {
+                scope.suppressed.fetch_add(1, Ordering::Relaxed);
+                scope.clone()
+            })
+            .ok(),
+    )
+}
+
+/// See [`suppress_read_grace`].
+pub struct ReadGraceSuppressed(Option<Arc<ReadGraceScope>>);
+
+impl Drop for ReadGraceSuppressed {
+    fn drop(&mut self) {
+        if let Some(scope) = &self.0 {
+            scope.suppressed.fetch_sub(1, Ordering::Relaxed);
+        }
+    }
+}
+
+/// Every deadline-bounded read wrapper calls this before it starts a read. It settles the grace
+/// that answered the previous window and refuses once `deadline` has passed: no read starts
+/// after its window, whatever a grace just returned.
+pub fn begin_read(deadline: tokio::time::Instant) -> bool {
+    let open = tokio::time::Instant::now() < deadline;
+    let _ = READ_GRACE_SCOPE.try_with(|scope| scope.settle(open));
+    open
+}
+
+/// Whether a step may still use evidence for the window ending at `deadline`: the window has
+/// not closed, or the grace just finished the read that was running when it did. It never
+/// permits another read: [`begin_read`] refuses after the window whatever this says.
+pub fn window_open(deadline: tokio::time::Instant) -> bool {
+    tokio::time::Instant::now() < deadline
+        || READ_GRACE_SCOPE
+            .try_with(|scope| {
+                scope
+                    .answered
+                    .lock()
+                    .as_ref()
+                    .is_some_and(|answered| answered.window_end == deadline)
+            })
+            .unwrap_or(false)
+}
+
+/// A step's own check that its window is over. When the grace answered this window and the
+/// step gives up on it anyway, that answer did not satisfy the step.
+pub fn window_closed(deadline: tokio::time::Instant) -> bool {
+    if tokio::time::Instant::now() < deadline {
+        return false;
+    }
+    let _ = READ_GRACE_SCOPE.try_with(|scope| {
+        let mut answered = scope.answered.lock();
+        if answered
+            .as_ref()
+            .is_some_and(|answered| answered.window_end == deadline)
+        {
+            let unsatisfied = answered.take();
+            drop(answered);
+            if let Some(unsatisfied) = unsatisfied {
+                unsatisfied.log(false);
+            }
+        }
+    });
+    true
+}
+
+/// Keep awaiting `read`, whose window closed at `window_end`, for up to [`READ_GRACE`], never
+/// past the scope's outer budget and never once `stopped()`, and return its output if it
+/// finished. `None` outside an open [`with_read_grace`] scope, so the caller abandons the read
+/// exactly as it did without one. This polls only the read it is given and starts nothing;
+/// a gesture is never handed here.
+pub(crate) async fn await_in_flight<F: Future>(
+    mut read: Pin<&mut F>,
+    window_end: tokio::time::Instant,
+    stopped: impl Fn() -> bool,
+) -> Option<F::Output> {
+    let scope = READ_GRACE_SCOPE.try_with(Arc::clone).ok()?;
+    let bound = scope.bound(window_end)?;
+    loop {
+        let now = tokio::time::Instant::now();
+        if now >= bound || stopped() {
+            log_grace(
+                (scope.hooks.serial)().as_deref(),
+                (scope.hooks.step)().as_deref(),
+                now.saturating_duration_since(window_end),
+                false,
+                false,
+            );
+            return None;
+        }
+        tokio::select! {
+            biased;
+            output = read.as_mut() => {
+                scope.answer(window_end);
+                return Some(output);
+            }
+            _ = tokio::time::sleep_until(bound.min(now + GRACE_STOP_POLL)) => {}
+        }
+    }
 }
 
 /// Wait using only `UiSession::observe`, one monotonic total deadline and cancellation.
