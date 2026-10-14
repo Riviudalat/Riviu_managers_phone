@@ -1,8 +1,8 @@
 import { useCallback, useEffect, useMemo, useState } from "react";
 import { useQueries } from "@tanstack/react-query";
-import { operationQueryRuns } from "../../api";
+import { listenRiviuEvents, operationQueryRuns } from "../../api";
 import { describeError } from "../../describeError";
-import { readQueryClient } from "../../readQuery";
+import { invalidateReadScope, readQueryClient } from "../../readQuery";
 import type { OperationRunDetail, OperationRunKind, OperationRunSummary } from "../../types";
 import {
   deviceAttentionItems, publishAttentionItems, runAttentionItems, sortAttentionItems,
@@ -20,6 +20,16 @@ const MAX_RECENT_RUN_READS = 20;
 const MAX_CLASSIFY_READS = 20;
 /** One page of each all-age discovery read; a further page is reported, never assumed empty. */
 const DISCOVERY_PAGE = 200;
+/**
+ * A finished campaign is read again when the backend says it changed, at most this often.
+ *
+ * r124 (15/10/2026): 59 campaigns kept unresolved rows and each finished one was re-read every
+ * 10 s, a 3 MB `publish_get` plus a verification scan per read. The controller sat at two cores
+ * with nothing posting and peaked at 13, which slowed every phone's tree reads in the run.
+ */
+const PUBLISH_EVENT_READ_GAP_MS = 10_000;
+/** Safety net for a finished campaign whose change event was missed. */
+const FINISHED_PUBLISH_READ_MS = 120_000;
 export const UNRESOLVED_REGISTRY_KEY = "riviu.queue.unresolved.v1";
 
 const newestFirst = (left: OperationRunSummary, right: OperationRunSummary) =>
@@ -67,8 +77,9 @@ const pollQuery = (run: Planned) => run.kind === "publish"
   ? {
     queryKey: publishRunScope(run.sourceId),
     queryFn: () => readPublishRun(run.sourceId),
-    // A finished campaign changes only through background checks and Sheet retries.
-    refetchInterval: run.active ? 2000 : 10_000,
+    // A finished campaign changes only through background checks and Sheet retries, which
+    // emit publishUpdated (read below); the interval is only the safety net.
+    refetchInterval: run.active ? 2000 : FINISHED_PUBLISH_READ_MS,
     refetchIntervalInBackground: true,
   }
   : {
@@ -115,6 +126,36 @@ export function useAttentionQueue({ runs, runsSettled, runsError, runsHasMore = 
   const uncertainAll = useMonitorRead(readUncertainAll, 60_000, ["runs", "uncertain", "all"]);
   const partialAll = useMonitorRead(readPartialAll, 60_000, ["runs", "partial", "all"]);
   const [registry, setRegistry] = useState<OperationRunSummary[]>(readRegistry);
+  // Re-read a campaign when the backend reports it changed: once per gap, plus once at the
+  // gap's end so the last change of a burst is never left to the safety interval.
+  useEffect(() => {
+    let disposed = false;
+    let stop: (() => void) | undefined;
+    const lastRead = new Map<string, number>();
+    const trailing = new Map<string, ReturnType<typeof setTimeout>>();
+    const read = (campaignId: string) => {
+      lastRead.set(campaignId, Date.now());
+      void invalidateReadScope(publishRunScope(campaignId));
+    };
+    Promise.resolve()
+      .then(() => listenRiviuEvents(event => {
+        if (event.type !== "publishUpdated" || disposed) return;
+        const wait = (lastRead.get(event.campaignId) ?? 0) + PUBLISH_EVENT_READ_GAP_MS - Date.now();
+        if (wait <= 0) return read(event.campaignId);
+        if (!trailing.has(event.campaignId)) {
+          trailing.set(event.campaignId, setTimeout(() => {
+            trailing.delete(event.campaignId);
+            if (!disposed) read(event.campaignId);
+          }, wait));
+        }
+      }))
+      .then(unlisten => { if (disposed) unlisten(); else stop = unlisten; }, () => undefined);
+    return () => {
+      disposed = true;
+      stop?.();
+      for (const timer of trailing.values()) clearTimeout(timer);
+    };
+  }, []);
   // Bumped when a one-shot read lands, so the next runs move into the read window.
   const [classifyTick, setClassifyTick] = useState(0);
 
