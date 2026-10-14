@@ -87,6 +87,7 @@ use tokio::time::Instant;
 
 use crate::driver::{ElementBox, ElementQuery, UiSession};
 use crate::publish::{select_sound_candidate, PublishSoundPolicy, SoundSelectionEvidence};
+use crate::read_latency::window as read_window;
 use crate::tiktok_drawer::TapPlanner;
 use crate::tiktok_labels::{TikTokControl, TikTokControls};
 use crate::tiktok_sound::{choose_and_confirm_sound, confirm_sound, SoundPickerPlan};
@@ -1088,6 +1089,15 @@ tokio::task_local! {
     static STAGE_DIAGNOSTICS: std::cell::RefCell<StageDiagnosticState>;
 }
 
+/// The phone this task is publishing from, as its stage diagnostics name it. Sizes read
+/// windows only ([`crate::read_latency::window`]); never a target or proof.
+pub(crate) fn stage_udid() -> Option<String> {
+    STAGE_DIAGNOSTICS
+        .try_with(|state| state.borrow().report.context.udid.clone())
+        .ok()
+        .filter(|udid| !udid.is_empty())
+}
+
 /// Opt in around an existing production preparation or scout future. The supplied deadline
 /// is recorded only; the original route retains its own cancellation/deadline/effect gates.
 /// No hierarchy, caption, sound title, account, request body or credential is retained.
@@ -1381,7 +1391,11 @@ impl<'a, P: TapPlanner> Composer<'a, P> {
     async fn open(&mut self, stop: &AtomicBool) -> anyhow::Result<bool> {
         let Some(opener) = self
             .await_navigation_target(
-                crate::tiktok_sound::phase_deadline(CAMERA_STEP_WINDOW),
+                crate::tiktok_sound::phase_deadline(read_window(
+                    "cameraOpener",
+                    CAMERA_STEP_WINDOW,
+                    3,
+                )),
                 self.plan.open,
                 stop,
                 Some("composer_opener_unavailable"),
@@ -1393,7 +1407,11 @@ impl<'a, P: TapPlanner> Composer<'a, P> {
         self.tap_inside(&opener).await?;
         Ok(self
             .await_navigation_target(
-                crate::tiktok_sound::phase_deadline(CAMERA_STEP_WINDOW),
+                crate::tiktok_sound::phase_deadline(read_window(
+                    "cameraShutter",
+                    CAMERA_STEP_WINDOW,
+                    3,
+                )),
                 self.plan.shutter,
                 stop,
                 Some("composer_camera_unavailable"),
@@ -1422,14 +1440,19 @@ impl<'a, P: TapPlanner> Composer<'a, P> {
     ) -> anyhow::Result<bool> {
         // Preserve the previous enclosing ceiling (8 + 8 + 30 + 3 seconds); every strategy
         // consumes this one gallery budget, each camera-screen read within CAMERA_STEP_WINDOW.
-        let deadline =
-            crate::tiktok_sound::phase_deadline(COMPOSER_WINDOW * 2 + Duration::from_secs(33));
+        // Both are sized once here for this phone's measured reads.
+        let deadline = crate::tiktok_sound::phase_deadline(read_window(
+            "gallery",
+            COMPOSER_WINDOW * 2 + Duration::from_secs(33),
+            8,
+        ));
+        let camera_step = read_window("galleryStep", CAMERA_STEP_WINDOW, 3);
         let epoch = self.session.gui_session_epoch();
         let mut gallery = StageDiagnosticOperation::start("galleryShutter", &epoch, Some(deadline));
         gallery.finish("errorOrInterrupted");
         let Some(shutter) = self
             .await_navigation_target(
-                deadline.min(Instant::now() + CAMERA_STEP_WINDOW),
+                deadline.min(Instant::now() + camera_step),
                 self.plan.shutter,
                 stop,
                 Some("composer_camera_unavailable"),
@@ -1451,7 +1474,7 @@ impl<'a, P: TapPlanner> Composer<'a, P> {
             }
             let entry = self
                 .await_navigation_target(
-                    deadline.min(Instant::now() + CAMERA_STEP_WINDOW),
+                    deadline.min(Instant::now() + camera_step),
                     entry_query,
                     stop,
                     None,
@@ -1549,7 +1572,7 @@ impl<'a, P: TapPlanner> Composer<'a, P> {
             }
             let mut stable = entry;
             // One pause plus one full re-read; CAMERA_STEP_WINDOW records the 3 s that failed.
-            let end = deadline.min(Instant::now() + CAMERA_STEP_WINDOW);
+            let end = deadline.min(Instant::now() + camera_step);
             loop {
                 sleep(
                     Duration::from_millis(350).min(end.saturating_duration_since(Instant::now())),
@@ -1644,7 +1667,7 @@ impl<'a, P: TapPlanner> Composer<'a, P> {
     async fn await_picker(&self, stop: &AtomicBool) -> anyhow::Result<bool> {
         Ok(self
             .await_navigation_target(
-                crate::tiktok_sound::phase_deadline(PICKER_WINDOW),
+                crate::tiktok_sound::phase_deadline(read_window("picker", PICKER_WINDOW, 4)),
                 self.plan.multi_select,
                 stop,
                 Some("composer_picker_unavailable"),
@@ -1680,11 +1703,13 @@ impl<'a, P: TapPlanner> Composer<'a, P> {
     ) -> anyhow::Result<AlbumChoice> {
         use crate::driver::{classify_read_failure, ReadFailureKind};
         use crate::ui_automation::runtime::{read_before_deadline, ReadWaitResult};
-        let total_deadline = crate::tiktok_sound::phase_deadline(PICKER_WINDOW * 3);
+        let album_step = read_window("albumStep", PICKER_WINDOW, 4);
+        let total_deadline =
+            crate::tiktok_sound::phase_deadline(read_window("album", PICKER_WINDOW * 3, 10));
         let epoch = self.session.gui_session_epoch();
         let Some(menu) = self
             .await_condition_until(
-                total_deadline.min(Instant::now() + PICKER_WINDOW),
+                total_deadline.min(Instant::now() + album_step),
                 self.plan.album_menu,
                 stop,
                 |_| true,
@@ -1709,7 +1734,7 @@ impl<'a, P: TapPlanner> Composer<'a, P> {
         // Galaxy S8+ fleet 08/09/2026: album rows arrive after the menu animation.
         // A single immediate read reported AlbumNotFound although import was verified.
         // Wait for one exact row with stable geometry; never choose an ambiguous album.
-        let deadline = total_deadline.min(Instant::now() + PICKER_WINDOW);
+        let deadline = total_deadline.min(Instant::now() + album_step);
         let mut previous: Option<ElementBox> = None;
         let mut scrolls = 0;
         let mut empty_reads = 0;
@@ -1840,11 +1865,7 @@ impl<'a, P: TapPlanner> Composer<'a, P> {
         // turned every completed negative into DeadlineExceeded.
         Ok(
             if self
-                .pill_reads(
-                    album,
-                    stop,
-                    total_deadline.min(Instant::now() + PICKER_WINDOW),
-                )
+                .pill_reads(album, stop, total_deadline.min(Instant::now() + album_step))
                 .await?
             {
                 AlbumChoice::Confirmed
@@ -1880,7 +1901,11 @@ impl<'a, P: TapPlanner> Composer<'a, P> {
     ) -> anyhow::Result<bool> {
         use crate::driver::{classify_read_failure, ReadFailureKind};
         use crate::ui_automation::runtime::{read_before_deadline, ReadWaitResult};
-        let deadline = deadline.min(crate::tiktok_sound::phase_deadline(PICKER_WINDOW));
+        let deadline = deadline.min(crate::tiktok_sound::phase_deadline(read_window(
+            "albumPill",
+            PICKER_WINDOW,
+            4,
+        )));
         let epoch = self.session.gui_session_epoch();
         let mut named_another = false;
         loop {
@@ -1972,7 +1997,8 @@ impl<'a, P: TapPlanner> Composer<'a, P> {
         if self.picker_snapshot() {
             return self.enable_multi_select_from_tree(stop).await;
         }
-        let probe_deadline = crate::tiktok_sound::phase_deadline(COMPOSER_WINDOW);
+        let probe_deadline =
+            crate::tiktok_sound::phase_deadline(read_window("pickerModeProbe", COMPOSER_WINDOW, 3));
         if self
             .await_condition_inner(probe_deadline, self.plan.picker_next, stop, |_| true, true)
             .await?
@@ -1999,7 +2025,12 @@ impl<'a, P: TapPlanner> Composer<'a, P> {
             ));
         }
         if self
-            .await_condition(ENGAGE_WINDOW, self.plan.picker_next, stop, |_| true)
+            .await_condition(
+                read_window("pickerEngage", ENGAGE_WINDOW, 1),
+                self.plan.picker_next,
+                stop,
+                |_| true,
+            )
             .await?
             .is_some()
         {
@@ -2022,7 +2053,8 @@ impl<'a, P: TapPlanner> Composer<'a, P> {
     ) -> anyhow::Result<MultiSelectMode> {
         use crate::ui_automation::runtime::ReadWaitResult;
         let epoch = self.session.gui_session_epoch();
-        let deadline = crate::tiktok_sound::phase_deadline(PICKER_WINDOW);
+        let deadline =
+            crate::tiktok_sound::phase_deadline(read_window("pickerMode", PICKER_WINDOW, 4));
         let mut popup = crate::app_automation::dialogs::PopupBudget::default();
         let toggle = loop {
             match self.picker_mode(deadline, stop, &mut popup).await? {
@@ -2059,7 +2091,8 @@ impl<'a, P: TapPlanner> Composer<'a, P> {
             ));
         }
         self.tap_inside(&toggle).await?;
-        let deadline = crate::tiktok_sound::phase_deadline(PICKER_WINDOW);
+        let deadline =
+            crate::tiktok_sound::phase_deadline(read_window("pickerMode", PICKER_WINDOW, 4));
         loop {
             match self.picker_mode(deadline, stop, &mut popup).await? {
                 ReadWaitResult::Ready(PickerMode::Multi) => return Ok(MultiSelectMode::TurnedOn),
@@ -2081,7 +2114,12 @@ impl<'a, P: TapPlanner> Composer<'a, P> {
     /// means the control is not on screen; nothing was tapped.
     pub async fn tap_multi_select_once(&mut self, stop: &AtomicBool) -> anyhow::Result<bool> {
         let Some(control) = self
-            .await_condition(PICKER_WINDOW, self.plan.multi_select, stop, |_| true)
+            .await_condition(
+                read_window("pickerToggle", PICKER_WINDOW, 4),
+                self.plan.multi_select,
+                stop,
+                |_| true,
+            )
             .await?
         else {
             return Ok(false);
@@ -2097,7 +2135,7 @@ impl<'a, P: TapPlanner> Composer<'a, P> {
     async fn grid(&self, screen: Screen, stop: &AtomicBool) -> anyhow::Result<Option<PhotoGrid>> {
         let Some(tabs) = self
             .await_navigation_target(
-                crate::tiktok_sound::phase_deadline(PICKER_WINDOW),
+                crate::tiktok_sound::phase_deadline(read_window("pickerTabs", PICKER_WINDOW, 4)),
                 self.plan.tabs,
                 stop,
                 None,
@@ -2193,9 +2231,12 @@ impl<'a, P: TapPlanner> Composer<'a, P> {
     /// and after a selection, so a version of this that read it would return immediately with
     /// nothing selected — and the next step would advance out of the picker empty-handed.
     async fn await_armed(&self, stop: &AtomicBool) -> anyhow::Result<Option<ElementBox>> {
-        self.await_condition(ARM_WINDOW, self.plan.picker_next, stop, |element| {
-            element.clickable
-        })
+        self.await_condition(
+            read_window("pickerArm", ARM_WINDOW, 2),
+            self.plan.picker_next,
+            stop,
+            |element| element.clickable,
+        )
         .await
     }
 
@@ -2291,7 +2332,7 @@ impl<'a, P: TapPlanner> Composer<'a, P> {
         match self.plan.edit_step_marker {
             Some(edit_next) => match self
                 .await_condition_until(
-                    deadline.min(Instant::now() + COMPOSER_WINDOW),
+                    deadline.min(Instant::now() + read_window("editStep", COMPOSER_WINDOW, 3)),
                     edit_next,
                     stop,
                     |_| true,
@@ -2366,8 +2407,12 @@ impl<'a, P: TapPlanner> Composer<'a, P> {
                 Err(error) => Err(error),
             },
             None => {
-                self.await_absent(COMPOSER_WINDOW, self.plan.multi_select, stop)
-                    .await
+                self.await_absent(
+                    read_window("pickerLeave", COMPOSER_WINDOW, 3),
+                    self.plan.multi_select,
+                    stop,
+                )
+                .await
             }
         }
     }
@@ -2390,7 +2435,12 @@ impl<'a, P: TapPlanner> Composer<'a, P> {
         let next = {
             let mut timing = FinalReproofPhaseTiming::start("nextLocate");
             let result = self
-                .await_condition(COMPOSER_WINDOW, edit_next, stop, |_| true)
+                .await_condition(
+                    read_window("editNext", COMPOSER_WINDOW, 3),
+                    edit_next,
+                    stop,
+                    |_| true,
+                )
                 .await;
             timing.finish(
                 &result,
@@ -2407,7 +2457,8 @@ impl<'a, P: TapPlanner> Composer<'a, P> {
         };
         let epoch = self.session.gui_session_epoch();
         let tap_error = self.tap_inside(&next).await.err();
-        let arrival_deadline = crate::tiktok_sound::phase_deadline(COMPOSER_WINDOW);
+        let arrival_deadline =
+            crate::tiktok_sound::phase_deadline(read_window("captionArrival", COMPOSER_WINDOW, 3));
         let tap_error = match tap_error {
             Some(error)
                 if self.session.gui_session_epoch() != epoch
@@ -2524,7 +2575,7 @@ impl<'a, P: TapPlanner> Composer<'a, P> {
         {
             return crate::tiktok_sound::with_observation_budget(
                 stop,
-                COMPOSER_WINDOW,
+                read_window("captionTyping", COMPOSER_WINDOW, 4),
                 Box::pin(self.type_caption_inner(caption, stop)),
             )
             .await;
@@ -2544,7 +2595,12 @@ impl<'a, P: TapPlanner> Composer<'a, P> {
             return Ok(CaptionOutcome::NothingToSay);
         }
         let Some(field) = self
-            .await_condition(COMPOSER_WINDOW, query, stop, |_| true)
+            .await_condition(
+                read_window("captionField", COMPOSER_WINDOW, 3),
+                query,
+                stop,
+                |_| true,
+            )
             .await?
         else {
             return Ok(CaptionOutcome::NoField);
@@ -2569,7 +2625,8 @@ impl<'a, P: TapPlanner> Composer<'a, P> {
         // So: exactly one node must match the locator, and its text must equal the caption.
         // A build that reformats what it stores fails closed here — which is a measurement to
         // take, not a post to publish on a guess.
-        let deadline = crate::tiktok_sound::phase_deadline(COMPOSER_WINDOW);
+        let deadline =
+            crate::tiktok_sound::phase_deadline(read_window("captionReadback", COMPOSER_WINDOW, 3));
         let mut cursor = observation::Cursor::default();
         loop {
             if stop.load(Ordering::Relaxed) || Instant::now() >= deadline {
@@ -3098,8 +3155,9 @@ impl<'a, P: TapPlanner> Composer<'a, P> {
         let epoch = self.session.gui_session_epoch();
         let started = Instant::now();
         let mut phase = "captionBeforeBack";
+        let editor_transition_window = read_window("editorTransition", Duration::from_secs(8), 3);
         let result =
-            crate::tiktok_sound::with_observation_budget(stop, Duration::from_secs(8), async {
+            crate::tiktok_sound::with_observation_budget(stop, editor_transition_window, async {
                 let back_query = sound_plan
                     .post_back_query()
                     .context("sound preparation back query missing")?;
@@ -3144,7 +3202,11 @@ impl<'a, P: TapPlanner> Composer<'a, P> {
                                     self.plan.package,
                                     caption_query,
                                     caption,
-                                    crate::tiktok_sound::phase_deadline(Duration::from_secs(8)),
+                                    crate::tiktok_sound::phase_deadline(read_window(
+                                        "editorCaption",
+                                        Duration::from_secs(8),
+                                        3,
+                                    )),
                                     stop,
                                     &mut observation::Cursor::default(),
                                 )
@@ -3186,7 +3248,11 @@ impl<'a, P: TapPlanner> Composer<'a, P> {
                                         self.plan.package,
                                         caption_query,
                                         caption,
-                                        crate::tiktok_sound::phase_deadline(Duration::from_secs(8)),
+                                        crate::tiktok_sound::phase_deadline(read_window(
+                                            "editorCaption",
+                                            Duration::from_secs(8),
+                                            3,
+                                        )),
                                         stop,
                                         &mut observation::Cursor::default(),
                                     )
@@ -3240,7 +3306,8 @@ impl<'a, P: TapPlanner> Composer<'a, P> {
         caption: &str,
         stop: &AtomicBool,
     ) -> anyhow::Result<()> {
-        crate::tiktok_sound::with_observation_budget(stop, Duration::from_secs(8), async {
+        let window = read_window("captionKeyboard", Duration::from_secs(8), 3);
+        crate::tiktok_sound::with_observation_budget(stop, window, async {
             let epoch = self.session.gui_session_epoch();
             let started = Instant::now();
             let shown = match crate::tiktok_sound::read_sound(self.session.keyboard_shown()).await {
@@ -3300,7 +3367,11 @@ impl<'a, P: TapPlanner> Composer<'a, P> {
             CaptionState::Unknown => anyhow::bail!("caption readback unavailable"),
         }
         observation::check(
-            crate::tiktok_sound::phase_deadline(Duration::from_secs(8)),
+            crate::tiktok_sound::phase_deadline(read_window(
+                "captionState",
+                Duration::from_secs(8),
+                3,
+            )),
             Some(stop),
         )?;
         // Only the previously approved caption may be restored, before the
@@ -3336,7 +3407,11 @@ impl<'a, P: TapPlanner> Composer<'a, P> {
         stop: &AtomicBool,
     ) -> anyhow::Result<observation::CaptionState> {
         let query = self.plan.publish.context("caption plan missing")?.caption;
-        let deadline = crate::tiktok_sound::phase_deadline(Duration::from_secs(8));
+        let deadline = crate::tiktok_sound::phase_deadline(read_window(
+            "captionState",
+            Duration::from_secs(8),
+            3,
+        ));
         let mut cursor = observation::Cursor::default();
         loop {
             observation::check(deadline, Some(stop))?;
@@ -4968,7 +5043,11 @@ where
     let navigation_epoch = composer.session.gui_session_epoch();
     // Retain the previous attempt's three read windows (arrival probe,
     // editor Next, destination), shared by all retries and their backoff.
-    let navigation_deadline = crate::tiktok_sound::phase_deadline(COMPOSER_WINDOW * 3);
+    let navigation_deadline = crate::tiktok_sound::phase_deadline(read_window(
+        "captionNavigation",
+        COMPOSER_WINDOW * 3,
+        8,
+    ));
     let navigation = crate::tiktok_sound::with_deadline_budget(stop, navigation_deadline, async {
         loop {
             let attempt = async {
@@ -4979,7 +5058,11 @@ where
                 {
                     match read_before_deadline(
                         composer.session.locate_all(tail.post_button),
-                        crate::tiktok_sound::phase_deadline(COMPOSER_WINDOW),
+                        crate::tiktok_sound::phase_deadline(read_window(
+                            "captionArrivalProbe",
+                            COMPOSER_WINDOW,
+                            2,
+                        )),
                         stop,
                     )
                     .await?
@@ -5049,8 +5132,9 @@ where
             .plan
             .publish
             .is_some_and(|tail| matches!(tail.caption, ElementQuery::ResourceIdSuffix(_)));
-    let caption_deadline =
-        bounded_caption.then(|| crate::tiktok_sound::phase_deadline(COMPOSER_WINDOW));
+    let caption_deadline = bounded_caption.then(|| {
+        crate::tiktok_sound::phase_deadline(read_window("captionStage", COMPOSER_WINDOW, 6))
+    });
     let caption_work = async {
         loop {
             if crate::publish_recovery::active() && bounded_caption && !caption.trim().is_empty() {
@@ -7371,6 +7455,93 @@ mod tests {
             "the run stalled on the edit screen, which is what forgetting to tap looks like"
         );
         assert_eq!(verdict, ComposerVerdict::Submitted);
+    }
+
+    /// Run one full carousel walk as a production publish task on `serial`, every read taking
+    /// `read`, after the phone's agent measured `/source` reads of `measured`.
+    async fn slow_walk(
+        serial: &str,
+        read: Duration,
+        measured: Option<Duration>,
+    ) -> (anyhow::Result<ComposerVerdict>, Duration) {
+        if let Some(measured) = measured {
+            for _ in 0..8 {
+                crate::read_latency::record_tree_read(serial, measured);
+            }
+        }
+        let session = FakeSession {
+            locate_delay: read,
+            described_delay: read,
+            hierarchy_delay: read,
+            ..FakeSession::full_walk("riviu-abc")
+        };
+        let request = CarouselRequest {
+            album: "riviu-abc",
+            images: 3,
+            caption: "đi Đà Lạt thật đã",
+            screen: screen(),
+        };
+        let stop = AtomicBool::new(false);
+        let started = Instant::now();
+        let (verdict, _) = with_stage_diagnostics(
+            StageDiagnosticContext {
+                request_id: "fixture".into(),
+                operation_id: "publish:fixture".into(),
+                udid: serial.into(),
+                queue_wait_ms: None,
+            },
+            None,
+            publish_carousel(
+                &session,
+                plan(),
+                |element: &ElementBox| element.centre(),
+                &request,
+                &stop,
+            ),
+        )
+        .await;
+        (verdict, started.elapsed())
+    }
+
+    /// r111 (14/10/2026, 28 phones, cap 10): `/source` p50 1.5 s, p90 3-8 s, and almost every
+    /// compose stopped on `publish_observation_deadline` before Post. A phone whose reads take
+    /// 2.7 s now gets step windows sized from its measured q90 and reaches Post; the same
+    /// phone with idle-sized windows does not.
+    #[tokio::test(start_paused = true)]
+    async fn a_phone_with_slow_measured_reads_still_reaches_post() {
+        let read = Duration::from_millis(2_700);
+        let (idle_sized, _) = slow_walk("fixture-slow-unmeasured", read, None).await;
+        // The 2 s engage window closes before the first 2.7 s read after the toggle returns.
+        assert_eq!(
+            idle_sized.expect("no transport error"),
+            ComposerVerdict::MultiSelectDidNotEngage,
+            "the fixture must be too slow for the idle-measured windows"
+        );
+
+        let (verdict, _) = slow_walk("fixture-slow-measured", read, Some(read)).await;
+        assert_eq!(
+            verdict.expect("no transport error"),
+            ComposerVerdict::Submitted
+        );
+    }
+
+    /// Reads slower than any window may grow still end, with the same answer an idle-sized
+    /// window gives, inside the finite ceiling.
+    #[tokio::test(start_paused = true)]
+    async fn reads_slower_than_the_ceiling_still_fail_finitely_with_the_same_code() {
+        let read = crate::read_latency::WINDOW_CEILING + Duration::from_secs(1);
+        let outcome = |result: anyhow::Result<ComposerVerdict>| match result {
+            Ok(verdict) => format!("{verdict:?}"),
+            Err(error) => crate::publish_recovery::describe(&error).code.to_string(),
+        };
+        let (idle_sized, _) = slow_walk("fixture-stuck-unmeasured", read, None).await;
+        let (widened, elapsed) = slow_walk("fixture-stuck-measured", read, Some(read)).await;
+        assert_eq!(outcome(idle_sized), "publish_observation_deadline");
+        assert_eq!(outcome(widened), "publish_observation_deadline");
+        assert!(
+            elapsed <= crate::read_latency::WINDOW_CEILING * 2,
+            "one stuck read must not hold the walk for {elapsed:?}"
+        );
     }
 
     /// A composer that never opens is named, and **nothing further is tapped**.

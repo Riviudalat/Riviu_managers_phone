@@ -51,6 +51,9 @@ mod visual;
 // five phones (`sound_load_timeout`). 20 s holds the longest completed read, like the picker's
 // `TAP_READBACK_WINDOW`; the outer `SOUND_WINDOW` still caps the phase.
 const READBACK_WINDOW: Duration = Duration::from_secs(20);
+/// Tree reads one sheet/editor readback expects: popup check, sheet or chip, a stable re-read
+/// and one retry read.
+const READBACK_READS: u32 = 5;
 const POLL: Duration = Duration::from_millis(250);
 const SOUND_WINDOW: Duration = Duration::from_secs(180);
 // #23/#28 (Global 45.7.3/en, 2026-10-08 20:34-20:50): every pinned /source on the sheet waited
@@ -686,7 +689,13 @@ pub(crate) async fn with_readback_budget<T>(
     stop: &AtomicBool,
     work: impl std::future::Future<Output = anyhow::Result<T>>,
 ) -> anyhow::Result<T> {
-    with_observation_budget(stop, READBACK_WINDOW, work).await
+    with_observation_budget(stop, readback_window("soundReadback"), work).await
+}
+
+/// [`READBACK_WINDOW`] sized once for this phone's measured reads
+/// ([`crate::read_latency::window`]); the enclosing stage budget still caps it.
+fn readback_window(step: &'static str) -> Duration {
+    crate::read_latency::window(step, READBACK_WINDOW, READBACK_READS)
 }
 
 pub(crate) async fn with_observation_budget<T>(
@@ -2866,7 +2875,7 @@ pub async fn choose_and_confirm_sound(
         if plan.closes_with_back() {
             // The measured Android sheet selects inline; Back closes only that sheet.
             // Prove the same pool remains before dismissing it, then prove the editor chip.
-            let deadline = phase_deadline(READBACK_WINDOW);
+            let deadline = phase_deadline(readback_window("soundPostRow"));
             readback_deadline = Some(deadline);
             let mut recovered = false;
             let mut network_observation_used = false;
@@ -2905,7 +2914,7 @@ pub async fn choose_and_confirm_sound(
                         // otherwise the still-open sheet must be proven before Back.
                         phase = "editorFallback";
                         let editor = tokio::time::timeout_at(
-                            phase_deadline(READBACK_WINDOW),
+                            phase_deadline(readback_window("soundEditorFallback")),
                             selection_recovery::confirm_editor(session, plan, &candidate.title),
                         )
                         .await;
@@ -3384,6 +3393,65 @@ mod tests {
                 usize::from(entry_ready)
             );
         }
+    }
+
+    /// r105/r111: a loaded phone's sheet reads ran 6 s and more, so four of them outlast the
+    /// idle-sized 20 s readback. Sized from the phone's measured q90 they fit; reads past the
+    /// finite ceiling still end with the same `sound_load_timeout`.
+    #[tokio::test(start_paused = true)]
+    async fn sound_readback_is_sized_by_the_phones_measured_reads() {
+        let read = Duration::from_secs(6);
+        let readback = |serial: &'static str, reads: u32, read: Duration| async move {
+            let stop = AtomicBool::new(false);
+            let started = Instant::now();
+            let (result, _) = crate::tiktok_composer::with_stage_diagnostics(
+                crate::tiktok_composer::StageDiagnosticContext {
+                    request_id: "fixture".into(),
+                    operation_id: "publish:fixture".into(),
+                    udid: serial.into(),
+                    queue_wait_ms: None,
+                },
+                None,
+                with_sound_budget(&stop, async {
+                    with_readback_budget(&stop, async {
+                        for _ in 0..reads {
+                            read_sound(async {
+                                tokio::time::sleep(read).await;
+                                Ok(())
+                            })
+                            .await?;
+                        }
+                        Ok(())
+                    })
+                    .await
+                }),
+            )
+            .await;
+            (result, started.elapsed())
+        };
+        let (idle_sized, _) = readback("fixture-sound-unmeasured", 4, read).await;
+        assert!(
+            idle_sized.is_err(),
+            "four 6 s reads must outlast the idle-sized window"
+        );
+
+        for _ in 0..8 {
+            crate::read_latency::record_tree_read("fixture-sound-measured", read);
+        }
+        let (sized, _) = readback("fixture-sound-measured", 4, read).await;
+        sized.expect("the measured phone's readback fits its sized window");
+
+        let stuck = crate::read_latency::ceiling(READBACK_WINDOW) + Duration::from_secs(1);
+        for _ in 0..8 {
+            crate::read_latency::record_tree_read("fixture-sound-stuck", stuck);
+        }
+        let (late, elapsed) = readback("fixture-sound-stuck", 1, stuck).await;
+        let late = late.expect_err("a read past the ceiling never completes the readback");
+        assert_eq!(
+            crate::publish_recovery::describe(&late).code,
+            "sound_load_timeout"
+        );
+        assert!(elapsed <= crate::read_latency::ceiling(READBACK_WINDOW));
     }
 
     #[tokio::test(start_paused = true)]
