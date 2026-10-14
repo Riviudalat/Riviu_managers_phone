@@ -22,7 +22,10 @@ Phần dưới là nội dung tái dùng; chép vào common của run rồi ch�
 
 ## Tests and gates
 - <"Write NO new tests" nếu owner đã quyết, hoặc "use test-audit before writing tests">.
-- Offline checks: `cargo fmt` on your files; `cargo clippy --locked -p <touched crate>
+- Offline checks: `rustfmt --edition 2021 <your files>` then revert any hunk you did not
+  write (the tree is not rustfmt-clean; `cargo fmt --all` rewrites ~100 files and CRLF→LF).
+  Edit Vietnamese text with Python or `-Encoding UTF8`, never PowerShell `Get-Content -Raw`
+  round-trips. `cargo clippy --locked -p <touched crate>
   --all-targets -- -D warnings` (report pre-existing debt elsewhere, do not fix unrelated
   files); the EXISTING tests of the modules you touch, filtered by module path; for UI:
   `npx tsc -b` and `npm run lint` in `apps/desktop`.
