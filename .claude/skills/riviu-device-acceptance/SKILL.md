@@ -145,11 +145,13 @@ Mỗi mục dưới đây từng làm mất 20–60 phút. Đọc trước khi m
 
 ### Tải khi chạy 30 máy
 
-- 30 máy soạn bài cùng lúc, có stream hình trực tiếp: `/source` 5–18 s (bình thường <1 s),
-  `surfaceflinger ≥60%` CPU, load average 7–8 trên SM-G955F; ~1/3 dòng hỏng lượt đầu
-  (chọn ảnh/nhạc quá hạn) rồi recovery tự đăng được. Máy tính host không nghẽn (Riviu ~10%
-  CPU). Khi chưa có cap đồng thời trong code: chạy theo đợt ≤10 máy hoặc chấp nhận một
-  vòng retry.
+- Đo tải bằng chẩn đoán từng lượt (`evidence_json.stageDiagnostics`, trung vị `/source` theo
+  pha của bài thành công), không bằng nhãn chờ adb trong log: nhãn cũ gộp ba tầng chờ và từng
+  cho "`/source` 5–18 s" trong khi thật là p50 0,8 s (r105). Số sai đó dẫn tới HX-QUIET (tắt
+  stream suốt lượt đăng) làm `/source` chậm gấp đôi; gỡ ở `25ddc2c6`, r114 đạt 19/20.
+- Đổi gì về tải máy thì so trung vị theo pha trước/sau trên cùng đội máy và build TikTok trước
+  khi giữ thay đổi. Máy tính host không nghẽn (Riviu ~10% CPU); trần 10 máy cùng làm việc đăng bài
+  nằm trong code (`PUBLISH_PHONE_WORK_CAP`).
 - WebView của controller lên 3 GB sau vài giờ; đóng controller giữa các đợt bằng `close.mjs`.
 - Chỉ một build Rust tại một thời điểm trên máy 32 GB khi controller đang chạy; build thứ hai
   bị hệ điều hành giết.
