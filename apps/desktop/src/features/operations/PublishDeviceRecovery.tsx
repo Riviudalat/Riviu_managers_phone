@@ -16,6 +16,8 @@ const accountGuidance: Record<string, string> = {
  account_unreadable: "Chưa đọc đủ thông tin hồ sơ. Kiểm tra màn hình điện thoại rồi thử lại; chưa kết luận tài khoản đã đổi.",
  account_mismatch: "Tài khoản đang mở khác tài khoản của lượt này. Mở lại đúng tài khoản; không tự đổi tài khoản đã gắn với bài.",
  account_read_failed: "Không đọc được hồ sơ do kết nối hoặc phiên điều khiển. Kiểm tra kết nối máy rồi thử lại.",
+ account_draft_banner_persisted: "Banner \"Continue editing this post?\" vẫn còn trên Hồ sơ sau một lần bấm Save draft. Bấm Save draft trên máy (không bấm Edit) rồi thử lại; chưa bấm Đăng.",
+ account_draft_banner_unconfirmed: "Đầu trang Hồ sơ bị che nhưng chưa xác nhận được banner nháp. Xem máy, nếu có banner thì bấm Save draft (không bấm Edit) rồi thử lại; chưa bấm Đăng.",
  publish_device_not_released: "Lúc bắt đầu chưa nhả được máy này nên chưa gửi gì lên máy; các máy khác vẫn đăng. Khi máy rảnh, bấm Thử lại.",
 };
 function object(value: unknown): Record<string, unknown> {
