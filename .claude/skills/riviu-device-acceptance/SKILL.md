@@ -150,8 +150,23 @@ Mỗi mục dưới đây từng làm mất 20–60 phút. Đọc trước khi m
   cho "`/source` 5–18 s" trong khi thật là p50 0,8 s (r105). Số sai đó dẫn tới HX-QUIET (tắt
   stream suốt lượt đăng) làm `/source` chậm gấp đôi; gỡ ở `25ddc2c6`, r114 đạt 19/20.
 - Đổi gì về tải máy thì so trung vị theo pha trước/sau trên cùng đội máy và build TikTok trước
-  khi giữ thay đổi. Máy tính host không nghẽn (Riviu ~10% CPU); trần 10 máy cùng làm việc đăng bài
-  nằm trong code (`PUBLISH_PHONE_WORK_CAP`).
+  khi giữ thay đổi. Trần 10 máy cùng làm việc đăng bài nằm trong code (`PUBLISH_PHONE_WORK_CAP`).
+- **Đo cả CPU của controller, không chỉ điện thoại** (15/10/2026). Trung vị `/source` đứng yên
+  qua r114→r123, nhưng tỉ lệ đọc ≥ 8 s tăng 1,9% → 8,9% và lượt hỏng tăng theo. Thủ phạm nằm trên
+  host: hàng đợi "Cần xử lý" đọc lại 59 chiến dịch cũ mỗi 10 giây (mỗi lần 3 MB `publish_get` +
+  quét xác minh), controller 2 nhân lúc rảnh, đỉnh 13 nhân, luồng chính 100%. Ghi CPU mỗi phút
+  (`cores`, luồng chính, host) song song với đợt chạy. Đọc "chậm" trong `stageDiagnostics` có thể
+  là controller bị nghẽn, không phải điện thoại.
+- **Build bản nghiệm thu có tối ưu** khi đo hiệu năng:
+  `$env:CARGO_PROFILE_DEV_OPT_LEVEL='2'` trước `build-native.py` (vẫn là dev nên chế độ nghiệm thu
+  còn hoạt động). Bản dev thường không tối ưu, luồng chính chạy kín một nhân với 20 máy.
+- So đợt bằng `publish_attempts` (mỗi lượt có kết quả và `stageDiagnostics`), không chỉ trạng
+  thái cuối: số lượt hỏng/thành công và pha cuối của lượt hỏng (`opening_composer` tăng 7 → 47
+  là dấu hiệu chậm toàn cục).
+- Chiến dịch đã **Dừng** không được bộ xác minh tự kiểm: chỉ `publish_resume_verification` từng
+  dòng mới mở lại (r112–r114 kẹt tới khi resume, rồi 15/15 lên Sheet).
+- Máy bị `device_overloaded` mà Riviu không tự khởi động lại vì còn dòng "chưa rõ" cũ trên máy: khi
+  không còn việc đang chạy trên máy đó, `adb -s <serial> reboot` rồi preflight lại (máy 43, 15/10).
 - WebView của controller lên 3 GB sau vài giờ; đóng controller giữa các đợt bằng `close.mjs`.
 - Chỉ một build Rust tại một thời điểm trên máy 32 GB khi controller đang chạy; build thứ hai
   bị hệ điều hành giết.
