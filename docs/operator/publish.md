@@ -322,10 +322,13 @@ Caption tạm thời chưa đọc được được kiểm tra lại trong thờ
 bị coi ngay là đã đổi nội dung. Sau nút Tiếp bị mất phản hồi, app kiểm tra màn đã
 tới trước khi tiếp tục; không bấm lại chỉ vì chưa nhận được ACK.
 Sai account, chưa cho phép USB, thiếu quyền hoặc phiên bản chưa hỗ trợ cần xử lý trước.
-Banner **"Continue editing this post?"** trên trang Profile của TikTok (tồn tại sau phiên
-soạn bài bị ngắt giữa chừng) có thể khiến bước chứng minh tài khoản trước Đăng báo lỗi
-trên 45.7.3/en. Khi gặp lỗi này, vào trang Profile của đúng tài khoản trên điện thoại,
-bấm **Save draft** trên banner rồi bấm **Thử lại** trong controller.
+Banner **"Continue editing this post?"** trên trang Profile của TikTok (còn lại sau phiên
+soạn bài bị ngắt giữa chừng) che phần đầu Hồ sơ. Trên 45.7.3/en, app xác nhận banner qua
+ảnh chụp màn hình rồi tự bấm **Save draft** một lần: bài dở được cất vào Drafts, không đăng
+gì, và app không bao giờ bấm **Edit**. Sau đó app chứng minh lại tài khoản. Nếu banner vẫn
+còn, hoặc app không xác nhận được banner trên ảnh, máy dừng trước Đăng và tự thử lại ở lượt
+sau. Khi lỗi lặp lại, vào trang Profile trên điện thoại, bấm **Save draft** rồi bấm
+**Thử lại**.
 Khi mở phiên TikTok trên Android user 0, app tự cấp các quyền runtime còn thiếu trong
 danh sách Camera, Microphone, đọc và ghi bộ nhớ nếu TikTok đã khai báo chúng; app đọc
 lại trạng thái quyền trước khi tiếp tục. Android từ chối hoặc không đọc được trạng thái
