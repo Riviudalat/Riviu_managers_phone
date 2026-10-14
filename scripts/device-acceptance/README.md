@@ -37,6 +37,11 @@ py -3.12 -I scripts/device-acceptance/build-native.py r1
 # 2. Đóng controller cũ (graceful, chờ pid thoát; không bao giờ kill)
 node scripts/device-acceptance/close.mjs end-r0 <campaignId,...>
 
+# 2b. Dọn album/stage riviu-* sót trên máy của đợt (controller phải đã đóng). Bộ quét của
+#     controller tắt dưới dev-acceptance scope, nên album của dòng hỏng/hủy cứ tích lại và
+#     làm picker TikTok chậm. Mặc định chỉ liệt kê; --apply mới xóa.
+py -3.12 -I scripts/device-acceptance/sweep-media.py r1 target/device-acceptance/r1/scope.json --apply
+
 # 3. Mở controller mới: backup DB chỉ đọc trước, từ chối nếu đã có riviu*.exe hoặc cổng bận
 py -3.12 -I scripts/device-acceptance/launch.py r1 target/device-acceptance/r1/scope.json --build r1
 node scripts/device-acceptance/ipc.mjs list_devices

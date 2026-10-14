@@ -349,9 +349,14 @@ impl Database {
         write(&tx, &job.assignment_id, &job.run.token, &s)?;
         // Composer cleanup may have invalidated imported assets. Re-enter transfer
         // for revalidation using the existing import identity, never a new publication.
+        // Keep the failed attempt's evidence (stage diagnostics included): the next transfer
+        // overwrites the assignment's, and r112 (14/10/2026) lost every retried attempt's
+        // record of which read expired.
         tx.execute(
-            "UPDATE publish_attempts SET finished_at_ms=?2,result=?3 WHERE attempt_id=?1",
-            params![job.attempt_id, now, error],
+            "UPDATE publish_attempts SET finished_at_ms=?2,result=?3,
+                evidence_json=(SELECT evidence_json FROM publish_assignments WHERE id=?4)
+             WHERE attempt_id=?1",
+            params![job.attempt_id, now, error, job.assignment_id],
         )?;
         tx.execute("INSERT INTO publish_attempts(attempt_id,publication_id,campaign_id,started_at_ms) SELECT ?2,publication_id,campaign_id,?3 FROM publish_assignments WHERE id=?1",params![job.assignment_id,attempt,now])?;
         tx.execute("UPDATE publish_dispatch_jobs SET state='queued',phase='transfer',attempt_id=?2,owner=NULL,reason='recovery_pending',revision=revision+1 WHERE assignment_id=?1",params![job.assignment_id,attempt])?;

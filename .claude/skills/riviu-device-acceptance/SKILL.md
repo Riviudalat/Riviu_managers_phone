@@ -8,7 +8,7 @@ description: >
   adb-server khi controller chạy, reboot máy còn effect chưa rõ hay chạy tương tác công khai
   ngoài phạm vi duyệt.
 metadata:
-  version: "1.2.0"
+  version: "1.3.0"
   origin: local
   project: riviu-manager
 ---
@@ -35,6 +35,10 @@ sang `riviu-device-diagnostics`. Vòng sửa lỗi trọn gói (spec → worker 
   UiAutomation với session của Riviu. Screencap thì được.
 
 ## 2. Preflight từng máy
+
+Trước khi mở controller: `sweep-media.py <label> <scope.json> --apply` dọn album/stage
+`riviu-*` của dòng đã kết thúc. Bộ quét của controller tắt dưới dev-acceptance scope; r112
+(14/10) mỗi máy còn 16–31 album và bước chọn album quá hạn trên 3/20 máy.
 
 `preflight.mjs <label> <scope.json>` (chỉ đọc) ghi theo serial: adb `device`, auto-rotate
 tắt, khóa màn hình tắt, tải máy, helper không còn bảo trì chờ, cửa sổ focus không phải
