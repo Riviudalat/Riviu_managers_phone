@@ -383,13 +383,14 @@ impl DispatchCompletions {
 }
 
 /// A roster scan may admit or refuse a queued phone only this long after the scan began.
-/// Measured on 14/10/2026 (r110, 28 Samsung phones, one adb 37.0.1 server): one full
-/// `list_devices` took ~150-180 s, so 60 s left every snapshot stale on arrival and no job
-/// was ever dispatched (all 28 `roster_pending` for 20 min). 300 s covers that scan with a
-/// margin. A stale-looking phone is still gated by its worker's lease and exact-serial
-/// reads, so the snapshot only decides whether to try.
+/// The dispatcher reads the background roster scan (`state.rs`, every ~3 s) rather than
+/// running its own: on 14/10/2026 (r110, 28 Samsung phones, one adb 37.0.1 server) its own
+/// scan reached it 145-180 s after spawn while the background scan of the same fleet
+/// finished every ~3.8 s, so every snapshot was stale on arrival and all 28 jobs sat
+/// `roster_pending` for 20 min. 300 s is a margin, not a measured scan time. A stale-looking
+/// phone is still gated by its worker's lease and exact-serial reads, so the snapshot only
+/// decides whether to try.
 const ROSTER_MAX_AGE: Duration = Duration::from_secs(300);
-const ROSTER_REFRESH_EVERY: Duration = Duration::from_secs(2);
 
 /// What the latest usable roster says about one phone. `Unknown` is not `Offline`: it
 /// starts no reconnect window and fails nothing.
@@ -453,62 +454,41 @@ impl RosterSnapshot {
     }
 }
 
-type RosterScan =
-    tokio::task::JoinHandle<Result<Vec<riviu_core::DeviceInfo>, riviu_core::DeviceControlError>>;
-
-/// The dispatcher's roster, refreshed by one owned scan task so that a scan waiting on the
-/// inventory lock, the adb queue or a cold probe never holds completion drain or the
-/// dispatch of phones the last scan already proved. A scan is never aborted: it ends on its
-/// own, and on shutdown its handle is dropped, which detaches it. The snapshot only admits
-/// a job to a claim; the worker's lease and its own reads of that exact serial still decide
-/// whether any effect happens.
+/// The dispatcher's view of the background roster scan. It never scans: a scan waiting on
+/// the inventory lock, the adb queue or a cold probe cannot hold completion drain or the
+/// dispatch of phones the last scan already proved, and the fleet is not scanned twice. The
+/// snapshot only admits a job to a claim; the worker's lease and its own reads of that exact
+/// serial still decide whether any effect happens.
 #[derive(Default)]
 struct RosterRefresh {
     snapshot: Option<RosterSnapshot>,
-    scan: Option<(tokio::time::Instant, RosterScan)>,
-    finished_at: Option<tokio::time::Instant>,
-    reported_slow: bool,
+    reported_stale: bool,
 }
 
 impl RosterRefresh {
-    fn start_if_due(&mut self, control: &Arc<DeviceControlPlane>) {
-        if let Some((started, _)) = &self.scan {
-            if !self.reported_slow && started.elapsed() >= ROSTER_MAX_AGE {
-                self.reported_slow = true;
-                log::warn!(
-                    "Đăng bài: danh sách máy chưa quét xong sau {} giây; tạm hoãn giao việc cho máy chưa rõ trạng thái, vẫn thu kết quả máy đang chạy",
-                    started.elapsed().as_secs()
-                );
+    /// Take the newest background scan, if it is newer than the one already held.
+    fn refresh(&mut self, registry: &riviu_core::DeviceRegistry) {
+        if let Some(scan) = registry.latest_scan() {
+            if self
+                .snapshot
+                .as_ref()
+                .is_none_or(|held| scan.started_at > held.scanned_at)
+            {
+                self.snapshot = Some(RosterSnapshot::new(scan.started_at, scan.devices));
             }
-            return;
         }
-        if self
-            .finished_at
-            .is_some_and(|at| at.elapsed() < ROSTER_REFRESH_EVERY)
-        {
-            return;
-        }
-        let control = control.clone();
-        self.reported_slow = false;
-        self.scan = Some((
-            tokio::time::Instant::now(),
-            tokio::spawn(async move { control.list_devices().await }),
-        ));
-    }
-
-    /// Cancel-safe: a losing `select!` branch leaves the scan in place.
-    async fn finished(&mut self) {
-        let Some((started, scan)) = self.scan.as_mut() else {
-            return std::future::pending().await;
-        };
-        let started = *started;
-        let result = scan.await;
-        self.scan = None;
-        self.finished_at = Some(tokio::time::Instant::now());
-        match result {
-            Ok(Ok(roster)) => self.snapshot = Some(RosterSnapshot::new(started, roster)),
-            Ok(Err(error)) => log::warn!("publish dispatch roster scan failed: {error}"),
-            Err(error) => log::error!("publish dispatch roster scan ended: {error}"),
+        let age = self.snapshot.as_ref().map(|held| held.scanned_at.elapsed());
+        if age.is_some_and(|age| age <= ROSTER_MAX_AGE) {
+            self.reported_stale = false;
+        } else if !self.reported_stale {
+            self.reported_stale = true;
+            log::warn!(
+                "Đăng bài: danh sách máy {}; tạm hoãn giao việc cho máy chưa rõ trạng thái, vẫn thu kết quả máy đang chạy",
+                match age {
+                    Some(age) => format!("đã {} giây chưa được quét lại", age.as_secs()),
+                    None => "chưa được quét lần nào".to_string(),
+                }
+            );
         }
     }
 
@@ -535,6 +515,7 @@ impl RosterRefresh {
 #[allow(clippy::too_many_arguments)]
 pub(crate) async fn run_dispatcher(
     control: Arc<DeviceControlPlane>,
+    registry: riviu_core::DeviceRegistry,
     db: Arc<Database>,
     frames: Arc<dyn FrameSource>,
     events: riviu_core::events::EventBus,
@@ -555,7 +536,6 @@ pub(crate) async fn run_dispatcher(
         tokio::select! {
             _ = interval.tick() => {},
             _ = completed.settle_ready(&db), if db.ensure_publish_recovery_ready().is_ok() => {},
-            _ = roster.finished(), if roster.scan.is_some() => {},
             Some(result) = tasks.join_next_with_id(), if !tasks.is_empty() => {
                 let (id, error) = match result {
                     Ok((id, result)) => (id, result.err()),
@@ -658,7 +638,7 @@ pub(crate) async fn run_dispatcher(
             if pending.is_empty() {
                 return Ok::<_, anyhow::Error>(());
             }
-            roster.start_if_due(&control);
+            roster.refresh(&registry);
             for job in pending {
                 // Durable claims and the device lease serialize one phone. A slow
                 // sibling must not consume a global publish worker slot.
@@ -1128,23 +1108,17 @@ mod tests {
         }
     }
 
-    /// The first scan lists `phone-a` and `phone-b`; `phone-c` is absent, so its job stays
-    /// queued and the dispatcher keeps scanning. Every later scan never returns.
-    struct HungRosterDriver {
+    /// Counts fleet scans, which the dispatcher must never run itself; every scan it could
+    /// start would hang.
+    struct GatedPhonesDriver {
         scans: std::sync::atomic::AtomicUsize,
-        hung: tokio::sync::Notify,
         gates: HashMap<&'static str, Arc<Semaphore>>,
     }
 
     #[async_trait::async_trait]
-    impl riviu_core::driver::DeviceDriver for HungRosterDriver {
+    impl riviu_core::driver::DeviceDriver for GatedPhonesDriver {
         async fn list_devices(&self) -> anyhow::Result<Vec<riviu_core::DeviceInfo>> {
-            if self.scans.fetch_add(1, std::sync::atomic::Ordering::SeqCst) == 0 {
-                return Ok(["phone-a", "phone-b"]
-                    .map(|udid| roster_row(udid, riviu_core::DeviceStatus::Connected))
-                    .into());
-            }
-            self.hung.notify_one();
+            self.scans.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
             std::future::pending().await
         }
         fn reports_element_bounds(&self, _udid: &str) -> bool {
@@ -1208,7 +1182,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn hung_roster_scan_does_not_hold_completion_or_shutdown() {
+    async fn dispatcher_uses_background_roster_and_never_scans_itself() {
         let path = std::env::temp_dir().join(format!("dispatch-roster-{}.db", Uuid::new_v4()));
         let db = Arc::new(Database::open(&path).unwrap());
         let udids = ["phone-a", "phone-b", "phone-c"];
@@ -1255,9 +1229,8 @@ mod tests {
         let gates: HashMap<_, _> = ["phone-a", "phone-b"]
             .map(|udid| (udid, Arc::new(Semaphore::new(0))))
             .into();
-        let driver = Arc::new(HungRosterDriver {
+        let driver = Arc::new(GatedPhonesDriver {
             scans: Default::default(),
-            hung: tokio::sync::Notify::new(),
             gates: gates.clone(),
         });
         let control = Arc::new(DeviceControlPlane::new(
@@ -1265,9 +1238,19 @@ mod tests {
             Arc::new(riviu_core::DeviceWorkCoordinator::new()),
             Arc::new(riviu_core::StreamBudgetManager::new(2).unwrap()),
         ));
+        // The background scan listed `phone-a` and `phone-b`; `phone-c` is absent, so its job
+        // stays queued. No later scan arrives.
+        let registry = riviu_core::DeviceRegistry::new(riviu_core::events::EventBus::new(64));
+        registry.record_scan(riviu_core::FleetScan {
+            started_at: tokio::time::Instant::now(),
+            devices: ["phone-a", "phone-b"]
+                .map(|udid| roster_row(udid, riviu_core::DeviceStatus::Connected))
+                .into(),
+        });
         let stop = Arc::new(std::sync::atomic::AtomicBool::new(false));
         let mut dispatcher = tokio::spawn(run_dispatcher(
             control,
+            registry,
             db.clone(),
             Arc::new(riviu_core::NullFrameSource),
             riviu_core::events::EventBus::new(64),
@@ -1291,13 +1274,10 @@ mod tests {
         .await;
         let (assignment_a, _, attempt_a) = job("phone-a");
         let (assignment_b, _, attempt_b) = job("phone-b");
-        tokio::time::timeout(Duration::from_secs(10), driver.hung.notified())
-            .await
-            .expect("a later roster scan began and never returns");
 
-        // Phone A's worker finishes while the scan hangs; its claim settles anyway.
+        // Phone A's worker finishes while no new roster arrives; its claim settles anyway.
         gates["phone-a"].add_permits(1);
-        wait_until("phone-a completion settled during the hung scan", || {
+        wait_until("phone-a completion settled without a new roster", || {
             let (_, state, attempt) = job("phone-a");
             !(state == "running" && attempt == attempt_a)
         })
@@ -1324,7 +1304,7 @@ mod tests {
         assert_ne!(state, "failed_before_dispatch", "{code:?}");
         assert_eq!(job("phone-c").1, "queued");
 
-        // Stopping waits for phone B's own worker, not for the scan, and keeps its claim.
+        // Stopping waits for phone B's own worker and keeps its claim.
         stop.store(true, std::sync::atomic::Ordering::Release);
         tokio::time::sleep(Duration::from_millis(600)).await;
         assert!(
@@ -1335,8 +1315,13 @@ mod tests {
         gates["phone-b"].add_permits(1);
         tokio::time::timeout(Duration::from_secs(10), &mut dispatcher)
             .await
-            .expect("shutdown does not wait for the hung scan")
+            .expect("shutdown ends once phone B's worker does")
             .unwrap();
+        assert_eq!(
+            driver.scans.load(std::sync::atomic::Ordering::SeqCst),
+            0,
+            "the dispatcher reads the background scan and never scans the fleet itself"
+        );
         assert_eq!(
             job("phone-b"),
             (assignment_b.clone(), "running".into(), attempt_b),

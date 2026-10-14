@@ -5,9 +5,18 @@ use parking_lot::RwLock;
 use crate::events::{AppEvent, EventBus};
 use crate::types::{DeviceInfo, DeviceStatus};
 
+/// One fleet scan exactly as the drivers answered it, before any merge or status update.
+#[derive(Clone)]
+pub struct FleetScan {
+    /// When the scan began, so its age is never understated.
+    pub started_at: tokio::time::Instant,
+    pub devices: Vec<DeviceInfo>,
+}
+
 #[derive(Clone)]
 pub struct DeviceRegistry {
     devices: Arc<RwLock<Vec<DeviceInfo>>>,
+    latest_scan: Arc<RwLock<Option<FleetScan>>>,
     events: EventBus,
 }
 
@@ -15,12 +24,23 @@ impl DeviceRegistry {
     pub fn new(events: EventBus) -> Self {
         Self {
             devices: Arc::new(RwLock::new(Vec::new())),
+            latest_scan: Arc::new(RwLock::new(None)),
             events,
         }
     }
 
     pub fn list(&self) -> Vec<DeviceInfo> {
         self.devices.read().clone()
+    }
+
+    /// Keep the background scan's raw answer for readers that need connection state as the
+    /// drivers reported it (the publish dispatcher), not the merged rows shown in the UI.
+    pub fn record_scan(&self, scan: FleetScan) {
+        *self.latest_scan.write() = Some(scan);
+    }
+
+    pub fn latest_scan(&self) -> Option<FleetScan> {
+        self.latest_scan.read().clone()
     }
 
     pub fn get(&self, udid: &str) -> Option<DeviceInfo> {

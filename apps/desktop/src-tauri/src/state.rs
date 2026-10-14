@@ -2494,7 +2494,13 @@ impl AppState {
                 }
                 if last_scan.elapsed() >= Duration::from_secs(3) {
                     last_scan = Instant::now();
+                    let scan_started = tokio::time::Instant::now();
                     if let Ok(devices) = control.list_devices().await {
+                        // The publish dispatcher reads this scan instead of running its own.
+                        registry.record_scan(riviu_core::FleetScan {
+                            started_at: scan_started,
+                            devices: devices.clone(),
+                        });
                         let number_udids = devices.iter().map(|device| device.udid.clone()).collect::<Vec<_>>();
                         if let Err(error) = numbering_db.storage_write(move |db| db.ensure_device_numbers(&number_udids)).await {
                             // Keep discovery visible; UI retains null/stale numbers until commit.
@@ -2949,6 +2955,7 @@ impl AppState {
         }
         tauri::async_runtime::spawn(crate::publish_commands::pipeline::run_dispatcher(
             self.control.clone(),
+            self.registry.clone(),
             self.db.clone(),
             Arc::new(self.streams.clone()),
             self.events.clone(),

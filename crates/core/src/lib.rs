@@ -120,7 +120,7 @@ pub use orchestration::*;
 pub use orchestration_runtime::*;
 pub use publish::*;
 pub use publish_runtime::*;
-pub use registry::DeviceRegistry;
+pub use registry::{DeviceRegistry, FleetScan};
 pub use screen::{ScreenKind, ScreenObservation};
 pub use screen_watch::{ScreenWatcher, WatchStats};
 pub use session_log::{SessionLogBook, SessionLogEntry, SessionLogSummary, SESSION_LOG_CAPACITY};

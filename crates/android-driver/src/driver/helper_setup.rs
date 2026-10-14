@@ -1,9 +1,25 @@
 //! Install the branded helper on arrival without opening it, switching IME, or starting a session.
 use super::*;
+use futures_util::StreamExt as _;
 
 const MIN_LAUNCHER_VERSION: u64 = 7;
 const QUERY_TIMEOUT: Duration = Duration::from_secs(15);
-const INVENTORY_METADATA_TTL: Duration = Duration::from_secs(15);
+/// How long one phone's model/OS/battery read is reused. r111 (14/10/2026, 28 phones):
+/// at 15 s this read was ~110 of the ~160 `adb shell` a minute an idle fleet ran, one per
+/// phone every ~15 s; none of the three fields needs that. A failed read still buys no TTL.
+const INVENTORY_METADATA_TTL: Duration = Duration::from_secs(60);
+/// How many agent `/status` reads one inventory scan runs at once. Chosen, not measured:
+/// one read is a loopback HTTP call with a 5 s ceiling, so a fleet of 30 with a few busy
+/// agents costs a few ceilings instead of one per phone. r110 (14/10/2026, 28 Samsung):
+/// the reads ran one after another and cost ~1.1 s per scan even with every phone cached.
+const AGENT_READY_CONCURRENCY: usize = 8;
+
+/// When a fleet scan began and how long it waited for the inventory caller lock, for the
+/// one per-scan timing line.
+pub(super) struct InventoryScanClock {
+    pub(super) started: std::time::Instant,
+    pub(super) lock_wait: Duration,
+}
 
 #[derive(Debug, PartialEq, Eq)]
 enum HelperPackage {
@@ -155,6 +171,7 @@ impl AndroidDriver {
     /// Merge optional enrichment with fresh roster states under the inventory caller lock.
     pub(super) async fn inventory_from_reading<F, Fut>(
         &self,
+        clock: InventoryScanClock,
         reading: adb::DeviceListReading,
         mut probe: F,
     ) -> Vec<DeviceInfo>
@@ -286,8 +303,11 @@ impl AndroidDriver {
         let mut devices = Vec::with_capacity(
             inflight.len() + cached_devices.len() + unreachable_devices.len(),
         );
+        // Rows whose agent is asked once probes settle, each still holding its reader:
+        // `Some(may_be_ready)` says whether a reachable agent makes the row Ready.
+        let mut readiness = Vec::with_capacity(inflight.len() + cached_devices.len());
         while let Some(result) = inflight.join_next().await {
-            let Ok((mut device, observed_at, _guard)) = result else {
+            let Ok((device, observed_at, guard)) = result else {
                 continue;
             };
             probe_fallbacks.remove(&device.udid);
@@ -303,21 +323,34 @@ impl AndroidDriver {
                 self.inventory_metadata_at.lock().remove(&device.udid);
             }
             self.inventory_cache.lock().insert(device.udid.clone(), device.clone());
-            device.wda_ready = self.agent_ready(&device.udid).await;
-            if device.wda_ready && metadata_complete {
-                device.status = DeviceStatus::Ready;
-            }
-            devices.push(device);
+            readiness.push((device, Some(metadata_complete), Some(guard)));
         }
         for (serial, fallback) in probe_fallbacks {
             self.inventory_metadata_at.lock().remove(&serial);
             self.inventory_cache.lock().remove(&serial);
             devices.push(fallback);
         }
-        for (mut device, guard) in cached_devices {
-            if let Some(_guard) = guard {
-                device.wda_ready = self.agent_ready(&device.udid).await;
-                if device.wda_ready && device.last_error.is_none() {
+        for (device, guard) in cached_devices {
+            // A row whose setup holds the writer is shown as it is, unasked.
+            let may_be_ready = guard.is_some().then_some(device.last_error.is_none());
+            readiness.push((device, may_be_ready, guard));
+        }
+        // One slow agent must not hold every phone behind it: the reads overlap, capped, and
+        // each row keeps its own answer.
+        let mut reads = Vec::with_capacity(readiness.len());
+        for (device, may_be_ready, _) in &readiness {
+            let udid = device.udid.as_str();
+            let ask = may_be_ready.is_some();
+            reads.push(async move { ask && self.agent_ready(udid).await });
+        }
+        let ready = futures_util::stream::iter(reads)
+            .buffered(AGENT_READY_CONCURRENCY)
+            .collect::<Vec<_>>()
+            .await;
+        for ((mut device, may_be_ready, _guard), ready) in readiness.into_iter().zip(ready) {
+            if let Some(may_be_ready) = may_be_ready {
+                device.wda_ready = ready;
+                if ready && may_be_ready {
                     device.status = DeviceStatus::Ready;
                 }
             }
@@ -367,9 +400,24 @@ impl AndroidDriver {
         if reading.stable && reading.failure.is_none() {
             *self.helper_inventory_snapshot.lock() = Some(devices.clone());
         }
+        // One line per scan: the total and the part that took longest.
+        let enrichment = started.elapsed();
+        let scan = clock.started.elapsed();
+        let adb_devices = scan.saturating_sub(clock.lock_wait + enrichment);
+        let (largest, _) = [
+            ("lock_wait", clock.lock_wait),
+            ("adb_devices", adb_devices),
+            ("enrichment", enrichment),
+        ]
+        .into_iter()
+        .max_by_key(|(_, elapsed)| *elapsed)
+        .unwrap_or(("enrichment", enrichment));
         tracing::info!(
             cached, probed, offline, setup_busy,
-            enrichment_elapsed_ms = started.elapsed().as_millis() as u64,
+            enrichment_elapsed_ms = enrichment.as_millis() as u64,
+            lock_wait_ms = clock.lock_wait.as_millis() as u64,
+            scan_elapsed_ms = scan.as_millis() as u64,
+            largest,
             "Android inventory metadata enrichment"
         );
         devices
@@ -547,11 +595,77 @@ mod tests {
         rows.iter().map(|row| row.udid.as_str()).collect()
     }
 
+    fn scan_clock() -> InventoryScanClock {
+        InventoryScanClock {
+            started: std::time::Instant::now(),
+            lock_wait: Duration::ZERO,
+        }
+    }
+
+    #[tokio::test]
+    async fn slow_agents_are_asked_side_by_side_not_one_after_another() {
+        // Every phone's forwarded agent answers `/status` only after 300 ms, as a busy
+        // agent does while a session holds it.
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let port = listener.local_addr().unwrap().port();
+        tokio::spawn(async move {
+            while let Ok((mut stream, _)) = listener.accept().await {
+                tokio::spawn(async move {
+                    let mut request = Vec::new();
+                    let mut chunk = [0u8; 1024];
+                    while !request.windows(4).any(|w| w == b"\r\n\r\n") {
+                        match stream.read(&mut chunk).await {
+                            Ok(0) | Err(_) => return,
+                            Ok(read) => request.extend_from_slice(&chunk[..read]),
+                        }
+                    }
+                    tokio::time::sleep(Duration::from_millis(300)).await;
+                    let _ = stream
+                        .write_all(
+                            b"HTTP/1.1 200 OK\r\nContent-Length: 2\r\nConnection: close\r\n\r\n{}",
+                        )
+                        .await;
+                });
+            }
+        });
+        let driver = inventory_driver();
+        let phones = ["a", "b", "c", "d", "e", "f"];
+        for serial in phones {
+            driver.ports.lock().insert(serial.into(), port);
+            driver.forwarded.lock().insert(serial.into());
+        }
+
+        let started = std::time::Instant::now();
+        let rows = driver
+            .inventory_from_reading(
+                scan_clock(),
+                inventory_reading(&phones, true, None),
+                inventory_probe,
+            )
+            .await;
+        let elapsed = started.elapsed();
+
+        assert_eq!(serials(&rows), phones);
+        assert!(
+            rows.iter().all(|row| row.wda_ready),
+            "every phone asked its own agent"
+        );
+        // One after another this is 6 x 300 ms; side by side it is one slow answer.
+        assert!(
+            elapsed < Duration::from_millis(1_200),
+            "scan took {elapsed:?}"
+        );
+    }
+
     #[tokio::test]
     async fn inventory_during_install_keeps_cached_identity_and_adb_order() {
         let driver = inventory_driver();
         driver
-            .inventory_from_reading(inventory_reading(&["a", "b"], true, None), inventory_probe)
+            .inventory_from_reading(
+                scan_clock(),
+                inventory_reading(&["a", "b"], true, None),
+                inventory_probe,
+            )
             .await;
         let _install_a = driver.helper_inventory_lock("a").write_owned().await;
         let _attach_c = driver.helper_inventory_lock("c").write_owned().await;
@@ -560,7 +674,7 @@ mod tests {
 
         let rows = tokio::time::timeout(
             Duration::from_secs(1),
-            driver.inventory_from_reading(reading, |adb, serial, model| {
+            driver.inventory_from_reading(scan_clock(), reading, |adb, serial, model| {
                 assert_eq!(
                     serial, "b",
                     "installing and unreachable phones must not be probed"
@@ -592,12 +706,17 @@ mod tests {
             .lock()
             .insert("a".into(), failure.into());
         driver
-            .inventory_from_reading(inventory_reading(&["a", "b"], true, None), inventory_probe)
+            .inventory_from_reading(
+                scan_clock(),
+                inventory_reading(&["a", "b"], true, None),
+                inventory_probe,
+            )
             .await;
 
         for scan_failure in [None, Some("adb server unavailable")] {
             let partial = driver
                 .inventory_from_reading(
+                    scan_clock(),
                     inventory_reading(&["b"], false, scan_failure),
                     inventory_probe,
                 )
@@ -609,13 +728,21 @@ mod tests {
             assert!(driver.inventory_cache.lock().contains_key("a"));
 
             let recovered = driver
-                .inventory_from_reading(inventory_reading(&["a", "b"], true, None), inventory_probe)
+                .inventory_from_reading(
+                    scan_clock(),
+                    inventory_reading(&["a", "b"], true, None),
+                    inventory_probe,
+                )
                 .await;
             assert_eq!(recovered[0].last_error.as_deref(), Some(failure));
         }
 
         driver
-            .inventory_from_reading(inventory_reading(&["b"], true, None), inventory_probe)
+            .inventory_from_reading(
+                scan_clock(),
+                inventory_reading(&["b"], true, None),
+                inventory_probe,
+            )
             .await;
         assert_eq!(
             serials(&driver.helper_connection_snapshot().unwrap()),
@@ -624,7 +751,11 @@ mod tests {
         assert!(!driver.inventory_cache.lock().contains_key("a"));
         assert!(driver.helper_setup_errors.lock().contains_key("a"));
         let reconnected = driver
-            .inventory_from_reading(inventory_reading(&["a", "b"], true, None), inventory_probe)
+            .inventory_from_reading(
+                scan_clock(),
+                inventory_reading(&["a", "b"], true, None),
+                inventory_probe,
+            )
             .await;
         assert_eq!(reconnected[0].last_error.as_deref(), Some(failure));
         assert_eq!(reconnected[0].status, DeviceStatus::Error);
