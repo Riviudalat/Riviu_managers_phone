@@ -686,7 +686,8 @@ pub(super) fn queue_sheet_row(
 #[cfg(test)]
 mod tests {
     use super::super::publish_verification::{
-        PROCESSING_WAIT_MINUTES, VERIFICATION_CHECK_SECONDS as CHECK_SECONDS,
+        METADATA_UNREACHABLE_MINUTES, PROCESSING_WAIT_MINUTES,
+        VERIFICATION_CHECK_SECONDS as CHECK_SECONDS,
         VERIFICATION_NO_PROGRESS_LIMIT as NO_PROGRESS_LIMIT,
     };
     use super::*;
@@ -1035,6 +1036,99 @@ mod tests {
             immutable["captured"]["capturedAt"]
         );
         assert!(db.pending_publish_sheet_row(&assignment).unwrap().is_none());
+        drop(db);
+        std::fs::remove_file(path).unwrap();
+    }
+
+    #[test]
+    fn unanswered_public_checks_wait_by_time_while_a_mismatch_still_ends_in_review() {
+        use crate::publish_submission::*;
+        let (db, path, campaign, assignment, intent, mut pending) = pending_metadata_fixture();
+        let observe = |pending: &PendingMetadataCandidate, code: &str| {
+            let row = db
+                .publish_verifications_for_campaign(&campaign, 10)
+                .unwrap()
+                .remove(0);
+            let diagnostic = serde_json::json!({"stage":"candidatePublicMetadata","pendingMetadataCandidate":pending,"reasonCode":code});
+            assert!(db
+                .record_publish_verification_diagnostic(&row, "public metadata", code, Some(&diagnostic))
+                .unwrap());
+            let row = db
+                .publish_verifications_for_campaign(&campaign, 10)
+                .unwrap()
+                .remove(0);
+            let evidence: serde_json::Value =
+                serde_json::from_str(row.evidence_json.as_deref().unwrap()).unwrap();
+            (row, evidence)
+        };
+        let next = |pending: &mut PendingMetadataCandidate, stage, http_status| {
+            pending.captured.metadata.attempts += 1;
+            pending.captured.metadata.checked_at = Utc::now().to_rfc3339();
+            pending.captured.metadata.stage = stage;
+            pending.captured.metadata.http_status = http_status;
+        };
+        // 14/10/2026: TikTok throttled oEmbed past the 12-attempt budget.
+        let throttled = [
+            (MetadataDiagnostic::HttpStatus, Some(429)),
+            (MetadataDiagnostic::Request, None),
+            (MetadataDiagnostic::HttpStatus, Some(503)),
+        ];
+        let mut evidence = serde_json::Value::Null;
+        for observation in 1..=14u64 {
+            let (stage, status) = throttled[observation as usize % throttled.len()];
+            next(&mut pending, stage, status);
+            evidence = observe(&pending, "metadataUnavailable").1;
+            assert_eq!(evidence["verificationStatus"]["state"], "pending", "observation {observation}");
+            assert_eq!(evidence["verificationBudget"]["metadataObservations"], 0);
+            assert_eq!(evidence["verificationBudget"]["metadataUnreachableObservations"], observation);
+        }
+        // The elapsed window, not a count, parks it: link kept, no Sheet row, no repost.
+        let since = DateTime::parse_from_rfc3339(
+            evidence["verificationBudget"]["metadataUnreachableSince"].as_str().unwrap(),
+        )
+        .unwrap();
+        evidence["verificationBudget"]["metadataUnreachableSince"] = serde_json::json!(
+            (since - chrono::Duration::minutes(METADATA_UNREACHABLE_MINUTES)).to_rfc3339()
+        );
+        db.conn()
+            .unwrap()
+            .execute(
+                "UPDATE publish_assignments SET evidence_json=?2 WHERE id=?1",
+                params![assignment, evidence.to_string()],
+            )
+            .unwrap();
+        next(&mut pending, MetadataDiagnostic::Request, None);
+        let (parked, evidence) = observe(&pending, "metadataUnavailable");
+        let status = &evidence["verificationStatus"];
+        assert_eq!(status["state"], "needsReview");
+        assert_eq!(status["cause"], "publicMetadataUnreachable");
+        assert!(status["nextCheckAt"].is_null());
+        assert!(status["reason"].as_str().unwrap().contains("không phản hồi"));
+        assert_eq!(
+            evidence["verificationDiagnostic"]["pendingMetadataCandidate"],
+            serde_json::to_value(&pending).unwrap()
+        );
+        assert!(db.pending_publish_sheet_row(&assignment).unwrap().is_none());
+        assert!(!db
+            .claim_publish_assignment_for_posting(&assignment, &intent)
+            .unwrap());
+        assert_eq!(
+            db.resume_publish_verification(&assignment, true, parked.revision)
+                .unwrap()
+                .state,
+            super::super::publish_verification::PublishResumeVerificationState::Accepted
+        );
+        // A public metadata mismatch keeps today's end.
+        for _ in 0..NO_PROGRESS_LIMIT {
+            next(&mut pending, MetadataDiagnostic::MetadataIdentity, None);
+            pending.captured.metadata.state = MetadataAttemptState::Rejected;
+            observe(&pending, "metadataIdentityMismatch");
+        }
+        let detail = db.get_publish_campaign(&campaign).unwrap().unwrap();
+        let evidence: serde_json::Value =
+            serde_json::from_str(detail.assignments[0].evidence_json.as_deref().unwrap()).unwrap();
+        assert_eq!(evidence["verificationStatus"]["state"], "needsReview");
+        assert_eq!(evidence["verificationStatus"]["cause"], "verificationNoProgress");
         drop(db);
         std::fs::remove_file(path).unwrap();
     }

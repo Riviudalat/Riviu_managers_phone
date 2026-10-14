@@ -4,6 +4,8 @@ use anyhow::Context;
 use hierarchy::Tree;
 use crate::publish_submission::MetadataDiagnostic;
 
+mod oembed_gate;
+
 fn normalize(text: &str) -> String {
     text.split_whitespace().collect::<Vec<_>>().join(" ")
 }
@@ -473,32 +475,74 @@ pub(super) async fn validate_public_link(
         "https://www.tiktok.com/@{}/video/{id}",
         identity.account.trim_start_matches('@')
     );
+    let embed = fetch_public_metadata(&video_url).await?;
+    validate_public_metadata(&embed, caption, &identity.account, &id)?;
+    Ok(())
+}
+
+/// One paced oEmbed read. Every failure here is TikTok availability, never a mismatch.
+async fn fetch_public_metadata(video_url: &str) -> Result<serde_json::Value, PublicMetadataUnavailable> {
     let client = reqwest::Client::builder()
         .timeout(Duration::from_secs(15))
         .redirect(reqwest::redirect::Policy::none())
         .build().map_err(|_| PublicMetadataUnavailable { stage: MetadataDiagnostic::RequestConfig, http_status: None })?;
-    let mut response = client
+    // A turn not granted within the wait is recorded as an unanswered request. No new
+    // stage: an older build must still parse this candidate after a rollback.
+    let turn = oembed_gate::shared()
+        .turn(oembed_gate::OEMBED_MAX_TURN_WAIT)
+        .await
+        .map_err(|_| PublicMetadataUnavailable { stage: MetadataDiagnostic::Request, http_status: None })?;
+    let (outcome, read) = read_oembed(&client, video_url).await;
+    turn.finish(outcome);
+    let (status, bytes) = read?;
+    serde_json::from_slice(&bytes)
+        .map_err(|_| PublicMetadataUnavailable { stage: MetadataDiagnostic::ResponseParse, http_status: status })
+}
+
+async fn read_oembed(
+    client: &reqwest::Client,
+    video_url: &str,
+) -> (oembed_gate::OembedOutcome, Result<(Option<u16>, Vec<u8>), PublicMetadataUnavailable>) {
+    use oembed_gate::OembedOutcome::{Answered, Throttled};
+    let unavailable = |stage, http_status| Err(PublicMetadataUnavailable { stage, http_status });
+    let mut response = match client
         .get("https://www.tiktok.com/oembed")
-        .query(&[("url", video_url.as_str())])
+        .query(&[("url", video_url)])
         .send()
-        .await.map_err(|error| PublicMetadataUnavailable { stage: MetadataDiagnostic::Request, http_status: error.status().map(|status| status.as_u16()) })?
-        .error_for_status().map_err(|error| PublicMetadataUnavailable { stage: MetadataDiagnostic::HttpStatus, http_status: error.status().map(|status| status.as_u16()) })?;
-    let status = Some(response.status().as_u16());
+        .await
+    {
+        Ok(response) => response,
+        Err(error) => {
+            let status = error.status().map(|status| status.as_u16());
+            return (Throttled { retry_after: None }, unavailable(MetadataDiagnostic::Request, status));
+        }
+    };
+    let status = response.status();
+    let code = Some(status.as_u16());
+    if status.is_client_error() || status.is_server_error() {
+        let outcome = if status == reqwest::StatusCode::TOO_MANY_REQUESTS || status.is_server_error() {
+            Throttled { retry_after: oembed_gate::retry_after(response.headers(), chrono::Utc::now()) }
+        } else {
+            Answered
+        };
+        return (outcome, unavailable(MetadataDiagnostic::HttpStatus, code));
+    }
     if response.content_length().is_some_and(|size| size > 262144) {
-        return Err(PublicMetadataUnavailable { stage: MetadataDiagnostic::BodyLimit, http_status: status }.into());
+        return (Answered, unavailable(MetadataDiagnostic::BodyLimit, code));
     }
     let mut bytes = Vec::new();
-    while let Some(chunk) = response.chunk().await
-        .map_err(|_| PublicMetadataUnavailable { stage: MetadataDiagnostic::BodyRead, http_status: status })? {
-        if bytes.len() + chunk.len() > 262144 {
-            return Err(PublicMetadataUnavailable { stage: MetadataDiagnostic::BodyLimit, http_status: status }.into());
+    loop {
+        match response.chunk().await {
+            Ok(Some(chunk)) => {
+                if bytes.len() + chunk.len() > 262144 {
+                    return (Answered, unavailable(MetadataDiagnostic::BodyLimit, code));
+                }
+                bytes.extend_from_slice(&chunk);
+            }
+            Ok(None) => return (Answered, Ok((code, bytes))),
+            Err(_) => return (Throttled { retry_after: None }, unavailable(MetadataDiagnostic::BodyRead, code)),
         }
-        bytes.extend_from_slice(&chunk);
     }
-    let embed: serde_json::Value = serde_json::from_slice(&bytes)
-        .map_err(|_| PublicMetadataUnavailable { stage: MetadataDiagnostic::ResponseParse, http_status: status })?;
-    validate_public_metadata(&embed, caption, &identity.account, &id)?;
-    Ok(())
 }
 
 /// The video viewer truncates its caption and opens a comment drawer on expansion.

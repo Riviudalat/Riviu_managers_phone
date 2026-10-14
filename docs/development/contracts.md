@@ -945,6 +945,20 @@ Candidate metadata đúng schema/assignment/intent/bundle/account/caption/time �
 kiểm qua mạng với `metadataObservations`, tối đa `metadataLimit=12` mỗi đợt xác minh.
 Các lượt này giữ nguyên bộ đếm tìm bài; lỗi đọc thông thường giữ bộ đếm metadata.
 Hết giới hạn metadata lưu cause `metadataRetryBudgetExhausted` và giữ candidate.
+Mọi lần gọi oEmbed trong tiến trình đi qua một cổng chung
+(`tiktok_share/photo_proof/oembed_gate.rs`): một yêu cầu một lúc, các lần bắt đầu cách nhau
+ít nhất 5 giây; sau 429/5xx/timeout/lỗi kết nối thì lùi từ 30 giây, gấp đôi mỗi lần bị chặn
+liên tiếp, có jitter, trần 10 phút, và tôn trọng `Retry-After` trong trần đó. Lượt phải chờ
+cổng quá 20 giây thì không gửi và ghi như yêu cầu không được trả lời (stage `request`); Stop
+huỷ được cả lúc đang chờ. Đo 14/10/2026 13:45–14:10 trên một máy chủ 20 máy: trang chủ TikTok
+200 trong 0,3 s, link ngắn 301 ngay, riêng `/oembed` treo 15–20 s hoặc 429/503, thỉnh thoảng
+200 với cùng link. Lượt TikTok không trả lời (stage `request`, `bodyRead`, `bodyLimit`,
+`responseParse`, hoặc `httpStatus` 429/5xx) không tiêu `metadataLimit`: budget đếm ở
+`metadataUnreachableObservations` và giới hạn theo thời gian, 120 phút
+(`METADATA_UNREACHABLE_MINUTES`) tính từ `metadataUnreachableSince`, lần đầu không được trả
+lời trong budget này. Hết hạn lưu needsReview cause `publicMetadataUnreachable`, giữ
+candidate và không đăng lại. Dữ liệu lệch (caption/tác giả/ID) và các 4xx khác vẫn kết thúc
+như trước.
 Sau 8 lượt liên tiếp không có bằng chứng mới của đúng bài, lưu needsReview với cause
 `verificationNoProgress`, nextCheckAt=null và giữ intent/media/khoản thiếu Sheet.
 Lỗi đọc/transport và tìm kiếm đều tiêu ngân sách hữu hạn này; offline/busy
@@ -1151,12 +1165,12 @@ vẫn kiểm quyền tại transaction; capability chỉ hướng dẫn UI, khô
 vượt điều kiện khi trạng thái đã đổi.
 
 Resume giữ campaign cancelled, publication/effect intent, jobs và đích Sheet/epoch
-ban đầu. Cause `verificationNoProgress`, `processingWaitExhausted` và `metadataRetryBudgetExhausted` cho phép resume rõ ràng; các review
+ban đầu. Cause `verificationNoProgress`, `processingWaitExhausted`, `metadataRetryBudgetExhausted` và `publicMetadataUnreachable` cho phép resume rõ ràng; các review
 khác không được nới. Transaction lưu status/budget/review-before-stop cũ trong
 `verificationBeforeResume` rồi mở budget mới; gọi lặp/ACK replay không reset.
 Worker hiện có dùng `nextCheckAt = checkedAt + 120 giây` khi còn ngân sách; 8 lượt
-không tiến triển liên tiếp ở bước tìm bài, hoặc 12 lượt metadata chưa sẵn sàng, lại needsReview.
-Confirmed resume đặt lại cả hai ngân sách và mở hạn chờ xử lý 60 phút mới, nhưng không đổi candidate, thời điểm capture hay metadata attempt.
+không tiến triển liên tiếp ở bước tìm bài, 12 lượt metadata được trả lời mà chưa xác minh, hoặc 120 phút TikTok không trả lời kiểm tra công khai, lại needsReview.
+Confirmed resume đặt lại các ngân sách đó và mở hạn chờ xử lý 60 phút mới, nhưng không đổi candidate, thời điểm capture hay metadata attempt.
 **Kiểm tra liên kết** một lần có thể
 chốt canonical nhưng thất bại không reset budget hoặc mở lại review đã dừng.
 **Kiểm tra liên kết** gọi `publish_check_links`, không
