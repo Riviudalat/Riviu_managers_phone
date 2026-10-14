@@ -1,0 +1,62 @@
+{
+  "package": "com.zhiliaoapp.musically",
+  "version": "45.7.3",
+  "locale": "en",
+  "device": "Riviu #36, SM-G955F ce04171435f104080c, Android 9, 1080x2220 (p36-*); Riviu #44, SM-G955F (p44-*)",
+  "capturedOn": "2026-10-14",
+  "publicPost": true,
+  "effects": "manual link read of an already posted photo on #36 (campaign r115 21c2c7b5): Profile tab, Profile again, newest tile, Share, sentinel clipboard, Copy link (TikTok counts it as a share); #44 was only observed with the sheet the verifier had left open. Nothing was posted",
+  "files": [
+    {
+      "file": "real-20261014-linkflow-p36-feed.xml",
+      "sha256": "95e274946d2927f185caaf9d8c4f0efb8cbe23b0b4082ebd46732d672f65fde9",
+      "source": "target/apply-apk-20261009/linkflow-p36-20261014/p36-00-start.xml",
+      "sourceSha256": "0e35b0ca8540fee947f30751dea79b66698f3aaf02da8f9c0e1f11a14b0710f7",
+      "screen": "Friends feed right after Post, playing the own photo post: title, zm7 Photo, zwj '· 2s ago', full desc caption, nrb Profile tab",
+      "sanitized": [
+        "third-party display name in the feed's vcz TextView -> 'Liên hệ 1'"
+      ],
+      "tool": "Riviu inspector_observe through the long-lived UiAutomator2 session (controller r115, same lease as device_tap)"
+    },
+    {
+      "file": "real-20261014-linkflow-p36-profile.xml",
+      "sha256": "0f4b8c71c5d910765295b76c20d45d99c0bdce561cc7edec25241fefd7e76cb0",
+      "source": "target/apply-apk-20261009/linkflow-p36-20261014/p36-01-profile.xml",
+      "sourceSha256": "0f4b8c71c5d910765295b76c20d45d99c0bdce561cc7edec25241fefd7e76cb0",
+      "screen": "own Profile after re-selecting the Profile tab: s0v @handle, Edit, Profile menu, nine emr/cover tiles, newest at [0,876][358,1353]",
+      "sanitized": [],
+      "tool": "Riviu inspector_observe through the long-lived UiAutomator2 session (controller r115, same lease as device_tap)"
+    },
+    {
+      "file": "real-20261014-linkflow-p36-post.xml",
+      "sha256": "9273cf25101fb7ad30a85c69dcaf45e4270a36aaf267c5bff8911d17655bb739",
+      "source": "target/apply-apk-20261009/linkflow-p36-20261014/p36-03-post.xml",
+      "sourceSha256": "9273cf25101fb7ad30a85c69dcaf45e4270a36aaf267c5bff8911d17655bb739",
+      "screen": "newest tile opened: widget_container photo viewer, zm7 Photo, zwj '· 10m ago', desc caption folded with a trailing ellipsis, bj1 Back, fpv 'Share video.  shares'",
+      "sanitized": [],
+      "tool": "Riviu inspector_observe through the long-lived UiAutomator2 session (controller r115, same lease as device_tap)"
+    },
+    {
+      "file": "real-20261014-linkflow-p36-share.xml",
+      "sha256": "9cb995ae695837f1208a921194532825ec2e9fef99b3452b384eadf5a4a21f48",
+      "source": "target/apply-apk-20261009/linkflow-p36-20261014/p36-04-share.xml",
+      "sourceSha256": "e4aa53ed64c9d6f2c2681b5079a396fef71f3dda9a38bd075d4ca8a71d058af9",
+      "screen": "share sheet of the own post: fl4 Bottom sheet, ti2 header with tv_title 'Send to' and l86 Close, Copy link row (dka), Edit post / Pin / Privacy settings",
+      "sanitized": [
+        "contact tiles of the share sheet's tqg list: text and content-desc -> 'Liên hệ N'"
+      ],
+      "tool": "Riviu inspector_observe through the long-lived UiAutomator2 session (controller r115, same lease as device_tap)"
+    },
+    {
+      "file": "real-20261014-linkflow-p44-send-to-sheet.xml",
+      "sha256": "198444084ef2a5960a6bb1cfdd92e11312ddbdd7ebbc85e18d44f40c5d3f60ff",
+      "source": "target/apply-apk-20261009/linkflow-p36-20261014/p44-00-sheet.xml",
+      "sourceSha256": "b68b130462a7698ccf2d4fddbbded5120eef58f4f0090703ce343bf39f75b60c",
+      "screen": "the 'Send to' share sheet variant left open by the verifier: same ti2 header (tv_title 'Send to', l86 Close) but no Copy link row; tiles Cast/Pin/Create group/Captions/Playback speed/Privacy settings",
+      "sanitized": [
+        "contact tiles of the share sheet's tqg list: text and content-desc -> 'Liên hệ N'"
+      ],
+      "tool": "Riviu inspector_observe through the long-lived UiAutomator2 session (controller r115, same lease as device_tap)"
+    }
+  ]
+}

@@ -516,6 +516,49 @@ pub(super) fn authorize_metadata_observer(
     Ok(())
 }
 
+fn metadata_unavailable(error: &anyhow::Error) -> bool {
+    error
+        .downcast_ref::<VerificationObservation>()
+        .is_some_and(|observation| observation.code == "metadataUnavailable")
+}
+
+/// The network lookup stays the recorded observation; the phone attempt rides along as
+/// evidence, so an unproven own-Profile pass spends no phone-search budget.
+fn with_phone_route(
+    lookup: anyhow::Error,
+    phone: &anyhow::Error,
+    udid: &str,
+    assignment_id: &str,
+) -> anyhow::Error {
+    let observation = phone.downcast_ref::<VerificationObservation>();
+    let busy = matches!(
+        phone.downcast_ref::<riviu_core::DeviceControlError>(),
+        Some(riviu_core::DeviceControlError::Busy(_))
+    );
+    let code = match observation {
+        Some(observation) => observation.code,
+        None if busy => "deviceBusy",
+        None if phone.downcast_ref::<SessionUnavailable>().is_some() => "sessionUnavailable",
+        None => "readFailed",
+    };
+    log::info!(
+        "Bài {assignment_id} trên {udid}: dữ liệu công khai TikTok chưa trả lời, Hồ sơ trên máy chưa xác minh được ({code}); giữ liên kết ứng viên, không đăng lại"
+    );
+    match lookup.downcast::<VerificationObservation>() {
+        Ok(mut host) => {
+            if let Some(diagnostic) = host.diagnostic.as_mut() {
+                diagnostic["phoneRoute"] = serde_json::json!({
+                    "reasonCode": code,
+                    "reason": phone.to_string().chars().take(512).collect::<String>(),
+                    "diagnostic": observation.and_then(|observation| observation.diagnostic.clone()),
+                });
+            }
+            host.into()
+        }
+        Err(lookup) => lookup,
+    }
+}
+
 pub(crate) async fn verify_pending_assignment(
     control: &DeviceControlPlane,
     db: &Database,
@@ -540,8 +583,8 @@ async fn verify_pending_assignment_inner(
     if !db.publish_verification_is_current(candidate)? {
         return Ok((CheckStatus::Stale, None));
     }
-    let metadata_only = match candidate.retained_metadata_candidate() {
-        Ok(candidate) => candidate.is_some(),
+    let retained = match candidate.retained_metadata_candidate() {
+        Ok(retained) => retained,
         Err(_) => {
             // Controlled terminal diagnostic; never serialize the invalid envelope.
             let reason = "Retained metadata candidate is invalid; review the original publication, no phone fallback.";
@@ -554,13 +597,34 @@ async fn verify_pending_assignment_inner(
             return Ok((CheckStatus::Stale, None));
         }
     };
+    let metadata_only = retained.is_some();
     if metadata_only && !manual && !candidate.automatic_metadata_observation_allowed(chrono::Utc::now()) {
         return Ok((CheckStatus::Pending, None));
     }
-    if !metadata_only && control.current_work_owner(&candidate.udid).is_some() {
+    let phone_free = control.current_work_owner(&candidate.udid).is_none();
+    if !metadata_only && !phone_free {
         return Ok((CheckStatus::Busy, None));
     }
-    let permit = if metadata_only {
+    // A candidate whose last public-metadata lookup was an availability failure (timeout,
+    // 429/503, request) may also be proven on its free phone's own Profile. The phone claim
+    // also excludes a concurrent metadata observer of this assignment; a busy phone keeps
+    // the network-only lookup, as before.
+    let phone_permit = match &retained {
+        Some(pending)
+            if phone_free
+                && matches!(
+                    pending.captured.metadata.state,
+                    riviu_core::publish_submission::MetadataAttemptState::Unavailable
+                ) =>
+        {
+            db.try_publish_work(&candidate.udid, "verify", &candidate.assignment_id)?
+        }
+        _ => None,
+    };
+    let phone_route = phone_permit.is_some();
+    let permit = if phone_route {
+        phone_permit
+    } else if metadata_only {
         db.try_publish_metadata_work(candidate, manual)?
     } else {
         db.try_publish_work(&candidate.udid, "verify", &candidate.assignment_id)?
@@ -588,15 +652,39 @@ async fn verify_pending_assignment_inner(
         progress::PublishProgress::CheckingExistingPostLink { attempt },
     );
     let capture = if metadata_only {
-        // This branch has no control/session argument and no fallback, even if a
-        // concurrent revision removes or changes the retained candidate.
-        async {
+        // The network lookup never falls back to a phone search for a different post, even
+        // if a concurrent revision removes or changes the retained candidate.
+        let lookup = async {
             db.publish_campaign_request(&assignment.campaign_id)?
                 .context("publish campaign request not found")?.network.ensure_implemented()?;
             anyhow::ensure!(!bundle.caption.trim().is_empty(), "caption missing for own-post proof");
             execution::capture_pending_metadata(db, &assignment, &bundle, Some(candidate))
                 .await?.context("retained metadata candidate missing; phone fallback forbidden")
-        }.await
+        }.await;
+        match (lookup, retained.as_ref()) {
+            // Still unavailable: only the same candidate's own-Profile proof may verify it.
+            (Err(error), Some(pending)) if phone_route && metadata_unavailable(&error) => {
+                match execution::capture_retained_candidate_on_phone(
+                    db,
+                    control,
+                    &assignment,
+                    &bundle,
+                    Some(candidate),
+                    &pending.captured,
+                )
+                .await
+                {
+                    Ok(captured) => Ok(captured),
+                    Err(phone) => Err(with_phone_route(
+                        error,
+                        &phone,
+                        &candidate.udid,
+                        &candidate.assignment_id,
+                    )),
+                }
+            }
+            (lookup, _) => lookup,
+        }
     } else {
         execution::capture_confirmed_assignment_link(db, control, &assignment, &bundle, Some(candidate)).await
     };
@@ -617,6 +705,11 @@ async fn verify_pending_assignment_inner(
                 evidence["verificationDiagnostic"]["stage"] == "expandedPhotoPublicProof";
             let video_public = evidence["verificationDiagnostic"]["stage"] == "videoPublicProof";
             let candidate_public = evidence["verificationDiagnostic"]["stage"] == "candidatePublicMetadata";
+            // Own-Profile proof of a post whose public metadata did not answer, in this pass
+            // (it copied a candidate first) or for an already retained candidate.
+            let without_metadata = !(expanded || video_public || candidate_public)
+                && (phone_route
+                    || evidence["verificationDiagnostic"]["capturedMetadataCandidate"].is_object());
             let post = if evidence.get("post").is_some() {
                 &mut evidence["post"]
             } else {
@@ -641,6 +734,12 @@ async fn verify_pending_assignment_inner(
                 &bundle.partners,
             )?;
             if changed {
+                if without_metadata {
+                    log::info!(
+                        "Bài {} trên {}: đã xác minh trên Hồ sơ của chính tài khoản (caption, thời gian, Sao chép liên kết) khi dữ liệu công khai TikTok chưa trả lời",
+                        candidate.assignment_id, candidate.udid
+                    );
+                }
                 progress::record_progress(
                     db,
                     &candidate.campaign_id,

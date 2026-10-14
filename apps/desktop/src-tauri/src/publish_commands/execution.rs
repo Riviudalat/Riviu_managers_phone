@@ -2353,13 +2353,11 @@ pub(super) async fn capture_pending_metadata(
     }
 }
 
-pub(super) async fn capture_confirmed_assignment_link(
+fn ensure_link_recovery(
     db: &Database,
-    control: &DeviceControlPlane,
     assignment: &riviu_core::PublishAssignmentRecord,
     bundle: &riviu_core::PublishBundle,
-    observer: Option<&riviu_core::db::PendingPublishVerification>,
-) -> anyhow::Result<ConfirmedAssignmentLink> {
+) -> anyhow::Result<()> {
     db.publish_campaign_request(&assignment.campaign_id)?
         .context("publish campaign request not found")?
         .network
@@ -2377,9 +2375,56 @@ pub(super) async fn capture_confirmed_assignment_link(
         !bundle.caption.trim().is_empty(),
         "caption missing for own-post proof"
     );
+    Ok(())
+}
+
+pub(super) async fn capture_confirmed_assignment_link(
+    db: &Database,
+    control: &DeviceControlPlane,
+    assignment: &riviu_core::PublishAssignmentRecord,
+    bundle: &riviu_core::PublishBundle,
+    observer: Option<&riviu_core::db::PendingPublishVerification>,
+) -> anyhow::Result<ConfirmedAssignmentLink> {
+    ensure_link_recovery(db, assignment, bundle)?;
     if let Some(captured) = capture_pending_metadata(db, assignment, bundle, observer).await? {
         return Ok(captured);
     }
+    capture_on_phone(db, control, assignment, bundle, observer, None).await
+}
+
+/// TikTok's public metadata did not answer for the retained candidate: prove it on the
+/// phone's own Profile under the same session, lease and restart guards as any phone
+/// observation. Only a link to the candidate's own post ID verifies.
+pub(super) async fn capture_retained_candidate_on_phone(
+    db: &Database,
+    control: &DeviceControlPlane,
+    assignment: &riviu_core::PublishAssignmentRecord,
+    bundle: &riviu_core::PublishBundle,
+    observer: Option<&riviu_core::db::PendingPublishVerification>,
+    retained: &riviu_core::publish_submission::CapturedMetadataCandidate,
+) -> anyhow::Result<ConfirmedAssignmentLink> {
+    ensure_link_recovery(db, assignment, bundle)?;
+    let captured =
+        capture_on_phone(db, control, assignment, bundle, observer, Some(retained)).await?;
+    if captured.url.rsplit('/').next() != Some(retained.post_id.as_str()) {
+        return Err(super::verification::VerificationObservation {
+            code: "multipleMatchingPosts",
+            reason: "Liên kết trên Hồ sơ thuộc bài khác bài ứng viên đã giữ; chưa xác minh".into(),
+            diagnostic: Some(captured.diagnostic),
+        }
+        .into());
+    }
+    Ok(captured)
+}
+
+async fn capture_on_phone(
+    db: &Database,
+    control: &DeviceControlPlane,
+    assignment: &riviu_core::PublishAssignmentRecord,
+    bundle: &riviu_core::PublishBundle,
+    observer: Option<&riviu_core::db::PendingPublishVerification>,
+    retained: Option<&riviu_core::publish_submission::CapturedMetadataCandidate>,
+) -> anyhow::Result<ConfirmedAssignmentLink> {
     // This remains a verification-only session. A submitted Android receipt
     // restarts its exact TikTok package here; no composer or Post is reachable.
     let context = control
@@ -2461,6 +2506,20 @@ pub(super) async fn capture_confirmed_assignment_link(
         };
         let guarded = super::verification_session::VerificationSession::new(session.as_ref(), &authorize);
         guarded.check()?;
+        // A share sheet an earlier pass left open (phone 44, 14/10/2026) would fail every
+        // screen read below as an unrecognized dialog. Only its measured Close is tapped; it
+        // touches no upload, so it may precede the restart guards.
+        match riviu_core::tiktok_share::close_leftover_share_sheet(&guarded, &package).await {
+            Ok(true) => log::info!(
+                "Đã đóng bảng Chia sẻ còn mở trên {} trước khi kiểm tra link (lượt {})",
+                assignment.udid, assignment.id
+            ),
+            Ok(false) => {}
+            Err(error) => log::warn!(
+                "Chưa đóng được bảng Chia sẻ còn mở trên {} (lượt {}): {error:#}",
+                assignment.udid, assignment.id
+            ),
+        }
         let processing_admission = if processing_restart && !shared_debt {
             match super::verification_restart::admit_processing_restart(
                 &guarded, &package, &bundle.caption).await {
@@ -2539,14 +2598,29 @@ pub(super) async fn capture_confirmed_assignment_link(
             }
         }
         let other_publication_urls = db.other_publish_post_urls(&assignment.id)?;
-        let capture = riviu_core::tiktok_share::capture_submission_link_excluding(
-            session,
-            &plan,
-            &bundle.caption,
-            &identity,
-            &other_publication_urls,
-        )
-        .await;
+        let capture = match retained {
+            Some(retained) => {
+                riviu_core::tiktok_share::capture_retained_candidate_link(
+                    session,
+                    &plan,
+                    &bundle.caption,
+                    &identity,
+                    &other_publication_urls,
+                    &retained.canonical_url,
+                )
+                .await
+            }
+            None => {
+                riviu_core::tiktok_share::capture_submission_link_excluding(
+                    session,
+                    &plan,
+                    &bundle.caption,
+                    &identity,
+                    &other_publication_urls,
+                )
+                .await
+            }
+        };
         guarded.check()?;
         // A verifier uses a manual session and may have no JPEG stream. Keep
         // one bounded diagnostic image before releasing this same owned session.

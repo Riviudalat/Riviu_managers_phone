@@ -541,7 +541,8 @@ fn classify(tree: &Tree, plan: &PublishVerificationPlan) -> Screen {
             AccountBlocker::SecurityPrompt => return Screen::SecurityPrompt,
             AccountBlocker::UnrecognizedDialog
                 if decline_facebook_permission(tree, plan).is_none()
-                    && tree.copy_control(package).ok().flatten().is_none() =>
+                    && tree.copy_control(package).ok().flatten().is_none()
+                    && tree.share_sheet_close(package).is_none() =>
             {
                 return Screen::UnrecognizedDialog
             }
@@ -607,7 +608,10 @@ fn classify(tree: &Tree, plan: &PublishVerificationPlan) -> Screen {
     {
         return Screen::Post;
     }
-    if tree.copy_control(package).is_err() || tree.copy_control(package).ok().flatten().is_some() {
+    if tree.copy_control(package).is_err()
+        || tree.copy_control(package).ok().flatten().is_some()
+        || tree.share_sheet_close(package).is_some()
+    {
         return Screen::Share;
     }
     if plan
@@ -837,9 +841,48 @@ struct Capture<'a> {
     caption_expanded: bool,
     public_link: Option<String>,
     trace_nonce: [u8; 16],
+    metadata: MetadataRoute,
+}
+
+/// What this pass knows about TikTok's public metadata for the submission.
+#[derive(Debug, Default)]
+struct MetadataRoute {
+    /// Post ID of the copied candidate an earlier observation retained because public
+    /// metadata did not answer. A proof of any other post never verifies over it.
+    retained_post_id: Option<String>,
+    /// Public metadata did not answer. Another public proof would only Copy and wait on it
+    /// again, so the own-Profile device proof is the remaining route.
+    skip_public_proof: bool,
+    /// This pass copied a candidate whose public metadata did not answer. When the own-Profile
+    /// proof settles nothing, that stays the outcome so the candidate keeps its route.
+    unavailable_here: bool,
+}
+
+fn post_id(canonical: &str) -> Option<&str> {
+    canonical.rsplit('/').next().filter(|id| !id.is_empty())
 }
 
 impl Capture<'_> {
+    fn defer_public_metadata(&mut self) {
+        self.metadata.skip_public_proof = true;
+        self.metadata.unavailable_here = true;
+    }
+
+    /// A proof of a different post than a copied candidate still awaiting public metadata
+    /// is a second match, never a replacement for that candidate.
+    fn conflicts_with_candidate(&self, canonical: &str) -> bool {
+        self.metadata
+            .retained_post_id
+            .iter()
+            .chain(
+                self.diagnostic
+                    .captured_metadata_candidate
+                    .iter()
+                    .map(|candidate| &candidate.post_id),
+            )
+            .any(|candidate| Some(candidate.as_str()) != post_id(canonical))
+    }
+
     fn remember_proven_candidate(
         &mut self,
         candidate: &mut Option<(String, VerificationDiagnostic)>,
@@ -870,6 +913,9 @@ impl Capture<'_> {
         evidence
             .proven_candidate_url
             .get_or_insert_with(|| proof.0.clone());
+        if self.conflicts_with_candidate(&proof.0) {
+            return Err(VerificationReason::MultipleMatchingPosts);
+        }
         remember_candidate(candidate, proof)
     }
 
@@ -1234,11 +1280,16 @@ impl Capture<'_> {
                     || last_action_at.is_some_and(|at| at.elapsed() >= Duration::from_secs(5)))
             {
                 // Back only from a proved post detail/share/comments surface, never a
-                // composer, arbitrary activity, or unlabelled screen.
-                self.session
-                    .back()
-                    .await
-                    .map_err(|_| VerificationReason::ReadFailed)?;
+                // composer, arbitrary activity, or unlabelled screen. A measured share
+                // sheet, left open by an earlier pass, answers only its own Close.
+                let close = (screen == Screen::Share)
+                    .then(|| tree.share_sheet_close(self.plan.labels.package()))
+                    .flatten();
+                match close {
+                    Some(close) => self.session.tap(close.centre()).await,
+                    None => self.session.back().await,
+                }
+                .map_err(|_| VerificationReason::ReadFailed)?;
                 last_screen = Some(screen);
                 last_action_at = Some(Instant::now());
                 actions += 1;
@@ -1383,14 +1434,17 @@ impl Capture<'_> {
             // comments drawer. Only the full public proof may populate this link.
             // A measured truncated Unicode placeholder looks like a mismatch
             // here; the candidate filter and exact public metadata decide it.
-            if matches!(
-                proof,
-                Err(VerificationReason::CaptionTruncated
-                    | VerificationReason::CaptionMismatch
-                    | VerificationReason::TimestampMissing)
-            ) && tree.nodes.iter().any(|node| {
-                node.visible(self.plan.labels.package()) && node.attr("content-desc") == "Video"
-            }) {
+            if !self.metadata.skip_public_proof
+                && matches!(
+                    proof,
+                    Err(VerificationReason::CaptionTruncated
+                        | VerificationReason::CaptionMismatch
+                        | VerificationReason::TimestampMissing)
+                )
+                && tree.nodes.iter().any(|node| {
+                    node.visible(self.plan.labels.package()) && node.attr("content-desc") == "Video"
+                })
+            {
                 match self.visible_video().await {
                     Ok(Some(link)) => {
                         self.public_link = Some(link);
@@ -1401,6 +1455,9 @@ impl Capture<'_> {
                         VerificationReason::ClipboardUnchanged
                         | VerificationReason::ClipboardNotPostLink,
                     ) => {}
+                    // This viewer was opened from the own Profile: its caption and time
+                    // can still prove it on the device below.
+                    Err(VerificationReason::MetadataUnavailable) => self.defer_public_metadata(),
                     Err(reason) => return Err(reason),
                 }
             }
@@ -1459,10 +1516,17 @@ impl Capture<'_> {
     async fn close_share(&mut self) -> Result<(), VerificationReason> {
         let tree = self.read().await?;
         if classify(&tree, self.plan) == Screen::Share {
-            self.session
-                .back()
-                .await
-                .map_err(|_| VerificationReason::ReadFailed)?;
+            // The "Send to" variant has no Copy row; its measured Close is the only tap.
+            let close = tree
+                .copy_control(self.plan.labels.package())
+                .is_ok_and(|row| row.is_none())
+                .then(|| tree.share_sheet_close(self.plan.labels.package()))
+                .flatten();
+            match close {
+                Some(close) => self.session.tap(close.centre()).await,
+                None => self.session.back().await,
+            }
+            .map_err(|_| VerificationReason::ReadFailed)?;
             tokio::time::sleep(POLL).await;
             if classify(&self.read().await?, self.plan) == Screen::Share {
                 return Err(VerificationReason::UnknownScreen);
@@ -1666,54 +1730,64 @@ impl Capture<'_> {
         // 45.7.3/en (box 31-50, 10/10): the open viewer can say "Post is being
         // processed" while the Profile grid tile already carries the caption and
         // time. Keep searching the grid; report Processing only if that fails too.
+        // A viewer whose Share sheet had no Copy link (the "Send to" variant, phone
+        // 44, 14/10/2026) is kept the same way.
         let mut processing = None;
-        match self.visible_video().await {
-            Ok(Some(link)) => return Ok(link),
-            Ok(None)
-            | Err(
-                VerificationReason::OtherPublication
-                | VerificationReason::CaptionMismatch
-                | VerificationReason::SubmissionTooOld,
-            ) => {}
-            Err(
-                reason @ (VerificationReason::Processing
-                | VerificationReason::ClipboardUnchanged
-                | VerificationReason::ClipboardNotPostLink),
-            ) => {
-                processing = Some(reason);
-            }
-            Err(reason) => return Err(reason),
-        }
-        match super::photo_proof::capture_expanded_photo_link_counted(
-            self.session,
-            self.plan.labels.package(),
-            self.caption,
-            self.identity,
-            &mut self.diagnostic.copy_attempts,
-            self.other_publication_urls,
-        )
-        .await
-        {
-            Ok(link) => {
-                self.diagnostic.stage = "expandedPhotoPublicProof";
-                return Ok(link);
-            }
-            Err(error) => {
-                if let Some(reason) = self.matched_photo_failure(&error) {
-                    if matches!(
-                        reason,
-                        VerificationReason::Processing
-                            | VerificationReason::ClipboardUnchanged
-                            | VerificationReason::ClipboardNotPostLink
-                    ) {
-                        processing = Some(reason);
-                    } else if !matches!(
-                        reason,
-                        VerificationReason::OtherPublication | VerificationReason::SubmissionTooOld
-                    ) {
-                        return Err(reason);
-                    }
+        // (1) and (2) prove a post only through TikTok's public metadata, since a viewer
+        // opened from the feed cannot prove ownership. When that metadata does not answer,
+        // the own-Profile grid (3) proves the post on the device instead of waiting.
+        if !self.metadata.skip_public_proof {
+            match self.visible_video().await {
+                Ok(Some(link)) => return Ok(link),
+                Ok(None)
+                | Err(
+                    VerificationReason::OtherPublication
+                    | VerificationReason::CaptionMismatch
+                    | VerificationReason::SubmissionTooOld,
+                ) => {}
+                Err(
+                    reason @ (VerificationReason::Processing
+                    | VerificationReason::ClipboardUnchanged
+                    | VerificationReason::ClipboardNotPostLink
+                    | VerificationReason::CopyUnavailable
+                    | VerificationReason::ShareUnavailable),
+                ) => {
+                    processing = Some(reason);
                 }
+                Err(VerificationReason::MetadataUnavailable) => self.defer_public_metadata(),
+                Err(reason) => return Err(reason),
+            }
+        }
+        if !self.metadata.skip_public_proof {
+            match super::photo_proof::capture_expanded_photo_link_counted(
+                self.session,
+                self.plan.labels.package(),
+                self.caption,
+                self.identity,
+                &mut self.diagnostic.copy_attempts,
+                self.other_publication_urls,
+            )
+            .await
+            {
+                Ok(link) => {
+                    self.diagnostic.stage = "expandedPhotoPublicProof";
+                    return Ok(link);
+                }
+                Err(error) => match self.matched_photo_failure(&error) {
+                    Some(
+                        reason @ (VerificationReason::Processing
+                        | VerificationReason::ClipboardUnchanged
+                        | VerificationReason::ClipboardNotPostLink
+                        | VerificationReason::CopyUnavailable
+                        | VerificationReason::ShareUnavailable),
+                    ) => processing = Some(reason),
+                    Some(VerificationReason::MetadataUnavailable) => self.defer_public_metadata(),
+                    Some(
+                        VerificationReason::OtherPublication | VerificationReason::SubmissionTooOld,
+                    )
+                    | None => {}
+                    Some(reason) => return Err(reason),
+                },
             }
         }
         self.diagnostic.stage = "profile";
@@ -1809,7 +1883,12 @@ impl Capture<'_> {
                 // the visible video only through exact public metadata proof,
                 // before any caption expansion hides its Share control.
                 'candidate_proof: {
-                    match self.visible_video().await {
+                    let public = if self.metadata.skip_public_proof {
+                        Ok(None)
+                    } else {
+                        self.visible_video().await
+                    };
+                    match public {
                         Ok(Some(link)) => {
                             self.mark_candidate(VerificationReason::Verified);
                             self.remember_proven_candidate(
@@ -1838,6 +1917,11 @@ impl Capture<'_> {
                             VerificationReason::ClipboardUnchanged
                             | VerificationReason::ClipboardNotPostLink,
                         ) => {}
+                        // A tile opened from the own Profile proves itself on the device
+                        // below: account, full caption, submission time, then Copy link.
+                        Err(VerificationReason::MetadataUnavailable) => {
+                            self.defer_public_metadata()
+                        }
                         Err(reason) => {
                             self.mark_candidate(reason);
                             return Err(reason);
@@ -1925,12 +2009,14 @@ impl Capture<'_> {
                                 return Err(reason);
                             }
                             let mut reason = reason;
-                            if matches!(
-                                reason,
-                                VerificationReason::CaptionMissing
-                                    | VerificationReason::TimestampMissing
-                                    | VerificationReason::CaptionTruncated
-                            ) {
+                            if !self.metadata.skip_public_proof
+                                && matches!(
+                                    reason,
+                                    VerificationReason::CaptionMissing
+                                        | VerificationReason::TimestampMissing
+                                        | VerificationReason::CaptionTruncated
+                                )
+                            {
                                 match super::photo_proof::capture_expanded_photo_link_counted(
                                     self.session,
                                     self.plan.labels.package(),
@@ -2054,6 +2140,51 @@ pub async fn capture_submission_link_excluding(
     identity: &SubmissionIdentity,
     other_publication_urls: &[String],
 ) -> VerificationCapture {
+    capture_with(
+        session,
+        plan,
+        caption,
+        identity,
+        other_publication_urls,
+        None,
+    )
+    .await
+}
+
+/// A candidate retained while TikTok's public metadata did not answer, proven on the own
+/// Profile instead: account, full caption, submission time, Copy link and canonical
+/// redirect. Only a link to the candidate's own post ID verifies; public metadata is not
+/// asked again in this pass, and nothing here reaches the composer or Post.
+pub async fn capture_retained_candidate_link(
+    session: &dyn UiSession,
+    plan: &PublishVerificationPlan,
+    caption: &str,
+    identity: &SubmissionIdentity,
+    other_publication_urls: &[String],
+    candidate_canonical_url: &str,
+) -> VerificationCapture {
+    let candidate = post_id(candidate_canonical_url)
+        .unwrap_or_default()
+        .to_owned();
+    capture_with(
+        session,
+        plan,
+        caption,
+        identity,
+        other_publication_urls,
+        Some(candidate),
+    )
+    .await
+}
+
+async fn capture_with(
+    session: &dyn UiSession,
+    plan: &PublishVerificationPlan,
+    caption: &str,
+    identity: &SubmissionIdentity,
+    other_publication_urls: &[String],
+    retained_post_id: Option<String>,
+) -> VerificationCapture {
     let mut capture = Capture {
         session,
         plan,
@@ -2064,6 +2195,11 @@ pub async fn capture_submission_link_excluding(
         caption_expanded: false,
         public_link: None,
         trace_nonce: *uuid::Uuid::new_v4().as_bytes(),
+        metadata: MetadataRoute {
+            skip_public_proof: retained_post_id.is_some(),
+            retained_post_id,
+            unavailable_here: false,
+        },
         diagnostic: VerificationDiagnostic {
             captured_metadata_candidate: None,
             publication_evidence: None,
@@ -2114,6 +2250,18 @@ pub async fn capture_submission_link_excluding(
     ) {
         capture.leave_own_viewer().await;
     }
+    // The own-Profile proof did not settle a candidate whose public metadata did not answer:
+    // keep that outcome so the retained candidate keeps its route. A second matching post
+    // still refuses.
+    let result = match result {
+        Err(reason)
+            if capture.metadata.unavailable_here
+                && reason != VerificationReason::MultipleMatchingPosts =>
+        {
+            Err(VerificationReason::MetadataUnavailable)
+        }
+        result => result,
+    };
     let outcome = match result {
         Ok(link) => {
             capture.diagnostic.reason_code = VerificationReason::Verified;

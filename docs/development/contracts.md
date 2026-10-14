@@ -945,6 +945,27 @@ Candidate metadata đúng schema/assignment/intent/bundle/account/caption/time �
 kiểm qua mạng với `metadataObservations`, tối đa `metadataLimit=12` mỗi đợt xác minh.
 Các lượt này giữ nguyên bộ đếm tìm bài; lỗi đọc thông thường giữ bộ đếm metadata.
 Hết giới hạn metadata lưu cause `metadataRetryBudgetExhausted` và giữ candidate.
+Viewer mở từ feed (bước video và ảnh mở rộng) không chứng minh được bài là của mình nên chỉ
+xác minh qua metadata công khai. Khi metadata ấy không trả lời (hết giờ, 429/503, lỗi
+request) hoặc bảng Chia sẻ của viewer không có Copy link, lượt quan sát không dừng mà sang
+lưới Hồ sơ của chính tài khoản: tài khoản trên header, caption đầy đủ, nhãn thời gian sau
+`submittedAt`, Share → Copy link có sentinel và redirect chuẩn
+(`ownProfileCaptionAndCanonicalLink`). Từ lần metadata không trả lời đầu tiên, lượt đó không
+Copy qua đường công khai nữa. Proof hồ sơ ra content ID khác candidate đang giữ là hai bài
+cùng khớp (`multipleMatchingPosts`), không xác minh. Hồ sơ không chứng minh được thì kết quả
+vẫn là `metadataUnavailable` và candidate đi tiếp đường metadata. Với candidate đã giữ mà lần
+tra gần nhất là lỗi khả dụng, verifier vẫn tra mạng trước; còn lỗi khả dụng và máy rảnh thì
+lấy claim `verify` của máy (loại trừ observer metadata của cùng bài), mở phiên bằng
+`open_manual_session` với cùng guard restart (không restart khi upload chưa chứng minh xong)
+và chỉ nhận link đúng content ID của candidate. Không chứng minh được thì ghi lượt metadata
+như cũ, kèm `phoneRoute` trong chẩn đoán; máy bận/offline chỉ tra mạng; candidate bị metadata
+từ chối không đi đường máy.
+Bảng Chia sẻ Global45.7.3/en (đo 14/10/2026, máy 36 và 44) có `Bottom sheet` với header
+`tv_title` "Send to" và `l86` "Close"; biến thể "Send to" không có dòng Copy link. Bảng do
+lượt này mở mà không có Copy link được đóng bằng Close rồi đọc lại; bảng còn mở từ lượt
+trước là màn đã biết, không phải hộp thoại lạ, và được đóng bằng Close ngay khi phiên xác
+minh mở, trước guard restart và phép đọc tài khoản (Close không chạm upload). Không bấm ô
+liên hệ hay ứng dụng nào trong bảng.
 Sau 8 lượt liên tiếp không có bằng chứng mới của đúng bài, lưu needsReview với cause
 `verificationNoProgress`, nextCheckAt=null và giữ intent/media/khoản thiếu Sheet.
 Lỗi đọc/transport và tìm kiếm đều tiêu ngân sách hữu hạn này; offline/busy
