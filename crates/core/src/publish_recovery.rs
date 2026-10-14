@@ -221,6 +221,23 @@ pub fn media_transfer_failure(error: &anyhow::Error) -> RecoveryFailure {
     )
 }
 
+/// adb could not reach the local server while a publish session was opening, and failed to
+/// start a second one. Measured r117, 14/10/2026, phone 49 (`ce071827715f321b05`): `wm size`
+/// in startStreamAfterSession printed this while the server running since 05:14 kept serving
+/// the other 19 phones, and the row ended `post_refused_before_dispatch` on its first try.
+/// Opening never reaches TikTok's composer, so the row spends its bounded retry budget; the
+/// same text from a tap or a Post stays terminal (`classify`).
+pub fn session_open_adb_daemon_failure(error: &anyhow::Error) -> Option<RecoveryFailure> {
+    let message = format!("{error:#}");
+    let lowercase = message.to_lowercase();
+    (lowercase.contains("* daemon not running; starting now at tcp:5037")
+        && lowercase.contains("could not read ok from adb server")
+        && lowercase.contains("* failed to start daemon")
+        && lowercase.contains("cannot connect to daemon")
+        && !specific_refusal(&lowercase))
+    .then(|| RecoveryFailure::new("adb_daemon_start_failed", FailureKind::Retryable, message))
+}
+
 /// A read phase exhausted its existing budget; this never describes a gesture.
 pub(crate) fn observation_deadline() -> anyhow::Error {
     crate::driver::UiError::new(
@@ -581,6 +598,15 @@ mod tests {
         let start_failure = RecoveryFailure::legacy(daemon_start);
         assert_eq!(start_failure.kind, FailureKind::Retryable);
         assert_eq!(start_failure.code, "adb_daemon_start_failed");
+        // r117 phone 49: the same daemon failure while the publish session opened.
+        let session_open = anyhow::anyhow!("cleanAppSession failed for device ce071827715f321b05: startStreamAfterSession failed for device ce071827715f321b05: adb -s ce071827715f321b05 shell wm size failed: * daemon not running; starting now at tcp:5037\r\ncould not read ok from ADB Server\r\n* failed to start daemon\r\nadb.exe: cannot connect to daemon");
+        let open_failure = session_open_adb_daemon_failure(&session_open).unwrap();
+        assert_eq!(open_failure.kind, FailureKind::Retryable);
+        assert_eq!(open_failure.code, "adb_daemon_start_failed");
+        assert!(session_open_adb_daemon_failure(&anyhow::anyhow!(
+            "device unauthorized: {session_open}"
+        ))
+        .is_none());
         for refusal in [
             format!("device unauthorized: {daemon_connect}"),
             daemon_connect.replace("127.0.0.1:5037", "192.0.2.1:5037"),

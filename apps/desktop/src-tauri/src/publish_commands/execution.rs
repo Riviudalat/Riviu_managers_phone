@@ -3064,10 +3064,12 @@ async fn post_one_assignment_owned(
             // (`device_screen_locked`), not the generic `post_refused_before_dispatch`.
             // Nothing reached the composer, so retrying the same phone after unlock is safe.
             // A stale approval is a typed terminal refusal and must reach settlement as one.
+            // adb failing to reach its server while opening is retryable for the same reason.
             attempt.recovery_failure = error
                 .downcast_ref::<riviu_core::publish_recovery::RecoveryFailure>()
                 .cloned()
-                .or_else(|| screen_locked_failure(&error));
+                .or_else(|| screen_locked_failure(&error))
+                .or_else(|| riviu_core::publish_recovery::session_open_adb_daemon_failure(&error));
             return attempt;
         }
     };
