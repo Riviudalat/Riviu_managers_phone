@@ -8,6 +8,8 @@
 //! whole popup. APK-only entries stay [`PopupMode::Shadow`]: recognised, logged and captured
 //! for review, never pressed. Popups that do not cover the screen (the feed reward pendant,
 //! the profile "expired Stories" banner) are deliberately absent: nothing needs dismissing.
+//! So is the Profile draft banner "Continue editing this post?": it is in no tree, so the
+//! account proof confirms it on a screenshot (`dialogs::draft_banner_shape`).
 use super::*;
 
 const fn part(
@@ -327,24 +329,5 @@ pub(super) const CATALOG: &[CatalogPopup] = &[
         acted: "",
         spent: "TikTok hỏi có hủy bài đang tải lên không — Riviu không hủy và không đăng lại; cần người vận hành",
         shadow: "[chạy bóng] nhận ra hỏi \"Cancel upload\" (chỉ có trong APK) — loại chỉ người vận hành xử lý; Riviu không bấm gì, cần người vận hành",
-    },
-    // Photo only (target/apply-apk-20261009/p37-continue-editing-banner.png, 13/10/2026,
-    // ce051715e15b2c2e02, SM-G955F Android 9, 45.7.3/en). An inline banner across the top
-    // of the Profile page after a compose session was interrupted. "Edit" reopens the draft
-    // in the composer; "Save draft" stores it locally without reopening. Seen blocking the
-    // pre-Post account-proof step on @lch.trnh.slay (machine 37). Container id unknown
-    // without a hierarchy dump; matched here by the banner title text alone. Promote to Act
-    // once a real dump is committed to fixtures (add container id, verify button tree, add
-    // button("Save draft") as dismiss and anchors).
-    CatalogPopup {
-        key: "continue_editing_banner",
-        mode: PopupMode::Shadow,
-        class: PopupClass::Dismissable,
-        container: text("Continue editing this post?"),
-        anchors: &[],
-        dismiss: None,
-        acted: "đã bấm \"Save draft\" trên banner nháp đỉnh trang Profile; chờ đọc lại màn hình",
-        spent: "banner \"Continue editing this post?\" vẫn còn sau khi bấm — không bấm lại; cần người vận hành",
-        shadow: "[chạy bóng] nhận ra banner \"Continue editing this post?\" đỉnh trang Profile (chỉ có ảnh 45.7.3/en, chưa dump XML) — khi được bật sẽ bấm \"Save draft\"; lần này Riviu không bấm, cần người vận hành",
     },
 ];

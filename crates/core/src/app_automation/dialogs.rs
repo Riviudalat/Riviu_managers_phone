@@ -1044,6 +1044,117 @@ pub fn account_blocker(tree: &Tree, labels: TikTokControls) -> Option<AccountBlo
         .then_some(AccountBlocker::UnrecognizedDialog)
 }
 
+/// `bk2` measured [0,0][1080,625] on phone 37 (SM-G955F, 1080x2220) while it held the draft
+/// banner; a frame this tall at the top of the Profile covers the whole header.
+const DRAFT_BANNER_MIN_HEIGHT: f64 = 500.0;
+
+/// Phone 37 (ce051715e15b2c2e02, SM-G955F Android 9, Global 45.7.3/en, 14/10/2026; fixture
+/// tiktok-publish/musically-45.7.3-en/real-20261014-draft-banner-session.xml): after a compose
+/// session was killed mid-edit, TikTok keeps "Continue editing this post?" [Save draft] [Edit]
+/// across the top of the own Profile. The banner is in no tree: its `bk2` frame has no
+/// children. Through Riviu's long-lived UiAutomator2 session every header node lying fully
+/// inside that frame goes with it (avatar, `rz5` name, `s0v` handle, Edit, `ov8` toolbar), so
+/// the account proof has no handle to read; a plain `uiautomator dump` of the same screen keeps
+/// them. `bk2` stays, empty, once the banner is gone, so only the missing header tells the two
+/// apart.
+///
+/// The shape is a reason to look, never to tap: [`draft_banner_save_point`] must confirm the
+/// banner on a screenshot first. Answers the `bk2` bounds.
+pub(crate) fn draft_banner_shape(tree: &Tree, labels: TikTokControls) -> Option<ElementBox> {
+    if !first_run_profile(labels) {
+        return None;
+    }
+    let package = labels.package();
+    let profile_tab = measured_node(
+        tree,
+        package,
+        package,
+        "nrb",
+        Some("android.widget.FrameLayout"),
+        None,
+    )?;
+    let private_tabs = tree
+        .matching(
+            package,
+            ElementQuery::Description {
+                value: "Private videos",
+                exact: true,
+            },
+        )
+        .into_iter()
+        .filter(|index| tree.nodes[*index].attr("class") == "android.widget.RelativeLayout")
+        .count();
+    let frame = measured_node(
+        tree,
+        package,
+        package,
+        "bk2",
+        Some("android.widget.FrameLayout"),
+        None,
+    )?;
+    let bounds = tree.nodes[frame].rect()?;
+    let header_hidden = ["s0v", "rz5", "ov8"].into_iter().all(|id| {
+        let full = format!("{package}:id/{id}");
+        !tree
+            .nodes
+            .iter()
+            .any(|node| node.attr("resource-id") == full)
+    });
+    (tree.nodes[profile_tab].attr("content-desc") == "Profile"
+        && tree.nodes[profile_tab].attr("selected") == "true"
+        && private_tabs == 1
+        && bounds.y == 0.0
+        && bounds.height >= DRAFT_BANNER_MIN_HEIGHT
+        && !tree.nodes.iter().any(|node| node.parent == Some(frame))
+        && header_hidden)
+        .then_some(bounds)
+}
+
+/// The "Save draft" centre in one OCR answer for the frame of a [`draft_banner_shape`]: one
+/// banner title and exactly one "Save draft" below it, both inside `banner`, "Save draft" in
+/// its left half. Phone 37's screenshot has them at about (212,128) and (322,228); its Edit,
+/// never pressed, sits in the right half. Anything else answers `None` and taps nothing.
+pub(crate) fn draft_banner_save_point(
+    lines: &[crate::ui_automation::OcrLine],
+    banner: &ElementBox,
+) -> Option<crate::TapPoint> {
+    let words = |text: &str| {
+        text.split(|ch: char| !ch.is_alphanumeric())
+            .filter(|word| !word.is_empty())
+            .map(str::to_lowercase)
+            .collect::<Vec<_>>()
+            .join(" ")
+    };
+    let inside = |rect: &crate::ui_automation::OcrRect, right: f64| {
+        let (x, y) = (f64::from(rect.x), f64::from(rect.y));
+        let (width, height) = (f64::from(rect.width), f64::from(rect.height));
+        width > 0.0
+            && height > 0.0
+            && x >= banner.x
+            && y >= banner.y
+            && x + width <= right
+            && y + height <= banner.y + banner.height
+    };
+    let titles: Vec<_> = lines
+        .iter()
+        .filter(|line| words(&line.text) == "continue editing this post")
+        .collect();
+    let saves: Vec<_> = lines
+        .iter()
+        .filter(|line| words(&line.text) == "save draft")
+        .collect();
+    let ([title], [save]) = (titles.as_slice(), saves.as_slice()) else {
+        return None;
+    };
+    (inside(&title.bounds, banner.x + banner.width)
+        && inside(&save.bounds, banner.x + banner.width / 2.0)
+        && save.bounds.y > title.bounds.y)
+        .then(|| crate::TapPoint {
+            x: f64::from(save.bounds.x) + f64::from(save.bounds.width) / 2.0,
+            y: f64::from(save.bounds.y) + f64::from(save.bounds.height) / 2.0,
+        })
+}
+
 const LOGIN_REQUIRED_SAYS: &str = "TikTok đang ở màn hình đăng nhập — Riviu không tự đăng nhập và không bấm Back; cần người vận hành đăng nhập lại trên máy";
 const SECURITY_PROMPT_SAYS: &str = "TikTok đang hỏi kiểm tra bảo mật — Riviu không bấm Tiếp tục và không bấm Back; cần người vận hành xử lý trên máy";
 const UNKNOWN_MODAL_SAYS: &str = "hộp thoại lạ đang che màn hình — Riviu không bấm gì, kể cả Back; cần người vận hành xem và đóng tay. Đã lưu XML (đã che chữ nhập) và ảnh màn hình vào thư mục artifacts/popups để rà soát";

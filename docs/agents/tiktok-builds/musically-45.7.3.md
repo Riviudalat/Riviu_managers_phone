@@ -207,16 +207,37 @@ sheet che feed nên bước quan sát sau Post không thấy feed và bài thàn
 Fixture thật: `crates/core/fixtures/tiktok-publish/musically-45.7.3-en/real-20261012-email-updates-dialog.xml`.
 
 Banner "Continue editing this post?" hiện đè lên đỉnh trang Profile sau khi phiên soạn bài
-bị gián đoạn (máy `ce051715e15b2c2e02` / @lch.trnh.slay ngày 2026-10-13, en). Banner gồm
-thumbnail nháp, nút **Save draft** và nút **Edit**. **Save draft** giữ nháp cục bộ mà không
-mở lại trình soạn; **Edit** mở trình soạn với nội dung nháp cũ (sai nội dung nếu đang đăng
-bài mới). Banner này làm đọc cây giao diện trang Profile xuất hiện hai nút android.widget.Button
-có text "Edit" (một của Profile, một của banner), khiến bước chứng minh tài khoản trước Đăng
-thất bại với `account_unreadable` trên tài khoản không có bio và không có video riêng tư.
-Catalog popup `continue_editing_banner` (Shadow) nhận ra banner này và ghi log; code chứng
-minh tài khoản xử lý thêm trường hợp `edits == 2` từ 45.7.3 build này. Khi có dump XML, bổ
-sung id container và nút dismiss vào catalog để chuyển sang Act. Thao tác operator: vào trang
-Profile, bấm **Save draft**, rồi Thử lại trong controller.
+bị ngắt giữa chừng (TikTok bị tắt khi đang soạn) và còn đó qua nhiều ngày cho tới khi có
+người bấm (máy `ce051715e15b2c2e02` / @lch.trnh.slay, en, 13–14/10/2026). Banner gồm
+thumbnail nháp, nút **Save draft** và nút **Edit**. **Save draft** chỉ cất bài dở vào Drafts
+(lưới hồ sơ có thêm ô "Drafts: 1"), không đăng gì. **Edit** mở lại trình soạn với nháp cũ, nên
+không bao giờ bấm. Banner không có trong cây giao diện nào: nó nằm trong `bk2`, một
+FrameLayout `[0,0][1080,625]` không có node con, và không thêm nút "Edit" nào vào cây. Khi đọc
+qua phiên UiAutomator2 dài hạn của Riviu, mọi node đầu trang nằm trọn trong vùng đó cũng biến
+mất: ảnh đại diện `bf1`, tên `rz5`, handle `s0v`, nút Edit của hồ sơ và thanh `ov8` (Profile
+menu, Share, Profile views). Các node kéo xuống dưới y=625 vẫn còn: hàng số liệu
+`rzt`/`rzs`, bio, dải tab và lưới. Vì không đọc được handle, bước chứng minh tài khoản trước
+Đăng từng dừng với `account_unreadable`. `uiautomator dump` thường (không có phiên Riviu) vẫn
+thấy đầu trang. `bk2` vẫn còn, rỗng, sau khi banner đã tắt. Fixture thật:
+`crates/core/fixtures/tiktok-publish/musically-45.7.3-en/real-20261014-draft-banner-session.xml`
+(có banner, đọc qua phiên Riviu) và `real-20261014-draft-banner-saved.xml` (sau Save draft).
+
+Bước chứng minh tài khoản ([`tiktok_account.rs`](../../../crates/core/src/tiktok_account.rs),
+nhận diện ở `draft_banner_shape` trong `dialogs.rs`) tự xử lý banner này:
+
+1. **Cây chỉ là lý do để nhìn.** Tab `nrb` "Profile" đang được chọn, có đúng một tab
+   "Private videos", `bk2` bắt đầu ở y=0, cao từ 500 px, không có con, và không có
+   `s0v`/`rz5`/`ov8`. Hình dạng này không bao giờ đủ để bấm.
+2. **Xác nhận bằng ảnh.** Riviu chụp một ảnh 1080x2220, chạy OCR trong vùng `bk2`, và cần
+   thấy "Continue editing this post?" cùng đúng một "Save draft" nằm ở nửa trái `bk2`
+   (Edit nằm ở nửa phải).
+3. **Bấm một lần.** Riviu bấm tâm khung chữ "Save draft" qua shell, như bảng nhạc. Trên
+   máy 37 điểm này là (409, 244). Sau đó Riviu chứng minh lại tài khoản trên hai lần đọc
+   mới; mọi quan sát trước lúc bấm đều bỏ.
+4. **Không bấm lần thứ hai.** Nếu banner xuất hiện lại trong cùng lượt, bước này dừng với
+   `account_draft_banner_persisted`. Nếu cây có hình dạng banner mà ảnh hoặc OCR không xác
+   nhận được, Riviu không bấm gì và dừng với `account_draft_banner_unconfirmed`. Cả hai lỗi
+   đều xảy ra trước Đăng và đều được thử lại tự động.
 
 Hộp "Add to Home screen?" thấy trên máy 40/43/48 ngày 2026-10-10 do chính TikTok gây ra:
 `com.ss.android.ugc.aweme.shortcut.TiktokShortcutManager` (dịch vụ `IShortcutService`) gọi

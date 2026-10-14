@@ -1,0 +1,30 @@
+{
+  "package": "com.zhiliaoapp.musically",
+  "version": "45.7.3",
+  "locale": "en",
+  "device": "Riviu #37, SM-G955F ce051715e15b2c2e02, Android 9, 1080x2220",
+  "capturedOn": "2026-10-14",
+  "publicPost": false,
+  "effects": "one tap on Save draft at (409, 244) between the two captures; the interrupted composition went to Drafts, nothing was posted",
+  "files": [
+    {
+      "file": "real-20261014-draft-banner-session.xml",
+      "sha256": "27d94aa9ea4a62b84409168a23c5e6ebf0601c51177ed92a6b061328b8a12bdd",
+      "source": "target/apply-apk-20261009/p37-banner-riviu-session.xml",
+      "sourceSha256": "5e99488e8a8f9ceee8b76a9fe8d82dc5d45fcdde3ec64d136e469963da8c862b",
+      "tool": "Riviu inspector_observe through the long-lived UiAutomator2 session, 08:48",
+      "screen": "own Profile with the \"Continue editing this post?\" banner on screen: bk2 [0,0][1080,625] has no children and s0v/rz5/ov8/bf1 are absent",
+      "sanitized": [],
+      "normalized": "line endings \\r\\r\\n -> \\n"
+    },
+    {
+      "file": "real-20261014-draft-banner-saved.xml",
+      "sha256": "993d09f5b167fce1365573bb05803f95fed6984482043f54a864c773a437bf7b",
+      "source": "target/apply-apk-20261009/p37-after-savedraft.xml",
+      "sourceSha256": "993d09f5b167fce1365573bb05803f95fed6984482043f54a864c773a437bf7b",
+      "tool": "adb shell uiautomator dump (no Riviu session connected)",
+      "screen": "the same Profile after Save draft: banner gone, header back (s0v @lch.trnh.slay), bk2 still present and empty, grid shows Drafts: 1",
+      "sanitized": []
+    }
+  ]
+}

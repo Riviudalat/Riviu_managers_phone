@@ -1,4 +1,5 @@
-//! Read-only account proof for a measured own-profile screen. Never changes the login.
+//! Account proof for a measured own-profile screen. Never changes the login; it taps only
+//! measured popup dismissals and the Profile draft banner's "Save draft".
 use crate::tiktok_labels::TikTokControls;
 use crate::{ElementBox, ElementQuery, UiSession};
 
@@ -15,6 +16,10 @@ pub enum AccountState {
     Unreadable,
     Mismatch,
     TransportReadFailed,
+    /// The draft banner hid the Profile header again after its one Save-draft tap.
+    DraftBannerPersisted,
+    /// The tree had the draft-banner shape, but no screenshot confirmed it: nothing tapped.
+    DraftBannerUnconfirmed,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -61,13 +66,21 @@ impl AccountDiagnostic {
             AccountState::Mismatch => "account_mismatch",
             AccountState::TransportReadFailed => "account_read_failed",
             AccountState::UnrecognizedDialog | AccountState::Unreadable => "account_unreadable",
+            AccountState::DraftBannerPersisted => "account_draft_banner_persisted",
+            AccountState::DraftBannerUnconfirmed => "account_draft_banner_unconfirmed",
         };
-        let kind = self
-            .transport_failure
-            .as_ref()
-            .map(|failure| failure.kind)
-            .filter(|_| self.state == AccountState::TransportReadFailed)
-            .unwrap_or(FailureKind::Terminal);
+        let kind = match self.state {
+            // Nothing was posted and the next attempt reads the Profile from nothing.
+            AccountState::DraftBannerPersisted | AccountState::DraftBannerUnconfirmed => {
+                FailureKind::Retryable
+            }
+            _ => self
+                .transport_failure
+                .as_ref()
+                .map(|failure| failure.kind)
+                .filter(|_| self.state == AccountState::TransportReadFailed)
+                .unwrap_or(FailureKind::Terminal),
+        };
         Some(RecoveryFailure::new(code, kind, self.message.clone()))
     }
     pub fn read_failed(labels: TikTokControls, error: &anyhow::Error) -> Self {
@@ -91,6 +104,19 @@ impl AccountDiagnostic {
 }
 
 tokio::task_local! { static ACCOUNT_DIAGNOSTIC: std::cell::RefCell<Option<AccountDiagnostic>>; }
+// Whether the one Save-draft tap on the Profile draft banner is spent: per assignment attempt
+// under [`with_account_diagnostic`], else per outermost account read.
+tokio::task_local! { static DRAFT_BANNER_SAVED: std::cell::Cell<bool>; }
+
+async fn with_draft_banner_allowance<T>(future: impl std::future::Future<Output = T>) -> T {
+    if DRAFT_BANNER_SAVED.try_with(|_| ()).is_ok() {
+        future.await
+    } else {
+        DRAFT_BANNER_SAVED
+            .scope(std::cell::Cell::new(false), future)
+            .await
+    }
+}
 pub fn current_account_diagnostic() -> Option<AccountDiagnostic> {
     ACCOUNT_DIAGNOSTIC
         .try_with(|slot| slot.borrow().clone())
@@ -103,14 +129,18 @@ pub fn current_account_diagnostic() -> Option<AccountDiagnostic> {
 pub async fn with_account_diagnostic<T>(
     future: impl std::future::Future<Output = T>,
 ) -> (T, Option<AccountDiagnostic>) {
+    let attempt = async {
+        let result = Box::pin(future).await;
+        (
+            result,
+            ACCOUNT_DIAGNOSTIC.with(|slot| slot.borrow().clone()),
+        )
+    };
     ACCOUNT_DIAGNOSTIC
-        .scope(std::cell::RefCell::new(None), async {
-            let result = Box::pin(future).await;
-            (
-                result,
-                ACCOUNT_DIAGNOSTIC.with(|slot| slot.borrow().clone()),
-            )
-        })
+        .scope(
+            std::cell::RefCell::new(None),
+            DRAFT_BANNER_SAVED.scope(std::cell::Cell::new(false), attempt),
+        )
         .await
 }
 
@@ -318,18 +348,7 @@ fn global_profile_from_snapshot_with_id(
             && selected_profiles == 1
             && private_tabs == 1
             && private_locks == 1
-            && favorites_tabs == 1)
-        // Draft recovery banner on 45.7.3/en ("Continue editing this post?") at the top
-        // of the profile page adds a second "Edit" Button (android.widget.Button, text
-        // "Edit"), making edits == 2 and breaking the first condition. The selected
-        // own-profile tab (nrb, selected_profiles == 1) and the Profile menu button
-        // (menus == 1) together prove the right page.
-        // ce051715e15b2c2e02 / @lch.trnh.slay, 13/10/2026 (r105).
-        || (resource_version == Some("45.7.3")
-            && username_id == "s0v"
-            && edits == 2
-            && menus == 1
-            && selected_profiles == 1))
+            && favorites_tabs == 1))
         .then(|| single_username(&usernames))
         .flatten())
 }
@@ -418,7 +437,166 @@ async fn clear_popups_before_account_read(session: &dyn UiSession, labels: TikTo
     dismissed
 }
 
+const DRAFT_BANNER_PERSISTED_SAYS: &str = "TikTok hiện banner \"Continue editing this post?\" trên Hồ sơ; đã bấm \"Save draft\" một lần nhưng banner còn — Riviu không bấm lại và chưa Đăng. Lượt sau sẽ đọc lại từ đầu; nếu vẫn còn, cần người vận hành bấm \"Save draft\" trên máy này";
+const DRAFT_BANNER_UNSEEN_SAYS: &str = "phần đầu trang Hồ sơ bị che giống banner \"Continue editing this post?\" nhưng ảnh chụp màn hình không cho thấy banner và nút \"Save draft\" — Riviu không bấm gì và chưa Đăng; cần người vận hành xem máy này, nếu có banner thì bấm \"Save draft\" (không bấm Edit)";
+const DRAFT_BANNER_NO_OCR_SAYS: &str = "phần đầu trang Hồ sơ bị che giống banner \"Continue editing this post?\" nhưng không đọc được chữ trên ảnh chụp màn hình (OCR) — Riviu không bấm gì và chưa Đăng; cần người vận hành bấm \"Save draft\" trên banner ở máy này (không bấm Edit)";
+/// One OCR answer over the banner frame; the account read has no deadline of its own.
+const DRAFT_BANNER_OCR_MS: u64 = 8_000;
+/// After the Save-draft tap, before the proof reads again, like the dialog dismissal in
+/// [`restore_own_profile_header`]. The fresh reads and their generations still decide.
+const DRAFT_BANNER_SETTLE: std::time::Duration = std::time::Duration::from_millis(500);
+
+/// One screenshot and one OCR answer over a draft-banner frame. `Ok(None)`: OCR read the frame
+/// and did not confirm the banner. `Err`: no OCR answer for it.
+async fn draft_banner_point(
+    session: &dyn UiSession,
+    tree: &Tree,
+    banner: &ElementBox,
+    epoch: &str,
+) -> anyhow::Result<Option<crate::TapPoint>> {
+    use crate::ui_automation::{OcrImage, OcrRect, OcrRequest};
+    use anyhow::Context;
+    use base64::Engine;
+    use sha2::{Digest, Sha256};
+    let reasoner = session.gui_reasoner().context("chưa có OCR cục bộ")?;
+    let png = session.screenshot_png().await?;
+    let dimensions = image::ImageReader::new(std::io::Cursor::new(&png))
+        .with_guessed_format()?
+        .into_dimensions()?;
+    // Phone 37 (SM-G955F, 1080x2220): screenshot pixels are the tree's screen pixels.
+    anyhow::ensure!(
+        dimensions == (1080, 2220),
+        "kích thước ảnh chụp chưa đo cho banner nháp"
+    );
+    let right = (banner.x + banner.width).min(1080.0);
+    let bottom = (banner.y + banner.height).min(2220.0);
+    anyhow::ensure!(
+        right > banner.x && bottom > banner.y,
+        "khung banner nháp nằm ngoài ảnh chụp"
+    );
+    let request = OcrRequest {
+        protocol_version: 1,
+        request_id: uuid::Uuid::new_v4().to_string(),
+        observation_id: uuid::Uuid::new_v4().to_string(),
+        session_epoch: epoch.to_owned(),
+        generation: tree.generation,
+        remaining_ms: DRAFT_BANNER_OCR_MS,
+        screenshot: OcrImage {
+            bytes_base64: base64::engine::general_purpose::STANDARD.encode(&png),
+            sha256: format!("{:x}", Sha256::digest(&png)),
+            width: 1080,
+            height: 2220,
+        },
+        roi: Some(OcrRect {
+            x: banner.x as u32,
+            y: banner.y as u32,
+            width: (right - banner.x) as u32,
+            height: (bottom - banner.y) as u32,
+        }),
+        languages: vec!["en".into()],
+        min_confidence: 0.85,
+    };
+    let response = reasoner.ocr(request.clone()).await?;
+    response.validate_binding(&request)?;
+    Ok(crate::app_automation::dialogs::draft_banner_save_point(
+        &response.lines,
+        banner,
+    ))
+}
+
+/// The own Profile has the draft-banner shape: confirm the banner on one screenshot, then tap
+/// its "Save draft" once. Never "Edit", and never a second time in one attempt: a second
+/// appearance fails typed and retryable, as does a shape no screenshot confirms. `Ok(true)`
+/// means the tap was sent and every earlier observation is void; `Ok(false)`, that TikTok left
+/// the foreground first and nothing was tapped.
+async fn save_draft_banner(
+    session: &dyn UiSession,
+    labels: TikTokControls,
+    tree: &Tree,
+    banner: ElementBox,
+    epoch: &str,
+) -> anyhow::Result<bool> {
+    let refuse = |state, message: String| {
+        AccountDiagnostic::new(state, labels, Some(tree.generation), message).into_error()
+    };
+    // The public account reads always open an allowance; outside one, nothing may be tapped.
+    if DRAFT_BANNER_SAVED
+        .try_with(std::cell::Cell::get)
+        .unwrap_or(true)
+    {
+        return Err(refuse(
+            AccountState::DraftBannerPersisted,
+            DRAFT_BANNER_PERSISTED_SAYS.into(),
+        ));
+    }
+    let point = match draft_banner_point(session, tree, &banner, epoch).await {
+        Ok(Some(point)) => point,
+        Ok(None) => {
+            return Err(refuse(
+                AccountState::DraftBannerUnconfirmed,
+                DRAFT_BANNER_UNSEEN_SAYS.into(),
+            ))
+        }
+        Err(error) => {
+            return Err(refuse(
+                AccountState::DraftBannerUnconfirmed,
+                format!("{DRAFT_BANNER_NO_OCR_SAYS} ({error:#})"),
+            ))
+        }
+    };
+    anyhow::ensure!(
+        session.gui_session_epoch() == epoch,
+        "account_session_changed"
+    );
+    if session
+        .active_app_bundle()
+        .await
+        .map_err(|e| AccountDiagnostic::read_failed(labels, &e).into_error())?
+        != labels.package()
+    {
+        return Ok(false);
+    }
+    // Spent before it is sent: a tap whose ACK fails may still have landed.
+    let _ = DRAFT_BANNER_SAVED.try_with(|saved| saved.set(true));
+    tracing::info!(
+        popup = "continue_editing_banner",
+        package = labels.package(),
+        x = point.x,
+        y = point.y,
+        generation = tree.generation,
+        "bấm \"Save draft\" trên banner \"Continue editing this post?\" ở Hồ sơ (không bấm Edit) để đọc được tài khoản; đọc lại màn hình"
+    );
+    // The banner is in no tree, so the tap goes through the OS shell like the sound sheet's;
+    // only a session that sent nothing falls back to the helper.
+    let contact_ms = {
+        use rand::Rng;
+        rand::thread_rng().gen_range(45..=130)
+    };
+    match session
+        .tap_outside_automation(point.clone(), contact_ms)
+        .await
+    {
+        Err(error)
+            if error
+                .downcast_ref::<crate::driver::UnsupportedCapability>()
+                .is_some() =>
+        {
+            session.tap(point).await?;
+        }
+        result => result?,
+    }
+    tokio::time::sleep(DRAFT_BANNER_SETTLE).await;
+    Ok(true)
+}
+
 pub async fn observe_own_account(
+    session: &dyn UiSession,
+    labels: TikTokControls,
+) -> anyhow::Result<Option<String>> {
+    with_draft_banner_allowance(observe_own_account_once(session, labels)).await
+}
+
+async fn observe_own_account_once(
     session: &dyn UiSession,
     labels: TikTokControls,
 ) -> anyhow::Result<Option<String>> {
@@ -442,7 +620,10 @@ pub async fn observe_own_account(
         return Ok(None);
     }
     let mut previous: Option<(u64, String)> = None;
-    for _ in 0..2 {
+    // Generation of the tree that led to a Save-draft tap: later reads must be newer.
+    let mut tapped_at: Option<u64> = None;
+    let mut reads = 0;
+    while reads < 2 {
         let snapshot = session
             .hierarchy_source_snapshot()
             .await
@@ -463,6 +644,20 @@ pub async fn observe_own_account(
             session.gui_session_epoch() == epoch,
             "account_session_changed"
         );
+        if tapped_at.is_some_and(|generation| tree.generation <= generation) {
+            return Ok(None);
+        }
+        if let Some(banner) = crate::app_automation::dialogs::draft_banner_shape(&tree, labels) {
+            if !save_draft_banner(session, labels, &tree, banner, &epoch).await? {
+                return Ok(None);
+            }
+            // The proof starts over on reads taken after the tap.
+            tapped_at = Some(tree.generation);
+            previous = None;
+            reads = 0;
+            continue;
+        }
+        reads += 1;
         let handle = if labels.package() == "com.zhiliaoapp.musically" && !labels.adaptive() {
             let id = global_username_id(labels.resource_version())
                 .ok_or_else(|| anyhow::anyhow!("unmeasured account build"))?;
@@ -591,6 +786,13 @@ pub(crate) async fn decline_profile_facebook_consent(
 /// scroll container. The S8 Trill 38.3.2 snapshots from 14/09 show Edit profile
 /// still visible while :id/mjf/@handle is above the viewport after grid browsing.
 pub async fn restore_own_profile_header(
+    session: &dyn UiSession,
+    labels: TikTokControls,
+) -> anyhow::Result<Option<String>> {
+    with_draft_banner_allowance(restore_own_profile_header_once(session, labels)).await
+}
+
+async fn restore_own_profile_header_once(
     session: &dyn UiSession,
     labels: TikTokControls,
 ) -> anyhow::Result<Option<String>> {
@@ -1158,5 +1360,256 @@ mod tests {
         assert!(!account_read_supported(
             controls_for("com.ss.android.ugc.trill", "en", "46.3.3").unwrap()
         ));
+    }
+
+    mod draft_banner {
+        use super::*;
+        use crate::ui_automation::{
+            GuiReasoner, GuiRequest, GuiResponse, OcrLine, OcrRect, OcrRequest, OcrResponse,
+        };
+        use std::sync::Arc;
+
+        const BANNER: &str = include_str!(
+            "../fixtures/tiktok-publish/musically-45.7.3-en/real-20261014-draft-banner-session.xml"
+        );
+        const SAVED: &str = include_str!(
+            "../fixtures/tiktok-publish/musically-45.7.3-en/real-20261014-draft-banner-saved.xml"
+        );
+        const TITLE: (&str, [u32; 4]) = ("Continue editing this post?", [212, 128, 500, 50]);
+        const SAVE: (&str, [u32; 4]) = ("Save draft", [322, 228, 175, 35]);
+
+        /// Answers each OCR request with these lines, bound to it.
+        struct FakeOcr(Vec<(&'static str, [u32; 4])>);
+
+        #[async_trait::async_trait]
+        impl GuiReasoner for FakeOcr {
+            async fn resolve(&self, _: GuiRequest) -> anyhow::Result<GuiResponse> {
+                anyhow::bail!("not used")
+            }
+            async fn ocr(&self, request: OcrRequest) -> anyhow::Result<OcrResponse> {
+                let lines: Vec<_> = self
+                    .0
+                    .iter()
+                    .map(|(text, [x, y, width, height])| OcrLine {
+                        text: (*text).into(),
+                        bounds: OcrRect {
+                            x: *x,
+                            y: *y,
+                            width: *width,
+                            height: *height,
+                        },
+                        confidence: 0.97,
+                    })
+                    .collect();
+                Ok(OcrResponse {
+                    protocol_version: request.protocol_version,
+                    request_id: request.request_id,
+                    observation_id: request.observation_id,
+                    session_epoch: request.session_epoch,
+                    generation: request.generation,
+                    screenshot_sha256: request.screenshot.sha256,
+                    status: (if lines.is_empty() {
+                        "unresolved"
+                    } else {
+                        "resolved"
+                    })
+                    .into(),
+                    text: lines
+                        .iter()
+                        .map(|line| line.text.as_str())
+                        .collect::<Vec<_>>()
+                        .join("\n"),
+                    lines,
+                    engine: "fake".into(),
+                    elapsed_ms: 1,
+                })
+            }
+        }
+
+        struct BannerSession {
+            snapshots: Mutex<VecDeque<&'static str>>,
+            generation: Mutex<u64>,
+            ocr: Option<Vec<(&'static str, [u32; 4])>>,
+            taps: Mutex<Vec<(f64, f64)>>,
+        }
+
+        impl BannerSession {
+            fn new(snapshots: &[&'static str], ocr: Option<Vec<(&'static str, [u32; 4])>>) -> Self {
+                Self {
+                    snapshots: Mutex::new(snapshots.iter().copied().collect()),
+                    generation: Mutex::new(0),
+                    ocr,
+                    taps: Mutex::new(Vec::new()),
+                }
+            }
+            fn feed(&self, snapshots: &[&'static str]) {
+                self.snapshots.lock().unwrap().extend(snapshots);
+            }
+            fn taps(&self) -> Vec<(f64, f64)> {
+                self.taps.lock().unwrap().clone()
+            }
+        }
+
+        #[async_trait::async_trait]
+        impl UiSession for BannerSession {
+            async fn tap(&self, _: crate::TapPoint) -> anyhow::Result<()> {
+                panic!("the banner tap goes through the OS shell")
+            }
+            async fn tap_outside_automation(
+                &self,
+                point: crate::TapPoint,
+                _: u64,
+            ) -> anyhow::Result<()> {
+                self.taps.lock().unwrap().push((point.x, point.y));
+                Ok(())
+            }
+            async fn swipe(&self, _: crate::SwipeGesture) -> anyhow::Result<()> {
+                panic!("account observation must not swipe")
+            }
+            async fn type_text(&self, _: &str) -> anyhow::Result<()> {
+                panic!("account observation must not type")
+            }
+            async fn home(&self) -> anyhow::Result<()> {
+                panic!("account observation must not navigate")
+            }
+            async fn find_and_tap(&self, _: &str) -> anyhow::Result<()> {
+                panic!("account observation must not tap")
+            }
+            async fn assert_visible(&self, _: &str) -> anyhow::Result<()> {
+                panic!("account observation requires complete proof")
+            }
+            fn stream_url(&self) -> Option<String> {
+                None
+            }
+            fn gui_session_epoch(&self) -> String {
+                "banner-epoch".into()
+            }
+            fn gui_reasoner(&self) -> Option<crate::ui_automation::SharedReasoner> {
+                self.ocr
+                    .clone()
+                    .map(|lines| Arc::new(FakeOcr(lines)) as crate::ui_automation::SharedReasoner)
+            }
+            async fn active_app_bundle(&self) -> anyhow::Result<String> {
+                Ok("com.zhiliaoapp.musically".into())
+            }
+            async fn hierarchy_source_snapshot(
+                &self,
+            ) -> anyhow::Result<crate::HierarchySourceSnapshot> {
+                let mut generation = self.generation.lock().unwrap();
+                *generation += 1;
+                Ok(crate::HierarchySourceSnapshot {
+                    generation: *generation,
+                    xml: self
+                        .snapshots
+                        .lock()
+                        .unwrap()
+                        .pop_front()
+                        .expect("a planned source read")
+                        .into(),
+                })
+            }
+            async fn screenshot_png(&self) -> anyhow::Result<Vec<u8>> {
+                let mut png = Vec::new();
+                image::GrayImage::new(1080, 2220)
+                    .write_to(&mut std::io::Cursor::new(&mut png), image::ImageFormat::Png)?;
+                Ok(png)
+            }
+        }
+
+        fn labels() -> TikTokControls {
+            controls_for("com.zhiliaoapp.musically", "en", "45.7.3").unwrap()
+        }
+
+        fn failure(
+            error: &anyhow::Error,
+        ) -> (AccountState, String, crate::publish_recovery::FailureKind) {
+            let diagnostic = error
+                .downcast_ref::<AccountDiagnostic>()
+                .expect("a typed account diagnostic");
+            let failure = diagnostic.failure().expect("a failed proof");
+            (diagnostic.state, failure.code, failure.kind)
+        }
+
+        #[tokio::test]
+        async fn confirmed_banner_gets_one_save_draft_tap_then_fresh_reads_prove_the_account() {
+            let session = BannerSession::new(&[BANNER, SAVED, SAVED], Some(vec![TITLE, SAVE]));
+            assert_eq!(
+                observe_own_account(&session, labels())
+                    .await
+                    .unwrap()
+                    .as_deref(),
+                Some("lch.trnh.slay")
+            );
+            // The centre of the OCR box of "Save draft"; phone 37 took the tap at (409, 244).
+            assert_eq!(session.taps(), vec![(409.5, 245.5)]);
+
+            // One attempt: a banner seen again, even by a later read, is not tapped again.
+            let session = BannerSession::new(&[BANNER, SAVED, SAVED], Some(vec![TITLE, SAVE]));
+            let ((first, second), _) = with_account_diagnostic(async {
+                let first = observe_own_account(&session, labels()).await;
+                session.feed(&[BANNER]);
+                (first, observe_own_account(&session, labels()).await)
+            })
+            .await;
+            assert_eq!(first.unwrap().as_deref(), Some("lch.trnh.slay"));
+            assert_eq!(
+                failure(&second.unwrap_err()),
+                (
+                    AccountState::DraftBannerPersisted,
+                    "account_draft_banner_persisted".into(),
+                    crate::publish_recovery::FailureKind::Retryable
+                )
+            );
+            assert_eq!(session.taps().len(), 1);
+        }
+
+        #[tokio::test]
+        async fn banner_shape_without_ocr_confirmation_taps_nothing_and_fails_typed() {
+            let labels = labels();
+            let parse = |xml: &str| {
+                Tree::parse(crate::HierarchySourceSnapshot {
+                    generation: 1,
+                    xml: xml.into(),
+                })
+                .unwrap()
+            };
+            // The empty bk2 stays after the banner; only the hidden header makes the shape.
+            assert!(
+                crate::app_automation::dialogs::draft_banner_shape(&parse(BANNER), labels)
+                    .is_some()
+            );
+            let other_tab = BANNER.replacen(
+                "id/nrb\" checkable=\"false\" checked=\"false\" clickable=\"true\" enabled=\"true\" focusable=\"true\" focused=\"false\" long-clickable=\"false\" password=\"false\" scrollable=\"false\" selected=\"true\"",
+                "id/nrb\" checkable=\"false\" checked=\"false\" clickable=\"true\" enabled=\"true\" focusable=\"true\" focused=\"false\" long-clickable=\"false\" password=\"false\" scrollable=\"false\" selected=\"false\"",
+                1,
+            );
+            assert_ne!(other_tab, BANNER);
+            for other in [SAVED.to_owned(), other_tab] {
+                assert!(
+                    crate::app_automation::dialogs::draft_banner_shape(&parse(&other), labels)
+                        .is_none()
+                );
+            }
+            for ocr in [
+                None,
+                Some(vec![]),
+                Some(vec![TITLE, ("Edit", [796, 228, 64, 35])]),
+                // "Save draft" in the banner's right half, where its Edit sits.
+                Some(vec![TITLE, ("Save draft", [700, 228, 175, 35])]),
+                Some(vec![SAVE]),
+            ] {
+                let session = BannerSession::new(&[BANNER], ocr);
+                let error = observe_own_account(&session, labels).await.unwrap_err();
+                assert_eq!(
+                    failure(&error),
+                    (
+                        AccountState::DraftBannerUnconfirmed,
+                        "account_draft_banner_unconfirmed".into(),
+                        crate::publish_recovery::FailureKind::Retryable
+                    )
+                );
+                assert!(session.taps().is_empty());
+            }
+        }
     }
 }
