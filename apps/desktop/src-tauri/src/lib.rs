@@ -2617,9 +2617,16 @@ mod tests {
             .nth(1)
             .and_then(|rest| rest.split("\nasync fn ").next())
             .expect("with_manual_session is still here");
+        // `f`'s future may be wrapped (the manual-session timeout), but it must be awaited in
+        // the same statement, so `let fut = f(hold.session()); drop(hold); fut.await` fails.
         let works = helper
-            .find("f(hold.session()).await")
+            .find("f(hold.session())")
             .expect("the session must flow into `f` while the guard is still bound");
+        let statement = helper[works..].split(';').next().unwrap_or_default();
+        assert!(
+            statement.contains(".await"),
+            "`f(hold.session())` must be awaited in the statement that creates it: {statement}"
+        );
         let dropped = helper
             .find("drop(hold)")
             .expect("the guard must be dropped explicitly, after the work");
