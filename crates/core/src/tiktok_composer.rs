@@ -1098,6 +1098,13 @@ pub(crate) fn stage_udid() -> Option<String> {
         .filter(|udid| !udid.is_empty())
 }
 
+/// The progress step this task last reported (`opening_composer`, …), for log lines only.
+pub(crate) fn stage_phase() -> Option<String> {
+    STAGE_DIAGNOSTICS
+        .try_with(|state| state.borrow().phase.clone())
+        .ok()
+}
+
 /// Opt in around an existing production preparation or scout future. The supplied deadline
 /// is recorded only; the original route retains its own cancellation/deadline/effect gates.
 /// No hierarchy, caption, sound title, account, request body or credential is retained.
@@ -2762,6 +2769,8 @@ impl<'a, P: TapPlanner> Composer<'a, P> {
             self.session.gui_session_epoch() == prepared_epoch,
             "caption preparation session changed"
         );
+        // The fresh proof below and everything after Post are never graced.
+        crate::ui_automation::runtime::close_read_grace();
         // One finite deadline for every read and navigation below, set once from this
         // session's measured preparation and never extended. Expiry stays a retryable
         // pre-Post error: no effect intent exists yet and Post is never tapped.
@@ -3982,6 +3991,9 @@ impl<'a, P: TapPlanner> Composer<'a, P> {
             self.plan.popup_profile.1.unwrap_or_default(),
         )
         .context("popup profile unavailable")?;
+        // A popup read the window cut off cannot finish the step even if graced: the step
+        // still needs its own read after it, and none starts after the window.
+        let _no_grace = crate::ui_automation::runtime::suppress_read_grace();
         loop {
             match step_before_deadline(self.session, labels, budget, deadline, stop, effect_stop)
                 .await?
@@ -4027,7 +4039,7 @@ impl<'a, P: TapPlanner> Composer<'a, P> {
                 self.session.gui_session_epoch() == epoch,
                 "composer navigation session changed"
             );
-            if Instant::now() >= deadline {
+            if crate::ui_automation::runtime::window_closed(deadline) {
                 return match missing_code {
                     Some(code) => Err(crate::publish_recovery::retryable_error(
                         code,
@@ -4631,7 +4643,7 @@ where
     let mut composer = Composer::new(session, plan, plan_tap)
         .with_progress(progress)
         .with_selection_diagnostics(diagnostics);
-    let outcome = async {
+    let walk = async {
         crate::publish_recovery::step("media", None)?;
         // Keep the full media walk off the caller's async stack. This step now
         // carries bounded primary/recovery reads for several screens; embedding
@@ -4920,7 +4932,14 @@ where
         )
         .await?;
         Ok((verdict, Some(selection)))
-    }
+    };
+    // The pre-Post walk's observation steps may finish the one read in flight when a window
+    // closes (`READ_GRACE`); the fresh proof before Post closes it (`post_with_effect_intent`).
+    // Boxed so installing the scope never moves this whole walk on the caller's stack.
+    let outcome = crate::ui_automation::runtime::with_read_grace(
+        observation::READ_GRACE_HOOKS,
+        Box::pin(walk),
+    )
     .await;
     if leave_on_return && !matches!(outcome, Ok((ComposerVerdict::PostNotConfirmed, _))) {
         composer.leave_with_stop(stop).await;
@@ -6146,6 +6165,8 @@ mod tests {
         locate_fails_at: Option<usize>,
         locate_delay: Duration,
         described_delay: Duration,
+        /// How long a dispatched tap takes to be acknowledged.
+        tap_delay: Duration,
         fail_first_read_after_tap: bool,
         post_read_failed: Mutex<bool>,
         locates: Mutex<usize>,
@@ -6425,6 +6446,9 @@ mod tests {
             }
             let (x, y) = (point.x, point.y);
             self.taps.lock().push(point);
+            if !self.tap_delay.is_zero() {
+                tokio::time::sleep(self.tap_delay).await;
+            }
             let mut at = self.at.lock();
             // **Only a tap on this screen's exit control navigates.** A grid cell is tapped
             // where no element is registered, so it changes nothing — which is what the real
@@ -9463,6 +9487,125 @@ Lưu list này để có lịch đi Đà Lạt gọn hơn, dễ chọn điểm t
             assert!(session.taps.lock().is_empty());
         }
 
+    }
+
+    /// r112/r113 (14/10/2026): on stalled phones the step deadline cut a read off 7.7-13.4 s
+    /// in, and each cut cost the whole compose attempt. Inside the publish walk's read grace, a
+    /// read that finishes 3 s after its window closes answers its step once, and the walk goes
+    /// on to the next step's own window. Nothing is read again after either window.
+    #[tokio::test(start_paused = true)]
+    async fn a_read_finishing_after_its_window_answers_the_step_through_the_grace() {
+        let late = Duration::from_secs(3);
+        let session = FakeSession {
+            locate_delay: CAMERA_STEP_WINDOW + late,
+            ..FakeSession::with(vec![feed(), camera()])
+        };
+        let mut composer = Composer::new(&session, plan(), |element: &ElementBox| element.centre());
+        let stop = AtomicBool::new(false);
+        let start = Instant::now();
+        let opened = crate::ui_automation::runtime::with_read_grace(
+            observation::READ_GRACE_HOOKS,
+            composer.open(&stop),
+        )
+        .await
+        .expect("each late read answers its step");
+        assert!(
+            opened,
+            "the opener and the shutter were both proved by graced reads"
+        );
+        assert_eq!(start.elapsed(), (CAMERA_STEP_WINDOW + late) * 2);
+        assert_eq!(
+            *session.locates.lock(),
+            2,
+            "one read per step, no poll after a window"
+        );
+        assert_eq!(session.taps.lock().len(), 1);
+    }
+
+    /// A read still running when its window and the whole grace have passed ends the step with
+    /// the code it had before the grace, and nothing is tapped. The grace never outlives an
+    /// enclosing sound budget: inside one, the step ends with the budget, under its code.
+    #[tokio::test(start_paused = true)]
+    async fn a_read_slower_than_its_window_and_the_grace_keeps_the_old_code() {
+        use crate::ui_automation::runtime::READ_GRACE;
+        let budget = CAMERA_STEP_WINDOW + Duration::from_secs(5);
+        for (sound_budget, code, ends) in [
+            (
+                false,
+                "publish_observation_deadline",
+                CAMERA_STEP_WINDOW + READ_GRACE,
+            ),
+            (true, "sound_load_timeout", budget),
+        ] {
+            let session = FakeSession {
+                locate_delay: CAMERA_STEP_WINDOW + READ_GRACE + Duration::from_secs(1),
+                ..FakeSession::with(vec![feed(), camera()])
+            };
+            let mut composer =
+                Composer::new(&session, plan(), |element: &ElementBox| element.centre());
+            let stop = AtomicBool::new(false);
+            let start = Instant::now();
+            let work = composer.open(&stop);
+            let result = crate::ui_automation::runtime::with_read_grace(
+                observation::READ_GRACE_HOOKS,
+                async {
+                    if sound_budget {
+                        crate::tiktok_sound::with_observation_budget(&stop, budget, work).await
+                    } else {
+                        work.await
+                    }
+                },
+            )
+            .await;
+            let error = result.expect_err("an unfinished read never answers the step");
+            assert_eq!(
+                crate::publish_recovery::describe(&error).code,
+                code,
+                "sound_budget={sound_budget}"
+            );
+            assert_eq!(start.elapsed(), ends, "sound_budget={sound_budget}");
+            assert!(session.taps.lock().is_empty());
+        }
+    }
+
+    /// A gesture is never waited on by the grace. The grace finishes the read in flight when
+    /// its window closes; the tap that read then authorizes drains exactly as before, and when
+    /// the enclosing budget runs out during it, the step ends the moment it drains, with no
+    /// grace for the gesture and no read after it.
+    #[tokio::test(start_paused = true)]
+    async fn the_grace_finishes_a_read_but_never_waits_on_the_gesture_after_it() {
+        let late = Duration::from_secs(3);
+        let tap = Duration::from_secs(15);
+        let budget = CAMERA_STEP_WINDOW + Duration::from_secs(10);
+        let session = FakeSession {
+            locate_delay: CAMERA_STEP_WINDOW + late,
+            tap_delay: tap,
+            ..FakeSession::with(vec![feed(), camera()])
+        };
+        let mut composer = Composer::new(&session, plan(), |element: &ElementBox| element.centre());
+        let stop = AtomicBool::new(false);
+        let start = Instant::now();
+        let result = crate::ui_automation::runtime::with_read_grace(
+            observation::READ_GRACE_HOOKS,
+            crate::tiktok_sound::with_observation_budget(&stop, budget, composer.open(&stop)),
+        )
+        .await;
+        let error = result.expect_err("the budget ran out while the tap drained");
+        assert_eq!(
+            crate::publish_recovery::describe(&error).code,
+            "sound_load_timeout"
+        );
+        assert_eq!(
+            session.taps.lock().len(),
+            1,
+            "the graced read authorized one tap"
+        );
+        assert_eq!(start.elapsed(), CAMERA_STEP_WINDOW + late + tap);
+        assert_eq!(
+            *session.locates.lock(),
+            1,
+            "no read started after the gesture"
+        );
     }
 
     #[tokio::test(start_paused = true)]

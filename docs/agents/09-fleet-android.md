@@ -111,8 +111,9 @@ và `adb.global_slot` p90 ≤ 750 ms. Một bước cần 3–6 lần đọc nê
 máy rảnh. Code: `crates/core/src/read_latency.rs`; ghi số đo ở `note_tree_read` trong
 `crates/android-driver/src/agent.rs`.
 
-- Mỗi `GET /source` hoàn tất được ghi theo serial (tối đa 128 máy × 32 lần, bỏ lần cũ hơn
-  10 phút). Lần đọc hết giờ hoặc bị hủy không được ghi: nó đo deadline, không đo máy.
+- Mỗi `GET /source` và lệnh tìm `POST /element`/`/elements` hoàn tất được ghi theo serial
+  (tối đa 128 máy × 32 lần, bỏ lần cũ hơn 10 phút). Lần đọc hết giờ hoặc bị hủy không được
+  ghi: nó đo deadline, không đo máy.
 - Bước quan sát trước Post tính cửa sổ một lần lúc bắt đầu, theo công thức trong
   [hợp đồng](../development/contracts.md) (nền, số lần đọc dự kiến của bước, q90 của máy, trần
   `min(4 × nền, 90 s)`). Serial lấy từ ngữ cảnh stage diagnostics của lượt Đăng; ngoài lượt
@@ -124,6 +125,12 @@ máy rảnh. Code: `crates/core/src/read_latency.rs`; ghi số đo ở `note_tre
 - Không đổi: bằng chứng tươi trước Post (12–16 s), bước bấm/effect, chờ feed sau Post, ngân
   sách nhạc 180/300 s. Số lần đọc dự kiến của từng bước và lề 2 s **chưa đo**; kiểm lại bằng
   dòng INFO trên và HX-TELEMETRY ở đợt chạy kế tiếp (cùng số máy/cap) trước khi chỉnh.
+- Ân hạn đọc (HX-GRACE): r112 (`25672a42`) và r113 (`204867f9`), 20 SM-G955F/N, máy kẹt từng
+  đợt (`/source` max 14,9–18,8 s, `/actions` max 20,8–28 s trong cùng phút) và 10/12 lượt soạn
+  hỏng có diagnostics của r112 kết thúc vì deadline bước cắt một lần đọc đang chạy sau 7,7–13,4 s;
+  lần đọc đó nay được chờ thêm tối đa 15 s ([hợp đồng](../development/contracts.md)). Đợt chạy
+  kế tiếp đếm log INFO "…(ân hạn đọc)" (`completed`, `satisfied`) và các hàng
+  `publish_observation_deadline`/`sound_load_timeout` có sự kiện cuối `interrupted`.
 
 ### ADB server treo (HX-ADB)
 

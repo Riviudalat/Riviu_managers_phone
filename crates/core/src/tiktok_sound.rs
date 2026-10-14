@@ -821,6 +821,13 @@ pub(crate) fn phase_deadline(window: Duration) -> Instant {
         .try_with(|b| b.deadline.min(deadline))
         .unwrap_or(deadline)
 }
+
+/// The innermost sound budget's deadline, if one encloses this task. Every budget is an
+/// outer bound for the read grace ([`crate::ui_automation::runtime::READ_GRACE`]): a step's
+/// window may be graced up to it, and a budget's own expiry never is.
+pub(crate) fn budget_deadline() -> Option<Instant> {
+    SOUND_BUDGET.try_with(|b| b.deadline).ok()
+}
 pub(crate) fn check_wait() -> anyhow::Result<()> {
     SOUND_BUDGET
         .try_with(|b| {
@@ -922,6 +929,8 @@ async fn clear_sound_popup(
     if let Some((replaced, fresh)) = own_recycle(session) {
         popup.rebind_epoch(&replaced, &fresh);
     }
+    // Never graced: a popup read cannot finish the step that needs a read after it.
+    let _no_grace = crate::ui_automation::runtime::suppress_read_grace();
     loop {
         let step =
             step_before_deadline(session, labels, &mut popup, deadline, &stopped, &stopped).await;
