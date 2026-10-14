@@ -202,6 +202,25 @@ pub fn retryable_error(code: &'static str, message: impl Into<String>) -> anyhow
     ClassifiedRecoveryError(RecoveryFailure::new(code, FailureKind::Retryable, message)).into()
 }
 
+/// A failure while staging media, before any composer. Nothing reached TikTok and a re-run
+/// reuses the import identity, so an unrecognised adb or read error spends the assignment's
+/// bounded retry budget instead of ending the row. Measured 14/10/2026: r112 phone 32
+/// (`ce031713a8f5bd0805`) `adb push` "failed to read copy response: EOF" while its view
+/// stream dropped in the same second; in r111 two rows read the TikTok version as unknown
+/// under load and one failed the photo-order `content update`. All four settled
+/// `legacy_terminal` on their first try. A deliberate refusal in the chain still ends it.
+pub fn media_transfer_failure(error: &anyhow::Error) -> RecoveryFailure {
+    let failure = describe(error);
+    if failure.kind != FailureKind::Terminal || specific_refusal(&failure.message.to_lowercase()) {
+        return failure;
+    }
+    RecoveryFailure::new(
+        "media_transfer_failed",
+        FailureKind::Retryable,
+        failure.message,
+    )
+}
+
 /// A read phase exhausted its existing budget; this never describes a gesture.
 pub(crate) fn observation_deadline() -> anyhow::Error {
     crate::driver::UiError::new(
@@ -583,6 +602,40 @@ mod tests {
             "Đã tạm dừng trong lúc chờ TikTok tải nhạc",
         ] {
             assert_eq!(classify(msg), FailureKind::Terminal, "{msg}");
+        }
+    }
+
+    #[test]
+    fn media_staging_failures_retry_unless_refused() {
+        // r112 phone 32, 14/10/2026: the push landed, the copy response did not.
+        let push = anyhow::anyhow!("adb: error: failed to read copy response: EOF")
+            .context("stagePublishMedia failed for device ce031713a8f5bd0805: push 01-cover.png");
+        assert_eq!(describe(&push).kind, FailureKind::Terminal);
+        let failure = media_transfer_failure(&push);
+        assert_eq!(failure.kind, FailureKind::Retryable);
+        assert_eq!(failure.code, "media_transfer_failed");
+        // Typed and transport answers keep their own kind and code.
+        let offline = anyhow::anyhow!("adb.exe: device 'x' not found");
+        assert_eq!(
+            media_transfer_failure(&offline).kind,
+            FailureKind::Disconnected
+        );
+        let typed = retryable_error("adb_daemon_connect_timeout", "typed");
+        assert_eq!(
+            media_transfer_failure(&typed).code,
+            "adb_daemon_connect_timeout"
+        );
+        for refusal in [
+            "device unauthorized",
+            "media hash mismatch",
+            "publish cancelled",
+        ] {
+            let error = anyhow::anyhow!("{refusal}").context("stagePublishMedia failed");
+            assert_eq!(
+                media_transfer_failure(&error).kind,
+                FailureKind::Terminal,
+                "{refusal}"
+            );
         }
     }
 

@@ -795,7 +795,13 @@ pub(crate) async fn run_dispatcher(
                             }
                         }
                     }
-                    result
+                    // Nothing on the transfer path reaches a composer, so an unrecognised
+                    // failure spends the bounded retry budget instead of ending the row.
+                    result.map_err(|error| {
+                        anyhow::Error::new(
+                            riviu_core::publish_recovery::media_transfer_failure(&error),
+                        )
+                    })
                 });
                 owned.insert(task.id(), job);
             }
