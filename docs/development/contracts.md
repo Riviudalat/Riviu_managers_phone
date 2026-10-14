@@ -82,9 +82,11 @@ executor; transaction không được giữ qua await HTTP hoặc thiết bị.
 
 Publish recovery dùng migration 45 và dispatcher hiện có. `publish_retry_assignment`
 nhận `assignmentId`, `confirmed`, `expectedRevision`, `requestId`; replay cùng request
-chỉ trả ACK, không tạo attempt khác. Retry tự động tối đa ba lần mỗi bước, thủ công
-chỉ tạo một lượt bài nhưng vẫn cho tối đa ba retry tạm thời trong từng bước của
-lượt đó. Lượt thủ công không tự requeue cả bài khi worker kết thúc. Counters,
+chỉ trả ACK, không tạo attempt khác. Retry tự động tối đa năm lần mỗi bước
+(`PRE_POST_RETRY_BUDGET`), thủ công chỉ tạo một lượt bài nhưng vẫn cho tối đa năm retry
+tạm thời trong từng bước của lượt đó. Retry trong một bước chờ 2/5/10 giây; requeue cả
+lượt mới chờ 30/90/180/300/300 giây (r122 15/10/2026: 8 dòng tiêu hết ba lần trong 23 phút
+đầu khi 10 máy cùng soạn, dòng thử lại sau đợt đó thì lên ngay). Lượt thủ công không tự requeue cả bài khi worker kết thúc. Counters,
 checkpoint, account và ứng viên nhạc được giữ trong SQLite.
 Reconnect đúng serial tối đa 120 giây nhường work permit; startup không tự chạy lại
 lượt recovery gián đoạn. Có Post intent thì chỉ xác minh; `publish_retry_sheet_assignment`
@@ -92,7 +94,7 @@ chỉ mở lại outbox của bài đã có canonical proof, không đi vào com
 Recovery state lưu thêm `lastErrorCode` và `lastErrorKind`. Các đường mới truyền
 `RecoveryFailure` có kiểu; parser chuỗi chỉ là compatibility boundary cho journal/lỗi
 cũ. Thay chữ hiển thị không được đổi retry policy. Retry vẫn chỉ trước Post và tối đa
-ba lần mỗi bước.
+năm lần mỗi bước.
 
 Publish observation dùng lỗi deadline có kiểu và một lượt đọc lại transient trong
 cùng phase/deadline; tạo cursor mới không làm mới ngân sách. `SessionEpochChanged`

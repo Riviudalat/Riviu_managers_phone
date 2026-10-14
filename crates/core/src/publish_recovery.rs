@@ -10,6 +10,15 @@ use std::{
 };
 use ts_rs::TS;
 
+/// Pre-Post retries per step, shared by retries inside a step and whole fresh attempts.
+///
+/// r122 (15/10/2026, 20 SM-G955F/N phones, ten composing at once): eight rows spent the old
+/// three retries within the first 23 minutes, while every read took 14-30 s, and ended
+/// `failed_before_dispatch` with nothing posted. Rows whose next attempt came after that wave
+/// posted at once (r117 phones 37/43/49 on one retry; r122 phone 47 on its sixth attempt).
+/// A cap, not a target: nothing here ever repeats Post.
+pub const PRE_POST_RETRY_BUDGET: u32 = 5;
+
 #[derive(Debug, Clone, Serialize, Deserialize, TS)]
 #[serde(rename_all = "camelCase")]
 pub struct PublishRecoveryState {
@@ -45,7 +54,7 @@ impl Default for PublishRecoveryState {
             checkpoint: "approved".into(),
             state: "running".into(),
             retries_used: 0,
-            max_retries: 3,
+            max_retries: PRE_POST_RETRY_BUDGET,
             next_retry_at: None,
             reconnect_deadline: None,
             last_error: None,

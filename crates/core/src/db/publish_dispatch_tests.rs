@@ -92,7 +92,7 @@ fn explicit_failed_assignment_retry_preserves_identity_and_leaves_all_siblings_u
 }
 
 #[test]
-fn explicit_retry_restores_three_sound_retries_without_reopening_post() {
+fn explicit_retry_restores_the_sound_retry_budget_without_reopening_post() {
     let (db, _, campaign, assignments) = fixture();
     let prior_run = db.claim_publish_pipeline(&campaign).unwrap().unwrap();
     let prior = db
@@ -106,7 +106,7 @@ fn explicit_retry_restores_three_sound_retries_without_reopening_post() {
         .unwrap();
     db.update_publish_recovery_step(&prior.assignment_id, &prior_run.token, "sound", None)
         .unwrap();
-    for _ in 0..3 {
+    for _ in 0..crate::publish_recovery::PRE_POST_RETRY_BUDGET {
         assert!(db
             .reserve_publish_step_retry(&prior.assignment_id, &prior_run.token, "network")
             .unwrap()
@@ -137,14 +137,17 @@ fn explicit_retry_restores_three_sound_retries_without_reopening_post() {
         .unwrap()
         .unwrap();
     assert!(recovery.manual);
-    assert_eq!(recovery.max_retries, 3);
+    assert_eq!(
+        recovery.max_retries,
+        crate::publish_recovery::PRE_POST_RETRY_BUDGET
+    );
     assert_eq!(recovery.retries_used, 0);
     assert!(recovery.counts.is_empty());
     db.init_publish_recovery(&prior.assignment_id, &run.token)
         .unwrap();
     db.update_publish_recovery_step(&prior.assignment_id, &run.token, "sound", None)
         .unwrap();
-    for _ in 0..3 {
+    for _ in 0..crate::publish_recovery::PRE_POST_RETRY_BUDGET {
         assert!(db
             .reserve_publish_step_retry(&prior.assignment_id, &run.token, "network")
             .unwrap()

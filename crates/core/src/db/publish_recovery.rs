@@ -55,6 +55,12 @@ fn record_failure(s: &mut PublishRecoveryState, failure: &RecoveryFailure) {
     s.last_error_kind = Some(failure.kind.as_str().into());
 }
 
+/// Wait before a whole fresh attempt, by the step's retries already used. Retries inside a
+/// step keep `spend`'s short waits. r122 (15/10/2026): with 2/5/10 s every fresh attempt of
+/// the eight failed rows landed in the same 23-minute wave of ten phones composing at once,
+/// where a compose attempt took 4-6 minutes; this spreads five attempts over about 45 minutes.
+const REQUEUE_BACKOFF_SECS: [u64; 5] = [30, 90, 180, 300, 300];
+
 /// Ledger key, not a step name: the one automatic fresh attempt after the sound budget ran out
 /// (blind sheet or not). The name predates the readable-sheet case and stays for stored ledgers.
 const SOUND_SHEET_BLIND_KEY: &str = "soundSheetBlind";
@@ -327,10 +333,16 @@ impl Database {
             s.reconnect_deadline.get_or_insert((now + 120_000) as f64);
             s.state = "waitingDevice".into();
             s.next_retry_at = Some((now + 2000) as f64);
-        } else if spend(&mut s, failure, now).is_none() {
-            write(&tx, &job.assignment_id, &job.run.token, &s)?;
-            tx.commit()?;
-            return Ok(false);
+        } else {
+            let Some(delay) = spend(&mut s, failure, now) else {
+                write(&tx, &job.assignment_id, &job.run.token, &s)?;
+                tx.commit()?;
+                return Ok(false);
+            };
+            let index =
+                (s.retries_used.saturating_sub(1) as usize).min(REQUEUE_BACKOFF_SECS.len() - 1);
+            let wait = delay.max(Duration::from_secs(REQUEUE_BACKOFF_SECS[index]));
+            s.next_retry_at = Some((now + wait.as_millis() as i64) as f64);
         }
         let attempt = Uuid::new_v4().to_string();
         // The old attempt is finished. Preserve its choice as evidence, then let
@@ -477,7 +489,7 @@ mod tests {
         }
     }
     #[tokio::test(start_paused = true)]
-    async fn actual_retry_loop_stops_after_four_attempts_and_cancel_prevents_the_next_one() {
+    async fn actual_retry_loop_stops_after_the_budget_and_cancel_prevents_the_next_one() {
         let (db, _, campaign, a) = fixture();
         let run = db.claim_publish_pipeline(&campaign).unwrap().unwrap();
         let db = std::sync::Arc::new(db);
@@ -504,7 +516,7 @@ mod tests {
             attempts
         })
         .await;
-        assert_eq!(attempts, 4);
+        assert_eq!(attempts, crate::publish_recovery::PRE_POST_RETRY_BUDGET + 1);
         stop.store(true, std::sync::atomic::Ordering::Release);
         crate::publish_recovery::scope(journal, async {
             crate::publish_recovery::step("caption", None).unwrap();
@@ -1091,7 +1103,8 @@ mod tests {
             .unwrap();
         assert_eq!(recovery.state, "retryWaiting");
         assert_eq!(recovery.retries_used, 1);
-        assert!(recovery.next_retry_at.unwrap() >= (before + 13_000) as f64);
+        // A whole fresh attempt waits the first requeue backoff, not the 13 s quiet window.
+        assert!(recovery.next_retry_at.unwrap() >= (before + 30_000) as f64);
         let assignment = db
             .get_publish_assignment_detail(&campaign, &compose.assignment_id)
             .unwrap()
@@ -1157,7 +1170,10 @@ mod tests {
             .unwrap();
         assert_eq!(queued.state, "retryWaiting");
         assert!(queued.manual);
-        assert_eq!(queued.max_retries, 3);
+        assert_eq!(
+            queued.max_retries,
+            crate::publish_recovery::PRE_POST_RETRY_BUDGET
+        );
         assert!(queued.next_retry_at.unwrap() >= (before + 64_000) as f64);
         assert!(!db
             .pending_publish_dispatch(10)
@@ -1173,7 +1189,7 @@ mod tests {
             .is_none());
     }
     #[test]
-    fn retry_budget_is_three_and_survives_reopening_database() {
+    fn retry_budget_is_five_and_survives_reopening_database() {
         let (db, path, campaign, a) = fixture();
         let run = db.claim_publish_pipeline(&campaign).unwrap().unwrap();
         let id = &a[0].id;
@@ -1198,6 +1214,14 @@ mod tests {
                 .unwrap(),
             Some(Duration::from_secs(10))
         );
+        for _ in 3..crate::publish_recovery::PRE_POST_RETRY_BUDGET {
+            assert_eq!(
+                reopened
+                    .reserve_publish_step_retry(id, &run.token, "network")
+                    .unwrap(),
+                Some(Duration::from_secs(10))
+            );
+        }
         assert!(reopened
             .reserve_publish_step_retry(id, &run.token, "network")
             .unwrap()
@@ -1311,7 +1335,10 @@ mod tests {
             .unwrap());
         let recovery = db.publish_recovery_state(id).unwrap().unwrap();
         assert!(recovery.manual);
-        assert_eq!(recovery.max_retries, 3);
+        assert_eq!(
+            recovery.max_retries,
+            crate::publish_recovery::PRE_POST_RETRY_BUDGET
+        );
         let mut retry_job = db
             .pending_publish_dispatch(10)
             .unwrap()
@@ -1324,9 +1351,9 @@ mod tests {
             .reserve_publish_step_retry(id, &first.token, "network")
             .unwrap()
             .is_some());
-        // Inline and whole-job recovery share this manual attempt's three-retry
-        // budget. Replaying the same operator request must never replenish it.
-        for used in 2..=3 {
+        // Inline and whole-job recovery share this manual attempt's retry budget.
+        // Replaying the same operator request must never replenish it.
+        for used in 2..=crate::publish_recovery::PRE_POST_RETRY_BUDGET {
             let sound = crate::SoundSelectionEvidence {
                 section: crate::publish::SoundSectionKind::Trending,
                 title: format!("Recommended attempt {used}"), artist: "Artist".into(),
@@ -1375,7 +1402,10 @@ mod tests {
         assert!(db.finish_publish_dispatch(&retry_job, Some("connection reset")).unwrap());
         let exhausted = db.publish_recovery_state(id).unwrap().unwrap();
         assert_eq!(exhausted.state, "exhausted");
-        assert_eq!(exhausted.counts["transfer"], 3);
+        assert_eq!(
+            exhausted.counts["transfer"],
+            crate::publish_recovery::PRE_POST_RETRY_BUDGET
+        );
         assert!(exhausted.next_retry_at.is_none());
         assert!(!db.pending_publish_dispatch(10).unwrap().iter().any(|job| job.assignment_id == *id));
         assert!(db.claim_publish_assignment_retry_checked(id, revision, &request).unwrap().is_some());

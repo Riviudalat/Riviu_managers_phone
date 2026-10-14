@@ -242,7 +242,7 @@ impl Database {
         // The operator grants one fresh bounded pre-Post recovery budget shared
         // by retries inside a step and whole-job requeues. Request replay returned
         // above, so it cannot reset these counters.
-        recovery.max_retries = 3;
+        recovery.max_retries = crate::publish_recovery::PRE_POST_RETRY_BUDGET;
         recovery.retries_used = 0;
         recovery.counts.clear();
         recovery.state = if agent_ready_at.is_some() {
