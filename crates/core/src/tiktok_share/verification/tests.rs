@@ -143,6 +143,7 @@ fn short_ellipsized_caption_requests_expansion_without_accepting_a_prefix() {
         caption_expanded: false,
         public_link: None,
         trace_nonce: [0; 16],
+        metadata: Default::default(),
         diagnostic: VerificationDiagnostic {
             captured_metadata_candidate: None,
             publication_evidence: None,
@@ -234,6 +235,7 @@ async fn earlier_copied_photo_is_a_rejected_old_candidate_not_an_unresolved_capt
         caption_expanded: false,
         public_link: None,
         trace_nonce: [0; 16],
+        metadata: Default::default(),
         diagnostic: VerificationDiagnostic {
             captured_metadata_candidate: None,
             publication_evidence: None,
@@ -377,6 +379,7 @@ async fn comments_recovery_observes_post_before_grid_and_never_backs_from_compos
             caption_expanded: false,
             public_link: None,
             trace_nonce: [0; 16],
+            metadata: Default::default(),
             diagnostic: VerificationDiagnostic {
             captured_metadata_candidate: None,
                 publication_evidence: None,
@@ -502,6 +505,8 @@ struct Session {
     expand_to: Option<String>,
     caption_clickable: bool,
     expanded: Mutex<bool>,
+    /// The screen under the measured "Send to" sheet, shown again after its Close.
+    sheet_parent: Mutex<&'static str>,
 }
 
 impl Default for Session {
@@ -538,6 +543,7 @@ impl Default for Session {
             expand_to: None,
             caption_clickable: false,
             expanded: Mutex::new(false),
+            sheet_parent: Mutex::new("feed"),
         }
     }
 }
@@ -634,7 +640,8 @@ impl Session {
                 };
                 format!("{edit}{}{}<node package=\"{PACKAGE}\" enabled=\"true\" scrollable=\"true\" bounds=\"[0,500][900,1750]\">{covers}</node>", node(username_id, "@fixture.account", "", "[300,160][600,210]", true), node("", "", "Profile menu", "[800,100][900,150]", true))
             }
-            "post" => format!(
+            "send-to-sheet" => return SEND_TO_SHEET.into(),
+            "post" | "feed-video" => format!(
                 "{}{}{}{}{}",
                 caption,
                 if self.duplicate_caption {
@@ -660,7 +667,7 @@ impl Session {
                     false
                 ),
                 node("", "", "Share video", "[800,1000][950,1100]", true),
-                if self.video_surface {
+                if self.video_surface || page == "feed-video" {
                     node(
                         ":id/long_press_layout",
                         "",
@@ -762,7 +769,21 @@ impl UiSession for Session {
     }
     async fn tap(&self, point: crate::TapPoint) -> anyhow::Result<()> {
         let mut page = self.page.lock();
+        if *page == "send-to-sheet" {
+            // Measured l86 Close [948,1409][996,1525]; a contact or app tile fails the test.
+            anyhow::ensure!(
+                (948.0..=996.0).contains(&point.x) && (1409.0..=1525.0).contains(&point.y),
+                "unexpected tap on the Send to sheet"
+            );
+            *page = *self.sheet_parent.lock();
+            self.actions.lock().push("closeSheet".into());
+            return Ok(());
+        }
         let target = match *page {
+            "feed-video" if point.x > 800.0 => {
+                *self.sheet_parent.lock() = "feed-video";
+                "send-to-sheet"
+            }
             "feed" if point.x > 800.0 => "profile",
             "dialog" => "feed",
             "profile" => {
@@ -820,6 +841,7 @@ impl UiSession for Session {
         let mut page = self.page.lock();
         *page = match *page {
             "post" | "caption-hidden-post" => "profile",
+            "feed-video" => "feed",
             "share" => "post",
             "comments" => self.comments_back_target,
             _ => anyhow::bail!("unproved Back"),
@@ -984,6 +1006,7 @@ async fn global_photo_tile_evidence(
         caption_expanded: false,
         public_link: None,
         trace_nonce: [0; 16],
+        metadata: Default::default(),
         diagnostic: VerificationDiagnostic {
             captured_metadata_candidate: None,
             publication_evidence: None,
@@ -1756,6 +1779,7 @@ fn a_changed_post_snapshot_cannot_combine_prior_caption_with_new_time() {
         caption_expanded: false,
         public_link: None,
         trace_nonce: [0; 16],
+        metadata: Default::default(),
         diagnostic: VerificationDiagnostic {
             captured_metadata_candidate: None,
             publication_evidence: None,
@@ -1798,4 +1822,312 @@ fn a_changed_post_snapshot_cannot_combine_prior_caption_with_new_time() {
         capture.post_proof(&tree(snapshot.replace(":id/tv_post_time", ":id/not-time"))),
         Err(VerificationReason::TimestampMissing)
     );
+}
+
+const SEND_TO_SHEET: &str = include_str!(
+    "../../../fixtures/tiktok-publish/musically-45.7.3-en/real-20261014-linkflow-p44-send-to-sheet.xml"
+);
+
+/// A share sheet without Copy link (Global 45.7.3/en, phone 44, 14/10/2026) is closed with
+/// its measured Close whether an earlier pass left it open or this pass opened it, and the
+/// pass goes on to prove the post on the own Profile instead of stopping on the sheet.
+#[tokio::test(start_paused = true)]
+async fn send_to_sheet_without_copy_link_is_closed_and_the_profile_proof_continues() {
+    let plan = PublishVerificationPlan::for_build(PACKAGE, "en", "45.7.3").unwrap();
+    assert_eq!(classify(&tree(SEND_TO_SHEET.into()), &plan), Screen::Share);
+    for start in ["send-to-sheet", "feed-video"] {
+        let session = Session {
+            global_45_7_3: true,
+            page: Mutex::new(start),
+            ..Default::default()
+        };
+        let captured = capture_submission_link(&session, &plan, CAPTION, &identity()).await;
+        let actions = session.actions.lock();
+        assert_eq!(
+            captured.outcome,
+            OwnPostLink::Captured(URL.into()),
+            "{start}: {actions:?}"
+        );
+        assert_eq!(
+            actions.iter().filter(|action| *action == "closeSheet").count(),
+            1,
+            "{start}: {actions:?}"
+        );
+        assert_eq!(captured.diagnostic.copy_attempts, 1, "{start}");
+    }
+}
+
+const LINKFLOW_FEED: &str = include_str!(
+    "../../../fixtures/tiktok-publish/musically-45.7.3-en/real-20261014-linkflow-p36-feed.xml"
+);
+const LINKFLOW_PROFILE: &str = include_str!(
+    "../../../fixtures/tiktok-publish/musically-45.7.3-en/real-20261014-linkflow-p36-profile.xml"
+);
+const LINKFLOW_POST: &str = include_str!(
+    "../../../fixtures/tiktok-publish/musically-45.7.3-en/real-20261014-linkflow-p36-post.xml"
+);
+const LINKFLOW_SHARE: &str = include_str!(
+    "../../../fixtures/tiktok-publish/musically-45.7.3-en/real-20261014-linkflow-p36-share.xml"
+);
+/// Where phone 36's copied `vt.tiktok.com` link redirected (14/10/2026).
+const LINKFLOW_URL: &str =
+    "https://www.tiktok.com/@dongchoinoinoi_dalat/photo/7696402901803158805";
+const LINKFLOW_CAPTION: &str = "chi phí đà lạt cho 3 ngày đây, lưu lại kẻo quên nha \u{1f3d4}\u{fe0f} Lưu list này để có lịch đi Đà Lạt gọn hơn, dễ chọn điểm theo buổi và đỡ mất thời gian mò từng nơi. #riviudalat #dalat #dalatreview #72hdalat #budgetdalat";
+
+/// The raw `text` attribute of the one `:id/desc` caption in a captured tree.
+fn caption_attribute(xml: &str) -> &str {
+    let id = xml.find(":id/desc\"").expect("captured caption");
+    let start = xml[..id].rfind(" text=\"").expect("caption text") + " text=\"".len();
+    let end = start + xml[start..].find('"').expect("caption end");
+    &xml[start..end]
+}
+
+fn within(point: &crate::TapPoint, [left, top, right, bottom]: [f64; 4]) -> bool {
+    (left..=right).contains(&point.x) && (top..=bottom).contains(&point.y)
+}
+
+fn linkflow_identity() -> SubmissionIdentity {
+    // The newest tile reads "· 10m ago": its whole rounded interval lies after this Post.
+    SubmissionIdentity {
+        prepared_at: None,
+        account: "dongchoinoinoi_dalat".into(),
+        submitted_at: (chrono::Utc::now() - chrono::Duration::minutes(12)).to_rfc3339(),
+    }
+}
+
+/// Phone 36's measured manual link flow (Global 45.7.3/en, 14/10/2026) replayed page by
+/// page, taps routed by the captured bounds; any other tap fails the test. Only the newest
+/// tile is the submission: older tiles show another caption, and expanding the folded
+/// caption shows the full text the feed captured.
+struct Linkflow {
+    page: Mutex<&'static str>,
+    tile: Mutex<usize>,
+    expanded: Mutex<bool>,
+    generation: AtomicU64,
+    clipboard: Mutex<Vec<u8>>,
+    actions: Mutex<Vec<&'static str>>,
+}
+
+impl Linkflow {
+    fn new() -> Self {
+        Self {
+            page: Mutex::new("feed"),
+            tile: Mutex::new(0),
+            expanded: Mutex::new(false),
+            generation: AtomicU64::new(0),
+            clipboard: Mutex::new(b"prior clipboard".to_vec()),
+            actions: Mutex::new(Vec::new()),
+        }
+    }
+
+    fn xml(&self) -> String {
+        match *self.page.lock() {
+            "feed" => LINKFLOW_FEED.into(),
+            "profile" => LINKFLOW_PROFILE.into(),
+            "share" => LINKFLOW_SHARE.into(),
+            _ => {
+                let folded = caption_attribute(LINKFLOW_POST);
+                let shown = if *self.tile.lock() != 1 {
+                    "Một bài cũ hơn của tài khoản, caption khác hẳn lượt vừa đăng"
+                } else if *self.expanded.lock() {
+                    caption_attribute(LINKFLOW_FEED)
+                } else {
+                    folded
+                };
+                LINKFLOW_POST.replacen(folded, shown, 1)
+            }
+        }
+    }
+}
+
+#[async_trait::async_trait]
+impl UiSession for Linkflow {
+    async fn locate(
+        &self,
+        query: crate::ElementQuery<'_>,
+    ) -> anyhow::Result<Option<crate::ElementBox>> {
+        let found = self.locate_all_described(query).await?;
+        anyhow::ensure!(found.len() <= 1, "fixture locate target not unique");
+        Ok(found.into_iter().next())
+    }
+    async fn locate_all(
+        &self,
+        query: crate::ElementQuery<'_>,
+    ) -> anyhow::Result<Vec<crate::ElementBox>> {
+        self.locate_all_described(query).await
+    }
+    async fn locate_all_described(
+        &self,
+        query: crate::ElementQuery<'_>,
+    ) -> anyhow::Result<Vec<crate::ElementBox>> {
+        let snapshot = tree(self.xml());
+        Ok(snapshot
+            .matching(PACKAGE, query)
+            .into_iter()
+            .filter_map(|index| snapshot.nodes[index].rect())
+            .collect())
+    }
+    async fn activate_element(&self, query: crate::ElementQuery<'_>) -> anyhow::Result<()> {
+        let snapshot = tree(self.xml());
+        let found = snapshot.matching(PACKAGE, query);
+        let [index] = found.as_slice() else {
+            anyhow::bail!("fixture target not unique");
+        };
+        self.tap(snapshot.nodes[*index].rect().unwrap().centre())
+            .await
+    }
+    async fn tap(&self, point: crate::TapPoint) -> anyhow::Result<()> {
+        let mut page = self.page.lock();
+        let action = match *page {
+            // nrb "Profile".
+            "feed" if within(&point, [864.0, 1965.0, 1080.0, 2094.0]) => {
+                *page = "profile";
+                "profileTab"
+            }
+            // The three-column emr/cover grid above the bottom navigation.
+            "profile" if within(&point, [0.0, 876.0, 1080.0, 1964.0]) => {
+                *self.tile.lock() =
+                    ((point.y - 876.0) / 480.0) as usize * 3 + (point.x / 361.0) as usize + 1;
+                *self.expanded.lock() = false;
+                *page = "post";
+                "tile"
+            }
+            // desc: folded with a trailing ellipsis and itself clickable.
+            "post" if within(&point, [32.0, 1695.0, 870.0, 1945.0]) => {
+                *self.expanded.lock() = true;
+                "expandCaption"
+            }
+            // fpv "Share video.  shares".
+            "post" if within(&point, [912.0, 1682.0, 1080.0, 1808.0]) => {
+                *page = "share";
+                "share"
+            }
+            // The Copy link row; the sheet closes itself and the viewer returns.
+            "share" if within(&point, [24.0, 1589.0, 192.0, 1810.0]) => {
+                *self.clipboard.lock() = LINKFLOW_URL.as_bytes().to_vec();
+                *page = "post";
+                "copyLink"
+            }
+            other => anyhow::bail!("unexpected tap on {other}"),
+        };
+        self.actions.lock().push(action);
+        Ok(())
+    }
+    async fn swipe(&self, _: crate::SwipeGesture) -> anyhow::Result<()> {
+        anyhow::bail!("the newest tile is in the first viewport")
+    }
+    async fn back(&self) -> anyhow::Result<()> {
+        let mut page = self.page.lock();
+        *page = match *page {
+            "post" => "profile",
+            "share" => "post",
+            other => anyhow::bail!("unproved Back on {other}"),
+        };
+        self.actions.lock().push("back");
+        Ok(())
+    }
+    async fn home(&self) -> anyhow::Result<()> {
+        anyhow::bail!("no hardware Home")
+    }
+    async fn type_text(&self, _: &str) -> anyhow::Result<()> {
+        anyhow::bail!("no typing")
+    }
+    async fn find_and_tap(&self, _: &str) -> anyhow::Result<()> {
+        anyhow::bail!("no blind tap")
+    }
+    async fn assert_visible(&self, _: &str) -> anyhow::Result<()> {
+        Ok(())
+    }
+    fn stream_url(&self) -> Option<String> {
+        None
+    }
+    fn supports_element_bounds(&self) -> bool {
+        true
+    }
+    async fn active_app_bundle(&self) -> anyhow::Result<String> {
+        Ok(PACKAGE.into())
+    }
+    async fn ui_language(&self) -> Option<String> {
+        Some("en".into())
+    }
+    async fn app_version(&self, _: &str) -> Option<String> {
+        Some("45.7.3".into())
+    }
+    async fn hierarchy_source_snapshot(&self) -> anyhow::Result<crate::HierarchySourceSnapshot> {
+        Ok(crate::HierarchySourceSnapshot {
+            generation: self.generation.fetch_add(1, Ordering::Relaxed) + 1,
+            xml: self.xml(),
+        })
+    }
+    async fn set_clipboard(&self, _: &str, bytes: &[u8]) -> anyhow::Result<()> {
+        *self.clipboard.lock() = bytes.to_vec();
+        Ok(())
+    }
+    async fn get_clipboard(&self, _: usize) -> anyhow::Result<(String, Vec<u8>)> {
+        Ok(("plaintext".into(), self.clipboard.lock().clone()))
+    }
+}
+
+/// TikTok's public metadata did not answer for the retained candidate. Phone 36's measured
+/// manual order proves it on the own Profile instead (account, newest tile, full caption
+/// after expansion, "· 10m ago", Share, Copy link) without a public-proof Copy that would
+/// only wait on that metadata again.
+#[tokio::test(start_paused = true)]
+async fn retained_candidate_without_public_metadata_is_proven_on_the_own_profile() {
+    let plan = PublishVerificationPlan::for_build(PACKAGE, "en", "45.7.3").unwrap();
+    let session = Linkflow::new();
+    let captured = capture_retained_candidate_link(
+        &session,
+        &plan,
+        LINKFLOW_CAPTION,
+        &linkflow_identity(),
+        &[],
+        LINKFLOW_URL,
+    )
+    .await;
+    let actions = session.actions.lock();
+    assert_eq!(
+        captured.outcome,
+        OwnPostLink::Captured(LINKFLOW_URL.into()),
+        "{actions:?} {:?}",
+        captured.diagnostic
+    );
+    assert_eq!(captured.diagnostic.stage, "verified");
+    assert_eq!(captured.diagnostic.copy_attempts, 1);
+    assert_eq!(
+        actions[..6],
+        [
+            "profileTab",
+            "tile",
+            "expandCaption",
+            "share",
+            "copyLink",
+            "back"
+        ]
+    );
+}
+
+/// The own Profile proves a different post than the retained candidate: two posts match
+/// this submission, so neither link is verified.
+#[tokio::test(start_paused = true)]
+async fn retained_candidate_and_profile_link_of_another_post_never_verify() {
+    let plan = PublishVerificationPlan::for_build(PACKAGE, "en", "45.7.3").unwrap();
+    let session = Linkflow::new();
+    let captured = capture_retained_candidate_link(
+        &session,
+        &plan,
+        LINKFLOW_CAPTION,
+        &linkflow_identity(),
+        &[],
+        "https://www.tiktok.com/@dongchoinoinoi_dalat/photo/7696402901803158806",
+    )
+    .await;
+    assert_eq!(
+        captured.diagnostic.reason_code,
+        VerificationReason::MultipleMatchingPosts,
+        "{:?}",
+        session.actions.lock()
+    );
+    assert!(captured.outcome.link().is_none());
+    assert_eq!(captured.diagnostic.copy_attempts, 1);
 }

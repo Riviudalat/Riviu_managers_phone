@@ -125,6 +125,41 @@ impl Tree {
         }
     }
 
+    /// Global 45.7.3/en share sheet, measured 14/10/2026 on phone 36 (the sheet with Copy
+    /// link) and phone 44 (the "Send to" variant without it): a `Bottom sheet` whose header
+    /// row holds `tv_title` "Send to" and `l86` "Close". That Close is the only control this
+    /// answers; the contact and app tiles in the same sheet are never targets.
+    pub(crate) fn share_sheet_close(&self, package: &str) -> Option<ElementBox> {
+        let closes = self.matching(
+            package,
+            ElementQuery::Description {
+                value: "Close",
+                exact: true,
+            },
+        );
+        let [close] = closes.as_slice() else {
+            return None;
+        };
+        let node = &self.nodes[*close];
+        let header = node.parent?;
+        let titled = self.nodes.iter().enumerate().any(|(index, title)| {
+            title.parent == Some(header)
+                && title.visible(package)
+                && title.attr("resource-id").ends_with(":id/tv_title")
+                && title.attr("text") == "Send to"
+                && self.ancestors_visible(index)
+        });
+        let in_sheet = self.nodes.iter().enumerate().any(|(index, sheet)| {
+            sheet.attr("content-desc") == "Bottom sheet"
+                && sheet.visible(package)
+                && self.inside(*close, index)
+        });
+        if !node.attr("resource-id").ends_with(":id/l86") || !titled || !in_sheet {
+            return None;
+        }
+        node.rect().filter(|rect| rect.enabled && rect.clickable)
+    }
+
     pub fn grid(&self, plan: &PublishVerificationPlan) -> Vec<ElementBox> {
         let Some(tile) = plan.labels.post_tile_id() else {
             return Vec::new();

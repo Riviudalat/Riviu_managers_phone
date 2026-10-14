@@ -62,8 +62,9 @@ pub use processing::{is_processing_notice, ProcessingNotice};
 mod verification;
 pub use photo_proof::{capture_expanded_photo_link, capture_visible_video_link};
 pub use verification::{
-    capture_submission_link, capture_submission_link_excluding, probe_clipboard_restore,
-    PublishVerificationPlan, VerificationCapture, VerificationDiagnostic, VerificationReason,
+    capture_retained_candidate_link, capture_submission_link, capture_submission_link_excluding,
+    probe_clipboard_restore, PublishVerificationPlan, VerificationCapture, VerificationDiagnostic,
+    VerificationReason,
 };
 
 /// How long the share sheet may take to come up.
@@ -1358,17 +1359,58 @@ async fn await_copy_row(session: &dyn UiSession) -> CopyRow {
 ///
 /// **What this cannot cover:** dropping the future — an aborted task — skips it entirely,
 /// because there is no async destructor to hang it on.
+///
+/// A sheet without a copy row (Global 45.7.3's "Send to" variant, phone 44, 14/10/2026) is
+/// closed with its own measured Close; left open, it stalled every later pass as an
+/// unrecognized dialog.
 async fn close_sheet(session: &dyn UiSession) {
     for _ in 0..3 {
-        if !matches!(await_copy_row_once(session).await, CopyRow::Found(_)) {
-            return;
+        match await_copy_row_once(session).await {
+            CopyRow::Found(_) => {
+                let _ = session.back().await;
+            }
+            CopyRow::Missing => match measured_share_sheet_close(session).await {
+                Some(close) => {
+                    let _ = session.tap(close.centre()).await;
+                }
+                None => return,
+            },
+            CopyRow::Ambiguous | CopyRow::Failed(_) => return,
         }
-        let _ = session.back().await;
         tokio::time::sleep(POLL).await;
-        if matches!(await_copy_row_once(session).await, CopyRow::Missing) {
-            return;
-        }
     }
+}
+
+async fn measured_share_sheet_close(session: &dyn UiSession) -> Option<ElementBox> {
+    let package = session.active_app_bundle().await.ok()?;
+    hierarchy::Tree::parse(session.hierarchy_source_snapshot().await.ok()?)
+        .ok()?
+        .share_sheet_close(&package)
+}
+
+/// A share sheet an earlier pass left open is a known screen, not an unrecognized dialog:
+/// close it with its measured Close before anything reads the account. Never taps a
+/// contact or app tile. `Ok(false)` when no measured sheet was open.
+pub async fn close_leftover_share_sheet(
+    session: &dyn UiSession,
+    package: &str,
+) -> anyhow::Result<bool> {
+    let mut closed = false;
+    for _ in 0..2 {
+        let tree = hierarchy::Tree::parse(session.hierarchy_source_snapshot().await?)?;
+        let Some(close) = tree.share_sheet_close(package) else {
+            return Ok(closed);
+        };
+        session.tap(close.centre()).await?;
+        closed = true;
+        tokio::time::sleep(POLL).await;
+    }
+    let tree = hierarchy::Tree::parse(session.hierarchy_source_snapshot().await?)?;
+    anyhow::ensure!(
+        tree.share_sheet_close(package).is_none(),
+        "Bảng Chia sẻ vẫn mở sau hai lần bấm Đóng"
+    );
+    Ok(true)
 }
 
 /// One look for the copy row, with no waiting. Split out so the close loop does not spend a
