@@ -620,9 +620,13 @@ pub async fn ensure_photo_order(
     }
     for (image, row) in images.iter().zip(&ordered) {
         let remote = &row.data;
+        // r125 (15/10/2026) phone 32: this re-proof read the adb client's own
+        // `failed to start daemon` as the phone's exit 1 and lost the turn before Post.
         verify_staged_file(remote, image.byte_len, &image.sha256, |script| async move {
-            adb.shell_output(serial, &script, crate::adb::DEFAULT_TIMEOUT).await
-        }).await.context("reprove imported photo bytes")?;
+            staging_read(adb, serial, &script).await
+        })
+        .await
+        .context("reprove imported photo bytes")?;
     }
 
     // Existing metadata is not enough until all image bytes and album membership are re-proved.
