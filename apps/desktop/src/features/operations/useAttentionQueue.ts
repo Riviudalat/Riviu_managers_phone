@@ -107,7 +107,7 @@ const classifyQuery = ([id, sourceId, kind, updatedAt]: [string, string, Operati
  * removes it. A failed read keeps the rows of its last success and says so. Every budget and
  * unread page turns the count into a floor. Polls only; nothing here sends a command.
  */
-export function useAttentionQueue({ runs, runsSettled, runsError, runsHasMore = false, phones, attention, attentionKnown, labels, dismissed }: {
+export function useAttentionQueue({ runs, runsSettled, runsError, runsHasMore = false, phones, attention, attentionKnown, labels, dismissed, listen = true }: {
   runs: readonly OperationRunSummary[];
   runsSettled: boolean;
   runsError: string | null;
@@ -118,6 +118,8 @@ export function useAttentionQueue({ runs, runsSettled, runsError, runsHasMore = 
   attentionKnown: boolean;
   labels: ReadonlyMap<string, string>;
   dismissed: readonly DismissedRecord[];
+  /** False until startup is known to be clean: nothing listens to a backend that failed to start. */
+  listen?: boolean;
 }): AttentionQueue {
   const readPublishAll = useCallback(() => operationQueryRuns({ kind: "publish", limit: DISCOVERY_PAGE, offset: 0 }), []);
   const readUncertainAll = useCallback(() => operationQueryRuns({ state: "uncertain", limit: DISCOVERY_PAGE, offset: 0 }), []);
@@ -129,6 +131,7 @@ export function useAttentionQueue({ runs, runsSettled, runsError, runsHasMore = 
   // Re-read a campaign when the backend reports it changed: once per gap, plus once at the
   // gap's end so the last change of a burst is never left to the safety interval.
   useEffect(() => {
+    if (!listen) return;
     let disposed = false;
     let stop: (() => void) | undefined;
     const lastRead = new Map<string, number>();
@@ -155,7 +158,7 @@ export function useAttentionQueue({ runs, runsSettled, runsError, runsHasMore = 
       stop?.();
       for (const timer of trailing.values()) clearTimeout(timer);
     };
-  }, []);
+  }, [listen]);
   // Bumped when a one-shot read lands, so the next runs move into the read window.
   const [classifyTick, setClassifyTick] = useState(0);
 

@@ -1281,7 +1281,7 @@ function App() {
         />
         {!focusDevice && recordingControls}
         <OperationProgressCenter deviceLabels={automationDeviceLabels} pillHost={monitorPill}
-          phones={queueFleet.phones} attention={queueFleet.attention} attentionKnown={counts.attention !== null}
+          phones={queueFleet.phones} attention={queueFleet.attention} attentionKnown={counts.attention !== null} listen={startupIssue === null}
           onDeviceDetails={setDetailsFor} onOpenRuns={() => void requestPage("jobs", true)} />
         <div
           ref={contentRef}

@@ -45,7 +45,7 @@ type QueueTab = "attention" | "running";
  *
  * Without a host (unit tests, startup) the bar controls fall back to `document.body`.
  */
-export function OperationProgressCenter({ deviceLabels, phones = EMPTY_PHONES, attention = EMPTY_ATTENTION, attentionKnown = true, pillHost = null, onDeviceDetails, onOpenRuns }: {
+export function OperationProgressCenter({ deviceLabels, phones = EMPTY_PHONES, attention = EMPTY_ATTENTION, attentionKnown = true, listen = true, pillHost = null, onDeviceDetails, onOpenRuns }: {
   deviceLabels: ReadonlyMap<string, string>;
   /** Every phone's number, box and current holder. */
   phones?: ReadonlyMap<string, QueuePhone>;
@@ -53,6 +53,8 @@ export function OperationProgressCenter({ deviceLabels, phones = EMPTY_PHONES, a
   attention?: readonly DeviceAttention[];
   /** False while that counter is unknown ("?"): the list may then miss phones. */
   attentionKnown?: boolean;
+  /** False while startup is unknown or failed: the queue then does not listen to backend events. */
+  listen?: boolean;
   pillHost?: HTMLElement | null;
   onDeviceDetails?: (udid: string) => void;
   onOpenRuns?: () => void;
@@ -121,7 +123,7 @@ export function OperationProgressCenter({ deviceLabels, phones = EMPTY_PHONES, a
   const selectedRun = pendingStart ? null : runs.find((run) => run.id === selectedId) ?? runs.find(run => run.id === pinnedRun?.id) ?? runs[0] ?? null;
   const queue = useAttentionQueue({
     runs: listedRuns, runsSettled: state.value !== null || state.error !== null, runsError: state.error, runsHasMore: state.value?.page.hasMore ?? false,
-    phones, attention, attentionKnown, labels: deviceLabels, dismissed: dismissal.records,
+    phones, attention, attentionKnown, labels: deviceLabels, dismissed: dismissal.records, listen,
   });
 
   const openQueue = useCallback((next: QueueTab, opener: HTMLElement | null) => {
