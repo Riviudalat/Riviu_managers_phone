@@ -41,11 +41,11 @@ pub(crate) fn spawn(
             let Ok(_admitted) = admission.ensure_accepting_work() else {
                 return;
             };
-            let journal = |action: &str, message: &str| {
-                if let Err(error) = db.log_op(action, message) {
-                    log::error!("could not persist {action}: {error:#}");
-                }
+            // Returns the write error: the driver refuses a restart whose intent did not land,
+            // and logs a receipt that did not as an error.
+            let journal = |action: &str, message: &str| -> anyhow::Result<()> {
                 log::warn!("{message}");
+                db.log_op(action, message)
             };
             let safe_boundary = || match db.adb_restart_blockers(chrono::Utc::now()) {
                 Ok(blockers) if blockers.is_empty() => Ok(()),
@@ -78,7 +78,9 @@ pub(crate) fn spawn(
             };
             match hold {
                 Some((action, message)) if last_hold.as_deref() != Some(action) => {
-                    journal(action, &message);
+                    if let Err(error) = journal(action, &message) {
+                        log::error!("không ghi được {action} vào nhật ký hoạt động: {error:#}");
+                    }
                     last_hold = Some(action.to_string());
                 }
                 Some(_) => {}

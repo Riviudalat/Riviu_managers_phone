@@ -1834,7 +1834,7 @@ impl AndroidDriver {
         safe_boundary: S,
     ) -> crate::ServerRecovery
     where
-        J: Fn(&str, &str),
+        J: Fn(&str, &str) -> anyhow::Result<()>,
         S: FnOnce() -> Result<(), String>,
     {
         self.adb.recover_hung_server(journal, safe_boundary).await

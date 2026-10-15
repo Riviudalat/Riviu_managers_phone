@@ -217,6 +217,8 @@ pub enum RestartRefusal {
     Cooldown { remaining: std::time::Duration },
     HourlyCap,
     InProgress,
+    /// The `adb.server.restart` intent could not be written, so nothing was killed.
+    IntentNotRecorded,
 }
 
 impl RestartRefusal {
@@ -227,10 +229,13 @@ impl RestartRefusal {
                 remaining.as_secs().max(1)
             ),
             Self::HourlyCap => format!(
-                "đã khởi động lại ADB {MAX_RESTARTS_PER_HOUR} lần trong một giờ; Riviu không \
+                "đã thử khởi động lại ADB {MAX_RESTARTS_PER_HOUR} lần trong một giờ; Riviu không \
                  tự khởi động lại nữa. Kiểm tra cáp/hub USB và phần mềm khác đang dùng ADB"
             ),
             Self::InProgress => "đang khởi động lại ADB".to_string(),
+            Self::IntentNotRecorded => "không ghi được ý định khởi động lại vào nhật ký hoạt \
+                 động, nên Riviu không tắt ADB server. Kiểm tra ổ đĩa và cơ sở dữ liệu của Riviu"
+                .to_string(),
         }
     }
 }
@@ -307,6 +312,15 @@ impl ServerWatch {
         self.restarts.history.push_back(now);
         self.restarting = Some(now);
         Ok(())
+    }
+
+    /// Close a restart begun by [`Self::begin_restart`] that never reached `kill-server`
+    /// because its intent could not be recorded. The attempt still counts against the
+    /// cooldown and the hourly cap: a ledger that cannot be written is a host fault that a
+    /// retry every tick would not fix, and the cap keeps the attempts finite. No notice:
+    /// nothing happened to the server, and the caller reports the refusal.
+    pub fn abandon_restart(&mut self) {
+        self.restarting = None;
     }
 
     /// Close a restart begun by [`Self::begin_restart`] and queue its operator notice.

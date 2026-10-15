@@ -807,11 +807,13 @@ impl AdbProgram {
     ///
     /// Order: a suspicion from [`Self::server_hang_suspected`]; the budget; a roster probe
     /// that must go unanswered; `safe_boundary` (no Post/Send between intent and receipt);
-    /// then the intent is journaled before `kill-server` and the receipt after. Nothing is
-    /// replayed: callers see only the transport fault the restart causes.
+    /// then the intent is journaled before `kill-server` and the receipt after. An intent
+    /// that cannot be journaled refuses the restart; a receipt that cannot be is logged as an
+    /// error, since the effect has already happened. Nothing is replayed: callers see only
+    /// the transport fault the restart causes.
     pub async fn recover_hung_server<J, S>(&self, journal: J, safe_boundary: S) -> ServerRecovery
     where
-        J: Fn(&str, &str),
+        J: Fn(&str, &str) -> anyhow::Result<()>,
         S: FnOnce() -> Result<(), String>,
     {
         let Some(watch) = &self.server_watch else {
@@ -843,7 +845,7 @@ impl AdbProgram {
         if let Err(refusal) = watch.lock().begin_restart(Instant::now()) {
             return ServerRecovery::Refused(refusal);
         }
-        journal(
+        let intent = journal(
             "adb.server.restart",
             &format!(
                 "ADB server cổng {port} không trả lời (lỗi phía máy tính trên {} máy trong {} giây: {}); \
@@ -855,6 +857,16 @@ impl AdbProgram {
                 self.path.display()
             ),
         );
+        if let Err(error) = intent {
+            // Intent before effect: a restart nobody recorded leaves every dropped stream and
+            // session without a cause, so nothing is killed.
+            tracing::error!(
+                port,
+                "không ghi được ý định khởi động lại ADB server; không khởi động lại: {error:#}"
+            );
+            watch.lock().abandon_restart();
+            return ServerRecovery::Refused(crate::adb_server::RestartRefusal::IntentNotRecorded);
+        }
         let started = Instant::now();
         match self.restart_server(port).await {
             Ok(roster) => {
@@ -864,7 +876,12 @@ impl AdbProgram {
                      xác nhận sẽ không tự gửi lại",
                     started.elapsed().as_secs()
                 );
-                journal("adb.server.restart.done", &message);
+                if let Err(error) = journal("adb.server.restart.done", &message) {
+                    tracing::error!(
+                        port,
+                        "không ghi được biên nhận khởi động lại ADB server: {error:#}"
+                    );
+                }
                 watch
                     .lock()
                     .end_restart(port, Some(&roster), message, Instant::now());
@@ -875,7 +892,12 @@ impl AdbProgram {
                     "Riviu không khởi động lại được ADB server cổng {port}: {error:#}. Đóng phần \
                      mềm khác đang dùng ADB rồi mở lại Riviu nếu máy vẫn không phản hồi"
                 );
-                journal("adb.server.restart.failed", &message);
+                if let Err(error) = journal("adb.server.restart.failed", &message) {
+                    tracing::error!(
+                        port,
+                        "không ghi được biên nhận khởi động lại ADB server thất bại: {error:#}"
+                    );
+                }
                 watch
                     .lock()
                     .end_restart(port, None, message.clone(), Instant::now());
@@ -3230,7 +3252,10 @@ mod tests {
             }
         };
         let journal = parking_lot::Mutex::new(Vec::<String>::new());
-        let record = |action: &str, _: &str| journal.lock().push(action.to_string());
+        let record = |action: &str, _: &str| -> anyhow::Result<()> {
+            journal.lock().push(action.to_string());
+            Ok(())
+        };
 
         hang(&adb);
         assert!(adb.server_hang_suspected());
