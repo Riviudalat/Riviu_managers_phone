@@ -2995,7 +2995,48 @@ impl<'a, P: TapPlanner> Composer<'a, P> {
         // Focusing is not optional: `type_text` writes into whichever field has focus.
         self.tap_inside(&field).await?;
         crate::tiktok_sound::check_wait()?;
-        self.session.type_text(caption).await?;
+        match self.session.type_text(caption).await {
+            Ok(()) => {}
+            // gf90 B6, r123 phone 49 (15/10/2026): TikTok re-rendered the field between the
+            // agent's find and `set_text`, and the 404 cost the whole attempt. That answer came
+            // back before any text was set, so the field is found again on a fresh read,
+            // focused, and written once more inside this same step. A timeout, any other
+            // failure, or this one a second time is returned as before; the readback below
+            // still decides.
+            Err(error) if caption_field_detached(&error) => {
+                let epoch = self.session.gui_session_epoch();
+                let mut trace = StageDiagnosticOperation::start("captionRetype", &epoch, None);
+                trace.query(query);
+                tracing::info!(
+                    udid = ?stage_udid(),
+                    "ô chú thích bị TikTok vẽ lại ngay khi ghi chữ (404, phần tử đã tách) — tìm lại ô và ghi lại một lần; chưa bấm Đăng"
+                );
+                crate::tiktok_sound::check_wait()?;
+                let Some(field) = self
+                    .await_condition(
+                        read_window("captionField", COMPOSER_WINDOW, 3),
+                        query,
+                        stop,
+                        |_| true,
+                    )
+                    .await?
+                else {
+                    trace.finish("noField");
+                    return Err(error);
+                };
+                anyhow::ensure!(
+                    self.session.gui_session_epoch() == epoch,
+                    "caption retype session changed"
+                );
+                trace.target(&field, None);
+                self.tap_inside(&field).await?;
+                crate::tiktok_sound::check_wait()?;
+                let typed = self.session.type_text(caption).await;
+                trace.finish(if typed.is_ok() { "typed" } else { "error" });
+                typed?;
+            }
+            Err(error) => return Err(error),
+        }
         crate::tiktok_sound::check_wait()?;
 
         // **Equality on exactly one field, not a prefix on any field.**
@@ -6004,6 +6045,16 @@ async fn sleep(duration: Duration, stop: &AtomicBool) {
         let left = deadline.saturating_duration_since(Instant::now());
         tokio::time::sleep(left.min(Duration::from_millis(120))).await;
     }
+}
+
+/// The agent's answer to `set_text` on a caption field TikTok had already replaced: 404 on
+/// `/element/<id>/value`, "no longer attached" (r123 phone 49, 15/10/2026; once before on
+/// 12/10). The same text `publish_recovery` classifies as a retryable attempt; only this one
+/// answer is retyped in place, never a timeout or an unclassified failure.
+fn caption_field_detached(error: &anyhow::Error) -> bool {
+    let message = format!("{error:#}").to_lowercase();
+    message.contains("/value lỗi 404")
+        && message.contains("the referenced element is no longer attached")
 }
 
 // Global 46.2.1 video, 18/09: returning from the sound editor adds a space after
