@@ -561,30 +561,53 @@ pub(crate) async fn run_bound_sheet_worker(
             }
         };
         let now = chrono::Utc::now().timestamp_millis();
+        // Manual acceptance: the scoped assignments this phone set allows, read on a reader
+        // lane from ids and Sheet rows only. The writer closures below only configure and
+        // claim; they used to load every scoped campaign's full detail while holding the one
+        // writer permit, up to three times a tick.
+        let scoped = if acceptance.active() {
+            let scope = acceptance.clone();
+            match read_for_view(
+                &db,
+                "sheet_acceptance_scope",
+                None,
+                move |db| {
+                    let rows = db.publish_sheet_scope(&scope.scoped_campaign_ids())?;
+                    Ok(rows
+                        .into_iter()
+                        .filter(|row| {
+                            scope.allows(
+                                crate::dev_acceptance::AcceptanceCapability::SheetDelivery,
+                                &row.campaign_id,
+                                &row.udid,
+                            )
+                        })
+                        .collect::<Vec<_>>())
+                },
+                |rows| format!("{} máy", rows.len()),
+            )
+            .await
+            {
+                Ok(rows) => Some(rows),
+                Err(error) => {
+                    log::warn!("Sheet: không đọc được các máy trong phạm vi nghiệm thu: {error:#}");
+                    continue;
+                }
+            }
+        } else {
+            None
+        };
         if configured_fingerprint.as_ref() != Some(&fingerprint) {
             let current = fingerprint.clone();
-            let scope = acceptance.clone();
+            let assignment_ids = scoped.as_ref().map(|rows| {
+                rows.iter()
+                    .map(|row| row.assignment_id.clone())
+                    .collect::<Vec<_>>()
+            });
             if let Err(error) = db
-                .storage_write(move |db| {
-                    if scope.active() {
-                        let mut assignment_ids = Vec::new();
-                        for campaign_id in scope.scoped_campaign_ids() {
-                            if let Some(detail) = db.get_publish_campaign(&campaign_id)? {
-                                for assignment in detail.assignments {
-                                    if scope.allows(
-                                        crate::dev_acceptance::AcceptanceCapability::SheetDelivery,
-                                        &campaign_id,
-                                        &assignment.udid,
-                                    ) {
-                                        assignment_ids.push(assignment.id);
-                                    }
-                                }
-                            }
-                        }
-                        db.configure_scoped_bound_sheet_delivery(&current, now, &assignment_ids)
-                    } else {
-                        db.configure_bound_sheet_delivery(&current, now)
-                    }
+                .storage_write(move |db| match assignment_ids {
+                    Some(ids) => db.configure_scoped_bound_sheet_delivery(&current, now, &ids),
+                    None => db.configure_bound_sheet_delivery(&current, now),
                 })
                 .await
             {
@@ -593,39 +616,33 @@ pub(crate) async fn run_bound_sheet_worker(
             }
             configured_fingerprint = Some(fingerprint);
         }
+        // Only rows that may still owe Sheet work are tried; each claim re-checks its row.
+        let pending = scoped.map(|rows| {
+            rows.into_iter()
+                .filter(|row| row.sheet_pending)
+                .map(|row| row.assignment_id)
+                .collect::<Vec<_>>()
+        });
         for kind in [
             SheetDeliveryKind::Canonical,
             SheetDeliveryKind::Report,
             SheetDeliveryKind::Canonical,
         ] {
-            if tasks.len() >= 2 {
+            if tasks.len() >= 2 || pending.as_ref().is_some_and(Vec::is_empty) {
                 break;
             }
-            let acceptance = acceptance.clone();
+            let pending = pending.clone();
             match db
                 .storage_write(move |db| {
-                    if acceptance.active() {
-                        for id in acceptance.scoped_campaign_ids() {
-                            if let Some(detail) = db.get_publish_campaign(&id)? {
-                                for a in detail.assignments {
-                                    if !acceptance.allows(
-                                        crate::dev_acceptance::AcceptanceCapability::SheetDelivery,
-                                        &id,
-                                        &a.udid,
-                                    ) {
-                                        continue;
-                                    }
-                                    if let Some(claim) =
-                                        db.claim_bound_sheet_delivery(kind, Some(&a.id), now)?
-                                    {
-                                        return Ok(Some(claim));
-                                    }
-                                }
-                            }
+                    let Some(ids) = pending else {
+                        return db.claim_bound_sheet_delivery(kind, None, now);
+                    };
+                    for id in &ids {
+                        if let Some(claim) = db.claim_bound_sheet_delivery(kind, Some(id), now)? {
+                            return Ok(Some(claim));
                         }
-                        return Ok(None);
                     }
-                    db.claim_bound_sheet_delivery(kind, None, now)
+                    Ok(None)
                 })
                 .await
             {
