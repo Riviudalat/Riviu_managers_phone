@@ -5,7 +5,7 @@
 > Không phải để copy code.
 >
 > **Ngày khảo sát:** 10/08/2026. **Máy khảo sát:** Windows 11 26200.
-> **Cập nhật lần cuối:** 10/08/2026.
+> **Cập nhật lần cuối:** 15/10/2026 (§13: bổ sung từ bản 2.6.2).
 
 ---
 
@@ -552,3 +552,63 @@ Chỗ đáng học trực tiếp: **mô hình cooldown có cửa sổ cho mọi 
 (§12.2) và **timeout kín mọi đường** (§12.3). Chỗ đã thấy rõ cái giá: SQLite sync
 trên main thread và console→IPC không tiết chế — Riviu (Rust + tách process) đang
 ở thế tốt hơn, đừng bắt chước hai thứ này.
+
+## 13. Bổ sung từ GenFarmer 2.6.2 (15/10/2026)
+
+Nguồn: bản dịch ngược 2.6.2 nằm ngoài repo (main process là bytecode V8). Bản này chỉ có tên hàm, hằng số và chuỗi, không có thân hàm, nên mọi kết luận về thứ tự hay chính sách đều là suy luận từ tên và hằng.
+
+Ba đính chính cho các ghi chép trước:
+- Hậu tố `2` trong tên lớp (`AdbHangRecoveryService2`, `DeviceService2`, `RunRepository2`) là esbuild đổi tên khi trùng. Đó không phải phiên bản mới.
+- `createJob` là code mã hóa của Node, không phải logic của GenFarmer.
+- `QUICK_PHASE` là các đoạn chữ lưu sẵn, còn "mobile data" là trình duyệt file. Cả hai không phải tính năng cài đặt máy.
+
+### 13.1 Cơ chế đọc được
+
+- **Thang khôi phục adb.** Hằng số:
+
+  | Hằng | Giá trị |
+  |---|---|
+  | `LIST_DEVICES_OP_TIMEOUT_MS` | 12000 |
+  | `STABLE_POLL_MS` | 700 |
+  | `STABLE_PASSES_REQUIRED` | 3 |
+  | `MAX_STABLE_PHASE_MS` | 90000 |
+  | `COOLDOWN_GRACE_TRY_STABLE_MS` | 35000 |
+  | `MIN_MS_BETWEEN_KILLS` | 45000 |
+  | `RECONNECT_CHUNK` | 5 |
+  | `NETWORK_CONNECT_TIMEOUT_MS` | 8000 |
+
+  Chỉ một lần khôi phục chạy tại một thời điểm, và mọi lượt chạy đều chờ nó. Sau đó mỗi máy có một watchdog; máy nào không quay lại thì lượt chạy của nó dừng.
+- **Kill.** Bước kill diệt **mọi** `adb.exe` trên PC theo tên (`taskkill /IM adb.exe /T /F`, rồi `Stop-Process -Name adb`). Vì vậy một cổng adb riêng không che được tool khác chạy trên cùng PC.
+- **adbkit.** Mở một socket cho mỗi lệnh, không giữ kết nối, và tự `start-server` khi bị từ chối.
+- **Máy rớt.** Không có khái niệm "cả hộp USB rớt", và chỉ máy mạng được tự nối lại. Lưới vẫn giữ máy vắng mặt: `hideDisconnected: false` là mặc định.
+- **Sau khi khôi phục hạ tầng, node đang dở được tự chạy lại** (log "tự động thử lại node đang chạy"). Timeout của node mặc định 120 s và đi theo cạnh success. Riviu cấm cả hai với Post/Send.
+- **Thành phần trên máy.** So MD5 của binary agent và `versionCode` của APK mỗi lần dựng phiên. Việc dựng là lười: chỉ chạy ở lần dùng đầu tiên, hoặc trong warmup theo lô (máy hỏng bị loại trước khi giao việc).
+- **Stream.** Preset mặc định là High (`deviceQuality: 75`): trần 4 Mbps, ô encode khoảng 167 px, 15 fps. Ô bị che chỉ chạy 1 fps. Byte video không đi qua main process. Đòn bẩy của họ là độ phân giải ô, không phải bitrate.
+- **Nhận dạng ảnh.** 4 worker Airtest luôn sống. Riviu chỉ có 2 chỗ OCR và spawn một tiến trình cho mỗi yêu cầu (`gui_service.rs`, `riviu_gui/app.py`).
+- **Sức khỏe máy.** Không đo, không tự reboot.
+- **Root.** Kiểm bằng binary `genfarmer`/`su` có sẵn trên máy; trong chuỗi của 2.6.2 không có `adb root`.
+- **TikTok.** Corpus không có selector nào. Kịch bản bán trong store được mã hóa. `checkTiktok` chỉ cào trang hồ sơ trên web để trả live/die.
+
+### 13.2 Áp cho Riviu
+
+**Nên học:**
+- Khôi phục hạ tầng chạy một mối, và việc nhận effect mới chờ nó: một rào chắn nguyên tử, không phải chỉ đọc sổ.
+- Lưới giữ máy vắng mặt khi cả hộp USB rớt.
+- Kiểm danh tính chính xác cho UiAutomator2 server (`versionCode` và SHA-256).
+- Mỗi vòng chờ dùng một cây UI.
+- Đẩy lên UI tín hiệu không kèm dữ liệu, rồi để UI tự đọc lại.
+- Năng lực nhận dạng ảnh thường trú, nhưng phải đo trước.
+
+**Không chép:**
+- Diệt adb theo tên tiến trình.
+- Chạy lại node sau khi khôi phục.
+- Timeout đi theo cạnh success.
+- `eval` script.
+- Chạm ngay sau khi khớp ảnh 1 khung.
+- Tắt kiểm duyệt cài đặt toàn máy.
+- Để AdbKeyboard làm bàn phím mặc định.
+- Ép GC định kỳ.
+
+**Không chạy GenFarmer và Riviu trên cùng PC.**
+
+**Đính chính §12.6:** câu "Riviu đang ở thế tốt hơn" về SQLite trên main thread chưa đúng. Các lệnh Tauri đồng bộ (`publish_get`, `publish_list`, `publish_recovery_capabilities`, ...) chạy trên luồng UI. Riviu cần đưa các lệnh đọc nặng ra khỏi luồng đó.

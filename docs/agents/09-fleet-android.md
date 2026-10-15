@@ -63,8 +63,9 @@ sở hữu inventory/hash; không nhân bản danh sách pin.
   p50/p90 từ log driver, (b) tỉ lệ dòng đăng được ở lượt đầu (không qua recovery), (c)
   `surfaceflinger` CPU và load average từ lượt đo tải. Phải thấy tile của máy đang đăng dừng
   ở khung cuối và bật lại sau khi lượt xong; máy rảnh vẫn Tile 480.
-- Tham chiếu GenFarmer 2.6.2: stream mặc định 176 px/25–50 Kbps, High 288 px/1 Mbps, có
-  `autoScreenOff`, `ADB_GLOBAL_CONCURRENCY = 16`. Riviu không hạ Tile xuống dưới 480 px vì
+- Tham chiếu GenFarmer 2.6.2: preset mặc định là High (`deviceQuality 75`): trần 4 Mbps, ô
+  encode khoảng 167 px, 15 fps (Low là 50 Kbps/176 px); có `autoScreenOff`,
+  `ADB_GLOBAL_CONCURRENCY = 16`. Đòn bẩy của họ là độ phân giải ô, không phải bitrate. Riviu không hạ Tile xuống dưới 480 px vì
   176 px bị Redmi API 35 từ chối `MediaCodec.configure` và 320 px ra SPS `avc1.42000D`
   WebView2 có thể từ chối (`scrcpy.rs`).
 - Đề xuất chưa bật (chỉ ghi để cân nhắc): tắt màn hình vật lý khi máy đang tự động
@@ -169,6 +170,10 @@ sống; vài phút sau `adb shell echo` lại 230–290 ms.
   existing transport inventory". Không xác định được server thì giữ nguyên và ghi log.
 - Cổng tường minh (`RIVIU_ADB_SERVER_PORT`, `ADB_SERVER_SOCKET`, ...) không có watch nên
   không tự restart.
+- GenFarmer 2.6.2, khi tự khôi phục, diệt **mọi** `adb.exe` trên PC theo tên
+  (`taskkill /IM adb.exe /T /F`, `Stop-Process -Name adb`). Cổng riêng không che được Riviu,
+  nên không chạy GenFarmer và Riviu trên cùng PC
+  ([khảo sát](../re/genfarmer/README.md#13-bổ-sung-từ-genfarmer-262-15102026)).
 
 ### Sức khỏe máy trước code
 
@@ -250,7 +255,8 @@ Khi chỉ một máy có root không đọc được hoặc tap bị nuốt, so 
   nền bị đóng băng), chờ boot, và `wait_for_adb_online_after_reboot` (≤100 s) trong hai
   đường reboot của `device_load.rs`. Đường của job thử lấy helper thêm một lần khi máy
   online lại.
-- adbd chạy root (`id -u` = 0, thường do GenFarmer `adb root`) được tự sửa: một
+- adbd chạy root (`id -u` = 0; nguồn chưa rõ, vì chuỗi của GenFarmer 2.6.2 không có
+  `adb root`: họ kiểm root bằng binary `genfarmer`/`su` trên máy) được tự sửa: một
   `adb -s <serial> unroot` mỗi boot id dưới lease Repair, ghi intent trước, chờ ≤45 s
   (chưa đo trên máy). Root không phải lý do restart adb-server; vẫn root thì báo tắt GenFarmer và
   khởi động lại máy. Lúc nhận phiên, `recovery_required` trên máy root từng che
