@@ -31,6 +31,64 @@ pub enum PublishTransferSettle<'a> {
     FailedBeforeDispatch { error_code: &'a str },
 }
 
+/// One assignment as the acceptance-scoped Sheet worker filters it.
+#[derive(Debug, Clone)]
+pub struct PublishSheetScopeRow {
+    pub campaign_id: String,
+    pub assignment_id: String,
+    pub udid: String,
+    /// An unsent bound outbox row or a report due time exists. This is a superset of what
+    /// `claim_bound_sheet_delivery` can claim, and that claim still checks every condition.
+    pub sheet_pending: bool,
+}
+
+/// The `publish_campaigns` columns [`publish_campaign_header`] reads, in its order.
+const PUBLISH_CAMPAIGN_HEADER: &str =
+    "id,request_id,source_root,state,run_at,request_json,created_at,updated_at,error_code";
+
+/// One campaign row as its header record, with the assignment plan frozen in its request.
+fn publish_campaign_header(
+    row: &rusqlite::Row<'_>,
+) -> rusqlite::Result<crate::publish::PublishCampaignRecord> {
+    let request_json: String = row.get(5)?;
+    let request: crate::publish::PublishCampaignRequest = serde_json::from_str(&request_json)
+        .map_err(|error| {
+            rusqlite::Error::FromSqlConversionFailure(
+                5,
+                rusqlite::types::Type::Text,
+                Box::new(error),
+            )
+        })?;
+    Ok(crate::publish::PublishCampaignRecord {
+        id: row.get(0)?,
+        request_id: row.get(1)?,
+        source_root: row.get(2)?,
+        state: publish_state_from_str(&row.get::<_, String>(3)?),
+        run_at: row.get(4)?,
+        visibility: request.visibility,
+        cleanup_policy: request.cleanup_policy,
+        assignments: request
+            .bundle_ids
+            .into_iter()
+            .zip(request.udids)
+            .enumerate()
+            .map(
+                |(ordinal, (bundle_id, udid))| crate::publish::PublishAssignmentPlan {
+                    bundle_id,
+                    udid,
+                    // Not a `narrow`: this is `enumerate()` over a list the caller just
+                    // built, not a value read back out of a column. There is no stored
+                    // number here that could disagree with the type.
+                    ordinal: ordinal as u32,
+                },
+            )
+            .collect(),
+        created_at: row.get(6)?,
+        updated_at: row.get(7)?,
+        error_code: row.get(8)?,
+    })
+}
+
 fn serialize_wire_enum(value: impl serde::Serialize) -> anyhow::Result<String> {
     serde_json::to_value(value)?
         .as_str()
@@ -471,25 +529,59 @@ impl Database {
         }
         Ok(true)
     }
+    /// The newest campaigns as header records, from one scan of `publish_campaigns`.
+    ///
+    /// This used to load each campaign's full detail (bundles, every assignment's evidence and
+    /// the whole event history) and keep only `detail.campaign`, 50 times per call while the
+    /// publish page re-read it on every `publishUpdated`. The detail read builds its header
+    /// with the same [`publish_campaign_header`], so the records are identical.
     pub fn list_publish_campaigns(
         &self,
         limit: usize,
     ) -> anyhow::Result<Vec<crate::publish::PublishCampaignRecord>> {
         let conn = self.conn()?;
-        let ids = {
-            let mut stmt =
-                conn.prepare("SELECT id FROM publish_campaigns ORDER BY created_at DESC LIMIT ?1")?;
-            let rows = stmt.query_map(params![limit as i64], |row| row.get::<_, String>(0))?;
-            rows.collect::<Result<Vec<_>, _>>()?
-        };
-        drop(conn);
-        let mut campaigns = Vec::with_capacity(ids.len());
-        for id in ids {
-            if let Some(detail) = self.get_publish_campaign(&id)? {
-                campaigns.push(detail.campaign);
+        let mut stmt = conn.prepare(&format!(
+            "SELECT {PUBLISH_CAMPAIGN_HEADER} FROM publish_campaigns ORDER BY created_at DESC LIMIT ?1"
+        ))?;
+        let campaigns = stmt
+            .query_map(params![limit as i64], publish_campaign_header)?
+            .collect::<Result<Vec<_>, _>>()?;
+        Ok(campaigns)
+    }
+
+    /// The assignments of these campaigns, in campaign order and then by ordinal, read from
+    /// the assignment, outbox and sync rows only: no evidence, bundle or event.
+    ///
+    /// The acceptance-scoped Sheet worker filters this outside the writer permit instead of
+    /// loading each scoped campaign's full detail inside it, up to three times a second.
+    pub fn publish_sheet_scope(
+        &self,
+        campaign_ids: &[String],
+    ) -> anyhow::Result<Vec<PublishSheetScopeRow>> {
+        let conn = self.conn()?;
+        let mut stmt = conn.prepare(
+            "SELECT a.id,a.udid,
+               EXISTS(SELECT 1 FROM publish_sheet_outbox o WHERE o.assignment_id=a.id
+                 AND o.delivery_target_json IS NOT NULL AND o.state<>'sent')
+               OR EXISTS(SELECT 1 FROM publish_sheet_sync_state s WHERE s.assignment_id=a.id
+                 AND s.report_due_at_ms IS NOT NULL)
+             FROM publish_assignments a WHERE a.campaign_id=?1 ORDER BY a.ordinal",
+        )?;
+        let mut rows = Vec::new();
+        for campaign_id in campaign_ids {
+            let campaign = stmt.query_map([campaign_id], |row| {
+                Ok(PublishSheetScopeRow {
+                    campaign_id: campaign_id.clone(),
+                    assignment_id: row.get(0)?,
+                    udid: row.get(1)?,
+                    sheet_pending: row.get(2)?,
+                })
+            })?;
+            for row in campaign {
+                rows.push(row?);
             }
         }
-        Ok(campaigns)
+        Ok(rows)
     }
     pub fn get_publish_campaign(
         &self,
@@ -528,38 +620,11 @@ impl Database {
         assignment_id: Option<&str>,
         include_history: bool,
     ) -> anyhow::Result<Option<crate::publish::PublishCampaignDetail>> {
-        let Some((campaign, request)) = conn
+        let Some(mut campaign) = conn
             .query_row(
-                "SELECT id,request_id,source_root,state,run_at,request_json,created_at,updated_at,error_code
-                 FROM publish_campaigns WHERE id=?1",
+                &format!("SELECT {PUBLISH_CAMPAIGN_HEADER} FROM publish_campaigns WHERE id=?1"),
                 params![id],
-                |row| {
-                    let request_json: String = row.get(5)?;
-                    let request: crate::publish::PublishCampaignRequest =
-                        serde_json::from_str(&request_json).map_err(|error| {
-                            rusqlite::Error::FromSqlConversionFailure(
-                                5,
-                                rusqlite::types::Type::Text,
-                                Box::new(error),
-                            )
-                        })?;
-                    Ok((
-                        crate::publish::PublishCampaignRecord {
-                            id: row.get(0)?,
-                            request_id: row.get(1)?,
-                            source_root: row.get(2)?,
-                            state: publish_state_from_str(&row.get::<_, String>(3)?),
-                            run_at: row.get(4)?,
-                            visibility: request.visibility.clone(),
-                            cleanup_policy: request.cleanup_policy.clone(),
-                            assignments: Vec::new(),
-                            created_at: row.get(6)?,
-                            updated_at: row.get(7)?,
-                            error_code: row.get(8)?,
-                        },
-                        request,
-                    ))
-                },
+                publish_campaign_header,
             )
             .optional()?
         else {
@@ -642,23 +707,6 @@ impl Database {
                 })
             })?
             .collect::<Result<Vec<_>, _>>()?;
-        let mut campaign = campaign;
-        campaign.assignments = request
-            .bundle_ids
-            .iter()
-            .zip(&request.udids)
-            .enumerate()
-            .map(
-                |(ordinal, (bundle_id, udid))| crate::publish::PublishAssignmentPlan {
-                    bundle_id: bundle_id.clone(),
-                    udid: udid.clone(),
-                    // Not a `narrow`: this is `enumerate()` over a list the caller just
-                    // built, not a value read back out of a column. There is no stored
-                    // number here that could disagree with the type.
-                    ordinal: ordinal as u32,
-                },
-            )
-            .collect();
         if assignment_id.is_some() {
             campaign
                 .assignments
