@@ -391,6 +391,12 @@ pub(crate) fn is_sound_fresh_attempt(code: &str) -> bool {
 }
 pub fn classify(message: &str) -> FailureKind {
     let s = message.to_lowercase();
+    // A helper whose prior owner the driver could not supersede before media staging (r127
+    // phone 35, r129 phone 29, 15-16/10/2026): nothing was copied or posted. Checked before the
+    // specific refusals because its chain quotes the helper's own `401 Unauthorized`.
+    if helper_recovery_before_media(&s) {
+        return FailureKind::Retryable;
+    }
     // Specific refusals always win over words such as timeout in an error chain.
     if specific_refusal(&s) {
         return FailureKind::Terminal;
@@ -475,6 +481,14 @@ pub fn classify(message: &str) -> FailureKind {
 }
 
 /// A word that names a deliberate refusal; `lowercase` is the message already lowercased.
+/// `stagePublishMedia` refused because the helper still holds an unreconciled prior owner. The
+/// driver already tried its once-per-boot supersession; a later attempt finds it settled.
+fn helper_recovery_before_media(lowercase: &str) -> bool {
+    lowercase.contains("stagepublishmedia failed for device ")
+        && lowercase.contains("chưa đăng bài")
+        && lowercase.contains("helperrecoveryrequired: prior owner cleanup unresolved")
+}
+
 fn specific_refusal(lowercase: &str) -> bool {
     [
         "unauthorized",
@@ -673,6 +687,11 @@ mod tests {
         assert_eq!(
             classify("chưa đo nút Đăng trên bản build này — không bấm gì cả"),
             FailureKind::Terminal
+        );
+        // r129 phone 29: the helper's prior owner was still unreconciled; nothing was posted.
+        assert_eq!(
+            classify("stagePublishMedia failed for device ce081718512d0cd80b: Không chuẩn bị được Riviu Helper trên máy này; chưa chuyển ảnh/video, chưa đăng bài: helper owner resume unresolved (helper /v1/session/status HTTP 401 Unauthorized): HelperRecoveryRequired: prior owner cleanup unresolved; no claim or action replay"),
+            FailureKind::Retryable
         );
         // r123 phone 49: the caption field was re-rendered under set_text.
         assert_eq!(
