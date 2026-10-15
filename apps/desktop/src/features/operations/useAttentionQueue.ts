@@ -30,6 +30,8 @@ const DISCOVERY_PAGE = 200;
 const PUBLISH_EVENT_READ_GAP_MS = 10_000;
 /** Safety net for a finished campaign whose change event was missed. */
 const FINISHED_PUBLISH_READ_MS = 120_000;
+/** How long a classify read outlives the last plan that holds it. */
+const CLASSIFY_GC_MS = 10 * 60_000;
 export const UNRESOLVED_REGISTRY_KEY = "riviu.queue.unresolved.v1";
 
 const newestFirst = (left: OperationRunSummary, right: OperationRunSummary) =>
@@ -53,8 +55,25 @@ function writeRegistry(runs: readonly OperationRunSummary[]) {
   try { localStorage.setItem(UNRESOLVED_REGISTRY_KEY, JSON.stringify(runs)); } catch { /* kept in memory */ }
 }
 
+/**
+ * Time to a finished campaign's next safety read. Each campaign has its own slot in the window,
+ * a stable offset from its id, so the reads spread across the 120 s instead of all firing in the
+ * second the queue mounted. TanStack restarts the timer on every update of the query, so the
+ * slot is found again after each read, event-driven ones included.
+ */
+function untilSafetyRead(campaignId: string, now = Date.now()): number {
+  let hash = 0x811c9dc5;
+  for (let index = 0; index < campaignId.length; index += 1) hash = Math.imul(hash ^ campaignId.charCodeAt(index), 0x01000193) >>> 0;
+  const wait = ((hash % FINISHED_PUBLISH_READ_MS - now) % FINISHED_PUBLISH_READ_MS + FINISHED_PUBLISH_READ_MS) % FINISHED_PUBLISH_READ_MS;
+  // A timer that fires a moment early must not read the same slot twice.
+  return wait < 1000 ? wait + FINISHED_PUBLISH_READ_MS : wait;
+}
+
+/** A queue group; a campaign's group carries the read its rows came from, for its totals. */
+export type QueueGroup = AttentionGroup & { publishRead?: PublishRunRead };
+
 export interface AttentionQueue {
-  groups: AttentionGroup[];
+  groups: QueueGroup[];
   total: number;
   /** Some source is unread, failed or truncated, so `total` is a floor, never the whole count. */
   unknown: boolean;
@@ -79,7 +98,7 @@ const pollQuery = (run: Planned) => run.kind === "publish"
     queryFn: () => readPublishRun(run.sourceId),
     // A finished campaign changes only through background checks and Sheet retries, which
     // emit publishUpdated (read below); the interval is only the safety net.
-    refetchInterval: run.active ? 2000 : FINISHED_PUBLISH_READ_MS,
+    refetchInterval: run.active ? 2000 : () => untilSafetyRead(run.sourceId),
     refetchIntervalInBackground: true,
   }
   : {
@@ -89,13 +108,24 @@ const pollQuery = (run: Planned) => run.kind === "publish"
     refetchIntervalInBackground: true,
   };
 
-/** One read per run version: a finished run holding nothing unresolved is not polled again. */
+/**
+ * One read per run version: a finished run holding nothing unresolved is not polled again. A
+ * version already read is held without reading while the plan offers it; once a newer version
+ * lands the older ones go, and what no plan holds (polled now, or off the discovery pages) goes
+ * after CLASSIFY_GC_MS. Keeping every version of every run for the session grew the WebView.
+ */
 const classifyKey = (run: Pick<OperationRunSummary, "id" | "updatedAt">) => ["queueClassify", run.id, run.updatedAt ?? ""] as const;
-const classifyQuery = ([id, sourceId, kind, updatedAt]: [string, string, OperationRunKind, string]) => ({
+type Classify = [id: string, sourceId: string, kind: OperationRunKind, updatedAt: string, read: boolean];
+const classifyQuery = ([id, sourceId, kind, updatedAt, read]: Classify) => ({
   queryKey: classifyKey({ id, updatedAt }),
-  queryFn: () => kind === "publish" ? readPublishRun(sourceId) : readOperationRun(id),
+  queryFn: async () => {
+    const data = await (kind === "publish" ? readPublishRun(sourceId) : readOperationRun(id));
+    readQueryClient.removeQueries({ queryKey: ["queueClassify", id], predicate: query => query.queryKey[2] !== updatedAt && !query.getObserversCount() });
+    return data;
+  },
+  enabled: read,
   staleTime: Infinity,
-  gcTime: Infinity,
+  gcTime: CLASSIFY_GC_MS,
 });
 
 /**
@@ -201,16 +231,20 @@ export function useAttentionQueue({ runs, runsSettled, runsError, runsHasMore = 
   // Stable query options, so TanStack does not re-apply fresh option objects after every render.
   const pollPlan = JSON.stringify(plan.polled.map((run): Planned => ({ id: run.id, sourceId: run.sourceId, kind: run.kind, active: activeRun(run) })));
   const pollQueries = useMemo(() => (JSON.parse(pollPlan) as Planned[]).map(pollQuery), [pollPlan]);
-  const classifyPlan = JSON.stringify(plan.classify.map(run => [run.id, run.sourceId, run.kind, run.updatedAt ?? ""]));
-  const classifyQueries = useMemo(() => (JSON.parse(classifyPlan) as [string, string, OperationRunKind, string][]).map(classifyQuery), [classifyPlan]);
+  const classifyPlan = JSON.stringify([
+    ...plan.classify.map((run): Classify => [run.id, run.sourceId, run.kind, run.updatedAt ?? "", true]),
+    ...plan.classified.map((run): Classify => [run.id, run.sourceId, run.kind, run.updatedAt ?? "", false]),
+  ]);
+  const classifyQueries = useMemo(() => (JSON.parse(classifyPlan) as Classify[]).map(classifyQuery), [classifyPlan]);
   const pollReads = useQueries({ queries: pollQueries }, readQueryClient);
   const classifyReads = useQueries({ queries: classifyQueries }, readQueryClient);
-  const classifyLanded = classifyReads.some(read => read.data !== undefined);
+  // Only the reads asked for count; the held versions already have their data.
+  const classifyLanded = classifyReads.slice(0, plan.classify.length).some(read => read.data !== undefined);
   useEffect(() => { if (classifyLanded) setClassifyTick(tick => tick + 1); }, [classifyLanded, classifyPlan]);
 
   const queue = useMemo(() => {
     const hidden = new Set(dismissed.map(record => record.key));
-    const groups: AttentionGroup[] = [];
+    const groups: QueueGroup[] = [];
     const unresolved = new Map<string, OperationRunSummary>();
     const cleared = new Set<string>();
     let unknown = !attentionKnown || !runsSettled || runsError !== null || runsHasMore || plan.omitted > 0;
@@ -222,7 +256,7 @@ export function useAttentionQueue({ runs, runsSettled, runsError, runsHasMore = 
     if (attention.length) {
       groups.push({ key: "devices", title: "Máy cần xử lý", run: null, items: sortAttentionItems(deviceAttentionItems(attention, phones, labels)) });
     }
-    const runGroups: AttentionGroup[] = [];
+    const runGroups: QueueGroup[] = [];
     const collect = (run: OperationRunSummary, read: Read | undefined, polled: boolean) => {
       const data = read?.data;
       // A failed read keeps the rows of its last success beside the error. A read that never
@@ -242,9 +276,20 @@ export function useAttentionQueue({ runs, runsSettled, runsError, runsHasMore = 
       // Outside the day's window only what stays until a conclusion is shown; a dismissed
       // snapshot hides only the failures.
       const shown = all.filter(item => item.persistent || (recentIds.has(run.id) && !hidden.has(monitorRecordKey(run))));
-      if (shown.length || error) runGroups.push({ key: run.id, title: runOptionLabel(run), run, items: sortAttentionItems(shown), error, stale: !!error });
+      // The totals come from this read too: the open drawer adds no reader of its own.
+      const publishRead = run.kind === "publish" ? data as PublishRunRead : undefined;
+      if (shown.length || error) runGroups.push({ key: run.id, title: runOptionLabel(run), run, items: sortAttentionItems(shown), error, stale: !!error, publishRead });
     };
-    plan.polled.forEach((run, index) => collect(run, pollReads[index], true));
+    plan.polled.forEach((run, index) => {
+      const read = pollReads[index];
+      // A run that just joined the poll keeps the rows its one-shot read of this version found
+      // until the poll's first read answers, so its group and buttons never blink out. A poll
+      // that has failed is shown as failed.
+      const held = read?.data === undefined && !read?.error && !read?.errorUpdateCount
+        ? readQueryClient.getQueryData(classifyKey(run)) : undefined;
+      if (held === undefined) collect(run, read, true);
+      else collect(run, { data: held, error: null, errorUpdateCount: 0 }, false);
+    });
     plan.classify.forEach((run, index) => collect(run, classifyReads[index], false));
     for (const run of plan.classified) collect(run, { data: readQueryClient.getQueryData(classifyKey(run)), error: null, errorUpdateCount: 0 }, false);
     runGroups.sort((left, right) => left.run && right.run ? newestFirst(left.run, right.run) : 0);

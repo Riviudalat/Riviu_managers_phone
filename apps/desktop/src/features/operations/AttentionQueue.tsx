@@ -1,12 +1,19 @@
-import { useEffect, useState } from "react";
+import { memo, useEffect, useState } from "react";
 import { CircleHelp, CircleX, Eye, FileSpreadsheet, Inbox, Info, TriangleAlert, Undo2, type LucideIcon } from "lucide-react";
 import { EmptyState } from "../../components/States";
 import type { OperationRunSummary } from "../../types";
-import type { AttentionGroup, AttentionItem, AttentionKind } from "./attentionQueueModel";
+import type { AttentionItem, AttentionKind } from "./attentionQueueModel";
 import { MonitorReadError } from "./OperationRunDevices";
-import { PostOutcomeEvidence, PostOutcomeLayers, PostOutcomeLink } from "./PostOutcome";
-import { PublishRunOutcomeTotals } from "./PublishRunOutcome";
+import { PostOutcomeEvidence, PostOutcomeLayers, PostOutcomeLink, PostOutcomeTotals } from "./PostOutcome";
+import { postOutcomeTotals } from "./postOutcomeModel";
+import { publishRunOutcomes, type PublishRunRead } from "./publishRunRead";
+import type { QueueGroup } from "./useAttentionQueue";
 import "../../styles/attention-queue.css";
+
+/** A campaign's totals from the queue's own read of it, counted again only when that read changes. */
+const QueueGroupTotals = memo(function QueueGroupTotals({ read }: { read: PublishRunRead }) {
+  return <PostOutcomeTotals totals={postOutcomeTotals([...publishRunOutcomes(read).values()])} />;
+});
 
 type Tone = "attention" | "unknown" | "error";
 
@@ -98,11 +105,12 @@ function QueueItem({ item, run, seenAt, now, onWatch, onDeviceDetails }: {
 /**
  * Tab "Cần xử lý": one row per phone and reason, grouped by where it came from. Post rows use
  * the shared post-outcome component and the campaign's totals, so this tab, the campaign detail
- * and Lượt chạy show the same numbers. Chưa rõ and Sheet errors only offer Xem bằng chứng and
- * Theo dõi; nothing here re-posts, re-sends, takes a phone or starts work.
+ * and Lượt chạy show the same numbers. The totals are counted from the queue's own read of the
+ * campaign, so opening the tab starts no read. Chưa rõ and Sheet errors only offer Xem bằng
+ * chứng and Theo dõi; nothing here re-posts, re-sends, takes a phone or starts work.
  */
 export function AttentionQueueList({ groups, total, unknown, omitted, runsError, retryRuns, attentionUnknown, seenAt, onWatch, onDeviceDetails, onDismiss, undoCount, onUndo, dismissError, onOpenRuns }: {
-  groups: AttentionGroup[];
+  groups: QueueGroup[];
   total: number;
   unknown: boolean;
   omitted: number;
@@ -149,7 +157,8 @@ export function AttentionQueueList({ groups, total, unknown, omitted, runsError,
                   onClick={() => group.run && onDismiss(group.run)}>Đã xem</button>
               )}
             </header>
-            {group.run?.kind === "publish" && (group.stale || !group.error) && <div className="queue-group-totals"><PublishRunOutcomeTotals campaignId={group.run.sourceId} /></div>}
+            {/* A failed re-read shows its error below, never the last read's numbers as current. */}
+            {group.publishRead && !group.error && <div className="queue-group-totals"><QueueGroupTotals read={group.publishRead} /></div>}
             {!group.run && <p className="queue-group-note">Cùng tập với bộ đếm Cần xử lý trên thanh hệ thống.</p>}
             {group.error && <p className="queue-note is-error" role="alert">{group.stale
               ? `Chưa đọc lại được lượt này: ${group.error}. Đang giữ các mục của lần đọc trước; chúng chưa có kết luận.`
