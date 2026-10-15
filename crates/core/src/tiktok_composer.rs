@@ -2719,7 +2719,13 @@ impl<'a, P: TapPlanner> Composer<'a, P> {
                 return Ok(ComposerVerdict::Stopped);
             }
             if !self.popup_clear(&mut popup, deadline, stop, stop).await? {
-                return Ok(ComposerVerdict::Stopped);
+                if stop.load(Ordering::Relaxed) {
+                    return Ok(ComposerVerdict::Stopped);
+                }
+                // The popup read ran this window out: an expired read before any Post intent,
+                // not a Stop. r125 phone 42 (15/10/2026) read "dừng lại trước khi bấm Đăng"
+                // here after an 8 s `/element`, and a Stop reason is never retried.
+                return Err(crate::publish_recovery::observation_deadline());
             }
             match read_before_deadline(self.resolve_post_button(caption), deadline, stop).await? {
                 ReadWaitResult::Ready(Some(_)) => break true,

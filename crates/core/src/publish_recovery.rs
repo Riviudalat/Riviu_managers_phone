@@ -187,13 +187,17 @@ fn adb_daemon_connect_timeout(message: &str) -> bool {
         && message.contains("(10060)")
 }
 
+/// adb lost its server during the media transfer or the read-only photo-order proof that
+/// follows it (r125 phone 32, 15/10/2026: `sha256sum` of an imported image). Both run before
+/// any composer; a tap or Post with the same text stays terminal.
 fn adb_transfer_daemon_start_failed(message: &str) -> bool {
     let message = message.to_ascii_lowercase();
-    message.contains("stagepublishmedia failed for device ")
+    (message.contains("stagepublishmedia failed for device ")
+        || message.contains("ensurepublishphotoorder failed for device "))
         && message.contains("* daemon not running; starting now at tcp:5037")
         && message.contains("could not read ok from adb server")
         && message.contains("* failed to start daemon")
-        && message.contains("failed to get feature set: cannot connect to daemon")
+        && message.contains("cannot connect to daemon")
 }
 
 #[derive(Debug)]
@@ -431,6 +435,18 @@ pub fn classify(message: &str) -> FailureKind {
         // read grace let the last read finish): nothing was posted and a fresh attempt
         // rebuilds the picker. Its sentence once said "đã dừng", which read as a Stop.
         "chưa xác nhận chọn đủ ảnh",
+        // Composer screens that did not show in time (r125, 15/10/2026: phone 49's camera
+        // shutter on a slow camera screen ended the row on its first attempt). All are before
+        // Post and a fresh attempt restarts the composer; "chưa đo nút Đăng", "số ảnh cần nhiều
+        // hơn số ô lưới" and a Stop stay terminal.
+        "không thấy nút chụp",
+        "picker không mở",
+        "không thấy album của chiến dịch",
+        "picker không chuyển sang đúng album",
+        "không thấy hàng tab của picker",
+        "nút tiếp không sáng",
+        "không mọc nút tiếp",
+        "gõ caption xong mà đọc lại không thấy",
     ]
     .iter()
     .any(|x| s.contains(x))
@@ -618,6 +634,21 @@ mod tests {
         let start_failure = RecoveryFailure::legacy(daemon_start);
         assert_eq!(start_failure.kind, FailureKind::Retryable);
         assert_eq!(start_failure.code, "adb_daemon_start_failed");
+        // r125 phone 32: the same loss during the read-only photo-order proof.
+        let order = "ce031713a8f5bd0805: chưa xác minh được thứ tự ảnh trước Đăng (ensurePublishPhotoOrder failed for device ce031713a8f5bd0805: reprove imported photo bytes: publish transfer operation=sha256sum path=/storage/emulated/0/Pictures/x/06-image.png reason=exitError exit=1 stdout= stderr=* daemon not running; starting now at tcp:5037\r\ncould not read ok from ADB Server\r\n* failed to start daemon\r\nadb.exe: cannot connect to daemon)";
+        assert_eq!(
+            RecoveryFailure::legacy(order).code,
+            "adb_daemon_start_failed"
+        );
+        // r125 phone 49: the camera shutter did not show in time; nothing was posted.
+        assert_eq!(
+            classify("ce071827715f321b05: không thấy nút chụp — không có mốc để tìm ô thư viện"),
+            FailureKind::Retryable
+        );
+        assert_eq!(
+            classify("chưa đo nút Đăng trên bản build này — không bấm gì cả"),
+            FailureKind::Terminal
+        );
         // r117 phone 49: the same daemon failure while the publish session opened.
         let session_open = anyhow::anyhow!("cleanAppSession failed for device ce071827715f321b05: startStreamAfterSession failed for device ce071827715f321b05: adb -s ce071827715f321b05 shell wm size failed: * daemon not running; starting now at tcp:5037\r\ncould not read ok from ADB Server\r\n* failed to start daemon\r\nadb.exe: cannot connect to daemon");
         let open_failure = session_open_adb_daemon_failure(&session_open).unwrap();
