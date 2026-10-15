@@ -1292,10 +1292,10 @@ impl AppState {
             .await
         {
             Ok(0) => {}
-            // `interrupt_orphaned_publish_campaigns` stops only unsent work; a campaign
-            // with submitted posts stays `verifying` and keeps its read-only checks.
+            // `interrupt_orphaned_publish_campaigns` resumes only work without a Post intent; a
+            // campaign with submitted posts stays `verifying` and keeps its read-only checks.
             Ok(count) => log::warn!(
-                "{count} chiến dịch đăng bài còn dở từ lần chạy trước đã được đối soát: phần chưa đăng đã dừng, bài đã gửi tiếp tục được kiểm tra, không đăng lại"
+                "{count} chiến dịch đăng bài còn dở từ lần chạy trước đã được đối soát: bài chưa bấm Đăng tự chạy tiếp, bài đã gửi tiếp tục được kiểm tra, không đăng lại"
             ),
             Err(error) => log::warn!("không dọn được chiến dịch đăng bài dở: {error:#}"),
         }
@@ -2935,7 +2935,13 @@ impl AppState {
                         if at > now {
                             continue;
                         }
-                        let result = if at < publish_started_at {
+                        // The admission window is [run_at, run_at + 30 s], the same one the
+                        // claim checks: an app opened inside it still admits the schedule.
+                        let result = if publish_started_at
+                            .signed_duration_since(at)
+                            .num_milliseconds()
+                            > 30_000
+                        {
                             publish_db.miss_publish_schedule(&id, &raw, "app_opened_after_deadline")
                         } else if now.signed_duration_since(at).num_milliseconds() > 30_000 {
                             publish_db.miss_publish_schedule(

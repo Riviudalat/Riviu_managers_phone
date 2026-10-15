@@ -86,6 +86,134 @@ fn spend(s: &mut PublishRecoveryState, failure: &RecoveryFailure, now: i64) -> O
     s.next_retry_at = Some((now + delay.as_millis() as i64) as f64);
     Some(delay)
 }
+
+/// Result of a running pre-Post attempt whose process ended, and its job's resume reason.
+const APP_RESTARTED_BEFORE_POST: &str = "app_restarted_before_post";
+/// Such an attempt's step had no retry left, so the row waits for the operator's Retry.
+const RESTART_RETRY_EXHAUSTED: &str = "restart_retry_exhausted";
+
+/// Startup recovery of pre-Post work whose process ended (`interrupt_orphaned_publish_campaigns`).
+/// Nothing here touches a phone, and a row with an effect intent is never resumed: it stays
+/// observe-only. A queued or paused row keeps its attempt, phase and ledger; only a reconnect
+/// window that ran while the app was closed is dropped, so the next offline observation opens a
+/// fresh one. A running row's attempt ended with the process: like an automatic requeue it starts
+/// again from transfer under a new attempt with its sound choice archived, and the interrupted
+/// attempt spends one retry of its step, so an attempt that keeps ending the process cannot loop
+/// across restarts. A step with no retry left settles before dispatch, as an exhausted budget does.
+///
+/// `interrupted_starts` is a JSON array of the campaigns whose Start was stopped mid-preparation
+/// at this startup; the caller settles their rows.
+pub(super) fn resume_after_restart(
+    conn: &Connection,
+    interrupted_starts: &str,
+) -> anyhow::Result<()> {
+    conn.execute(
+        "UPDATE publish_recovery_state SET payload=json_set(payload,'$.reconnectDeadline',NULL)
+         WHERE json_extract(payload,'$.reconnectDeadline') IS NOT NULL
+         AND assignment_id IN (SELECT assignment_id FROM publish_dispatch_jobs WHERE state IN ('queued','paused'))",
+        [],
+    )?;
+    let running: Vec<(String, String, String)> = conn
+        .prepare(
+            "SELECT j.assignment_id,j.attempt_id,r.run_token FROM publish_dispatch_jobs j
+             JOIN publish_recovery_state r ON r.assignment_id=j.assignment_id
+             JOIN publish_assignments a ON a.id=j.assignment_id
+             JOIN publish_campaigns c ON c.id=j.campaign_id
+             WHERE j.state='running' AND a.effect_intent IS NULL AND c.state NOT IN ('cancelled','missed')
+             AND j.campaign_id NOT IN (SELECT value FROM json_each(?1))
+             AND NOT EXISTS(SELECT 1 FROM publish_exclude_requests e WHERE e.assignment_id=j.assignment_id)",
+        )?
+        .query_map([interrupted_starts], |r| {
+            Ok((r.get(0)?, r.get(1)?, r.get(2)?))
+        })?
+        .collect::<Result<_, _>>()?;
+    let now = Utc::now();
+    let (now_ms, now_text) = (now.timestamp_millis(), now.to_rfc3339());
+    for (id, attempt, token) in running {
+        let Some((_, mut s)) = read(conn, &id)? else {
+            continue;
+        };
+        let used = *s.counts.get(&s.step).unwrap_or(&0);
+        let resumed = used < s.max_retries;
+        s.next_retry_at = None;
+        s.reconnect_deadline = None;
+        s.reconnect_retry = false;
+        s.last_error_code = Some(APP_RESTARTED_BEFORE_POST.into());
+        s.last_error_kind = Some(FailureKind::Retryable.as_str().into());
+        let next = resumed.then(|| Uuid::new_v4().to_string());
+        let text = if resumed {
+            s.retries_used = used + 1;
+            s.counts.insert(s.step.clone(), used + 1);
+            s.state = "running".into();
+            format!(
+                "Ứng dụng đã đóng khi bài đang chạy, chưa bấm Đăng; tự chạy lại từ bước chuyển media (bước {}: lượt thử {}/{})",
+                s.step,
+                used + 1,
+                s.max_retries
+            )
+        } else {
+            s.state = "exhausted".into();
+            format!(
+                "Ứng dụng đã đóng khi bài đang chạy, chưa bấm Đăng, và bước {} đã hết {} lượt tự thử; kiểm tra lỗi rồi bấm Thử lại máy này",
+                s.step, s.max_retries
+            )
+        };
+        s.last_error = Some(text.clone());
+        let detail = serde_json::json!({
+            "assignmentId": id, "source": "app_restart", "priorAttemptId": attempt,
+            "attemptId": next, "step": s.step, "retriesUsed": s.retries_used,
+            "maxRetries": s.max_retries, "priorCheckpoint": s.checkpoint,
+        });
+        // The interrupted attempt keeps its evidence, as an automatic requeue keeps it.
+        conn.execute(
+            "UPDATE publish_attempts SET finished_at_ms=?2,result=?3,
+                evidence_json=(SELECT evidence_json FROM publish_assignments WHERE id=?4)
+             WHERE attempt_id=?1",
+            params![attempt, now_ms, APP_RESTARTED_BEFORE_POST, id],
+        )?;
+        if let Some(next) = &next {
+            // A new attempt binds a current Recommended song; the old choice stays as evidence.
+            if let Some(prior) = s.sound.take() {
+                conn.execute("INSERT INTO operation_device_events(source_kind,source_id,udid,action,state,recorded_at,text,detail)
+                    SELECT 'publish',campaign_id,udid,'publishSoundRebind','retrying',?2,?3,?4 FROM publish_assignments WHERE id=?1",
+                    params![id, now_text,
+                        "Chọn nhạc trong Recommended cho lượt tự chạy lại sau khi mở lại ứng dụng, trước Post",
+                        serde_json::to_string(&serde_json::json!({
+                            "assignmentId": id, "priorAttemptId": attempt, "attemptId": next,
+                            "source": "app_restart_before_post", "priorSound": prior,
+                            "priorCheckpoint": s.checkpoint,
+                        }))?])?;
+            }
+            conn.execute(
+                "INSERT INTO publish_attempts(attempt_id,publication_id,campaign_id,started_at_ms)
+                SELECT ?2,publication_id,campaign_id,?3 FROM publish_assignments WHERE id=?1",
+                params![id, next, now_ms],
+            )?;
+            conn.execute("UPDATE publish_dispatch_jobs SET state='queued',phase='transfer',attempt_id=?2,owner=NULL,
+                reason=?3,revision=revision+1 WHERE assignment_id=?1",
+                params![id, next, APP_RESTARTED_BEFORE_POST])?;
+            conn.execute("UPDATE publish_assignments SET state='queued',error_code=NULL,revision=revision+1,updated_at=?2
+                WHERE id=?1 AND effect_intent IS NULL
+                AND state IN ('queued','scheduled','ready','transferring','imported','failed_before_dispatch')",
+                params![id, now_text])?;
+        } else {
+            conn.execute("UPDATE publish_dispatch_jobs SET state='finished',owner=NULL,reason=?2,finished_at_ms=?3,
+                revision=revision+1 WHERE assignment_id=?1",
+                params![id, RESTART_RETRY_EXHAUSTED, now_ms])?;
+            conn.execute("UPDATE publish_assignments SET state='failed_before_dispatch',error_code=?2,revision=revision+1,updated_at=?3
+                WHERE id=?1 AND effect_intent IS NULL
+                AND state IN ('queued','scheduled','ready','transferring','imported','failed_before_dispatch')",
+                params![id, RESTART_RETRY_EXHAUSTED, now_text])?;
+        }
+        conn.execute("INSERT INTO publish_recovery_state VALUES(?1,?2,?3) ON CONFLICT(assignment_id) DO UPDATE SET run_token=excluded.run_token,payload=excluded.payload",
+            params![id, token, serde_json::to_string(&s)?])?;
+        conn.execute("INSERT INTO operation_device_events(source_kind,source_id,udid,action,state,recorded_at,text,detail)
+            SELECT 'publish',campaign_id,udid,'publishRecovery',?2,?3,?4,?5 FROM publish_assignments WHERE id=?1",
+            params![id, s.state, now_text, text, detail.to_string()])?;
+    }
+    Ok(())
+}
+
 impl Database {
     pub fn verify_publish_recovery_account(&self, id: &str, observed: &str) -> anyhow::Result<()> {
         let mut conn = self.conn()?;
@@ -651,20 +779,34 @@ mod tests {
         let (db, _, campaign, a) = fixture();
         let run = db.claim_publish_pipeline(&campaign).unwrap().unwrap();
         let id = &a[0].id;
+        let job = db
+            .pending_publish_dispatch(20)
+            .unwrap()
+            .into_iter()
+            .find(|j| j.assignment_id == *id)
+            .unwrap();
         db.init_publish_recovery(id, &run.token).unwrap();
+        assert!(db.claim_publish_dispatch(&job, 0).unwrap());
         db.update_publish_recovery_step(id, &run.token, "sound", Some("mediaSelected"))
             .unwrap();
         db.reserve_publish_step_retry(id, &run.token, "network")
             .unwrap();
         db.interrupt_orphaned_publish_campaigns().unwrap();
-        assert!(db
+        // The attempt on the phone ended with the process. The row resumes without the operator,
+        // from transfer under a new attempt, and the interruption spends one retry of its step
+        // from the kept ledger.
+        let resumed = db
             .pending_publish_dispatch(20)
             .unwrap()
-            .iter()
-            .all(|j| j.assignment_id != *id));
+            .into_iter()
+            .find(|j| j.assignment_id == *id)
+            .expect("the interrupted row is queued again");
+        assert_eq!(resumed.phase, "transfer");
+        assert_ne!(resumed.attempt_id, job.attempt_id);
         let s = db.publish_recovery_state(id).unwrap().unwrap();
-        assert_eq!(s.state, "interrupted");
-        assert_eq!(s.counts["sound"], 1);
+        assert_eq!(s.state, "running");
+        assert_eq!(s.counts["sound"], 2);
+        // The ended process's run cannot spend from it any more.
         assert!(db
             .reserve_publish_step_retry(id, &run.token, "network")
             .is_err());

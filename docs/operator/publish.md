@@ -346,8 +346,9 @@ dừng để người dùng kiểm tra; gửi lại cùng yêu cầu Thử lại
 Nếu agent đang phục hồi, lệnh được ghi nhận
 nhưng chờ hết cooldown của máy trước khi mở phiên mới. Khi đang tự phục hồi, nút bị khóa và
 hiện bước cùng số lần. Bài đã Post chỉ có **Kiểm tra liên kết** hoặc **Ghi lại Sheet**;
-không gửi lại Post. Dừng hủy cả lượt đang chờ. Mở lại app giữ bộ đếm và yêu cầu bấm
-Thử lại cho lượt phục hồi bị gián đoạn. **Tải lại tiến độ** chỉ đọc lại màn hình theo dõi.
+không gửi lại Post. Dừng hủy cả lượt đang chờ. Mở lại app giữ bộ đếm và tự chạy tiếp mọi
+bài chưa bấm Đăng; bài đang chạy dở thì chạy lại từ chuyển media và tính một lần tự thử của
+bước đó. **Tải lại tiến độ** chỉ đọc lại màn hình theo dõi.
 Nếu máy đã làm xong nhưng lưu kết quả tạm thời lỗi, app thử lưu lại kết quả đó,
 không chạy lại điện thoại. Khi mở app mà còn kết quả chưa đối soát được, Đăng bài
 báo rõ nguyên nhân và tự kiểm tra lại sau 30 giây. Kiểm tra quyền ghi và dung lượng

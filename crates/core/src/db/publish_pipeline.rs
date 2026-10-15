@@ -221,7 +221,6 @@ impl Database {
                 token: token.clone(),
             },
             Utc::now().timestamp_millis(),
-            admitted_at,
         )?;
         tx.execute("UPDATE publish_start_requests SET state='queued',stage='queued',revision=revision+1,updated_at=?2
             WHERE campaign_id=?1 AND state='preparing'",params![campaign_id,now])?;

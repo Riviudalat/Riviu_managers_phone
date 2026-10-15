@@ -1475,12 +1475,31 @@ Giảm `transfer` chặn cấp lượt chuyển mới đến khi số đang ch�
 không cắt request đang thực hiện. Phân trang candidate chỉ phân chia lượt quét,
 không giới hạn tổng worker. Foreground stream tăng theo số máy đã phát hiện;
 preview vẫn dùng ngân sách cấu hình chung và nhường cho foreground.
-Đợt hẹn giờ chỉ được claim trong cửa sổ 30 giây theo giờ máy chủ. Cohort được
-claim đúng giờ không có deadline theo công suất cho từng assignment; started_at_ms
-chỉ được ghi khi thực sự dispatch. Cohort chưa được nhận đúng cửa sổ vẫn CAS sang
-missed; các deadline của lịch cũ không được viết lại. Shutdown giữ hàng chưa chạy
-và restart không tự phát lại effect đã có intent. Trước migration40→41 tạo và đọc
-lại bản sao SQLite `pre-publication-v40.db`.
+Đợt hẹn giờ chỉ được claim trong cửa sổ 30 giây theo giờ máy chủ, `[run_at, run_at + 30 s]`
+(`claim_publish_pipeline`): giờ hẹn áp cho lần nhận cả đợt, không áp cho từng máy. Không job
+nào mang deadline (`enqueue_publish_jobs`): trong đợt đã nhận, hàng chờ giãn compose 8 s,
+`PUBLISH_PHONE_WORK_CAP`, reconnect hay backoff thử lại không bao giờ thành `missed` (20 máy
+× 8 s = 160 s là chờ bình thường); started_at_ms chỉ được ghi khi thực sự dispatch. Claim sau
+cửa sổ chỉ nhận lượt đã chạy, tức người vận hành chạy lại, nên cũng không có deadline (trước
+đây hàng chạy lại nhận deadline cũ đã qua và thành `missed` ở tick sau). `deadline_ms` chỉ còn
+ở job của bản cũ; dispatcher và lúc mở app chỉ chuyển `missed` khi deadline đó đã qua. Đợt
+không được nhận trong cửa sổ thì cả lượt CAS sang `missed`: `app_opened_after_deadline` khi
+app mở sau `run_at + 30 s`, `schedule_capacity_deadline` khi app đang chạy mà không nhận được
+đợt trong 30 giây; event của lượt ghi `runAt`, nhật ký thao tác ghi `publish.schedule.missed`
+kèm lý do; không tự đăng bù. App mở trong cửa sổ vẫn nhận đợt.
+
+Restart không cần người vận hành cho việc chưa bấm Đăng. Lịch chưa tới giờ giữ `scheduled`
+(Start của nó giữ `queued`). Job chưa có effect intent tự chạy tiếp
+(`publish_recovery::resume_after_restart`): `queued`/`paused` giữ attempt, pha và sổ thử lại,
+chỉ bỏ cửa sổ reconnect đã chạy lúc app đóng; `running` mất attempt cùng tiến trình, nên chạy
+lại từ chuyển media với attempt mới, nhạc đã chọn được lưu làm bằng chứng rồi chọn lại, và lần
+bị ngắt tính một lượt thử của bước đang chạy (`app_restarted_before_post`) để một attempt làm
+chết tiến trình không lặp vô hạn qua các lần mở; bước đã hết lượt thì dừng trước Đăng
+(`restart_retry_exhausted`) chờ **Thử lại máy này**. Job có intent chỉ đối soát. Start chỉ
+thành `uncertain` (`PublishStartInterrupted`) khi còn chuẩn bị: `accepted`/`preparing`, hoặc
+`queued`/`running` mà lượt chưa hẹn giờ và chưa có job; chỉ job của Start bị ngắt ở chính lần
+mở đó dừng (`start_interrupted`). Trước migration40→41 tạo và đọc lại bản sao SQLite
+`pre-publication-v40.db`.
 
 `publish_sheet_reset_reporting` nhận UUID `resetId`, dừng cấp claim Sheet mới và
 đợi claim đang chạy kết thúc. Apps Script backup/readback workbook, đóng epoch cũ

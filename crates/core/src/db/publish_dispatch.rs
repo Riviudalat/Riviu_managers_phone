@@ -380,37 +380,19 @@ impl Database {
     }
 
     /// Called inside the campaign claim transaction: double clicks cannot enqueue twice.
+    ///
+    /// Jobs carry no deadline. A schedule's 30-second window is checked once, by the claim
+    /// (`claim_publish_pipeline`), and admits the whole cohort; inside it every row waits for
+    /// compose pacing, `PUBLISH_PHONE_WORK_CAP`, reconnect or recovery backoff without ever
+    /// turning `missed`. A claim after the window is accepted only for a campaign that already
+    /// started, which is an explicit re-run, so it gets no deadline either; giving its rows the
+    /// schedule's long-past deadline turned every one of them `missed` at the next tick.
+    /// `deadline_ms` stays only for jobs written by earlier versions.
     pub(super) fn enqueue_publish_jobs(
         conn: &Connection,
         run: &PublishPipelineRun,
         now: i64,
-        admitted_at: chrono::NaiveDateTime,
     ) -> anyhow::Result<()> {
-        let raw: Option<String> = conn.query_row(
-            "SELECT run_at FROM publish_campaigns WHERE id=?1",
-            [&run.campaign_id],
-            |r| r.get(0),
-        )?;
-        let deadline = raw
-            .map(|v| {
-                chrono::NaiveDateTime::parse_from_str(&v, "%Y-%m-%dT%H:%M:%S")
-                    .or_else(|_| chrono::NaiveDateTime::parse_from_str(&v, "%Y-%m-%dT%H:%M"))
-                    .map(|at| {
-                        // The campaign claim is the schedule admission boundary.
-                        // An on-time accepted cohort keeps waiting for its stage
-                        // capacity; waiting never manufactures a started timestamp.
-                        // Late resumed runs retain their original per-job deadline.
-                        let on_time = admitted_at >= at
-                            && admitted_at.signed_duration_since(at).num_milliseconds() <= 30_000;
-                        if on_time {
-                            None
-                        } else {
-                            Some(at.and_utc().timestamp_millis() + 30_000)
-                        }
-                    })
-            })
-            .transpose()?
-            .flatten();
         // A phone the Start could not release waits for its own per-phone retry.
         let rows: Vec<(String,String,String,String)> = conn.prepare(
             "SELECT id,publication_id,udid,state FROM publish_assignments WHERE campaign_id=?1
@@ -423,11 +405,11 @@ impl Database {
             conn.execute("INSERT INTO publish_attempts(attempt_id,publication_id,campaign_id,started_at_ms) VALUES(?1,?2,?3,?4)",
                 params![attempt,publication,run.campaign_id,now])?;
             conn.execute("INSERT INTO publish_dispatch_jobs(assignment_id,campaign_id,run_token,attempt_id,udid,phase,state,queued_at_ms,deadline_ms)
-                VALUES(?1,?2,?3,?4,?5,?6,'queued',?7,?8)
+                VALUES(?1,?2,?3,?4,?5,?6,'queued',?7,NULL)
                 ON CONFLICT(assignment_id) DO UPDATE SET run_token=excluded.run_token,attempt_id=excluded.attempt_id,
-                phase=excluded.phase,state='queued',queued_at_ms=excluded.queued_at_ms,deadline_ms=excluded.deadline_ms,
+                phase=excluded.phase,state='queued',queued_at_ms=excluded.queued_at_ms,deadline_ms=NULL,
                 started_at_ms=NULL,finished_at_ms=NULL,owner=NULL,reason=NULL,revision=publish_dispatch_jobs.revision+1",
-                params![id,run.campaign_id,run.token,attempt,udid,if state=="imported" {"compose"} else {"transfer"},now,deadline])?;
+                params![id,run.campaign_id,run.token,attempt,udid,if state=="imported" {"compose"} else {"transfer"},now])?;
         }
         Ok(())
     }

@@ -185,10 +185,28 @@ impl Database {
     ) -> anyhow::Result<bool> {
         let mut conn = self.conn()?;
         let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
+        let now = Utc::now().to_rfc3339();
         let changed=tx.execute("UPDATE publish_campaigns SET state='missed',error_code=?3,revision=revision+1,updated_at=?4
-            WHERE id=?1 AND state='scheduled' AND run_at=?2",params![id,run_at,reason,Utc::now().to_rfc3339()])?;
+            WHERE id=?1 AND state='scheduled' AND run_at=?2",params![id,run_at,reason,now])?;
         if changed == 1 {
             tx.execute("UPDATE publish_assignments SET state='missed',error_code=?2,revision=revision+1 WHERE campaign_id=?1 AND effect_intent IS NULL AND state='scheduled'",params![id,reason])?;
+            // The reason stays readable after the fact: the event and the operator log carry the
+            // due time and why the 30-second admission window was not met.
+            tx.execute("INSERT INTO publish_events(campaign_id,revision,kind,payload_json,created_at)
+                SELECT id,revision,'state',json_object('state',state,'errorCode',error_code,'runAt',run_at,'source','schedule'),?2
+                FROM publish_campaigns WHERE id=?1",params![id,now])?;
+            let why = match reason {
+                "app_opened_after_deadline" => "ứng dụng mở sau giờ hẹn quá 30 giây",
+                "schedule_capacity_deadline" => {
+                    "ứng dụng đang chạy nhưng không nhận được đợt trong 30 giây sau giờ hẹn"
+                }
+                _ => "không nhận được đợt trong cửa sổ 30 giây",
+            };
+            tx.execute("INSERT INTO op_logs(id,action,detail,created_at) VALUES(?1,'publish.schedule.missed',?2,?3)",
+                params![Uuid::new_v4().to_string(),
+                    format!("Lịch đăng {id} lúc {}: Lỡ lịch vì {why} ({reason}); không tự đăng bù",
+                        run_at.replace('T', " ")),
+                    now])?;
         }
         tx.commit()?;
         Ok(changed == 1)
@@ -800,17 +818,35 @@ impl Database {
     ///
     /// `imported` assignments are untouched: the crash cost them nothing and they are still
     /// exactly where Post expects to find them.
+    ///
+    /// # Unsent dispatch work resumes on its own
+    ///
+    /// A dispatch job whose assignment has no effect intent never reached Post, so it resumes
+    /// without the operator: queued and paused jobs as they were, a running one from transfer
+    /// under a new attempt that spends one retry of its step
+    /// (`publish_recovery::resume_after_restart`). A job with an intent only reconciles.
     pub fn interrupt_orphaned_publish_campaigns(&self) -> anyhow::Result<usize> {
         let mut conn = self.conn()?;
         let transaction = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
         let now = Utc::now().to_rfc3339();
         // Acceptance is durable but preparation is not replayable. Even without a campaign,
         // an interrupted start requires an explicit new decision, never an automatic Post.
-        transaction.execute("UPDATE publish_start_requests SET state='uncertain',stage='interrupted',
+        // Preparation ends once the campaign waits for its hour or holds dispatch jobs: from
+        // then on its work is durable per assignment and restarts under the job rules below.
+        // Settling such a Start too (`running` is a Start's last state) used to stop every
+        // unsent row of a Start-created round at each restart.
+        let interrupted_starts: Vec<Option<String>> = transaction
+            .prepare("UPDATE publish_start_requests SET state='uncertain',stage='interrupted',
             error_json=?1,revision=revision+1,updated_at=?2
-            WHERE state IN ('accepted','preparing','running') OR (state='queued' AND NOT EXISTS
-                (SELECT 1 FROM publish_campaigns c WHERE c.id=campaign_id AND c.run_at IS NOT NULL AND c.state='scheduled'))", params![
-            serde_json::json!({"code":"PublishStartInterrupted","message":"Ứng dụng đã đóng khi lượt bắt đầu chưa kết thúc; kiểm tra lượt cũ, không tự đăng lại"}).to_string(),now])?;
+            WHERE state IN ('accepted','preparing') OR (state IN ('queued','running') AND NOT EXISTS
+                (SELECT 1 FROM publish_campaigns c WHERE c.id=campaign_id AND ((c.run_at IS NOT NULL AND c.state='scheduled')
+                    OR EXISTS(SELECT 1 FROM publish_dispatch_jobs j WHERE j.campaign_id=c.id))))
+            RETURNING campaign_id")?
+            .query_map(params![
+            serde_json::json!({"code":"PublishStartInterrupted","message":"Ứng dụng đã đóng khi lượt bắt đầu chưa kết thúc; kiểm tra lượt cũ, không tự đăng lại"}).to_string(),now], |row| row.get(0))?
+            .collect::<Result<_, _>>()?;
+        let interrupted_starts =
+            serde_json::to_string(&interrupted_starts.into_iter().flatten().collect::<Vec<_>>())?;
         let stranded: Vec<String> = transaction
             .prepare(
                 "SELECT id FROM publish_campaigns
@@ -929,13 +965,13 @@ impl Database {
                 ],
             )?;
         }
-        // New recovery-aware attempts require explicit operator continuation after
-        // process restart. Preserve counters and never resume a cached UI checkpoint.
-        transaction.execute("UPDATE publish_assignments SET state='failed_before_dispatch',error_code='retry_interrupted',revision=revision+1 WHERE effect_intent IS NULL AND NOT EXISTS(SELECT 1 FROM publish_exclude_requests e WHERE e.assignment_id=publish_assignments.id) AND id IN(SELECT j.assignment_id FROM publish_dispatch_jobs j JOIN publish_recovery_state r ON r.assignment_id=j.assignment_id WHERE j.state IN ('queued','running','paused'))",[])?;
-        transaction.execute("UPDATE publish_dispatch_jobs SET state='finished',owner=NULL,reason='retry_interrupted',revision=revision+1 WHERE state IN ('queued','running','paused') AND assignment_id IN(SELECT assignment_id FROM publish_recovery_state) AND EXISTS(SELECT 1 FROM publish_assignments a WHERE a.id=assignment_id AND a.effect_intent IS NULL)",[])?;
-        transaction.execute("UPDATE publish_recovery_state SET payload=json_set(payload,'$.state','interrupted','$.nextRetryAt',NULL) WHERE assignment_id IN(SELECT assignment_id FROM publish_dispatch_jobs WHERE reason='retry_interrupted')",[])?;
+        // Pre-Post work resumes without the operator and keeps its retry ledger; a running
+        // attempt restarts from transfer, never from a cached UI checkpoint.
+        super::publish_recovery::resume_after_restart(&transaction, &interrupted_starts)?;
+        // Only a Start interrupted at this startup stops its rows. An older uncertain Start's
+        // campaign holds jobs only from an explicit Retry, which is the new decision it asked for.
         transaction.execute("UPDATE publish_dispatch_jobs SET state='finished',owner=NULL,reason='start_interrupted',revision=revision+1
-            WHERE state IN ('queued','running','paused') AND EXISTS(SELECT 1 FROM publish_start_requests s WHERE s.campaign_id=publish_dispatch_jobs.campaign_id AND s.state='uncertain')",[])?;
+            WHERE state IN ('queued','running','paused') AND campaign_id IN (SELECT value FROM json_each(?1))",[&interrupted_starts])?;
         transaction.execute("UPDATE publish_dispatch_jobs SET state='cancelled',owner=NULL,reason='assignment_excluded',revision=revision+1
             WHERE state IN ('queued','running','paused') AND EXISTS(SELECT 1 FROM publish_exclude_requests e WHERE e.assignment_id=publish_dispatch_jobs.assignment_id)",[])?;
         transaction.execute("UPDATE publish_dispatch_jobs SET state='queued',reason=NULL,revision=revision+1 WHERE state='paused'",[])?;
@@ -945,8 +981,14 @@ impl Database {
           WHERE state='running' AND EXISTS(SELECT 1 FROM publish_assignments a WHERE a.id=assignment_id AND a.effect_intent IS NULL)",[])?;
         transaction.execute("UPDATE publish_dispatch_jobs SET state='finished',owner=NULL,reason='app_interrupted_after_send',revision=revision+1
           WHERE state IN ('running','queued') AND EXISTS(SELECT 1 FROM publish_assignments a WHERE a.id=assignment_id AND a.effect_intent IS NOT NULL)",[])?;
+        // Only a deadline that has passed. Deadlines are local wall-clock milliseconds, as the
+        // dispatcher's expiry reads them; new jobs carry none (`enqueue_publish_jobs`).
+        let local_now_ms = chrono::Local::now()
+            .naive_local()
+            .and_utc()
+            .timestamp_millis();
         transaction.execute("UPDATE publish_dispatch_jobs SET state='missed',reason='app_opened_after_deadline',revision=revision+1
-          WHERE state='queued' AND deadline_ms IS NOT NULL AND started_at_ms IS NULL",[])?;
+          WHERE state='queued' AND deadline_ms IS NOT NULL AND deadline_ms<?1 AND started_at_ms IS NULL",[local_now_ms])?;
         transaction.execute("UPDATE publish_assignments SET state='missed',error_code='app_opened_after_deadline',revision=revision+1
           WHERE effect_intent IS NULL AND id IN(SELECT assignment_id FROM publish_dispatch_jobs WHERE state='missed') AND state<>'missed'",[])?;
         // Queue expiry follows orphan reconciliation, so a campaign with only
@@ -972,7 +1014,12 @@ impl Database {
             [&now],
         )?;
         transaction.execute("UPDATE publish_dispatch_jobs SET run_token=(SELECT token FROM publish_pipeline_runs r WHERE r.campaign_id=publish_dispatch_jobs.campaign_id),revision=revision+1 WHERE state='queued'",[])?;
-        transaction.execute("UPDATE publish_campaigns SET state='posting',revision=revision+1 WHERE id IN(SELECT campaign_id FROM publish_pipeline_runs)",[])?;
+        // The resumed campaign drops the interruption reason settled above; its event says why
+        // it runs again, and the pipeline end recomputes its state from the rows.
+        transaction.execute("UPDATE publish_campaigns SET state='posting',error_code=NULL,revision=revision+1,updated_at=?1 WHERE id IN(SELECT campaign_id FROM publish_pipeline_runs)",[&now])?;
+        transaction.execute("INSERT INTO publish_events(campaign_id,revision,kind,payload_json,created_at)
+            SELECT id,revision,'state',json_object('state',state,'errorCode',error_code,'source','restart_resume'),?1
+            FROM publish_campaigns WHERE id IN(SELECT campaign_id FROM publish_pipeline_runs)",[&now])?;
         transaction.execute("UPDATE publish_attempts SET finished_at_ms=?1,result=(SELECT reason FROM publish_dispatch_jobs j WHERE j.attempt_id=publish_attempts.attempt_id)
           WHERE finished_at_ms IS NULL AND attempt_id IN(SELECT attempt_id FROM publish_dispatch_jobs WHERE state IN ('missed','finished','cancelled'))",[Utc::now().timestamp_millis()])?;
         // Account locks after the reconciliation above: interrupted preparations and settled
