@@ -1,9 +1,187 @@
+use std::collections::{HashSet, VecDeque};
 use std::sync::Arc;
+use std::time::{Duration, Instant};
 
 use parking_lot::RwLock;
 
 use crate::events::{AppEvent, EventBus};
-use crate::types::{DeviceInfo, DeviceStatus};
+use crate::types::{DeviceInfo, DeviceStatus, TileStreamState};
+
+/// Phones that leave the roster within [`MASS_DISCONNECT_WINDOW`] of each other are one box
+/// event, not that many phone faults, once they are at least this many and at least
+/// [`MASS_DISCONNECT_MIN_SHARE_PERCENT`] of the phones known just before.
+///
+/// Not measured. The one data point is r125 (15/10/2026 07:04): a 20-phone USB box went from
+/// 20 phones to 0 within 8 s, and the grid then read 0/0 for 18 minutes. Three keeps a single
+/// unplugged phone, or two swapped by hand, on the ordinary path where the row goes. A wrong
+/// call either way is safe: a kept row is display only and authorises nothing.
+pub const MASS_DISCONNECT_MIN_PHONES: usize = 3;
+/// Not measured. Low on purpose, so that one hub of three phones in a fleet of up to 30 is
+/// still one event (the 30% first proposed would need six phones of a 20-phone box). It only
+/// bites on larger fleets, where a few unrelated departures, such as reboots, are commoner.
+pub const MASS_DISCONNECT_MIN_SHARE_PERCENT: usize = 10;
+/// Not measured. Covers a box that drops across consecutive scans (scans run every 3 s, and
+/// the r125 scan that saw the drop took 7.7 s) without joining unrelated departures minutes
+/// apart.
+pub const MASS_DISCONNECT_WINDOW: Duration = Duration::from_secs(20);
+/// How long a phone lost in a mass disconnect stays on the grid. Not measured: long enough
+/// that an operator who finds a dark box after a night still sees which phones it held,
+/// short enough that a retired box is not shown for days. Expiry only bounds memory: a kept
+/// row is display only, so its age cannot authorise anything either way.
+pub const ABSENT_ROW_TTL: Duration = Duration::from_secs(12 * 3600);
+/// A kept or departed row was a live phone, so the TTL already bounds both sets by the phones
+/// plugged in within it; this cap only guards against a flapping network transport.
+const MAX_KEPT_ROWS: usize = 256;
+const MAX_PENDING_MASS_DISCONNECTS: usize = 8;
+
+/// One mass disconnect, for the activity log. See [`DeviceRegistry::take_mass_disconnects`].
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct MassDisconnect {
+    /// The phones lost, sorted.
+    pub udids: Vec<String>,
+    /// Phones known just before: live rows plus departures inside the window.
+    pub known: usize,
+}
+
+impl MassDisconnect {
+    /// The single operator notice for the event, in Vietnamese because it is shown as is.
+    pub fn notice(&self) -> String {
+        const LISTED: usize = 30;
+        let mut phones = self
+            .udids
+            .iter()
+            .take(LISTED)
+            .cloned()
+            .collect::<Vec<_>>()
+            .join(", ");
+        if self.udids.len() > LISTED {
+            phones.push_str(", …");
+        }
+        format!(
+            "Mất kết nối {}/{} máy cùng lúc (hub/nguồn USB?). Riviu giữ các máy này trên lưới ở \
+             trạng thái mất kết nối và không giao việc cho chúng; cắm lại là máy tự về, không \
+             cần bấm gì. Máy: {phones}",
+            self.udids.len(),
+            self.known
+        )
+    }
+}
+
+struct KeptRow {
+    since: Instant,
+    row: DeviceInfo,
+}
+
+/// The roster behind [`DeviceRegistry`]. Only `live` is a phone anything may act on.
+#[derive(Default)]
+struct Roster {
+    live: Vec<DeviceInfo>,
+    /// Phones lost in a mass disconnect, shown as disconnected until they return or expire.
+    kept: Vec<KeptRow>,
+    /// Ordinary departures inside [`MASS_DISCONNECT_WINDOW`], held back so that a box that
+    /// drops across two scans is still one event. Never shown.
+    departed: VecDeque<KeptRow>,
+    pending: VecDeque<MassDisconnect>,
+}
+
+impl Roster {
+    fn display(&self, now: Instant) -> Vec<DeviceInfo> {
+        let mut devices = self.live.clone();
+        devices.extend(
+            self.kept
+                .iter()
+                .filter(|kept| now.saturating_duration_since(kept.since) < ABSENT_ROW_TTL)
+                .filter(|kept| !self.live.iter().any(|live| live.udid == kept.row.udid))
+                .map(|kept| kept.row.clone()),
+        );
+        devices
+    }
+
+    fn forget_absent(&mut self, udid: &str) {
+        self.kept.retain(|kept| kept.row.udid != udid);
+        self.departed.retain(|gone| gone.row.udid != udid);
+    }
+
+    /// Replace the live roster with a scan, and keep the phones it lost when they are a box.
+    fn replace_live(&mut self, devices: Vec<DeviceInfo>, now: Instant) {
+        let previous = std::mem::replace(&mut self.live, devices);
+        let present = self
+            .live
+            .iter()
+            .map(|device| device.udid.clone())
+            .collect::<HashSet<_>>();
+        // A phone that is back replaces its kept row; nothing of the old row survives.
+        self.kept.retain(|kept| {
+            !present.contains(&kept.row.udid)
+                && now.saturating_duration_since(kept.since) < ABSENT_ROW_TTL
+        });
+        self.departed.retain(|gone| {
+            !present.contains(&gone.row.udid)
+                && now.saturating_duration_since(gone.since) < MASS_DISCONNECT_WINDOW
+        });
+        let known = previous.len() + self.departed.len();
+        let lost = previous
+            .into_iter()
+            .filter(|row| !present.contains(&row.udid))
+            .collect::<Vec<_>>();
+        if lost.is_empty() {
+            return;
+        }
+        let gone = lost.len() + self.departed.len();
+        let mass = gone >= MASS_DISCONNECT_MIN_PHONES
+            && gone * 100 >= known * MASS_DISCONNECT_MIN_SHARE_PERCENT;
+        if !mass {
+            // Today's path for a single phone: the row goes. Held back unseen, in case more
+            // of its box follows within the window.
+            self.departed
+                .extend(lost.into_iter().map(|row| KeptRow { since: now, row }));
+            while self.departed.len() > MAX_KEPT_ROWS {
+                self.departed.pop_front();
+            }
+            return;
+        }
+        let rows = self
+            .departed
+            .drain(..)
+            .map(|gone| gone.row)
+            .chain(lost)
+            .collect::<Vec<_>>();
+        // Constant for the life of the row: preparation caches key on `last_error`.
+        let reason = format!(
+            "Mất kết nối lúc {} cùng {} máy (hub/nguồn USB?); cắm lại là máy tự về",
+            chrono::Local::now().format("%H:%M"),
+            rows.len()
+        );
+        let mut udids = Vec::with_capacity(rows.len());
+        for row in rows {
+            udids.push(row.udid.clone());
+            self.kept.retain(|kept| kept.row.udid != row.udid);
+            self.kept.push(KeptRow {
+                since: now,
+                // Nothing of the live row that claims a working phone survives.
+                row: DeviceInfo {
+                    status: DeviceStatus::Disconnected,
+                    battery: None,
+                    wda_ready: false,
+                    wda_expires_at: None,
+                    stream_url: None,
+                    tile_stream_state: TileStreamState::Parked,
+                    last_error: Some(reason.clone()),
+                    ..row
+                },
+            });
+        }
+        if self.kept.len() > MAX_KEPT_ROWS {
+            let excess = self.kept.len() - MAX_KEPT_ROWS;
+            self.kept.drain(..excess);
+        }
+        udids.sort();
+        if self.pending.len() == MAX_PENDING_MASS_DISCONNECTS {
+            self.pending.pop_front();
+        }
+        self.pending.push_back(MassDisconnect { udids, known });
+    }
+}
 
 /// One fleet scan exactly as the drivers answered it, before any merge or status update.
 #[derive(Clone)]
@@ -13,9 +191,15 @@ pub struct FleetScan {
     pub devices: Vec<DeviceInfo>,
 }
 
+/// The fleet roster.
+///
+/// [`Self::list`], [`Self::get`] and [`Self::set_status`] see only the phones the last scan
+/// found. Phones lost in a mass disconnect stay visible through [`Self::list_with_absent`]
+/// and `DevicesUpdated` as disconnected rows, and nothing that picks phones for work or
+/// leases ever reads them.
 #[derive(Clone)]
 pub struct DeviceRegistry {
-    devices: Arc<RwLock<Vec<DeviceInfo>>>,
+    devices: Arc<RwLock<Roster>>,
     latest_scan: Arc<RwLock<Option<FleetScan>>>,
     events: EventBus,
 }
@@ -23,14 +207,26 @@ pub struct DeviceRegistry {
 impl DeviceRegistry {
     pub fn new(events: EventBus) -> Self {
         Self {
-            devices: Arc::new(RwLock::new(Vec::new())),
+            devices: Arc::new(RwLock::new(Roster::default())),
             latest_scan: Arc::new(RwLock::new(None)),
             events,
         }
     }
 
+    /// The live roster: phones the last scan found.
     pub fn list(&self) -> Vec<DeviceInfo> {
-        self.devices.read().clone()
+        self.devices.read().live.clone()
+    }
+
+    /// The grid's roster: [`Self::list`] plus phones lost in a mass disconnect, as
+    /// `Disconnected` rows with a reason. Display only; never pick phones for work from it.
+    pub fn list_with_absent(&self) -> Vec<DeviceInfo> {
+        self.devices.read().display(Instant::now())
+    }
+
+    /// Mass disconnects since the last call, oldest first, each to be logged once.
+    pub fn take_mass_disconnects(&self) -> Vec<MassDisconnect> {
+        self.devices.write().pending.drain(..).collect()
     }
 
     /// Keep the background scan's raw answer for readers that need connection state as the
@@ -43,32 +239,45 @@ impl DeviceRegistry {
         self.latest_scan.read().clone()
     }
 
+    /// A live phone. A row kept from a mass disconnect is not one.
     pub fn get(&self, udid: &str) -> Option<DeviceInfo> {
-        self.devices.read().iter().find(|d| d.udid == udid).cloned()
+        self.devices
+            .read()
+            .live
+            .iter()
+            .find(|d| d.udid == udid)
+            .cloned()
     }
 
+    /// Replace the live roster with a scan. A phone that left goes, as before, unless it left
+    /// with a box (see [`MASS_DISCONNECT_MIN_PHONES`]): then it stays on the grid as a
+    /// disconnected row until it returns or [`ABSENT_ROW_TTL`] passes, and the event waits
+    /// in [`Self::take_mass_disconnects`].
     pub fn upsert_many(&self, devices: Vec<DeviceInfo>) {
-        {
+        let now = Instant::now();
+        let devices = {
             let mut guard = self.devices.write();
-            *guard = devices.clone();
-        }
+            guard.replace_live(devices, now);
+            guard.display(now)
+        };
         self.events.emit(AppEvent::DevicesUpdated { devices });
     }
 
     pub fn upsert(&self, device: DeviceInfo) {
         {
             let mut guard = self.devices.write();
-            if let Some(existing) = guard.iter_mut().find(|d| d.udid == device.udid) {
+            guard.forget_absent(&device.udid);
+            if let Some(existing) = guard.live.iter_mut().find(|d| d.udid == device.udid) {
                 *existing = device.clone();
             } else {
-                guard.push(device.clone());
+                guard.live.push(device.clone());
             }
         }
         self.events.emit(AppEvent::DeviceUpdated {
             device: device.clone(),
         });
         self.events.emit(AppEvent::DevicesUpdated {
-            devices: self.list(),
+            devices: self.list_with_absent(),
         });
     }
 
@@ -98,6 +307,7 @@ impl DeviceRegistry {
         let updated = {
             let mut guard = self.devices.write();
             guard
+                .live
                 .iter_mut()
                 .find(|device| device.udid == udid)
                 .map(|device| {
@@ -118,7 +328,7 @@ impl DeviceRegistry {
             device: device.clone(),
         });
         self.events.emit(AppEvent::DevicesUpdated {
-            devices: self.list(),
+            devices: self.list_with_absent(),
         });
         true
     }

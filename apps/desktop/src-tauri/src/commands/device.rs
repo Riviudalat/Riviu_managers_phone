@@ -40,7 +40,7 @@ pub struct DeviceWorkState {
 
 #[tauri::command]
 pub async fn list_devices(state: State<'_, AppState>) -> Result<Vec<DeviceInfo>, CommandError> {
-    Ok(state.registry.list())
+    Ok(state.registry.list_with_absent())
 }
 
 /// Reads held ownership and one bounded persisted-progress batch; no phone IO.

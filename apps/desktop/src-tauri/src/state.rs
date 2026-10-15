@@ -2528,9 +2528,25 @@ impl AppState {
                             )
                             .collect();
                         registry.upsert_many(merged);
+                        // A whole box gone at once (C1, r125 15/10/2026: 20 phones in 8 s)
+                        // stays on the grid as disconnected rows; the operator gets one
+                        // notice for it, not one per phone.
+                        for event in registry.take_mass_disconnects() {
+                            let notice = event.notice();
+                            log::warn!("{notice}");
+                            if let Err(error) = numbering_db
+                                .storage_write(move |db| {
+                                    db.log_op("device.mass_disconnect", &notice)
+                                })
+                                .await
+                            {
+                                log::error!("không ghi được thông báo mất kết nối hàng loạt vào nhật ký hoạt động: {error:#}");
+                            }
+                        }
                         // This scan is the only place a device DEPARTURE is observed —
-                        // `upsert_many` replaces the roster wholesale, so nothing else is
-                        // ever told a phone was unplugged. The hub needs to hear it now that
+                        // `upsert_many` drops it from the live roster (a box-sized loss is
+                        // kept for display only), so nothing else is ever told a phone was
+                        // unplugged. The hub needs to hear it now that
                         // each device owns a channel: without this it keeps one
                         // fully-allocated ring per udid it has ever seen, and the rings are
                         // allocated eagerly.
