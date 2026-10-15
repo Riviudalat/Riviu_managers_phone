@@ -1275,10 +1275,75 @@ impl AndroidDriver {
         }
     }
 
+    /// The default "Cài đặt máy" baseline (lock screen off, auto-rotate off) at a job's claim,
+    /// under the job's lease and before any of its effects, in every mode, acceptance
+    /// included. A phone rebooted outside Riviu (the operator, another tool) came back with
+    /// auto-rotate on and kept it until Riviu's next reboot. Same read, write-what-drifted,
+    /// re-read path as the page; `device.baseline.admission` journals a write or a failure.
+    ///
+    /// Settled once per (phone, boot id): after that a claim costs one boot-id read. A
+    /// failed read or write is not settled and is tried again at the next claim. Never
+    /// refuses the job: a phone with a PIN stays the lock-screen preflight's refusal.
+    async fn ensure_baseline_for_job(&self, serial: &str) {
+        use riviu_core::device_control::baseline::{
+            summarize, BaselineOutcome, BaselineSetting, DeviceBaselineResult,
+        };
+        static SETTLED: std::sync::OnceLock<Mutex<HashMap<String, String>>> =
+            std::sync::OnceLock::new();
+        let settled = SETTLED.get_or_init(Default::default);
+        let boot_id = match self
+            .adb
+            .shell_output(
+                serial,
+                "cat /proc/sys/kernel/random/boot_id",
+                ADB_UNROOT_PROBE_TIMEOUT,
+            )
+            .await
+        {
+            Ok(output) if output.exit_code == 0 => proved_boot_id(&output.stdout),
+            _ => None,
+        };
+        if boot_id
+            .as_ref()
+            .is_some_and(|boot| settled.lock().get(serial) == Some(boot))
+        {
+            return;
+        }
+        let result = match self
+            .apply_baseline(serial, &BaselineSetting::DEFAULT_BASELINE)
+            .await
+        {
+            Ok(items) => DeviceBaselineResult::from_items(serial, items),
+            Err(error) => DeviceBaselineResult::whole_device(
+                serial,
+                BaselineOutcome::Failed,
+                format!("không đọc được máy, chưa thay đổi gì: {error:#}"),
+            ),
+        };
+        // A setting adb cannot change (a PIN) is final for this boot too: only a person can.
+        if result.outcome != BaselineOutcome::Failed {
+            if let Some(boot) = boot_id {
+                settled.lock().insert(serial.to_string(), boot);
+            }
+        }
+        if result.outcome == BaselineOutcome::AlreadyOk {
+            return;
+        }
+        self.load.journal(
+            serial,
+            "device.baseline.admission",
+            &format!(
+                "kiểm Cài đặt máy khi nhận việc, trước khi mở phiên: {}",
+                summarize(&result)
+            ),
+        );
+    }
+
     /// The load admission gate (`DeviceDriver::ensure_load_admissible`). The caller holds the
     /// job's exclusive lease and no effect step is running.
     ///
-    /// A fresh pass skips the sample. An overloaded phone gets tier 1 (unless it was cleaned in
+    /// The default baseline first ([`Self::ensure_baseline_for_job`]). A fresh pass skips the
+    /// sample. An overloaded phone gets tier 1 (unless it was cleaned in
     /// the last 30 minutes) and a fresh sample. A phone still overloaded gets tier 2 here, under
     /// the job's own lease, through the desktop's reboot repair: reboot when the ledger and the
     /// 6 h budget allow, then sample again (12/10/2026: the background monitor never rebooted a
@@ -1297,6 +1362,7 @@ impl AndroidDriver {
         if !self.automatic_setup_allowed {
             return Ok(());
         }
+        self.ensure_baseline_for_job(serial).await;
         if self.load.fresh_pass(serial, crate::load::now_ms()) {
             return Ok(());
         }
