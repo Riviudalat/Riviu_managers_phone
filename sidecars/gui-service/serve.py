@@ -9,13 +9,15 @@ import uvicorn
 
 from riviu_gui import PROTOCOL_VERSION, VERSION
 from riviu_gui.app import create_app
+from riviu_gui.ocr import DEFAULT_WORKERS
 from riviu_gui.provider import ProviderConfig
 
 
 def main():
     bootstrap = json.loads(sys.stdin.readline())
     config = ProviderConfig(**bootstrap.get("provider", {}))
-    app = create_app(bootstrap["token"], config)
+    # The desktop sends the local OCR/template capacity it admits, so both sides agree.
+    app = create_app(bootstrap["token"], config, local_capacity=bootstrap.get("localCapacity", DEFAULT_WORKERS))
     sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
     sock.bind(("127.0.0.1", 0))
     server = uvicorn.Server(uvicorn.Config(app, log_level="warning", access_log=False, workers=1))

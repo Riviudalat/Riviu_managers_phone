@@ -9,7 +9,7 @@ import pytest
 from fastapi.testclient import TestClient
 
 from riviu_gui.app import create_app
-from riviu_gui.ocr import recognize, run_ocr, verified_models
+from riviu_gui.ocr import DEFAULT_WORKERS, OcrWorkerPool, recognize, run_ocr, verified_models
 from riviu_gui.ocr_models import OcrRequest
 
 TOKEN = "ocr-test-token-" * 4
@@ -117,7 +117,7 @@ def test_bad_image_hash_is_input_error_before_any_worker_spawn(staged_models, mo
     spawn.assert_not_called()
 
 
-def test_ocr_capacity_two_admitted_requests_then_releases_after_cancel(monkeypatch):
+def test_ocr_capacity_admits_one_request_per_worker_then_releases_after_cancel(monkeypatch):
     import httpx
 
     import riviu_gui.app as module
@@ -126,7 +126,7 @@ def test_ocr_capacity_two_admitted_requests_then_releases_after_cancel(monkeypat
         entered = 0
         finished = 0
 
-        async def held(_request):
+        async def held(*_):
             nonlocal entered, finished
             entered += 1
             try:
@@ -137,15 +137,15 @@ def test_ocr_capacity_two_admitted_requests_then_releases_after_cancel(monkeypat
         monkeypatch.setattr(module, "run_ocr", held)
         transport = httpx.ASGITransport(app=create_app(TOKEN))
         async with httpx.AsyncClient(transport=transport, base_url="http://test") as client:
-            tasks = [asyncio.create_task(client.post("/v1/gui/ocr", headers=HEADERS, json=request_body(requestId=str(i)))) for i in range(2)]
-            while entered != 2:
+            tasks = [asyncio.create_task(client.post("/v1/gui/ocr", headers=HEADERS, json=request_body(requestId=str(i)))) for i in range(DEFAULT_WORKERS)]
+            while entered != DEFAULT_WORKERS:
                 await asyncio.sleep(0.001)
-            third = await client.post("/v1/gui/ocr", headers=HEADERS, json=request_body(requestId="third"))
-            assert third.status_code == 429 and third.headers["Retry-After"] == "1"
+            extra = await client.post("/v1/gui/ocr", headers=HEADERS, json=request_body(requestId="extra"))
+            assert extra.status_code == 429 and extra.headers["Retry-After"] == "1"
             for task in tasks:
                 task.cancel()
             await asyncio.gather(*tasks, return_exceptions=True)
-            assert finished == 2
+            assert finished == DEFAULT_WORKERS
             ready = await client.get("/health/ready", headers=HEADERS)
             assert ready.json()["activeRequests"] == 0
 
@@ -158,12 +158,14 @@ def test_cancel_kills_and_reaps_the_native_worker(monkeypatch):
     monkeypatch.setattr(module, "verified_models", lambda: ({}, {}))
 
     class Child:
+        pid = 4242
         returncode = None
         killed = False
         reaped = False
 
-        async def communicate(self, _data):
-            await asyncio.Event().wait()
+        def __init__(self):
+            self.stdin = type("Pipe", (), {"write": lambda _self, _data: None, "drain": AsyncMock()})()
+            self.stdout = type("Pipe", (), {"readline": lambda _self: asyncio.Event().wait()})()
 
         def kill(self):
             self.killed = True
@@ -176,13 +178,16 @@ def test_cancel_kills_and_reaps_the_native_worker(monkeypatch):
         child = Child()
         spawn = AsyncMock(return_value=child)
         monkeypatch.setattr(module.asyncio, "create_subprocess_exec", spawn)
-        task = asyncio.create_task(run_ocr(OcrRequest.model_validate(request_body())))
+        pool = OcrWorkerPool(1)
+        task = asyncio.create_task(run_ocr(OcrRequest.model_validate(request_body()), pool))
         while not spawn.called:
             await asyncio.sleep(0.001)
         task.cancel()
         with pytest.raises(asyncio.CancelledError):
             await task
         assert child.killed and child.reaped
+        # The killed worker is not handed to the next request.
+        assert pool._idle == [] and pool._live == 0
 
     asyncio.run(exercise())
 
@@ -192,12 +197,14 @@ def test_native_worker_deadline_kills_and_reaps(monkeypatch):
 
     monkeypatch.setattr(module, "verified_models", lambda: ({}, {}))
     child = type("Child", (), {})()
+    child.pid = 4242
     child.returncode = None
-    child.communicate = AsyncMock(side_effect=asyncio.TimeoutError)
+    child.stdin = type("Pipe", (), {"write": lambda _self, _data: None, "drain": AsyncMock()})()
+    child.stdout = type("Pipe", (), {"readline": lambda _self: asyncio.Event().wait()})()
     child.kill = lambda: setattr(child, "returncode", -9)
     child.wait = AsyncMock()
     monkeypatch.setattr(module.asyncio, "create_subprocess_exec", AsyncMock(return_value=child))
     with pytest.raises(TimeoutError):
-        asyncio.run(run_ocr(OcrRequest.model_validate(request_body(remainingMs=1))))
+        asyncio.run(run_ocr(OcrRequest.model_validate(request_body(remainingMs=500)), OcrWorkerPool(1)))
     assert child.returncode == -9
     child.wait.assert_awaited_once()

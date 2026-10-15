@@ -221,18 +221,18 @@ def test_timed_out_native_work_retains_shared_capacity_until_it_stops(monkeypatc
     request = observation()
     request["remainingMs"] = 100
     try:
-        with TestClient(create_app(TOKEN)) as client, ThreadPoolExecutor(2) as pool:
+        with TestClient(create_app(TOKEN, local_capacity=2)) as client, ThreadPoolExecutor(2) as pool:
             calls = [pool.submit(client.post, ENDPOINT, headers=HEADERS, json=request) for _ in range(2)]
             started.wait(timeout=5)
             assert all(call.result(timeout=5).status_code == 504 for call in calls)
             assert client.get("/health/ready", headers=HEADERS).json()["activeRequests"] == 2
             response = client.post(ENDPOINT, headers=HEADERS, json=observation())
             assert response.status_code == 429 and response.headers["Retry-After"] == "1"
-            # Existing remote routes share the same two admission slots.
+            # The LLM routes keep their own two slots; local work cannot starve them.
             from test_api import observation as remote_observation
 
             assert (
-                client.post("/v1/gui/resolve", headers=HEADERS, json=remote_observation()).status_code == 429
+                client.post("/v1/gui/resolve", headers=HEADERS, json=remote_observation()).status_code == 200
             )
             release.set()
             for _ in range(100):

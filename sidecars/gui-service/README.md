@@ -49,8 +49,10 @@ văn bản hay danh tính tài khoản. Mẫu cố định không tự thích ng
 
 Giới hạn tải: screenshot 8 MiB / 8 MiPixel, template 2 MiB / 1 MiPixel;
 tổng vị trí so khớp qua các scale tối đa 32 Mi. Thu hẹp ROI hoặc tập scale khi
-vượt giới hạn. Hai request nhận diện dùng chung hai slot; mỗi phép OpenCV dùng
-một luồng CPU, chạy ngoài event loop. Hết hạn trả HTTP 504 và yêu cầu worker
+vượt giới hạn. Template matching và OCR dùng chung N slot cục bộ (mặc định 4;
+desktop gửi N qua bootstrap `localCapacity`, ghi đè bằng `RIVIU_OCR_WORKERS`
+1–8); `resolve`/`recover` gọi AI provider giữ trần riêng hai slot. Mỗi phép
+OpenCV dùng một luồng CPU, chạy ngoài event loop. Hết hạn trả HTTP 504 và yêu cầu worker
 dừng; slot chỉ được trả khi worker thực sự kết thúc. Worker kiểm hạn giữa các
 phép native và peak; một lời gọi native đang chạy hoàn tất trước khi nhả slot.
 HTTP 429 có Retry-After khi đủ slot, HTTP 422 cho đầu vào sai.
@@ -74,9 +76,14 @@ tự động; khi chạy ứng dụng không tải model hay gửi ảnh qua m�
 OCR nhận cùng định danh quan sát với template matching, một `screenshot`,
 `roi` pixel tùy chọn, `languages: ["vi", "en"]` và `minConfidence` từ 0 đến 1.
 Ngân sách tối đa 8 MiB/8 MiPixel, 30 giây, 128 dòng/4096 byte UTF-8 đầu ra;
-hai yêu cầu chia sẻ slot với các phương thức nhận diện khác. Mỗi lượt chạy trong
-tiến trình riêng, một luồng native; timeout/hủy dừng và thu hồi tiến trình trước
-khi trả slot. Thiếu model trả HTTP 503 và capability `ocrModelsMissing`.
+mỗi yêu cầu chiếm một trong N slot cục bộ chung với template matching. N worker
+thường trú, mỗi worker một luồng native, giữ model đã nạp giữa các lượt; worker
+chỉ khởi động khi có yêu cầu. Timeout/hủy giết và thu hồi worker đang chạy trước
+khi trả slot; worker thay thế khởi động ở yêu cầu sau, có backoff và trần số lần
+khởi động lại mỗi phút (vượt trần trả HTTP 503 `gui_ocr_workers_unavailable`).
+Kết quả mang ticket của lượt gửi và định danh request, nên không thể trả lời một
+request khác. Mỗi request ghi một dòng `ocr ... queue_ms=... work_ms=...` vào
+stderr (`service.log`) và trả header `x-riviu-queue-ms`. Thiếu model trả HTTP 503 và capability `ocrModelsMissing`.
 Sẵn sàng có `localOcr`, `ocr.vi`, `ocr.en` dù chưa cấu hình AI provider.
 
 Kết quả gồm văn bản, từng dòng có bounds pixel trong **ảnh gốc**, confidence,

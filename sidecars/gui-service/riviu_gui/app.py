@@ -1,5 +1,6 @@
 import asyncio
 import secrets
+import sys
 import threading
 import time
 from contextlib import asynccontextmanager
@@ -8,22 +9,56 @@ from typing import Annotated
 import httpx
 from fastapi import APIRouter, Depends, FastAPI, Header, HTTPException
 from fastapi import Request as HttpRequest
+from fastapi import Response as HttpResponse
 from starlette.responses import JSONResponse
 
 from . import VERSION
 from .models import GuiRequest, GuiResponse, Readiness
-from .ocr import ocr_ready, run_ocr
+from .ocr import DEFAULT_WORKERS, OcrTiming, OcrWorkerPool, OcrWorkersUnavailable, ocr_ready, run_ocr
 from .ocr_models import OcrRequest, OcrResponse
 from .provider import ProviderConfig, VisionProvider
 from .template_match import match_template
 from .template_models import TemplateMatchRequest, TemplateMatchResponse
 
+# LLM resolve/recover keep their own cap: they wait on a remote provider, not on this CPU.
+REMOTE_CAPACITY = 2
 
-def create_app(token: str, config: ProviderConfig | None = None, transport=None) -> FastAPI:
+
+def measure(line: str) -> None:
+    # stderr is the desktop's service.log; one line per local OCR request.
+    print(line, file=sys.stderr, flush=True)
+
+
+def ocr_outcome(task: asyncio.Task, stopped: str) -> str:
+    if task.cancelled():
+        return stopped
+    match task.exception():
+        case None:
+            return "ok"
+        case TimeoutError():
+            return "deadline"
+        case FileNotFoundError():
+            return "models_missing"
+        case OcrWorkersUnavailable() as error:
+            return str(error)
+        case ValueError():
+            return "input_invalid"
+        case RuntimeError():
+            return "inference_failed"
+        case error:
+            return type(error).__name__
+
+
+def create_app(
+    token: str, config: ProviderConfig | None = None, transport=None, local_capacity: int = DEFAULT_WORKERS
+) -> FastAPI:
     if len(token) < 32:
         raise ValueError("service token must contain at least 32 characters")
     config = config or ProviderConfig()
-    active = 0
+    # OCR and template matching share `local_capacity` slots, one resident OCR worker each.
+    ocr_pool = OcrWorkerPool(local_capacity)
+    remote_active = 0
+    local_active = 0
     local_tasks: set[asyncio.Task] = set()
 
     @asynccontextmanager
@@ -35,6 +70,7 @@ def create_app(token: str, config: ProviderConfig | None = None, transport=None)
             finally:
                 if local_tasks:
                     await asyncio.gather(*local_tasks, return_exceptions=True)
+                await ocr_pool.close()
 
     app = FastAPI(
         title="Riviu GUI Service", version=VERSION, lifespan=lifespan, docs_url=None, redoc_url=None
@@ -68,16 +104,16 @@ def create_app(token: str, config: ProviderConfig | None = None, transport=None)
             provider_ready=config.ready,
             capabilities=["resolve", "recover", "imageValidation", "localTemplateMatch"]
             + (["localOcr", "ocr.vi", "ocr.en"] if ocr_ready() else ["ocrModelsMissing"]),
-            active_requests=active,
+            active_requests=remote_active + local_active,
         )
 
     router = APIRouter(prefix="/v1/gui", dependencies=[Depends(authorize)])
 
     async def perceive(request: GuiRequest) -> GuiResponse:
-        nonlocal active
-        if active >= 2:
+        nonlocal remote_active
+        if remote_active >= REMOTE_CAPACITY:
             raise HTTPException(429, detail="gui_capacity", headers={"Retry-After": "1"})
-        active += 1
+        remote_active += 1
         try:
             async with asyncio.timeout(min(30.0, request.remaining_ms / 1000)):
                 return await app.state.provider.resolve(request)
@@ -88,7 +124,7 @@ def create_app(token: str, config: ProviderConfig | None = None, transport=None)
         except httpx.HTTPError as error:
             raise HTTPException(502, detail="gui_provider_unavailable") from error
         finally:
-            active -= 1
+            remote_active -= 1
 
     @router.post("/resolve")
     async def resolve(request: GuiRequest) -> GuiResponse:
@@ -99,20 +135,27 @@ def create_app(token: str, config: ProviderConfig | None = None, transport=None)
         return await perceive(request)
 
     @router.post("/ocr")
-    async def ocr(request: OcrRequest, http_request: HttpRequest) -> OcrResponse:
-        nonlocal active
-        if active >= 2:
+    async def ocr(request: OcrRequest, http_request: HttpRequest, http_response: HttpResponse) -> OcrResponse:
+        nonlocal local_active
+        if local_active >= local_capacity:
+            measure(f"ocr request={request.request_id} admission=capacity active={local_active}")
             raise HTTPException(429, detail="gui_capacity", headers={"Retry-After": "1"})
-        active += 1
-        task = asyncio.create_task(run_ocr(request))
+        local_active += 1
+        timing = OcrTiming()
+        stopped = "cancelled"
+        task = asyncio.create_task(run_ocr(request, ocr_pool, timing))
         local_tasks.add(task)
 
         def release_ocr(completed: asyncio.Task):
-            nonlocal active
-            active -= 1
+            nonlocal local_active
+            # The worker is drained (served, or killed and reaped) before the task completes.
+            local_active -= 1
             local_tasks.discard(completed)
-            if not completed.cancelled():
-                completed.exception()
+            measure(
+                f"ocr request={request.request_id} admission=admitted queue_ms={timing.queue_ms} "
+                f"work_ms={timing.work_ms} worker={timing.worker} spawned={int(timing.spawned)} "
+                f"outcome={ocr_outcome(completed, stopped)}"
+            )
 
         task.add_done_callback(release_ocr)
 
@@ -126,13 +169,19 @@ def create_app(token: str, config: ProviderConfig | None = None, transport=None)
         disconnect = asyncio.create_task(wait_for_disconnect())
         try:
             async with asyncio.timeout(request.remaining_ms / 1000):
-                return await asyncio.shield(task)
+                response = await asyncio.shield(task)
+            # The desktop's measurement line splits its own wait from this one.
+            http_response.headers["x-riviu-queue-ms"] = str(timing.queue_ms)
+            return response
         except TimeoutError as error:
+            stopped = "deadline"
             raise HTTPException(504, detail="gui_deadline") from error
         except FileNotFoundError as error:
             raise HTTPException(503, detail="gui_ocr_models_missing") from error
         except ValueError as error:
             raise HTTPException(422, detail="gui_ocr_input_invalid") from error
+        except OcrWorkersUnavailable as error:
+            raise HTTPException(503, detail="gui_ocr_workers_unavailable") from error
         except RuntimeError as error:
             raise HTTPException(502, detail="gui_ocr_inference_failed") from error
         finally:
@@ -143,22 +192,22 @@ def create_app(token: str, config: ProviderConfig | None = None, transport=None)
 
     @router.post("/template-match")
     async def template_match(request: TemplateMatchRequest) -> TemplateMatchResponse:
-        nonlocal active
-        if active >= 2:
+        nonlocal local_active
+        if local_active >= local_capacity:
             raise HTTPException(429, detail="gui_capacity", headers={"Retry-After": "1"})
-        active += 1
+        local_active += 1
         stop = threading.Event()
         duration = request.remaining_ms / 1000
         deadline = time.monotonic() + duration
 
         async def work() -> TemplateMatchResponse:
-            nonlocal active
+            nonlocal local_active
             try:
                 return await asyncio.to_thread(match_template, request, stop, deadline)
             finally:
                 # Cancellation of an HTTP caller does not stop a native call.
                 # Keep its capacity slot until the thread actually completes.
-                active -= 1
+                local_active -= 1
 
         task = asyncio.create_task(work())
         local_tasks.add(task)
