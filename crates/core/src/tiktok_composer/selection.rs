@@ -1145,10 +1145,11 @@ impl<P: TapPlanner> Composer<'_, P> {
                         trace.reason(SelectionReason::Stopped);
                         return Ok(Selection::Stopped);
                     }
-                    if Instant::now() >= hard_deadline {
-                        trace.reason(SelectionReason::SelectionReadbackUnproven);
-                        return Ok(Selection::NotEnoughSelected);
-                    }
+                    // A read the read grace finished past `hard_deadline` is judged once, below,
+                    // before the deadline ends the wait. r129 (16/10/2026, SM-G955F/N, Global
+                    // 45.7.3) phones 24 and 27 read complete pickers in 25.0 s and 22.3 s
+                    // after a cell tap; this check threw both reads away unjudged and each
+                    // attempt ended "chưa xác nhận chọn đủ ảnh".
                     if session.gui_session_epoch() != epoch {
                         trace.reason(SelectionReason::HierarchyReadFailed);
                         return Ok(Selection::NotEnoughSelected);
@@ -1170,6 +1171,7 @@ impl<P: TapPlanner> Composer<'_, P> {
                             break proved;
                         }
                     }
+                    // `deadline` is never later than `hard_deadline`.
                     if Instant::now() >= deadline {
                         trace.reason(SelectionReason::SelectionReadbackUnproven);
                         return Ok(Selection::NotEnoughSelected);

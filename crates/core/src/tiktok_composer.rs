@@ -2241,7 +2241,10 @@ impl<'a, P: TapPlanner> Composer<'a, P> {
             )
             .await;
         };
-        if stop.load(Ordering::Relaxed) || Instant::now() >= deadline {
+        // A second read the read grace finished past `deadline` still proved the row:
+        // r129 (16/10/2026, `ce0317139ca344520c`) read it stable in a 23.7 s `/source` and
+        // stopped here as "album not found".
+        if stop.load(Ordering::Relaxed) || !crate::ui_automation::runtime::window_open(deadline) {
             return Ok(AlbumChoice::NotFound);
         }
         self.tap_inside(&row).await?;
@@ -2249,9 +2252,17 @@ impl<'a, P: TapPlanner> Composer<'a, P> {
         // read is unknown, not proof of a different album; never replay the tap here.
         // `pill_reads` owns this deadline: a second read bounded by the same instant
         // turned every completed negative into DeadlineExceeded.
+        //
+        // One album step from when the tap has drained, no longer capped by the album budget:
+        // that budget is for the reads before the tap. r129 (16/10/2026, 30 SM-G955F/N,
+        // Global 45.7.3) phones 27, 41 and 49 had the row tap's `/actions` answer after
+        // 25.9-29.2 s, the album budget was already spent, and the pill read never started:
+        // three attempts ended "album pill observation unavailable" with the album tapped.
+        // Still one bounded window, sized by `read_window` and the enclosing budget; the tap
+        // is never repeated.
         Ok(
             if self
-                .pill_reads(album, stop, total_deadline.min(Instant::now() + album_step))
+                .pill_reads(album, stop, Instant::now() + album_step)
                 .await?
             {
                 AlbumChoice::Confirmed
