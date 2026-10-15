@@ -2030,7 +2030,21 @@ impl<'a, P: TapPlanner> Composer<'a, P> {
         // Galaxy S8+ fleet 08/09/2026: album rows arrive after the menu animation.
         // A single immediate read reported AlbumNotFound although import was verified.
         // Wait for one exact row with stable geometry; never choose an ambiguous album.
-        let deadline = total_deadline.min(Instant::now() + album_step);
+        //
+        // r127 phone 31 (15/10/2026, SM-G955F, Global 45.7.3) gave up with "0 lần cuộn; 0 lần
+        // đọc trống": every completed read named exactly one row, and the window closed before
+        // a second read could confirm its position. Each read here was `/elements` plus a rect
+        // and a text call per row. Where the session reads trees, one `/source` per poll answers
+        // the row (UiSelector `text()` is an exact match, see [`tree_answers`]) and, after empty
+        // reads, the album list to scroll.
+        let in_tree = self.session.supports_accessibility_readback();
+        let row_query = ElementQuery::Text {
+            value: album,
+            exact: true,
+        };
+        let mut deadline = total_deadline.min(Instant::now() + album_step);
+        let mut extended = false;
+        let mut previous_generation = None;
         let mut previous: Option<ElementBox> = None;
         let mut scrolls = 0;
         let mut empty_reads = 0;
@@ -2038,19 +2052,23 @@ impl<'a, P: TapPlanner> Composer<'a, P> {
             if stop.load(Ordering::Relaxed) {
                 return Ok(AlbumChoice::NotFound);
             }
-            let rows = match read_before_deadline(
-                self.session.locate_all_described(ElementQuery::Text {
-                    value: album,
-                    exact: true,
-                }),
-                deadline,
-                stop,
-            )
-            .await
-            {
-                Ok(ReadWaitResult::Ready(rows)) => rows,
+            let mut trace = StageDiagnosticOperation::start("albumRows", &epoch, Some(deadline));
+            trace.query(row_query);
+            let read = async {
+                if !in_tree {
+                    let rows = self.session.locate_all_described(row_query).await?;
+                    return anyhow::Ok((Some(rows), None));
+                }
+                let tree = crate::ui_automation::tree::Tree::parse(
+                    self.session.hierarchy_source_snapshot().await?,
+                )?;
+                anyhow::Ok((tree_rows(&tree, self.plan.package, row_query), Some(tree)))
+            };
+            let (rows, tree) = match read_before_deadline(read, deadline, stop).await {
+                Ok(ReadWaitResult::Ready(read)) => read,
                 Ok(ReadWaitResult::Cancelled) => return Ok(AlbumChoice::NotFound),
                 Ok(ReadWaitResult::DeadlineExceeded) => {
+                    trace.finish("deadline");
                     anyhow::ensure!(
                         self.session.gui_session_epoch() == epoch,
                         "album session changed before read deadline"
@@ -2060,6 +2078,8 @@ impl<'a, P: TapPlanner> Composer<'a, P> {
                     ));
                 }
                 Err(error) if classify_read_failure(&error) == ReadFailureKind::Transient => {
+                    trace.finish("transientError");
+                    drop(trace);
                     anyhow::ensure!(
                         self.session.gui_session_epoch() == epoch,
                         "album session changed before read retry"
@@ -2081,6 +2101,27 @@ impl<'a, P: TapPlanner> Composer<'a, P> {
                 self.session.gui_session_epoch() == epoch,
                 "album session changed before navigation"
             );
+            if let Some(tree) = &tree {
+                trace.snapshot(tree.generation);
+                // Stability compares two reads, so the same tree can never answer twice.
+                anyhow::ensure!(
+                    previous_generation.is_none_or(|old| tree.generation > old),
+                    "album snapshot is stale"
+                );
+                previous_generation = Some(tree.generation);
+            }
+            let Some(rows) = rows else {
+                // A matching row without bounds is unread, not an empty list: no scroll.
+                trace.finish("unboundedMatch");
+                drop(trace);
+                previous = None;
+                sleep(
+                    POLL.min(deadline.saturating_duration_since(Instant::now())),
+                    stop,
+                )
+                .await;
+                continue;
+            };
             match rows.as_slice() {
                 [row]
                     if previous.as_ref().is_some_and(|old| {
@@ -2090,25 +2131,39 @@ impl<'a, P: TapPlanner> Composer<'a, P> {
                             && old.height == row.height
                     }) =>
                 {
-                    break row.clone()
+                    trace.target(row, None);
+                    trace.finish("stable");
+                    break row.clone();
                 }
-                [row] => previous = Some(row.clone()),
+                [row] => {
+                    trace.target(row, None);
+                    trace.finish("unconfirmed");
+                    previous = Some(row.clone());
+                }
                 [] => {
+                    trace.finish("empty");
                     previous = None;
                     empty_reads += 1;
                     if empty_reads >= 2 && scrolls < 4 {
                         if let Some(query) = self.plan.album_scroll {
-                            let lists = match read_before_deadline(
-                                self.session.locate_all(query),
-                                deadline,
-                                stop,
-                            )
-                            .await?
-                            {
-                                ReadWaitResult::Ready(lists) => lists,
-                                ReadWaitResult::Cancelled | ReadWaitResult::DeadlineExceeded => {
-                                    return Ok(AlbumChoice::NotFound)
+                            let lists = match &tree {
+                                // The same tree that showed no row names the list to scroll.
+                                Some(tree) => {
+                                    tree_rows(tree, self.plan.package, query).unwrap_or_default()
                                 }
+                                None => match read_before_deadline(
+                                    self.session.locate_all(query),
+                                    deadline,
+                                    stop,
+                                )
+                                .await?
+                                {
+                                    ReadWaitResult::Ready(lists) => lists,
+                                    ReadWaitResult::Cancelled
+                                    | ReadWaitResult::DeadlineExceeded => {
+                                        return Ok(AlbumChoice::NotFound)
+                                    }
+                                },
                             };
                             if let [list] = lists.as_slice() {
                                 if list.width > 0.0 && list.height > 0.0 {
@@ -2140,10 +2195,42 @@ impl<'a, P: TapPlanner> Composer<'a, P> {
                         }
                     }
                 }
-                _ => anyhow::bail!("album_ambiguous: có {} dòng khớp album {album}", rows.len()),
+                _ => {
+                    trace.finish("ambiguous");
+                    anyhow::bail!("album_ambiguous: có {} dòng khớp album {album}", rows.len())
+                }
             }
             if Instant::now() >= deadline {
-                anyhow::bail!("album_not_visible: chưa thấy album {album} sau {scrolls} lần cuộn; {empty_reads} lần đọc trống");
+                if previous.is_none() {
+                    anyhow::bail!("album_not_visible: chưa thấy album {album} sau {scrolls} lần cuộn; {empty_reads} lần đọc trống");
+                }
+                // The last read named exactly one row that no second read has confirmed. One
+                // more window, once, from the album budget, keeping one step of it for the
+                // pill read after the tap. Past that it is an unconfirmed screen, not a
+                // missing album: nothing was selected, so the attempt may run again.
+                let end = total_deadline
+                    .checked_sub(album_step)
+                    .map(|end| end.min(Instant::now() + album_step))
+                    .filter(|end| *end > Instant::now());
+                match end {
+                    Some(end) if !extended => {
+                        extended = true;
+                        deadline = end;
+                        tracing::info!(
+                            udid = ?stage_udid(),
+                            "đã thấy đúng một dòng album nhưng chưa kịp xác nhận vị trí — đọc thêm trong ngân sách bước album; chưa chọn album"
+                        );
+                    }
+                    _ => {
+                        anyhow::ensure!(
+                            self.session.gui_session_epoch() == epoch,
+                            "album session changed before read deadline"
+                        );
+                        return Err(crate::publish_recovery::observation_deadline().context(
+                            format!("album_row_unconfirmed: đã thấy album {album} nhưng vị trí dòng chưa đứng yên qua hai lần đọc trước khi hết thời gian; chưa chọn album"),
+                        ));
+                    }
+                }
             }
             sleep(
                 POLL.min(deadline.saturating_duration_since(Instant::now())),
