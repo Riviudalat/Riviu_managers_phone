@@ -1356,10 +1356,14 @@ mod tests {
         for used in 2..=crate::publish_recovery::PRE_POST_RETRY_BUDGET {
             let sound = crate::SoundSelectionEvidence {
                 section: crate::publish::SoundSectionKind::Trending,
-                title: format!("Recommended attempt {used}"), artist: "Artist".into(),
-                index: 0, candidates_digest: format!("pool-{used}"), confirmed: true,
+                title: format!("Recommended attempt {used}"),
+                artist: "Artist".into(),
+                index: 0,
+                candidates_digest: format!("pool-{used}"),
+                confirmed: true,
             };
-            db.bind_publish_recovery_sound(id, &first.token, Some(&sound)).unwrap();
+            db.bind_publish_recovery_sound(id, &first.token, Some(&sound))
+                .unwrap();
             assert!(db.claim_publish_dispatch(&retry_job, 0).unwrap());
             assert!(db
                 .finish_publish_dispatch(&retry_job, Some("connection reset"))
@@ -1399,7 +1403,9 @@ mod tests {
             retry_job = next;
         }
         assert!(db.claim_publish_dispatch(&retry_job, 0).unwrap());
-        assert!(db.finish_publish_dispatch(&retry_job, Some("connection reset")).unwrap());
+        assert!(db
+            .finish_publish_dispatch(&retry_job, Some("connection reset"))
+            .unwrap());
         let exhausted = db.publish_recovery_state(id).unwrap().unwrap();
         assert_eq!(exhausted.state, "exhausted");
         assert_eq!(
@@ -1407,9 +1413,19 @@ mod tests {
             crate::publish_recovery::PRE_POST_RETRY_BUDGET
         );
         assert!(exhausted.next_retry_at.is_none());
-        assert!(!db.pending_publish_dispatch(10).unwrap().iter().any(|job| job.assignment_id == *id));
-        assert!(db.claim_publish_assignment_retry_checked(id, revision, &request).unwrap().is_some());
-        assert_eq!(db.publish_recovery_state(id).unwrap().unwrap().state, "exhausted");
+        assert!(!db
+            .pending_publish_dispatch(10)
+            .unwrap()
+            .iter()
+            .any(|job| job.assignment_id == *id));
+        assert!(db
+            .claim_publish_assignment_retry_checked(id, revision, &request)
+            .unwrap()
+            .is_some());
+        assert_eq!(
+            db.publish_recovery_state(id).unwrap().unwrap().state,
+            "exhausted"
+        );
         let other = a.iter().find(|a| a.id != *id).unwrap();
         assert!(db
             .acknowledged_publish_retry(&other.id, revision, &request)

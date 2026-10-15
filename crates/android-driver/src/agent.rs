@@ -833,7 +833,10 @@ impl AgentClient {
             request = request.json(&body);
         }
         let mut trace = riviu_core::tiktok_composer::StageDiagnosticOperation::start(
-            suffix, &self.session_identity(), Some(tokio::time::Instant::from_std(deadline)));
+            suffix,
+            &self.session_identity(),
+            Some(tokio::time::Instant::from_std(deadline)),
+        );
         let mut call = crate::telemetry::CallTimer::start(
             crate::telemetry::AGENT,
             &route,
@@ -911,9 +914,7 @@ impl AgentClient {
         }
         match &result {
             Ok(_) => call.answered(),
-            Err(_) if body_received.load(std::sync::atomic::Ordering::Relaxed) => {
-                call.answered()
-            }
+            Err(_) if body_received.load(std::sync::atomic::Ordering::Relaxed) => call.answered(),
             Err(error) if error.to_string().contains("observation_deadline_exceeded") => {
                 call.timed_out()
             }
@@ -1035,7 +1036,10 @@ impl AgentClient {
         // so anything past half a second is the thing the operator is complaining about and
         // it should be in the log with the device and the route on it.
         let mut trace = riviu_core::tiktok_composer::StageDiagnosticOperation::start(
-            suffix, &self.session_identity(), request_timeout.map(|timeout| tokio::time::Instant::now() + timeout));
+            suffix,
+            &self.session_identity(),
+            request_timeout.map(|timeout| tokio::time::Instant::now() + timeout),
+        );
         let started = std::time::Instant::now();
         let mut unanswered = UnansweredTreeRead::start(&self.serial, suffix);
         // Every call, not only the slow ones: percentiles of warnings are the tail's.
@@ -1071,27 +1075,21 @@ impl AgentClient {
             );
             anyhow::Error::new(failure)
         };
-        let response = request
-            .send()
-            .await
-            .map_err(|error| {
-                trace.finish("transportError");
-                call_failed(&mut call, &error);
-                request_failure("response_headers", error)
-            })?;
+        let response = request.send().await.map_err(|error| {
+            trace.finish("transportError");
+            call_failed(&mut call, &error);
+            request_failure("response_headers", error)
+        })?;
         let status = response.status();
         trace.finish("headersReceived");
         // Read as bytes and decode UTF-8 ourselves. The server answers without a
         // charset for some routes. Include body reception in the latency measurement:
         // headers alone do not mean the accessibility result has reached the caller.
-        let bytes = response
-            .bytes()
-            .await
-            .map_err(|error| {
-                trace.finish("transportError");
-                call_failed(&mut call, &error);
-                request_failure("response_body", error)
-            })?;
+        let bytes = response.bytes().await.map_err(|error| {
+            trace.finish("transportError");
+            call_failed(&mut call, &error);
+            request_failure("response_body", error)
+        })?;
         call.answered();
         let elapsed = started.elapsed();
         unanswered.answered();
