@@ -529,6 +529,59 @@ fn locate_in_tree(
     tree.nodes[matches[0]].rect()
 }
 
+/// Whether one tree answers `query` the way the agent's selector does on the phone (gf90 B4).
+///
+/// `accessibility id` and UiSelector `text()` compare whole strings, case included;
+/// `resourceIdMatches(".*<suffix>")` is an end match; `class name` is exact; a semantic role is
+/// already a tree read on Android. UiSelector's `descriptionContains`/`textContains` fold case
+/// on the phone, and [`crate::ui_automation::tree::Node`]'s matcher does not agree with them on
+/// that, so a step waiting on one of those keeps its `/element` reads.
+fn tree_answers(query: ElementQuery<'_>) -> bool {
+    matches!(
+        query,
+        ElementQuery::Description { exact: true, .. }
+            | ElementQuery::Text { exact: true, .. }
+            | ElementQuery::ResourceIdSuffix(_)
+            | ElementQuery::ClassName(_)
+            | ElementQuery::Semantic(_)
+    )
+}
+
+/// Every node one tree shows for `query`, read by [`tree_answers`]' rules: visible nodes of
+/// `package` under visible ancestors, as UiAutomator skips invisible subtrees.
+///
+/// `None` when the selector is not one of those, or when a matching node has no rectangle on
+/// screen: that node can be neither tapped nor dropped to prove another one unique, so the
+/// read proves nothing either way.
+fn tree_rows(
+    tree: &crate::ui_automation::tree::Tree,
+    package: &str,
+    query: ElementQuery<'_>,
+) -> Option<Vec<ElementBox>> {
+    if let ElementQuery::Semantic(role) = query {
+        return Some(crate::app_automation::tiktok_roles::locate(
+            tree, package, role,
+        ));
+    }
+    if !tree_answers(query) {
+        return None;
+    }
+    let mut rows = Vec::new();
+    for (index, node) in tree.nodes.iter().enumerate() {
+        let named = match query {
+            ElementQuery::Description { value, exact: true } => node.attr("content-desc") == value,
+            ElementQuery::Text { value, exact: true } => node.attr("text") == value,
+            ElementQuery::ResourceIdSuffix(value) => node.attr("resource-id").ends_with(value),
+            ElementQuery::ClassName(value) => node.attr("class") == value,
+            _ => false,
+        };
+        if named && node.visible(package) && tree.ancestors_visible(index) {
+            rows.push(node.rect()?);
+        }
+    }
+    Some(rows)
+}
+
 /// The three locators that turn a reachable edit step into a published post.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 struct PublishTail {
@@ -1069,6 +1122,22 @@ pub struct StageDiagnosticEvent {
     pub clickable: Option<bool>,
     pub snapshot_generation: Option<u64>,
     pub snapshot_sha256: Option<String>,
+    /// Settle records only (gf90 B5, see [`NavigationSettle`]): the focused window's
+    /// `package/activity` at the tap's own foreground gate, and right after its ACK.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub focus_before: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub focus_after: Option<String>,
+    /// ACK to `focus_after` answered.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub focus_after_ms: Option<u64>,
+    /// How long the first tree read after the tap took (its bracketing foreground reads
+    /// included); `elapsed_ms` runs from the ACK until that tree was in hand.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub first_tree_ms: Option<u64>,
+    /// That tree still named the tapped control and not the awaited one.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub first_tree_previous_screen: Option<bool>,
 }
 
 #[derive(Debug, serde::Serialize)]
@@ -1084,6 +1153,79 @@ struct StageDiagnosticState {
     started: Instant,
     deadline: Option<Instant>,
     phase: String,
+    settle: Option<NavigationSettle>,
+}
+
+impl StageDiagnosticState {
+    fn push(&mut self, event: StageDiagnosticEvent) {
+        if self.report.events.len() < 1024 {
+            self.report.events.push(event);
+        } else {
+            self.report.dropped_events = self.report.dropped_events.saturating_add(1);
+        }
+    }
+}
+
+/// gf90 B5, diagnostic only: what the phone showed right after Create, the gallery entry or
+/// the editor's Next. The first tree read after Create took 12–17 s and still returned the
+/// feed (phone 43, 15/10/2026), while `mCurrentFocus` comes from system_server rather than
+/// TikTok's UI thread. This records both, per tap, for the coordinator to decide whether a
+/// focus change can gate that first read. It never authorizes, delays or refuses anything.
+struct NavigationSettle {
+    event: StageDiagnosticEvent,
+    acked: Instant,
+    /// The control just tapped, which names the screen being left.
+    left: ElementQuery<'static>,
+    /// The control the next wait looks for.
+    target: ElementQuery<'static>,
+    package: &'static str,
+}
+
+/// Not measured: the study's estimate for one `dumpsys window` is 0.1-0.3 s, and nothing on
+/// this fleet has timed it, which is what [`NavigationSettle`] is for. Safe because the read
+/// only fills a diagnostic: a slower one records no `focusAfter` and the walk goes on as
+/// before, at most this much later and before the next step's window opens.
+const SETTLE_FOCUS_CAP: Duration = Duration::from_secs(2);
+
+/// Close the pending settle record with the first tree read after its tap, or with the
+/// reason no tree came (`popup`, `unread`, `unobserved`).
+fn settle_first_tree(
+    tree: Option<&crate::ui_automation::tree::Tree>,
+    read: Option<Duration>,
+    without_tree: &str,
+) {
+    let _ = STAGE_DIAGNOSTICS.try_with(|state| {
+        let mut state = state.borrow_mut();
+        let Some(settle) = state.settle.take() else {
+            return;
+        };
+        let mut event = settle.event;
+        event.elapsed_ms = settle.acked.elapsed().as_millis().min(u64::MAX as u128) as u64;
+        event.first_tree_ms = read.map(|read| read.as_millis().min(u64::MAX as u128) as u64);
+        event.outcome = without_tree.into();
+        if let Some(tree) = tree {
+            event.snapshot_generation = Some(tree.generation);
+            let present =
+                |query| tree_rows(tree, settle.package, query).map(|rows| !rows.is_empty());
+            let (outcome, previous) = match (present(settle.target), present(settle.left)) {
+                (Some(true), _) => ("targetScreen", Some(false)),
+                (Some(false), Some(true)) => ("previousScreen", Some(true)),
+                (Some(false), Some(false)) => ("neither", Some(false)),
+                _ => ("unknownSelector", None),
+            };
+            event.outcome = outcome.into();
+            event.first_tree_previous_screen = previous;
+        }
+        state.push(event);
+    });
+}
+
+/// Closes a settle record its wait never answered with a tree.
+struct SettleUnread;
+impl Drop for SettleUnread {
+    fn drop(&mut self) {
+        settle_first_tree(None, None, "unread");
+    }
 }
 tokio::task_local! {
     static STAGE_DIAGNOSTICS: std::cell::RefCell<StageDiagnosticState>;
@@ -1115,10 +1257,11 @@ pub async fn with_stage_diagnostics<T>(
 ) -> (T, StageDiagnostics) {
     let state = StageDiagnosticState {
         report: StageDiagnostics { context, events: Vec::new(), dropped_events: 0 },
-        started: Instant::now(), deadline, phase: "preparation".into(),
+        started: Instant::now(), deadline, phase: "preparation".into(), settle: None,
     };
     STAGE_DIAGNOSTICS.scope(std::cell::RefCell::new(state), async {
         let result = work.await;
+        settle_first_tree(None, None, "unobserved");
         let report = STAGE_DIAGNOSTICS.with(|state| {
             let mut state = state.borrow_mut();
             StageDiagnostics {
@@ -1129,6 +1272,25 @@ pub async fn with_stage_diagnostics<T>(
         });
         (result, report)
     }).await
+}
+
+fn selector_label(query: ElementQuery<'_>) -> String {
+    match query {
+        ElementQuery::ResourceIdSuffix(value) => format!("resourceIdSuffix:{value}"),
+        ElementQuery::ClassName(value) => format!("class:{value}"),
+        ElementQuery::Semantic(value) => format!("semantic:{value}"),
+        // Do not copy album/caption/account values into timing evidence.
+        ElementQuery::Description { value, .. }
+            if matches!(
+                value,
+                "Create" | "Next" | "Record video" | "Select multiple"
+            ) =>
+        {
+            format!("description:{value}")
+        }
+        ElementQuery::Description { .. } => "description".into(),
+        ElementQuery::Text { .. } => "text".into(),
+    }
 }
 
 /// Used by the production Android transport too, so nested read-chain timings carry the
@@ -1162,22 +1324,20 @@ impl StageDiagnosticOperation {
                 outcome: "interrupted".into(), bounds: None, planner_point: None,
                 enabled: None, clickable: None,
                 snapshot_generation: None, snapshot_sha256: None,
+                focus_before: None, focus_after: None, focus_after_ms: None,
+                first_tree_ms: None, first_tree_previous_screen: None,
             }
         }).ok();
         Self { event, started, deadline: effective_deadline, previous_deadline }
     }
+    fn snapshot(&mut self, generation: u64) {
+        if let Some(event) = &mut self.event {
+            event.snapshot_generation = Some(generation);
+        }
+    }
     fn query(&mut self, query: ElementQuery<'_>) {
         if let Some(event) = &mut self.event {
-            event.selector = Some(match query {
-                ElementQuery::ResourceIdSuffix(value) => format!("resourceIdSuffix:{value}"),
-                ElementQuery::ClassName(value) => format!("class:{value}"),
-                ElementQuery::Semantic(value) => format!("semantic:{value}"),
-                // Do not copy album/caption/account values into timing evidence.
-                ElementQuery::Description { value, .. }
-                    if matches!(value, "Create" | "Next" | "Record video" | "Select multiple") => format!("description:{value}"),
-                ElementQuery::Description { .. } => "description".into(),
-                ElementQuery::Text { .. } => "text".into(),
-            });
+            event.selector = Some(selector_label(query));
         }
     }
     fn target(&mut self, element: &ElementBox, point: Option<[f64; 2]>) {
@@ -1201,8 +1361,7 @@ impl Drop for StageDiagnosticOperation {
         let _ = STAGE_DIAGNOSTICS.try_with(|state| {
             let mut state = state.borrow_mut();
             if let Some(previous) = self.previous_deadline { state.deadline = previous; }
-            if state.report.events.len() < 1024 { state.report.events.push(event); }
-            else { state.report.dropped_events = state.report.dropped_events.saturating_add(1); }
+            state.push(event);
         });
     }
 }
@@ -1359,13 +1518,45 @@ impl<'a, P: TapPlanner> Composer<'a, P> {
     }
 
     async fn tap_inside(&mut self, element: &ElementBox) -> anyhow::Result<()> {
+        self.tap_inside_noting(element, None).await
+    }
+
+    /// [`Self::tap_inside`], whose foreground gate also keeps the focused window's
+    /// `package/activity` for a settle record ([`NavigationSettle`]). It is the same
+    /// `mCurrentFocus` read answering with the activity, so no read is added, and the gate
+    /// still compares the package alone. A backend that cannot name the activity keeps the
+    /// package read.
+    async fn tap_inside_noting(
+        &mut self,
+        element: &ElementBox,
+        focus: Option<&mut Option<String>>,
+    ) -> anyhow::Result<()> {
         crate::tiktok_sound::check_wait()?;
         observation::check_session(self.session)?;
         if self.session.supports_accessibility_readback() && observation::android(self.plan.package)
         {
             let epoch = self.session.gui_session_epoch();
-            let foreground =
-                crate::tiktok_sound::read_sound(self.session.active_app_bundle()).await?;
+            let foreground = match focus {
+                Some(focus) => {
+                    match crate::tiktok_sound::read_sound(self.session.active_app_component()).await
+                    {
+                        Ok(component) => {
+                            let package = component
+                                .split_once('/')
+                                .map_or(component.as_str(), |(package, _)| package)
+                                .to_owned();
+                            *focus = Some(component);
+                            package
+                        }
+                        Err(error) if error.is::<crate::driver::UnsupportedCapability>() => {
+                            crate::tiktok_sound::read_sound(self.session.active_app_bundle())
+                                .await?
+                        }
+                        Err(error) => return Err(error),
+                    }
+                }
+                None => crate::tiktok_sound::read_sound(self.session.active_app_bundle()).await?,
+            };
             anyhow::ensure!(
                 foreground == self.plan.package && self.session.gui_session_epoch() == epoch,
                 "composer foreground/session changed before tap"
@@ -1384,6 +1575,75 @@ impl<'a, P: TapPlanner> Composer<'a, P> {
         trace.finish(if result.is_ok() { "completed" } else { "error" });
         result?;
         crate::tiktok_sound::check_wait()
+    }
+
+    /// Open a settle record for a navigation tap that has just been acknowledged (gf90 B5):
+    /// read the focused window once, before the next wait's first tree read, which then
+    /// closes the record. Only where stage diagnostics are collected; nothing waits on it.
+    async fn note_navigation_tap(
+        &self,
+        operation: &str,
+        left: ElementQuery<'static>,
+        target: ElementQuery<'static>,
+        focus_before: Option<String>,
+        stop: &AtomicBool,
+    ) {
+        if STAGE_DIAGNOSTICS.try_with(|_| ()).is_err() {
+            return;
+        }
+        let acked = Instant::now();
+        let focus_after = if stop.load(Ordering::Relaxed) {
+            None
+        } else {
+            tokio::time::timeout(
+                SETTLE_FOCUS_CAP,
+                crate::tiktok_sound::read_sound(self.session.active_app_component()),
+            )
+            .await
+            .ok()
+            .and_then(Result::ok)
+        };
+        let focus_after_ms = acked.elapsed().as_millis().min(u64::MAX as u128) as u64;
+        let epoch = self.session.gui_session_epoch();
+        let package = self.plan.package;
+        let _ = STAGE_DIAGNOSTICS.try_with(|state| {
+            let mut state = state.borrow_mut();
+            let event = StageDiagnosticEvent {
+                phase: state.phase.clone(),
+                operation: operation.into(),
+                selector: Some(selector_label(left)),
+                session_epoch: epoch,
+                started_ms: acked
+                    .saturating_duration_since(state.started)
+                    .as_millis()
+                    .min(u64::MAX as u128) as u64,
+                elapsed_ms: 0,
+                remaining_budget_ms: None,
+                remaining_after_ms: None,
+                outcome: "unobserved".into(),
+                bounds: None,
+                planner_point: None,
+                enabled: None,
+                clickable: None,
+                snapshot_generation: None,
+                snapshot_sha256: None,
+                focus_before,
+                focus_after,
+                focus_after_ms: Some(focus_after_ms),
+                first_tree_ms: None,
+                first_tree_previous_screen: None,
+            };
+            // A record its walk never answered is kept, not overwritten.
+            if let Some(stale) = state.settle.replace(NavigationSettle {
+                event,
+                acked,
+                left,
+                target,
+                package,
+            }) {
+                state.push(stale.event);
+            }
+        });
     }
 
     /// Tap the composer tab and wait for the measured camera shutter.
@@ -1411,7 +1671,16 @@ impl<'a, P: TapPlanner> Composer<'a, P> {
         else {
             return Ok(false);
         };
-        self.tap_inside(&opener).await?;
+        let mut focus = None;
+        self.tap_inside_noting(&opener, Some(&mut focus)).await?;
+        self.note_navigation_tap(
+            "settleAfterCreate",
+            self.plan.open,
+            self.plan.shutter,
+            focus,
+            stop,
+        )
+        .await;
         Ok(self
             .await_navigation_target(
                 crate::tiktok_sound::phase_deadline(read_window(
@@ -1625,7 +1894,16 @@ impl<'a, P: TapPlanner> Composer<'a, P> {
                         });
                         return Ok(false);
                     }
-                    self.tap_inside(&current).await?;
+                    let mut focus = None;
+                    self.tap_inside_noting(&current, Some(&mut focus)).await?;
+                    self.note_navigation_tap(
+                        "settleAfterGalleryEntry",
+                        resolved_query,
+                        self.plan.multi_select,
+                        focus,
+                        stop,
+                    )
+                    .await;
                     break;
                 }
                 stable = current;
@@ -1660,7 +1938,18 @@ impl<'a, P: TapPlanner> Composer<'a, P> {
             });
             return Ok(false);
         };
-        self.tap_inside(&entry.rect()).await?;
+        let mut focus = None;
+        self.tap_inside_noting(&entry.rect(), Some(&mut focus))
+            .await?;
+        // The geometry entry has no locator of its own: the shutter names the camera.
+        self.note_navigation_tap(
+            "settleAfterGalleryEntry",
+            self.plan.shutter,
+            self.plan.multi_select,
+            focus,
+            stop,
+        )
+        .await;
         gallery.finish("tapped");
         Ok(true)
     }
@@ -2463,9 +2752,8 @@ impl<'a, P: TapPlanner> Composer<'a, P> {
             return Ok(false);
         };
         let epoch = self.session.gui_session_epoch();
-        let tap_error = self.tap_inside(&next).await.err();
-        let arrival_deadline =
-            crate::tiktok_sound::phase_deadline(read_window("captionArrival", COMPOSER_WINDOW, 3));
+        let mut focus = None;
+        let tap_error = self.tap_inside_noting(&next, Some(&mut focus)).await.err();
         let tap_error = match tap_error {
             Some(error)
                 if self.session.gui_session_epoch() != epoch
@@ -2486,6 +2774,11 @@ impl<'a, P: TapPlanner> Composer<'a, P> {
             }
             other => other,
         };
+        // Before the arrival window opens, so the settle read never spends it.
+        self.note_navigation_tap("settleAfterEditNext", edit_next, post, focus, stop)
+            .await;
+        let arrival_deadline =
+            crate::tiktok_sound::phase_deadline(read_window("captionArrival", COMPOSER_WINDOW, 3));
         // A lost response does not prove Next failed. Observe the destination
         // before the caller can admit another navigation attempt.
         if tap_error.is_some() && observation::android(self.plan.package) {
@@ -3872,6 +4165,7 @@ impl<'a, P: TapPlanner> Composer<'a, P> {
         ).context("camera/gallery profile unavailable")?;
         let mut previous_generation = None;
         loop {
+            let read_started = Instant::now();
             let observed = read_before_deadline(crate::tiktok_sound::read_sound(async {
                 let foreground = self.session.active_app_bundle().await?;
                 let tree = crate::ui_automation::tree::Tree::parse(
@@ -3886,6 +4180,7 @@ impl<'a, P: TapPlanner> Composer<'a, P> {
                 ReadWaitResult::Cancelled => return Ok(ReadWaitResult::Cancelled),
                 ReadWaitResult::DeadlineExceeded => return Ok(ReadWaitResult::DeadlineExceeded),
             };
+            settle_first_tree(Some(&tree), Some(read_started.elapsed()), "unread");
             anyhow::ensure!(previous_generation.is_none_or(|old| tree.generation > old),
                 "camera/gallery observation is stale after popup");
             let modal = dialogs::optional_decline(&tree, labels).is_some()
@@ -4026,6 +4321,76 @@ impl<'a, P: TapPlanner> Composer<'a, P> {
         }
     }
 
+    /// Whether this wait finds `query` in the tree its popup step reads anyway (gf90 B4).
+    ///
+    /// r122–r125 (15/10/2026, 20 SM-G955F/N, Global 45.7.3) lost first attempts to observation
+    /// deadlines while these waits still went through the accessibility tree twice per poll:
+    /// the popup step's `/source`, then `/element(s)`, a rect and up to three attribute calls
+    /// for the target. Steps waiting on a selector a tree cannot answer faithfully
+    /// ([`tree_answers`]) keep that second read; the camera/gallery anchors keep their own
+    /// snapshot ([`Self::camera_gallery_rows`]).
+    fn popup_tree_query(&self, query: ElementQuery<'_>) -> bool {
+        self.session.supports_accessibility_readback()
+            && !self.camera_gallery_snapshot_query(query)
+            && tree_answers(query)
+    }
+
+    /// One popup step, handing back the tree it screened when nothing covered the screen.
+    /// `Ready(None)` means it dismissed a popup: the tree that showed the popup is never
+    /// searched, and the caller reads again after its pause.
+    async fn popup_step_tree(
+        &self,
+        budget: &mut crate::app_automation::dialogs::PopupBudget,
+        deadline: Instant,
+        stop: &AtomicBool,
+    ) -> anyhow::Result<
+        crate::ui_automation::runtime::ReadWaitResult<Option<crate::ui_automation::tree::Tree>>,
+    > {
+        use crate::app_automation::dialogs::{step_before_deadline_with_tree, PopupStep};
+        use crate::ui_automation::runtime::ReadWaitResult;
+        let labels = crate::tiktok_labels::controls_for_runtime(
+            self.plan.package,
+            self.plan.popup_profile.0,
+            self.plan.popup_profile.1.unwrap_or_default(),
+        )
+        .context("popup profile unavailable")?;
+        // As in `popup_clear`: a graced tree could not be bracketed by the step's second
+        // foreground read, which never starts after the window.
+        let _no_grace = crate::ui_automation::runtime::suppress_read_grace();
+        Ok(
+            match step_before_deadline_with_tree(self.session, labels, budget, deadline, stop, stop)
+                .await?
+            {
+                ReadWaitResult::Ready((PopupStep::Clear, Some(tree))) => {
+                    ReadWaitResult::Ready(Some(tree))
+                }
+                ReadWaitResult::Ready((PopupStep::Dismissed, _)) => ReadWaitResult::Ready(None),
+                ReadWaitResult::Ready((PopupStep::Blocked, _)) => {
+                    anyhow::bail!("popup requires operator review; no background action permitted")
+                }
+                ReadWaitResult::Ready((PopupStep::Clear, None)) => {
+                    anyhow::bail!("popup step returned no snapshot")
+                }
+                ReadWaitResult::Cancelled => ReadWaitResult::Cancelled,
+                ReadWaitResult::DeadlineExceeded => ReadWaitResult::DeadlineExceeded,
+            },
+        )
+    }
+
+    /// The role `UiSession::locate` falls back to on Android when a measured id finds nothing,
+    /// so a tree answer for [`Self::await_condition_inner`] keeps that fallback.
+    fn id_fallback_role(&self, query: ElementQuery<'_>) -> Option<&'static str> {
+        if !matches!(query, ElementQuery::ResourceIdSuffix(_)) {
+            None
+        } else if self.plan.publish.is_some_and(|tail| tail.caption == query) {
+            Some("caption")
+        } else if query == self.plan.album_menu {
+            Some("album")
+        } else {
+            None
+        }
+    }
+
     /// Only pre-Post navigation distinguishes absent from ambiguous targets.
     /// `None` retains the measured gallery lookup's same-epoch local fallback.
     async fn await_navigation_target(
@@ -4043,6 +4408,9 @@ impl<'a, P: TapPlanner> Composer<'a, P> {
         );
         let epoch = self.session.gui_session_epoch();
         let mut popup = crate::app_automation::dialogs::PopupBudget::default();
+        let in_tree = self.popup_tree_query(query);
+        let mut previous_generation = None;
+        let _settle = SettleUnread;
         loop {
             if stop.load(Ordering::Relaxed) {
                 return Ok(None);
@@ -4060,22 +4428,74 @@ impl<'a, P: TapPlanner> Composer<'a, P> {
                     None => Ok(None),
                 };
             }
-            if !self.camera_gallery_snapshot_query(query)
-                && !self.popup_clear(&mut popup, deadline, stop, stop).await? {
+            let popup_unread = || -> anyhow::Result<Option<ElementBox>> {
                 if stop.load(Ordering::Relaxed) {
                     return Ok(None);
                 }
-                anyhow::ensure!(self.session.gui_session_epoch() == epoch,
-                    "composer navigation session changed");
+                anyhow::ensure!(
+                    self.session.gui_session_epoch() == epoch,
+                    "composer navigation session changed"
+                );
                 if Instant::now() >= deadline {
                     return Err(crate::publish_recovery::observation_deadline());
                 }
-                return Ok(None);
+                Ok(None)
+            };
+            if !in_tree
+                && !self.camera_gallery_snapshot_query(query)
+                && !self.popup_clear(&mut popup, deadline, stop, stop).await?
+            {
+                return popup_unread();
             }
-            let mut trace = StageDiagnosticOperation::start("locate", &epoch, Some(deadline));
+            let mut trace = StageDiagnosticOperation::start(
+                if in_tree { "locateInTree" } else { "locate" },
+                &epoch,
+                Some(deadline),
+            );
             trace.query(query);
             let observed = if self.camera_gallery_snapshot_query(query) {
                 self.camera_gallery_rows(query, deadline, stop, &mut popup).await
+            } else if in_tree {
+                let read_started = Instant::now();
+                let tree = match self.popup_step_tree(&mut popup, deadline, stop).await? {
+                    ReadWaitResult::Ready(Some(tree)) => tree,
+                    ReadWaitResult::Ready(None) => {
+                        settle_first_tree(None, Some(read_started.elapsed()), "popup");
+                        trace.finish("popupDismissed");
+                        drop(trace);
+                        sleep(
+                            POLL.min(deadline.saturating_duration_since(Instant::now())),
+                            stop,
+                        )
+                        .await;
+                        continue;
+                    }
+                    ReadWaitResult::Cancelled | ReadWaitResult::DeadlineExceeded => {
+                        trace.finish("popupUnread");
+                        return popup_unread();
+                    }
+                };
+                settle_first_tree(Some(&tree), Some(read_started.elapsed()), "unread");
+                trace.snapshot(tree.generation);
+                anyhow::ensure!(
+                    previous_generation.is_none_or(|old| tree.generation > old),
+                    "composer navigation snapshot is stale"
+                );
+                previous_generation = Some(tree.generation);
+                Ok(match tree_rows(&tree, self.plan.package, query) {
+                    Some(rows) => ReadWaitResult::Ready(rows),
+                    None => {
+                        // A matching node without bounds: neither absent nor one target.
+                        trace.finish("unboundedMatch");
+                        drop(trace);
+                        sleep(
+                            POLL.min(deadline.saturating_duration_since(Instant::now())),
+                            stop,
+                        )
+                        .await;
+                        continue;
+                    }
+                })
             } else {
                 read_before_deadline(
                     crate::tiktok_sound::read_sound(self.session.locate_all(query)), deadline, stop,
@@ -4170,6 +4590,9 @@ impl<'a, P: TapPlanner> Composer<'a, P> {
         let epoch = self.session.gui_session_epoch();
         let mut last_error = None;
         let mut popup = crate::app_automation::dialogs::PopupBudget::default();
+        let in_tree = self.popup_tree_query(query);
+        let mut previous_generation = None;
+        let _settle = SettleUnread;
         loop {
             // **Stop first.** With the order reversed a control that happened to be on screen
             // won over an already-set stop flag, so asking the run to stop while the Post
@@ -4179,11 +4602,17 @@ impl<'a, P: TapPlanner> Composer<'a, P> {
             }
             // Only the read is cancellable. Already-dispatched device gestures
             // must drain and are never handed to this helper.
-            if !self.camera_gallery_snapshot_query(query)
-                && !self.popup_clear(&mut popup, deadline, stop, stop).await? {
+            if !in_tree
+                && !self.camera_gallery_snapshot_query(query)
+                && !self.popup_clear(&mut popup, deadline, stop, stop).await?
+            {
                 return Ok(None);
             }
-            let mut trace = StageDiagnosticOperation::start("locate", &epoch, Some(deadline));
+            let mut trace = StageDiagnosticOperation::start(
+                if in_tree { "locateInTree" } else { "locate" },
+                &epoch,
+                Some(deadline),
+            );
             trace.query(query);
             let observed = if self.camera_gallery_snapshot_query(query) {
                 self.camera_gallery_rows(query, deadline, stop, &mut popup).await.map(|read| match read {
@@ -4194,6 +4623,49 @@ impl<'a, P: TapPlanner> Composer<'a, P> {
                     ReadWaitResult::Cancelled => ReadWaitResult::Cancelled,
                     ReadWaitResult::DeadlineExceeded => ReadWaitResult::DeadlineExceeded,
                 })
+            } else if in_tree {
+                let read_started = Instant::now();
+                let tree = match self.popup_step_tree(&mut popup, deadline, stop).await? {
+                    ReadWaitResult::Ready(Some(tree)) => tree,
+                    ReadWaitResult::Ready(None) => {
+                        settle_first_tree(None, Some(read_started.elapsed()), "popup");
+                        trace.finish("popupDismissed");
+                        drop(trace);
+                        sleep(
+                            POLL.min(deadline.saturating_duration_since(Instant::now())),
+                            stop,
+                        )
+                        .await;
+                        continue;
+                    }
+                    ReadWaitResult::Cancelled | ReadWaitResult::DeadlineExceeded => {
+                        trace.finish("popupUnread");
+                        return Ok(None);
+                    }
+                };
+                settle_first_tree(Some(&tree), Some(read_started.elapsed()), "unread");
+                trace.snapshot(tree.generation);
+                anyhow::ensure!(
+                    previous_generation.is_none_or(|old| tree.generation > old),
+                    "composer read snapshot is stale"
+                );
+                previous_generation = Some(tree.generation);
+                // Exactly one node, as the snapshot steps require; a matching node without
+                // bounds proves nothing this poll.
+                let mut rows = tree_rows(&tree, self.plan.package, query);
+                if rows.as_ref().is_some_and(Vec::is_empty) {
+                    if let Some(role) = self.id_fallback_role(query) {
+                        rows = Some(crate::app_automation::tiktok_roles::locate(
+                            &tree,
+                            self.plan.package,
+                            role,
+                        ));
+                    }
+                }
+                Ok(ReadWaitResult::Ready(match rows.as_deref() {
+                    Some([only]) => Some(only.clone()),
+                    _ => None,
+                }))
             } else {
                 read_before_deadline(
                     crate::tiktok_sound::read_sound(self.session.locate(query)), deadline, stop,
