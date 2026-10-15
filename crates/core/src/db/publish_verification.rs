@@ -145,9 +145,18 @@ impl PendingPublishVerification {
     pub fn automatic_metadata_observation_allowed(&self, now: DateTime<Utc>) -> bool {
         let evidence: serde_json::Value = self.evidence_json.as_deref()
             .and_then(|raw| serde_json::from_str(raw).ok()).unwrap_or_default();
-        !needs_review(self.evidence_json.as_deref()) && self.is_due(now)
-            && evidence["verificationBudget"]["metadataObservations"].as_u64().unwrap_or(0) < METADATA_RETRY_LIMIT
-            && evidence["verificationBudget"]["noProgressObservations"].as_u64().unwrap_or(0) < VERIFICATION_NO_PROGRESS_LIMIT
+        // A reopened re-check keeps its exhausted counters; its own window bounds it.
+        !needs_review(self.evidence_json.as_deref())
+            && self.is_due(now)
+            && (evidence["verificationStatus"]["cause"] == AUTOMATIC_RECHECK_CAUSE
+                || (evidence["verificationBudget"]["metadataObservations"]
+                    .as_u64()
+                    .unwrap_or(0)
+                    < METADATA_RETRY_LIMIT
+                    && evidence["verificationBudget"]["noProgressObservations"]
+                        .as_u64()
+                        .unwrap_or(0)
+                        < VERIFICATION_NO_PROGRESS_LIMIT))
     }
 
     /// Old receipts without scheduling metadata remain immediately eligible.
@@ -231,6 +240,84 @@ const METADATA_UNREACHABLE_CAUSE: &str = "publicMetadataUnreachable";
 // Copy link still showed "Post is being processed" 36+ minutes after Post. A cap, not a target.
 pub(super) const PROCESSING_WAIT_MINUTES: i64 = 60;
 const PROCESSING_WAIT_CAUSE: &str = "processingWaitExhausted";
+// The helper clipboard did not take or give back the sentinel: the phone's tooling failed, not
+// the search for the post (r129 phone 48, r127 phone 32: caption and time proved on the
+// Profile, then every Copy read failed). Such passes spend this cap, not the no-progress
+// limit. Not measured: 15 passes at the 2-minute cadence plus a 1-3 minute pass span roughly
+// 45-75 minutes of helper self-repair before the slow re-check below takes over, and a pass
+// whose sentinel write fails taps nothing public. A cap, not a target.
+const INFRASTRUCTURE_REASONS: [&str; 2] = ["clipboardUnwritable", "clipboardUnreadable"];
+const INFRASTRUCTURE_RETRY_LIMIT: u64 = 15;
+const INFRASTRUCTURE_RETRY_CAUSE: &str = "infrastructureRetryExhausted";
+// A row parked only because TikTok's public metadata did not answer or a phone read or
+// clipboard primitive failed is not a negative about the post. The worker reopens it for one
+// more read-only observation every 30 minutes, for 24 hours from its first park. Not measured:
+// oEmbed stayed unanswered for hours on 14-16/10/2026 and its own backoff caps at 10 minutes;
+// 30 minutes keeps a parked row to two phone passes an hour, and 24 hours spans an overnight
+// outage. At most 48 extra observations, none of which can reach the composer or Post.
+const AUTOMATIC_RECHECK_MINUTES: i64 = 30;
+const AUTOMATIC_RECHECK_WINDOW_HOURS: i64 = 24;
+const AUTOMATIC_RECHECK_CAUSE: &str = "automaticRecheck";
+/// Last observations of a parked row that say nothing against the post itself.
+const AUTOMATIC_RECHECK_REASONS: [&str; 5] = [
+    "metadataUnavailable",
+    "clipboardUnwritable",
+    "clipboardUnreadable",
+    "readFailed",
+    "staleSnapshot",
+];
+
+fn infrastructure_failure(reason_code: &str) -> bool {
+    INFRASTRUCTURE_REASONS.contains(&reason_code)
+}
+
+/// A review the background worker may reopen on its own: an exhausted automatic budget whose
+/// last observation said only that public metadata did not answer or a read failed. Another
+/// post, an account mismatch or a rejected candidate never qualifies.
+fn automatic_recheck_review(evidence: &serde_json::Value) -> bool {
+    let status = &evidence["verificationStatus"];
+    let diagnostic = &evidence["verificationDiagnostic"];
+    status["state"] == "needsReview"
+        && matches!(
+            status["cause"].as_str(),
+            Some(
+                VERIFICATION_NO_PROGRESS_CAUSE
+                    | METADATA_RETRY_CAUSE
+                    | METADATA_UNREACHABLE_CAUSE
+                    | INFRASTRUCTURE_RETRY_CAUSE
+            )
+        )
+        && status["reasonCode"]
+            .as_str()
+            .is_some_and(|code| AUTOMATIC_RECHECK_REASONS.contains(&code))
+        && !matches!(
+            diagnostic["phoneRoute"]["reasonCode"].as_str(),
+            Some("accountMismatch" | "otherPublication" | "multipleMatchingPosts")
+        )
+        && diagnostic["pendingMetadataCandidate"]["captured"]["metadata"]["state"] != "rejected"
+}
+
+fn rfc3339_utc(value: &serde_json::Value) -> Option<DateTime<Utc>> {
+    value
+        .as_str()
+        .and_then(|at| DateTime::parse_from_rfc3339(at).ok())
+        .map(|at| at.with_timezone(&Utc))
+}
+
+/// End of the re-check window: 24 hours from the first park of this budget.
+fn automatic_recheck_until(evidence: &serde_json::Value) -> Option<DateTime<Utc>> {
+    rfc3339_utc(&evidence["verificationBudget"]["recheckSince"])
+        .or_else(|| rfc3339_utc(&evidence["verificationStatus"]["checkedAt"]))
+        .map(|since| since + chrono::Duration::hours(AUTOMATIC_RECHECK_WINDOW_HOURS))
+}
+
+fn automatic_recheck_due(evidence: &serde_json::Value, now: DateTime<Utc>) -> bool {
+    automatic_recheck_review(evidence)
+        && rfc3339_utc(&evidence["verificationStatus"]["checkedAt"]).is_some_and(|parked| {
+            now >= parked + chrono::Duration::minutes(AUTOMATIC_RECHECK_MINUTES)
+        })
+        && automatic_recheck_until(evidence).is_some_and(|until| now < until)
+}
 
 /// Copy returned no link while TikTok still holds the upload: the processing notice, or an
 /// unchanged clipboard on a pass whose restart guard found the upload not proven settled.
@@ -267,6 +354,7 @@ fn new_verification_budget(intent: Option<&str>) -> serde_json::Value {
         "publicationStage":0,"noProgressObservations":0,"observations":0,
         "metadataObservations":0,"metadataLimit":METADATA_RETRY_LIMIT,
         "limit":VERIFICATION_NO_PROGRESS_LIMIT,
+        "infrastructureObservations":0,"infrastructureLimit":INFRASTRUCTURE_RETRY_LIMIT,
     })
 }
 
@@ -330,6 +418,7 @@ fn advance_verification_budget(
     diagnostic: Option<&serde_json::Value>,
     exempt: bool,
     processing_wait: bool,
+    infrastructure: bool,
 ) -> serde_json::Value {
     use sha2::Digest;
     let initial = new_verification_budget(intent);
@@ -354,7 +443,7 @@ fn advance_verification_budget(
     let prior_no_progress = prior["noProgressObservations"].as_u64().unwrap_or(0);
     let no_progress = if stage > previous_stage {
         0
-    } else if exempt || processing_wait {
+    } else if exempt || processing_wait || infrastructure {
         prior_no_progress
     } else {
         prior_no_progress.saturating_add(1)
@@ -378,10 +467,19 @@ fn advance_verification_budget(
         "metadataObservations":prior["metadataObservations"].as_u64().unwrap_or(0),
         "metadataLimit":METADATA_RETRY_LIMIT,
         "limit":VERIFICATION_NO_PROGRESS_LIMIT,
-        // A processing wait leaves the every-other exemption where it was.
-        "lastObservationExempt":(exempt || (processing_wait && prior["lastObservationExempt"] == true))
+        "infrastructureObservations":prior["infrastructureObservations"].as_u64().unwrap_or(0)
+            .saturating_add(u64::from(infrastructure)),
+        "infrastructureLimit":INFRASTRUCTURE_RETRY_LIMIT,
+        // A processing or infrastructure wait leaves the every-other exemption where it was.
+        "lastObservationExempt":(exempt
+            || ((processing_wait || infrastructure) && prior["lastObservationExempt"] == true))
             && stage == previous_stage,
     });
+    for field in ["recheckSince", "recheckCount"] {
+        if !prior[field].is_null() {
+            budget[field] = prior[field].clone();
+        }
+    }
     if !proven_candidate_url.is_null() {
         budget["provenCandidateUrl"] = proven_candidate_url;
     }
@@ -630,12 +728,14 @@ fn explicit_non_stop_review(evidence: Option<&str>) -> bool {
                 && review["cause"] != VERIFICATION_NO_PROGRESS_CAUSE
                 && review["cause"] != PROCESSING_WAIT_CAUSE
                 && review["cause"] != METADATA_RETRY_CAUSE
-                && review["cause"] != METADATA_UNREACHABLE_CAUSE)
+                && review["cause"] != METADATA_UNREACHABLE_CAUSE
+                && review["cause"] != INFRASTRUCTURE_RETRY_CAUSE)
                 || v.get("verificationReviewBeforeStop")
                     .is_some_and(|prior| prior["cause"] != VERIFICATION_NO_PROGRESS_CAUSE
                         && prior["cause"] != PROCESSING_WAIT_CAUSE
                         && prior["cause"] != METADATA_RETRY_CAUSE
-                        && prior["cause"] != METADATA_UNREACHABLE_CAUSE)
+                        && prior["cause"] != METADATA_UNREACHABLE_CAUSE
+                        && prior["cause"] != INFRASTRUCTURE_RETRY_CAUSE)
         })
 }
 
@@ -1618,13 +1718,30 @@ impl Database {
         current_contract_only: bool,
     ) -> anyhow::Result<Vec<String>> {
         let mut campaigns = Vec::new();
+        let now = Utc::now();
         for candidate in
-            self.publish_verification_candidates(1000, None, false, current_contract_only)?
+            self.publish_verification_candidates(1000, None, true, current_contract_only)?
         {
             let reopen = obsolete_deadline_review(
                 candidate.effect_intent.as_deref(),
                 candidate.evidence_json.as_deref(),
             );
+            // Other reviews stay parked, except the bounded automatic re-check.
+            if needs_review(candidate.evidence_json.as_deref()) && !reopen {
+                let due = candidate
+                    .evidence_json
+                    .as_deref()
+                    .and_then(|raw| serde_json::from_str::<serde_json::Value>(raw).ok())
+                    .is_some_and(|evidence| automatic_recheck_due(&evidence, now));
+                if due
+                    && submission_identity_complete(candidate.effect_intent.as_deref())
+                    && self.reopen_publish_verification_for_recheck(&candidate)?
+                    && !campaigns.contains(&candidate.campaign_id)
+                {
+                    campaigns.push(candidate.campaign_id);
+                }
+                continue;
+            }
             if !reopen && submission_identity_complete(candidate.effect_intent.as_deref()) {
                 continue;
             }
@@ -1640,6 +1757,86 @@ impl Database {
             }
         }
         Ok(campaigns)
+    }
+
+    /// One more read-only observation of a parked row (`automatic_recheck_due`), under the same
+    /// CAS and observer authority as any observation. Its exhausted counters stay as they are,
+    /// so the next unproven observation parks it again; only a verified link or new proof of
+    /// the post moves it on. Never touches the Post intent, media or Sheet obligation.
+    fn reopen_publish_verification_for_recheck(
+        &self,
+        candidate: &PendingPublishVerification,
+    ) -> anyhow::Result<bool> {
+        let mut conn = self.conn()?;
+        let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
+        let Some((current, state, active)) = recovery_row(&tx, &candidate.assignment_id)? else {
+            return Ok(false);
+        };
+        if active
+            || current.campaign_id != candidate.campaign_id
+            || current.revision != candidate.revision
+            || current.effect_intent != candidate.effect_intent
+            || current.evidence_json != candidate.evidence_json
+            || !may_verify(
+                &state,
+                current.effect_intent.as_deref(),
+                current.evidence_json.as_deref(),
+            )
+            || !observer_authorized(&tx, candidate)?
+        {
+            return Ok(false);
+        }
+        let Some(mut evidence) = candidate
+            .evidence_json
+            .as_deref()
+            .and_then(|raw| serde_json::from_str::<serde_json::Value>(raw).ok())
+            .filter(serde_json::Value::is_object)
+        else {
+            return Ok(false);
+        };
+        let now = Utc::now();
+        if !automatic_recheck_due(&evidence, now) {
+            return Ok(false);
+        }
+        // Only a budget of this exact intent: a re-check never hands out fresh counters.
+        let initial = new_verification_budget(candidate.effect_intent.as_deref());
+        if evidence["verificationBudget"]["version"] != 1
+            || evidence["verificationBudget"]["intentSha256"] != initial["intentSha256"]
+        {
+            return Ok(false);
+        }
+        let parked = evidence["verificationStatus"].clone();
+        let budget = &mut evidence["verificationBudget"];
+        if !budget["recheckSince"].is_string() {
+            budget["recheckSince"] = parked["checkedAt"].clone();
+        }
+        let count = budget["recheckCount"]
+            .as_u64()
+            .unwrap_or(0)
+            .saturating_add(1);
+        budget["recheckCount"] = serde_json::json!(count);
+        let at = now.to_rfc3339();
+        evidence["verificationStatus"] = serde_json::json!({
+            "state":"pending","cause":AUTOMATIC_RECHECK_CAUSE,"parkedCause":parked["cause"],
+            "reasonCode":parked["reasonCode"],"observationReason":parked["observationReason"],
+            "reason":format!("Tự kiểm tra lại lần {count}: lần dừng trước chỉ do dữ liệu công khai TikTok chưa trả lời hoặc lỗi đọc/clipboard trên máy, không phải bằng chứng bài sai. App tự kiểm tra mỗi {AUTOMATIC_RECHECK_MINUTES} phút trong {AUTOMATIC_RECHECK_WINDOW_HOURS} giờ; không đăng lại."),
+            "checkedAt":parked["checkedAt"],"submittedAt":parked["submittedAt"],
+            "attempts":parked["attempts"],"readFailures":parked["readFailures"],
+            "checkIntervalSeconds":AUTOMATIC_RECHECK_MINUTES * 60,"reviewAfterMinutes":null,
+            "nextCheckAt":at,"deadlineAt":null,
+        });
+        let changed = tx.execute(
+            "UPDATE publish_assignments SET state='verifying',error_code='post_verification_pending',evidence_json=?1,revision=revision+1,updated_at=?2
+             WHERE id=?3 AND campaign_id=?4 AND revision=?5 AND state IN ('verifying','uncertain','succeeded')",
+            params![evidence.to_string(), at, candidate.assignment_id, candidate.campaign_id, candidate.revision],
+        )?;
+        if changed != 1 {
+            return Ok(false);
+        }
+        reconcile_verified_campaign(&tx, &candidate.campaign_id, &at)?;
+        reconcile_verification_snapshot(&tx, &candidate.campaign_id, &at)?;
+        tx.commit()?;
+        Ok(true)
     }
 
     /// Keep a failed observation; scheduled posts retain periodic checks until link proof.
@@ -1763,6 +1960,7 @@ impl Database {
         let processing_wait = processing_until.is_some_and(|until| checked < until);
         let processing_exhausted =
             !prior_review && processing_until.is_some_and(|until| checked >= until);
+        let infrastructure = infrastructure_failure(reason_code);
         let budget = if prior_review {
             // A one-shot manual check can settle proof, but cannot renew automatic work.
             evidence["verificationBudget"].clone()
@@ -1791,8 +1989,13 @@ impl Database {
                 diagnostic,
                 exempt,
                 processing_wait,
+                infrastructure,
             )
         };
+        let infrastructure_exhausted = !prior_review
+            && infrastructure
+            && budget["infrastructureObservations"].as_u64().unwrap_or(0)
+                >= INFRASTRUCTURE_RETRY_LIMIT;
         let metadata_exhausted = budget["metadataObservations"].as_u64().unwrap_or(0) >= METADATA_RETRY_LIMIT;
         let metadata_unreachable = !prior_review
             && metadata_unanswered
@@ -1802,8 +2005,13 @@ impl Database {
         let budget_exhausted = metadata_exhausted || metadata_unreachable || budget["noProgressObservations"].as_u64().unwrap_or(0)
             >= VERIFICATION_NO_PROGRESS_LIMIT;
         evidence["verificationBudget"] = budget;
-        let review = identity_missing || legacy_review || prior_review || budget_exhausted
-            || processing_exhausted || reason_code == "metadataCandidateInvalid";
+        let review = identity_missing
+            || legacy_review
+            || prior_review
+            || budget_exhausted
+            || processing_exhausted
+            || infrastructure_exhausted
+            || reason_code == "metadataCandidateInvalid";
         if manual
             && legacy
             && !review
@@ -1837,6 +2045,8 @@ impl Database {
             format!("Đã giữ liên kết ứng viên; kiểm tra công khai của TikTok không phản hồi suốt {METADATA_UNREACHABLE_MINUTES} phút (TikTok giới hạn tần suất hoặc lỗi máy chủ), dữ liệu bài chưa bị từ chối. {observation_reason} Không đăng lại; xác nhận Tiếp tục xác minh bài đã gửi để thử lại.")
         } else if processing_exhausted && !legacy_review {
             format!("TikTok vẫn chưa trả link sau {PROCESSING_WAIT_MINUTES} phút chờ xử lý bài ({reason_code}). {observation_reason} Cần kiểm tra; xác nhận Tiếp tục xác minh bài đã gửi để chờ thêm, không đăng lại.")
+        } else if infrastructure_exhausted && !legacy_review {
+            format!("Tự kiểm tra đã dừng sau {INFRASTRUCTURE_RETRY_LIMIT} lượt lỗi clipboard của helper trên máy ({reason_code}); đây là lỗi công cụ, không phải bằng chứng bài sai. {observation_reason} Không đăng lại; xác nhận Tiếp tục xác minh bài đã gửi để mở ngân sách mới.")
         } else if budget_exhausted && !legacy_review {
             format!("Tự kiểm tra đã dừng sau {VERIFICATION_NO_PROGRESS_LIMIT} lượt liên tiếp không có bằng chứng mới của đúng bài ({reason_code}). {observation_reason} Cần kiểm tra; xác nhận Tiếp tục xác minh bài đã gửi để mở ngân sách mới, không đăng lại.")
         } else {
@@ -1877,6 +2087,8 @@ impl Database {
             METADATA_UNREACHABLE_CAUSE
         } else if processing_exhausted {
             PROCESSING_WAIT_CAUSE
+        } else if infrastructure_exhausted {
+            INFRASTRUCTURE_RETRY_CAUSE
         } else if budget_exhausted {
             VERIFICATION_NO_PROGRESS_CAUSE
         } else {
@@ -1892,6 +2104,24 @@ impl Database {
             "attempts":attempts,"readFailures":read_failures,"nextCheckAt":next_check,
             "deadlineAt":null
         });
+        // A park the worker reopens itself says so instead of asking for the operator. It
+        // stays needsReview with no nextCheckAt; `expire_publish_verifications` reopens it.
+        let recheck_at = checked + chrono::Duration::minutes(AUTOMATIC_RECHECK_MINUTES);
+        if review
+            && !prior_review
+            && !legacy_review
+            && automatic_recheck_review(&evidence)
+            && automatic_recheck_until(&evidence).is_some_and(|until| recheck_at < until)
+        {
+            let parked = evidence["verificationStatus"]["reason"]
+                .as_str()
+                .unwrap_or_default();
+            evidence["verificationStatus"]["reason"] = serde_json::json!(format!(
+                "{parked} Lý do dừng chỉ là dữ liệu công khai TikTok chưa trả lời hoặc lỗi đọc/clipboard trên máy, không phải bằng chứng bài sai: app tự kiểm tra lại mỗi {AUTOMATIC_RECHECK_MINUTES} phút trong {AUTOMATIC_RECHECK_WINDOW_HOURS} giờ, không cần thao tác."
+            ));
+            evidence["verificationStatus"]["automaticRecheckAt"] =
+                serde_json::json!(recheck_at.to_rfc3339());
+        }
         let next_state = if review { "uncertain" } else { "verifying" };
         let error = if review {
             "post_verification_needs_review"
