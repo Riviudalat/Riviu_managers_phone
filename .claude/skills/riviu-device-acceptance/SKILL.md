@@ -137,6 +137,13 @@ Mỗi mục dưới đây từng làm mất 20–60 phút. Đọc trước khi m
   gốc>` (đội máy dùng `com.genfarmer.uiautomator/.AdbKeyboard`) → `agent_helper_maintenance_prepare`
   → `execute` (confirmed, qualifyReplacement); receipt `superseded` +
   `packageProcessAbsent:true` là xong.
+- `--helper-recover` báo `HelperMaintenanceAdbUnavailable` hay `HelperMaintenancePrepareFailed`:
+  xem `adb devices` và số thiết bị USB `VID_04E8` trước khi kết luận lỗi helper. Ngày 15/10, lúc
+  07:00, box 31–50 mất USB cả 20 máy. Lần khôi phục đầu báo ADB không đọc được, máy 50 lỗi
+  `dumpsys` cùng lúc, và lần khôi phục thứ hai chạy khi không còn máy nào.
+- Dòng Sheet `pending` của chiến dịch nằm ngoài scope đang mở thì không được gửi. Đóng
+  controller, mở controller mới với scope chỉ gồm chiến dịch đó (`sheetDelivery`/
+  `publishVerification`) để gửi nốt; không cần điện thoại (r126, 15/10).
 - Máy kẹt `offline` sau reboot do Riviu: từ `6c5572fb` tự `adb -s <serial> reconnect`. Một máy
   offline không phải lý do `reconnect` toàn bộ hay `kill-server`.
 - Popup mới sau Post (email updates, "Continue editing this post?"): chụp màn hình vào
@@ -170,5 +177,8 @@ Mỗi mục dưới đây từng làm mất 20–60 phút. Đọc trước khi m
 - WebView của controller lên 3 GB sau vài giờ; đóng controller giữa các đợt bằng `close.mjs`.
 - Chỉ một build Rust tại một thời điểm trên máy 32 GB khi controller đang chạy; build thứ hai
   bị hệ điều hành giết.
+- `cargo test --workspace` chạy cùng Playwright từng hết bộ nhớ ảo (`os error 1455`, 15/10). Khi
+  có việc khác thì dùng `-j 8`. Playwright chạy đầy đủ trong lúc build Rust thì hỏng 19/244 vì
+  quá thời gian chờ; chạy lại riêng hoặc `--workers=2` thì qua hết.
 - Đợt tham chiếu: `fff151ba` 30/30, `a62c6b72` 29/30 lên Sheet
   (`target/apply-apk-20261009/OPEN-ISSUES-publish-20261013.md`).
