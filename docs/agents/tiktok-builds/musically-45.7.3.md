@@ -101,6 +101,13 @@ Bản APKPure trùng từng byte với `base.apk` kéo từ máy #44. Kiểm l�
      ([`driver.rs`](../../../crates/core/src/driver.rs)): không chứng minh cử chỉ đã hay
      chưa tác động, nên điều hướng đọc lại màn hình còn tap effect giữ trạng thái chưa rõ.
 
+**Cửa sổ focus không phân biệt màn soạn bài.** Đo trong r128–r129 (15–16/10/2026, 30 máy
+SM-G955F/N, 237 lần soạn, chẩn đoán `settleAfterCreate` / `settleAfterGalleryEntry` /
+`settleAfterEditNext`): trước và sau mỗi lần bấm Create, ô thư viện hay Next, `mCurrentFocus`
+luôn là `com.ss.android.ugc.aweme.splash.SplashActivity`. Camera, picker và editor dùng chung
+một activity, nên `dumpsys window` không dùng được làm cổng "màn đã đổi". Lần đọc cây đầu tiên
+sau khi bấm mất p50 1,8 s, p90 2,7 s, tối đa 9,8 s, và chưa lần nào trả về màn cũ.
+
 ## 3. Bảng id Riviu dùng cho 45.7.3
 
 Bảng lấy từ các match arm `"45.7.3"` trong code (75 id, không id nào thiếu trong build).
