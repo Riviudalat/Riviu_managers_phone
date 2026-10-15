@@ -326,7 +326,7 @@ fn no_link_is_read_off_the_feed_until_the_route_is_measured() {
         "the immediate route must retain identity-aware capture"
     );
     let body = body.join("\n");
-    assert!(body.contains("observe_publish_account(session, &labels)"));
+    assert!(body.contains("observe_publish_account_on_profile("));
     assert!(body.contains("SubmissionIdentity"));
     assert!(body.contains("before_post(Some(selection), Some(&proof))"));
 }

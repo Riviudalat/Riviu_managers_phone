@@ -311,6 +311,9 @@ bộ chọn ảnh trong thời hạn hiện có cũng dùng ngân sách này. Kh
 đọc màn hình có thể mất 10–18 giây, nên mỗi bước mở soạn bài/thư viện được chờ tới 16 giây
 và mỗi ảnh vừa chọn được chờ đọc lại tới 20 giây trước khi tính là lỗi. Nếu có nhiều mục cùng
 khớp khiến đích bấm mơ hồ, app dừng trước Đăng, không tự chọn hoặc thử tiếp.
+Sau khi xác minh tài khoản trên trang Hồ sơ, app bấm dấu + ngay trên Hồ sơ (thanh dưới có
+cùng nút Create), không quay về feed For You: video tự phát làm lần đọc màn hình trên feed
+treo 25–30 giây (r130, 16/10/2026, 12 lượt đầu hỏng ở bước này).
 Nếu agent Android không đọc được cây UI hoặc không trả `/status`,
 lượt kế tiếp chờ ít nhất đến hết khoảng phục hồi của phiên (tối đa khoảng 65 giây),
 không tiêu hết lượt thử trong lúc instrumentation còn cooldown. Bước chọn nhạc có

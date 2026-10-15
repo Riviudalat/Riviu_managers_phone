@@ -4506,11 +4506,14 @@ pub(super) async fn post_through_the_composer(
             "Helper clipboard chưa sẵn sàng trước Đăng: {error}"
         ));
     }
-    let expected_account =
-        match riviu_core::tiktok_share::observe_publish_account(session, &labels).await {
-            Ok(account) => account,
-            Err(error) => return refuse(format!("chưa xác minh tài khoản trước Đăng ({error})")),
-        };
+    let expected_account = match riviu_core::tiktok_share::observe_publish_account_on_profile(
+        session, &labels,
+    )
+    .await
+    {
+        Ok(account) => account,
+        Err(error) => return refuse(format!("chưa xác minh tài khoản trước Đăng ({error})")),
+    };
 
     if let Some(mut diagnostic) = riviu_core::tiktok_account::current_account_diagnostic() {
         diagnostic.expected_account = db

@@ -490,7 +490,27 @@ pub async fn observe_publish_account(
     session: &dyn UiSession,
     labels: &TikTokControls,
 ) -> anyhow::Result<String> {
-    let result = observe_publish_account_inner(session, labels).await;
+    observe_publish_account_then(session, labels, true).await
+}
+
+/// The publish preflight's account proof, which leaves TikTok on the own Profile: its bottom
+/// bar carries the same exact `Create` tab, so composing never waits on the autoplaying feed.
+/// r130 (16/10/2026, 30 SM-G955F/N, Global 45.7.3): the Create wait on For You right after the
+/// Home tap lost 12 first attempts to one `/source` hung 25-30 s, against 0.5-0.8 s on the
+/// attempts whose feed answered; every one was cut at the end of its read grace.
+pub async fn observe_publish_account_on_profile(
+    session: &dyn UiSession,
+    labels: &TikTokControls,
+) -> anyhow::Result<String> {
+    observe_publish_account_then(session, labels, false).await
+}
+
+async fn observe_publish_account_then(
+    session: &dyn UiSession,
+    labels: &TikTokControls,
+    return_home: bool,
+) -> anyhow::Result<String> {
+    let result = observe_publish_account_inner(session, labels, return_home).await;
     result.map_err(|error| {
         if error.is::<crate::tiktok_account::AccountDiagnostic>() {
             return error;
@@ -513,6 +533,7 @@ pub async fn observe_publish_account(
 async fn observe_publish_account_inner(
     session: &dyn UiSession,
     labels: &TikTokControls,
+    return_home: bool,
 ) -> anyhow::Result<String> {
     navigate_own_profile(session, labels).await?;
     let deadline = tokio::time::Instant::now() + PROFILE_WINDOW;
@@ -552,14 +573,16 @@ async fn observe_publish_account_inner(
         }
         tokio::time::sleep(POLL).await;
     };
-    let home = labels
-        .label(TikTokControl::HomeTab)
-        .ok_or_else(|| anyhow::anyhow!("Home tab unmeasured"))?;
-    let tab = session
-        .locate(home.to_query())
-        .await?
-        .ok_or_else(|| anyhow::anyhow!("Home tab absent"))?;
-    session.tap(tab.centre()).await?;
+    if return_home {
+        let home = labels
+            .label(TikTokControl::HomeTab)
+            .ok_or_else(|| anyhow::anyhow!("Home tab unmeasured"))?;
+        let tab = session
+            .locate(home.to_query())
+            .await?
+            .ok_or_else(|| anyhow::anyhow!("Home tab absent"))?;
+        session.tap(tab.centre()).await?;
+    }
     if crate::tiktok_account::current_account_diagnostic().is_none() {
         // The existing measured selected-account sheet also uses two fresh
         // generations; do not invent a profile-snapshot generation for it.
