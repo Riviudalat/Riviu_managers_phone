@@ -503,6 +503,14 @@ function sameOrderedTargets(
   );
 }
 
+/**
+ * Event-driven reads of the list, the device guards and each open campaign run at most once per
+ * this gap, plus once at its end so a burst's last change is shown. Posting phones announce
+ * publishUpdated at each state write, and `publish_list` is a synchronous command that loads
+ * up to 50 full campaigns one by one.
+ */
+const PUBLISH_EVENT_READ_GAP_MS = 2000;
+
 type PublishPageProps = SelProps & {
   scopeControl?: ReactNode;
   targetUdids?: string[];
@@ -946,10 +954,25 @@ export function PublishPage({
     void reload();
     let unlisten: UnlistenFn | undefined;
     let live = true;
+    const lastRead = new Map<string, number>();
+    const trailing = new Map<string, ReturnType<typeof setTimeout>>();
+    const coalesce = (key: string, read: () => void) => {
+      const run = () => { lastRead.set(key, Date.now()); read(); };
+      const wait = (lastRead.get(key) ?? 0) + PUBLISH_EVENT_READ_GAP_MS - Date.now();
+      if (wait <= 0) return run();
+      if (!trailing.has(key)) {
+        trailing.set(key, setTimeout(() => {
+          trailing.delete(key);
+          if (live) run();
+        }, wait));
+      }
+    };
     listenRiviuEvents((event) => {
       if (!live || event.type !== "publishUpdated") return;
-      void reload();
-      void refreshDeviceGuards();
+      coalesce("list", () => {
+        void reload();
+        void refreshDeviceGuards();
+      });
       if (openDetailIds.current.has(event.campaignId)) {
         // A previous retry projection is not evidence for a new campaign revision.
         setExecutionSnapshots((current) => {
@@ -957,7 +980,9 @@ export function PublishPage({
           delete next[event.campaignId];
           return next;
         });
-        void loadCampaignDetail(event.campaignId, false);
+        coalesce(`campaign:${event.campaignId}`, () => {
+          if (openDetailIds.current.has(event.campaignId)) void loadCampaignDetail(event.campaignId, false);
+        });
       }
     })
       .then((off) => {
@@ -969,11 +994,13 @@ export function PublishPage({
       live = false;
       reloadTicket.current += 1;
       unlisten?.();
+      for (const timer of trailing.values()) clearTimeout(timer);
     };
   }, [loadCampaignDetail, refreshDeviceGuards]);
 
   // Assignment transfer/progress commits can precede the next campaign event.
-  // Refresh only the visible monitor; never reconcile or dispatch from this poll.
+  // Refresh only the visible monitor (its tab, in a window not hidden); never reconcile or
+  // dispatch from this poll.
   const monitorRefresh = useRef<() => Promise<void>>(async () => {});
   monitorRefresh.current = async () => {
     if (!campaigns.some(c => ["queued", "transferring", "imported", "posting", "verifying"].includes(c.state))) return;
@@ -985,7 +1012,7 @@ export function PublishPage({
     if (workspaceTab !== "monitor") return;
     let active = true, inFlight = false;
     const timer = window.setInterval(() => {
-      if (!active || inFlight) return;
+      if (!active || inFlight || document.visibilityState === "hidden") return;
       inFlight = true;
       void monitorRefresh.current().finally(() => { inFlight = false; });
     }, 5000);
