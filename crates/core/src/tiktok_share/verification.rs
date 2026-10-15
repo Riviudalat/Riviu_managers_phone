@@ -855,7 +855,8 @@ struct Capture<'a> {
 /// tile viewer's folded caption and time, then the expanded page's exact caption.
 ///
 /// Coarse time, r119 14/10/2026 on phone 46: an hour or day label ("· 1h ago") cannot place
-/// its rounded interval after the submission, so it only must not exclude it.
+/// its rounded interval after the submission, so it only must not exclude it. A minute label
+/// whose interval straddles the submission is the same case (r128 phone 39, 15/10/2026).
 ///
 /// Either way Copy link must give the own account and a post ID allocated inside the
 /// recorded preparation window (`photo_proof::validate_photo_identity`).
@@ -864,7 +865,7 @@ struct Capture<'a> {
 enum TileTime {
     /// The whole rounded interval lies after the submission.
     Exact,
-    /// An hour or day label that does not exclude the submission; the post ID must prove it.
+    /// A label that does not exclude the submission without proving it; the post ID must.
     Coarse,
 }
 
@@ -1472,10 +1473,15 @@ impl Capture<'_> {
         if relative_post_age(text).is_none() {
             return Err(VerificationReason::TimestampUnmeasured);
         }
-        if submission_time_recheck_delay(text, &self.identity.submitted_at, now).is_some() {
-            return Err(VerificationReason::SubmissionTimeAmbiguous);
-        }
-        if relative_post_time_consistent(text, &self.identity.submitted_at, now) {
+        // A minute label whose rounded interval straddles the submission (its newest end
+        // after it, its oldest before) does not exclude it either. r128 phone 39
+        // (ce11171beb405c2701, Global45.7.3/en, 15/10/2026): the newest tile read such a
+        // label on every pass while oEmbed never answered, so the row waited 8 passes for
+        // public metadata. The folded caption's expanded page has no time label to re-read
+        // after a wait, so the copied post ID proves the time instead, as for an hour label.
+        if submission_time_recheck_delay(text, &self.identity.submitted_at, now).is_some()
+            || relative_post_time_consistent(text, &self.identity.submitted_at, now)
+        {
             return Ok(TileTime::Coarse);
         }
         Err(VerificationReason::SubmissionTooOld)
@@ -1625,20 +1631,6 @@ impl Capture<'_> {
                 }
                 Err(VerificationReason::CaptionMissing) if start.elapsed() < POST_PAGE_WINDOW => {
                     tokio::time::sleep(POLL).await
-                }
-                Err(VerificationReason::SubmissionTimeAmbiguous) => {
-                    let delay = submission_time_recheck_delay(
-                        self.diagnostic.time_label.as_deref().unwrap_or_default(),
-                        &self.identity.submitted_at,
-                        chrono::Utc::now(),
-                    )
-                    .ok_or(VerificationReason::SubmissionTimeAmbiguous)?;
-                    if start.elapsed() + delay >= Duration::from_secs(65)
-                        || self.started.elapsed() + delay >= self.window()
-                    {
-                        return Err(VerificationReason::SubmissionTimeAmbiguous);
-                    }
-                    tokio::time::sleep(delay).await;
                 }
                 Err(reason) => return Err(reason),
             }
