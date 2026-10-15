@@ -187,6 +187,14 @@ fn adb_daemon_connect_timeout(message: &str) -> bool {
         && message.contains("(10060)")
 }
 
+/// TikTok re-rendered the caption field between finding it and `set_text` (r123 phone 49,
+/// 15/10/2026; once before on 12/10). `ACTION_SET_TEXT` is one accessibility action, so a
+/// detached element took no text, and the composer only types before Post.
+fn caption_field_detached(lowered: &str) -> bool {
+    lowered.contains("/value lỗi 404")
+        && lowered.contains("the referenced element is no longer attached")
+}
+
 /// adb lost its server during the media transfer or the read-only photo-order proof that
 /// follows it (r125 phone 32, 15/10/2026: `sha256sum` of an imported image). Both run before
 /// any composer; a tap or Post with the same text stays terminal.
@@ -277,7 +285,10 @@ pub fn describe(error: &anyhow::Error) -> RecoveryFailure {
     // 15/10/2026: `/actions` 400 "Unable to perform W3C actions" while the pre-Post account
     // read moved to the Profile). The Post tap never reaches here: the composer turns its
     // failure into PostNotConfirmed, and the intent gate still refuses any retry after Post.
-    if error.chain().any(|cause| cause.is::<crate::driver::GestureCancelled>()) {
+    if error
+        .chain()
+        .any(|cause| cause.is::<crate::driver::GestureCancelled>())
+    {
         return RecoveryFailure::new(
             "gesture_cancelled",
             FailureKind::Retryable,
@@ -407,6 +418,9 @@ pub fn classify(message: &str) -> FailureKind {
     // out". Match the measured loopback daemon failure, after specific terminal
     // refusals; the existing intent/revision gates still own permission to retry.
     if adb_daemon_connect_timeout(message) || adb_transfer_daemon_start_failed(message) {
+        return FailureKind::Retryable;
+    }
+    if caption_field_detached(&s) {
         return FailureKind::Retryable;
     }
     if [
@@ -648,6 +662,11 @@ mod tests {
         assert_eq!(
             classify("chưa đo nút Đăng trên bản build này — không bấm gì cả"),
             FailureKind::Terminal
+        );
+        // r123 phone 49: the caption field was re-rendered under set_text.
+        assert_eq!(
+            classify("agent /element/00000000-0000-0c55-ffff-ffff00000dec/value lỗi 404 Not Found: The referenced element is no longer attached to the DOM"),
+            FailureKind::Retryable
         );
         // r117 phone 49: the same daemon failure while the publish session opened.
         let session_open = anyhow::anyhow!("cleanAppSession failed for device ce071827715f321b05: startStreamAfterSession failed for device ce071827715f321b05: adb -s ce071827715f321b05 shell wm size failed: * daemon not running; starting now at tcp:5037\r\ncould not read ok from ADB Server\r\n* failed to start daemon\r\nadb.exe: cannot connect to daemon");
