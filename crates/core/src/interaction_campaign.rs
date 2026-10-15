@@ -6489,10 +6489,10 @@ mod boundary_tests {
 
     /// And the wrappers are wrappers: every free function there is a command.
     ///
-    /// A helper is where the next 1,712 lines would start. The two that remain are named, so
-    /// adding a third is a decision someone has to write down rather than a drift.
+    /// A helper is where the next 1,712 lines would start. The ones that remain are named, so
+    /// adding another is a decision someone has to write down rather than a drift.
     #[test]
-    fn nothing_but_commands_and_two_named_helpers_live_beside_them() {
+    fn nothing_but_commands_and_named_helpers_live_beside_them() {
         const ALLOWED_HELPERS: &[(&str, &str)] = &[
             (
                 "interaction_error",
@@ -6501,6 +6501,14 @@ mod boundary_tests {
             (
                 "require_parent_locator",
                 "argument validation for the two thread commands",
+            ),
+            (
+                "read_account_bounded",
+                "the IPC ceiling of interaction_read_account (df3e0ee2); the read itself is inspection::read_account",
+            ),
+            (
+                "account_read_error",
+                "shapes AccountReadTimedOut into its CommandError code",
             ),
         ];
         let desktop = include_str!("../../../apps/desktop/src-tauri/src/interaction_commands.rs");
