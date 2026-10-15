@@ -159,7 +159,19 @@ pub struct HelperClient {
     production_runtime: bool,
     clipboard_qualified: std::sync::Arc<std::sync::atomic::AtomicBool>,
     clipboard_baseline: std::sync::Arc<parking_lot::Mutex<Option<ClipboardBaseline>>>,
+    /// Clipboard jobs this owner submitted, and whether its helper ledger is spent; see
+    /// [`CLIPBOARD_LEDGER_RENEWAL`].
+    clipboard_jobs: std::sync::Arc<std::sync::atomic::AtomicU32>,
+    owner_renewal_due: std::sync::Arc<std::sync::atomic::AtomicBool>,
 }
+
+/// The bundled helper keeps every named clipboard job of one owner for settlement queries and
+/// refuses the 129th (`ClipboardStore` → `MainThreadJobs(…, 128)`), so a long-lived owner ends
+/// up refusing every clipboard call. At a session boundary past this count the owner is
+/// released and claimed afresh, which starts an empty ledger. Not measured: it leaves 32 jobs
+/// for the next session, and one link verification of 4 copy attempts submits about 16
+/// (sentinel write, readback and two reads per attempt; phone 48, SM-G955F, 15/10/2026).
+const CLIPBOARD_LEDGER_RENEWAL: u32 = 96;
 
 /// None text is an absent native clip; Some(empty bytes) is a plaintext empty string.
 #[derive(Clone)]
@@ -184,12 +196,7 @@ impl ClipboardBaseline {
 
 /// A successful job must explicitly prove absence; unavailable or malformed reads fail closed.
 fn clipboard_read_payload(value: &Value, limit: usize) -> anyhow::Result<Option<Vec<u8>>> {
-    let kind = match value["baselineKind"].as_str() {
-        Some("empty") => "empty",
-        Some("plaintext") => "plaintext",
-        Some("unsupported") => "unsupported",
-        _ => "unknown",
-    };
+    let kind = clipboard_kind(value);
     if kind == "empty" && value["available"] == false && value["plainTextBaseline"] == false
         && value.get("text").is_none() {
         return Ok(None);
@@ -201,6 +208,16 @@ fn clipboard_read_payload(value: &Value, limit: usize) -> anyhow::Result<Option<
     let text = value["text"].as_str().context("clipboard plaintext missing; empty was not proved")?;
     anyhow::ensure!(text.len() <= limit, "helper clipboard exceeded read limit");
     Ok(Some(text.as_bytes().to_vec()))
+}
+
+/// The helper's classification of a clip, as a fixed label.
+fn clipboard_kind(value: &Value) -> &'static str {
+    match value["baselineKind"].as_str() {
+        Some("empty") => "empty",
+        Some("plaintext") => "plaintext",
+        Some("unsupported") => "unsupported",
+        _ => "unknown",
+    }
 }
 
 #[derive(Clone)]
@@ -849,6 +866,8 @@ impl HelperClient {
             production_runtime: false,
             clipboard_qualified: Default::default(),
             clipboard_baseline: Default::default(),
+            clipboard_jobs: Default::default(),
+            owner_renewal_due: Default::default(),
         })
     }
 
@@ -856,6 +875,10 @@ impl HelperClient {
     pub async fn shutdown(self) -> anyhow::Result<()> {
         // A cancelled caller may leave its owned clipboard task draining/restoring.
         let _serial = ime_lock(&self.serial).lock_owned().await;
+        // A job whose answer was lost is settled before the release that requires it.
+        if self.pending_clipboard.lock().is_some() {
+            self.settle_clipboard_debt_locked().await;
+        }
         let mut closed = self.lifecycle.lock().await;
         self.require_unfenced()?;
         anyhow::ensure!(
@@ -969,6 +992,9 @@ impl HelperClient {
                 if error.is::<ClipboardSettledFailure>() {
                     error
                 } else {
+                    // Fixed vocabulary only: a reply in the chain may carry clipboard text.
+                    let stage = error.downcast_ref::<ClipboardJobUnsettled>().map_or("other", |stage| stage.0);
+                    tracing::warn!(serial = %self.serial, action, stage, "chưa xác định được kết quả thao tác clipboard của helper; giữ bàn phím helper đến khi tự đối soát ở lần dùng clipboard hoặc phiên sau, không lặp thao tác");
                     anyhow!(ClipboardSettlementUnknown)
                 }
             })
@@ -1020,47 +1046,96 @@ impl HelperClient {
         if let Some(ticket) = self.pending_clipboard.lock().as_mut() {
             ticket["serviceInstance"] = json!(instance);
             ticket["operationId"] = json!(id);
+            // Settling a lost answer later depends on whether this job could write.
+            ticket["action"] = json!(action);
             ticket["phase"] = json!("submissionPending");
         }
         self.persist_clipboard_checkpoint()
             .map_err(|_| anyhow!(ClipboardSettledFailure))?;
+        self.clipboard_jobs
+            .fetch_add(1, std::sync::atomic::Ordering::AcqRel);
         // Send once. A lost submission ACK is reconciled by ID, never resubmitted.
-        let submitted = self.post_json("/v1/clipboard/jobs/submit", body).await;
-        let deadline = tokio::time::Instant::now() + Duration::from_secs(12);
+        let mut value = match self
+            .post_clipboard_job("/v1/clipboard/jobs/submit", body)
+            .await
+        {
+            Ok(JobReply::Answer(reply)) => Some(reply),
+            // Refused before admission, so it never became a job and nothing runs later.
+            Ok(JobReply::Refused(
+                code @ ("unauthorized"
+                | "instance_mismatch"
+                | "clipboard_ledger_full"
+                | "invalid_argument"),
+            )) => {
+                if code == "clipboard_ledger_full" {
+                    self.owner_renewal_due
+                        .store(true, std::sync::atomic::Ordering::Release);
+                }
+                tracing::warn!(serial = %self.serial, action, code, "helper từ chối nhận thao tác clipboard (chưa thành thao tác nên không chạy sau); trả lại bàn phím");
+                return Err(anyhow!(ClipboardSettledFailure));
+            }
+            // Lost or unclassified: the job may exist, so it is only ever asked about by ID.
+            Ok(JobReply::Refused(_)) | Err(_) => None,
+        };
+        let deadline = tokio::time::Instant::now() + CLIPBOARD_SETTLEMENT;
+        let grace = deadline + CLIPBOARD_SETTLEMENT_GRACE;
         let request = json!({"serviceInstance":instance,"requestId":id});
-        let mut value = submitted.ok();
         loop {
             if let Some(reply) = value.take() {
-                require_ok(&reply, "clipboard job")?;
-                anyhow::ensure!(
-                    reply["serviceInstance"].as_str() == Some(instance)
-                        && reply["operationId"].as_str() == Some(id.as_str()),
-                    "clipboard job identity mismatch"
-                );
+                require_ok(&reply, "clipboard job")
+                    .map_err(|_| anyhow!(ClipboardJobUnsettled("replyNotOk")))?;
+                if reply["serviceInstance"].as_str() != Some(instance)
+                    || reply["operationId"].as_str() != Some(id.as_str())
+                {
+                    return Err(anyhow!(ClipboardJobUnsettled("identityMismatch")));
+                }
                 match reply["state"].as_str() {
                     Some("succeeded") => return Ok(reply["result"].clone()),
                     Some("failed" | "cancelled") => return Err(anyhow!(ClipboardSettledFailure)),
                     Some("queued" | "running") => {}
-                    _ => anyhow::bail!("clipboard job settlement is unknown"),
+                    _ => return Err(anyhow!(ClipboardJobUnsettled("unknownState"))),
                 }
             }
-            if tokio::time::Instant::now() >= deadline {
-                let cancel = self
-                    .post_json("/v1/clipboard/jobs/cancelQueued", request.clone())
-                    .await?;
-                require_ok(&cancel, "clipboard cancel settlement")?;
-                anyhow::ensure!(cancel["serviceInstance"].as_str() == Some(instance)
-                    && cancel["operationId"].as_str() == Some(id.as_str())
-                    && matches!(cancel["state"].as_str(), Some("cancelled" | "succeeded" | "failed")),
-                    "clipboard job still running or identity changed; settlement required before IME cleanup");
-                return Err(anyhow!(ClipboardSettledFailure));
+            let now = tokio::time::Instant::now();
+            if now >= grace {
+                return Err(anyhow!(ClipboardJobUnsettled("deadline")));
             }
             tokio::time::sleep(Duration::from_millis(100)).await;
-            value = Some(
-                self.post_json("/v1/clipboard/jobs/status", request.clone())
-                    .await?,
-            );
+            // Past the deadline each ask also cancels a job still queued. Neither call can
+            // start a job, so both are repeated after a lost answer instead of giving up.
+            let path = if now >= deadline {
+                "/v1/clipboard/jobs/cancelQueued"
+            } else {
+                "/v1/clipboard/jobs/status"
+            };
+            value = match self.post_clipboard_job(path, request.clone()).await {
+                Ok(JobReply::Answer(reply)) => Some(reply),
+                Ok(JobReply::Refused("operation_unknown")) | Err(_) => None,
+                // Another owner or service instance answers now; settlement waits for proof.
+                Ok(JobReply::Refused(_)) => {
+                    return Err(anyhow!(ClipboardJobUnsettled("ownerChanged")))
+                }
+            };
         }
+    }
+
+    /// One clipboard-job call. A refusal the helper answered (its HTTP status and fixed `error`
+    /// code) is told apart from a lost answer, because only a lost answer leaves a job unknown.
+    async fn post_clipboard_job(&self, path: &str, body: Value) -> anyhow::Result<JobReply> {
+        let (status, value) = self.post_json_answer(path, body).await?;
+        if status.is_success() {
+            return Ok(JobReply::Answer(value));
+        }
+        Ok(JobReply::Refused(
+            match (status.as_u16(), value["error"].as_str()) {
+                (401, _) => "unauthorized",
+                (_, Some("instance_mismatch")) => "instance_mismatch",
+                (_, Some("clipboard_ledger_full")) => "clipboard_ledger_full",
+                (_, Some("operation_unknown")) => "operation_unknown",
+                (_, Some("invalid_argument")) => "invalid_argument",
+                _ => "other",
+            },
+        ))
     }
 
     pub async fn set_clipboard(&self, content_type: &str, bytes: &[u8]) -> anyhow::Result<()> {
@@ -1095,7 +1170,11 @@ impl HelperClient {
             client
                 .with_ime(|| async {
                     let value = client.clipboard_job("get", None).await?;
-                    let bytes = clipboard_read_payload(&value, maximum_decoded_bytes)?;
+                    let bytes = clipboard_read_payload(&value, maximum_decoded_bytes).inspect_err(|_| {
+                        // The helper's labels only: the clip itself never reaches a log.
+                        tracing::warn!(serial = %client.serial, kind = clipboard_kind(&value), available = value["available"] == true,
+                            "helper đọc clipboard xong nhưng nội dung không phải văn bản thuần hoặc vượt giới hạn; không coi là trống");
+                    })?;
                     // Public read API represents proven absence as zero bytes, never writes it back.
                     Ok(("plaintext".to_string(), bytes.unwrap_or_default()))
                 })
@@ -1278,6 +1357,30 @@ impl HelperClient {
 
     /// Caller holds the lifecycle lock; avoid re-entering it for owner status.
     async fn post_json_open(&self, path: &str, body: Value) -> anyhow::Result<Value> {
+        let (status, value) = self.post_json_answer_open(path, body).await?;
+        if !status.is_success() {
+            anyhow::bail!("helper {path} HTTP {status}");
+        }
+        Ok(value)
+    }
+
+    /// The helper's HTTP status with its JSON body. Only a lost or unreadable answer is an error.
+    async fn post_json_answer(
+        &self,
+        path: &str,
+        body: Value,
+    ) -> anyhow::Result<(reqwest::StatusCode, Value)> {
+        let closed = self.lifecycle.lock().await;
+        self.require_unfenced()?;
+        anyhow::ensure!(!*closed, "helper connection is closed");
+        self.post_json_answer_open(path, body).await
+    }
+
+    async fn post_json_answer_open(
+        &self,
+        path: &str,
+        body: Value,
+    ) -> anyhow::Result<(reqwest::StatusCode, Value)> {
         let response = self
             .http
             .post(format!("{}{path}", self.base))
@@ -1290,10 +1393,7 @@ impl HelperClient {
         let text = read_capped(response, path).await?;
         let value: Value = serde_json::from_str(&text)
             .with_context(|| format!("helper {path} response is not JSON"))?;
-        if !status.is_success() {
-            anyhow::bail!("helper {path} HTTP {status}");
-        }
-        Ok(value)
+        Ok((status, value))
     }
 
     /// Switch to the helper IME, run `op`, always restore the previous IME.
@@ -1326,6 +1426,11 @@ impl HelperClient {
         if self.production_runtime {
             self.require_canary_identity().await?;
             anyhow::ensure!(self.adb.shell(&self.serial, "am get-current-user").await?.trim() == "0", "clipboard Android user changed; no IME mutation");
+            // An earlier call's job whose answer was lost is settled first, under this same
+            // lock, and the keyboard it kept is handed back. Nothing is replayed.
+            if self.pending_clipboard.lock().is_some() {
+                self.settle_clipboard_debt_locked().await;
+            }
         }
         anyhow::ensure!(
             self.pending_clipboard.lock().is_none(),
@@ -1345,7 +1450,12 @@ impl HelperClient {
             "helper clipboard settlement is unavailable; no IME switch"
         );
         self.describe_apps(&[PACKAGE.to_string()], false).await?;
-        let previous = current_ime(&self.adb, &self.serial).await?;
+        let mut previous = current_ime(&self.adb, &self.serial).await?;
+        if previous == IME_ID && self.production_runtime {
+            // Left selected with no job of this owner pending (an older build or owner): hand
+            // back the fleet keyboard by `runtime::fallback_keyboard` instead of refusing.
+            previous = self.hand_back_stray_helper_keyboard().await?;
+        }
         anyhow::ensure!(
             previous != IME_ID,
             "previous IME is already the helper; reconciliation required"
@@ -1383,7 +1493,7 @@ impl HelperClient {
             .is_some_and(|error| error.is::<ClipboardSettlementUnknown>())
         {
             anyhow::bail!(
-                "clipboard settlement unknown; IME retained for explicit reconciliation, no replay"
+                "clipboard settlement unknown; IME retained until automatic settlement, no replay"
             );
         }
         let restore = async {
@@ -1531,6 +1641,34 @@ impl std::fmt::Display for ClipboardSettlementUnknown {
     }
 }
 impl std::error::Error for ClipboardSettlementUnknown {}
+
+/// Where a submitted job's settlement was lost, as a fixed log label.
+#[derive(Debug)]
+struct ClipboardJobUnsettled(&'static str);
+impl std::fmt::Display for ClipboardJobUnsettled {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            formatter,
+            "clipboard job settlement is unknown ({})",
+            self.0
+        )
+    }
+}
+impl std::error::Error for ClipboardJobUnsettled {}
+
+/// A clipboard-job answer, or the fixed code of a refusal the helper answered.
+enum JobReply {
+    Answer(Value),
+    Refused(&'static str),
+}
+
+/// How long one clipboard job may take before the host cancels it if still queued. The helper
+/// cancels a job not dispatched within 5 s itself (`ClipboardStore`), so one unsettled past
+/// this is running on Android's main looper or its answer was lost.
+const CLIPBOARD_SETTLEMENT: Duration = Duration::from_secs(12);
+/// Extra asking after that deadline, so one status reply dropped by `adb forward` under fleet
+/// load does not retain the IME. Not measured: it only bounds a transient drop.
+const CLIPBOARD_SETTLEMENT_GRACE: Duration = Duration::from_secs(8);
 
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]

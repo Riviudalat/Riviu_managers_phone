@@ -615,6 +615,202 @@ fn recorded_ime_restore(state: &Path, serial: &str, owner_id: &str) -> Option<Va
     Some(json!({"previousIme":previous,"helperWasEnabled":was_enabled}))
 }
 
+/// Keyboard handed back when the lost clipboard job's checkpoint names none that Android still
+/// lists as enabled (older data, or a helper IME left selected with no job pending). Not a
+/// guess: every helper checkpoint on the fleet PC (13–16/10/2026, SM-G955F/N, Android 9)
+/// recorded either this Samsung Keyboard or GenFarmer's AdbKeyboard, and AdbKeyboard is never
+/// assumed because it exists only where GenFarmer installed it. Chosen only when enabled.
+const FLEET_DEFAULT_KEYBOARD: &str = "com.sec.android.inputmethod/.SamsungKeypad";
+
+/// `effectIntent.automatic` of the supersession `ensure_runtime` runs itself (no app ledger).
+const AUTO_SUPERSEDE: &str = "retainedOwnerRefused";
+
+fn ime_enabled(enabled: &str, ime: &str) -> bool {
+    enabled
+        .trim()
+        .split(':')
+        .any(|entry| entry.split(';').next() == Some(ime))
+}
+
+/// `FLEET_DEFAULT_KEYBOARD` when Android lists it as enabled; otherwise nothing is chosen.
+async fn fallback_keyboard(adb: &AdbProgram, serial: &str) -> anyhow::Result<Option<String>> {
+    let enabled = adb
+        .shell(serial, "settings get secure enabled_input_methods")
+        .await?;
+    Ok(ime_enabled(&enabled, FLEET_DEFAULT_KEYBOARD).then(|| FLEET_DEFAULT_KEYBOARD.to_owned()))
+}
+
+/// How a clipboard job whose answer was lost was proved unable to act any more.
+struct ClipboardDebtProof {
+    /// Fixed log label.
+    label: &'static str,
+    /// The owner that took the job still answers to this host's credential.
+    owner_alive: bool,
+}
+
+/// Prove a lost clipboard job settled, or that it can no longer run. `None` keeps the fence.
+///
+/// The helper server that took a job keeps it until it settles and never evicts a named one
+/// (`MainThreadJobs`). So while that owner still answers, its status of the ID is the proof,
+/// and an ID it does not know never became a job. A different owner, a refused credential or
+/// a proven helper restart means that server is gone: a new claim needs the old owner
+/// released after its work settled (`AgentService`), or a new process.
+async fn prove_clipboard_settled(
+    client: &HelperClient,
+    owner: &CanaryOwner,
+    pending: &Value,
+    record: Option<&Value>,
+) -> Option<ClipboardDebtProof> {
+    let alive = |label| {
+        Some(ClipboardDebtProof {
+            label,
+            owner_alive: true,
+        })
+    };
+    let gone = |label| {
+        Some(ClipboardDebtProof {
+            label,
+            owner_alive: false,
+        })
+    };
+    let nonce = uuid::Uuid::new_v4().simple().to_string();
+    match client
+        .post_json_answer("/v1/session/status", json!({"nonce":nonce}))
+        .await
+    {
+        Ok((status, value)) if status.is_success() => {
+            if value["ok"] != true || value["nonce"].as_str() != Some(nonce.as_str()) {
+                return None;
+            }
+            if value["ownerId"].as_str() != Some(owner.owner_id.as_str())
+                || value["serviceInstance"].as_str() != Some(owner.instance.as_str())
+                || value["ownerGeneration"].as_str() != Some(owner.generation.as_str())
+                || value["ownership"] != "owned"
+            {
+                return gone("ownerReplaced");
+            }
+        }
+        Ok((status, _)) if status == reqwest::StatusCode::UNAUTHORIZED => {
+            return gone("credentialRefused")
+        }
+        Ok(_) => return None,
+        Err(_) => {
+            let proof =
+                owner_restart_proof(&client.adb, &client.serial, &owner.report, record?).await?;
+            return gone(match proof["kind"].as_str() {
+                Some("reboot") => "reboot",
+                Some("processAbsent") => "processAbsent",
+                _ => "processRestarted",
+            });
+        }
+    }
+    let Some(id) = pending["operationId"].as_str() else {
+        // Recorded before submission: the keyboard may have switched, but no job exists.
+        return if pending["phase"] == "switching" {
+            alive("notSubmitted")
+        } else {
+            None
+        };
+    };
+    if pending["serviceInstance"].as_str() != Some(owner.instance.as_str()) {
+        return None;
+    }
+    let request = json!({"serviceInstance":owner.instance,"requestId":id});
+    let deadline = tokio::time::Instant::now() + CLIPBOARD_SETTLEMENT;
+    let mut path = "/v1/clipboard/jobs/status";
+    loop {
+        match client.post_clipboard_job(path, request.clone()).await {
+            Ok(JobReply::Answer(reply)) => {
+                if reply["ok"] != true
+                    || reply["operationId"].as_str() != Some(id)
+                    || reply["serviceInstance"].as_str() != Some(owner.instance.as_str())
+                {
+                    return None;
+                }
+                match reply["state"].as_str() {
+                    Some("succeeded" | "failed" | "cancelled") => return alive("settled"),
+                    // Only a job not yet dispatched can be cancelled; the call starts nothing.
+                    Some("queued") => path = "/v1/clipboard/jobs/cancelQueued",
+                    Some("running") => {}
+                    _ => return None,
+                }
+            }
+            Ok(JobReply::Refused("operation_unknown")) => return alive("notAdmitted"),
+            Ok(JobReply::Refused("unauthorized")) => return gone("credentialRefused"),
+            Ok(JobReply::Refused(_)) | Err(_) => {}
+        }
+        if tokio::time::Instant::now() >= deadline {
+            return None;
+        }
+        tokio::time::sleep(Duration::from_millis(250)).await;
+    }
+}
+
+/// Hand back the keyboard a settled clipboard job left selected and return the one now
+/// selected: the recorded one while Android still lists it, else `fallback_keyboard`. A
+/// keyboard chosen by someone after ours is kept. Every change is read back.
+async fn hand_back_keyboard(
+    adb: &AdbProgram,
+    serial: &str,
+    pending: &Value,
+) -> anyhow::Result<String> {
+    let current = current_ime(adb, serial).await?;
+    let keyboard = if current == IME_ID {
+        let enabled = adb
+            .shell(serial, "settings get secure enabled_input_methods")
+            .await?;
+        let recorded = pending["previousIme"].as_str().filter(|ime| {
+            validate_ime_id(ime).is_ok() && *ime != IME_ID && ime_enabled(&enabled, ime)
+        });
+        let target = match recorded {
+            Some(ime) => ime.to_owned(),
+            None => fallback_keyboard(adb, serial)
+                .await?
+                .context("clipboard settlement keyboard unknown; not guessed")?,
+        };
+        set_ime(adb, serial, &target).await?;
+        anyhow::ensure!(
+            current_ime(adb, serial).await? == target,
+            "clipboard settlement keyboard restore unverified"
+        );
+        target
+    } else {
+        current
+    };
+    if pending["helperWasEnabled"] == false {
+        adb.shell(serial, &format!("ime disable {IME_ID}")).await?;
+        let enabled = adb
+            .shell(serial, "settings get secure enabled_input_methods")
+            .await?;
+        anyhow::ensure!(
+            !ime_enabled(&enabled, IME_ID),
+            "clipboard settlement helper IME disable unverified"
+        );
+    }
+    Ok(keyboard)
+}
+
+/// One operator line per settled lost job; fixed labels and the keyboard id only.
+fn log_clipboard_settlement(
+    serial: &str,
+    proof: &ClipboardDebtProof,
+    pending: &Value,
+    baseline_dropped: bool,
+    keyboard: &str,
+) {
+    let action = pending["action"]
+        .as_str()
+        .filter(|action| matches!(*action, "get" | "snapshot" | "set" | "restoreSnapshot"))
+        .unwrap_or("unknown");
+    let outcome = if matches!(action, "get" | "snapshot") && !baseline_dropped {
+        "không làm đổi clipboard"
+    } else {
+        "nội dung clipboard coi như không xác định"
+    };
+    tracing::info!(serial, proof = proof.label, action, keyboard,
+        "tự đối soát clipboard helper: thao tác cũ đã khép ({outcome}); đã trả bàn phím, không lặp thao tác");
+}
+
 /// Once the recorded keyboard is back, a fresh observation reads it as the boot IME and no
 /// longer derives the restore; the plan's restore is the only permitted carry-over.
 fn carry_ime_restore(observed: &mut Value, plan: &Value) {
@@ -977,12 +1173,103 @@ impl HelperClient {
         Ok(true)
     }
 
+    /// Settle this owner's clipboard job whose answer was lost (`prove_clipboard_settled`) and
+    /// hand back the keyboard it kept. The caller holds this phone's IME lock. Best effort:
+    /// without proof the debt and its fence stay exactly as they were.
+    pub(super) async fn settle_clipboard_debt_locked(&self) {
+        if let Err(error) = self.try_settle_clipboard_debt().await {
+            tracing::warn!(serial = %self.serial, error = %format!("{error:#}"), "chưa tự đối soát được thao tác clipboard cũ của helper; giữ bàn phím và bản ghi, không lặp thao tác");
+        }
+    }
+
+    async fn try_settle_clipboard_debt(&self) -> anyhow::Result<()> {
+        if !self.production_runtime || self.require_unfenced().is_err() {
+            return Ok(());
+        }
+        let Some(pending) = self.pending_clipboard.lock().clone() else {
+            return Ok(());
+        };
+        let owner = self
+            .canary
+            .as_ref()
+            .context("clipboard settlement owner missing")?;
+        let record = owner_record(&owner.report, &self.serial).ok();
+        let Some(proof) = prove_clipboard_settled(self, owner, &pending, record.as_ref()).await
+        else {
+            return Ok(());
+        };
+        let keyboard = hand_back_keyboard(&self.adb, &self.serial, &pending).await?;
+        // A runtime owner takes a snapshot only inside its clipboard qualification, which ended
+        // with this lost job. Nobody restores it any more: the clipboard is simply unknown.
+        // The durable record goes first, so a failed removal leaves the debt still fenced.
+        let checkpoint = owner.report.join("ime-checkpoint.json");
+        if checkpoint.try_exists()? {
+            std::fs::remove_file(checkpoint)?;
+        }
+        self.pending_clipboard.lock().take();
+        let baseline_dropped = self.clipboard_baseline.lock().take().is_some();
+        log_clipboard_settlement(&self.serial, &proof, &pending, baseline_dropped, &keyboard);
+        Ok(())
+    }
+
+    /// Session open reaches a cached owner first in `settle_released_runtime`.
+    async fn settle_clipboard_debt(&self) {
+        if !self.production_runtime || self.pending_clipboard.lock().is_none() {
+            return;
+        }
+        // A clipboard task still running holds this lock and settles its own job.
+        let Ok(_serial) = ime_lock(&self.serial).try_lock_owned() else {
+            return;
+        };
+        self.settle_clipboard_debt_locked().await;
+    }
+
+    /// The helper IME selected with no job of this owner pending (left by an older build or
+    /// owner): select `fallback_keyboard` and read it back. The caller holds the IME lock.
+    pub(super) async fn hand_back_stray_helper_keyboard(&self) -> anyhow::Result<String> {
+        let keyboard = fallback_keyboard(&self.adb, &self.serial).await?
+            .context("previous IME is already the helper and no keyboard is recorded; reconciliation required")?;
+        set_ime(&self.adb, &self.serial, &keyboard).await?;
+        anyhow::ensure!(
+            current_ime(&self.adb, &self.serial).await? == keyboard,
+            "helper IME hand-back unverified"
+        );
+        tracing::info!(serial = %self.serial, keyboard = %keyboard, "bàn phím mặc định đang là bàn phím Riviu Helper mà không có thao tác nào chờ; đã trả về bàn phím mặc định của đội máy");
+        Ok(keyboard)
+    }
+
+    /// Release an owner whose helper ledger is spent or nearly so (`CLIPBOARD_LEDGER_RENEWAL`)
+    /// between sessions, with no clipboard work pending, so the caller claims afresh with an
+    /// empty one. The exact release and its journal are the normal ones.
+    async fn renew_spent_owner(&self) -> anyhow::Result<bool> {
+        let jobs = self
+            .clipboard_jobs
+            .load(std::sync::atomic::Ordering::Acquire);
+        if !(self
+            .owner_renewal_due
+            .load(std::sync::atomic::Ordering::Acquire)
+            || jobs >= CLIPBOARD_LEDGER_RENEWAL)
+            || self.cleanup_is_pending()
+            || self.require_unfenced().is_err()
+        {
+            return Ok(false);
+        }
+        tracing::info!(serial = %self.serial, jobs, "phiên helper đã dùng gần hết sổ thao tác clipboard; trả đúng phiên này và nhận phiên mới, không lặp thao tác nào");
+        self.clone().shutdown().await?;
+        Ok(true)
+    }
+
     /// A durable release (including an unresolved intent) fences authenticated reconnect.
+    /// Session open reaches a cached owner here first, so a clipboard job whose answer was lost
+    /// is settled before the caller reads the cleanup fence, and a spent owner is renewed.
     pub(crate) async fn settle_released_runtime(&self) -> anyhow::Result<bool> {
         let result = async {
             if !self.production_runtime { return Ok(false); }
             let owner = self.canary.as_ref().context("runtime owner missing")?;
-            if !release_path(owner).try_exists()? { return Ok(false); }
+            self.settle_clipboard_debt().await;
+            if !release_path(owner).try_exists()? {
+                return self.renew_spent_owner().await;
+            }
             // A release journal against a process proven gone settles by that restart; a
             // repeated RELEASE could never reach the claim that died with the process.
             if self.retire_if_restarted().await? { return Ok(true); }
@@ -1151,8 +1438,129 @@ impl HelperClient {
 
     /// Called under the driver's inventory writer and the caller's control lease.
     pub(crate) async fn ensure_runtime(adb: AdbProgram, serial: &str, apk: Option<&Path>, state_dir: Option<&Path>) -> anyhow::Result<Self> {
-        let state = state_path(state_dir.context("helper durable state directory missing")?, serial)?;
-        anyhow::ensure!(!state.join("maintenance-active.json").try_exists().context(HelperRecoveryRequired)?, HelperRecoveryRequired);
+        let error = match Self::ensure_runtime_attempt(adb.clone(), serial, apk, state_dir).await {
+            Ok(client) => return Ok(client),
+            Err(error) => error,
+        };
+        match Self::supersede_refused_owner(&adb, serial, apk, state_dir, &error).await {
+            Ok(true) => Self::ensure_runtime_attempt(adb, serial, apk, state_dir).await,
+            Ok(false) => Err(error),
+            Err(supersede) => {
+                tracing::warn!(serial, error = %format!("{supersede:#}"), "tự thay phiên helper chưa xong; giữ bản ghi để đối soát, không lặp thao tác");
+                Err(error)
+            }
+        }
+    }
+
+    /// Owner decision 2026-10-12 (no buttons): a retained owner this host can neither resume
+    /// nor settle -- its claim met `owner_conflict`, or the helper refuses its credential after
+    /// a desktop or USB-box restart -- is superseded by the existing maintenance here, under
+    /// the caller's device lease, so session open and media staging claim afresh instead of
+    /// failing (r127/r129, 15–16/10/2026, phones 35 and 29). At most once per phone boot
+    /// (durable marker written first); never with a clipboard job unsettled, another
+    /// maintenance active, an adbd identity refusal or the phone off adb. Its own interrupted
+    /// plan is only reconciled, never stopped again. No claim or action is replayed.
+    async fn supersede_refused_owner(
+        adb: &AdbProgram,
+        serial: &str,
+        apk: Option<&Path>,
+        state_dir: Option<&Path>,
+        error: &anyhow::Error,
+    ) -> anyhow::Result<bool> {
+        if !error.is::<HelperRecoveryRequired>()
+            || error.is::<HelperShellIdentityRefused>()
+            || crate::adb::is_transport_lost(error)
+        {
+            return Ok(false);
+        }
+        let (Some(root), Some(apk)) = (state_dir, apk) else {
+            return Ok(false);
+        };
+        let state = state_path(root, serial)?;
+        let active = state.join("maintenance-active.json");
+        if active.try_exists()? {
+            let intent = bounded_json(&active)?;
+            if intent["plan"]["effectIntent"]["automatic"] != AUTO_SUPERSEDE {
+                return Ok(false);
+            }
+            Self::execute_maintenance(
+                adb,
+                serial,
+                Some(apk),
+                Some(root),
+                intent["plan"].clone(),
+                true,
+                true,
+            )
+            .await?;
+            tracing::info!(serial, "tự đối soát helper: đã khép lần tự thay phiên dở trước đó (chỉ quan sát, không dừng helper lần nữa)");
+            return Ok(true);
+        }
+        if !state.join("runtime-owner.json").try_exists()?
+            || state.join("ime-checkpoint.json").try_exists()?
+        {
+            return Ok(false);
+        }
+        let boot_id = boot_identity(adb, serial).await?;
+        let marker = state.join("auto-supersede.json");
+        // An unreadable marker cannot prove a new boot, so it counts as spent.
+        if marker.try_exists()?
+            && bounded_json(&marker).map_or(true, |spent| {
+                spent["bootId"].as_str() == Some(boot_id.as_str())
+            })
+        {
+            return Ok(false);
+        }
+        let maintenance_id = uuid::Uuid::new_v4().simple().to_string();
+        // Written before any effect: a crash after it spends this boot, never repeats a stop.
+        durable_json(
+            &marker,
+            &json!({"serial":serial,"androidUser":0,"bootId":boot_id,"maintenanceId":maintenance_id}),
+        )?;
+        tracing::info!(serial, "tự đối soát helper: không nhận lại được phiên helper cũ (helper đang có chủ phiên khác hoặc từ chối khóa); tự thay phiên một lần cho lần khởi động này của máy, không lặp thao tác nào");
+        // A helper IME left selected with no checkpoint cannot be planned around; hand back
+        // the fleet keyboard first, exactly as the next clipboard use would.
+        if current_ime(adb, serial).await? == IME_ID {
+            let keyboard = fallback_keyboard(adb, serial)
+                .await?
+                .context("maintenance cannot guess or restore a lost boot IME")?;
+            set_ime(adb, serial, &keyboard).await?;
+            anyhow::ensure!(
+                current_ime(adb, serial).await? == keyboard,
+                "maintenance IME restore unverified"
+            );
+        }
+        let plan = Self::prepare_maintenance(
+            adb,
+            serial,
+            Some(apk),
+            Some(root),
+            &maintenance_id,
+            json!({"automatic":AUTO_SUPERSEDE,"bootId":boot_id}),
+        )
+        .await?;
+        Self::execute_maintenance(adb, serial, Some(apk), Some(root), plan, true, false).await?;
+        tracing::info!(serial, "tự đối soát helper: đã thay phiên helper cũ (tiến trình helper đã dừng, bản ghi cũ lưu trữ ở trạng thái chưa đối soát); nhận phiên mới");
+        Ok(true)
+    }
+
+    async fn ensure_runtime_attempt(
+        adb: AdbProgram,
+        serial: &str,
+        apk: Option<&Path>,
+        state_dir: Option<&Path>,
+    ) -> anyhow::Result<Self> {
+        let state = state_path(
+            state_dir.context("helper durable state directory missing")?,
+            serial,
+        )?;
+        anyhow::ensure!(
+            !state
+                .join("maintenance-active.json")
+                .try_exists()
+                .context(HelperRecoveryRequired)?,
+            HelperRecoveryRequired
+        );
         // A reboot or helper restart already ended the retained claim; its unresolved
         // release or resume can never settle against a process that no longer exists.
         settle_restarted_owner(&adb, serial, &state).await.context(HelperRecoveryRequired)?;
@@ -1163,6 +1571,10 @@ impl HelperClient {
                 fence_identity_refusal(error).unwrap_or_else(|error| anyhow!(HelperRecoveryRequired)
                     .context(format!("helper pending cleanup unresolved ({error:#})")))
             })?;
+            // An owner the recovery proved gone is settled by its restart, not resumed.
+            settle_restarted_owner(&adb, serial, &state)
+                .await
+                .context(HelperRecoveryRequired)?;
         }
         // A prior failed claim/attach is never replaced by a new claim. Its credential
         // may have died with the host process; explicit owner reconciliation is required.
@@ -1383,36 +1795,39 @@ impl HelperClient {
         client.canary = Some(owner.clone());
         client.production_runtime = true;
         let result = async {
-            client.require_canary_identity().await?;
             let pending = &checkpoint["pending"];
-            let previous = pending["previousIme"].as_str().context("pending cleanup previous IME missing")?;
-            anyhow::ensure!(validate_ime_id(previous).is_ok() && previous != IME_ID, "pending cleanup previous IME invalid");
-            let was_enabled = pending["helperWasEnabled"].as_bool().context("pending cleanup prior enablement missing")?;
-            // Clipboard contents are never persisted. A snapshot obligation cannot be guessed.
-            anyhow::ensure!(checkpoint["baseline"].is_null(), "clipboard baseline restoration still pending");
-            if let Some(id) = pending["operationId"].as_str() {
-                let status = client.post_json("/v1/clipboard/jobs/status", json!({"serviceInstance":owner.instance,"requestId":id})).await?;
-                anyhow::ensure!(status["ok"] == true && status["serviceInstance"].as_str() == Some(owner.instance.as_str()) && status["operationId"].as_str() == Some(id) && matches!(status["state"].as_str(), Some("succeeded" | "failed" | "cancelled")), "pending clipboard job not terminal; no replay");
-            } else { anyhow::ensure!(pending["phase"] == "switching", "pending cleanup job identity unavailable"); }
-            client.require_canary_identity().await?;
-            let current = current_ime(&adb, serial).await?;
-            if current == IME_ID { set_ime(&adb, serial, previous).await?; }
-            else { anyhow::ensure!(current == previous, "pending IME changed outside owner; preserved"); }
-            anyhow::ensure!(current_ime(&adb, serial).await? == previous, "pending IME restore unverified");
-            if !was_enabled {
+            // Settled, never replayed: `prove_clipboard_settled` decides, the job is not resent.
+            let proof = prove_clipboard_settled(&client, &owner, pending, Some(&record))
+                .await
+                .context("pending clipboard job not provably settled; no replay")?;
+            // Clipboard contents are never persisted, and a runtime owner's snapshot belongs to
+            // the qualification this lost job ended: it is dropped, the clipboard is unknown.
+            if proof.owner_alive {
                 client.require_canary_identity().await?;
-                adb.shell(serial, &format!("ime disable {IME_ID}")).await?;
-                let enabled = adb.shell(serial, "settings get secure enabled_input_methods").await?;
-                anyhow::ensure!(!enabled.trim().split(':').any(|entry| entry.split(';').next() == Some(IME_ID)), "pending IME enablement restore unverified");
             }
+            let keyboard = hand_back_keyboard(&adb, serial, pending).await?;
             std::fs::remove_file(state.join("ime-checkpoint.json"))?;
-            release(&adb, serial, &owner, token.as_ref(), Some(port)).await?;
-            Ok::<(), anyhow::Error>(())
+            log_clipboard_settlement(
+                serial,
+                &proof,
+                pending,
+                !checkpoint["baseline"].is_null(),
+                &keyboard,
+            );
+            // An owner that still answers is released exactly; a gone one is settled by its
+            // restart (`settle_restarted_owner`) or by supersession, never released twice.
+            if proof.owner_alive {
+                release(&adb, serial, &owner, token.as_ref(), Some(port)).await?;
+            }
+            Ok::<bool, anyhow::Error>(proof.owner_alive)
         }.await;
         let cleanup = frames::remove_forward(&adb, serial, port).await;
-        result?;
+        let released = result?;
         cleanup?;
-        finish_release(serial, &owner).await
+        if released {
+            finish_release(serial, &owner).await?;
+        }
+        Ok(())
     }
 }
 
