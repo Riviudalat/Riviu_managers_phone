@@ -1813,6 +1813,9 @@ pub(crate) async fn install_apk(adb: &AdbProgram, serial: &str, apk: &Path) -> a
             if text.contains("INSTALL_FAILED_USER_RESTRICTED") {
                 anyhow::bail!("{}", miui_install_refused(serial));
             }
+            if text.contains("INSTALL_FAILED_VERSION_DOWNGRADE") {
+                anyhow::bail!("{}", newer_helper_kept(serial));
+            }
             return Err(error).context(format!(
                 "install {} on {serial}. On MIUI/HyperOS a refusal is often \
                  INSTALL_FAILED_USER_RESTRICTED until Developer options → \
@@ -1823,6 +1826,9 @@ pub(crate) async fn install_apk(adb: &AdbProgram, serial: &str, apk: &Path) -> a
     };
     if output.contains("INSTALL_FAILED_USER_RESTRICTED") {
         anyhow::bail!("{}", miui_install_refused(serial));
+    }
+    if output.contains("INSTALL_FAILED_VERSION_DOWNGRADE") {
+        anyhow::bail!("{}", newer_helper_kept(serial));
     }
     anyhow::ensure!(
         output.lines().any(|line| line.trim() == "Success"),
@@ -1837,6 +1843,16 @@ fn miui_install_refused(serial: &str) -> String {
         "Máy {serial} chặn cài Riviu Helper (INSTALL_FAILED_USER_RESTRICTED). \
          Bật Tuỳ chọn nhà phát triển → Cài đặt qua USB trên điện thoại, rồi kết nối lại. \
          MIUI/HyperOS cũng có thể yêu cầu Gỡ lỗi USB (Cài đặt bảo mật)."
+    )
+}
+
+/// `install -r` without `-d`: Android itself refuses to replace a newer helper, and Riviu
+/// never asks it to downgrade one (a newer Riviu on another PC may have put it there).
+fn newer_helper_kept(serial: &str) -> String {
+    format!(
+        "Máy {serial} đang có Riviu Helper mới hơn bản kèm theo Riviu Manager này \
+         (INSTALL_FAILED_VERSION_DOWNGRADE). Riviu không hạ cấp helper; cập nhật Riviu Manager \
+         trên máy tính này lên bản mới hơn để dùng máy này."
     )
 }
 
