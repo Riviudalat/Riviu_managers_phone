@@ -320,6 +320,42 @@ fn gesture_cancelled_by_os(suffix: &str, response: &Value) -> bool {
                 .is_some_and(|message| message.contains("Unable to perform W3C actions")))
 }
 
+/// Whether an agent error names a dead or disconnected UiAutomation (`DeadObjectException`
+/// from its binder, "UiAutomation not connected!"). Classification only: it marks the phone
+/// for one probe at its next session start, see [`note_ui_automation_suspect`].
+fn names_dead_ui_automation(message: &str) -> bool {
+    ["UiAutomation", "DeadObject", "not connected"]
+        .iter()
+        .any(|marker| message.contains(marker))
+}
+
+/// Phones whose UiAutomator2 server may have lost its UiAutomation: a W3C gesture failed, or
+/// an error named a dead connection. `AndroidDriver::ensure_agent` takes the mark and proves
+/// it with [`AgentClient::probe_ui_automation`] before it reuses the server.
+fn ui_automation_suspects() -> &'static Mutex<std::collections::HashSet<String>> {
+    static SUSPECTS: std::sync::OnceLock<Mutex<std::collections::HashSet<String>>> =
+        std::sync::OnceLock::new();
+    SUSPECTS.get_or_init(Default::default)
+}
+
+pub(crate) fn note_ui_automation_suspect(serial: &str) {
+    ui_automation_suspects().lock().insert(serial.to_owned());
+}
+
+pub(crate) fn take_ui_automation_suspect(serial: &str) -> bool {
+    ui_automation_suspects().lock().remove(serial)
+}
+
+/// What one `/screenshot` proved about a server's UiAutomation.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum UiAutomationProbe {
+    Alive,
+    /// The server answered and could not capture: its `UiAutomationConnection` is gone.
+    Dead(String),
+    /// No answer, or an answer that proves nothing either way. Never read as dead.
+    Unknown(String),
+}
+
 /// Whether a failed accessibility request may be repeated after replacing the agent session.
 ///
 /// UiAutomator2 models element lookup as `POST`, so HTTP method alone cannot separate reads from
@@ -652,6 +688,76 @@ impl AgentClient {
         }
     }
 
+    /// Whether this server's UiAutomation still reaches its `am instrument` host, by one
+    /// read-only `/screenshot`: the cheapest call that needs the host's
+    /// `UiAutomationConnection` binder. Tree reads go through the app's own accessibility
+    /// connection and keep answering after that host dies; input injection and screenshots do
+    /// not. r127 phone 37 (ce051715e15b2c2e02, SM-G955F, 15/10/2026): `/status` and element
+    /// queries answered while `/actions` returned 400 "Unable to perform W3C actions" on six
+    /// attempts, and logcat showed `UiAutomation.takeScreenshot` failing every 100 ms through
+    /// a dead `IUiAutomationConnection`, so [`Self::is_alive`] alone passed a dead server.
+    /// No session recovery and nothing replayed.
+    pub(crate) async fn probe_ui_automation(&self) -> UiAutomationProbe {
+        // A cap, not measured: a full-screen capture was never timed on this fleet, and a
+        // dead connection answers at once.
+        const PROBE_TIMEOUT: Duration = Duration::from_secs(15);
+        if let Err(error) = self.refuse_if_sealed("/screenshot") {
+            return UiAutomationProbe::Unknown(format!("{error:#}"));
+        }
+        let response = match self
+            .http
+            .get(self.url("/screenshot"))
+            .timeout(PROBE_TIMEOUT)
+            .send()
+            .await
+        {
+            Ok(response) => response,
+            Err(error) => {
+                return UiAutomationProbe::Unknown(format!("/screenshot không trả lời: {error}"))
+            }
+        };
+        let status = response.status();
+        let value: Value = match response.json().await {
+            Ok(value) => value,
+            Err(error) => {
+                return UiAutomationProbe::Unknown(format!(
+                    "/screenshot trả về không phải JSON: {error}"
+                ))
+            }
+        };
+        if status.is_success() {
+            return if value
+                .pointer("/value")
+                .and_then(Value::as_str)
+                .is_some_and(|image| !image.is_empty())
+            {
+                UiAutomationProbe::Alive
+            } else {
+                UiAutomationProbe::Unknown("/screenshot trả về ảnh rỗng".into())
+            };
+        }
+        let error = value
+            .pointer("/value/error")
+            .and_then(Value::as_str)
+            .unwrap_or_default();
+        let message = value
+            .pointer("/value/message")
+            .and_then(Value::as_str)
+            .unwrap_or_default();
+        let detail: String = format!("/screenshot lỗi {status}: {error}: {message}")
+            .chars()
+            .take(300)
+            .collect();
+        if error == "unable to capture screen"
+            || names_dead_ui_automation(message)
+            || message.to_ascii_lowercase().contains("screenshot")
+        {
+            UiAutomationProbe::Dead(detail)
+        } else {
+            UiAutomationProbe::Unknown(detail)
+        }
+    }
+
     fn url(&self, suffix: &str) -> String {
         format!("{}/session/{}{suffix}", self.base, self.session_id.lock())
     }
@@ -874,6 +980,9 @@ impl AgentClient {
             let value: Value =
                 serde_json::from_slice(&bytes).context("observation_invalid_json")?;
             let message = value.pointer("/value/message").and_then(Value::as_str);
+            if message.is_some_and(names_dead_ui_automation) {
+                note_ui_automation_suspect(&self.serial);
+            }
             if message.is_some_and(|message| message.contains(STALE_TREE_MARKER)) {
                 return Err(riviu_core::driver::UiError::new(
                     riviu_core::driver::UiErrorKind::Session,
@@ -1116,9 +1225,15 @@ impl AgentClient {
                 .unwrap_or(text.as_ref());
             let failure = format!("agent {suffix} lỗi {status}: {message}");
             if gesture_cancelled_by_os(suffix, &value) {
+                // Android refused the event, or the server lost its UiAutomation (r127 phone
+                // 37): the next session start proves which before reusing this server.
+                note_ui_automation_suspect(&self.serial);
                 return Err(anyhow::Error::new(riviu_core::driver::GestureCancelled {
                     message: failure,
                 }));
+            }
+            if names_dead_ui_automation(message) {
+                note_ui_automation_suspect(&self.serial);
             }
             return Err(anyhow!(failure));
         }

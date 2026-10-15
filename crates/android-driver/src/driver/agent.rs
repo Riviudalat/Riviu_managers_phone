@@ -25,6 +25,15 @@ impl InstrumentationChildren {
         }
     }
 
+    /// Whether the `am instrument -w` host this driver started for `serial` still runs.
+    /// `None` when this process holds none: the server's UiAutomation then belongs to a host
+    /// it cannot see (another controller's, or one that ended with a USB drop).
+    async fn host_running(&self, serial: &str) -> Option<bool> {
+        let mut children = self.children.lock().await;
+        let process = children.get_mut(serial)?;
+        Some(matches!(process.child.try_wait(), Ok(None)))
+    }
+
     pub(super) async fn shutdown(&self) -> anyhow::Result<Vec<String>> {
         let children = std::mem::take(&mut *self.children.lock().await);
         let mut serials = Vec::with_capacity(children.len());
@@ -820,6 +829,43 @@ impl AndroidDriver {
         }
     }
 
+    /// Whether this phone's server must prove its UiAutomation before reuse: a call marked it
+    /// (a refused W3C gesture, an error naming a dead connection), or the `am instrument` host
+    /// this driver started for it has ended. `unowned_host` also counts a server this process
+    /// holds no host for. Diagnostic scopes never probe: they never restart either.
+    async fn ui_automation_suspect(&self, serial: &str, unowned_host: bool) -> bool {
+        if !self.automatic_setup_allowed {
+            return false;
+        }
+        let marked = crate::agent::take_ui_automation_suspect(serial);
+        let host = self.instrumentation_children.host_running(serial).await;
+        marked || host == Some(false) || (unowned_host && host.is_none())
+    }
+
+    /// True when `agent`'s UiAutomation is proved dead, journaled. An unknown answer keeps
+    /// the server: it is never read as dead.
+    async fn ui_automation_proved_dead(&self, serial: &str, agent: &AgentClient) -> bool {
+        match agent.probe_ui_automation().await {
+            crate::agent::UiAutomationProbe::Dead(detail) => {
+                self.load.journal(
+                    serial,
+                    "agent.uiautomation.dead",
+                    &format!(
+                        "UiAutomator2 còn trả lời nhưng UiAutomation đã mất kết nối với tiến \
+                         trình am instrument ({detail}): thao tác chạm không tới màn hình. Khởi \
+                         động lại instrumentation trước khi giao phiên."
+                    ),
+                );
+                true
+            }
+            crate::agent::UiAutomationProbe::Alive => false,
+            crate::agent::UiAutomationProbe::Unknown(detail) => {
+                tracing::debug!(serial, %detail, "UiAutomation probe inconclusive; server kept");
+                false
+            }
+        }
+    }
+
     /// Make sure the agent is installed, running and forwarded.
     pub(super) async fn ensure_agent(&self, serial: &str) -> anyhow::Result<AgentClient> {
         self.verify_adb_transport(serial).await?;
@@ -827,12 +873,20 @@ impl AndroidDriver {
         let base = self.agent_base(serial);
         let runtime = self.instrumentation_runtime();
 
+        // A readable tree is not a live UiAutomation (r127 phone 37): a suspect server proves
+        // it with `probe_ui_automation` before reuse, and a dead one is restarted below.
+        let mut ui_automation_dead = false;
         // Reuse the session we already have. Opening a second one costs the whole
         // fleet: see the note on `Self::agents`.
         let cached = self.agents.lock().get(serial).cloned();
         if let Some(agent) = cached {
             if agent.is_alive().await {
-                return Ok(agent);
+                if !self.ui_automation_suspect(serial, false).await
+                    || !self.ui_automation_proved_dead(serial, &agent).await
+                {
+                    return Ok(agent);
+                }
+                ui_automation_dead = true;
             }
             // Evict the blind client before replacing it. POST /session replaces the
             // upstream singleton; DELETE schedules asynchronous instrumentation shutdown
@@ -892,20 +946,36 @@ impl AndroidDriver {
             // A server that answers `/status` and will not give a session is wedged whatever
             // the message says, so the failure is not inspected: it is treated exactly like a
             // blind session.
-            let opened = runtime.open_and_cache_agent(serial, &base).await;
-            match opened {
-                Ok(agent) if agent.is_alive().await => return Ok(agent),
-                Ok(agent) => {
-                    let _ = agent.close().await;
-                    self.agents.lock().remove(serial);
-                }
-                Err(error) => {
-                    tracing::warn!(
-                        serial,
-                        %error,
-                        "the agent answers /status but will not open a session"
-                    );
-                    self.agents.lock().remove(serial);
+            //
+            // A third presentation reads the tree and answers every query, while its
+            // UiAutomation lost the `am instrument` host it injects input through (r127 phone
+            // 37): a server this driver did not start, or a suspect one, proves it first.
+            if !ui_automation_dead {
+                let opened = runtime.open_and_cache_agent(serial, &base).await;
+                match opened {
+                    Ok(agent) if agent.is_alive().await => {
+                        if !self.ui_automation_suspect(serial, true).await
+                            || !self.ui_automation_proved_dead(serial, &agent).await
+                        {
+                            return Ok(agent);
+                        }
+                        // No DELETE: its asynchronous shutdown can kill the replacement, and
+                        // the restart below force-stops this server anyway.
+                        ui_automation_dead = true;
+                        self.agents.lock().remove(serial);
+                    }
+                    Ok(agent) => {
+                        let _ = agent.close().await;
+                        self.agents.lock().remove(serial);
+                    }
+                    Err(error) => {
+                        tracing::warn!(
+                            serial,
+                            %error,
+                            "the agent answers /status but will not open a session"
+                        );
+                        self.agents.lock().remove(serial);
+                    }
                 }
             }
             // A restart we already tried and that did not take. Refuse rather than repeat:
@@ -926,6 +996,18 @@ impl AndroidDriver {
                         "refusing to restart the instrumentation again inside its cooldown"
                     );
                     let note = runtime.foreign_instrumentation_note(serial).await;
+                    if ui_automation_dead {
+                        self.load.journal(
+                            serial,
+                            "agent.uiautomation.restart.refused",
+                            &format!(
+                                "chưa khởi động lại UiAutomator2 vì vừa khởi động lại {:.0} giây \
+                                 trước; chờ thêm {:.0} giây.",
+                                since.as_secs_f64(),
+                                quiet_for.as_secs_f64()
+                            ),
+                        );
+                    }
                     anyhow::bail!(
                         "the agent on {serial} is listening but cannot read the accessibility \
                          tree, and its instrumentation was already restarted {:.0}s ago \
@@ -935,9 +1017,16 @@ impl AndroidDriver {
                     );
                 }
             }
-            runtime
-                .refuse_active_foreign_instrumentation(serial)
-                .await?;
+            if let Err(error) = runtime.refuse_active_foreign_instrumentation(serial).await {
+                if ui_automation_dead {
+                    self.load.journal(
+                        serial,
+                        "agent.uiautomation.restart.refused",
+                        &format!("chưa khởi động lại UiAutomator2: {error:#}"),
+                    );
+                }
+                return Err(error);
+            }
             let note = runtime.foreign_instrumentation_note(serial).await;
             tracing::warn!(
                 serial,
@@ -958,6 +1047,23 @@ impl AndroidDriver {
                 ok = recovered.is_ok(),
                 "instrumentation restart finished"
             );
+            if ui_automation_dead {
+                let (action, outcome) = match &recovered {
+                    Ok(_) => (
+                        "agent.uiautomation.restart.done",
+                        "đã khởi động lại UiAutomator2, phiên mới đọc được màn hình".to_string(),
+                    ),
+                    Err(error) => (
+                        "agent.uiautomation.restart.failed",
+                        format!("khởi động lại UiAutomator2 chưa lên: {error:#}"),
+                    ),
+                };
+                self.load.journal(
+                    serial,
+                    action,
+                    &format!("{outcome} ({} ms).", started.elapsed().as_millis()),
+                );
+            }
             return recovered;
         }
 
