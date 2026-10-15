@@ -456,6 +456,10 @@ pub fn classify(message: &str) -> FailureKind {
         "không thấy nút chụp",
         "picker không mở",
         "không thấy album của chiến dịch",
+        // The picker's album list never showed the campaign album within its search window
+        // (r127 phone 31, 15/10/2026: legacy_terminal on attempt 1). Only the album list was
+        // read and scrolled, before any selection or Post.
+        "album_not_visible: chưa thấy album",
         "picker không chuyển sang đúng album",
         "không thấy hàng tab của picker",
         "nút tiếp không sáng",
@@ -657,6 +661,13 @@ mod tests {
         // r125 phone 49: the camera shutter did not show in time; nothing was posted.
         assert_eq!(
             classify("ce071827715f321b05: không thấy nút chụp — không có mốc để tìm ô thư viện"),
+            FailureKind::Retryable
+        );
+        // r127 phone 31: the campaign album never showed in the picker's album list.
+        assert_eq!(
+            classify(
+                "album_not_visible: chưa thấy album riviu-abc sau 3 lần cuộn; 2 lần đọc trống"
+            ),
             FailureKind::Retryable
         );
         assert_eq!(
