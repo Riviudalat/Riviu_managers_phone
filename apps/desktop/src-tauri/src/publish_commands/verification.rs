@@ -120,60 +120,84 @@ pub struct PublishRecoveryCapabilitiesView {
     pub verification_wait: Option<PublishVerificationWait>,
 }
 
+/// One background-verifier row, reduced on the reader lane to what the view maps.
+struct AutomaticVerification {
+    assignment_id: String,
+    udid: String,
+    /// Due now and not holding a retained metadata candidate; both parse the row's evidence.
+    due: bool,
+}
+
 #[tauri::command]
-pub fn publish_recovery_capabilities(
+pub async fn publish_recovery_capabilities(
     state: State<'_, AppState>,
     campaign_id: String,
 ) -> Result<Vec<PublishRecoveryCapabilitiesView>, CommandError> {
     let _admission = state.ensure_accepting_work()?;
-    let capabilities = state
-        .db
-        .publish_recovery_capabilities(&campaign_id)
-        .map_err(preflight::err)?;
-    // The same rows and phone predicate the background verifier uses; read-only.
-    let automatic = state
-        .db
-        .pending_current_publish_verifications_for_campaign(&campaign_id, 1000)
-        .map_err(preflight::err)?;
-    let now = chrono::Utc::now();
+    let id = campaign_id.clone();
+    let (capabilities, automatic, fleet_full) = read_for_view(
+        &state.db,
+        "publish_recovery_capabilities",
+        Some(&campaign_id),
+        move |db| {
+            let capabilities = db.publish_recovery_capabilities(&id)?;
+            // The same rows and phone predicate the background verifier uses; read-only.
+            let automatic = db.pending_current_publish_verifications_for_campaign(&id, 1000)?;
+            let now = chrono::Utc::now();
+            let automatic = automatic
+                .into_iter()
+                .map(|row| AutomaticVerification {
+                    due: row.is_due(now) && matches!(row.retained_metadata_candidate(), Ok(None)),
+                    assignment_id: row.assignment_id,
+                    udid: row.udid,
+                })
+                .collect::<Vec<_>>();
+            let fleet_full = automatic.iter().any(|row| row.due)
+                && db
+                    .publish_phone_work_in_use()
+                    .is_ok_and(|used| used >= riviu_core::db::PUBLISH_PHONE_WORK_CAP);
+            Ok((capabilities, automatic, fleet_full))
+        },
+        |(capabilities, automatic, _)| {
+            format!(
+                "{} dòng, {} dòng chờ kiểm tra tự động",
+                capabilities.len(),
+                automatic.len()
+            )
+        },
+    )
+    .await
+    .map_err(preflight::err)?;
     Ok(capabilities
         .into_iter()
         .map(|capabilities| {
             let row = automatic
                 .iter()
                 .find(|row| row.assignment_id == capabilities.assignment_id);
-            let verification_wait = row
-                .filter(|row| {
-                    row.is_due(now) && matches!(row.retained_metadata_candidate(), Ok(None))
-                })
-                .and_then(|row| {
-                    let fleet_full = state
-                        .db
-                        .publish_phone_work_in_use()
-                        .is_ok_and(|used| used >= riviu_core::db::PUBLISH_PHONE_WORK_CAP);
-                    let wait = VerificationQueue::phone_wait(
-                        state.registry.get(&row.udid).as_ref(),
-                        state.control.current_work_owner(&row.udid).is_some(),
-                        fleet_full,
-                    );
-                    // On an admitted phone, the last session-open failure is the cause.
-                    let session = wait
-                        .is_none_or(|wait| wait.admits())
-                        .then(|| SESSION_WAITS.lock().get(&row.udid).cloned())
-                        .flatten();
-                    match session {
-                        Some(session) => Some(PublishVerificationWait {
-                            code: session.category,
-                            message: session.message,
-                            retry_at: Some(session.retry_at.to_rfc3339()),
-                        }),
-                        None => wait.map(|wait| PublishVerificationWait {
-                            code: wait.code(),
-                            message: wait.message(),
-                            retry_at: None,
-                        }),
-                    }
-                });
+            let verification_wait = row.filter(|row| row.due).and_then(|row| {
+                let wait = VerificationQueue::phone_wait(
+                    state.registry.get(&row.udid).as_ref(),
+                    state.control.current_work_owner(&row.udid).is_some(),
+                    fleet_full,
+                );
+                // On an admitted phone, the last session-open failure is the cause.
+                let session = wait
+                    .is_none_or(|wait| wait.admits())
+                    .then(|| SESSION_WAITS.lock().get(&row.udid).cloned())
+                    .flatten();
+                match session {
+                    Some(session) => Some(PublishVerificationWait {
+                        code: session.category,
+                        message: session.message,
+                        retry_at: Some(session.retry_at.to_rfc3339()),
+                    }),
+                    None => wait.map(|wait| PublishVerificationWait {
+                        code: wait.code(),
+                        message: wait.message(),
+                        retry_at: None,
+                    }),
+                }
+            });
             PublishRecoveryCapabilitiesView {
                 capabilities,
                 automatic_verification: row.is_some(),

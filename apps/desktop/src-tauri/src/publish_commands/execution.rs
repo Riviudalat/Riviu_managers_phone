@@ -692,32 +692,114 @@ pub(super) fn apply_caption_overrides(
     Ok(())
 }
 
-#[tauri::command]
-pub fn publish_list(
-    state: State<'_, AppState>,
-    limit: Option<usize>,
-) -> Result<Vec<PublishCampaignRecord>, CommandError> {
-    state
-        .db
-        .list_publish_campaigns(limit.unwrap_or(50).clamp(1, 200))
-        .map_err(err)
+/// A UI read slower than this, lane wait included, is logged as IPC telemetry.
+///
+/// Not measured. The attention queue and the monitor poll these reads every 2 s, so a read
+/// past a quarter of that period already shows the operator a stale view, and the log stays
+/// quiet while reads are healthy.
+const SLOW_VIEW_READ: Duration = Duration::from_millis(500);
+
+/// Run one polled UI read on the storage reader lane instead of the UI thread.
+///
+/// A synchronous `#[tauri::command]` runs on the WebView's UI thread, so every poll of a heavy
+/// read froze the window while SQLite and JSON ran. A call slower than [`SLOW_VIEW_READ`] logs
+/// one warning with the campaign id, the time spent waiting for a reader, and `size`, which
+/// describes the payload and runs only for a slow read.
+pub(crate) async fn read_for_view<T, F>(
+    db: &Arc<Database>,
+    command: &'static str,
+    campaign_id: Option<&str>,
+    action: F,
+    size: impl FnOnce(&T) -> String,
+) -> anyhow::Result<T>
+where
+    T: Send + 'static,
+    F: FnOnce(&Database) -> anyhow::Result<T> + Send + 'static,
+{
+    let started = Instant::now();
+    let read = db
+        .storage_read(move |db| {
+            let reading = Instant::now();
+            action(db).map(|value| (value, reading.elapsed()))
+        })
+        .await;
+    let elapsed = started.elapsed();
+    if elapsed > SLOW_VIEW_READ {
+        let subject = campaign_id
+            .map(|id| format!(" chiến dịch {id}"))
+            .unwrap_or_default();
+        match &read {
+            Ok((value, reading)) => log::warn!(
+                "Đọc chậm {command}{subject}: {} ms, trong đó chờ lượt đọc {} ms; {}",
+                elapsed.as_millis(),
+                elapsed.saturating_sub(*reading).as_millis(),
+                size(value)
+            ),
+            Err(error) => log::warn!(
+                "Đọc chậm {command}{subject}: {} ms rồi lỗi: {error:#}",
+                elapsed.as_millis()
+            ),
+        }
+    }
+    read.map(|(value, _)| value)
 }
 
 #[tauri::command]
-pub fn publish_get(
+pub async fn publish_list(
+    state: State<'_, AppState>,
+    limit: Option<usize>,
+) -> Result<Vec<PublishCampaignRecord>, CommandError> {
+    let limit = limit.unwrap_or(50).clamp(1, 200);
+    read_for_view(
+        &state.db,
+        "publish_list",
+        None,
+        move |db| db.list_publish_campaigns(limit),
+        |campaigns| format!("{} chiến dịch", campaigns.len()),
+    )
+    .await
+    .map_err(err)
+}
+
+#[tauri::command]
+pub async fn publish_get(
     state: State<'_, AppState>,
     campaign_id: String,
 ) -> Result<Option<PublishCampaignDetail>, CommandError> {
-    let mut detail = state.db.get_publish_campaign(&campaign_id).map_err(err)?;
-    for assignment in detail
-        .iter_mut()
-        .flat_map(|detail| detail.assignments.iter_mut())
-    {
-        if let Some(raw) = assignment.evidence_json.as_deref() {
-            assignment.evidence_json = Some(evidence_for_view(raw));
-        }
-    }
-    Ok(detail)
+    let id = campaign_id.clone();
+    read_for_view(
+        &state.db,
+        "publish_get",
+        Some(&campaign_id),
+        move |db| {
+            let mut detail = db.get_publish_campaign(&id)?;
+            for assignment in detail
+                .iter_mut()
+                .flat_map(|detail| detail.assignments.iter_mut())
+            {
+                if let Some(raw) = assignment.evidence_json.as_deref() {
+                    assignment.evidence_json = Some(evidence_for_view(raw));
+                }
+            }
+            Ok(detail)
+        },
+        |detail| match detail {
+            Some(detail) => format!(
+                "{} máy, {} sự kiện, evidence {} byte",
+                detail.assignments.len(),
+                detail.events.len(),
+                detail
+                    .assignments
+                    .iter()
+                    .filter_map(|assignment| assignment.evidence_json.as_ref())
+                    .map(String::len)
+                    .sum::<usize>()
+            ),
+            None => "không có chiến dịch".to_owned(),
+        },
+    )
+    .await
+    .map_err(err)
 }
 
 /// Assignment evidence as the publish views read it.

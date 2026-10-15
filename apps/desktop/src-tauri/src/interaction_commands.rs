@@ -852,14 +852,23 @@ pub fn interaction_list(
 }
 
 #[tauri::command]
-pub fn interaction_get(
+pub async fn interaction_get(
     state: State<'_, AppState>,
     campaign_id: String,
 ) -> Result<Option<InteractionCampaignDetail>, CommandError> {
-    state
-        .db
-        .get_interaction_campaign(&campaign_id)
-        .map_err(CommandError::operation)
+    let id = campaign_id.clone();
+    crate::publish_commands::read_for_view(
+        &state.db,
+        "interaction_get",
+        Some(&campaign_id),
+        move |db| db.get_interaction_campaign(&id),
+        |detail| match detail {
+            Some(detail) => format!("{} máy", detail.assignments.len()),
+            None => "không có chiến dịch".to_owned(),
+        },
+    )
+    .await
+    .map_err(CommandError::operation)
 }
 
 #[tauri::command]
