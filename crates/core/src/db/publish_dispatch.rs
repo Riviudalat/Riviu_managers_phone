@@ -486,6 +486,21 @@ impl Database {
         Self::publish_dispatch_turn(&conn, &job.udid)?;
         Ok(())
     }
+
+    /// Records why a job waits on fleet-wide capacity (pacing, stage slots, fleet load) without
+    /// sending its phone to the back of the turn order. Only a claim or a phone-specific deferral
+    /// rotates: r130 rotated every queued phone each 8 s pacing tick, so a retry whose phone kept
+    /// its claim-time turn jumped ahead and phone 37 waited 36 min for its first attempt.
+    pub fn hold_publish_dispatch(
+        &self,
+        job: &PublishDispatchJob,
+        reason: &str,
+    ) -> anyhow::Result<()> {
+        let connection = self.dispatch_conn()?;
+        let conn = connection.lock();
+        conn.execute("UPDATE publish_dispatch_jobs SET reason=?3 WHERE assignment_id=?1 AND revision=?2 AND state='queued'",params![job.assignment_id,job.revision,reason])?;
+        Ok(())
+    }
     fn publish_dispatch_turn(conn: &Connection, udid: &str) -> anyhow::Result<()> {
         conn.execute("INSERT INTO publish_dispatch_turns(udid,last_turn) VALUES(?1,(SELECT COALESCE(MAX(last_turn),0)+1 FROM publish_dispatch_turns))
           ON CONFLICT(udid) DO UPDATE SET last_turn=excluded.last_turn",[udid])?;

@@ -1438,7 +1438,14 @@ pipeline vẫn kiểm tại nút Đăng. Worker đã lỗi sau effect chỉ chuy
 Trong trần đó, claim compose mới được giãn:
 - tối đa một lần mỗi 8 s;
 - số máy soạn cùng lúc bắt đầu ở 4, chỉ tăng dần tới trần khi q90 đọc cây của fleet dưới 8 s;
-- giảm một nửa (không dưới 2) mỗi lần `publish_observation_deadline`.
+- giảm một nửa (không dưới 2) mỗi lần `publish_observation_deadline` của một lượt soạn bắt đầu
+  sau lần giảm trước. Lượt soạn đã nhận trước lần giảm đó chạy dưới mức cũ, nên deadline của nó
+  là cùng một tín hiệu: r130 giảm 8 → 4 → 2 trong một giây vì hai máy như vậy.
+
+Thứ tự lượt (`publish_dispatch_turns`) chỉ xoay khi máy được nhận việc hoặc bị hoãn vì lý do
+của chính máy đó (`device_busy`, `roster_pending`). Hoãn vì sức chứa chung (`compose_pacing`,
+`stage_capacity`, `fleet_load`) giữ nguyên chỗ, nên máy chưa có lượt đầu đi trước lượt thử lại
+của máy vừa chạy. r130 xoay mọi máy mỗi tick giãn 8 s; máy 37 chờ 36 phút mới có lượt đầu.
 
 Retry cả lượt chờ q90 đó hạ, tối đa 10 phút sau giờ hẹn. Máy chưa có số đo mượn q90 của fleet.
 Khi adb server mất hoặc bị nghi treo thì không claim việc mới, tối đa 10 phút mỗi sự cố; job

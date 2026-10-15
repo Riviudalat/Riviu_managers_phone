@@ -536,6 +536,9 @@ const OBSERVATION_DEADLINE: &str = "publish_observation_deadline";
 struct ComposeRamp {
     limit: usize,
     last_start: Option<tokio::time::Instant>,
+    /// When each phone's current compose started, so a deadline can be dated against `last_cut`.
+    started_at: HashMap<String, tokio::time::Instant>,
+    last_cut: Option<tokio::time::Instant>,
 }
 
 impl ComposeRamp {
@@ -543,6 +546,8 @@ impl ComposeRamp {
         Self {
             limit: COMPOSE_CONCURRENCY_START,
             last_start: None,
+            started_at: HashMap::new(),
+            last_cut: None,
         }
     }
 
@@ -553,8 +558,9 @@ impl ComposeRamp {
             })
     }
 
-    fn started(&mut self, now: tokio::time::Instant) {
+    fn started(&mut self, udid: &str, now: tokio::time::Instant) {
         self.last_start = Some(now);
+        self.started_at.insert(udid.to_string(), now);
     }
 
     fn set(&mut self, limit: usize, why: &str) {
@@ -585,7 +591,17 @@ impl ComposeRamp {
         }
     }
 
+    /// One cut per load episode. A compose admitted before the last cut ran under the higher
+    /// limit that cut already answered, so its deadline is the same signal: r130 halved 8 → 4 → 2
+    /// within one second on two such phones, and one phone's step retry and attempt end counted
+    /// twice.
     fn observation_deadline(&mut self, udid: &str) {
+        if let (Some(cut), Some(started)) = (self.last_cut, self.started_at.get(udid)) {
+            if *started < cut {
+                return;
+            }
+        }
+        self.last_cut = Some(tokio::time::Instant::now());
         self.set(
             (self.limit / 2).max(COMPOSE_CONCURRENCY_FLOOR),
             &format!("{udid} hết giờ chờ đọc màn hình ({OBSERVATION_DEADLINE})"),
@@ -593,6 +609,8 @@ impl ComposeRamp {
     }
 
     fn reset_when_idle(&mut self) {
+        self.started_at.clear();
+        self.last_cut = None;
         self.set(
             COMPOSE_CONCURRENCY_START,
             "không còn bài nào đang chạy hay chờ; vòng sau bắt đầu lại từ mức đầu",
@@ -866,7 +884,7 @@ pub(crate) async fn run_dispatcher(
                     chrono::Utc::now().timestamp_millis(),
                     fleet_ready,
                 )? {
-                    db.defer_publish_dispatch(&job, "fleet_load")?;
+                    db.hold_publish_dispatch(&job, "fleet_load")?;
                     continue;
                 }
                 let compose = job.phase == "compose";
@@ -875,12 +893,12 @@ pub(crate) async fn run_dispatcher(
                         .lock()
                         .may_start(composing, tokio::time::Instant::now())
                 {
-                    db.defer_publish_dispatch(&job, "compose_pacing")?;
+                    db.hold_publish_dispatch(&job, "compose_pacing")?;
                     continue;
                 }
                 let Some(permit) = db.try_publish_work(&job.udid, &job.phase, &job.attempt_id)?
                 else {
-                    db.defer_publish_dispatch(&job, "stage_capacity")?;
+                    db.hold_publish_dispatch(&job, "stage_capacity")?;
                     continue;
                 };
                 let Ok(admitted) = admission.ensure_accepting_work() else {
@@ -897,7 +915,7 @@ pub(crate) async fn run_dispatcher(
                 }
                 if compose {
                     let mut ramp = ramp.lock();
-                    ramp.started(tokio::time::Instant::now());
+                    ramp.started(&job.udid, tokio::time::Instant::now());
                     composing += 1;
                     log::info!(
                         "Đăng bài: bắt đầu soạn bài trên {} ({composing}/{} máy đang soạn)",
