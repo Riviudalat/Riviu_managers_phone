@@ -1883,8 +1883,11 @@ impl<'a, P: TapPlanner> Composer<'a, P> {
                     && current.height == stable.height
                 {
                     // Use the just-proved target. activate_element hides a new
-                    // unbounded read before dispatch and can race Stop there.
-                    if stop.load(Ordering::Relaxed) || Instant::now() >= end {
+                    // unbounded read before dispatch and can race Stop there. A re-read the
+                    // read grace finished past `end` is still this window's proof.
+                    if stop.load(Ordering::Relaxed)
+                        || !crate::ui_automation::runtime::window_open(end)
+                    {
                         gallery.finish(if stop.load(Ordering::Relaxed) {
                             "cancelled"
                         } else if Instant::now() >= end {
@@ -4278,6 +4281,12 @@ impl<'a, P: TapPlanner> Composer<'a, P> {
 
     /// One whole camera/gallery tree, read after any measured covering modal is cleared and
     /// bracketed by two foreground reads naming the target package.
+    ///
+    /// Both foreground reads and the tree are one deadline-bounded read, so the read grace
+    /// finishes the bracket with the tree. r129 (16/10/2026, `ce031713aadf361905`, 30 SM-G955F/N,
+    /// Global 45.7.3): the gallery entry's re-read `/source` took 13.7 s and finished 0.4 s past
+    /// its window; the grace answered it, then the closing foreground read could not start after
+    /// the window and the attempt ended `publish_observation_deadline` with the tree in hand.
     async fn camera_gallery_tree(
         &self,
         deadline: Instant,
@@ -4294,21 +4303,30 @@ impl<'a, P: TapPlanner> Composer<'a, P> {
         let mut previous_generation = None;
         loop {
             let read_started = Instant::now();
-            let observed = read_before_deadline(crate::tiktok_sound::read_sound(async {
-                let foreground = self.session.active_app_bundle().await?;
-                let tree = crate::ui_automation::tree::Tree::parse(
-                    self.session.hierarchy_source_snapshot().await?,
-                )?;
-                anyhow::ensure!(self.session.gui_session_epoch() == epoch,
-                    "camera/gallery observation session changed");
-                Ok((foreground, tree))
-            }), deadline, stop).await?;
-            let (foreground, tree) = match observed {
+            let observed = read_before_deadline(
+                crate::tiktok_sound::read_sound(async {
+                    let foreground = self.session.active_app_bundle().await?;
+                    let tree = crate::ui_automation::tree::Tree::parse(
+                        self.session.hierarchy_source_snapshot().await?,
+                    )?;
+                    let tree_read = read_started.elapsed();
+                    anyhow::ensure!(
+                        self.session.gui_session_epoch() == epoch,
+                        "camera/gallery observation session changed"
+                    );
+                    let current = self.session.active_app_bundle().await?;
+                    Ok((foreground, tree, tree_read, current))
+                }),
+                deadline,
+                stop,
+            )
+            .await?;
+            let (foreground, tree, tree_read, current) = match observed {
                 ReadWaitResult::Ready(value) => value,
                 ReadWaitResult::Cancelled => return Ok(ReadWaitResult::Cancelled),
                 ReadWaitResult::DeadlineExceeded => return Ok(ReadWaitResult::DeadlineExceeded),
             };
-            settle_first_tree(Some(&tree), Some(read_started.elapsed()), "unread");
+            settle_first_tree(Some(&tree), Some(tree_read), "unread");
             anyhow::ensure!(previous_generation.is_none_or(|old| tree.generation > old),
                 "camera/gallery observation is stale after popup");
             let modal = dialogs::optional_decline(&tree, labels).is_some()
@@ -4331,16 +4349,10 @@ impl<'a, P: TapPlanner> Composer<'a, P> {
             }
             anyhow::ensure!(foreground == self.plan.package,
                 "camera/gallery foreground does not match target");
-            let current = read_before_deadline(
-                crate::tiktok_sound::read_sound(self.session.active_app_bundle()), deadline, stop,
-            ).await?;
-            match current {
-                ReadWaitResult::Ready(package) => anyhow::ensure!(package == self.plan.package
-                    && self.session.gui_session_epoch() == epoch,
-                    "camera/gallery foreground or session changed during observation"),
-                ReadWaitResult::Cancelled => return Ok(ReadWaitResult::Cancelled),
-                ReadWaitResult::DeadlineExceeded => return Ok(ReadWaitResult::DeadlineExceeded),
-            }
+            anyhow::ensure!(
+                current == self.plan.package && self.session.gui_session_epoch() == epoch,
+                "camera/gallery foreground or session changed during observation"
+            );
             return Ok(ReadWaitResult::Ready(tree));
         }
     }
@@ -4482,9 +4494,11 @@ impl<'a, P: TapPlanner> Composer<'a, P> {
             self.plan.popup_profile.1.unwrap_or_default(),
         )
         .context("popup profile unavailable")?;
-        // As in `popup_clear`: a graced tree could not be bracketed by the step's second
-        // foreground read, which never starts after the window.
-        let _no_grace = crate::ui_automation::runtime::suppress_read_grace();
+        // Unlike `popup_clear`, this tree is the step's own read, and the popup step reads it
+        // with both foreground reads as one read, so the read grace may finish it. A dismissal
+        // still never happens after the window: the popup step refuses any gesture past it.
+        // r129 (16/10/2026, 30 SM-G955F/N, Global 45.7.3): the Create wait on the feed lost
+        // six attempts to one ungraced `/source` of 12.1-16 s cut at its 16 s window.
         Ok(
             match step_before_deadline_with_tree(self.session, labels, budget, deadline, stop, stop)
                 .await?

@@ -1584,9 +1584,19 @@ pub(crate) async fn step_before_deadline_with_tree(
     let transition_started = Instant::now();
     let transition_until = (transition_started + OS_PERMISSION_TRANSITION_WINDOW).min(deadline);
     let mut transition_reads: u32 = 0;
-    let (foreground, tree, candidate) = loop {
-        let foreground = read!(session.active_app_bundle());
-        let tree = Tree::parse(read!(session.hierarchy_source_snapshot()))?;
+    let (foreground, tree, fresh_foreground, candidate) = loop {
+        // The tree and both foreground reads around it are one deadline-bounded read, so a
+        // caller that lets the read grace finish a tree past its window also gets the
+        // closing foreground: no read starts after the window, and none is needed. r129
+        // (16/10/2026, 30 SM-G955F/N, Global 45.7.3): six composer Create waits had their one
+        // tree read cut at the window (12.1-16 s) because a graced tree could not be bracketed.
+        let (foreground, snapshot, fresh_foreground) = read!(async {
+            let foreground = session.active_app_bundle().await?;
+            let snapshot = session.hierarchy_source_snapshot().await?;
+            let fresh_foreground = session.active_app_bundle().await?;
+            anyhow::Ok((foreground, snapshot, fresh_foreground))
+        });
+        let tree = Tree::parse(snapshot)?;
         if budget
             .last_action_generation
             .is_some_and(|generation| tree.generation <= generation)
@@ -1611,7 +1621,7 @@ pub(crate) async fn step_before_deadline_with_tree(
                     "đọc lại màn hình sau khi hộp thoại quyền hệ thống chuyển cảnh"
                 );
             }
-            break (foreground, tree, candidate);
+            break (foreground, tree, fresh_foreground, candidate);
         }
         if transition_reads == 0 {
             tracing::info!(
@@ -1663,7 +1673,6 @@ pub(crate) async fn step_before_deadline_with_tree(
             labels.package()
         );
     }
-    let fresh_foreground = read!(session.active_app_bundle());
     anyhow::ensure!(
         fresh_foreground == foreground,
         "popup foreground changed during observation"
