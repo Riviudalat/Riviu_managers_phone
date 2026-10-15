@@ -978,10 +978,20 @@ impl UiSession for AndroidUiSession {
     }
 
     async fn keyboard_shown(&self) -> anyhow::Result<bool> {
+        /// Ceiling on one `dumpsys input_method` read, adb queueing included.
+        ///
+        /// Measured in publish stage diagnostics r103b-r129 (10-16/10/2026, 20-30
+        /// SM-G955F/N, Android 9, Global 45.7.3): 965 reads, p99 560 ms, slowest completed
+        /// 1.43 s; the former 2 s cap cut two more at 2.3 s (r115) and 2.9 s (r129,
+        /// `ce12171c825e870105`), and each cut threw away an attempt before Post. The read is
+        /// an `adb shell` behind the phone's other adb calls: in r129 the slowest shell call
+        /// of a minute was at most 3.9 s in 90% of 82 minutes. Callers still bound it by their
+        /// own budget (the composer's `captionKeyboard` window, 8 s or more).
+        const KEYBOARD_VISIBILITY_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(5);
         self.traced("keyboard_shown", async {
         let epoch = self.gui_session_epoch();
         let dump = tokio::time::timeout(
-            std::time::Duration::from_secs(2),
+            KEYBOARD_VISIBILITY_TIMEOUT,
             self.adb.shell(&self.serial, "dumpsys input_method"),
         ).await.context("keyboard visibility read timed out")??;
         anyhow::ensure!(self.gui_session_epoch() == epoch, "keyboard visibility session changed");
