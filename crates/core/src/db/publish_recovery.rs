@@ -61,6 +61,9 @@ fn record_failure(s: &mut PublishRecoveryState, failure: &RecoveryFailure) {
 /// where a compose attempt took 4-6 minutes; this spreads five attempts over about 45 minutes.
 const REQUEUE_BACKOFF_SECS: [u64; 5] = [30, 90, 180, 300, 300];
 
+/// How long a queued row waits for its exact phone to come back (`waitingDevice`).
+const RECONNECT_WINDOW_MS: i64 = 120_000;
+
 /// Ledger key, not a step name: the one automatic fresh attempt after the sound budget ran out
 /// (blind sheet or not). The name predates the readable-sheet case and stays for stored ledgers.
 const SOUND_SHEET_BLIND_KEY: &str = "soundSheetBlind";
@@ -330,7 +333,8 @@ impl Database {
                 return Ok(false);
             }
             s.reconnect_retry = true;
-            s.reconnect_deadline.get_or_insert((now + 120_000) as f64);
+            s.reconnect_deadline
+                .get_or_insert((now + RECONNECT_WINDOW_MS) as f64);
             s.state = "waitingDevice".into();
             s.next_retry_at = Some((now + 2000) as f64);
         } else {
@@ -425,7 +429,9 @@ impl Database {
             return Ok(false);
         }
         if !online || s.state == "waitingDevice" {
-            let deadline = *s.reconnect_deadline.get_or_insert((now + 120_000) as f64);
+            let deadline = *s
+                .reconnect_deadline
+                .get_or_insert((now + RECONNECT_WINDOW_MS) as f64);
             // This due job has begun its bounded device-readiness stage. The
             // schedule's initial capacity window must not truncate reconnect.
             tx.execute("UPDATE publish_dispatch_jobs SET started_at_ms=COALESCE(started_at_ms,?2) WHERE assignment_id=?1 AND state='queued'",params![job.assignment_id,now])?;
@@ -456,6 +462,48 @@ impl Database {
             return Ok(online && (now as f64) < deadline);
         };
         Ok(true)
+    }
+
+    /// A whole-attempt retry (`retryWaiting`) whose clock has passed still waits while the
+    /// fleet is not known to be fast, for at most `RETRY_FLEET_WAIT_MAX` past that clock; then
+    /// it competes as before. Waiting spends nothing from the retry budget.
+    pub fn publish_retry_waits_for_fleet(
+        &self,
+        assignment_id: &str,
+        now_ms: i64,
+        fleet_ready: bool,
+    ) -> anyhow::Result<bool> {
+        if fleet_ready {
+            return Ok(false);
+        }
+        let Some(s) = self.publish_recovery_state(assignment_id)? else {
+            return Ok(false);
+        };
+        let wait_max = crate::read_latency::RETRY_FLEET_WAIT_MAX.as_millis() as f64;
+        let now = now_ms as f64;
+        Ok(s.state == "retryWaiting"
+            && s.next_retry_at
+                .is_some_and(|due| now >= due && now < due + wait_max))
+    }
+
+    /// A queued row's reconnect window does not run while the dispatcher held claims for an
+    /// adb incident: the part of `[held_from_ms, held_until_ms]` after its window opened is
+    /// added to its deadline. A window that had closed before the hold is left to time out.
+    pub fn pause_publish_reconnect_windows(
+        &self,
+        held_from_ms: i64,
+        held_until_ms: i64,
+    ) -> anyhow::Result<usize> {
+        let conn = self.conn()?;
+        Ok(conn.execute(
+            "UPDATE publish_recovery_state SET payload=json_set(payload,'$.reconnectDeadline',
+                CAST(json_extract(payload,'$.reconnectDeadline') AS REAL)
+                + MAX(0, ?2 - MAX(?1, CAST(json_extract(payload,'$.reconnectDeadline') AS REAL) - ?3)))
+             WHERE json_extract(payload,'$.state')='waitingDevice'
+             AND CAST(json_extract(payload,'$.reconnectDeadline') AS REAL)>=?1
+             AND assignment_id IN (SELECT assignment_id FROM publish_dispatch_jobs WHERE state='queued')",
+            params![held_from_ms, held_until_ms, RECONNECT_WINDOW_MS],
+        )?)
     }
 }
 

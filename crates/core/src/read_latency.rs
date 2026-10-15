@@ -29,6 +29,11 @@
 //! **Bounded by construction.** At most [`MAX_SERIALS`] phones, [`SAMPLES_PER_SERIAL`] reads
 //! each, and reads older than [`SAMPLE_MAX_AGE`] are ignored, so a phone that was slow an
 //! hour ago is sized by what it does now.
+//!
+//! **The fleet.** [`fleet_tree_read_q90`] is the median of the q90s of the phones reading now.
+//! A phone without enough reads of its own borrows it for its windows, and the Publish
+//! dispatcher paces new composes and whole-attempt retries by it. Every constant of that
+//! admission policy lives in the last section of this file, with its reason.
 
 use std::collections::{HashMap, VecDeque};
 use std::sync::OnceLock;
@@ -124,6 +129,23 @@ impl Book {
         let rank = (recent.len() * 9).div_ceil(10).clamp(1, recent.len());
         recent.get(rank - 1).copied()
     }
+
+    /// Upper median of the q90s of the phones that read within [`FLEET_ACTIVE_WITHIN`], once
+    /// at least [`FLEET_MIN_PHONES`] of them have one. With an even count the slower middle
+    /// phone decides, so a tie never reads as fast.
+    fn fleet_q90(&self, now: Instant) -> Option<Duration> {
+        let mut phones: Vec<Duration> = self
+            .serials
+            .iter()
+            .filter(|(_, series)| now.saturating_duration_since(series.last) <= FLEET_ACTIVE_WITHIN)
+            .filter_map(|(serial, _)| self.q90(serial, now))
+            .collect();
+        if phones.len() < FLEET_MIN_PHONES {
+            return None;
+        }
+        phones.sort_unstable();
+        phones.get(phones.len() / 2).copied()
+    }
 }
 
 fn book() -> &'static parking_lot::Mutex<Book> {
@@ -147,6 +169,11 @@ pub fn record_tree_read(serial: &str, elapsed: Duration) {
 /// The phone's recent tree-read q90, if it has enough recent reads to say.
 pub fn tree_read_q90(serial: &str) -> Option<Duration> {
     book().lock().q90(serial, Instant::now())
+}
+
+/// The fleet's recent tree-read q90 ([`Book::fleet_q90`]). `None` means not known, never fast.
+pub fn fleet_tree_read_q90() -> Option<Duration> {
+    book().lock().fleet_q90(Instant::now())
 }
 
 /// The finite ceiling for a step whose idle-measured window is `base`.
@@ -184,7 +211,11 @@ pub fn window_for(
     expected_reads: u32,
     serial: &str,
 ) -> Duration {
-    let q90 = tree_read_q90(serial);
+    let own = tree_read_q90(serial);
+    // A phone with fewer than `MIN_SAMPLES` reads borrows the fleet's q90, so the first steps
+    // of a first attempt (device, transfer, media: where r111's rows mostly stopped) are not
+    // sized as if the fleet were idle.
+    let q90 = own.or_else(fleet_tree_read_q90);
     let window = sized(base, expected_reads, q90);
     if window > base {
         tracing::info!(
@@ -192,6 +223,7 @@ pub fn window_for(
             step,
             base_ms = base.as_millis() as u64,
             q90_ms = q90.map(|q90| q90.as_millis() as u64),
+            source = if own.is_some() { "phone" } else { "fleet" },
             reads = expected_reads,
             window_ms = window.as_millis() as u64,
             "Nới cửa sổ chờ đọc màn hình theo độ trễ đo được của máy"
@@ -199,6 +231,78 @@ pub fn window_for(
     }
     window
 }
+
+// Publish admission under measured load. Every constant of the dispatcher's compose ramp, its
+// whole-attempt retry gate and its adb incident hold is here, beside the book they read. Missing
+// data never adds load: without a fleet q90 the ramp does not climb, a cold phone keeps its base
+// window and a retry waits (at most `RETRY_FLEET_WAIT_MAX`) while anything composes.
+
+/// Fewest phones with a q90 of their own before the fleet has one.
+///
+/// Not measured. One or two phones describe themselves, not the fleet: a single overloaded
+/// phone would otherwise hold every retry and widen every cold phone's windows. Three is the
+/// smallest count whose median is never one phone's extreme.
+pub const FLEET_MIN_PHONES: usize = 3;
+
+/// A phone counts toward the fleet only while it has read this recently.
+///
+/// Not measured. Even at r122's slowest reads (14-30 s) a composing phone ends a read at least
+/// every half minute, so two minutes without one means it stopped (finished, failed or waiting
+/// for a retry) and its q90 describes load that has passed.
+pub const FLEET_ACTIVE_WITHIN: Duration = Duration::from_secs(120);
+
+/// The fleet is loaded while its q90 is at or above this.
+///
+/// Measured r114-r125 (15/10/2026, 20 SM-G955F/N, Android 9, TikTok 45.7.3, ten composing at
+/// once): the share of tree reads at or above 8 s rose from 1.9 % to 8.9 % while first-attempt
+/// posts fell to 1-6 of 20 (`target/genfarmer-study/03-automation-runs.md` §2).
+pub const FLEET_LOADED_Q90: Duration = Duration::from_secs(8);
+
+/// Least time between two compose starts.
+///
+/// Not measured. r122-r125 overloaded when ten phones entered the read-heavy picker and sound
+/// steps in the same second. Eight seconds is one idle-measured composer step window (8-20 s)
+/// and a loaded read's p90 (3-8 s, r111), so consecutive phones reach those steps at least a
+/// step apart; starting ten takes 72 s, small against a 4-6 min loaded attempt.
+pub const COMPOSE_START_SPACING: Duration = Duration::from_secs(8);
+
+/// Composes allowed at once when a round starts.
+///
+/// Not measured as an optimum. Six composing with 20 live tiles hit adb daemon timeouts
+/// (12/10/2026) and ten put reads at 14-30 s (r122); four starts below both and the ramp has
+/// to earn every step above it with a fast fleet.
+pub const COMPOSE_CONCURRENCY_START: usize = 4;
+
+/// Halving after an observation deadline never goes below this.
+///
+/// Not measured. Two composing phones keep the round moving and keep producing the pre-Post
+/// arrivals the ramp needs to climb back; one would serialise the round.
+pub const COMPOSE_CONCURRENCY_FLOOR: usize = 2;
+
+/// Longest a whole-attempt retry whose clock has passed waits for the fleet to drop below
+/// [`FLEET_LOADED_Q90`]; past it the retry competes as before.
+///
+/// Not measured. Waiting spends nothing from the retry budget, and ten minutes is about two
+/// loaded attempts (4-6 min each, r122): long enough for one wave to pass, short enough that a
+/// fleet which stays loaded delays each retry by a bounded amount.
+pub const RETRY_FLEET_WAIT_MAX: Duration = Duration::from_secs(600);
+
+/// Longest one adb incident (server out or suspected hung) holds new publish claims.
+///
+/// Not measured. The hold only stops new claims: no running job, permit or effect is touched,
+/// queued rows are before Post with no intent, no retry is spent, reconnect windows pause and an
+/// on-time scheduled cohort has no claim deadline. Ten minutes is the effect ledger's own
+/// horizon (`db/device_activity.rs`): with no new claim, every Post/Send that defers HX-ADB's
+/// restart has settled or aged out by then. A signal outlasting it is not one that holding
+/// claims fixes (restart cap reached, dead hub); per-phone handling takes over again.
+pub const ADB_INCIDENT_HOLD_MAX: Duration = Duration::from_secs(600);
+
+/// An adb signal that returns this soon after clearing continues the same incident and budget.
+///
+/// Not measured. The hang signal is a 20 s window of failures and the outage signal a 15 s
+/// hold, so a server that is still settling flaps; a new budget per flap would make the hold
+/// endless. Two minutes covers HX-ADB's 45 s restart cooldown and a 30-phone re-enumeration.
+pub const ADB_INCIDENT_SAME_WITHIN: Duration = Duration::from_secs(120);
 
 #[cfg(test)]
 mod tests {

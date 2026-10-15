@@ -1,7 +1,11 @@
 //! One transfer-to-composer journey per device, with app-wide admission and durable ownership.
 use super::execution::{self, PhoneFailure};
 use super::*;
-use riviu_core::db::PublishPipelineRun;
+use riviu_core::db::{PublishPipelineRun, PUBLISH_PHONE_WORK_CAP};
+use riviu_core::read_latency::{
+    fleet_tree_read_q90, ADB_INCIDENT_HOLD_MAX, ADB_INCIDENT_SAME_WITHIN,
+    COMPOSE_CONCURRENCY_FLOOR, COMPOSE_CONCURRENCY_START, COMPOSE_START_SPACING, FLEET_LOADED_Q90,
+};
 use riviu_core::{PublishAssignmentRecord, PublishBundle, PublishCampaignState as Stage};
 
 use tokio::sync::Semaphore;
@@ -29,6 +33,8 @@ struct Recovery {
     db: Arc<Database>,
     assignment: String,
     run: PublishPipelineRun,
+    udid: String,
+    ramp: Arc<parking_lot::Mutex<ComposeRamp>>,
 }
 impl riviu_core::publish_recovery::RecoveryJournal for Recovery {
     fn note_read(
@@ -48,13 +54,24 @@ impl riviu_core::publish_recovery::RecoveryJournal for Recovery {
         )
     }
     fn step(&self, step: &str, checkpoint: Option<&str>) -> anyhow::Result<()> {
-        self.db
-            .update_publish_recovery_step(&self.assignment, &self.run.token, step, checkpoint)
+        self.db.update_publish_recovery_step(
+            &self.assignment,
+            &self.run.token,
+            step,
+            checkpoint,
+        )?;
+        if step == "prePost" {
+            self.ramp.lock().reached_pre_post(&self.udid);
+        }
+        Ok(())
     }
     fn retry(
         &self,
         failure: &riviu_core::publish_recovery::RecoveryFailure,
     ) -> anyhow::Result<Option<Duration>> {
+        if failure.code == OBSERVATION_DEADLINE {
+            self.ramp.lock().observation_deadline(&self.udid);
+        }
         let delay = self.db.reserve_publish_step_retry_failure(
             &self.assignment,
             &self.run.token,
@@ -510,6 +527,164 @@ impl RosterRefresh {
     }
 }
 
+/// The typed code of a read that outlived its observation window (`publish_recovery::describe`).
+const OBSERVATION_DEADLINE: &str = "publish_observation_deadline";
+
+/// How many composes may run at once, and when the next may start. Only a new compose claim
+/// is paced: no running permit is revoked, and transfer, verification and cleanup keep sharing
+/// `PUBLISH_PHONE_WORK_CAP` as before. Constants and their reasons: `riviu_core::read_latency`.
+struct ComposeRamp {
+    limit: usize,
+    last_start: Option<tokio::time::Instant>,
+}
+
+impl ComposeRamp {
+    fn new() -> Self {
+        Self {
+            limit: COMPOSE_CONCURRENCY_START,
+            last_start: None,
+        }
+    }
+
+    fn may_start(&self, composing: usize, now: tokio::time::Instant) -> bool {
+        composing < self.limit
+            && self.last_start.is_none_or(|started| {
+                now.saturating_duration_since(started) >= COMPOSE_START_SPACING
+            })
+    }
+
+    fn started(&mut self, now: tokio::time::Instant) {
+        self.last_start = Some(now);
+    }
+
+    fn set(&mut self, limit: usize, why: &str) {
+        if limit != self.limit {
+            log::info!(
+                "Đăng bài: số máy soạn bài cùng lúc {} → {limit} ({why})",
+                self.limit
+            );
+            self.limit = limit;
+        }
+    }
+
+    /// One step up per attempt that reaches the pre-Post check, and only on a fleet measured
+    /// fast; an unknown fleet q90 never raises the limit.
+    fn reached_pre_post(&mut self, udid: &str) {
+        let cap = PUBLISH_PHONE_WORK_CAP as usize;
+        if let Some(q90) = fleet_tree_read_q90() {
+            if q90 < FLEET_LOADED_Q90 && self.limit < cap {
+                self.set(
+                    self.limit + 1,
+                    &format!(
+                        "{udid} tới bước kiểm tra trước Đăng; q90 đọc màn hình của cả dàn {} ms < {} ms",
+                        q90.as_millis(),
+                        FLEET_LOADED_Q90.as_millis()
+                    ),
+                );
+            }
+        }
+    }
+
+    fn observation_deadline(&mut self, udid: &str) {
+        self.set(
+            (self.limit / 2).max(COMPOSE_CONCURRENCY_FLOOR),
+            &format!("{udid} hết giờ chờ đọc màn hình ({OBSERVATION_DEADLINE})"),
+        );
+    }
+
+    fn reset_when_idle(&mut self) {
+        self.set(
+            COMPOSE_CONCURRENCY_START,
+            "không còn bài nào đang chạy hay chờ; vòng sau bắt đầu lại từ mức đầu",
+        );
+    }
+}
+
+/// While the adb server is out or suspected hung, the dispatcher claims no new publish job, so
+/// no transfer or compose starts and no new Post intent follows from one. Running jobs are left
+/// alone; the intent and verification rules settle them. One incident holds at most
+/// `ADB_INCIDENT_HOLD_MAX`, and a signal back within `ADB_INCIDENT_SAME_WITHIN` continues it.
+#[derive(Default)]
+struct AdbIncidentHold {
+    /// When the current incident began; its hold budget runs from here.
+    began: Option<tokio::time::Instant>,
+    last_seen: Option<tokio::time::Instant>,
+    /// The current hold's start, also in UTC ms for the reconnect windows it pauses.
+    holding: Option<(tokio::time::Instant, i64)>,
+}
+
+impl AdbIncidentHold {
+    /// Whether new claims are held this tick. Without queued or running publish work there is
+    /// nothing to hold and nothing to say about Publish.
+    fn observe(&mut self, signal: bool, in_flight: bool, db: &Database) -> bool {
+        let now = tokio::time::Instant::now();
+        if signal {
+            if self
+                .last_seen
+                .is_none_or(|seen| now.saturating_duration_since(seen) > ADB_INCIDENT_SAME_WITHIN)
+            {
+                self.began = Some(now);
+            }
+            self.last_seen = Some(now);
+        }
+        let within_budget = self
+            .began
+            .is_some_and(|began| now.saturating_duration_since(began) < ADB_INCIDENT_HOLD_MAX);
+        let hold = signal && in_flight && within_budget;
+        match (self.holding, hold) {
+            (None, true) => {
+                self.holding = Some((now, chrono::Utc::now().timestamp_millis()));
+                note_activity(
+                    db,
+                    "publish.dispatch.held",
+                    &format!(
+                        "Đăng bài: ADB server đang mất hoặc nghi bị treo; tạm dừng giao việc đăng mới \
+                         (không bắt đầu chuyển media, soạn bài hay lệnh Đăng mới). Máy đang chạy dở vẫn \
+                         tiếp tục; tạm dừng tối đa {} phút",
+                        ADB_INCIDENT_HOLD_MAX.as_secs() / 60
+                    ),
+                );
+            }
+            (Some((since, since_ms)), false) => {
+                self.holding = None;
+                if let Err(error) = db.pause_publish_reconnect_windows(
+                    since_ms,
+                    chrono::Utc::now().timestamp_millis(),
+                ) {
+                    log::error!("publish dispatch: reconnect windows not paused: {error:#}");
+                }
+                let why = if !signal {
+                    "ADB đã trả lời lại".to_string()
+                } else if !within_budget {
+                    format!(
+                        "đã tạm dừng đủ {} phút mà ADB vẫn chưa ổn; giao việc lại như bình thường",
+                        ADB_INCIDENT_HOLD_MAX.as_secs() / 60
+                    )
+                } else {
+                    "không còn bài đăng nào đang chạy hay chờ".to_string()
+                };
+                note_activity(
+                    db,
+                    "publish.dispatch.resumed",
+                    &format!(
+                        "Đăng bài: tiếp tục giao việc đăng sau {} giây tạm dừng ({why})",
+                        now.saturating_duration_since(since).as_secs()
+                    ),
+                );
+            }
+            _ => {}
+        }
+        hold
+    }
+}
+
+fn note_activity(db: &Database, action: &str, message: &str) {
+    if let Err(error) = db.log_op(action, message) {
+        log::error!("could not persist {action}: {error:#}");
+    }
+    log::warn!("{message}");
+}
+
 /// One application dispatcher serves immediate and scheduled campaigns. Queue rows
 /// hold IDs only; media and driver sessions are loaded after per-device admission.
 #[allow(clippy::too_many_arguments)]
@@ -523,14 +698,17 @@ pub(crate) async fn run_dispatcher(
     admission: Arc<crate::state::CommandAdmissionState>,
     stop: Arc<std::sync::atomic::AtomicBool>,
     acceptance: crate::dev_acceptance::DevAcceptancePolicy,
+    android: Option<Arc<riviu_android_driver::AndroidDriver>>,
 ) {
     let mut tasks = tokio::task::JoinSet::<anyhow::Result<()>>::new();
-    let mut owned = HashMap::new();
+    let mut owned: HashMap<tokio::task::Id, riviu_core::db::PublishDispatchJob> = HashMap::new();
     let mut idle_deferrals = HashMap::new();
     let mut completed = DispatchCompletions::default();
     let mut interval = tokio::time::interval(Duration::from_millis(250));
     let mut roster = RosterRefresh::default();
     let mut recovery_at = tokio::time::Instant::now();
+    let ramp = Arc::new(parking_lot::Mutex::new(ComposeRamp::new()));
+    let mut incident = AdbIncidentHold::default();
     interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
     loop {
         tokio::select! {
@@ -542,6 +720,11 @@ pub(crate) async fn run_dispatcher(
                     Err(e) => (e.id(), Some(anyhow::Error::new(e))),
                 };
                 if let Some(job) = owned.remove(&id) {
+                    if error.as_ref().is_some_and(|error| {
+                        riviu_core::publish_recovery::describe(error).code == OBSERVATION_DEADLINE
+                    }) {
+                        ramp.lock().observation_deadline(&job.udid);
+                    }
                     completed.push(job, error);
                 }
             }
@@ -630,15 +813,24 @@ pub(crate) async fn run_dispatcher(
                 )
                 .collect();
             idle_deferrals.retain(|udid, _| needed.contains(udid));
+            let in_flight = !needed.is_empty();
             for udid in needed {
                 idle_deferrals
                     .entry(udid.clone())
                     .or_insert_with(|| control.defer_idle_work(&[udid], DeviceWorkOwner::Script));
             }
-            if pending.is_empty() {
+            if !in_flight {
+                ramp.lock().reset_when_idle();
+            }
+            let adb_incident = android.as_ref().is_some_and(|android| {
+                android.adb_server_outage() || android.adb_server_hang_suspected()
+            });
+            if incident.observe(adb_incident, in_flight, &db) || pending.is_empty() {
                 return Ok::<_, anyhow::Error>(());
             }
             roster.refresh(&registry);
+            let fleet_q90 = fleet_tree_read_q90();
+            let mut composing = owned.values().filter(|job| job.phase == "compose").count();
             for job in pending {
                 // Durable claims and the device lease serialize one phone. A slow
                 // sibling must not consume a global publish worker slot.
@@ -666,6 +858,26 @@ pub(crate) async fn run_dispatcher(
                 )? {
                     continue;
                 }
+                // A whole-attempt retry whose clock has passed waits for a fleet measured fast.
+                // Unknown counts as fast only while nothing composes: then it is the least load.
+                let fleet_ready = fleet_q90.map_or(composing == 0, |q90| q90 < FLEET_LOADED_Q90);
+                if db.publish_retry_waits_for_fleet(
+                    &job.assignment_id,
+                    chrono::Utc::now().timestamp_millis(),
+                    fleet_ready,
+                )? {
+                    db.defer_publish_dispatch(&job, "fleet_load")?;
+                    continue;
+                }
+                let compose = job.phase == "compose";
+                if compose
+                    && !ramp
+                        .lock()
+                        .may_start(composing, tokio::time::Instant::now())
+                {
+                    db.defer_publish_dispatch(&job, "compose_pacing")?;
+                    continue;
+                }
                 let Some(permit) = db.try_publish_work(&job.udid, &job.phase, &job.attempt_id)?
                 else {
                     db.defer_publish_dispatch(&job, "stage_capacity")?;
@@ -683,12 +895,23 @@ pub(crate) async fn run_dispatcher(
                 if !db.claim_publish_dispatch(&job, claimed_at)? {
                     continue;
                 }
-                let (work_db, work_control, work_frames, work_events, work_agent) = (
+                if compose {
+                    let mut ramp = ramp.lock();
+                    ramp.started(tokio::time::Instant::now());
+                    composing += 1;
+                    log::info!(
+                        "Đăng bài: bắt đầu soạn bài trên {} ({composing}/{} máy đang soạn)",
+                        job.udid,
+                        ramp.limit
+                    );
+                }
+                let (work_db, work_control, work_frames, work_events, work_agent, work_ramp) = (
                     db.clone(),
                     control.clone(),
                     frames.clone(),
                     events.clone(),
                     agent.clone(),
+                    ramp.clone(),
                 );
                 let task_job = job.clone();
                 let task = tasks.spawn(async move {
@@ -738,6 +961,8 @@ pub(crate) async fn run_dispatcher(
                             db: runtime.db.clone(),
                             assignment: a.id.clone(),
                             run: runtime.run.clone(),
+                            udid: task_job.udid.clone(),
+                            ramp: work_ramp,
                         });
                         return riviu_core::publish_recovery::scope(
                             journal,
@@ -1264,6 +1489,7 @@ mod tests {
             Arc::new(crate::state::CommandAdmissionState::new(true)),
             stop.clone(),
             crate::dev_acceptance::DevAcceptancePolicy::from_parts(false, None, None),
+            None,
         ));
         let conn = rusqlite::Connection::open(&path).unwrap();
         let job = |udid: &str| -> (String, String, String) {

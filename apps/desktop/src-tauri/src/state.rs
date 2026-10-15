@@ -2963,6 +2963,7 @@ impl AppState {
             self.command_admission.clone(),
             self.background_stop.clone(),
             self.dev_acceptance.clone(),
+            self.android.clone(),
         ));
 
         // Flow orphan sweep. Startup recovery settles what it finds at boot; this loop is
