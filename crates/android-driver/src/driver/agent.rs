@@ -182,6 +182,134 @@ async fn instrumentation_exit_diagnostics(child: &mut InstrumentationProcess) ->
     }
 }
 
+/// What one UiAutomator2 half is on the phone, as [`agent_identity_script`] proved it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum AgentHalfIdentity {
+    Missing,
+    Installed {
+        sha256: String,
+        version_code: Option<String>,
+    },
+}
+
+impl AgentHalfIdentity {
+    fn matches(&self, bundled_sha256: &str) -> bool {
+        matches!(self, Self::Installed { sha256, .. } if sha256.eq_ignore_ascii_case(bundled_sha256))
+    }
+
+    /// Vietnamese, for the activity log line.
+    fn describe(&self, package: &str, bundled_sha256: &str) -> String {
+        match self {
+            Self::Missing => format!("{package} chưa cài"),
+            Self::Installed {
+                sha256,
+                version_code,
+            } => {
+                let version = version_code.as_deref().unwrap_or("không đọc được");
+                if sha256.eq_ignore_ascii_case(bundled_sha256) {
+                    format!("{package} đúng bản kèm (versionCode {version})")
+                } else {
+                    format!(
+                        "{package} khác bản kèm (versionCode {version}, sha256 {}…)",
+                        sha256.get(..12).unwrap_or(sha256.as_str())
+                    )
+                }
+            }
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct AgentIdentityReading {
+    boot_id: String,
+    server: AgentHalfIdentity,
+    test: AgentHalfIdentity,
+}
+
+/// One shell round trip: the boot id, then for each half its `pm path`, the SHA-256 of the
+/// APK that names and its `versionCode`. Chained on the phone, as in `installed_apk_sha256`,
+/// so the path never crosses back through the host.
+fn agent_identity_script() -> String {
+    let mut script = String::from("echo '@@boot'; cat /proc/sys/kernel/random/boot_id; ");
+    for package in [AGENT_PACKAGE, AGENT_TEST_PACKAGE] {
+        script.push_str(&format!(
+            "a=$(pm path {package} 2>&1); echo '@@path {package}'; echo \"$a\"; \
+             b=$(echo \"$a\" | grep '^package:' | head -n 1 | cut -d: -f2); \
+             echo '@@sha {package}'; [ -n \"$b\" ] && sha256sum \"$b\"; \
+             echo '@@version {package}'; [ -n \"$b\" ] && dumpsys package {package} | grep 'versionCode=' | head -n 1; "
+        ));
+    }
+    script.push_str("echo '@@end'");
+    script
+}
+
+/// `None` unless the phone proved each half's state: a `pm path` that printed anything but
+/// `package:` lines, an installed half without a digest, or no boot id is unknown, never
+/// "missing", so it never earns a reinstall.
+fn parse_agent_identity(stdout: &str) -> Option<AgentIdentityReading> {
+    let sections = crate::baseline::split_sections(stdout);
+    let boot_id = proved_boot_id(sections.get("boot")?)?;
+    let half = |package: &str| -> Option<AgentHalfIdentity> {
+        let paths: Vec<&str> = sections
+            .get(&format!("path {package}"))?
+            .lines()
+            .map(str::trim)
+            .filter(|line| !line.is_empty())
+            .collect();
+        if paths.is_empty() {
+            return Some(AgentHalfIdentity::Missing);
+        }
+        if !paths.iter().all(|line| line.starts_with("package:")) {
+            return None;
+        }
+        let digest = sections
+            .get(&format!("sha {package}"))?
+            .split_whitespace()
+            .next()?;
+        if digest.len() != 64 || !digest.bytes().all(|byte| byte.is_ascii_hexdigit()) {
+            return None;
+        }
+        let version_code = sections
+            .get(&format!("version {package}"))
+            .and_then(|dump| riviu_core::tiktok_labels::parse_version_code(dump))
+            .map(str::to_owned);
+        Some(AgentHalfIdentity::Installed {
+            sha256: digest.to_ascii_lowercase(),
+            version_code,
+        })
+    };
+    Some(AgentIdentityReading {
+        boot_id,
+        server: half(AGENT_PACKAGE)?,
+        test: half(AGENT_TEST_PACKAGE)?,
+    })
+}
+
+/// SHA-256 of a bundled APK, read once per process: the installer pins these bytes
+/// (`sidecars/android/android-tools-manifest.json`), so they do not change under a running
+/// controller.
+fn bundled_apk_sha256(path: &Path) -> anyhow::Result<String> {
+    static HASHES: std::sync::OnceLock<Mutex<HashMap<PathBuf, String>>> =
+        std::sync::OnceLock::new();
+    let hashes = HASHES.get_or_init(Default::default);
+    if let Some(hash) = hashes.lock().get(path) {
+        return Ok(hash.clone());
+    }
+    let bytes = std::fs::read(path)
+        .with_context(|| format!("đọc APK UiAutomator2 kèm theo {}", path.display()))?;
+    let hash = riviu_core::frame_sha256(&bytes);
+    hashes.lock().insert(path.to_path_buf(), hash.clone());
+    Ok(hash)
+}
+
+/// The boot id each phone's UiAutomator2 identity was last settled on in this process, so a
+/// phone pays for one identity read per boot, whatever the outcome.
+fn agent_identity_settled() -> &'static Mutex<HashMap<String, String>> {
+    static SETTLED: std::sync::OnceLock<Mutex<HashMap<String, String>>> =
+        std::sync::OnceLock::new();
+    SETTLED.get_or_init(Default::default)
+}
+
 impl AndroidDriver {
     pub(super) fn host_port(&self, serial: &str) -> u16 {
         let mut ports = self.ports.lock();
@@ -732,6 +860,10 @@ impl AndroidDriver {
             return Ok(agent);
         }
 
+        // No live session on this phone: the halves can be brought to the bundled bytes
+        // before anything starts against them. Once per boot; never fatal.
+        self.ensure_agent_apks_current(serial).await;
+
         // A server that answers `/status` usually just needs a fresh session — that is the
         // rotten-session case `AgentClient::recycle` documents. But `/status` does not prove
         // the accessibility tree is readable, and when it is not, a new session against the
@@ -866,6 +998,15 @@ impl AndroidDriver {
                  an installer that bundles them"
             ));
         };
+        // Not measured: the helper's cap (`MAX_CONCURRENT_HELPER_INSTALLS`) for the same
+        // reason. A fleet-wide rollout of a new server must not push 18 MB to ten phones at
+        // once through one adb server.
+        static INSTALLS: std::sync::OnceLock<tokio::sync::Semaphore> = std::sync::OnceLock::new();
+        let _install = INSTALLS
+            .get_or_init(|| tokio::sync::Semaphore::new(2))
+            .acquire()
+            .await
+            .context("UiAutomator2 install slot unavailable")?;
         // Server first: the test APK declares an instrumentation targeting the server's
         // package, and installing it against a missing target fails on some builds.
         for (apk, package) in [(server, AGENT_PACKAGE), (test, AGENT_TEST_PACKAGE)] {
@@ -880,17 +1021,207 @@ impl AndroidDriver {
                 .with_context(|| format!("install {package} on {serial} from {path}"))?;
         }
         // Prove it rather than trust the exit code: `pm install` has been observed to
-        // report success for a package that is not then listed.
-        let installed = self
-            .adb
-            .shell(serial, &format!("pm list packages {AGENT_PACKAGE}"))
-            .await
-            .unwrap_or_default();
-        anyhow::ensure!(
-            installed.contains(AGENT_PACKAGE),
-            "installed the agent on {serial} but `pm list packages` still does not show              {AGENT_PACKAGE}"
-        );
+        // report success for a package that is not then listed. Both halves, by exact
+        // package: `pm list packages <server>` also lists the test half.
+        for package in [AGENT_PACKAGE, AGENT_TEST_PACKAGE] {
+            let installed = self
+                .adb
+                .shell(serial, &format!("pm path {package}"))
+                .await
+                .unwrap_or_default();
+            anyhow::ensure!(
+                installed
+                    .lines()
+                    .any(|line| line.trim().starts_with("package:")),
+                "installed the agent on {serial} but `pm path {package}` still does not show it"
+            );
+        }
         Ok(())
+    }
+
+    /// Keep both UiAutomator2 halves on the bytes this build bundles. Until 15/10/2026 the
+    /// server was installed only when missing, so a copy left by another tool or an older
+    /// Riviu ran unseen while this code relies on v10.6.2's behaviour.
+    ///
+    /// One identity read per phone per boot: the boot id, each half's `pm path`, the SHA-256
+    /// of that APK and its `versionCode`, in one shell call. Equal digests imply equal
+    /// `versionCode`s; the codes are read for the log line, because the installer pins the
+    /// two APKs by digest only. A half that is missing or differs gets both halves
+    /// reinstalled and both read back, at most once per boot id (a durable marker written
+    /// before the install), and only when no other tool's instrumentation runs.
+    ///
+    /// The caller holds the phone's Repair or job lease and has no live session on it, so no
+    /// gesture is cut. Never fatal: an unknown reading changes nothing, and a refused install
+    /// (a newer or differently signed server) leaves the halves the phone has.
+    pub async fn ensure_agent_apks_current(&self, serial: &str) {
+        if !self.automatic_setup_allowed {
+            return;
+        }
+        let Some((server_apk, test_apk)) = self.agent_apks.clone() else {
+            return;
+        };
+        let bundled = match (
+            bundled_apk_sha256(&server_apk),
+            bundled_apk_sha256(&test_apk),
+        ) {
+            (Ok(server), Ok(test)) => (server, test),
+            (Err(error), _) | (_, Err(error)) => {
+                tracing::warn!(serial, error = %format!("{error:#}"), "bundled UiAutomator2 APK unreadable; identity not checked");
+                return;
+            }
+        };
+        let boot_id = match self
+            .adb
+            .shell_output(
+                serial,
+                "cat /proc/sys/kernel/random/boot_id",
+                ADB_UNROOT_PROBE_TIMEOUT,
+            )
+            .await
+        {
+            Ok(output) if output.exit_code == 0 => proved_boot_id(&output.stdout),
+            _ => None,
+        };
+        let Some(boot_id) = boot_id else {
+            return;
+        };
+        if agent_identity_settled().lock().get(serial) == Some(&boot_id) {
+            return;
+        }
+        let Some(reading) = self.read_agent_identity(serial).await else {
+            return;
+        };
+        // A reboot between the two reads: the next caller reads the new boot.
+        if reading.boot_id != boot_id {
+            return;
+        }
+        agent_identity_settled()
+            .lock()
+            .insert(serial.to_string(), boot_id.clone());
+        let describe = |reading: &AgentIdentityReading| {
+            format!(
+                "{}; {}",
+                reading.server.describe(AGENT_PACKAGE, &bundled.0),
+                reading.test.describe(AGENT_TEST_PACKAGE, &bundled.1)
+            )
+        };
+        let current = |reading: &AgentIdentityReading| {
+            reading.server.matches(&bundled.0) && reading.test.matches(&bundled.1)
+        };
+        if current(&reading) {
+            self.load.journal(
+                serial,
+                "agent.uiautomator2.current",
+                &format!(
+                    "UiAutomator2 đúng bản kèm theo Riviu: {}",
+                    describe(&reading)
+                ),
+            );
+            return;
+        }
+        let before = describe(&reading);
+        if let Err(reason) = self.spend_agent_reinstall(serial, &boot_id).await {
+            self.load.journal(
+                serial,
+                "agent.uiautomator2.stale",
+                &format!(
+                    "UiAutomator2 lệch bản kèm theo Riviu ({before}); chưa cài lại vì {reason}. \
+                     Dùng bản đang có trên máy."
+                ),
+            );
+            return;
+        }
+        self.load.journal(
+            serial,
+            "agent.uiautomator2.reinstall",
+            &format!(
+                "UiAutomator2 lệch bản kèm theo Riviu ({before}); cài lại cả hai nửa, một lần \
+                 cho lần khởi động này."
+            ),
+        );
+        // The old server holds `UiAutomation` and the port; no session of it survives this.
+        self.agents.lock().remove(serial);
+        let runtime = self.instrumentation_runtime();
+        if let Err(error) = runtime.stop_instrumentation(serial).await {
+            tracing::warn!(serial, %error, "could not stop the agent before its reinstall");
+        }
+        let result = match self.install_agent_apks(serial).await {
+            Ok(()) => match self.read_agent_identity(serial).await {
+                Some(after) if current(&after) => Ok(describe(&after)),
+                Some(after) => Err(format!("đọc lại vẫn lệch: {}", describe(&after))),
+                None => Err("chưa đọc lại được hai nửa sau khi cài".to_string()),
+            },
+            Err(error) => Err(format!("cài lại thất bại: {error:#}")),
+        };
+        match result {
+            Ok(after) => self.load.journal(
+                serial,
+                "agent.uiautomator2.reinstall.done",
+                &format!("đã cài lại UiAutomator2, đọc lại khớp bản kèm: {after}"),
+            ),
+            Err(reason) => self.load.journal(
+                serial,
+                "agent.uiautomator2.reinstall.failed",
+                &format!(
+                    "{reason}. Không thử lại cho tới lần khởi động sau; dùng bản đang có trên máy."
+                ),
+            ),
+        }
+    }
+
+    /// [`agent_identity_script`] on `serial`. `None` when the phone did not prove both halves.
+    async fn read_agent_identity(&self, serial: &str) -> Option<AgentIdentityReading> {
+        // A cap, not measured end to end: hashing the 18 MB server took 225 ms on an
+        // SM-G955F (`installed_apk_sha256`); the rest is two `pm path` and two `dumpsys`.
+        const AGENT_IDENTITY_TIMEOUT: Duration = Duration::from_secs(20);
+        match self
+            .adb
+            .shell_output(serial, &agent_identity_script(), AGENT_IDENTITY_TIMEOUT)
+            .await
+        {
+            Ok(output) => parse_agent_identity(&output.stdout),
+            Err(error) => {
+                tracing::debug!(serial, error = %format!("{error:#}"), "UiAutomator2 identity unread");
+                None
+            }
+        }
+    }
+
+    /// Spend this boot's one UiAutomator2 reinstall: `Ok` once its durable marker is written,
+    /// before any effect. `Err` is the Vietnamese reason it may not run. An unreadable marker
+    /// or instrumentation ledger refuses, never allows.
+    async fn spend_agent_reinstall(&self, serial: &str, boot_id: &str) -> Result<(), String> {
+        let marker = self
+            .helper_state_dir
+            .as_ref()
+            .ok_or_else(|| "thiếu thư mục trạng thái của Riviu".to_string())?
+            .join("uiautomator2")
+            .join(format!(
+                "{}.json",
+                riviu_core::frame_sha256(serial.as_bytes())
+            ));
+        match adb_unroot_spent_boot(&marker, serial) {
+            Ok(Some(spent)) if spent == boot_id => {
+                return Err("đã thử cài lại một lần trong lần khởi động này".into())
+            }
+            Ok(_) => {}
+            Err(error) => return Err(format!("không đọc được dấu lần cài lại trước ({error:#})")),
+        }
+        let activity = self
+            .adb
+            .shell(serial, "dumpsys activity")
+            .await
+            .map_err(|error| format!("không đọc được danh sách instrumentation ({error:#})"))?;
+        let foreign =
+            AndroidDriver::active_instrumentations(&activity, &[AGENT_PACKAGE, AGENT_TEST_PACKAGE]);
+        if !foreign.is_empty() {
+            return Err(format!(
+                "máy đang chạy UiAutomator của công cụ khác: {}",
+                foreign.join(", ")
+            ));
+        }
+        spend_adb_unroot(&marker, serial, boot_id)
+            .map_err(|error| format!("không ghi được dấu lần cài lại ({error:#})"))
     }
     /// This driver's instrumentation recovery, shared with the sessions it opens.
     pub(super) fn instrumentation_runtime(&self) -> InstrumentationRuntime {

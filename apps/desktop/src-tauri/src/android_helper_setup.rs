@@ -94,6 +94,9 @@ impl AndroidHelperSetup {
                             // phone boot). If it stays root, preparation below refuses with
                             // `shell_root`, which latches the cause the tile shows.
                             crate::agent_commands::auto_unroot_adb(&android, &db, &serial).await;
+                            // Both UiAutomator2 halves on the bundled bytes, once per boot, while
+                            // no session runs on this phone. Never fatal; the result is logged.
+                            android.ensure_agent_apks_current(&serial).await;
                             let automatic_failure = |error: &anyhow::Error| crate::command_error::CommandError::code(
                                 "HelperAutomaticPreparationFailed", automatic_preparation_message(error));
                             let result = async {
