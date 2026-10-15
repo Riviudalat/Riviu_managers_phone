@@ -1325,16 +1325,19 @@ run ID trả về; contract/schema ở trang API và module `local_api/tasks.rs`
 
 GUI Service có endpoint template-match cục bộ dùng OpenCV/NumPy; thao tác xem thử
 trong FlowVisionCapture không chạm điện thoại. Snapshot, crop, hash, epoch và
-generation được ràng buộc hai phía. Tối đa2worker native; client timeout vẫn giữ
-slot đến khi công việc native kết thúc. Các tùy chọn thử đa tỷ lệ chỉ áp dụng phép
+generation được ràng buộc hai phía. Tối đa N worker native (mặc định 4, dùng chung
+với OCR; `RIVIU_OCR_WORKERS`); client timeout vẫn giữ slot đến khi công việc native
+kết thúc. Các tùy chọn thử đa tỷ lệ chỉ áp dụng phép
 thử này; Flow TapVision/IfVision vẫn dùng matcher Rust và config đã lưu.
 
 `OcrReadText` lấy frame từ generation đang sở hữu rồi gọi OCR cục bộ qua reasoner
 được tiêm vào FlowRuntime. Screenshot/hash/epoch được kiểm hai phía. Tesseract và
 model vie/eng được ghim SHA-256 và đóng gói; máy chạy không tải model ngầm.
 Output OCR giữ văn bản, engine, confidence, bounds và binding trong ledger; lỗi
-đọc/mất generation không thành văn bản rỗng giả. Worker OCR chạy process riêng,
-timeout/hủy thu hồi process, dùng chung trần2slot với các phép nhận diện khác.
+đọc/mất generation không thành văn bản rỗng giả. Worker OCR là process thường trú
+giữ model đã nạp, dùng chung trần N slot cục bộ với template matching (mặc định 4);
+timeout/hủy giết và thu hồi đúng worker đó trước khi nhả slot. AI resolve/recover giữ
+trần riêng hai slot.
 
 `ThreadCampaignRequest.scriptedConversation` giữ schema1, targetScripts, roleBindings,
 seed, durationMinutes và tùy chọn startsAt/endsAt. Planner dùng ordinal riêng 0–63 mỗi

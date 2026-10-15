@@ -6,6 +6,20 @@ use std::time::Duration;
 use tokio::{sync::Semaphore, time::Instant};
 
 const MAX_CAPACITY_ATTEMPTS: usize = 30;
+/// The sidecar's wait for a free OCR worker, reported beside its JSON contract.
+const SIDECAR_QUEUE_HEADER: &str = "x-riviu-queue-ms";
+
+/// Where one local OCR request's time went, for its measurement line.
+#[derive(Default)]
+struct OcrTiming {
+    /// Waiting for a desktop permit.
+    queue: Duration,
+    /// Sidecar admission: 429 round trips with their Retry-After, plus its wait for a worker.
+    admission: Duration,
+    /// The admitted request's round trip, less the sidecar's wait for a worker.
+    work: Duration,
+    attempts: usize,
+}
 
 async fn post_ocr_with_backpressure(
     client: &reqwest::Client,
@@ -14,17 +28,22 @@ async fn post_ocr_with_backpressure(
     request: &OcrRequest,
     capacity: &Semaphore,
     deadline: Instant,
+    timing: &mut OcrTiming,
 ) -> anyhow::Result<OcrResponse> {
     for attempt in 0..MAX_CAPACITY_ATTEMPTS {
+        timing.attempts = attempt + 1;
+        let waited = Instant::now();
         let permit = tokio::time::timeout_at(deadline, capacity.acquire())
             .await
             .map_err(|_| anyhow!("gui_deadline"))??;
+        timing.queue += waited.elapsed();
         let remaining = deadline.saturating_duration_since(Instant::now());
         ensure!(!remaining.is_zero(), "gui_deadline");
         let mut current = request.clone();
         current.remaining_ms = u64::try_from(remaining.as_millis())
             .unwrap_or(u64::MAX)
             .max(1);
+        let sent = Instant::now();
         let mut response = tokio::time::timeout_at(
             deadline,
             client.post(url).bearer_auth(token).json(&current).send(),
@@ -42,13 +61,23 @@ async fn post_ocr_with_backpressure(
             drop(response);
             drop(permit);
             if attempt + 1 == MAX_CAPACITY_ATTEMPTS {
+                timing.admission += sent.elapsed();
                 return Err(anyhow!("gui_ocr_http_429"));
             }
-            tokio::time::timeout_at(deadline, tokio::time::sleep(retry_after))
-                .await
-                .map_err(|_| anyhow!("gui_deadline"))?;
+            let slept = tokio::time::timeout_at(deadline, tokio::time::sleep(retry_after)).await;
+            timing.admission += sent.elapsed();
+            slept.map_err(|_| anyhow!("gui_deadline"))?;
             continue;
         }
+        let sidecar_queue = response
+            .headers()
+            .get(SIDECAR_QUEUE_HEADER)
+            .and_then(|value| value.to_str().ok())
+            .and_then(|value| value.parse::<u64>().ok())
+            .map(Duration::from_millis)
+            .unwrap_or_default()
+            .min(sent.elapsed());
+        timing.admission += sidecar_queue;
         ensure!(
             response.status().is_success(),
             "gui_ocr_http_{}",
@@ -65,6 +94,7 @@ async fn post_ocr_with_backpressure(
             );
             bytes.extend_from_slice(&chunk);
         }
+        timing.work += sent.elapsed().saturating_sub(sidecar_queue);
         let result: OcrResponse = serde_json::from_slice(&bytes)?;
         result.validate_binding(request)?;
         return Ok(result);
@@ -74,10 +104,16 @@ async fn post_ocr_with_backpressure(
 
 impl GuiService {
     pub async fn recognize_text(&self, request: OcrRequest) -> anyhow::Result<OcrResponse> {
+        let started = Instant::now();
+        let request_id = request.request_id.clone();
+        let session = request.session_epoch.clone();
+        let mut timing = OcrTiming::default();
         let duration = Duration::from_millis(request.remaining_ms.min(30_000));
-        tokio::time::timeout(duration, async {
+        let result = tokio::time::timeout(duration, async {
             let request = {
-                let permit = self.capacity.clone().acquire_owned().await?;
+                let waited = Instant::now();
+                let permit = self.local_capacity.clone().acquire_owned().await?;
+                timing.queue += waited.elapsed();
                 let (request, permit) = tokio::task::spawn_blocking(move || {
                     request.validate()?;
                     Ok::<_, anyhow::Error>((request, permit))
@@ -97,13 +133,28 @@ impl GuiService {
                 &format!("{url}/v1/gui/ocr"),
                 &token,
                 &request,
-                &self.capacity,
+                &self.local_capacity,
                 Instant::now() + duration,
+                &mut timing,
             )
             .await
         })
         .await
-        .map_err(|_| anyhow::anyhow!("gui_deadline"))?
+        .map_err(|_| anyhow::anyhow!("gui_deadline"))
+        .and_then(|result| result);
+        // One line per request. `session` is the GUI epoch that the sound diagnostics log
+        // beside the phone's serial.
+        log::info!(
+            "ocr request={request_id} session={session} queue_ms={} admission_ms={} work_ms={} engine_ms={} total_ms={} attempts={} result={}",
+            timing.queue.as_millis(),
+            timing.admission.as_millis(),
+            timing.work.as_millis(),
+            result.as_ref().map_or(0, |response| response.elapsed_ms),
+            started.elapsed().as_millis(),
+            timing.attempts,
+            result.as_ref().map_or_else(ToString::to_string, |_| "ok".into()),
+        );
+        result
     }
 }
 
@@ -188,6 +239,7 @@ mod tests {
             &request,
             &capacity,
             deadline,
+            &mut OcrTiming::default(),
         )
         .await
         .unwrap();
@@ -216,6 +268,7 @@ mod tests {
             &request,
             &capacity,
             Instant::now() + Duration::from_millis(30),
+            &mut OcrTiming::default(),
         )
         .await
         .unwrap_err();
@@ -247,6 +300,7 @@ mod tests {
             &request,
             &capacity,
             Instant::now() + Duration::from_millis(100),
+            &mut OcrTiming::default(),
         )
         .await
         .unwrap_err();

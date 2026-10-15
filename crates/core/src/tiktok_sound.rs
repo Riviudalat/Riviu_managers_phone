@@ -801,10 +801,14 @@ pub(crate) async fn with_stage_budget<T>(
 ///
 /// Measured in the controller log (2026-10-12, `ocrRequest` -> `captureComplete`): 2.0-2.9 s
 /// with one or two phones, but p90 11.0 s / max 17.0 s with 20 phones (r91 `d8e672cc`) and
-/// p90 14.6 s / max 28.0 s with 22 (r93 `4a25d804`), because the host runs two OCR workers
-/// and every phone queues behind them. The former 15 s cut that queue tail, and a request
-/// abandoned after its worker started wastes the CPU the other phones are waiting for.
-/// 30 s is the OCR contract's own ceiling.
+/// p90 14.6 s / max 28.0 s with 22 (r93 `4a25d804`). The host then ran two OCR slots, each a
+/// fresh process that reloaded its models (2.2-4.5 s per sound-sized frame on the farm PC,
+/// 2026-10-15), so every phone queued behind them. The sidecar now keeps four resident workers
+/// (`RIVIU_OCR_WORKERS`) that reuse loaded models: 0.45-0.72 s per warm frame there, with the
+/// first request on a new worker still paying its start. The controller logs every request's
+/// `queue_ms`, `admission_ms` and `work_ms`. The budget stays until a 20-phone round
+/// re-measures the tail: a request abandoned after its worker started wastes the CPU the other
+/// phones are waiting for, and 30 s is the OCR contract's own ceiling.
 pub(crate) const SOUND_OCR_BUDGET: Duration = Duration::from_secs(30);
 
 /// One OCR request's budget: what is left before `deadline`, at most [`SOUND_OCR_BUDGET`].

@@ -17,6 +17,30 @@ use tokio::{
 };
 
 const KEY: &str = "gui_service.config.v1";
+/// Local OCR and template requests in flight, one per resident OCR worker in the sidecar, which
+/// receives the same value at bootstrap. Not measured: the farm PC has 20 logical cores and each
+/// worker runs one native thread, so four leave the rest of the CPU to the phones' own work.
+const DEFAULT_LOCAL_CAPACITY: usize = 4;
+/// Not measured: a ceiling on the sidecar's RAM and CPU however the override is set.
+const MAX_LOCAL_CAPACITY: usize = 8;
+const LOCAL_CAPACITY_ENV: &str = "RIVIU_OCR_WORKERS";
+/// LLM resolve/recover wait on a remote provider rather than this CPU, and keep their own cap.
+const REMOTE_CAPACITY: usize = 2;
+
+fn local_capacity() -> usize {
+    let Ok(raw) = std::env::var(LOCAL_CAPACITY_ENV) else {
+        return DEFAULT_LOCAL_CAPACITY;
+    };
+    match raw.trim().parse::<usize>() {
+        Ok(workers) if (1..=MAX_LOCAL_CAPACITY).contains(&workers) => workers,
+        _ => {
+            log::warn!(
+                "{LOCAL_CAPACITY_ENV}={raw:?} không hợp lệ (1–{MAX_LOCAL_CAPACITY}); dùng {DEFAULT_LOCAL_CAPACITY} worker OCR"
+            );
+            DEFAULT_LOCAL_CAPACITY
+        }
+    }
+}
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(default, rename_all = "camelCase", deny_unknown_fields)]
 pub struct GuiConfig {
@@ -59,19 +83,24 @@ pub struct GuiService {
     data_dir: PathBuf,
     running: Mutex<Option<Running>>,
     starts: Mutex<Vec<Instant>>,
-    capacity: Arc<Semaphore>,
+    remote_capacity: Arc<Semaphore>,
+    local_capacity: Arc<Semaphore>,
+    local_workers: usize,
     last_error: parking_lot::Mutex<Option<String>>,
     trace_lock: parking_lot::Mutex<()>,
 }
 impl GuiService {
     pub fn new(db: Arc<Database>, resource_dir: Option<PathBuf>, data_dir: PathBuf) -> Self {
+        let local_workers = local_capacity();
         Self {
             db,
             resource_dir,
             data_dir,
             running: Mutex::new(None),
             starts: Mutex::new(Vec::new()),
-            capacity: Arc::new(Semaphore::new(2)),
+            remote_capacity: Arc::new(Semaphore::new(REMOTE_CAPACITY)),
+            local_capacity: Arc::new(Semaphore::new(local_workers)),
+            local_workers,
             last_error: parking_lot::Mutex::new(None),
             trace_lock: parking_lot::Mutex::new(()),
         }
@@ -221,7 +250,7 @@ impl GuiService {
             .write_all(
                 format!(
                     "{}\n",
-                    serde_json::json!({"token":token,"provider":provider})
+                    serde_json::json!({"token":token,"provider":provider,"localCapacity":self.local_workers})
                 )
                 .as_bytes(),
             )
@@ -380,7 +409,7 @@ impl GuiReasoner for GuiService {
         self.record(&request, None, "requested");
         let deadline = Duration::from_millis(request.remaining_ms.min(30_000));
         let result = tokio::time::timeout(deadline, async {
-            let _permit = self.capacity.acquire().await?;
+            let _permit = self.remote_capacity.acquire().await?;
             let (url, token) = self.connection().await?;
             let response = reqwest::Client::builder()
                 .timeout(deadline)

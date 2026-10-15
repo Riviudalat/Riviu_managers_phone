@@ -236,7 +236,7 @@ impl GuiService {
     ) -> anyhow::Result<TemplateMatchResponse> {
         let duration = Duration::from_millis(request.remaining_ms.min(30_000));
         tokio::time::timeout(duration, async {
-            let permit = self.capacity.clone().acquire_owned().await?;
+            let permit = self.local_capacity.clone().acquire_owned().await?;
             // Hashing and image-header parsing must not block Tauri's async executor.
             let (request, _permit) = tokio::task::spawn_blocking(move || {
                 request.validate()?;
@@ -451,9 +451,9 @@ mod tests {
             std::sync::Arc::new(super::super::Database::open(directory.join("test.db")).unwrap());
         let service = GuiService::new(db, None, directory.join("gui"));
         let held = service
-            .capacity
+            .local_capacity
             .clone()
-            .acquire_many_owned(2)
+            .acquire_many_owned(service.local_workers as u32)
             .await
             .unwrap();
         let mut request = request();
@@ -465,7 +465,10 @@ mod tests {
         assert!(service.running.lock().await.is_none());
         assert!(service.starts.lock().await.is_empty());
         drop(held);
-        assert_eq!(service.capacity.available_permits(), 2);
+        assert_eq!(
+            service.local_capacity.available_permits(),
+            service.local_workers
+        );
         drop(service);
         std::fs::remove_dir_all(directory).unwrap();
     }
