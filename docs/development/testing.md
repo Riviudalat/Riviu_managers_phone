@@ -171,6 +171,29 @@ Worktree mới có target Cargo riêng, trừ khi `CARGO_TARGET_DIR` trỏ về 
 chính (`dev_compile_cache.ps1` làm việc này). Dù vậy, các crate trong workspace vẫn build
 lại từ đầu cho mỗi đường dẫn worktree.
 
+Hai bẫy khi dùng `target/` chung:
+- **Độ mới.** Cargo xét độ mới theo mtime trên đường dẫn tương đối với workspace. Bản build
+  của worktree khác, nếu build sau, sẽ được coi là mới với source cũ hơn của bạn. Trước mỗi
+  lần gọi runner, kể cả cổng tích hợp trên main, hãy `touch` một file gốc của mỗi crate
+  (`crates/*/src/lib.rs`, `crates/deployment-checker/src/main.rs`,
+  `apps/desktop/src-tauri/src/lib.rs`).
+- **Tham số.** `powershell -File … -CargoArgs a,b,c` truyền cả danh sách thành một chuỗi.
+  Gọi bằng `-Command` với `@('a','b')`. Tên receipt không được chứa `::`.
+
+Sổ độ trễ đọc dùng chung cho cả tiến trình. Test nào kỳ vọng cửa sổ lúc rảnh cho một máy
+chưa đo chỉ đúng khi trong cùng tiến trình test có ít hơn `FLEET_MIN_PHONES` máy khác có lần
+đọc gần đây. Trong vòng máy, cảnh báo `Đọc chậm <command>` (lần đọc quá 500 ms, tính cả thời
+gian chờ lane) là telemetry đọc IPC.
+
+Chế độ nghiệm thu không chạy worker đóng TikTok sau job (`state.rs:1678`), cũng không chạy
+bảo trì helper tự động. Hệ quả:
+- TikTok bị để phát feed sau job. Ngày 15/10 có 6/20 máy bị preflight báo quá tải
+  (surfaceflinger 62–94%); bấm HOME là 20/20 đạt.
+- Helper bị kẹt `owner_conflict` hoặc `HelperMaintenanceCleanupPending` không tự gỡ.
+
+Vì vậy trước preflight hãy đưa máy về HOME. Đếm mọi `--helper-recover` và retry tay là can
+thiệp.
+
 ## Bàn giao
 
 Ghi scope, source commit/diff, lệnh thật/exit, baseline failures, artifact/hash và phần

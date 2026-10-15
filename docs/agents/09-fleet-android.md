@@ -25,6 +25,27 @@ sở hữu inventory/hash; không nhân bản danh sách pin.
 - Các engine đi qua control plane. IdleSweep thấp ưu tiên, không tranh foreground.
   Không dùng direct probe khi desktop giữ cùng USB.
 
+### Roster, đọc cây và vòng đời UiAutomator2 (gf90, 15/10/2026)
+
+- **Roster.** Máy rời ADB cùng lúc (≥ 3 máy và ≥ 10% trong 20 s, chưa đo) được giữ trên lưới ở
+  trạng thái Mất kết nối, chỉ để hiển thị, tối đa 12 giờ, kèm một dòng `device.mass_disconnect`.
+  `list()`/`get()` chỉ trả máy đang sống; không bao giờ chọn máy để giao việc từ
+  `list_with_absent()`.
+- **Đọc cây.** Các vòng chờ trước Post lấy mục tiêu từ chính cây mà bước popup vừa đọc (một
+  `/source` mỗi vòng). Chỉ selector chính xác mới dùng được đường này, vì `descriptionContains`/
+  `textContains` của UiSelector không phân biệt hoa thường, còn `Node::matches` hạ chữ thường
+  `content-desc`.
+- **Helper.** Helper được ghim theo SHA-256 trong `riviu_agent/runtime.rs::ensure_runtime`: lệch
+  thì cài lại, và Android tự từ chối hạ cấp. `prepare_package`/`MIN_LAUNCHER_VERSION` và
+  `upgrade_if_stale` không chạy trong production.
+- **UiAutomator2.** Cả hai nửa UiAutomator2 được so với APK đóng gói, lệch thì cài lại tối đa
+  một lần mỗi boot.
+- **UiAutomation chết.** UiAutomator2 server có thể sống lâu hơn tiến trình `am instrument`
+  chủ của nó. Ca đo được: r127, máy 37, sau khi hộp USB rớt lúc 07:04. Server vẫn trả lời
+  `/status` và đọc cây, nhưng mọi tap lỗi W3C 400 và mọi ảnh chụp lỗi (`DeadObjectException`).
+  Chỉ `/screenshot` hoặc input mới chứng minh được nó còn sống. Riviu dò ca này rồi khởi động
+  lại instrumentation, có giới hạn.
+
 ### UiAutomator của công cụ khác và quyền TikTok
 
 - Số đo: campaign `6e0bfb7c` (12/10/2026 02:28, 20 máy, 0 bài đăng) có UiAutomator của

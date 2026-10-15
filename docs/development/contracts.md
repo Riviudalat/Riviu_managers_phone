@@ -76,6 +76,15 @@ giữ read model persisted theo run/device/phạm vi; metadata thiết bị cach
 revision bất biến có thể cache lâu, còn danh sách thay đổi nhanh luôn stale. Mutation
 làm stale đúng family liên quan. Retry, focus và reconnect refetch bị tắt. Credential,
 preflight, probe thiết bị và effect không dùng query cache.
+TanStack 5.103 chạy một timer `refetchInterval` riêng cho mỗi observer và đặt lại timer ở mỗi
+lần query cập nhật. Vì vậy một component đọc cùng key với interval ngắn hơn sẽ âm thầm đè nhịp
+của nơi sở hữu poll. View phải dùng dữ liệu của lần đọc đó, không thêm observer. Cache đọc một
+lần theo phiên bản cần `gcTime` hữu hạn, cộng một observer tắt (`enabled: false`) giữ phiên bản
+đang dùng; chỉ có `gcTime` hữu hạn thì mỗi chu kỳ gc lại đọc lại tất cả.
+Lệnh `#[tauri::command]` đồng bộ chạy trên luồng UI của WebView (tauri-macros 2.6.3). Lệnh đọc
+bị poll hoặc nặng phải là `async` và đọc qua `storage_read`, như `read_for_view` trong
+`publish_commands/execution.rs`; lần đọc quá 500 ms (tính cả thời gian chờ lane) ghi cảnh báo
+`Đọc chậm <command> …`.
 SQLite async đi qua `StorageExecutor`: tối đa một writer, hai reader và 64 yêu cầu
 chờ; admission xảy ra trước `spawn_blocking`. Các monitor/guard đọc theo lô trong
 executor; transaction không được giữ qua await HTTP hoặc thiết bị.
@@ -1417,6 +1426,19 @@ media được tải theo bài đã nhận, hàng chờ chỉ giữ ID. `publish
 sử lần thử; `publication_id` được backfill bằng assignment ID và bất biến, không
 nhóm lại dữ liệu cũ theo caption, thư mục hoặc tên máy. Intent và revision của
 pipeline vẫn kiểm tại nút Đăng. Worker đã lỗi sau effect chỉ chuyển sang xác minh.
+
+Trong trần đó, claim compose mới được giãn:
+- tối đa một lần mỗi 8 s;
+- số máy soạn cùng lúc bắt đầu ở 4, chỉ tăng dần tới trần khi q90 đọc cây của fleet dưới 8 s;
+- giảm một nửa (không dưới 2) mỗi lần `publish_observation_deadline`.
+
+Retry cả lượt chờ q90 đó hạ, tối đa 10 phút sau giờ hẹn. Máy chưa có số đo mượn q90 của fleet.
+Khi adb server mất hoặc bị nghi treo thì không claim việc mới, tối đa 10 phút mỗi sự cố; job
+đang chạy vẫn đi tiếp theo luật intent. Hằng số và lý do nằm trong
+`crates/core/src/read_latency.rs`; các số này chưa đo, phải đo lại trên box 20 máy.
+Một hàng album đã thấy một lần mà chưa xác nhận được trả `album_row_unconfirmed` (retryable),
+không phải `album_not_visible`. Bằng chứng ổn định qua hai lần đọc phải từ chối snapshot dùng
+lại: generation phải tăng.
 
 Dispatcher không tự quét danh sách máy (`publish_commands/pipeline.rs`, `RosterRefresh`). Nó
 đọc kết quả thô của lượt quét nền (`state.rs`, ~3 giây một lượt, `DeviceRegistry::record_scan`

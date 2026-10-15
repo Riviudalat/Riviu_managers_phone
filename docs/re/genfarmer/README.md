@@ -611,4 +611,4 @@ Ba đính chính cho các ghi chép trước:
 
 **Không chạy GenFarmer và Riviu trên cùng PC.**
 
-**Đính chính §12.6:** câu "Riviu đang ở thế tốt hơn" về SQLite trên main thread chưa đúng. Các lệnh Tauri đồng bộ (`publish_get`, `publish_list`, `publish_recovery_capabilities`, ...) chạy trên luồng UI. Riviu cần đưa các lệnh đọc nặng ra khỏi luồng đó.
+**Đính chính §12.6:** câu "Riviu đang ở thế tốt hơn" về SQLite trên main thread chưa đúng. Các lệnh Tauri đồng bộ (`publish_get`, `publish_list`, `publish_recovery_capabilities`, ...) chạy trên luồng UI. Từ đợt gf90 (15/10/2026), bốn lệnh `publish_get`, `publish_list`, `publish_recovery_capabilities` và `interaction_get` đã chạy async trên lane đọc của storage.

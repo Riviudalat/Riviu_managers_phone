@@ -41,7 +41,10 @@ Các script có `--help`; đối số cụ thể theo invocation trong workflow 
    công cụ Android và GUI service đã qualify của bản trước rồi chạy lại cổng collector trên bản chép
    (tree hash phải trùng). Bản 0.2.83 làm vậy, bước chuẩn bị chỉ mất vài giây.
 5. `scripts/build_gui_service.py`, rồi `scripts/test_gui_service_package.py`:
-   GUI runtime, OCR models và overlay `target/tauri-gui-service.conf.json`.
+   GUI runtime, OCR models và overlay `target/tauri-gui-service.conf.json`. Controller
+   nghiệm thu dev chạy GUI sidecar từ venv source của checkout chính, đọc lúc sidecar khởi
+   động. Vì vậy một thay đổi trong `sidecars/gui-service` đã chạy được trên máy vẫn phải
+   build lại bước này, không được chép bản của lần phát hành trước.
 6. Build `riviu-deployment-checker` với target/version/config Google tương ứng;
    stage bằng `scripts/stage_deployment_checker.py`. Checker không phải EXE cũ
    tùy ý còn trong cache; hash/version phải khớp bước build cuối.

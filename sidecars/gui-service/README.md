@@ -83,7 +83,11 @@ khi trả slot; worker thay thế khởi động ở yêu cầu sau, có backoff
 khởi động lại mỗi phút (vượt trần trả HTTP 503 `gui_ocr_workers_unavailable`).
 Kết quả mang ticket của lượt gửi và định danh request, nên không thể trả lời một
 request khác. Mỗi request ghi một dòng `ocr ... queue_ms=... work_ms=...` vào
-stderr (`service.log`) và trả header `x-riviu-queue-ms`. Thiếu model trả HTTP 503 và capability `ocrModelsMissing`.
+stderr (`service.log`) và trả header `x-riviu-queue-ms`. Đo trên PC farm ngày 15/10/2026:
+OCR một lượt kiểu cũ tốn 2–4,5 s, gần như toàn bộ là khởi động process và nạp model;
+worker thường trú đọc một frame cỡ bảng nhạc trong 0,45–0,72 s. Worker Python dài hạn
+dùng NumPy phải đặt `OPENBLAS_NUM_THREADS=1`: không đặt thì mỗi process giữ khoảng
+700 MB commit trên PC 20 nhân, có đặt thì khoảng 85 MB. Thiếu model trả HTTP 503 và capability `ocrModelsMissing`.
 Sẵn sàng có `localOcr`, `ocr.vi`, `ocr.en` dù chưa cấu hình AI provider.
 
 Kết quả gồm văn bản, từng dòng có bounds pixel trong **ảnh gốc**, confidence,
