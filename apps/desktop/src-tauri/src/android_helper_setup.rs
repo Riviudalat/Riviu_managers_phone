@@ -260,7 +260,7 @@ async fn auto_apply_baseline(android: &AndroidDriver, db: &Database, serial: &st
 /// helper is verified and before the phone is admitted to work, switch the system language to
 /// English once per phone boot. Never fatal; the result goes to the operation log, and a phone
 /// still refused keeps the manual steps in its refusal.
-async fn auto_switch_system_language(android: &AndroidDriver, db: &Database, serial: &str) {
+async fn auto_switch_system_language(android: &AndroidDriver, db: &Arc<Database>, serial: &str) {
     use riviu_android_driver::driver::SystemLanguageSwitch;
     let outcome = android
         .switch_system_language_to_english(serial, |locale| {
@@ -289,7 +289,7 @@ async fn auto_switch_system_language(android: &AndroidDriver, db: &Database, ser
             ),
         ),
         Ok(SystemLanguageSwitch::SavedForReboot { before, after }) => {
-            match reboot_for_language(android, db, serial) {
+            match reboot_for_language(android, db, serial).await {
                 Ok(()) => match android.issue_load_reboot(serial, "đổi ngôn ngữ điện thoại sang English").await {
                     // The phone leaves adb and comes back as a new connection, so this setup
                     // runs again on the new boot; until then the language gate still refuses it.
@@ -323,10 +323,15 @@ async fn auto_switch_system_language(android: &AndroidDriver, db: &Database, ser
 }
 
 /// Ok when this connection may reboot the phone to apply its language: the reboot budget the
-/// load monitor uses is not spent, and the ledger has no uncertain or in-flight work.
-fn reboot_for_language(android: &AndroidDriver, db: &Database, serial: &str) -> Result<(), String> {
-    if !android.load_reboot_budget_left(serial) {
-        return Err("đã tự khởi động lại một lần trong 6 giờ qua".into());
+/// load monitor uses is not spent (durably, across controller restarts), and the ledger has
+/// no uncertain or in-flight work.
+async fn reboot_for_language(
+    android: &AndroidDriver,
+    db: &Arc<Database>,
+    serial: &str,
+) -> Result<(), String> {
+    if let Some(spent) = super::device_load::reboot_budget_blocker(android, db, serial).await {
+        return Err(spent);
     }
     match db.app_completion_block_reason(serial) {
         Ok(None) => Ok(()),

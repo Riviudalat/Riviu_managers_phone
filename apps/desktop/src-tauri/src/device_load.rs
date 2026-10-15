@@ -9,7 +9,9 @@
 //!   never cleaned while an effect step may be running.
 //! - Idle and marked: fresh sample; tier 1 (light cleanup) under a Repair lease; then tier 2
 //!   (reboot) only when the durable ledger shows nothing uncertain or in flight on the phone,
-//!   no job holds it and the 6 h budget allows. Otherwise "quá tải — chờ người vận hành".
+//!   no job holds it and the 6 h budget allows; the budget is read back from the durable
+//!   activity log, so a controller restart does not renew it. Otherwise "quá tải — chờ người
+//!   vận hành".
 //! - A job's own load gate: [`reboot_for_job`] is the driver's tier 2 inside the job's turn,
 //!   under its exclusive lease and before any of its effects. It is not a background worker,
 //!   so it also runs while acceptance mode freezes this monitor (12/10/2026: frozen in every
@@ -24,7 +26,7 @@ use std::sync::Arc;
 use riviu_android_driver::AndroidDriver;
 use riviu_core::db::Database;
 use riviu_core::device_control::load::{
-    DeviceLoadStatus, LoadVerdict, BACKGROUND_SAMPLE_PERIOD_MS,
+    DeviceLoadStatus, LoadVerdict, BACKGROUND_SAMPLE_PERIOD_MS, REBOOT_BUDGET_WINDOW_MS,
 };
 use riviu_core::{DeviceControlPlane, DeviceInfo, DevicePlatform, DeviceStatus, DeviceWorkOwner};
 use tokio::task::{Id, JoinSet};
@@ -171,10 +173,36 @@ async fn reboot_blocker(
             return Some(format!("máy đang được {owner:?} giữ"));
         }
     }
-    if !android.load_reboot_budget_left(udid) {
-        return Some("đã tự khởi động lại một lần trong 6 giờ qua".into());
+    if let Some(spent) = reboot_budget_blocker(android, db, udid).await {
+        return Some(spent);
     }
     ledger_blocker(db, udid, false).await
+}
+
+/// The reason this phone's 6 h reboot budget allows no reboot now, or `None`. This process's
+/// own record first, then the durable activity log, so a controller restart grants no new
+/// reboot; an unreadable log grants none either. Load and language reboots share it.
+pub(super) async fn reboot_budget_blocker(
+    android: &AndroidDriver,
+    db: &Arc<Database>,
+    udid: &str,
+) -> Option<String> {
+    const SPENT: &str = "đã tự khởi động lại một lần trong 6 giờ qua";
+    if !android.load_reboot_budget_left(udid) {
+        return Some(SPENT.into());
+    }
+    let serial = udid.to_string();
+    let since = chrono::Utc::now() - chrono::Duration::milliseconds(REBOOT_BUDGET_WINDOW_MS);
+    match db
+        .storage_read(move |db| db.phone_rebooted_since(&serial, since))
+        .await
+    {
+        Ok(false) => None,
+        Ok(true) => Some(format!("{SPENT} (theo nhật ký thao tác)")),
+        Err(error) => Some(format!(
+            "không đọc được nhật ký khởi động lại trong 6 giờ qua ({error:#})"
+        )),
+    }
 }
 
 /// The durable ledger's reason this phone still has work, or `None`. `job_holds_phone`: the
@@ -324,8 +352,8 @@ pub(super) async fn reboot_for_job(
     udid: &str,
     why: &str,
 ) -> Result<(), String> {
-    if !android.load_reboot_budget_left(udid) {
-        return Err("đã tự khởi động lại một lần trong 6 giờ qua".into());
+    if let Some(spent) = reboot_budget_blocker(android, db, udid).await {
+        return Err(spent);
     }
     if let Some(blocker) = ledger_blocker(db, udid, true).await {
         return Err(blocker);

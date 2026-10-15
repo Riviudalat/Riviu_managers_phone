@@ -405,4 +405,22 @@ impl Database {
         })?;
         Ok(rows.collect::<rusqlite::Result<Vec<_>>>()?)
     }
+
+    /// Whether the activity log holds a Riviu reboot of this phone at or after `since`: the
+    /// `device.load.reboot` line the Android driver writes before every load or language
+    /// reboot, as `Máy <serial>: …`. The durable half of the 6 h reboot budget, so a
+    /// controller restart does not grant another reboot. Read-only.
+    pub fn phone_rebooted_since(&self, serial: &str, since: DateTime<Utc>) -> anyhow::Result<bool> {
+        let conn = self.conn()?;
+        let prefix = format!("Máy {serial}:");
+        let rebooted = conn.query_row(
+            "SELECT EXISTS(SELECT 1 FROM op_logs
+               WHERE action='device.load.reboot'
+                 AND substr(detail,1,length(?1))=?1
+                 AND julianday(created_at)>=julianday(?2))",
+            params![prefix, since.to_rfc3339()],
+            |row| row.get::<_, bool>(0),
+        )?;
+        Ok(rebooted)
+    }
 }
