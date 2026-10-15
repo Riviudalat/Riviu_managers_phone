@@ -7,6 +7,8 @@
 //!
 //! - Running job: sample only (read-only). A phone that crosses a threshold is marked; it is
 //!   never cleaned while an effect step may be running.
+//! - Idle and unmarked: one read-only sample about every 10 minutes, a few phones at a time,
+//!   so an overloaded phone is marked (and handled below) before a job claims it.
 //! - Idle and marked: fresh sample; tier 1 (light cleanup) under a Repair lease; then tier 2
 //!   (reboot) only when the durable ledger shows nothing uncertain or in flight on the phone,
 //!   no job holds it and the 6 h budget allows; the budget is read back from the durable
@@ -20,7 +22,7 @@
 //! Publish work that only waits for the phone (queued, due, transferring, imported) blocks
 //! neither tier: it has sent nothing to TikTok, and its job waits out the reboot.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 
 use riviu_android_driver::AndroidDriver;
@@ -38,6 +40,13 @@ use super::CommandAdmissionState;
 const POST_REBOOT_SAMPLE_WINDOW: Duration = Duration::from_secs(60);
 /// Let a cleaned phone settle before the fresh sample decides.
 const SETTLE_AFTER_CLEANUP: Duration = Duration::from_secs(3);
+/// How often an idle phone nobody has marked gets one read-only sample, so an overloaded
+/// phone is known (and cleaned while idle) before a job claims it. Not measured: 30 phones
+/// at one shell each per 10 min is ~3 shells a minute beside the ~160 an idle fleet runs
+/// (r111, `helper_setup.rs`).
+const IDLE_SAMPLE_PERIOD: Duration = Duration::from_secs(10 * 60);
+/// Idle samples in flight at once. Not measured: keeps the sweep a trickle on the adb server.
+const MAX_IDLE_SAMPLES: usize = 3;
 
 pub(super) struct DeviceLoadMonitor {
     control: Arc<DeviceControlPlane>,
@@ -47,6 +56,8 @@ pub(super) struct DeviceLoadMonitor {
     last_visit: HashMap<String, Instant>,
     tasks: JoinSet<()>,
     running: HashMap<Id, String>,
+    /// The tasks in `running` that are idle samples.
+    idle_samples: HashSet<Id>,
     stopped: bool,
 }
 
@@ -65,6 +76,7 @@ impl DeviceLoadMonitor {
             last_visit: HashMap::new(),
             tasks: JoinSet::new(),
             running: HashMap::new(),
+            idle_samples: HashSet::new(),
             stopped: false,
         }
     }
@@ -79,6 +91,7 @@ impl DeviceLoadMonitor {
                 Err(error) => error.id(),
             };
             self.running.remove(&id);
+            self.idle_samples.remove(&id);
             if let Err(error) = result {
                 if !error.is_cancelled() {
                     log::error!("device load task failed: {error}");
@@ -103,11 +116,8 @@ impl DeviceLoadMonitor {
             if self.running.values().any(|running| running == udid) {
                 continue;
             }
-            if self
-                .last_visit
-                .get(udid)
-                .is_some_and(|at| at.elapsed() < period)
-            {
+            let visited = self.last_visit.get(udid).map(Instant::elapsed);
+            if visited.is_some_and(|elapsed| elapsed < period) {
                 continue;
             }
             let owner = self.control.current_work_owner(udid);
@@ -124,20 +134,29 @@ impl DeviceLoadMonitor {
                 Some(DeviceLoadStatus::Overloaded | DeviceLoadStatus::AwaitingOperator)
             );
             let idle_and_marked = owner.is_none() && marked;
-            if !job && !idle_and_marked {
+            let idle_sample = owner.is_none()
+                && !marked
+                && visited.is_none_or(|elapsed| elapsed >= IDLE_SAMPLE_PERIOD)
+                && self.idle_samples.len() < MAX_IDLE_SAMPLES;
+            if !job && !idle_and_marked && !idle_sample {
                 continue;
             }
             self.last_visit.insert(udid.to_string(), Instant::now());
             let udid = udid.to_string();
             let android = self.android.clone();
-            let handle = if job {
+            let handle = if job || idle_sample {
                 let task_udid = udid.clone();
-                self.tasks.spawn(async move {
+                let handle = self.tasks.spawn(async move {
                     // Read-only: marks the phone if it crosses a threshold, never cleans it.
+                    // An idle phone marked here takes the idle tier on a later tick.
                     if let Err(error) = android.sample_load(&task_udid, None).await {
                         log::debug!("device load sample {task_udid}: {error:#}");
                     }
-                })
+                });
+                if idle_sample {
+                    self.idle_samples.insert(handle.id());
+                }
+                handle
             } else {
                 let control = self.control.clone();
                 let admission = self.admission.clone();
@@ -158,6 +177,7 @@ impl DeviceLoadMonitor {
         self.tasks.abort_all();
         while self.tasks.join_next().await.is_some() {}
         self.running.clear();
+        self.idle_samples.clear();
     }
 }
 
