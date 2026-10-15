@@ -46,6 +46,29 @@ sở hữu inventory/hash; không nhân bản danh sách pin.
   Chỉ `/screenshot` hoặc input mới chứng minh được nó còn sống. Riviu dò ca này rồi khởi động
   lại instrumentation, có giới hạn.
 
+### Helper: job clipboard mất câu trả lời (gf91, 16/10/2026)
+
+- **Đối soát tự động.** Job clipboard mất câu trả lời được tự đối soát ở lần dùng clipboard
+  sau, lúc mở phiên, lúc tắt controller và lúc khởi động lạnh. Việc này chạy dưới lease của
+  máy và không lặp lại thao tác nào. Checkpoint `ime-checkpoint.json` ghi `action` và
+  `serviceInstance`.
+  - Chủ phiên còn trả lời: hỏi trạng thái theo ID.
+  - Chủ khác, 401, hoặc helper đã khởi động lại: job không còn chạy được nữa.
+  - Sau đó trả lại bàn phím đã ghi. Không có bản ghi thì dùng
+    `com.sec.android.inputmethod/.SamsungKeypad`, chỉ khi bàn phím này đang bật.
+- **Giới hạn sổ job của helper 0.x.** Helper giữ mọi job clipboard có tên của một chủ phiên
+  và từ chối job thứ 129 (`clipboard_ledger_full`, `MainThreadJobs(…,128)`); snapshot giới
+  hạn 32. Riviu trả phiên và nhận phiên mới sau 96 job hoặc sau lần bị từ chối đầu tiên.
+  Sửa tận gốc phải làm trong APK. Máy 48 ở r129 bị khóa đúng ở lượt xác minh thứ 9,
+  khoảng 150 job.
+- **Phiên cũ không nhận lại được.** `ensure_runtime` tự thay phiên helper cũ không nhận lại
+  được (`owner_conflict`, khóa bị từ chối) bằng maintenance sẵn có, một lần cho mỗi boot id
+  (`auto-supersede.json`). Lỗi `stagePublishMedia … HelperRecoveryRequired` trước Post giờ
+  được thử lại.
+- **Kẹt cùng lúc trên nhiều máy (r129, 30 máy).** Lệnh agent đơn lẻ kẹt 22–29 s cùng lúc trên
+  nhiều máy, trong cùng khoảng 17:35:25–17:35:55 UTC, trong khi `adb.serial_queue` p90
+  ≤ 5 ms. Nghi đường USB/host dùng chung, không phải từng máy.
+
 ### UiAutomator của công cụ khác và quyền TikTok
 
 - Số đo: campaign `6e0bfb7c` (12/10/2026 02:28, 20 máy, 0 bài đăng) có UiAutomator của

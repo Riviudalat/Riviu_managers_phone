@@ -143,7 +143,7 @@ như trước. Một lần locate (tìm rồi đọc khung/thuộc tính) tính 
 bắt đầu lần đọc mới và không poll lại. Ân hạn dừng ngay khi Stop và không bao giờ vượt ngân sách
 nhạc đang bao bước (mọi `with_*_budget` là trần; chính ngân sách hết thì không có ân hạn). Không
 áp cho thao tác bấm/gõ/vuốt/back (vẫn xả hết và đối soát như cũ), cho đọc popup (đọc xong vẫn
-cần thêm lần đọc của bước nên vô ích), cho bằng chứng tươi trước Post và mọi thứ sau Post
+cần thêm lần đọc của bước nên vô ích; trừ khi cây của bước popup chính là lần đọc của bước, như composer chờ trong cây: khi đó foreground + `/source` + foreground đóng là một lần đọc nên ân hạn hoàn tất cả cặp ngoặc, và bước nhận `Ready` trong ân hạn phải xét kết quả trước mọi kiểm `now >= deadline`), cho bằng chứng tươi trước Post và mọi thứ sau Post
 (`close_read_grace` trước `final_reproof_window`). Kết quả nhận trong ân hạn là bằng chứng tươi
 như mọi lần đọc; kiểm epoch/generation trước khi bấm vẫn áp dụng.
 
@@ -431,8 +431,14 @@ giờ. Các lịch khác, Nuôi và Điều phối vẫn đóng băng, không s�
 
 Verifier nền chỉ nhận bài đến hạn khi có `publishVerification` hợp lệ cho đúng
 campaign và serial. Nó kiểm lại khoảng 2 phút sau lượt trước; dừng sau 8 lượt liên tiếp không có bằng chứng mới
-khi tìm bài (lượt TikTok còn xử lý bài theo dõi bằng hạn 60 phút riêng), và có ngân sách riêng 12 lần metadata chưa sẵn sàng của candidate đã ràng buộc;
-không tự mở lại bài cần review. Truy vấn và cập nhật lượt thiết bị giới hạn trong
+khi tìm bài (lượt TikTok còn xử lý bài theo dõi bằng hạn 60 phút riêng), và có ngân sách riêng 12 lần metadata chưa sẵn sàng của candidate đã ràng buộc.
+Lỗi công cụ `clipboardUnwritable`/`clipboardUnreadable` tính vào ngân sách riêng
+`infrastructureObservations` (trần 15, nguyên nhân `infrastructureRetryExhausted`), không
+tính vào 8 lượt không có tiến triển. Một dòng dừng do hết ngân sách, nếu lần cuối là
+`metadataUnavailable`, `clipboard*`, `readFailed` hay `staleSnapshot`, được tự mở lại
+mỗi 30 phút trong 24 giờ (`automaticRecheck`). Dòng có "bài khác", sai tài khoản, hai bài
+khớp hay metadata bị bác thì không bao giờ được tự mở lại. Truy vấn và cập nhật lượt
+thiết bị giới hạn trong
 scope. Cleanup nền cần riêng `publishCleanup` và chỉ dọn bản chuyển đã có proof
 canonical qua kiểm revision/lease hiện có. Thiếu hoặc đổi scope thì không nhận
 việc mới; dùng Dừng để hủy và nhả việc đang chạy.
@@ -1002,7 +1008,9 @@ thời gian trong khung Đăng, rồi trang mở rộng có caption khớp chín
 (`validate_photo_identity`). Nhãn theo giờ/ngày ("· 1h ago", đo r119 máy 46 khi lộ trình máy
 tới bài 1–2 giờ sau Đăng) không đặt được cả khoảng làm tròn sau lần Đăng; khi nhãn không loại
 trừ lần Đăng (thời điểm tạo muộn nhất có thể không trước `submittedAt`) thì chỉ cho phép Copy,
-và cùng phép kiểm ID đó mới chứng minh thời gian. Nhãn phút giữ quy tắc cũ. Trước khi duyệt lưới,
+và cùng phép kiểm ID đó mới chứng minh thời gian. Nhãn phút có khoảng làm tròn vắt qua
+`submittedAt` cũng chỉ cho phép Copy, rồi ID bài được cấp trong `prepared_at`…`submittedAt+30m`
+chứng minh thời gian (r128 máy 39: ID cấp 25 s sau Đăng). Trước khi duyệt lưới,
 mỗi lượt bấm lại tab Profile một lần để TikTok tải lại lưới (r118 máy 47: 90 phút sau Đăng ô
 mới nhất vẫn là bài 12 giờ trước), chờ lưới đổi tối đa 5 giây rồi chứng minh lại tài khoản.
 Bảng Chia sẻ Global45.7.3/en (đo 14/10/2026, máy 36 và 44) có `Bottom sheet` với header
