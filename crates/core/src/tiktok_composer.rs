@@ -2679,11 +2679,16 @@ impl<'a, P: TapPlanner> Composer<'a, P> {
                     .as_deref(),
             );
             match result {
+                // The pixels could not be read, including an error that arrived during the OCR
+                // read grace; that says nothing about the screen.
                 Err(error)
                     if error.is::<crate::driver::ScreenshotReadUnavailable>()
                         || error.is::<crate::tiktok_sound::OcrReadUnavailable>() =>
                 {
-                    if stop.load(Ordering::Relaxed) || Instant::now() >= deadline {
+                    // The OCR window is given up: a grace that answered it with this error
+                    // did not satisfy the step, and the XML's first read must not log it so.
+                    crate::ui_automation::runtime::window_closed(deadline);
+                    if stop.load(Ordering::Relaxed) {
                         return Ok(false);
                     }
                     if self.session.gui_session_epoch() != epoch {
@@ -2696,14 +2701,33 @@ impl<'a, P: TapPlanner> Composer<'a, P> {
                     };
                     // The measured XML route has independent app/session and
                     // two-generation proof; no OCR geometry or tap is reused.
+                    // Its own window opens at the hand-over. r130-r134 (SM-G955F/N, Global
+                    // 45.7.3/en) had 25 OCR failures 19-74 s after the tap; sharing the OCR's
+                    // 60 s left the XML 0-41 s, and the 4 that came after it read no XML.
+                    let xml_deadline = crate::tiktok_sound::phase_deadline(read_window(
+                        "editorXmlAfterOcr",
+                        editor_recovery::RECOVERY_WINDOW,
+                        3,
+                    ));
+                    let mut trace = StageDiagnosticOperation::start(
+                        "editorXmlAfterOcr",
+                        &epoch,
+                        Some(xml_deadline),
+                    );
                     let recovered = editor_recovery::observe(
                         self.session,
                         controls.package,
                         marker,
-                        deadline,
+                        xml_deadline,
                         stop,
                     )
                     .await;
+                    trace.finish(match &recovered {
+                        Ok(true) => "ready",
+                        Ok(false) => "unavailable",
+                        Err(_) => "error",
+                    });
+                    drop(trace);
                     crate::publish_recovery::note_read(
                         "editor",
                         "measuredXmlAfterImageUnavailable",
@@ -2717,6 +2741,8 @@ impl<'a, P: TapPlanner> Composer<'a, P> {
                     );
                     return recovered;
                 }
+                // `Ok(false)`: OCR answered for the whole window and never saw the bottom bar
+                // stable twice. The XML proof cannot see occlusion, so it never overrides that.
                 other => return other,
             }
         }
@@ -5329,7 +5355,9 @@ where
         ))
         .await?
         {
-            ComposerVerdict::Stopped => {}
+            // `Stopped` means the editor was reached only while Stop is clear; a Stop during
+            // the media walk must not write the `mediaSelected` checkpoint.
+            ComposerVerdict::Stopped if !stop.load(Ordering::Relaxed) => {}
             refusal => return Ok((refusal, None)),
         }
         crate::publish_recovery::step("sound", Some("mediaSelected"))?;
@@ -6008,7 +6036,8 @@ where
     F: FnMut() -> anyhow::Result<()>,
 {
     match reach_selected_edit_step(composer, request, stop).await? {
-        ComposerVerdict::Stopped => {}
+        // The editor was reached only while Stop is clear.
+        ComposerVerdict::Stopped if !stop.load(Ordering::Relaxed) => {}
         refusal => return Ok(refusal),
     }
     if !publish {
@@ -6093,7 +6122,13 @@ async fn reach_selected_media_edit_step<P: TapPlanner>(
     });
     composer.emit_progress(PublishProgress::OpeningEditor);
     if !composer.advance_to_edit_step(&next, stop).await? {
-        return Ok(ComposerVerdict::EditStepDidNotOpen);
+        // A Stop is reported as a Stop, never as an editor that did not open; the callers
+        // check Stop before they read `Stopped` as the editor reached.
+        return Ok(if stop.load(Ordering::Relaxed) {
+            ComposerVerdict::Stopped
+        } else {
+            ComposerVerdict::EditStepDidNotOpen
+        });
     }
     Ok(ComposerVerdict::Stopped)
 }
