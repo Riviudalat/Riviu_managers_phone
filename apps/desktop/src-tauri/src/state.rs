@@ -1779,6 +1779,31 @@ impl AppState {
                             }
                             Err(error) => log::warn!("publish verification deadline: {error}"),
                         }
+                    } else {
+                        // Expiry stays off under dev acceptance, but a handed-back posted row
+                        // resumes verification there too, within the same pinned scope as every
+                        // acceptance mutation.
+                        match db.resume_publish_verifications_after_handoff(|campaign, udid| {
+                            acceptance.allows(
+                                crate::dev_acceptance::AcceptanceCapability::PublishVerification,
+                                campaign,
+                                udid,
+                            )
+                        }) {
+                            Ok(campaigns) => {
+                                for campaign_id in campaigns {
+                                    events.emit(riviu_core::events::AppEvent::PublishUpdated {
+                                        revision: db
+                                            .publish_campaign_revision(&campaign_id)
+                                            .unwrap_or_default(),
+                                        campaign_id,
+                                    });
+                                }
+                            }
+                            Err(error) => {
+                                log::warn!("tự tiếp tục xác minh sau khi trả máy: {error:#}")
+                            }
+                        }
                     }
                     let candidates = if acceptance.active() {
                         let campaign_ids = acceptance.scoped_campaign_ids();
