@@ -56,6 +56,21 @@ sở hữu inventory/hash; không nhân bản danh sách pin.
   - Chủ khác, 401, hoặc helper đã khởi động lại: job không còn chạy được nữa.
   - Sau đó trả lại bàn phím đã ghi. Không có bản ghi thì dùng
     `com.sec.android.inputmethod/.SamsungKeypad`, chỉ khi bàn phím này đang bật.
+  - Mỗi lần khép, Riviu ghi bản sao checkpoint và `receipt.json` vào
+    `ime-settled/<sha256 checkpoint>/` trước khi đổi bàn phím, rồi mới xóa
+    `ime-checkpoint.json`. Receipt kết thúc ở `closedSettled` (chủ phiên chứng minh) hoặc
+    `closedUnsettled`. Không gửi lại job, không coi clipboard là đã ghi.
+- **Rớt USB giữa lúc đổi bàn phím.** Box rớt USB giữ nguyên boot id và tiến trình helper,
+  nhưng adb xóa mọi cổng chuyển tiếp của máy. r132 (máy 47, 16/10/2026): client đang giữ chỉ
+  hỏi qua cổng đã chết, không có bằng chứng helper khởi động lại, nên
+  `prepare_helper_runtime` chặn ở `cleanup_is_pending` (`HelperRecoveryRequired` trần) mọi
+  lượt suốt hơn 20 phút; `ensure_runtime` không chạy tới.
+  - Cổng của client không còn trong `adb forward --list` (rớt USB, hoặc adb-server khởi động
+    lại) thì hỏi chủ phiên qua cổng mới, xong gỡ cổng đó.
+  - Checkpoint `phase: "switching"` không có `operationId` chưa từng gửi job, nên được khép
+    cả khi chủ phiên không trả lời (`ownerUnanswered`). Chủ phiên không trả lời, chủ khác,
+    401 hay helper khởi động lại thì bỏ client đang giữ; `ensure_runtime` nhận lại phiên,
+    hoặc tự thay phiên một lần cho mỗi boot id.
 - **Giới hạn sổ job của helper 0.x.** Helper giữ mọi job clipboard có tên của một chủ phiên
   và từ chối job thứ 129 (`clipboard_ledger_full`, `MainThreadJobs(…,128)`); snapshot giới
   hạn 32. Riviu trả phiên và nhận phiên mới sau 96 job hoặc sau lần bị từ chối đầu tiên.
