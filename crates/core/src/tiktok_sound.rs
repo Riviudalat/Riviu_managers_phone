@@ -920,10 +920,18 @@ async fn clear_sound_popup(
     }
     let package = (*binding).context("sound popup target is not bound")?;
     drop(binding);
-    let version =
-        read_sound(async { Ok(session.app_version(package).await.unwrap_or_default()) }).await?;
-    let language =
-        read_sound(async { Ok(session.ui_language().await.unwrap_or_default()) }).await?;
+    // A failed read stays that read's error, classified as such (an adb drop is a disconnect).
+    // r133 phone 49 (16/10/2026): its USB dropped for a second, both reads defaulted to "", and
+    // the empty pair ended the row as an unmeasured "sound popup profile unavailable".
+    let unread = || {
+        crate::publish_recovery::retryable_error(
+            "sound_profile_unread",
+            "chưa đọc được phiên bản hoặc ngôn ngữ TikTok cho bước nhạc; chưa bấm Đăng",
+        )
+    };
+    let version = read_sound(async { session.app_version(package).await.ok_or_else(unread) })
+        .await?;
+    let language = read_sound(async { session.ui_language().await.ok_or_else(unread) }).await?;
     let labels = crate::tiktok_labels::controls_for_runtime(package, &language, &version)
         .context("sound popup profile unavailable")?;
     let mut popup = popup.lock().await;
