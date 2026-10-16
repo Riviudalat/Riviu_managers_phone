@@ -70,6 +70,7 @@ pub use schedule::*;
 pub(crate) mod preflight;
 mod preparation;
 mod preview;
+mod prior_post;
 mod sheet;
 // Unregistered stepwise entry points and their historical calibration.
 #[allow(dead_code)]

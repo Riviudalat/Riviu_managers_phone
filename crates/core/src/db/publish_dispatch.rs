@@ -254,6 +254,8 @@ impl Database {
         recovery.next_retry_at = agent_ready_at.map(|at| at as f64);
         recovery.reconnect_deadline = None;
         recovery.reconnect_retry = false;
+        // The operator's retry also opens a fresh wait for an earlier post on the phone.
+        recovery.prior_post_wait_since = None;
         tx.execute("INSERT INTO publish_recovery_state VALUES(?1,?2,?3) ON CONFLICT(assignment_id) DO UPDATE SET run_token=excluded.run_token,payload=excluded.payload",params![assignment_id,run.token,serde_json::to_string(&recovery)?])?;
         if let Some((revision, id)) = request {
             tx.execute(

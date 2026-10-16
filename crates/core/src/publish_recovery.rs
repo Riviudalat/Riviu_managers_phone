@@ -46,6 +46,10 @@ pub struct PublishRecoveryState {
     #[serde(default)]
     #[ts(type = "unknown | null")]
     pub sound: Option<crate::SoundSelectionEvidence>,
+    /// When this row first waited for an earlier post on its phone (`priorPostWaiting`), in
+    /// epoch ms. The wait's deadline counts from here; an operator retry clears it.
+    #[serde(default)]
+    pub prior_post_wait_since: Option<f64>,
 }
 impl Default for PublishRecoveryState {
     fn default() -> Self {
@@ -66,8 +70,19 @@ impl Default for PublishRecoveryState {
             observed_account: None,
             counts: BTreeMap::new(),
             sound: None,
+            prior_post_wait_since: None,
         }
     }
+}
+
+/// A phone's earlier post of another campaign is not yet proven on TikTok or verified, or its
+/// release did not complete, so this row must not send media or close TikTok yet. Requeued
+/// without spending the retry budget; the prior-post wait (`PRIOR_POST_WAIT_MINUTES`) bounds it.
+pub const PRIOR_POST_PENDING: &str = "prior_post_pending";
+
+/// Typed Retryable failure for [`PRIOR_POST_PENDING`]: nothing was sent to the phone.
+pub fn prior_post_pending(message: impl Into<String>) -> RecoveryFailure {
+    RecoveryFailure::new(PRIOR_POST_PENDING, FailureKind::Retryable, message)
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]

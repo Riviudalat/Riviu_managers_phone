@@ -1815,7 +1815,11 @@ impl Database {
              WHERE a.state IN ('verifying','uncertain','succeeded') AND (?1 IS NULL OR a.campaign_id=?1)
              AND (?2=0 OR json_extract(c.request_json,'$.verificationContractVersion')=1
                  OR (json_valid(a.evidence_json) AND json_extract(a.evidence_json,'$.verificationResume.version') IN (1,2)))
-             ORDER BY COALESCE(t.last_turn,0),a.updated_at,a.campaign_id,a.ordinal"
+             ORDER BY CASE WHEN instr(a.evidence_json,'\"priorPostPriority\"')>0 AND json_valid(a.evidence_json)
+                 AND EXISTS(SELECT 1 FROM publish_dispatch_jobs p
+                     WHERE p.assignment_id=json_extract(a.evidence_json,'$.priorPostPriority.assignmentId')
+                     AND p.state IN ('queued','running')) THEN 0 ELSE 1 END,
+             COALESCE(t.last_turn,0),a.updated_at,a.campaign_id,a.ordinal"
         )?;
         let rows = statement.query_map(params![campaign_id, current_contract_only], |row| {
             Ok((
@@ -2927,4 +2931,277 @@ fn reconcile_verified_campaign(
     conn.execute("UPDATE publish_campaigns SET state=?1,error_code=?2,revision=revision+1,updated_at=?3 WHERE id=?4",params![state,error,now,campaign_id])?;
     conn.execute("INSERT INTO publish_events(campaign_id,revision,kind,payload_json,created_at) SELECT id,revision,'state',?1,?2 FROM publish_campaigns WHERE id=?3",params![serde_json::json!({"state":state,"errorCode":error,"source":"post_verification"}).to_string(),now,campaign_id])?;
     Ok(())
+}
+
+/// What a publish job may do about one earlier post of another campaign still holding its
+/// phone (`PublishDeviceGuard::blocking`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+pub enum PriorPostClass {
+    /// TikTok already holds the post (`publish_upload_settled`): a job whose approval carries
+    /// `priorPosts` may pause its verification, close TikTok and post.
+    Releasable,
+    /// Not proven yet, but still observed automatically: wait, send nothing.
+    Pending,
+    /// Only a person can move it on: stop before Post now.
+    NeedsOperator,
+}
+
+/// One earlier post on the phone, read at one revision.
+#[derive(Debug, Clone)]
+pub struct PriorPostHold {
+    pub assignment_id: String,
+    pub campaign_id: String,
+    pub revision: i64,
+    pub updated_at: String,
+    pub class: PriorPostClass,
+    /// Short Vietnamese reason, quoted in the operator's text.
+    pub reason: String,
+    pub intent_sha256: Option<String>,
+    pub publication_stage: u64,
+    pub package: Option<String>,
+}
+
+/// Which earlier posts the automatic verifier will still observe: the dev acceptance scope, and
+/// whether automatic re-checks of parked rows run (off under acceptance).
+pub struct PriorPostScope<'a> {
+    pub observable: &'a (dyn Fn(&str, &str) -> bool + Sync),
+    pub automatic_recheck: bool,
+}
+
+fn observe_every_post(_: &str, _: &str) -> bool {
+    true
+}
+
+impl PriorPostScope<'static> {
+    /// Production: the verifier observes every campaign and re-checks parked rows.
+    pub fn production() -> Self {
+        Self {
+            observable: &observe_every_post,
+            automatic_recheck: true,
+        }
+    }
+}
+
+/// The class of one blocking hold on `udid`, re-read on `conn` (inside the caller's transaction
+/// when it writes). A missing row is skipped. Never edits anything.
+pub(super) fn classify_prior_post_hold(
+    conn: &Connection,
+    udid: &str,
+    hold: &PublishDeviceHold,
+    scope: &PriorPostScope<'_>,
+) -> anyhow::Result<Option<PriorPostHold>> {
+    use sha2::Digest;
+    let Some((candidate, state, _)) = recovery_row(conn, &hold.assignment_id)? else {
+        return Ok(None);
+    };
+    let (intent, evidence) = (
+        candidate.effect_intent.as_deref(),
+        candidate.evidence_json.as_deref(),
+    );
+    let parsed: serde_json::Value = evidence
+        .and_then(|raw| serde_json::from_str(raw).ok())
+        .unwrap_or_default();
+    let worker: bool = conn.query_row(
+        "SELECT EXISTS(SELECT 1 FROM publish_dispatch_jobs WHERE assignment_id=?1 AND state='running')
+         OR EXISTS(SELECT 1 FROM publish_work_claims WHERE owner=?1)",
+        [&candidate.assignment_id],
+        |r| r.get(0),
+    )?;
+    let handoff_in_flight: bool = conn.query_row(
+        "SELECT EXISTS(SELECT 1 FROM publish_assignments o JOIN settings s
+             ON s.key='publish.handoff-pending.'||o.id WHERE o.udid=?1)",
+        [udid],
+        |r| r.get(0),
+    )?;
+    let current_contract: bool = conn.query_row(
+        "SELECT COALESCE(json_extract(request_json,'$.verificationContractVersion')=1,0)
+         FROM publish_campaigns WHERE id=?1",
+        [&candidate.campaign_id],
+        |r| r.get(0),
+    )?;
+    let observed_by_worker = current_contract || explicitly_resumed_verification(&candidate);
+    let review_reason = || {
+        parsed["verificationStatus"]["reason"]
+            .as_str()
+            .map(str::to_owned)
+            .unwrap_or_else(|| "bài đó cần kiểm tra".into())
+    };
+    use PriorPostClass::*;
+    let (class, reason) = if candidate.stop_marker.is_some()
+        || publish_close_pending(conn, &candidate.campaign_id)?
+    {
+        (NeedsOperator, "lượt đó đã bị Dừng".to_owned())
+    } else if !(scope.observable)(&candidate.campaign_id, udid) {
+        (
+            NeedsOperator,
+            "lượt đó ngoài phạm vi nghiệm thu đang mở".to_owned(),
+        )
+    } else if state == "posting" {
+        (Pending, "bài đó đang được gửi lên TikTok".to_owned())
+    } else if !has_post_intent(intent) || !submission_identity_complete(intent) {
+        (
+            NeedsOperator,
+            "thiếu bằng chứng tài khoản hoặc thời điểm Đăng của bài đó".to_owned(),
+        )
+    } else if worker {
+        (Pending, "đang kiểm tra bài đó".to_owned())
+    } else if handoff_in_flight {
+        (Pending, "đang nhả máy cho lượt khác".to_owned())
+    } else if !observer_authorized(conn, &candidate)? {
+        // Excluded with no release proof that still holds and no resume stamp: frozen.
+        (
+            NeedsOperator,
+            "bài đó đã bị tạm dừng xác minh và chưa được tiếp tục".to_owned(),
+        )
+    } else if !observed_by_worker {
+        (
+            NeedsOperator,
+            "bài đó thuộc lượt theo cơ chế xác minh cũ".to_owned(),
+        )
+    } else {
+        // A released post resumes on its own only on a phone still saved with its account
+        // (`handoff_resume_due`); otherwise it is not released, only waited for.
+        let account: String = conn.query_row(
+            "SELECT COALESCE((SELECT handle FROM device_meta WHERE udid=?1),'')",
+            [udid],
+            |r| r.get(0),
+        )?;
+        let account = crate::publish::normalize_publish_account(&account);
+        let expected = intent
+            .and_then(|raw| serde_json::from_str::<serde_json::Value>(raw).ok())
+            .and_then(|value| {
+                value["expectedAccount"]
+                    .as_str()
+                    .map(crate::publish::normalize_publish_account)
+            });
+        let resumable = !account.is_empty() && expected.as_deref() == Some(account.as_str());
+        let settled = publish_upload_settled(intent, evidence);
+        // Still observed with no person: a pending check, or a parked row the worker re-checks.
+        let automatic = !needs_review(evidence)
+            || (scope.automatic_recheck
+                && automatic_recheck_review(&parsed)
+                && automatic_recheck_until(&parsed).is_some_and(|until| Utc::now() < until));
+        if settled && resumable {
+            (Releasable, "app đã thấy bài đó trên Hồ sơ".to_owned())
+        } else if !automatic {
+            (NeedsOperator, review_reason())
+        } else if settled {
+            (
+                Pending,
+                "máy chưa lưu đúng tài khoản của bài đó nên chỉ chờ xác minh".to_owned(),
+            )
+        } else if needs_review(evidence) {
+            (Pending, "chờ lần tự kiểm tra lại bài đó".to_owned())
+        } else if parsed["verificationStatus"]["reasonCode"] == "tiktokProcessing" {
+            (Pending, "TikTok báo bài đang được xử lý".to_owned())
+        } else {
+            (Pending, "chưa thấy bài trên Hồ sơ".to_owned())
+        }
+    };
+    Ok(Some(PriorPostHold {
+        assignment_id: candidate.assignment_id,
+        campaign_id: candidate.campaign_id,
+        revision: candidate.revision,
+        updated_at: hold.updated_at.clone(),
+        class,
+        reason,
+        intent_sha256: intent.map(|raw| format!("{:x}", sha2::Sha256::digest(raw.as_bytes()))),
+        publication_stage: parsed["verificationBudget"]["publicationStage"]
+            .as_u64()
+            .unwrap_or(0),
+        package: intent
+            .and_then(|raw| serde_json::from_str::<serde_json::Value>(raw).ok())
+            .and_then(|value| value["package"].as_str().map(str::to_owned)),
+    }))
+}
+
+/// Every blocking post of another campaign on `udid`, classified on `conn`.
+pub(super) fn prior_post_outlook_on(
+    conn: &Connection,
+    udid: &str,
+    own_campaign: Option<&str>,
+    scope: &PriorPostScope<'_>,
+) -> anyhow::Result<Vec<PriorPostHold>> {
+    let mut holds = Vec::new();
+    for hold in Database::publish_device_guard_from_connection(conn, udid)?.blocking {
+        if own_campaign == Some(hold.campaign_id.as_str()) {
+            continue;
+        }
+        if let Some(classified) = classify_prior_post_hold(conn, udid, &hold, scope)? {
+            holds.push(classified);
+        }
+    }
+    Ok(holds)
+}
+
+/// Ask the verifier to check a waiting earlier post now, once per (that post, this job). Only a
+/// row waiting for its next automatic check, with no observer running on it, under CAS. Moves
+/// one check earlier and marks the row so the verifier lists it first while the job waits; never
+/// reopens a parked row or changes its budget.
+pub(super) fn prioritize_prior_post(
+    conn: &Connection,
+    hold: &PriorPostHold,
+    for_assignment: &str,
+    for_campaign: &str,
+) -> anyhow::Result<bool> {
+    let observing: bool = conn.query_row(
+        "SELECT EXISTS(SELECT 1 FROM publish_work_claims WHERE owner=?1)",
+        [&hold.assignment_id],
+        |r| r.get(0),
+    )?;
+    if observing || hold.class != PriorPostClass::Pending {
+        return Ok(false);
+    }
+    let Some((candidate, state, _)) = recovery_row(conn, &hold.assignment_id)? else {
+        return Ok(false);
+    };
+    let Some(mut evidence) = candidate
+        .evidence_json
+        .as_deref()
+        .and_then(|raw| serde_json::from_str::<serde_json::Value>(raw).ok())
+        .filter(serde_json::Value::is_object)
+    else {
+        return Ok(false);
+    };
+    if candidate.revision != hold.revision
+        || evidence["verificationStatus"]["state"] != "pending"
+        || evidence["priorPostPriority"]["assignmentId"] == for_assignment
+        || !may_verify(
+            &state,
+            candidate.effect_intent.as_deref(),
+            candidate.evidence_json.as_deref(),
+        )
+        || !observer_authorized(conn, &candidate)?
+    {
+        return Ok(false);
+    }
+    let now = Utc::now().to_rfc3339();
+    evidence["verificationStatus"]["nextCheckAt"] = serde_json::json!(now);
+    evidence["priorPostPriority"] = serde_json::json!({
+        "assignmentId": for_assignment, "campaignId": for_campaign, "requestedAt": now,
+    });
+    let changed = conn.execute(
+        "UPDATE publish_assignments SET evidence_json=?1,revision=revision+1
+         WHERE id=?2 AND campaign_id=?3 AND revision=?4",
+        params![
+            evidence.to_string(),
+            candidate.assignment_id,
+            candidate.campaign_id,
+            candidate.revision
+        ],
+    )?;
+    Ok(changed == 1)
+}
+
+impl Database {
+    /// Read-only: the earlier posts on `udid` a job of `own_campaign` (or a new request) would
+    /// meet at its turn, and their classes. Used by preflight notes and the dispatcher's gate.
+    pub fn prior_post_outlook(
+        &self,
+        udid: &str,
+        own_campaign: Option<&str>,
+        scope: &PriorPostScope<'_>,
+    ) -> anyhow::Result<Vec<PriorPostHold>> {
+        prior_post_outlook_on(&self.conn()?, udid, own_campaign, scope)
+    }
 }

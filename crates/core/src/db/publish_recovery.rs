@@ -26,6 +26,17 @@ fn write(conn: &Connection, id: &str, token: &str, s: &PublishRecoveryState) -> 
             "exhausted" => {
                 "Đã hết lượt tự thử; kiểm tra lỗi và bấm Thử lại để chạy thêm một lần".into()
             }
+            "priorPostWaiting" => s.last_error.clone().unwrap_or_else(|| {
+                "Chờ bài trước trên máy này lên TikTok hoặc có link; chưa thao tác trên máy".into()
+            }),
+            "failed"
+                if matches!(
+                    s.last_error_code.as_deref(),
+                    Some(PRIOR_POST_UNSETTLED | PRIOR_POST_NEEDS_REVIEW)
+                ) =>
+            {
+                s.last_error.clone().unwrap_or_default()
+            }
             _ => format!("Tiếp tục bước {}", s.step),
         };
         conn.execute("INSERT INTO operation_device_events(source_kind,source_id,udid,action,state,recorded_at,text,detail) SELECT 'publish',campaign_id,udid,'publishRecovery',?2,?3,?4,?5 FROM publish_assignments WHERE id=?1",params![id,s.state,Utc::now().to_rfc3339(),text,s.last_error]).context("publish_recovery write_state event")?;
@@ -49,6 +60,66 @@ fn approval_facts(
     )?;
     Ok((serde_json::from_str(&raw)?, udid, handle))
 }
+/// The job's approved account, when a row on another phone holds its reservation (a post there
+/// still owes its link): the composer would refuse this one at `reserve_publish_account`.
+fn account_reserved_elsewhere(
+    conn: &Connection,
+    job: &PublishDispatchJob,
+) -> anyhow::Result<Option<(String, String)>> {
+    let (request, udid, _) = approval_facts(conn, &job.assignment_id)?;
+    let Some(account) = request
+        .approval
+        .as_ref()
+        .and_then(|approval| approval.accounts.get(&udid))
+        .filter(|account| !account.is_empty())
+    else {
+        return Ok(None);
+    };
+    Ok(conn
+        .query_row(
+            "SELECT o.campaign_id FROM publish_account_reservations r
+             JOIN publish_assignments o ON o.id=r.assignment_id
+             WHERE r.account=?1 AND o.udid<>?2 AND o.id<>?3 LIMIT 1",
+            params![account, udid, job.assignment_id],
+            |r| r.get::<_, String>(0),
+        )
+        .optional()?
+        .map(|campaign| (account.clone(), campaign)))
+}
+
+/// The prior-post gate's end: the queued job finishes before Post with `code`, as a refused
+/// queued device does (`fail_publish_queued_device`). Nothing was sent for this attempt.
+fn end_before_post(
+    tx: &Connection,
+    job: &PublishDispatchJob,
+    token: &str,
+    s: &mut PublishRecoveryState,
+    code: &str,
+    text: &str,
+    now_ms: i64,
+) -> anyhow::Result<()> {
+    let changed = tx.execute("UPDATE publish_dispatch_jobs SET state='finished',reason=?3,finished_at_ms=?4,revision=revision+1
+        WHERE assignment_id=?1 AND revision=?2 AND state='queued'",
+        params![job.assignment_id, job.revision, code, now_ms])?;
+    if changed != 1 {
+        return Ok(());
+    }
+    tx.execute("UPDATE publish_assignments SET state='failed_before_dispatch',error_code=?2,revision=revision+1,updated_at=?3
+        WHERE id=?1 AND effect_intent IS NULL",
+        params![job.assignment_id, code, Utc::now().to_rfc3339()])?;
+    tx.execute(
+        "UPDATE publish_attempts SET finished_at_ms=?2,result=?3 WHERE attempt_id=?1 AND finished_at_ms IS NULL",
+        params![job.attempt_id, now_ms, code],
+    )?;
+    s.state = "failed".into();
+    s.last_error = Some(text.into());
+    s.last_error_code = Some(code.into());
+    s.last_error_kind = Some(FailureKind::Terminal.as_str().into());
+    s.next_retry_at = None;
+    s.reconnect_deadline = None;
+    write(tx, &job.assignment_id, token, s)
+}
+
 fn record_failure(s: &mut PublishRecoveryState, failure: &RecoveryFailure) {
     s.last_error = Some(failure.message.clone());
     s.last_error_code = Some(failure.code.clone());
@@ -63,6 +134,32 @@ const REQUEUE_BACKOFF_SECS: [u64; 5] = [30, 90, 180, 300, 300];
 
 /// How long a queued row waits for its exact phone to come back (`waitingDevice`).
 const RECONNECT_WINDOW_MS: i64 = 120_000;
+
+/// How often a row waiting for an earlier post on its phone (`priorPostWaiting`) looks again.
+/// Not measured: the verifier's pass runs every 120 s, so 15 s notices a proof within one pass
+/// while costing one small transaction per waiting row; it sends nothing to the phone.
+const PRIOR_POST_RECHECK_MS: i64 = 15_000;
+
+/// The row stopped before Post because an earlier post on its phone was still not proven on
+/// TikTok or verified when the prior-post wait ran out.
+pub const PRIOR_POST_UNSETTLED: &str = "prior_post_unsettled";
+/// The row stopped before Post because an earlier post on its phone needs a person.
+pub const PRIOR_POST_NEEDS_REVIEW: &str = "prior_post_needs_review";
+
+/// The dispatcher's prior-post gate for one queued job (`publish_prior_post_gate`).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum PriorPostGate {
+    /// Nothing on the phone holds the job back; any release happens inside the job.
+    Proceed,
+    /// The job waits and sends nothing. `key` changes when what it waits for changes.
+    Held { key: String, text: String },
+    /// The job finished before Post with this code.
+    Ended { code: &'static str, text: String },
+}
+
+fn short_id(id: &str) -> &str {
+    id.get(..8).unwrap_or(id)
+}
 
 /// Ledger key, not a step name: the one automatic fresh attempt after the sound budget ran out
 /// (blind sheet or not). The name predates the readable-sheet case and stays for stored ledgers.
@@ -452,7 +549,12 @@ impl Database {
         // same persisted budget as retries within a step.
         let now = Utc::now().timestamp_millis();
         record_failure(&mut s, failure);
-        if kind == FailureKind::Disconnected {
+        if failure.code == crate::publish_recovery::PRIOR_POST_PENDING {
+            // Nothing reached the phone: no spend. The gate's wait deadline bounds the loop.
+            s.state = "priorPostWaiting".into();
+            s.prior_post_wait_since.get_or_insert(now as f64);
+            s.next_retry_at = Some((now + PRIOR_POST_RECHECK_MS) as f64);
+        } else if kind == FailureKind::Disconnected {
             if *s.counts.get(&s.step).unwrap_or(&0) >= s.max_retries {
                 s.state = "exhausted".into();
                 s.next_retry_at = None;
@@ -503,7 +605,12 @@ impl Database {
             params![job.attempt_id, now, error, job.assignment_id],
         )?;
         tx.execute("INSERT INTO publish_attempts(attempt_id,publication_id,campaign_id,started_at_ms) SELECT ?2,publication_id,campaign_id,?3 FROM publish_assignments WHERE id=?1",params![job.assignment_id,attempt,now])?;
-        tx.execute("UPDATE publish_dispatch_jobs SET state='queued',phase='transfer',attempt_id=?2,owner=NULL,reason='recovery_pending',revision=revision+1 WHERE assignment_id=?1",params![job.assignment_id,attempt])?;
+        let reason = if failure.code == crate::publish_recovery::PRIOR_POST_PENDING {
+            crate::publish_recovery::PRIOR_POST_PENDING
+        } else {
+            "recovery_pending"
+        };
+        tx.execute("UPDATE publish_dispatch_jobs SET state='queued',phase='transfer',attempt_id=?2,owner=NULL,reason=?3,revision=revision+1 WHERE assignment_id=?1",params![job.assignment_id,attempt,reason])?;
         tx.execute("UPDATE publish_assignments SET state='queued',error_code=NULL,revision=revision+1,updated_at=?2 WHERE id=?1 AND effect_intent IS NULL",params![job.assignment_id,Utc::now().to_rfc3339()])?;
         super::publish_pipeline::lock_campaign_accounts(&tx, &job.run.campaign_id)?;
         tx.commit()?;
@@ -590,6 +697,165 @@ impl Database {
             return Ok(online && (now as f64) < deadline);
         };
         Ok(true)
+    }
+
+    /// The prior-post gate for one queued job, run by the dispatcher before it claims a work
+    /// permit, in both phases. Earlier posts of other campaigns on the phone are classified
+    /// (`classify_prior_post_hold`): none, or all Releasable under a `priorPosts` approval, let the
+    /// job proceed, and the job itself releases them (`release_prior_posts`). Any that needs a
+    /// person ends the row before Post now. Otherwise the row waits, spending nothing and sending
+    /// nothing to the phone, each waiting post is nudged once for this job, and at
+    /// `priorPostWaitSince + waitMinutes` the row ends before Post.
+    pub fn publish_prior_post_gate(
+        &self,
+        job: &PublishDispatchJob,
+        now_ms: i64,
+        scope: &super::PriorPostScope<'_>,
+    ) -> anyhow::Result<PriorPostGate> {
+        use super::PriorPostClass::{NeedsOperator, Pending, Releasable};
+        {
+            // Most jobs meet no earlier post: answer them from a read, with no write.
+            let conn = self.conn()?;
+            if super::publish_verification::prior_post_outlook_on(
+                &conn,
+                &job.udid,
+                Some(&job.run.campaign_id),
+                scope,
+            )?
+            .is_empty()
+                && account_reserved_elsewhere(&conn, job)?.is_none()
+            {
+                return Ok(PriorPostGate::Proceed);
+            }
+        }
+        let mut conn = self.conn()?;
+        let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
+        if !current(&tx, &job.assignment_id, &job.run.token)? {
+            return Ok(PriorPostGate::Proceed);
+        }
+        let Some((token, mut s)) = read(&tx, &job.assignment_id)? else {
+            return Ok(PriorPostGate::Proceed);
+        };
+        let (request, _, _) = approval_facts(&tx, &job.assignment_id)?;
+        let policy = request.approval.as_ref().and_then(|a| a.prior_posts);
+        let holds = super::publish_verification::prior_post_outlook_on(
+            &tx,
+            &job.udid,
+            Some(&job.run.campaign_id),
+            scope,
+        )?;
+        let media = if job.phase == "transfer" {
+            "chưa gửi ảnh nào lên máy"
+        } else {
+            "ảnh đã chuyển vẫn còn trên máy, chưa Đăng"
+        };
+        if let Some(hold) = holds.iter().find(|h| h.class == NeedsOperator) {
+            let text = format!(
+                "Chưa đăng: bài trước trên máy này (lượt {}) cần kiểm tra ({}); app không tự xử lý bài đó, {media}. Xử lý bài cũ trong Theo dõi (Kiểm tra liên kết hoặc Tiếp tục xác minh bài đã gửi) rồi bấm Thử lại máy này.",
+                short_id(&hold.campaign_id),
+                hold.reason
+            );
+            end_before_post(
+                &tx,
+                job,
+                &token,
+                &mut s,
+                PRIOR_POST_NEEDS_REVIEW,
+                &text,
+                now_ms,
+            )?;
+            tx.commit()?;
+            return Ok(PriorPostGate::Ended {
+                code: PRIOR_POST_NEEDS_REVIEW,
+                text,
+            });
+        }
+        let waiting = holds
+            .iter()
+            .find(|h| h.class == Pending)
+            .map(|h| {
+                (
+                    h.assignment_id.clone(),
+                    short_id(&h.campaign_id).to_owned(),
+                    format!("chưa được chứng minh đã tải xong lên TikTok: {}", h.reason),
+                )
+            })
+            .or_else(|| {
+                holds
+                    .iter()
+                    .find(|h| h.class == Releasable && policy.is_none())
+                    .map(|h| {
+                        (
+                            h.assignment_id.clone(),
+                            short_id(&h.campaign_id).to_owned(),
+                            "đã lên TikTok nhưng chưa có link; lượt này không được duyệt tự tạm dừng xác minh bài cũ".to_owned(),
+                        )
+                    })
+            });
+        let waiting = match waiting {
+            Some(waiting) => Some(waiting),
+            None => account_reserved_elsewhere(&tx, job)?.map(|(account, campaign)| {
+                (
+                    format!("account:{account}"),
+                    short_id(&campaign).to_owned(),
+                    format!("tài khoản @{account} còn bài chờ link trên máy khác"),
+                )
+            }),
+        };
+        let Some((key, campaign, reason)) = waiting else {
+            return Ok(PriorPostGate::Proceed);
+        };
+        let wait_minutes = policy.map_or(crate::PRIOR_POST_WAIT_MINUTES, |p| p.wait_minutes);
+        let since = *s.prior_post_wait_since.get_or_insert(now_ms as f64);
+        let deadline = since as i64 + i64::from(wait_minutes) * 60_000;
+        if now_ms >= deadline {
+            let text = format!(
+                "Chưa đăng: sau {wait_minutes} phút chờ, bài trước trên máy này (lượt {campaign}) vẫn {reason}. App không đóng TikTok để không làm mất bài đó; {media}. Khi bài cũ có link, bấm Thử lại máy này."
+            );
+            end_before_post(
+                &tx,
+                job,
+                &token,
+                &mut s,
+                PRIOR_POST_UNSETTLED,
+                &text,
+                now_ms,
+            )?;
+            tx.commit()?;
+            return Ok(PriorPostGate::Ended {
+                code: PRIOR_POST_UNSETTLED,
+                text,
+            });
+        }
+        let until = DateTime::<Utc>::from_timestamp_millis(deadline)
+            .map(|at| at.with_timezone(&chrono::Local).format("%H:%M").to_string())
+            .unwrap_or_default();
+        let text = format!(
+            "Chờ bài trước trên máy này: bài của lượt {campaign} {reason}. Đã ưu tiên kiểm tra bài cũ; tới {until} nếu vẫn chưa chứng minh được, bài này dừng trước Đăng. App không đóng TikTok để không làm mất bài cũ; chưa thao tác trên máy."
+        );
+        s.state = "priorPostWaiting".into();
+        s.next_retry_at = Some((now_ms + PRIOR_POST_RECHECK_MS) as f64);
+        s.last_error = Some(text.clone());
+        s.last_error_code = Some(crate::publish_recovery::PRIOR_POST_PENDING.into());
+        s.last_error_kind = Some(FailureKind::Retryable.as_str().into());
+        write(&tx, &job.assignment_id, &token, &s)?;
+        tx.execute(
+            "UPDATE publish_dispatch_jobs SET reason=?3 WHERE assignment_id=?1 AND revision=?2 AND state='queued'",
+            params![job.assignment_id, job.revision, crate::publish_recovery::PRIOR_POST_PENDING],
+        )?;
+        for hold in holds.iter().filter(|h| h.class == Pending) {
+            super::publish_verification::prioritize_prior_post(
+                &tx,
+                hold,
+                &job.assignment_id,
+                &job.run.campaign_id,
+            )?;
+        }
+        tx.commit()?;
+        Ok(PriorPostGate::Held {
+            key: format!("{key}:{reason}"),
+            text,
+        })
     }
 
     /// A whole-attempt retry (`retryWaiting`) whose clock has passed still waits while the

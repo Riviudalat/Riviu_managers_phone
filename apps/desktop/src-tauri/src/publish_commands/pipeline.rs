@@ -1,5 +1,6 @@
 //! One transfer-to-composer journey per device, with app-wide admission and durable ownership.
 use super::execution::{self, PhoneFailure};
+use super::prior_post;
 use super::*;
 use riviu_core::db::{PublishPipelineRun, PUBLISH_PHONE_WORK_CAP};
 use riviu_core::read_latency::{
@@ -189,6 +190,9 @@ impl Runtime {
             // Load admission before any byte reaches the phone; a refusal settles below as
             // `device_overloaded` before dispatch.
             self.control.ensure_load_admissible(&context,None).await?;
+            // An earlier post of another campaign that TikTok already holds is released by this
+            // job, under this lease, before any byte reaches the phone (`release_prior_posts`).
+            prior_post::release_prior_posts(&self.control,&self.db,Some(&self.events),&context,&a.id,&self.run).await?;
             self.progress(a,progress::PublishProgress::DeviceReady);
             self.progress(a,progress::PublishProgress::TransferringMedia{count:if bundle.video.is_some(){1}else{bundle.images.len()},video:bundle.video.is_some()});
             let id=execution::device_campaign_id(&self.run.campaign_id,a.ordinal);
@@ -727,6 +731,9 @@ pub(crate) async fn run_dispatcher(
     let mut tasks = tokio::task::JoinSet::<anyhow::Result<()>>::new();
     let mut owned: HashMap<tokio::task::Id, riviu_core::db::PublishDispatchJob> = HashMap::new();
     let mut idle_deferrals = HashMap::new();
+    // What each row waiting for an earlier post on its phone waits for, logged once per change.
+    let mut prior_post_waits: HashMap<String, String> = HashMap::new();
+    prior_post::install_acceptance(&acceptance);
     let mut completed = DispatchCompletions::default();
     let mut interval = tokio::time::interval(Duration::from_millis(250));
     let mut roster = RosterRefresh::default();
@@ -785,6 +792,16 @@ pub(crate) async fn run_dispatcher(
             for (assignment, udid, campaign) in db.pending_publish_exclusion_releases()? {
                 if control.current_work_owner(&udid).is_none() {
                     db.finish_publish_exclusion_after_release(&assignment)?;
+                    execution::announce(&events, &db, &campaign);
+                }
+            }
+            // A prior-post release whose job ended without its abort: abort it now, so the old
+            // posts carry on verifying as before.
+            for job in db.stale_prior_post_releases()? {
+                for campaign in db.abort_prior_post_release(
+                    &job,
+                    "Lượt hẹn giờ đã kết thúc khi đang nhả bài cũ",
+                )? {
                     execution::announce(&events, &db, &campaign);
                 }
             }
@@ -912,6 +929,39 @@ pub(crate) async fn run_dispatcher(
                     db.hold_publish_dispatch(&job, "compose_pacing")?;
                     continue;
                 }
+                // An earlier post of another campaign still owing its link on this phone: proceed
+                // (the job releases a post TikTok holds), wait sending nothing, or stop before Post.
+                let round = job.run.campaign_id.get(..8).unwrap_or(&job.run.campaign_id);
+                match prior_post::with_scope(|scope| {
+                    db.publish_prior_post_gate(&job, chrono::Utc::now().timestamp_millis(), scope)
+                })? {
+                    riviu_core::db::PriorPostGate::Proceed => {
+                        if prior_post_waits.remove(&job.assignment_id).is_some() {
+                            log::info!(
+                                "Lịch đăng {round} trên {}: bài trước trên máy không còn giữ lượt này; tiếp tục",
+                                job.udid
+                            );
+                        }
+                    }
+                    riviu_core::db::PriorPostGate::Held { key, text } => {
+                        if prior_post_waits.insert(job.assignment_id.clone(), key.clone())
+                            != Some(key)
+                        {
+                            log::warn!("Lịch đăng {round} trên {}: {text}", job.udid);
+                            execution::announce(&events, &db, &job.run.campaign_id);
+                        }
+                        continue;
+                    }
+                    riviu_core::db::PriorPostGate::Ended { code, text } => {
+                        prior_post_waits.remove(&job.assignment_id);
+                        log::warn!(
+                            "Lịch đăng {round} trên {}: dừng trước Đăng ({code}); không đóng TikTok, không đăng lại bài cũ. {text}",
+                            job.udid
+                        );
+                        execution::announce(&events, &db, &job.run.campaign_id);
+                        continue;
+                    }
+                }
                 let Some(permit) = db.try_publish_work(&job.udid, &job.phase, &job.attempt_id)?
                 else {
                     db.hold_publish_dispatch(&job, "stage_capacity")?;
@@ -1028,7 +1078,16 @@ pub(crate) async fn run_dispatcher(
                                     riviu_core::device_control::load::mentions_device_overloaded(
                                         &format!("{error:#}"),
                                     );
-                                let (code, what) = if overloaded {
+                                // Waiting for an earlier post on this phone is not a transfer
+                                // failure: nothing was sent, and the row is requeued unspent.
+                                let waiting_prior_post = riviu_core::publish_recovery::describe(error).code
+                                    == riviu_core::publish_recovery::PRIOR_POST_PENDING;
+                                let (code, what) = if waiting_prior_post {
+                                    (
+                                        riviu_core::publish_recovery::PRIOR_POST_PENDING,
+                                        "Chờ bài trước trên máy này, chưa chuyển ảnh/video",
+                                    )
+                                } else if overloaded {
                                     (
                                         riviu_core::device_control::load::DEVICE_OVERLOADED_CODE,
                                         "máy quá tải, chưa chuyển ảnh/video",
@@ -1487,6 +1546,7 @@ mod tests {
                 version: 1,
                 input_digest: "0".repeat(64),
                 accounts: udids.map(|udid| (udid.to_owned(), String::new())).into(),
+                prior_posts: None,
             }),
         };
         let campaign = db.create_publish_campaign(&request, &bundles).unwrap();

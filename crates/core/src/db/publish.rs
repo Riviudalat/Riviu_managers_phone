@@ -965,6 +965,23 @@ impl Database {
                 ],
             )?;
         }
+        // A scheduled job's prior-post release that the process cut off is aborted first: its
+        // earlier posts go back to verification as before, nothing is closed or re-posted.
+        let releases: Vec<String> = transaction
+            .prepare(
+                "SELECT json_extract(value,'$.assignmentId') FROM settings
+                 WHERE key GLOB 'publish.prior-post-release.*' AND json_valid(value)
+                 AND json_extract(value,'$.state')='requested'",
+            )?
+            .query_map([], |row| row.get(0))?
+            .collect::<Result<_, _>>()?;
+        for job in releases {
+            super::publish_start::abort_prior_post_release_on(
+                &transaction,
+                &job,
+                "Ứng dụng đã đóng khi đang nhả bài cũ",
+            )?;
+        }
         // Pre-Post work resumes without the operator and keeps its retry ledger; a running
         // attempt restarts from transfer, never from a cached UI checkpoint.
         super::publish_recovery::resume_after_restart(&transaction, &interrupted_starts)?;

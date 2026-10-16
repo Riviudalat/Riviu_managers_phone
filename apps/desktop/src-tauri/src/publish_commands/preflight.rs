@@ -306,6 +306,8 @@ pub(crate) struct PreparedPublishPreflight {
     pub(crate) bundles: Vec<riviu_core::PublishBundle>,
     /// Each receiving phone's normalised account, exactly as `report.input_digest` bound it.
     pub(crate) accounts: std::collections::BTreeMap<String, String>,
+    /// A scheduled request's prior-post policy, as `report.input_digest` bound it.
+    pub(crate) prior_posts: Option<riviu_core::PriorPostApproval>,
 }
 
 impl PreparedPublishPreflight {
@@ -315,6 +317,7 @@ impl PreparedPublishPreflight {
             version: 1,
             input_digest: self.report.input_digest.clone(),
             accounts: self.accounts.clone(),
+            prior_posts: self.prior_posts,
         }
     }
 }
@@ -555,6 +558,14 @@ pub async fn publish_preflight(
 /// Transfer capability alone never qualifies authenticated helper/clipboard runtime.
 fn refresh_preflight_checks(row: &mut riviu_core::PublishPreflightAssignmentReport) {
     let old_link = row.checks.iter().find(|check| check.id == "oldPostLink").cloned();
+    // A scheduled row's note on an earlier post still owing its link (`prior_post_check`).
+    let prior_post = row
+        .checks
+        .iter()
+        .find(|check| {
+            check.id == "pending" && check.status == riviu_core::ui_automation::CheckStatus::Unknown
+        })
+        .cloned();
     let helper_pending = row.checks.iter().any(|check| {
         check.id == "helper"
             && check
@@ -581,9 +592,48 @@ fn refresh_preflight_checks(row: &mut riviu_core::PublishPreflightAssignmentRepo
             helper.reason = Some("Kiểm tra helper và khôi phục clipboard trước khi chuyển nội dung; chưa đăng bài".into());
         }
     }
+    if let Some(prior_post) = prior_post {
+        if let Some(pending) = row.checks.iter_mut().find(|check| {
+            check.id == "pending" && check.status == riviu_core::ui_automation::CheckStatus::Pass
+        }) {
+            *pending = prior_post;
+        }
+    }
     if let Some(old_link) = old_link {
         row.checks.push(old_link);
     }
+}
+
+/// The "Lượt đăng trước" check of a scheduled row whose phone still holds an earlier post of
+/// another campaign owing its link: a note, never a blocker. It says what happens at the
+/// scheduled time for the worst class found; saving the schedule stops or closes nothing.
+fn prior_post_check(
+    holds: &[riviu_core::db::PriorPostHold],
+) -> Option<riviu_core::ui_automation::AutomationCheck> {
+    use riviu_core::db::PriorPostClass;
+    let hold = holds.iter().max_by_key(|hold| hold.class)?;
+    let round = hold.campaign_id.get(..8).unwrap_or(&hold.campaign_id);
+    let reason = match hold.class {
+        PriorPostClass::Releasable => format!(
+            "Máy còn bài của lượt {round} chờ lấy link (cập nhật {}); app đã thấy bài đó trên Hồ sơ nên bài đã lên TikTok. Tới giờ hẹn, nếu bài cũ vẫn chưa có link, app tạm dừng xác minh bài cũ trên máy này, đóng TikTok, đăng bài mới rồi tự xác minh tiếp bài cũ. Lưu lịch bây giờ không dừng hay đóng gì; không đăng lại bài nào.",
+            hold.updated_at
+        ),
+        PriorPostClass::Pending => format!(
+            "Máy còn bài của lượt {round} chờ lấy link ({}); app chưa thấy bài đó trên Hồ sơ nên chưa biết đã tải xong chưa. Tới giờ hẹn app ưu tiên kiểm tra bài cũ: bài cũ đã lên TikTok thì đăng như bình thường; nếu {} phút sau vẫn chưa chứng minh được, bài mới trên máy này dừng trước Đăng để không làm mất bài cũ. Lưu lịch bây giờ không dừng hay đóng gì.",
+            hold.reason,
+            riviu_core::PRIOR_POST_WAIT_MINUTES
+        ),
+        PriorPostClass::NeedsOperator => format!(
+            "Máy còn bài của lượt {round} cần bạn kiểm tra ({}); app không tự xử lý bài đó. Hãy xử lý trong Theo dõi trước giờ hẹn; nếu chưa, bài mới trên máy này dừng trước Đăng lúc tới giờ, không mất bài nào. Lưu lịch bây giờ không dừng hay đóng gì.",
+            hold.reason
+        ),
+    };
+    Some(riviu_core::ui_automation::AutomationCheck {
+        id: "pending".into(),
+        label: "Lượt đăng trước".into(),
+        status: riviu_core::ui_automation::CheckStatus::Unknown,
+        reason: Some(reason),
+    })
 }
 
 fn helper_pending_check() -> riviu_core::ui_automation::AutomationCheck {
@@ -787,6 +837,9 @@ pub(super) async fn build_publish_preflight_from_manifest_with_sheet(
     apply_caption_overrides(&mut bundles, Some(&overrides))?;
 
     let persisted_udids = request.udids.clone();
+    // A scheduled request never blocks on an earlier post still owing its link: its job releases
+    // or waits at its own turn (`publish_prior_post_gate`). The preflight only notes what happens.
+    let scheduled = request.run_at.is_some();
     let persisted = db
         .storage_read(move |db| {
             let metas = db.list_device_metas()?;
@@ -797,10 +850,19 @@ pub(super) async fn build_publish_preflight_from_manifest_with_sheet(
                 .into_iter()
                 .map(|udid| db.publish_device_guard(&udid).map(|guard| (udid, guard)))
                 .collect::<anyhow::Result<HashMap<_, _>>>()?;
-            Ok((metas, groups, guards))
+            let mut outlooks = HashMap::new();
+            if scheduled {
+                for (udid, guard) in &guards {
+                    if !guard.blocking.is_empty() {
+                        let scope = riviu_core::db::PriorPostScope::production();
+                        outlooks.insert(udid.clone(), db.prior_post_outlook(udid, None, &scope)?);
+                    }
+                }
+            }
+            Ok((metas, groups, guards, outlooks))
         })
         .await?;
-    let (metas, groups, guards) = persisted;
+    let (metas, groups, guards, outlooks) = persisted;
     let fleet_order = registry
         .list()
         .into_iter()
@@ -835,6 +897,7 @@ pub(super) async fn build_publish_preflight_from_manifest_with_sheet(
                         observed,
                         guard.with_context(|| format!("thiếu snapshot guard cho máy {udid}"))?,
                         meta,
+                        scheduled,
                     )
                 }
             },
@@ -851,6 +914,14 @@ pub(super) async fn build_publish_preflight_from_manifest_with_sheet(
     }
     for row in &mut assignments {
         refresh_preflight_checks(row);
+        if let Some(check) = outlooks
+            .get(&row.udid)
+            .and_then(|holds| prior_post_check(holds))
+        {
+            if let Some(pending) = row.checks.iter_mut().find(|check| check.id == "pending") {
+                *pending = check;
+            }
+        }
         let guard = guards
             .get(&row.udid)
             .with_context(|| format!("thiếu snapshot guard cho máy {}", row.udid))?;
@@ -895,6 +966,11 @@ pub(super) async fn build_publish_preflight_from_manifest_with_sheet(
     }
     observations
         .push(serde_json::json!({"sheetDelivery":sheet_delivery,"verificationContractVersion":1}));
+    // The approved preview and the created campaign come from the same prior-post policy.
+    let prior_posts = scheduled.then(riviu_core::PriorPostApproval::current);
+    if let Some(policy) = prior_posts {
+        observations.push(serde_json::json!({"priorPostPolicy":policy}));
+    }
     let input_digest =
         publish_preflight_digest(&request, &bundles, &target_snapshot, &observations)?;
     let sheet_configured = sheet_delivery.is_some();
@@ -926,6 +1002,7 @@ pub(super) async fn build_publish_preflight_from_manifest_with_sheet(
         report,
         bundles,
         accounts,
+        prior_posts,
     })
 }
 
@@ -938,12 +1015,13 @@ fn evaluate_device_observation(
     observed: PreflightDeviceObservation,
     guard: &riviu_core::db::PublishDeviceGuard,
     meta: Option<&riviu_core::types::DeviceMeta>,
+    scheduled: bool,
 ) -> anyhow::Result<(
     riviu_core::PublishPreflightAssignmentReport,
     serde_json::Value,
 )> {
     let mut row_issues = Vec::new();
-    if let Some(hold) = guard.blocking.first() {
+    if let Some(hold) = guard.blocking.first().filter(|_| !scheduled) {
         row_issues.push(preflight_issue(
                 "post_verification_pending",
                 udid,

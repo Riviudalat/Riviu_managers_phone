@@ -361,54 +361,494 @@ impl Database {
         Uuid::parse_str(request)?;
         let mut conn = self.conn()?;
         let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
-        if let Some(receipt) = exclusion_on(&tx, request)? {
-            let prior: i64 = tx.query_row(
-                "SELECT expected_revision FROM publish_exclude_requests WHERE request_id=?1",
-                [request],
-                |r| r.get(0),
-            )?;
-            anyhow::ensure!(
-                receipt.assignment_id == assignment && prior == revision,
-                "Exclude request identity changed"
-            );
-            return Ok(receipt);
-        }
-        let (actual, intent, state): (i64, Option<String>, String) = tx.query_row(
-            "SELECT revision,effect_intent,state FROM publish_assignments WHERE id=?1",
-            [assignment],
-            |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
-        )?;
-        anyhow::ensure!(actual == revision, "Bài đã thay đổi; tải lại tiến độ");
-        let debt = intent.is_some()
-            || matches!(
-                state.as_str(),
-                "posting" | "verifying" | "uncertain" | "succeeded"
-            );
-        let next = if debt { "needsReview" } else { "stopping" };
-        let reason = if debt {
-            Some("Bài có thể đã đăng; giữ bằng chứng và nợ xác minh/Sheet, không đăng lại")
-        } else {
-            None
-        };
-        tx.execute("INSERT INTO publish_exclude_requests(request_id,assignment_id,expected_revision,state,reason,updated_at)
-            VALUES(?1,?2,?3,?4,?5,?6)", params![request,assignment,revision,next,reason,Utc::now().to_rfc3339()])?;
-        if handoff {
-            tx.execute("INSERT INTO settings(key,value) VALUES(?1,?2) ON CONFLICT(key) DO UPDATE SET value=excluded.value",
-                params![format!("publish.handoff-pending.{assignment}"),request])?;
-        }
-        // A cancelled child fences transfer/composer CAS; Post-intent rows keep their exact state.
-        tx.execute(
-            "UPDATE publish_assignments SET state='cancelled',
-            revision=revision+1,updated_at=?4 WHERE id=?1 AND revision=?2 AND NOT ?3",
-            params![assignment, revision, debt, Utc::now().to_rfc3339()],
-        )?;
-        tx.execute("UPDATE publish_dispatch_jobs SET state='cancelled',reason='assignment_excluded',revision=revision+1,
-            finished_at_ms=?2 WHERE assignment_id=?1 AND state IN ('queued','paused')",params![assignment,Utc::now().timestamp_millis()])?;
-        tx.execute("UPDATE publish_recovery_state SET payload=json_set(payload,'$.state','stopped','$.nextRetryAt',NULL,'$.reconnectDeadline',NULL) WHERE assignment_id=?1",[assignment])?;
-        let receipt = exclusion_on(&tx, request)?.context("exclusion receipt missing")?;
+        let receipt = exclude_on(&tx, assignment, revision, request, handoff, None)?;
         tx.commit()?;
         Ok(receipt)
     }
+
+    /// Step 1 of a scheduled job's prior-post release (`release_prior_posts`), one IMMEDIATE
+    /// transaction. Re-checks that the job is the current running attempt of a pre-Post row whose
+    /// approval carries `priorPosts`, and that every blocking post of another campaign on its phone
+    /// is still Releasable at the revision read here. Then excludes each one exactly as a confirmed
+    /// replacement does (debt kept, `handoff-pending` marker written) and records the receipt
+    /// `publish.prior-post-release.{job}` in state `requested`. `Ok(None)`: nothing to release.
+    /// Any mismatch commits nothing and returns the typed `prior_post_pending` failure.
+    pub fn request_prior_post_release(
+        &self,
+        assignment: &str,
+        run: &super::PublishPipelineRun,
+        udid: &str,
+        scope: &super::PriorPostScope<'_>,
+    ) -> anyhow::Result<Result<Option<PriorPostRelease>, crate::publish_recovery::RecoveryFailure>>
+    {
+        use crate::publish_recovery::prior_post_pending;
+        let mut conn = self.conn()?;
+        // Most phones hold no earlier post: answer from a read, without the write lock.
+        if super::publish_verification::prior_post_outlook_on(
+            &conn,
+            udid,
+            Some(&run.campaign_id),
+            scope,
+        )?
+        .is_empty()
+        {
+            return Ok(Ok(None));
+        }
+        let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
+        // The running attempt of this pre-Post row under this pipeline run, on this phone.
+        let attempt: Option<String> = tx
+            .query_row(
+                "SELECT j.attempt_id FROM publish_dispatch_jobs j
+                 JOIN publish_assignments a ON a.id=j.assignment_id
+                 JOIN publish_pipeline_runs r ON r.campaign_id=j.campaign_id AND r.token=j.run_token
+                 WHERE j.assignment_id=?1 AND j.campaign_id=?2 AND j.run_token=?3 AND j.udid=?4
+                 AND j.state='running' AND a.effect_intent IS NULL
+                 AND NOT EXISTS(SELECT 1 FROM publish_exclude_requests e WHERE e.assignment_id=a.id)",
+                params![assignment, run.campaign_id, run.token, udid],
+                |r| r.get(0),
+            )
+            .optional()?;
+        let Some(attempt) = attempt else {
+            return Ok(Err(prior_post_pending(
+                "Lượt đăng đã đổi trước khi nhả bài cũ; chưa thao tác trên máy",
+            )));
+        };
+        let holds = super::publish_verification::prior_post_outlook_on(
+            &tx,
+            udid,
+            Some(&run.campaign_id),
+            scope,
+        )?;
+        if holds.is_empty() {
+            return Ok(Ok(None));
+        }
+        let raw: String = tx.query_row(
+            "SELECT request_json FROM publish_campaigns WHERE id=?1",
+            [&run.campaign_id],
+            |r| r.get(0),
+        )?;
+        let request: crate::PublishCampaignRequest = serde_json::from_str(&raw)?;
+        let approved = request
+            .approval
+            .as_ref()
+            .is_some_and(|approval| approval.prior_posts.is_some());
+        if let Some(hold) = holds
+            .iter()
+            .find(|hold| !approved || hold.class != super::PriorPostClass::Releasable)
+        {
+            return Ok(Err(prior_post_pending(format!(
+                "Bài của lượt {} trên máy này chưa nhả được ({}); chưa thao tác trên máy",
+                short_id(&hold.campaign_id),
+                hold.reason
+            ))));
+        }
+        let key = prior_post_release_key(assignment);
+        let pending: bool = tx.query_row(
+            "SELECT EXISTS(SELECT 1 FROM settings WHERE key=?1 AND json_valid(value)
+             AND json_extract(value,'$.state')='requested')",
+            [&key],
+            |r| r.get(0),
+        )?;
+        if pending {
+            return Ok(Err(prior_post_pending(
+                "Lần nhả bài cũ trước của lượt này chưa khép lại; chưa thao tác trên máy",
+            )));
+        }
+        let request_id = Uuid::new_v4().to_string();
+        let reason = format!(
+            "Tạm dừng xác minh để máy đăng bài hẹn giờ của lượt {}; bài này đã lên TikTok và tự xác minh tiếp khi máy được trả, không đăng lại.",
+            short_id(&run.campaign_id)
+        );
+        let mut rows = Vec::with_capacity(holds.len());
+        for hold in &holds {
+            let exclusion = Uuid::new_v4().to_string();
+            exclude_on(
+                &tx,
+                &hold.assignment_id,
+                hold.revision,
+                &exclusion,
+                true,
+                Some(&reason),
+            )?;
+            rows.push(PriorPostReleaseRow {
+                assignment_id: hold.assignment_id.clone(),
+                campaign_id: hold.campaign_id.clone(),
+                revision: hold.revision,
+                intent_sha256: hold.intent_sha256.clone(),
+                publication_stage: hold.publication_stage,
+                package: hold.package.clone(),
+                exclusion_request_id: exclusion,
+            });
+        }
+        let release = PriorPostRelease {
+            request_id,
+            assignment_id: assignment.to_owned(),
+            campaign_id: run.campaign_id.clone(),
+            attempt_id: attempt,
+            udid: udid.to_owned(),
+            rows,
+        };
+        tx.execute(
+            "INSERT INTO settings(key,value) VALUES(?1,?2) ON CONFLICT(key) DO UPDATE SET value=excluded.value",
+            params![key, release.receipt("requested", None).to_string()],
+        )?;
+        tx.commit()?;
+        Ok(Ok(Some(release)))
+    }
+
+    /// Step 4 of the release, after the job closed TikTok under its own lease: for each excluded
+    /// row the same proof as `record_publish_handoff_release` (fence re-checked, reservation and
+    /// marker deleted, exclusion settled), the receipt `released`, and the events of both rows.
+    /// All rows or none. Returns the campaigns to announce.
+    pub fn record_prior_post_release(
+        &self,
+        release: &PriorPostRelease,
+        fences: &[String],
+        terminations: &serde_json::Value,
+    ) -> anyhow::Result<Vec<String>> {
+        anyhow::ensure!(
+            fences.len() == release.rows.len(),
+            "Thiếu dấu khóa của bài cũ; chưa ghi nhận nhả máy"
+        );
+        let mut conn = self.conn()?;
+        let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
+        let key = prior_post_release_key(&release.assignment_id);
+        let state: Option<String> = tx
+            .query_row(
+                "SELECT json_extract(value,'$.state') FROM settings WHERE key=?1 AND json_valid(value)
+                 AND json_extract(value,'$.requestId')=?2",
+                params![key, release.request_id],
+                |r| r.get(0),
+            )
+            .optional()?;
+        anyhow::ensure!(
+            state.as_deref() == Some("requested"),
+            "Biên nhận nhả bài cũ đã đổi; chưa ghi nhận nhả máy"
+        );
+        let now = Utc::now().to_rfc3339();
+        for (row, fence) in release.rows.iter().zip(fences) {
+            anyhow::ensure!(
+                handoff_fence(&tx, &row.assignment_id, &row.exclusion_request_id)? == *fence,
+                "Bài cũ thay đổi trong lúc đóng máy; chưa ghi nhận nhả máy"
+            );
+            let proof = serde_json::json!({"requestId":row.exclusion_request_id,"fence":fence});
+            tx.execute("INSERT INTO settings(key,value) VALUES(?1,?2) ON CONFLICT(key) DO UPDATE SET value=excluded.value",
+                params![format!("publish.handoff-release.{}", row.assignment_id),proof.to_string()])?;
+            tx.execute(
+                "DELETE FROM publish_account_reservations WHERE assignment_id=?1",
+                [&row.assignment_id],
+            )?;
+            tx.execute(
+                "DELETE FROM settings WHERE key=?1 AND value=?2",
+                params![
+                    format!("publish.handoff-pending.{}", row.assignment_id),
+                    row.exclusion_request_id
+                ],
+            )?;
+            settle_exclusion_after_release(&tx, &row.assignment_id)?;
+            tx.execute("INSERT INTO operation_device_events(source_kind,source_id,udid,action,state,recorded_at,text,detail)
+                VALUES('publish',?1,?2,'publishPriorPostRelease','released',?3,?4,?5)",
+                params![row.campaign_id, release.udid, now,
+                    format!("Tạm dừng xác minh để máy đăng bài hẹn giờ của lượt {}; bài này đã lên TikTok và tự xác minh tiếp khi máy được trả, không đăng lại.", short_id(&release.campaign_id)),
+                    serde_json::json!({"requestId":release.request_id,"assignmentId":row.assignment_id,"exclusionRequestId":row.exclusion_request_id,"forAssignmentId":release.assignment_id}).to_string()])?;
+        }
+        let text = format!(
+            "Bài cũ của lượt {} đã lên TikTok nhưng chưa có link: tạm dừng xác minh bài đó, đóng TikTok để đăng bài hẹn giờ; bài cũ tự xác minh tiếp khi đăng xong, không đăng lại.",
+            release
+                .rows
+                .iter()
+                .map(|row| short_id(&row.campaign_id))
+                .collect::<std::collections::BTreeSet<_>>()
+                .into_iter()
+                .collect::<Vec<_>>()
+                .join(", ")
+        );
+        tx.execute("INSERT INTO operation_device_events(source_kind,source_id,udid,action,state,recorded_at,text,detail)
+            VALUES('publish',?1,?2,'publishPriorPostRelease','released',?3,?4,?5)",
+            params![release.campaign_id, release.udid, now, text,
+                serde_json::json!({"requestId":release.request_id,"assignmentId":release.assignment_id}).to_string()])?;
+        tx.execute(
+            "UPDATE publish_campaigns SET revision=revision+1,updated_at=?2 WHERE id=?1",
+            params![release.campaign_id, now],
+        )?;
+        tx.execute(
+            "INSERT INTO publish_events(campaign_id,revision,kind,payload_json,created_at)
+            SELECT id,revision,'priorPostRelease',?2,?3 FROM publish_campaigns WHERE id=?1",
+            params![
+                release.campaign_id,
+                serde_json::json!({"source":"prior_post_release","requestId":release.request_id,
+                    "assignmentId":release.assignment_id,"udid":release.udid,
+                    "rows":release.rows.iter().map(|row| &row.assignment_id).collect::<Vec<_>>()})
+                .to_string(),
+                now
+            ],
+        )?;
+        tx.execute(
+            "UPDATE settings SET value=?2 WHERE key=?1",
+            params![
+                key,
+                release.receipt("released", Some(terminations)).to_string()
+            ],
+        )?;
+        tx.commit()?;
+        let mut campaigns = vec![release.campaign_id.clone()];
+        for row in &release.rows {
+            if !campaigns.contains(&row.campaign_id) {
+                campaigns.push(row.campaign_id.clone());
+            }
+        }
+        Ok(campaigns)
+    }
+
+    /// Step 5: the release of `job` failed after its request. Each excluded row with no current
+    /// release proof gets a resume stamp tied to its exclusion, so verification carries on as
+    /// before, and its marker goes; the receipt becomes `aborted`. Returns the campaigns changed,
+    /// empty when the receipt was not `requested` (already settled).
+    pub fn abort_prior_post_release(
+        &self,
+        job_assignment: &str,
+        error: &str,
+    ) -> anyhow::Result<Vec<String>> {
+        let mut conn = self.conn()?;
+        let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
+        let campaigns = abort_prior_post_release_on(&tx, job_assignment, error)?;
+        tx.commit()?;
+        Ok(campaigns)
+    }
+
+    /// Receipts still `requested` whose job no longer runs that attempt: their release ended
+    /// without its abort. The dispatcher aborts each one.
+    pub fn stale_prior_post_releases(&self) -> anyhow::Result<Vec<String>> {
+        let conn = self.conn()?;
+        let mut statement = conn.prepare(
+            "SELECT json_extract(s.value,'$.assignmentId') FROM settings s
+             WHERE s.key GLOB 'publish.prior-post-release.*' AND json_valid(s.value)
+             AND json_extract(s.value,'$.state')='requested'
+             AND NOT EXISTS(SELECT 1 FROM publish_dispatch_jobs j
+                 WHERE j.assignment_id=json_extract(s.value,'$.assignmentId') AND j.state='running'
+                 AND j.attempt_id=json_extract(s.value,'$.attemptId'))",
+        )?;
+        let rows = statement
+            .query_map([], |r| r.get(0))?
+            .collect::<rusqlite::Result<_>>()?;
+        Ok(rows)
+    }
+}
+
+/// One earlier post a scheduled job excluded to release, at the revision it read.
+#[derive(Debug, Clone, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PriorPostReleaseRow {
+    pub assignment_id: String,
+    pub campaign_id: String,
+    pub revision: i64,
+    pub intent_sha256: Option<String>,
+    pub publication_stage: u64,
+    pub package: Option<String>,
+    pub exclusion_request_id: String,
+}
+
+/// The receipt of one prior-post release by a scheduled job (`publish.prior-post-release.{job}`).
+#[derive(Debug, Clone, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PriorPostRelease {
+    pub request_id: String,
+    pub assignment_id: String,
+    pub campaign_id: String,
+    pub attempt_id: String,
+    pub udid: String,
+    pub rows: Vec<PriorPostReleaseRow>,
+}
+
+impl PriorPostRelease {
+    fn receipt(&self, state: &str, terminations: Option<&serde_json::Value>) -> serde_json::Value {
+        let mut receipt = serde_json::json!({
+            "version": 1, "state": state, "requestId": self.request_id,
+            "assignmentId": self.assignment_id, "campaignId": self.campaign_id,
+            "attemptId": self.attempt_id, "udid": self.udid, "rows": self.rows,
+            "updatedAt": Utc::now().to_rfc3339(),
+        });
+        if let Some(terminations) = terminations {
+            receipt["terminations"] = terminations.clone();
+        }
+        receipt
+    }
+}
+
+fn prior_post_release_key(job_assignment: &str) -> String {
+    format!("publish.prior-post-release.{job_assignment}")
+}
+
+fn short_id(id: &str) -> &str {
+    id.get(..8).unwrap_or(id)
+}
+
+/// campaign, phone, revision, Post intent and evidence of a row about to get a resume stamp.
+type StampedRow = (String, String, i64, Option<String>, Option<String>);
+
+/// The abort body, shared with startup recovery (`interrupt_orphaned_publish_campaigns`).
+pub(super) fn abort_prior_post_release_on(
+    conn: &Connection,
+    job_assignment: &str,
+    error: &str,
+) -> anyhow::Result<Vec<String>> {
+    use sha2::Digest;
+    let key = prior_post_release_key(job_assignment);
+    let raw: Option<String> = conn
+        .query_row(
+            "SELECT value FROM settings WHERE key=?1 AND json_valid(value)
+             AND json_extract(value,'$.state')='requested'",
+            [&key],
+            |r| r.get(0),
+        )
+        .optional()?;
+    let Some(raw) = raw else {
+        return Ok(Vec::new());
+    };
+    let mut receipt: serde_json::Value = serde_json::from_str(&raw)?;
+    let now = Utc::now().to_rfc3339();
+    let job_campaign = receipt["campaignId"]
+        .as_str()
+        .unwrap_or_default()
+        .to_owned();
+    let mut campaigns = Vec::new();
+    for row in receipt["rows"].as_array().cloned().unwrap_or_default() {
+        let (Some(assignment), Some(exclusion)) = (
+            row["assignmentId"].as_str(),
+            row["exclusionRequestId"].as_str(),
+        ) else {
+            continue;
+        };
+        let released = conn
+            .query_row(
+                "SELECT value FROM settings WHERE key=?1",
+                [format!("publish.handoff-release.{assignment}")],
+                |r| r.get::<_, String>(0),
+            )
+            .optional()?
+            .and_then(|raw| serde_json::from_str::<serde_json::Value>(&raw).ok())
+            .is_some_and(|proof| proof["requestId"] == exclusion);
+        conn.execute(
+            "DELETE FROM settings WHERE key=?1 AND value=?2",
+            params![format!("publish.handoff-pending.{assignment}"), exclusion],
+        )?;
+        if released {
+            continue;
+        }
+        // The stamp `handoff_resumed` reads: observation is authorized again for exactly this
+        // exclusion. Verification status and budget stay as they were.
+        let current: Option<StampedRow> = conn
+            .query_row(
+                "SELECT campaign_id,udid,revision,effect_intent,evidence_json FROM publish_assignments WHERE id=?1",
+                [assignment],
+                |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?)),
+            )
+            .optional()?;
+        let Some((campaign, udid, revision, Some(intent), evidence)) = current else {
+            continue;
+        };
+        let Some(mut evidence) = evidence
+            .as_deref()
+            .and_then(|raw| serde_json::from_str::<serde_json::Value>(raw).ok())
+            .filter(serde_json::Value::is_object)
+        else {
+            continue;
+        };
+        let reason = format!(
+            "Lượt hẹn giờ {} chưa nhả được máy; tiếp tục xác minh bài này như trước, không đăng lại.",
+            short_id(&job_campaign)
+        );
+        evidence["verificationHandoffResume"] = serde_json::json!({
+            "version":1,"assignmentId":assignment,"campaignId":campaign,"udid":udid,
+            "exclusionRequestId":exclusion,
+            "intentSha256":format!("{:x}",sha2::Sha256::digest(intent.as_bytes())),
+            "resumedAt":now,"reason":reason,"statusBefore":evidence["verificationStatus"].clone(),
+            "source":"prior_post_release_aborted",
+        });
+        conn.execute(
+            "UPDATE publish_assignments SET evidence_json=?1,revision=revision+1,updated_at=?2
+             WHERE id=?3 AND revision=?4",
+            params![evidence.to_string(), now, assignment, revision],
+        )?;
+        conn.execute("INSERT INTO operation_device_events(source_kind,source_id,udid,action,state,recorded_at,text,detail)
+            VALUES('publish',?1,?2,'publishPriorPostRelease','aborted',?3,?4,?5)",
+            params![campaign, udid, now, reason,
+                serde_json::json!({"requestId":receipt["requestId"],"assignmentId":assignment,"exclusionRequestId":exclusion,"error":error}).to_string()])?;
+        if !campaigns.contains(&campaign) {
+            campaigns.push(campaign);
+        }
+    }
+    receipt["state"] = serde_json::json!("aborted");
+    receipt["error"] = serde_json::json!(error);
+    receipt["updatedAt"] = serde_json::json!(now);
+    conn.execute(
+        "UPDATE settings SET value=?2 WHERE key=?1",
+        params![key, receipt.to_string()],
+    )?;
+    if !job_campaign.is_empty() && !campaigns.contains(&job_campaign) {
+        campaigns.push(job_campaign);
+    }
+    Ok(campaigns)
+}
+
+/// The exclusion body shared by an operator's exclusion, a confirmed replacement (`handoff`) and a
+/// scheduled job's prior-post release (`reason` names that job). Debt rows keep their state.
+fn exclude_on(
+    tx: &Connection,
+    assignment: &str,
+    revision: i64,
+    request: &str,
+    handoff: bool,
+    reason: Option<&str>,
+) -> anyhow::Result<PublishExcludeReceipt> {
+    if let Some(receipt) = exclusion_on(tx, request)? {
+        let prior: i64 = tx.query_row(
+            "SELECT expected_revision FROM publish_exclude_requests WHERE request_id=?1",
+            [request],
+            |r| r.get(0),
+        )?;
+        anyhow::ensure!(
+            receipt.assignment_id == assignment && prior == revision,
+            "Exclude request identity changed"
+        );
+        return Ok(receipt);
+    }
+    let (actual, intent, state): (i64, Option<String>, String) = tx.query_row(
+        "SELECT revision,effect_intent,state FROM publish_assignments WHERE id=?1",
+        [assignment],
+        |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
+    )?;
+    anyhow::ensure!(actual == revision, "Bài đã thay đổi; tải lại tiến độ");
+    let debt = intent.is_some()
+        || matches!(
+            state.as_str(),
+            "posting" | "verifying" | "uncertain" | "succeeded"
+        );
+    let next = if debt { "needsReview" } else { "stopping" };
+    let reason =
+        if debt {
+            Some(reason.unwrap_or(
+                "Bài có thể đã đăng; giữ bằng chứng và nợ xác minh/Sheet, không đăng lại",
+            ))
+        } else {
+            None
+        };
+    tx.execute("INSERT INTO publish_exclude_requests(request_id,assignment_id,expected_revision,state,reason,updated_at)
+        VALUES(?1,?2,?3,?4,?5,?6)", params![request,assignment,revision,next,reason,Utc::now().to_rfc3339()])?;
+    if handoff {
+        tx.execute("INSERT INTO settings(key,value) VALUES(?1,?2) ON CONFLICT(key) DO UPDATE SET value=excluded.value",
+            params![format!("publish.handoff-pending.{assignment}"),request])?;
+    }
+    // A cancelled child fences transfer/composer CAS; Post-intent rows keep their exact state.
+    tx.execute(
+        "UPDATE publish_assignments SET state='cancelled',
+        revision=revision+1,updated_at=?4 WHERE id=?1 AND revision=?2 AND NOT ?3",
+        params![assignment, revision, debt, Utc::now().to_rfc3339()],
+    )?;
+    tx.execute("UPDATE publish_dispatch_jobs SET state='cancelled',reason='assignment_excluded',revision=revision+1,
+        finished_at_ms=?2 WHERE assignment_id=?1 AND state IN ('queued','paused')",params![assignment,Utc::now().timestamp_millis()])?;
+    tx.execute("UPDATE publish_recovery_state SET payload=json_set(payload,'$.state','stopped','$.nextRetryAt',NULL,'$.reconnectDeadline',NULL) WHERE assignment_id=?1",[assignment])?;
+    exclusion_on(tx, request)?.context("exclusion receipt missing")
 }
 
 fn handoff_fence(conn: &Connection, assignment: &str, request: &str) -> anyhow::Result<String> {

@@ -328,6 +328,35 @@ pub struct PublishApproval {
     pub version: u32,
     pub input_digest: String,
     pub accounts: std::collections::BTreeMap<String, String>,
+    /// A scheduled campaign's approval to release, at its own turn on each phone, verification
+    /// debt of other campaigns that TikTok already holds (`publish_upload_settled`). Absent on
+    /// immediate campaigns and on schedules saved before this policy: those only wait.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub prior_posts: Option<PriorPostApproval>,
+}
+
+/// The prior-post policy a scheduled campaign was approved with, bound in its preflight digest.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct PriorPostApproval {
+    pub version: u32,
+    pub wait_minutes: u32,
+}
+
+/// How long a scheduled phone waits, after its turn came, for an earlier post on it to be proven
+/// on TikTok or verified, before it stops before Post. Not measured: a cap, not a target. It is
+/// about eight verifier passes at the 120-second cadence, and the phone sends nothing while it
+/// waits, so waiting is safe; past it the scheduled post would be a catch-up post, which the
+/// owner refused (a schedule opened more than 30 s late is missed, never posted late).
+pub const PRIOR_POST_WAIT_MINUTES: u32 = 30;
+
+impl PriorPostApproval {
+    pub const fn current() -> Self {
+        Self {
+            version: 1,
+            wait_minutes: PRIOR_POST_WAIT_MINUTES,
+        }
+    }
 }
 
 /// The one account spelling used by approvals and the preflight digest: no `@`, no case.

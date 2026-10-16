@@ -3191,6 +3191,7 @@ async fn post_one_assignment_owned(
             db.admit_publish_effect(&assignment.id)?
                 .map_err(anyhow::Error::new)
         },
+        run.map(|run| (db, assignment.id.as_str(), run)),
     )
     .await
     {
@@ -3200,10 +3201,21 @@ async fn post_one_assignment_owned(
         // media is still on the phone with no context to clean it from, which the operator
         // needs told rather than hidden inside `uncertain`.
         Err(error) => {
-            let mut attempt = finish(PostOutcome::NothingPublished(format!(
-                "{}: không mở được phiên ({error}); ảnh vẫn còn trên máy",
-                assignment.udid
-            )));
+            // Waiting for an earlier post on this phone is not a refused session: TikTok was not
+            // touched, and the row is requeued without spending its budget.
+            let prior_post = error
+                .downcast_ref::<riviu_core::publish_recovery::RecoveryFailure>()
+                .filter(|failure| failure.code == riviu_core::publish_recovery::PRIOR_POST_PENDING);
+            let mut attempt = finish(PostOutcome::NothingPublished(match prior_post {
+                Some(failure) => format!(
+                    "{}: {failure}; chưa mở TikTok, ảnh vẫn còn trên máy, chưa Đăng",
+                    assignment.udid
+                ),
+                None => format!(
+                    "{}: không mở được phiên ({error}); ảnh vẫn còn trên máy",
+                    assignment.udid
+                ),
+            }));
             // A lock screen in front of TikTok is a typed, retryable pre-Post reason
             // (`device_screen_locked`), not the generic `post_refused_before_dispatch`.
             // Nothing reached the composer, so retrying the same phone after unlock is safe.
@@ -3776,14 +3788,19 @@ pub(crate) async fn open_publish_context(
     control: &DeviceControlPlane,
     udid: &str,
 ) -> anyhow::Result<riviu_core::UiWithStreamContext> {
-    open_publish_context_until(control, udid, || false, || Ok(())).await
+    open_publish_context_until(control, udid, || false, || Ok(()), None).await
 }
 
+/// `pipeline`: the pipeline row this session opens for (database, assignment, run). Such a row
+/// first releases earlier posts on the phone that TikTok holds (`release_prior_posts`, the
+/// backstop for a row that reached compose already imported), and an earlier post that still
+/// blocks the clean start is its retryable `prior_post_pending`, never a terminal refusal.
 async fn open_publish_context_until(
     control: &DeviceControlPlane,
     udid: &str,
     cancelled: impl Fn() -> bool + Send,
     admit: impl FnOnce() -> anyhow::Result<()> + Send,
+    pipeline: Option<(&Database, &str, &riviu_core::db::PublishPipelineRun)>,
 ) -> anyhow::Result<riviu_core::UiWithStreamContext> {
     let exclusive = control
         .acquire_exclusive(udid, DeviceWorkOwner::Script)
@@ -3798,6 +3815,10 @@ async fn open_publish_context_until(
     // The last wait is over and the lease is held: admit the effect now, before the app is
     // touched. Dropping the lease and capacity on refusal leaves the phone as it was.
     admit()?;
+    if let Some((db, assignment, run)) = pipeline {
+        super::prior_post::release_prior_posts(control, db, None, &exclusive, assignment, run)
+            .await?;
+    }
     // TikTok restores its last composer/gallery screen when launched with
     // kill_existing=false. Publish needs a deterministic feed entry point, so
     // terminate only the target bundle while the exclusive lease is held;
@@ -3829,7 +3850,14 @@ async fn open_publish_context_until(
             .start_clean_app_session(exclusive, capacity, &target_package, kind)
             .await
     }
-    .map_err(anyhow::Error::new)?;
+    .map_err(|error| match error {
+        riviu_core::DeviceControlError::PendingPublication { reason, .. } if pipeline.is_some() => {
+            anyhow::Error::new(riviu_core::publish_recovery::prior_post_pending(format!(
+                "máy còn bài trước chờ link ({reason})"
+            )))
+        }
+        error => anyhow::Error::new(error),
+    })?;
     let stream_url = &context.stream_proof().stream_url;
     if riviu_core::frame_source::is_no_stream(stream_url) {
         log::warn!(

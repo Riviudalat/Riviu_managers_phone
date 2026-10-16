@@ -49,6 +49,7 @@ pub(in crate::db) fn fixture() -> (
             accounts: ["a", "b", "c"]
                 .map(|udid| (udid.to_owned(), String::new()))
                 .into(),
+            prior_posts: None,
         }),
     };
     let c = db.create_publish_campaign(&request, &bundles).unwrap();

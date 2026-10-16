@@ -64,6 +64,7 @@ mod publish_helper_maintenance;
 pub use publish_helper_maintenance::HelperMaintenanceSubmittedBinding;
 mod publish_pipeline;
 mod publish_recovery;
+pub use publish_recovery::{PriorPostGate, PRIOR_POST_NEEDS_REVIEW, PRIOR_POST_UNSETTLED};
 mod tiktok_credentials;
 mod typesafe;
 pub use google_connection::{
@@ -82,7 +83,10 @@ pub use publish_media_sweep::{
     publish_album_scope, publish_device_scope, PublishMediaSweepClaim, PublishMediaSweepKind,
 };
 mod publish_start;
-pub use publish_start::{PublishExcludeReceipt, PublishStartError, PublishStartReceipt};
+pub use publish_start::{
+    PriorPostRelease, PriorPostReleaseRow, PublishExcludeReceipt, PublishStartError,
+    PublishStartReceipt,
+};
 mod publish_report;
 mod publish_sheet;
 mod publish_sheet_delivery;
@@ -103,6 +107,7 @@ pub use publish_verification::{
     PublishDeviceGuard, PublishDeviceHold, PublishRecoveryCapabilities, PublishRecoveryCapability,
     PublishResumeVerificationResult, PublishResumeVerificationState,
 };
+pub use publish_verification::{PriorPostClass, PriorPostHold, PriorPostScope};
 
 /// Somewhere to keep a secret that is **not** the SQLite file.
 ///
