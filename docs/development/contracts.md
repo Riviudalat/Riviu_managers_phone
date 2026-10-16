@@ -923,7 +923,7 @@ có versionCode tối thiểu 5 cho launcher; APK, manifest và NOTICE phải kh
   trong scope nghiệm thu, và máy còn lưu đúng tài khoản của bài (điều kiện để bài tự xác minh tiếp
   sau khi nhả). *Chờ* khi bài đang `posting`, đang được kiểm, máy đang nhả cho lượt khác, chưa
   chứng minh (hoặc đã chứng minh nhưng máy lưu tài khoản khác) mà verifier vẫn tự quan sát (pending,
-  hoặc needsReview còn trong cửa sổ tự kiểm lại 24 giờ, ngoài nghiệm thu), hoặc tài khoản đã duyệt
+  hoặc needsReview còn trong cửa sổ tự kiểm lại 24 giờ, kể cả trong scope nghiệm thu), hoặc tài khoản đã duyệt
   đang bị giữ bởi bài trên máy khác.
   *Cần người* khi lượt cũ bị Dừng/đang đóng, thiếu identity, bị loại mà không có proof nhả hay dấu
   tiếp tục, thuộc contract xác minh cũ, ngoài scope nghiệm thu, hoặc needsReview không tự kiểm lại.

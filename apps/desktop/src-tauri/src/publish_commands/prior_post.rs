@@ -16,8 +16,8 @@ pub(super) fn install_acceptance(policy: &DevAcceptancePolicy) {
 }
 
 /// Which earlier posts the automatic verifier still observes, as the gate and the release
-/// classify them: under dev acceptance only its pinned verification scope, with no automatic
-/// re-check of parked rows (expiry is off there); otherwise every post.
+/// classify them: under dev acceptance only its pinned verification scope, otherwise every post.
+/// Parked rows get the automatic 30-minute re-check in both (under acceptance only in scope).
 pub(super) fn with_scope<T>(work: impl FnOnce(&PriorPostScope<'_>) -> T) -> T {
     match ACCEPTANCE.get().filter(|policy| policy.active()) {
         Some(policy) => {
@@ -26,7 +26,7 @@ pub(super) fn with_scope<T>(work: impl FnOnce(&PriorPostScope<'_>) -> T) -> T {
             };
             work(&PriorPostScope {
                 observable: &observable,
-                automatic_recheck: false,
+                automatic_recheck: true,
             })
         }
         None => work(&PriorPostScope::production()),

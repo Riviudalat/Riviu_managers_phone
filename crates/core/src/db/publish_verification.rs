@@ -2962,7 +2962,7 @@ pub struct PriorPostHold {
 }
 
 /// Which earlier posts the automatic verifier will still observe: the dev acceptance scope, and
-/// whether automatic re-checks of parked rows run (off under acceptance).
+/// whether automatic re-checks of parked rows run.
 pub struct PriorPostScope<'a> {
     pub observable: &'a (dyn Fn(&str, &str) -> bool + Sync),
     pub automatic_recheck: bool,
