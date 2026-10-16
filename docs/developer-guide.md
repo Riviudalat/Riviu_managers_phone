@@ -21,6 +21,15 @@ Rust/Tauri/React/SQLite là stack hiện hành. Không tạo controller hoặc s
 Threads từ chối trước effect. Flow thiết bị là graph primitive; Điều phối gọi engine
 nghiệp vụ. Không biến node UI thành proof Post/Send.
 
+Tràn stack cũng làm dừng mọi máy, giống như một panic. `run()` dựng runtime cho
+`tauri::async_runtime` với stack 8 MiB cho mỗi worker và mỗi luồng blocking
+(`ASYNC_WORKER_STACK_BYTES`). Ngày 16/10/2026 (r136, bản debug nghiệm thu, 30 máy),
+stack mặc định 2 MiB đã tràn ngay khung xác nhận editor đầu tiên. Thêm một lớp `async`
+lồng sâu trong composer thì phải `Box::pin` future lớn (như
+`post_with_effect_intent`), đừng trông vào dư địa stack. Dùng
+`cargo run -p riviu-android-driver --example fleet_publish_rehearsal -- --future-sizes`
+để đo kích thước future cấp trên; lệnh này không mở máy nào.
+
 ## Chuẩn bị
 
 [Toolchain, dependency và lệnh kiểm](development/testing.md). Bảo toàn diff của
