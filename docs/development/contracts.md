@@ -108,9 +108,18 @@ năm lần mỗi bước.
 Publish observation dùng lỗi deadline có kiểu và một lượt đọc lại transient trong
 cùng phase/deadline; tạo cursor mới không làm mới ngân sách. `SessionEpochChanged`
 giữ nguyên kiểu để chủ phase/dispatcher bỏ target cũ và xác minh lại account, không
-chấp nhận observation của phiên mới dưới binding cũ. Caption Unknown được đọc lại;
-nội dung khác thật hoặc mơ hồ vẫn từ chối. Bước nhạc có một deadline 180 giây chung
-cho các attempt/backoff; hết tổng budget không tự requeue để cấp lại cửa sổ mới.
+chấp nhận observation của phiên mới dưới binding cũ. Trước Post, epoch đổi mà driver
+không chứng minh (agent tự thay phiên rồi đọc lại) là `composer_observation_invalidated`:
+thử lại được, chuẩn bị lại từ đầu, không dùng lại target cũ.
+`publish_observation_session_repaired` chỉ dành cho `SessionEpochChanged` mà driver đã
+chứng minh. Bước camera/thư viện và bước popup coi một cây là chưa đọc khi foreground ở
+hai đầu lần đọc khác nhau: không bấm gì, đọc lại trong cùng deadline. App khác cứ nằm
+trên thì kết thúc bằng deadline quan sát có kiểu. Lần đọc foreground hỏng vì adb server
+khởi động lại (mọi nguồn đều lỗi vận chuyển) tiêu một lần thử trước Post
+(`adb_foreground_read_failed`); "device … not found" vẫn là Disconnected. Caption Unknown
+được đọc lại; nội dung khác thật hoặc mơ hồ vẫn từ chối. Cả chặng nhạc có ngân sách chung
+300 giây (`phase_deadline`) cho các attempt/backoff, mỗi pha bên trong tối đa 180 giây
+(`SOUND_WINDOW`); hết tổng budget không tự requeue để cấp lại cửa sổ mới.
 Lần đọc lại nhạc, caption và nút Đăng ngay trước Post dùng một deadline hữu hạn, đặt
 một lần: 1,5 lần thời gian chuẩn bị đo được của cùng phiên, tối thiểu 12 giây, tối đa
 16 giây. Thiếu dữ liệu, mơ hồ hoặc hết hạn vẫn là lỗi thử lại trước Post: chưa có intent
@@ -145,7 +154,10 @@ nhạc đang bao bước (mọi `with_*_budget` là trần; chính ngân sách h
 áp cho thao tác bấm/gõ/vuốt/back (vẫn xả hết và đối soát như cũ), cho đọc popup (đọc xong vẫn
 cần thêm lần đọc của bước nên vô ích; trừ khi cây của bước popup chính là lần đọc của bước, như composer chờ trong cây: khi đó foreground + `/source` + foreground đóng là một lần đọc nên ân hạn hoàn tất cả cặp ngoặc, và bước nhận `Ready` trong ân hạn phải xét kết quả trước mọi kiểm `now >= deadline`), cho bằng chứng tươi trước Post và mọi thứ sau Post
 (`close_read_grace` trước `final_reproof_window`). Kết quả nhận trong ân hạn là bằng chứng tươi
-như mọi lần đọc; kiểm epoch/generation trước khi bấm vẫn áp dụng.
+như mọi lần đọc; kiểm epoch/generation trước khi bấm vẫn áp dụng. Mọi vòng quan sát phải xét
+đúng lần đọc mà ân hạn vừa hoàn tất, nên không được kiểm lại `now >= deadline` sau khi
+`read_before_deadline` trả `Ready`. Bước nào bỏ một cửa sổ để mở cửa sổ khác phải gọi
+`window_closed(cũ)` trước, nếu không ân hạn của cửa sổ cũ bị ghi `satisfied=true`.
 
 Dispatcher giữ completion receipt đến khi SQLite xác nhận cùng
 assignment/campaign/run/attempt/device/phase/revision. Journal cạnh DB lưu receipt
@@ -232,7 +244,14 @@ rồi kiểm Dừng và đối soát trước bước kế tiếp. Không tự p
 
 Sau khi bấm Next của picker, lỗi accessibility/HTTP timeout ở bước chờ editor
 cho phép quan sát XML trong tổng tối đa 30 giây, kể cả lần đọc đầu. Chỉ hai generation mới trong cùng phiên,
-cùng một nút Next đã đo và không có Loading mới chứng minh đã tới editor.
+cùng một nút Next đã đo và không có Loading mới chứng minh đã tới editor. Trên 45.7.3/en,
+khung ảnh đầu chờ 1 giây sau ACK của Next (r134, box 21-50: 19/19 khung chụp 0,1–0,4 giây sau
+ACK vẫn là picker, 19/19 khung từ 0,7 giây trở đi đã là editor). Lỗi OCR hoặc ảnh chụp, kể cả
+lỗi tới trong ân hạn, chuyển sang XML với cửa sổ riêng
+`clamp(3 × q90 + 2 s, 30 s, 90 s)` mở tại lúc chuyển. OCR trả `Ok(false)` (60 giây không
+thấy cặp Next/Your Story ổn định) không bao giờ chạy XML, vì XML không thấy được màn bị che.
+Hai khung ảnh chứng minh được lệch nhau tối đa 1 px ở cả ô Next lẫn ô Your Story
+(đo trên ce11171beb405c2701).
 Phục hồi này không bấm lại picker, không ghi intent và không gọi Đăng; Dừng vẫn
 được kiểm trước tap và sau mỗi lần đọc.
 Global 45.7.3/en có nhánh phục hồi riêng khi đã chọn nhạc nhưng không đọc được
@@ -352,7 +371,13 @@ tab Hot tối đa hai lần và chỉ khi hai ảnh mới chưa đổi, hàng nh
 ảnh mới có hàng chuyển hồng. OCR không bao giờ là bằng chứng chọn: `editorProof` ghi `xml`
 khi hai snapshot XML mới của màn chỉnh sửa cùng tên nhạc, và chỉ bằng chứng đó mới xác
 nhận lựa chọn (`visualSelection` ghi thời gian bấm hàng/đóng bảng và xác nhận editor);
-màn chỉnh sửa không xác nhận thì lượt thử kết thúc trước Đăng. Sau khi đã
+màn chỉnh sửa không xác nhận thì lượt thử kết thúc trước Đăng. Sau khi chính chặng nhạc đã
+bấm Back và Back được ACK, bảng nhạc coi như đã đóng. Từ đó chỉ chip nhạc trên editor mới
+chứng minh được nhạc: phục hồi đọc lại chip trong cửa sổ mới, tối đa 3 cửa sổ mỗi lần gọi
+(`closedPickerReadback`), không bao giờ chờ hàng của bảng. Ở r130–r133, lần chờ vô ích đó có
+p50 204 giây, trong khi một lần `observe` chip đã xác nhận ở 8/8 chặng phục hồi được.
+Nhãn popup (phiên bản TikTok, ngôn ngữ) đọc một lần cho mỗi phạm vi ngân sách nhạc, và stage
+diagnostics ghi các lần đọc shell (`soundPopupVersion`, `soundPopupLanguage`, `soundPopupStep`). Sau khi đã
 dừng server cũ mà phiên mới không lên thì phiên cũ cũng bị niêm phong, mọi yêu cầu sau đó
 bị từ chối ngay trước khi ra mạng và vòng dọn composer (Back + đọc) dừng ở lỗi đầu tiên
 thay vì gõ vào server đã chết. Sau khi khởi động lại cho chủ đọc, bằng chứng sẵn sàng là

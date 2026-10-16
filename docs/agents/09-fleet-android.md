@@ -228,6 +228,11 @@ sống; vài phút sau `adb shell echo` lại 230–290 ms.
   view keeper mở lại stream, không phát lại thao tác; xác minh chỉ đọc lại. Trong lúc restart
   inventory không báo "phần mềm khác", background start chờ; UI nhận
   `adbServerNotice` `restarted`.
+- Restart (của Riviu hay phần mềm khác) có thể cắt lần đọc foreground của một máy đang soạn.
+  Khi mọi nguồn đều lỗi vận chuyển (`… daemon not running; starting now at tcp:5037`, hoặc
+  stderr rỗng), dòng tiêu một lần thử trước Post (`adb_foreground_read_failed`) thay vì kết
+  thúc. Đã thấy ở r95: 4 dòng bị rớt trước gf93. "device … not found" vẫn là Disconnected,
+  giữ nguyên box hold.
 - Lúc khởi động controller (`replace_foreign_server_at_bootstrap`, trước mọi job): server
   đang chạy khác bản `Version` với client (đọc đường dẫn tiến trình nghe cổng rồi chạy
   `<server> version`) thì ghi cảnh báo và thay bằng adb của Riviu, thay vì giữ "selected from

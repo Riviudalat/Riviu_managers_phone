@@ -57,6 +57,12 @@ cargo clippy --locked -p riviu-managers-phone --all-targets -- -D warnings
 cargo clippy --locked -p riviu-android-driver --all-targets -- -D warnings
 ```
 
+Cây code chưa sạch rustfmt, nên chỉ sửa format các hunk mình viết.
+`rustfmt --check <file>` còn báo diff của mọi submodule `mod` dưới đường dẫn của file đó,
+nên phải lọc theo đường dẫn được báo. Với `core.autocrlf=true`, file trong worktree là CRLF
+nhưng `grep -c $'\r'` của Git Bash vẫn báo 0. Muốn khẳng định một file là LF thì đếm byte CR
+bằng Python.
+
 Chọn crate/test hẹp trước. CI chạy workspace với features diagnostics/deployment-check
 được chỉ định; không dùng all-features tùy tiện. Diagnostic binary, ví dụ
 `live_nurture_test`, cần `--features diagnostics` để build nhưng **không tự được phép

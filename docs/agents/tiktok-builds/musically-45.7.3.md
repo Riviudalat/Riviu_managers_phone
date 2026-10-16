@@ -107,6 +107,9 @@ SM-G955F/N, 237 lần soạn, chẩn đoán `settleAfterCreate` / `settleAfterGa
 luôn là `com.ss.android.ugc.aweme.splash.SplashActivity`. Camera, picker và editor dùng chung
 một activity, nên `dumpsys window` không dùng được làm cổng "màn đã đổi". Lần đọc cây đầu tiên
 sau khi bấm mất p50 1,8 s, p90 2,7 s, tối đa 9,8 s, và chưa lần nào trả về màn cũ.
+Ảnh chụp sau Next của picker (r134, box 21-50): 19/19 khung chụp 0,1–0,4 s sau ACK vẫn là
+picker, 19/19 khung từ 0,7 s trở đi đã là editor. Vì vậy khung ảnh đầu của bước chờ editor
+chờ 1 s (gf93).
 
 ## 3. Bảng id Riviu dùng cho 45.7.3
 

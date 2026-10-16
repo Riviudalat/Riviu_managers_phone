@@ -125,7 +125,12 @@ Mỗi mục dưới đây từng làm mất 20–60 phút. Đọc trước khi m
 
 ### Khôi phục không chạm máy
 
-- Dòng `uncertain`/`needsReview` (`processingWaitExhausted`, `clipboardUnchanged`…):
+- Dòng `uncertain`/`needsReview` (`processingWaitExhausted`, `clipboardUnchanged`…): từ
+  gf93 app tự kiểm tra lại mỗi 30 phút trong 24 giờ (`automaticRecheckAt`, log "Tự kiểm tra
+  lại lần …"). Khi đang đo cơ chế này, chờ nó chạy, đừng resume tay: resume tay mở ngân sách
+  mới và xóa `recheckSince`/`recheckCount`/`recheckCopyPasses`. Dưới dev acceptance, lần
+  kiểm lại chỉ chạy cho chiến dịch có trong scope đã ghim, nên dòng đậu của lượt trước cần
+  giữ chiến dịch đó trong scope tĩnh. Chỉ khi thật cần đóng sớm mới gọi
   `publish_recovery_capabilities` → `publish_resume_verification
   {assignmentId, confirmed:true, expectedRevision}`. Không bao giờ retry các dòng này.
 - Dòng `failed_before_dispatch`: `retry-publish.mjs <campaign> <vị trí 1-based trong
