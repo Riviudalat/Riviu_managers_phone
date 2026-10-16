@@ -858,6 +858,27 @@ có versionCode tối thiểu 5 cho launcher; APK, manifest và NOTICE phải kh
   Post intent và evidence; assignment đổi hoặc resume xác minh tường minh mới hơn làm
   proof mất hiệu lực. Chỉ account reservation của assignment đó bị xóa; link chưa giải
   quyết trở thành nợ review, không phải owner máy sống.
+- Bài đã có Post intent bị handoff loại chỉ còn nợ xác minh/Sheet và được tự tiếp tục xác minh
+  khi handoff đó trả máy, không cần **Tiếp tục xác minh** (16/10/2026: r127 máy 32 và r128 máy
+  39 nằm im 9 giờ sau hai–ba lần bị loại). Điều kiện đọc từ dữ liệu bền, kiểm lại trong
+  transaction ghi (`handoff_resume_due`): lần loại mới nhất có release proof mang đúng request
+  của nó (loại do operator tự làm không có proof) và máy đã được trả: không còn marker
+  handoff-pending nào trên máy, không Start `accepted`/`preparing` nào có khóa tài khoản chuẩn
+  bị trên máy, không dispatch job queued/running/paused, claim `transfer`/`compose`, hay
+  assignment khác chưa có effect intent còn việc mới (`queued`…`posting`, không bị loại, chiến
+  dịch không `scheduled`/`cancelled`/`missed`) trên máy. Tức lượt mới đã Đăng xong hoặc kết
+  thúc trên máy đó, nên không Start đang chạy nào còn dựa vào release proof mà lần tiếp tục này
+  làm mất hiệu lực. Máy phải còn đúng tài khoản của bài (`device_meta.handle` bằng
+  `expectedAccount`); nếu máy còn bài khác chưa giải quyết thì mọi pipeline liên quan phải đã
+  xong, vì khi đó verifier của cả hai đi đường nợ chung của máy (`verification_restart::authorize`)
+  và tiếp tục sớm chỉ làm chậm xác minh của lượt mới. Chỉ bài chưa có link, không có stop marker,
+  không needsReview, thuộc contract xác minh hiện hành (hoặc đã resume tường minh trước đó). CAS ghi
+  `verificationHandoffResume` (version 1, assignment, campaign, máy, `exclusionRequestId`, hash
+  intent, `resumedAt`, `statusBefore`), lý do "Tự tiếp tục xác minh bài đã gửi sau khi lượt mới
+  trả máy; không đăng lại" và `nextCheckAt` ngay; giữ state, intent, job, account reservation,
+  bộ đếm ngân sách và nghĩa vụ Sheet. Dấu chỉ gỡ đúng lần loại nó ghi; lần loại mới hơn lại chặn
+  worker tới khi handoff mới trả máy. Stop sau đó vẫn thắng. Worker vẫn chờ máy rảnh và ngân sách
+  điện thoại chung như mọi bài.
 - Thay thế không dừng publish toàn campaign. Assignment cùng campaign không được chọn
   không bị loại hay đóng. Caller handoff thủ công cũ giữ hành vi cũ.
 - `require_current_preflight_digest` không đổi. Readiness mới được kiểm sau khi nhả;
@@ -1127,7 +1148,11 @@ Không chạy dưới scope dev-acceptance; không mở phiên UI, không đóng
 Worker lưu `nextCheckAt` bằng thời điểm kết thúc quan sát cộng 120 giây cho bài
 còn ngân sách, kể cả lỗi đọc. Mỗi lần quan sát có deadline và lease riêng. Restart
 giữ mốc gửi, lần kiểm tiếp, fingerprint và số lượt không tiến triển; needsReview
-không được background tự mở lại. Nhật ký verifying chỉ nói kiểm thao tác Đăng đã có;
+không được background tự mở lại. Bài bị handoff loại được worker tự tiếp tục khi handoff trả
+máy (xem "Thay thế đã xác nhận"); vì lúc bị loại bài không được quan sát, chỉ hạn chờ xử lý 60
+phút và cửa sổ 120 phút TikTok không trả lời tính lại từ lúc tiếp tục, các bộ đếm giữ nguyên.
+Nhật ký ghi "Tự tiếp tục xác minh bài đã gửi trên {máy} sau khi lượt mới trả máy (lượt …, loại
+…); không đăng lại". Nhật ký verifying chỉ nói kiểm thao tác Đăng đã có;
 `checking_existing_post_link` ghi lần kiểmN, `link_pending` hiện lý do thiếu link,
 `link_needs_review` nói tự kiểm đã dừng. Không suy submitted/công khai từ thiếu link.
 Android ở trạng thái Connected sau restart vẫn được kiểm khi agent đã sẵn sàng;

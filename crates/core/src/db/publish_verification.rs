@@ -615,6 +615,9 @@ pub(super) fn needs_review(evidence: Option<&str>) -> bool {
         .is_some_and(|value| value["verificationStatus"]["state"] == "needsReview")
 }
 
+const HANDOFF_RESUME_REASON: &str =
+    "Tự tiếp tục xác minh bài đã gửi sau khi lượt mới trả máy; không đăng lại";
+
 const LEGACY_IDENTITY_REVIEW_REASON: &str = "Thiếu bằng chứng tài khoản hoặc thời điểm của lần Đăng cũ; cần kiểm tra bài trên máy, không đăng lại";
 
 fn submission_identity_complete(intent: Option<&str>) -> bool {
@@ -667,6 +670,160 @@ fn explicitly_resumed_verification(candidate: &PendingPublishVerification) -> bo
         })
 }
 
+/// The automatic resume stamp of `exclusion`, bound to this assignment and its Post intent.
+fn handoff_resumed(candidate: &PendingPublishVerification, exclusion: &str) -> bool {
+    use sha2::Digest;
+    let Some(intent) = candidate.effect_intent.as_deref() else {
+        return false;
+    };
+    has_post_intent(Some(intent))
+        && submission_identity_complete(Some(intent))
+        && candidate
+            .evidence_json
+            .as_deref()
+            .and_then(|raw| serde_json::from_str::<serde_json::Value>(raw).ok())
+            .is_some_and(|evidence| {
+                let stamp = &evidence["verificationHandoffResume"];
+                stamp["version"] == 1
+                    && stamp["assignmentId"] == candidate.assignment_id
+                    && stamp["exclusionRequestId"] == exclusion
+                    && stamp["intentSha256"]
+                        == format!("{:x}", sha2::Sha256::digest(intent.as_bytes()))
+            })
+}
+
+/// The latest exclusion of this posted row came from a handoff whose closer drained it and
+/// closed the app, and nothing that handoff started still needs the phone: no handoff or Start
+/// preparation is in flight on it, and no other assignment there can start fresh publish work.
+/// From then on no running Start relies on the row's release proof, so verification may go on.
+/// Returns that exclusion's request ID.
+fn handoff_resume_due(
+    conn: &Connection,
+    candidate: &PendingPublishVerification,
+    state: &str,
+) -> anyhow::Result<Option<String>> {
+    let (intent, evidence) = (
+        candidate.effect_intent.as_deref(),
+        candidate.evidence_json.as_deref(),
+    );
+    // Verification debt only: an operator Stop, a parked review or a settled link stays out.
+    if candidate.stop_marker.is_some()
+        || !has_post_intent(intent)
+        || !submission_identity_complete(intent)
+        || !may_verify(state, intent, evidence)
+        || evidence_has_post_link(evidence)
+        || needs_review(evidence)
+        || publish_close_pending(conn, &candidate.campaign_id)?
+        || observer_authorized(conn, candidate)?
+    {
+        return Ok(None);
+    }
+    // Only what the automatic worker took before the exclusion.
+    let current: bool = conn.query_row(
+        "SELECT COALESCE(json_extract(request_json,'$.verificationContractVersion')=1,0)
+         FROM publish_campaigns WHERE id=?1",
+        [&candidate.campaign_id],
+        |r| r.get(0),
+    )?;
+    if !current && !explicitly_resumed_verification(candidate) {
+        return Ok(None);
+    }
+    let Some(exclusion) = conn
+        .query_row(
+            "SELECT request_id FROM publish_exclude_requests WHERE assignment_id=?1
+             ORDER BY rowid DESC LIMIT 1",
+            [&candidate.assignment_id],
+            |r| r.get::<_, String>(0),
+        )
+        .optional()?
+    else {
+        return Ok(None);
+    };
+    // An operator's own exclusion has no release proof; a handoff still closing keeps its marker.
+    let released = conn
+        .query_row(
+            "SELECT value FROM settings WHERE key=?1",
+            [format!(
+                "publish.handoff-release.{}",
+                candidate.assignment_id
+            )],
+            |r| r.get::<_, String>(0),
+        )
+        .optional()?
+        .and_then(|raw| serde_json::from_str::<serde_json::Value>(&raw).ok())
+        .is_some_and(|proof| proof["requestId"] == exclusion.as_str());
+    if !released {
+        return Ok(None);
+    }
+    let needed: bool = conn.query_row(
+        "SELECT EXISTS(SELECT 1 FROM publish_assignments o JOIN settings s
+                ON s.key='publish.handoff-pending.'||o.id WHERE o.udid=?1)
+         OR EXISTS(SELECT 1 FROM settings l JOIN publish_start_requests r
+                ON r.request_id=json_extract(l.value,'$.owner')
+             WHERE substr(l.key,1,length(?3))=?3 AND json_valid(l.value)
+             AND json_extract(l.value,'$.udid')=?1 AND r.state IN ('accepted','preparing'))
+         OR EXISTS(SELECT 1 FROM publish_dispatch_jobs j WHERE j.udid=?1 AND j.assignment_id<>?2
+             AND j.state IN ('queued','running','paused'))
+         OR EXISTS(SELECT 1 FROM publish_work_claims w WHERE w.udid=?1
+             AND w.stage IN ('transfer','compose'))
+         OR EXISTS(SELECT 1 FROM publish_assignments o JOIN publish_campaigns c ON c.id=o.campaign_id
+             WHERE o.udid=?1 AND o.id<>?2 AND o.effect_intent IS NULL
+             AND o.state IN ('queued','preparing','ready','transferring','imported','posting')
+             AND c.state NOT IN ('scheduled','cancelled','missed')
+             AND NOT EXISTS(SELECT 1 FROM publish_exclude_requests e WHERE e.assignment_id=o.id))",
+        params![
+            candidate.udid,
+            candidate.assignment_id,
+            "publish.account-lock.preparing."
+        ],
+        |r| r.get(0),
+    )?;
+    if needed {
+        return Ok(None);
+    }
+    // A phone now holding another account cannot prove this post; a person decides.
+    let account: String = conn.query_row(
+        "SELECT COALESCE((SELECT handle FROM device_meta WHERE udid=?1),'')",
+        [&candidate.udid],
+        |r| r.get(0),
+    )?;
+    let account = crate::publish::normalize_publish_account(&account);
+    let expected = intent
+        .and_then(|raw| serde_json::from_str::<serde_json::Value>(raw).ok())
+        .and_then(|value| {
+            value["expectedAccount"]
+                .as_str()
+                .map(crate::publish::normalize_publish_account)
+        });
+    if account.is_empty() || expected.as_deref() != Some(account.as_str()) {
+        return Ok(None);
+    }
+    // With another unresolved post on the phone, an observer of either one needs every one of
+    // their pipelines finished (shared device debt); resuming sooner would stall the new
+    // round's own verification instead of starting this one.
+    let mut campaigns: Vec<String> =
+        Database::publish_device_guard_from_connection(conn, &candidate.udid)?
+            .blocking
+            .into_iter()
+            .filter(|hold| hold.assignment_id != candidate.assignment_id)
+            .map(|hold| hold.campaign_id)
+            .collect();
+    if !campaigns.is_empty() {
+        campaigns.push(candidate.campaign_id.clone());
+        for campaign in campaigns {
+            let active: bool = conn.query_row(
+                "SELECT EXISTS(SELECT 1 FROM publish_pipeline_runs WHERE campaign_id=?1)",
+                [&campaign],
+                |r| r.get(0),
+            )?;
+            if active {
+                return Ok(None);
+            }
+        }
+    }
+    Ok(Some(exclusion))
+}
+
 fn stop_generation(marker: Option<&str>) -> Option<String> {
     marker
         .and_then(|s| serde_json::from_str::<serde_json::Value>(s).ok())
@@ -707,7 +864,21 @@ fn observer_authorized(
         if !explicitly_resumed_verification(candidate)
             || resumed_at.is_none_or(|at| at <= excluded_at)
         {
-            return Ok(false);
+            // Otherwise only the automatic resume of exactly the latest exclusion, written
+            // once its handoff handed the phone back, lifts it; never under a Stop marker.
+            let latest: Option<String> = conn
+                .query_row(
+                    "SELECT request_id FROM publish_exclude_requests WHERE assignment_id=?1
+                     ORDER BY rowid DESC LIMIT 1",
+                    [&candidate.assignment_id],
+                    |r| r.get(0),
+                )
+                .optional()?;
+            if candidate.stop_marker.is_some()
+                || !latest.is_some_and(|request| handoff_resumed(candidate, &request))
+            {
+                return Ok(false);
+            }
         }
     }
     let marker = stop_marker(conn, &candidate.campaign_id)?;
@@ -1717,7 +1888,13 @@ impl Database {
         &self,
         current_contract_only: bool,
     ) -> anyhow::Result<Vec<String>> {
-        let mut campaigns = Vec::new();
+        // Exclusions lifted here become ordinary candidates below and in the same tick's queue.
+        let mut campaigns = self
+            .resume_publish_verifications_after_handoff(|_, _| true)
+            .unwrap_or_else(|error| {
+                tracing::warn!("tự tiếp tục xác minh sau khi trả máy: {error:#}");
+                Vec::new()
+            });
         let now = Utc::now();
         for candidate in
             self.publish_verification_candidates(1000, None, true, current_contract_only)?
@@ -1757,6 +1934,136 @@ impl Database {
             }
         }
         Ok(campaigns)
+    }
+
+    /// Lift each handoff exclusion off a posted row whose phone the handoff handed back
+    /// (`handoff_resume_due`), for the rows `admit(campaign, udid)` accepts. Worker mutation,
+    /// never a UI read. Returns the campaigns changed.
+    pub fn resume_publish_verifications_after_handoff(
+        &self,
+        admit: impl Fn(&str, &str) -> bool,
+    ) -> anyhow::Result<Vec<String>> {
+        let rows: Vec<(String, String, String)> = {
+            let conn = self.conn()?;
+            // Cheap prefilter; each row is decided again inside its own write transaction.
+            let mut statement = conn.prepare(
+                "SELECT a.id,a.campaign_id,a.udid FROM publish_assignments a
+                 WHERE a.state IN ('verifying','uncertain','succeeded') AND a.effect_intent IS NOT NULL
+                 AND NOT EXISTS(SELECT 1 FROM settings s WHERE s.key='operation.stop.publish:'||a.campaign_id)
+                 AND EXISTS(SELECT 1 FROM settings s WHERE s.key='publish.handoff-release.'||a.id
+                     AND json_valid(s.value) AND json_extract(s.value,'$.requestId')=
+                     (SELECT e.request_id FROM publish_exclude_requests e WHERE e.assignment_id=a.id
+                      ORDER BY e.rowid DESC LIMIT 1))
+                 AND json_valid(a.evidence_json)
+                 AND COALESCE(json_extract(a.evidence_json,'$.verificationStatus.state'),'')
+                     NOT IN ('needsReview','verified')
+                 AND COALESCE(json_extract(a.evidence_json,'$.verificationHandoffResume.exclusionRequestId'),'')<>
+                     (SELECT e.request_id FROM publish_exclude_requests e WHERE e.assignment_id=a.id
+                      ORDER BY e.rowid DESC LIMIT 1)
+                 ORDER BY a.updated_at,a.id LIMIT 1000",
+            )?;
+            let rows = statement
+                .query_map([], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)))?
+                .collect::<rusqlite::Result<_>>()?;
+            rows
+        };
+        let mut campaigns = Vec::new();
+        for (assignment, campaign, udid) in rows {
+            if !admit(&campaign, &udid) {
+                continue;
+            }
+            // One unreadable row must not hold back the others.
+            match self.resume_publish_verification_after_handoff(&assignment) {
+                Ok(true) if !campaigns.contains(&campaign) => campaigns.push(campaign),
+                Ok(_) => {}
+                Err(error) => tracing::warn!(
+                    "chưa tự tiếp tục xác minh lượt {assignment} trên {udid}: {error:#}"
+                ),
+            }
+        }
+        Ok(campaigns)
+    }
+
+    /// Record the automatic resume under CAS, before any observation. Verification only: the
+    /// Post intent, state, jobs, account reservation and Sheet obligation stay as they are.
+    fn resume_publish_verification_after_handoff(
+        &self,
+        assignment_id: &str,
+    ) -> anyhow::Result<bool> {
+        use sha2::Digest;
+        let mut conn = self.conn()?;
+        let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
+        let Some((candidate, state, _)) = recovery_row(&tx, assignment_id)? else {
+            return Ok(false);
+        };
+        let Some(exclusion) = handoff_resume_due(&tx, &candidate, &state)? else {
+            return Ok(false);
+        };
+        let Some(mut evidence) = candidate
+            .evidence_json
+            .as_deref()
+            .and_then(|raw| serde_json::from_str::<serde_json::Value>(raw).ok())
+            .filter(serde_json::Value::is_object)
+        else {
+            return Ok(false);
+        };
+        let intent = candidate.effect_intent.as_deref();
+        let at = Utc::now().to_rfc3339();
+        evidence["verificationHandoffResume"] = serde_json::json!({
+            "version":1,"assignmentId":assignment_id,"campaignId":candidate.campaign_id,
+            "udid":candidate.udid,"exclusionRequestId":exclusion,
+            "intentSha256":format!("{:x}",sha2::Sha256::digest(intent.unwrap_or_default().as_bytes())),
+            "resumedAt":at,"reason":HANDOFF_RESUME_REASON,
+            "statusBefore":evidence["verificationStatus"].clone(),
+        });
+        // Counters stay: this is no new budget. Only the time windows that ran while the row was
+        // excluded, unobserved, start again: the processing wait and TikTok's unanswered window.
+        let initial = new_verification_budget(intent);
+        if let Some(budget) = evidence
+            .get_mut("verificationBudget")
+            .and_then(serde_json::Value::as_object_mut)
+            .filter(|b| b.get("version").and_then(serde_json::Value::as_u64) == Some(1))
+            .filter(|b| b.get("intentSha256") == Some(&initial["intentSha256"]))
+        {
+            budget.insert("processingWaitFrom".into(), serde_json::json!(at));
+            budget.remove("metadataUnreachableSince");
+        }
+        // Keep cause/reasonCode/attempts: the next pass reads them (restart and re-check rules).
+        if evidence["verificationStatus"].is_object() {
+            let status = &mut evidence["verificationStatus"];
+            status["state"] = serde_json::json!("pending");
+            status["reason"] = serde_json::json!(HANDOFF_RESUME_REASON);
+            status["nextCheckAt"] = serde_json::json!(at);
+        } else {
+            evidence["verificationStatus"] = serde_json::json!({
+                "state":"pending","cause":"handoffReleased","reasonCode":"handoffReleased",
+                "reason":HANDOFF_RESUME_REASON,"attempts":0,"readFailures":0,
+                "checkIntervalSeconds":VERIFICATION_CHECK_SECONDS,"nextCheckAt":at,"deadlineAt":null,
+            });
+        }
+        let changed = tx.execute(
+            "UPDATE publish_assignments SET evidence_json=?1,revision=revision+1,updated_at=?2
+             WHERE id=?3 AND campaign_id=?4 AND revision=?5",
+            params![
+                evidence.to_string(),
+                at,
+                assignment_id,
+                candidate.campaign_id,
+                candidate.revision
+            ],
+        )?;
+        if changed != 1 {
+            return Ok(false);
+        }
+        reconcile_verification_snapshot(&tx, &candidate.campaign_id, &at)?;
+        tx.commit()?;
+        tracing::info!(
+            "Tự tiếp tục xác minh bài đã gửi trên {} sau khi lượt mới trả máy (lượt {}, loại {}); không đăng lại",
+            candidate.udid,
+            assignment_id,
+            exclusion
+        );
+        Ok(true)
     }
 
     /// One more read-only observation of a parked row (`automatic_recheck_due`), under the same
