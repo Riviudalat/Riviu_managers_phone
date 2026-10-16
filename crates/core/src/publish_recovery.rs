@@ -397,6 +397,14 @@ pub fn classify(message: &str) -> FailureKind {
     if helper_recovery_before_media(&s) {
         return FailureKind::Retryable;
     }
+    // The storage executor turned a request away before it ran, so nothing reached the phone.
+    // r131 (16/10/2026, 30 phones): a controller restart's startup burst failed ten rows'
+    // `resolveAppBinding` with it, and the wrappers ("composer ... chưa đo", "không mở được
+    // phiên") ended them as unmeasured builds or refused sessions. Checked before the specific
+    // refusals because the build wrapper says "chưa đo".
+    if s.contains("storagebusy: ") {
+        return FailureKind::Retryable;
+    }
     // Specific refusals always win over words such as timeout in an error chain.
     if specific_refusal(&s) {
         return FailureKind::Terminal;
@@ -471,6 +479,10 @@ pub fn classify(message: &str) -> FailureKind {
         "nút tiếp không sáng",
         "không mọc nút tiếp",
         "gõ caption xong mà đọc lại không thấy",
+        // The session was replaced while the pre-Post account proof read the Profile (r131
+        // phone 37, 16/10/2026: the row ended `account_unreadable`). Nothing was posted and the
+        // next attempt proves the account from nothing on a fresh session.
+        "account_session_changed",
     ]
     .iter()
     .any(|x| s.contains(x))

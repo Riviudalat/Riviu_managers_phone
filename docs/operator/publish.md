@@ -312,8 +312,10 @@ bộ chọn ảnh trong thời hạn hiện có cũng dùng ngân sách này. Kh
 và mỗi ảnh vừa chọn được chờ đọc lại tới 20 giây trước khi tính là lỗi. Nếu có nhiều mục cùng
 khớp khiến đích bấm mơ hồ, app dừng trước Đăng, không tự chọn hoặc thử tiếp.
 Sau khi xác minh tài khoản trên trang Hồ sơ, app bấm dấu + ngay trên Hồ sơ (thanh dưới có
-cùng nút Create), không quay về feed For You: video tự phát làm lần đọc màn hình trên feed
-treo 25–30 giây (r130, 16/10/2026, 12 lượt đầu hỏng ở bước này).
+cùng nút Create), không quay về feed For You. Lần đọc màn hình đầu tiên của bước mở soạn bài
+có thể mất 18–30 giây khi rơi vào khoảng 20–30 giây sau lúc TikTok vừa mở (r130–r131,
+16/10/2026: 44% lần đọc rơi vào khoảng đó bị chậm, so với 3% trước đó); app chờ thêm lần đọc
+đang chạy tối đa 20 giây trước khi tính là lỗi.
 Nếu agent Android không đọc được cây UI hoặc không trả `/status`,
 lượt kế tiếp chờ ít nhất đến hết khoảng phục hồi của phiên (tối đa khoảng 65 giây),
 không tiêu hết lượt thử trong lúc instrumentation còn cooldown. Bước chọn nhạc có

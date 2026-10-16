@@ -4791,6 +4791,31 @@ pub(super) async fn post_through_the_composer(
             }
             outcome
         }
+        // Nothing but the app closing asked this row to stop, so the Stop is the shutdown's and
+        // the row runs again before Post at the next start. r131 phone 28 (16/10/2026): settled
+        // like an operator Stop, "dừng lại trước khi bấm Đăng" ended the row.
+        ComposerVerdict::Stopped
+            if db.publish_shutdown_started()
+                && !db
+                    .publish_assignment_excluded(assignment_id)
+                    .unwrap_or(true)
+                && !db.publish_operation_stopped(campaign_id).unwrap_or(true)
+                && db
+                    .publish_campaign_state(campaign_id)
+                    .ok()
+                    .flatten()
+                    .is_some_and(|state| state != riviu_core::PublishCampaignState::Cancelled) =>
+        {
+            let message = format!(
+                "{udid}: dừng vì ứng dụng đang đóng, chưa bấm Đăng; lần mở sau tự chạy lại"
+            );
+            *recovery_failure = Some(riviu_core::publish_recovery::RecoveryFailure::new(
+                "app_closing_before_post",
+                riviu_core::publish_recovery::FailureKind::Retryable,
+                message.clone(),
+            ));
+            PostOutcome::NothingPublished(message)
+        }
         other if other.may_retry() => PostOutcome::NothingPublished(other.reason().to_string()),
         other => PostOutcome::Unknown(other.reason().to_string()),
     }

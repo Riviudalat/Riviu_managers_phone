@@ -135,10 +135,10 @@ không áp cho bằng chứng tươi trước Post (deadline đọc lại cuối
 của mọi lần đọc bên trong), cho bước bấm/effect hay cho chờ về feed sau Post. Hết cửa sổ vẫn
 trả cùng mã lỗi như trước; nới cửa sổ không bao giờ biến màn chưa đọc thành quyền bấm.
 
-Ân hạn đọc (`READ_GRACE` = 15 giây, `ui_automation/runtime.rs`): trên đường Đăng thật, khi cửa
+Ân hạn đọc (`READ_GRACE` = 20 giây, `ui_automation/runtime.rs`; 15 giây tới r131): trên đường Đăng thật, khi cửa
 sổ của một bước quan sát trước Post hết mà đúng một lần đọc còn đang chạy, bộ bọc đọc
 (`read_before_deadline`, `tiktok_composer::observation::read`) chờ tiếp chính lần đọc đó tối đa
-15 giây rồi bước xét điều kiện một lần với kết quả ấy; chưa đạt thì kết thúc với cùng mã lỗi
+20 giây rồi bước xét điều kiện một lần với kết quả ấy; chưa đạt thì kết thúc với cùng mã lỗi
 như trước. Một lần locate (tìm rồi đọc khung/thuộc tính) tính là một lần đọc. Sau cửa sổ không
 bắt đầu lần đọc mới và không poll lại. Ân hạn dừng ngay khi Stop và không bao giờ vượt ngân sách
 nhạc đang bao bước (mọi `with_*_budget` là trần; chính ngân sách hết thì không có ân hạn). Không
@@ -1510,7 +1510,12 @@ chỉ bỏ cửa sổ reconnect đã chạy lúc app đóng; `running` mất att
 lại từ chuyển media với attempt mới, nhạc đã chọn được lưu làm bằng chứng rồi chọn lại, và lần
 bị ngắt tính một lượt thử của bước đang chạy (`app_restarted_before_post`) để một attempt làm
 chết tiến trình không lặp vô hạn qua các lần mở; bước đã hết lượt thì dừng trước Đăng
-(`restart_retry_exhausted`) chờ **Thử lại máy này**. Job có intent chỉ đối soát. Start chỉ
+(`restart_retry_exhausted`) chờ **Thử lại máy này**. Job có intent chỉ đối soát. Composer chỉ dừng
+vì app đang đóng (không có Dừng, loại hay hủy) trả `app_closing_before_post` (thử lại được), nên
+lần mở sau chạy lại dòng đó trước Đăng thay vì chốt như lệnh Dừng của người vận hành: r131
+(16/10/2026) máy 28 trả "dừng lại trước khi bấm Đăng" khi tắt và bị chốt `legacy_terminal`. `StorageBusy` (bộ thực thi SQLite từ chối yêu cầu trước khi
+chạy) luôn là lỗi thử lại được: đợt dồn lúc khởi động của r131 làm `resolveAppBinding` của 10
+dòng lỗi rồi bị bọc thành "composer chưa đo" hoặc "không mở được phiên". Start chỉ
 thành `uncertain` (`PublishStartInterrupted`) khi còn chuẩn bị: `accepted`/`preparing`, hoặc
 `queued`/`running` mà lượt chưa hẹn giờ và chưa có job; chỉ job của Start bị ngắt ở chính lần
 mở đó dừng (`start_interrupted`). Trước migration40→41 tạo và đọc lại bản sao SQLite

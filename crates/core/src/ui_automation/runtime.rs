@@ -81,8 +81,14 @@ pub async fn read_before_deadline<T>(
 /// minute). Ten of r112's twelve failed compose attempts with stage diagnostics ended on a read
 /// the step deadline cut off after 7.7-13.4 s, and each cut threw the whole attempt away
 /// (requeue, TikTok restart, media re-staged, back at the same step 2-3 minutes later). 15 s
-/// covers those cut-offs. It is finite and never outlives an enclosing budget or Stop.
-pub const READ_GRACE: Duration = Duration::from_secs(15);
+/// covered those cut-offs.
+///
+/// r130/r131 (16/10/2026, 30 phones): the Create wait's first `/source`, started within 6 s of
+/// its 16 s window, was cut at 25.5-29.8 s, exactly at the end of a 15 s grace, 17 times; most had
+/// already received their response headers. A request ends by itself at the agent's 30 s timeout,
+/// so 20 s lets every read that starts in a window's first 6 s finish or fail on its own. It is
+/// finite and never outlives an enclosing budget or Stop.
+pub const READ_GRACE: Duration = Duration::from_secs(20);
 
 /// How often a grace re-checks Stop; the same cadence as [`read_before_deadline`].
 const GRACE_STOP_POLL: Duration = Duration::from_millis(50);
