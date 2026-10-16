@@ -85,6 +85,14 @@ pub(super) async fn post_one_phone(
     .await;
     if attempt.claim_refused {
         announce(&events, &db, &campaign_id);
+        // A refused claim committed nothing, so a typed retryable refusal (the app closing under
+        // the Post fence) spends the bounded pre-Post budget instead of ending the row.
+        if let Some(failure) = attempt
+            .recovery_failure
+            .filter(|failure| failure.kind != riviu_core::publish_recovery::FailureKind::Terminal)
+        {
+            return Err(PhoneFailure::Recovery(failure));
+        }
         return Err(PhoneFailure::NothingPublished(match attempt.outcome {
             PostOutcome::NothingPublished(reason) | PostOutcome::Unknown(reason) => reason,
             PostOutcome::Posted(_) | PostOutcome::Submitted(_) => format!(
@@ -3368,6 +3376,30 @@ async fn post_one_assignment_owned(
                 }
                 Ok(false) => {
                     claim_refused = true;
+                    // Only the app closing refused this claim: the shutdown fence wrote nothing,
+                    // so the row runs again before Post at the next start, like the composer's
+                    // Stopped arm for the same close.
+                    if db.publish_shutdown_started()
+                        && !db.publish_assignment_excluded(&assignment.id).unwrap_or(true)
+                        && !db.publish_operation_stopped(campaign_id).unwrap_or(true)
+                        && db
+                            .publish_campaign_state(campaign_id)
+                            .ok()
+                            .flatten()
+                            .is_some_and(|state| {
+                                state != riviu_core::PublishCampaignState::Cancelled
+                            })
+                    {
+                        return Err(riviu_core::publish_recovery::RecoveryFailure::new(
+                            "app_closing_before_post",
+                            riviu_core::publish_recovery::FailureKind::Retryable,
+                            format!(
+                                "{}: ứng dụng đang đóng nên chưa nhận lượt Đăng, chưa bấm Đăng; lần mở sau tự chạy lại",
+                                assignment.udid
+                            ),
+                        )
+                        .into());
+                    }
                     anyhow::bail!(
                         "{} đã đăng, đang được đăng, hoặc chiến dịch đã dừng — không tap Post",
                         assignment.udid
