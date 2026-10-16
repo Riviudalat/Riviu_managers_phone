@@ -65,10 +65,18 @@ struct SoundBudget {
     deadline: Instant,
     stopped: Arc<AtomicBool>,
     popup: Arc<tokio::sync::Mutex<crate::app_automation::dialogs::PopupBudget>>,
-    popup_package: Arc<tokio::sync::Mutex<Option<&'static str>>>,
+    popup_target: Arc<tokio::sync::Mutex<PopupTarget>>,
     route: Arc<SoundRouteEvidence>,
 }
 tokio::task_local! { static SOUND_BUDGET: SoundBudget; }
+
+/// The package a budget's popup checks are bound to and, once read, its popup labels. Nested
+/// scopes share the root's, so one sound stage reads the profile once; see [`popup_labels`].
+#[derive(Default)]
+struct PopupTarget {
+    package: Option<&'static str>,
+    labels: Option<crate::tiktok_labels::TikTokControls>,
+}
 
 /// What the sound stage observed about its own route. Timeline evidence only; it never
 /// authorizes a tap or Post.
@@ -715,7 +723,7 @@ pub(crate) async fn with_deadline_budget<T>(
         deadline: parent.deadline.min(deadline),
         stopped: parent.stopped.clone(),
         popup: parent.popup.clone(),
-        popup_package: parent.popup_package.clone(),
+        popup_target: parent.popup_target.clone(),
         route: parent.route.clone(),
     }) {
         return SOUND_BUDGET
@@ -730,7 +738,7 @@ pub(crate) async fn with_deadline_budget<T>(
         deadline,
         stopped: stopped.clone(),
         popup: Default::default(),
-        popup_package: Default::default(),
+        popup_target: Default::default(),
         route: Default::default(),
     };
     let task = SOUND_BUDGET.scope(
@@ -765,14 +773,14 @@ pub(crate) async fn with_stage_budget<T>(
             deadline: parent.deadline.min(stage_deadline),
             stopped: parent.stopped.clone(),
             popup: parent.popup.clone(),
-            popup_package: parent.popup_package.clone(),
+            popup_target: parent.popup_target.clone(),
             route: parent.route.clone(),
         })
         .unwrap_or_else(|_| SoundBudget {
             deadline: stage_deadline,
             stopped: Arc::new(AtomicBool::new(false)),
             popup: Default::default(),
-            popup_package: Default::default(),
+            popup_target: Default::default(),
             route: Default::default(),
         });
     SOUND_BUDGET
@@ -899,41 +907,18 @@ async fn clear_sound_popup(
     if !session.supports_accessibility_readback() {
         return Ok(());
     }
-    let Ok((deadline, stopped, popup, bound_package)) = SOUND_BUDGET.try_with(|budget| {
+    let Ok((deadline, stopped, popup, target)) = SOUND_BUDGET.try_with(|budget| {
         (
             deadline.min(budget.deadline),
             budget.stopped.clone(),
             budget.popup.clone(),
-            budget.popup_package.clone(),
+            budget.popup_target.clone(),
         )
     }) else {
         // Unscoped diagnostics are read-only: never create an independent popup controller.
         return Ok(());
     };
-    let mut binding = bound_package.lock().await;
-    if let Some(expected) = expected {
-        anyhow::ensure!(
-            (*binding).is_none_or(|bound| bound == expected),
-            "sound popup target changed"
-        );
-        *binding = Some(expected);
-    }
-    let package = (*binding).context("sound popup target is not bound")?;
-    drop(binding);
-    // A failed read stays that read's error, classified as such (an adb drop is a disconnect).
-    // r133 phone 49 (16/10/2026): its USB dropped for a second, both reads defaulted to "", and
-    // the empty pair ended the row as an unmeasured "sound popup profile unavailable".
-    let unread = || {
-        crate::publish_recovery::retryable_error(
-            "sound_profile_unread",
-            "chưa đọc được phiên bản hoặc ngôn ngữ TikTok cho bước nhạc; chưa bấm Đăng",
-        )
-    };
-    let version = read_sound(async { session.app_version(package).await.ok_or_else(unread) })
-        .await?;
-    let language = read_sound(async { session.ui_language().await.ok_or_else(unread) }).await?;
-    let labels = crate::tiktok_labels::controls_for_runtime(package, &language, &version)
-        .context("sound popup profile unavailable")?;
+    let labels = popup_labels(session, &target, expected, deadline).await?;
     let mut popup = popup.lock().await;
     // r97 (13/10/2026, ce031713aadf361905, ce051715e9f964e10d): the stage's own blind-sheet
     // recycle moved the session to a fresh epoch, and this budget, still bound to the old one,
@@ -944,8 +929,24 @@ async fn clear_sound_popup(
     // Never graced: a popup read cannot finish the step that needs a read after it.
     let _no_grace = crate::ui_automation::runtime::suppress_read_grace();
     loop {
+        // Foreground (`dumpsys window`), `/source`, foreground: the `/source` is its own event, so
+        // this one's elapsed time less that one is the two shell reads.
+        let mut trace = crate::tiktok_composer::StageDiagnosticOperation::start(
+            "soundPopupStep",
+            &session.gui_session_epoch(),
+            Some(deadline),
+        );
         let step =
             step_before_deadline(session, labels, &mut popup, deadline, &stopped, &stopped).await;
+        trace.finish(match &step {
+            Ok(ReadWaitResult::Ready(PopupStep::Clear)) => "clear",
+            Ok(ReadWaitResult::Ready(PopupStep::Dismissed)) => "dismissed",
+            Ok(ReadWaitResult::Ready(PopupStep::Blocked)) => "blocked",
+            Ok(ReadWaitResult::Cancelled) => "cancelled",
+            Ok(ReadWaitResult::DeadlineExceeded) => "deadline",
+            Err(_) => "error",
+        });
+        drop(trace);
         match &step {
             Ok(ReadWaitResult::Ready(_)) => note_readable_root(),
             Err(error) if unreadable_root(error) => note_unreadable_read(error),
@@ -966,6 +967,74 @@ async fn clear_sound_popup(
             }
         }
     }
+}
+
+/// The popup labels of the package `target` is bound to. The installed version (`dumpsys
+/// package`) and UI language (`am get-config`, `getprop`, `settings get`, a foreground read and
+/// one `/source`) are read by the first popup check of a budget scope and reused by every later
+/// one, nested scopes included. r130-r133 (15-16/10/2026, box 21-50, SM-G955F/N, Global
+/// 45.7.3/en): every check read both again, about five untraced adb shell reads and a `/source`
+/// before its own, and 8 of the 10 sound stages that ran out of budget spent their editor
+/// readback window inside that check, before the chip was read. Neither value changes within a
+/// stage; the composer's own popup checks keep one profile for the whole attempt
+/// (`plan.popup_profile`). Each read is a stage-diagnostics event (`soundPopupVersion`,
+/// `soundPopupLanguage`).
+async fn popup_labels(
+    session: &dyn UiSession,
+    target: &tokio::sync::Mutex<PopupTarget>,
+    expected: Option<&'static str>,
+    deadline: Instant,
+) -> anyhow::Result<crate::tiktok_labels::TikTokControls> {
+    let mut binding = target.lock().await;
+    if let Some(expected) = expected {
+        anyhow::ensure!(
+            binding.package.is_none_or(|bound| bound == expected),
+            "sound popup target changed"
+        );
+        binding.package = Some(expected);
+    }
+    let package = binding.package.context("sound popup target is not bound")?;
+    if let Some(labels) = binding.labels {
+        return Ok(labels);
+    }
+    drop(binding);
+    // A failed read stays that read's error, classified as such (an adb drop is a disconnect).
+    // r133 phone 49 (16/10/2026): its USB dropped for a second, both reads defaulted to "", and
+    // the empty pair ended the row as an unmeasured "sound popup profile unavailable".
+    let unread = || {
+        crate::publish_recovery::retryable_error(
+            "sound_profile_unread",
+            "chưa đọc được phiên bản hoặc ngôn ngữ TikTok cho bước nhạc; chưa bấm Đăng",
+        )
+    };
+    let epoch = session.gui_session_epoch();
+    let version = traced_profile_read("soundPopupVersion", &epoch, deadline, async {
+        session.app_version(package).await.ok_or_else(unread)
+    })
+    .await?;
+    let language = traced_profile_read("soundPopupLanguage", &epoch, deadline, async {
+        session.ui_language().await.ok_or_else(unread)
+    })
+    .await?;
+    let labels = crate::tiktok_labels::controls_for_runtime(package, &language, &version)
+        .context("sound popup profile unavailable")?;
+    // Only a complete profile is kept; a failed read is read again by the next check.
+    target.lock().await.labels = Some(labels);
+    Ok(labels)
+}
+
+/// One popup-profile read, timed as a stage-diagnostics event so its adb shell reads show up.
+async fn traced_profile_read<T>(
+    operation: &str,
+    epoch: &str,
+    deadline: Instant,
+    work: impl std::future::Future<Output = anyhow::Result<T>>,
+) -> anyhow::Result<T> {
+    let mut trace =
+        crate::tiktok_composer::StageDiagnosticOperation::start(operation, epoch, Some(deadline));
+    let result = read_sound(work).await;
+    trace.finish(if result.is_ok() { "ok" } else { "error" });
+    result
 }
 
 async fn sound_tap(session: &dyn UiSession, point: crate::TapPoint) -> anyhow::Result<()> {
@@ -3541,7 +3610,7 @@ mod tests {
             deadline: Instant::now(),
             stopped: Arc::new(AtomicBool::new(false)),
             popup: Default::default(),
-            popup_package: Default::default(),
+            popup_target: Default::default(),
             route: Default::default(),
         };
         let result = SOUND_BUDGET
