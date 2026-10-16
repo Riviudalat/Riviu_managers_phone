@@ -4502,9 +4502,17 @@ pub(super) async fn post_through_the_composer(
         }
     };
     if let Err(error) = riviu_core::tiktok_share::probe_clipboard_restore(session).await {
-        return refuse(format!(
-            "Helper clipboard chưa sẵn sàng trước Đăng: {error}"
+        // Nothing reached the composer, and the helper settles lost clipboard jobs and refused
+        // owners when the next session opens, so a later attempt within the step's budget may
+        // find it ready. r132 phone 47 (16/10/2026, two minutes before its box lost USB) ended
+        // here terminal.
+        let message = format!("Helper clipboard chưa sẵn sàng trước Đăng: {error}");
+        *recovery_failure = Some(riviu_core::publish_recovery::RecoveryFailure::new(
+            "helper_clipboard_not_ready",
+            riviu_core::publish_recovery::FailureKind::Retryable,
+            format!("{udid}: {message}"),
         ));
+        return refuse(message);
     }
     let expected_account = match riviu_core::tiktok_share::observe_publish_account_on_profile(
         session, &labels,
