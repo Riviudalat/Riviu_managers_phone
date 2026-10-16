@@ -55,6 +55,26 @@ pub(crate) fn check_session(session: &dyn UiSession) -> anyhow::Result<()> {
         .unwrap_or(Ok(()))
 }
 
+/// A composer read must still be on the session it started on. An unproven change (the agent's
+/// stale-root recreate-and-replay of an unpinned read) is typed retryable before Post
+/// ([`crate::publish_recovery::observation_invalidated`]): the attempt ends without a tap and
+/// the dispatcher prepares afresh. Never used after the Post intent.
+pub(super) fn ensure_epoch(session: &dyn UiSession, epoch: &str, what: &str) -> anyhow::Result<()> {
+    epoch_changed(session, epoch, what).map_or(Ok(()), |failure| Err(failure.into()))
+}
+
+/// [`ensure_epoch`]'s failure, for a caller that keeps a failed read's error as its cause
+/// (`error.context(failure)`, which `describe` still reads as this typed failure).
+pub(super) fn epoch_changed(
+    session: &dyn UiSession,
+    epoch: &str,
+    what: &str,
+) -> Option<crate::publish_recovery::RecoveryFailure> {
+    let current = session.gui_session_epoch();
+    (current != epoch)
+        .then(|| crate::publish_recovery::observation_invalidated(what, epoch, &current))
+}
+
 /// A raw final tree must advance beyond the phase's last semantic evidence.
 /// Its native generation is checked locally; no observation ID is fabricated.
 pub(super) fn check_tree_generation(session: &dyn UiSession, generation: u64) -> anyhow::Result<()> {

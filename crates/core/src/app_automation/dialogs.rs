@@ -1555,8 +1555,15 @@ pub(crate) async fn step_before_deadline_with_tree(
     effect_stop: &AtomicBool,
 ) -> anyhow::Result<ReadWaitResult<(PopupStep, Option<Tree>)>> {
     let epoch = session.gui_session_epoch();
+    // An unproven session change (the agent's stale-root recreate-and-replay of an unpinned
+    // read) voids the screen: typed retryable before Post, never a tap from that tree.
+    let invalidated = |what: &str, before: &str, after: &str| -> anyhow::Error {
+        crate::publish_recovery::observation_invalidated(what, before, after).into()
+    };
     if let Some(bound) = &budget.epoch {
-        anyhow::ensure!(bound == &epoch, "popup session changed");
+        if bound != &epoch {
+            return Err(invalidated("popup session changed", bound, &epoch));
+        }
     } else {
         budget.epoch = Some(epoch.clone());
     }
@@ -1565,10 +1572,10 @@ pub(crate) async fn step_before_deadline_with_tree(
         ($future:expr) => {
             match read_before_deadline($future, deadline, stop).await? {
                 ReadWaitResult::Ready(value) => {
-                    anyhow::ensure!(
-                        session.gui_session_epoch() == epoch,
-                        "popup session changed"
-                    );
+                    let current = session.gui_session_epoch();
+                    if current != epoch {
+                        return Err(invalidated("popup session changed", &epoch, &current));
+                    }
                     value
                 }
                 ReadWaitResult::Cancelled => return Ok(ReadWaitResult::Cancelled),
@@ -1584,7 +1591,8 @@ pub(crate) async fn step_before_deadline_with_tree(
     let transition_started = Instant::now();
     let transition_until = (transition_started + OS_PERMISSION_TRANSITION_WINDOW).min(deadline);
     let mut transition_reads: u32 = 0;
-    let (foreground, tree, fresh_foreground, candidate) = loop {
+    let mut bracket_logged = false;
+    let (foreground, tree, candidate) = loop {
         // The tree and both foreground reads around it are one deadline-bounded read, so a
         // caller that lets the read grace finish a tree past its window also gets the
         // closing foreground: no read starts after the window, and none is needed. r129
@@ -1596,6 +1604,30 @@ pub(crate) async fn step_before_deadline_with_tree(
             let fresh_foreground = session.active_app_bundle().await?;
             anyhow::Ok((foreground, snapshot, fresh_foreground))
         });
+        // Focus moved while the tree was read, so the tree belongs to neither foreground: it
+        // is unread, never acted on. Read again under the same deadline, Stop and epoch
+        // checks; the next consistent read meets every gate below as usual. 11/10/2026
+        // (campaign 6e0bfb7c, ce04171411ae6a1504, box 31-50): a plain error here ended a
+        // composing row `legacy_terminal` without naming either package.
+        if fresh_foreground != foreground {
+            if !bracket_logged {
+                bracket_logged = true;
+                tracing::info!(
+                    package = labels.package(),
+                    foreground = %foreground,
+                    fresh_foreground = %fresh_foreground,
+                    generation = snapshot.generation,
+                    "foreground đổi trong lúc đọc màn hình — bỏ cây này, không bấm gì; đọc lại"
+                );
+            }
+            let pause = OS_PERMISSION_TRANSITION_POLL
+                .min(deadline.saturating_duration_since(Instant::now()));
+            read!(async {
+                tokio::time::sleep(pause).await;
+                anyhow::Ok(())
+            });
+            continue;
+        }
         let tree = Tree::parse(snapshot)?;
         if budget
             .last_action_generation
@@ -1621,7 +1653,7 @@ pub(crate) async fn step_before_deadline_with_tree(
                     "đọc lại màn hình sau khi hộp thoại quyền hệ thống chuyển cảnh"
                 );
             }
-            break (foreground, tree, fresh_foreground, candidate);
+            break (foreground, tree, candidate);
         }
         if transition_reads == 0 {
             tracing::info!(
@@ -1673,10 +1705,6 @@ pub(crate) async fn step_before_deadline_with_tree(
             labels.package()
         );
     }
-    anyhow::ensure!(
-        fresh_foreground == foreground,
-        "popup foreground changed during observation"
-    );
     // (bit, gesture, operator line once sent, operator line once spent)
     let (kind, gesture, lines) = match (candidate, first_run, catalog) {
         (Some((kind, button)), _, _) => (kind, PopupGesture::Tap(button), os_contacts_lines(kind)),
@@ -1771,10 +1799,14 @@ pub(crate) async fn step_before_deadline_with_tree(
         return Ok(ReadWaitResult::Ready((PopupStep::Blocked, None)));
     }
     let fresh_foreground = read!(session.active_app_bundle());
-    anyhow::ensure!(
-        fresh_foreground == foreground,
-        "popup foreground changed before decline"
-    );
+    // Still no gesture from this tree; only the refusal is typed retryable before Post.
+    if fresh_foreground != foreground {
+        return Err(invalidated(
+            "popup foreground changed before decline",
+            &foreground,
+            &fresh_foreground,
+        ));
+    }
     if stop.load(Ordering::Relaxed) {
         return Ok(ReadWaitResult::Cancelled);
     }
@@ -1804,10 +1836,14 @@ pub(crate) async fn step_before_deadline_with_tree(
         PopupGesture::Tap(button) => session.tap(button.centre()).await?,
         PopupGesture::Swipe(swipe) => session.swipe(swipe).await?,
     }
-    anyhow::ensure!(
-        session.gui_session_epoch() == epoch,
-        "popup session changed after decline"
-    );
+    let current = session.gui_session_epoch();
+    if current != epoch {
+        return Err(invalidated(
+            "popup session changed after decline",
+            &epoch,
+            &current,
+        ));
+    }
     Ok(ReadWaitResult::Ready((PopupStep::Dismissed, None)))
 }
 

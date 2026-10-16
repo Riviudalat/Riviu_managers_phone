@@ -140,6 +140,11 @@ impl RecoveryFailure {
             FailureKind::Retryable if adb_transfer_daemon_start_failed(&message) => {
                 "adb_daemon_start_failed"
             }
+            FailureKind::Retryable
+                if foreground_read_failed_in_transport(&message.to_lowercase()) =>
+            {
+                "adb_foreground_read_failed"
+            }
             FailureKind::Retryable => "legacy_retryable",
             FailureKind::Terminal => "legacy_terminal",
         };
@@ -208,6 +213,18 @@ fn adb_transfer_daemon_start_failed(message: &str) -> bool {
         && message.contains("cannot connect to daemon")
 }
 
+/// Every source of the adb foreground read failed in transport: the adb server restarting
+/// ("* daemon not running; starting now at tcp:5037") or `adb shell` dying with empty output.
+/// r95 (12/10/2026, campaign 4a25d804, box 31-50): four rows composing when the server dropped
+/// for 52 s ended `legacy_terminal` on their first read. It is a dumpsys read, never an
+/// effect. A system window over the app (lock screen, system dialog) and an unreadable focus
+/// line keep their verdict; `lowercase` is the message already lowercased.
+fn foreground_read_failed_in_transport(lowercase: &str) -> bool {
+    lowercase.contains("could not read the foreground package. tried: ")
+        && !lowercase.contains("reported the system window")
+        && !lowercase.contains("had no readable mcurrentfocus line")
+}
+
 #[derive(Debug)]
 struct ClassifiedRecoveryError(RecoveryFailure);
 
@@ -267,6 +284,28 @@ pub(crate) fn observation_deadline() -> anyhow::Error {
         "publish observation deadline exceeded",
     )
     .into()
+}
+
+/// A pre-Post observation whose session (or foreground) changed while it was read, with no
+/// driver proof of what replaced it.
+pub const COMPOSER_OBSERVATION_INVALIDATED: &str = "composer_observation_invalidated";
+
+/// [`COMPOSER_OBSERVATION_INVALIDATED`], naming what changed (`before` and `after`: the two
+/// session epochs or foreground packages). The agent's stale-root recreate-and-replay swaps
+/// the session in place and its replayed read succeeds untyped, so every target read under
+/// the old epoch is void. Nothing is tapped from it: the attempt ends, and the dispatcher's
+/// fresh attempt prepares account, media and sound again within [`PRE_POST_RETRY_BUDGET`]
+/// ([`requires_fresh_preparation`]). It never claims the driver's proven repair
+/// (`publish_observation_session_repaired`) and is raised only before the Post intent.
+pub fn observation_invalidated(what: &str, before: &str, after: &str) -> RecoveryFailure {
+    RecoveryFailure::new(
+        COMPOSER_OBSERVATION_INVALIDATED,
+        FailureKind::Retryable,
+        format!(
+            "{what} (trước: {before}; sau: {after}): màn hình đã đổi giữa lúc đọc nên bỏ mọi \
+             mục tiêu đã đọc, không bấm gì thêm; lượt sau chuẩn bị lại từ đầu"
+        ),
+    )
 }
 
 pub fn describe(error: &anyhow::Error) -> RecoveryFailure {
@@ -375,6 +414,7 @@ pub(crate) fn requires_fresh_preparation(error: &anyhow::Error) -> bool {
             | "sound_any_choice_requires_fresh_attempt"
             | SOUND_SHEET_BLIND_FRESH_ATTEMPT
             | SOUND_BUDGET_FRESH_ATTEMPT
+            | COMPOSER_OBSERVATION_INVALIDATED
     )
 }
 /// The sound budget ran out on a blind sheet. Retried only as one fresh attempt per
@@ -432,6 +472,11 @@ pub fn classify(message: &str) -> FailureKind {
     // out". Match the measured loopback daemon failure, after specific terminal
     // refusals; the existing intent/revision gates still own permission to retry.
     if adb_daemon_connect_timeout(message) || adb_transfer_daemon_start_failed(message) {
+        return FailureKind::Retryable;
+    }
+    // After the refusals and the Disconnected check, so "unauthorized" stays terminal and
+    // "device … not found" keeps the reconnect window.
+    if foreground_read_failed_in_transport(&s) {
         return FailureKind::Retryable;
     }
     if caption_field_detached(&s) {

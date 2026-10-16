@@ -2022,10 +2022,11 @@ impl<'a, P: TapPlanner> Composer<'a, P> {
             // the window closed with no completed read. The picker was proven open just
             // before and nothing was selected, so this is an unread screen: the typed
             // observation deadline gives the assignment its bounded automatic retry.
-            anyhow::ensure!(
-                self.session.gui_session_epoch() == epoch,
-                "album menu session changed before read deadline"
-            );
+            observation::ensure_epoch(
+                self.session,
+                &epoch,
+                "album menu session changed before read deadline",
+            )?;
             return Err(crate::publish_recovery::observation_deadline()
                 .context("album_menu_missing: chưa thấy nút chọn album của picker"));
         };
@@ -2343,10 +2344,7 @@ impl<'a, P: TapPlanner> Composer<'a, P> {
                 }
                 Err(error) => return Err(error),
             };
-            anyhow::ensure!(
-                self.session.gui_session_epoch() == epoch,
-                "album pill session changed"
-            );
+            observation::ensure_epoch(self.session, &epoch, "album pill session changed")?;
             anyhow::ensure!(
                 pills.len() <= 1,
                 "album_pill_ambiguous: nhiều nút album khớp"
@@ -3038,10 +3036,7 @@ impl<'a, P: TapPlanner> Composer<'a, P> {
                     trace.finish("noField");
                     return Err(error);
                 };
-                anyhow::ensure!(
-                    self.session.gui_session_epoch() == epoch,
-                    "caption retype session changed"
-                );
+                observation::ensure_epoch(self.session, &epoch, "caption retype session changed")?;
                 trace.target(&field, None);
                 self.tap_inside(&field).await?;
                 crate::tiktok_sound::check_wait()?;
@@ -3194,10 +3189,11 @@ impl<'a, P: TapPlanner> Composer<'a, P> {
                 return Ok(ComposerVerdict::Stopped);
             }
             prepared?;
-            anyhow::ensure!(
-                self.session.gui_session_epoch() == prepared_epoch,
-                "caption preparation session changed"
-            );
+            observation::ensure_epoch(
+                self.session,
+                &prepared_epoch,
+                "caption preparation session changed",
+            )?;
             let prepared = self
                 .prepare_sound_editor(sound_plan, &expected_title, caption, stop)
                 .await;
@@ -3206,10 +3202,11 @@ impl<'a, P: TapPlanner> Composer<'a, P> {
             }
             prepared?;
         }
-        anyhow::ensure!(
-            self.session.gui_session_epoch() == prepared_epoch,
-            "caption preparation session changed"
-        );
+        observation::ensure_epoch(
+            self.session,
+            &prepared_epoch,
+            "caption preparation session changed",
+        )?;
         // The fresh proof below and everything after Post are never graced.
         crate::ui_automation::runtime::close_read_grace();
         // One finite deadline for every read and navigation below, set once from this
@@ -3783,10 +3780,11 @@ impl<'a, P: TapPlanner> Composer<'a, P> {
                 let still_shown =
                     crate::tiktok_sound::read_sound(self.session.keyboard_shown()).await?;
                 observation::check_session(self.session)?;
-                anyhow::ensure!(
-                    self.session.gui_session_epoch() == epoch,
-                    "keyboard preparation session changed"
-                );
+                observation::ensure_epoch(
+                    self.session,
+                    &epoch,
+                    "keyboard preparation session changed",
+                )?;
                 crate::tiktok_sound::check_wait()?;
                 if still_shown {
                     self.session.back().await?; // never cancel an in-flight gesture
@@ -3797,10 +3795,11 @@ impl<'a, P: TapPlanner> Composer<'a, P> {
                 }
                 Box::pin(self.require_caption_unchanged(caption, stop)).await?;
             }
-            anyhow::ensure!(
-                self.session.gui_session_epoch() == epoch,
-                "keyboard preparation session changed"
-            );
+            observation::ensure_epoch(
+                self.session,
+                &epoch,
+                "keyboard preparation session changed",
+            )?;
             tracing::info!(session = %epoch, was_shown = shown,
                 elapsed_ms = started.elapsed().as_millis() as u64,
                 "caption keyboard preparation before fresh sound proof");
@@ -4312,6 +4311,7 @@ impl<'a, P: TapPlanner> Composer<'a, P> {
             self.plan.popup_profile.1.unwrap_or_default(),
         ).context("camera/gallery profile unavailable")?;
         let mut previous_generation = None;
+        let mut foreign_logged = false;
         loop {
             let read_started = Instant::now();
             let observed = read_before_deadline(
@@ -4321,10 +4321,11 @@ impl<'a, P: TapPlanner> Composer<'a, P> {
                         self.session.hierarchy_source_snapshot().await?,
                     )?;
                     let tree_read = read_started.elapsed();
-                    anyhow::ensure!(
-                        self.session.gui_session_epoch() == epoch,
-                        "camera/gallery observation session changed"
-                    );
+                    observation::ensure_epoch(
+                        self.session,
+                        &epoch,
+                        "camera/gallery observation session changed",
+                    )?;
                     let current = self.session.active_app_bundle().await?;
                     Ok((foreground, tree, tree_read, current))
                 }),
@@ -4358,12 +4359,35 @@ impl<'a, P: TapPlanner> Composer<'a, P> {
                 // A cleared modal is not arrival proof; require a new target tree.
                 continue;
             }
-            anyhow::ensure!(foreground == self.plan.package,
-                "camera/gallery foreground does not match target");
-            anyhow::ensure!(
-                current == self.plan.package && self.session.gui_session_epoch() == epoch,
-                "camera/gallery foreground or session changed during observation"
-            );
+            observation::ensure_epoch(
+                self.session,
+                &epoch,
+                "camera/gallery observation session changed",
+            )?;
+            // A foreground other than TikTok at either end of the bracket makes this an unread
+            // tree, never a target: read again under the same deadline and Stop. A covering
+            // dialog then reaches the modal branch above; anything that stays in front ends as
+            // DeadlineExceeded, which every caller types retryable before Post. r91/6e0bfb7c
+            // (11-12/10/2026, box 31-50): a plain error here ended two composing rows
+            // `legacy_terminal` with a bounded retry unused, and named neither package.
+            if foreground != self.plan.package || current != self.plan.package {
+                if !foreign_logged {
+                    foreign_logged = true;
+                    tracing::info!(
+                        package = self.plan.package,
+                        foreground = %foreground,
+                        current = %current,
+                        generation = tree.generation,
+                        "camera/gallery: foreground không phải TikTok trong lúc đọc — bỏ cây này, không bấm gì; đọc lại"
+                    );
+                }
+                sleep(
+                    POLL.min(deadline.saturating_duration_since(Instant::now())),
+                    stop,
+                )
+                .await;
+                continue;
+            }
             return Ok(ReadWaitResult::Ready(tree));
         }
     }
@@ -4568,10 +4592,7 @@ impl<'a, P: TapPlanner> Composer<'a, P> {
             if stop.load(Ordering::Relaxed) {
                 return Ok(None);
             }
-            anyhow::ensure!(
-                self.session.gui_session_epoch() == epoch,
-                "composer navigation session changed"
-            );
+            observation::ensure_epoch(self.session, &epoch, "composer navigation session changed")?;
             if crate::ui_automation::runtime::window_closed(deadline) {
                 return match missing_code {
                     Some(code) => Err(crate::publish_recovery::retryable_error(
@@ -4585,10 +4606,11 @@ impl<'a, P: TapPlanner> Composer<'a, P> {
                 if stop.load(Ordering::Relaxed) {
                     return Ok(None);
                 }
-                anyhow::ensure!(
-                    self.session.gui_session_epoch() == epoch,
-                    "composer navigation session changed"
-                );
+                observation::ensure_epoch(
+                    self.session,
+                    &epoch,
+                    "composer navigation session changed",
+                )?;
                 if Instant::now() >= deadline {
                     return Err(crate::publish_recovery::observation_deadline());
                 }
@@ -4665,10 +4687,17 @@ impl<'a, P: TapPlanner> Composer<'a, P> {
                 trace.finish("sessionChanged");
                 return observed.map(|_| None);
             }
-            anyhow::ensure!(
-                self.session.gui_session_epoch() == epoch,
-                "composer navigation session changed"
-            );
+            if let Some(invalidated) = observation::epoch_changed(
+                self.session,
+                &epoch,
+                "composer navigation session changed",
+            ) {
+                // Keep a failed read's own error in the chain; the typed failure decides.
+                return Err(match observed {
+                    Err(error) => error.context(invalidated),
+                    _ => invalidated.into(),
+                });
+            }
             match observed {
                 Ok(ReadWaitResult::Ready(rows)) => match rows.as_slice() {
                     [target] => {
@@ -4847,17 +4876,25 @@ impl<'a, P: TapPlanner> Composer<'a, P> {
                 return observed.map(|_| None);
             }
             if matches!(observed, Ok(ReadWaitResult::Ready(_)) | Err(_)) {
-                anyhow::ensure!(
-                    self.session.gui_session_epoch() == epoch,
-                    "composer read session changed before recovery"
-                );
+                if let Some(invalidated) = observation::epoch_changed(
+                    self.session,
+                    &epoch,
+                    "composer read session changed before recovery",
+                ) {
+                    // A failed read keeps its own error as the cause; the typed failure decides.
+                    return Err(match observed {
+                        Err(error) => error.context(invalidated),
+                        _ => invalidated.into(),
+                    });
+                }
             }
             let element = match observed {
                 Ok(ReadWaitResult::Ready(element)) => {
-                    anyhow::ensure!(
-                        self.session.gui_session_epoch() == epoch,
-                        "composer read session changed before navigation"
-                    );
+                    observation::ensure_epoch(
+                        self.session,
+                        &epoch,
+                        "composer read session changed before navigation",
+                    )?;
                     element
                 }
                 Ok(ReadWaitResult::Cancelled) => return Ok(None),
@@ -5735,10 +5772,11 @@ where
                 } else {
                     false
                 };
-                anyhow::ensure!(
-                    composer.session.gui_session_epoch() == navigation_epoch,
-                    "caption navigation session changed"
-                );
+                observation::ensure_epoch(
+                    composer.session,
+                    &navigation_epoch,
+                    "caption navigation session changed",
+                )?;
                 if stop.load(Ordering::Relaxed) {
                     return Ok(false);
                 }
