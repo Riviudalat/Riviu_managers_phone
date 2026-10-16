@@ -834,7 +834,17 @@ impl Database {
         // Preparation ends once the campaign waits for its hour or holds dispatch jobs: from
         // then on its work is durable per assignment and restarts under the job rules below.
         // Settling such a Start too (`running` is a Start's last state) used to stop every
-        // unsent row of a Start-created round at each restart.
+        // unsent row of a Start-created round at each restart. One cut off between creating
+        // its scheduled campaign and its own last write ended preparation too: it is settled
+        // `queued`, as that write would have, so the scheduler can still claim the campaign.
+        transaction.execute(
+            &format!(
+                "UPDATE publish_start_requests SET state='queued',stage='queued',error_json=NULL,
+                 revision=revision+1,updated_at=?1 WHERE state='preparing' AND {}",
+                super::publish_pipeline::START_CAMPAIGN_WAITS
+            ),
+            [&now],
+        )?;
         let interrupted_starts: Vec<Option<String>> = transaction
             .prepare("UPDATE publish_start_requests SET state='uncertain',stage='interrupted',
             error_json=?1,revision=revision+1,updated_at=?2

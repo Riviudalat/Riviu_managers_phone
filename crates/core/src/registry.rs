@@ -33,6 +33,9 @@ pub const ABSENT_ROW_TTL: Duration = Duration::from_secs(12 * 3600);
 /// plugged in within it; this cap only guards against a flapping network transport.
 const MAX_KEPT_ROWS: usize = 256;
 const MAX_PENDING_MASS_DISCONNECTS: usize = 8;
+/// Not measured: a fleet of 50 USB phones lists 50 serials; the cap only guards against a
+/// network transport that returns under a new serial each time.
+const MAX_LISTED_PHONES: usize = 4096;
 
 /// One mass disconnect, for the activity log. See [`DeviceRegistry::take_mass_disconnects`].
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -82,9 +85,27 @@ struct Roster {
     /// drops across two scans is still one event. Never shown.
     departed: VecDeque<KeptRow>,
     pending: VecDeque<MassDisconnect>,
+    /// Every phone a roster of this process listed, in any state. A phone absent since start
+    /// never left the roster, so no kept row speaks for it (drop audit schedule_restart#1).
+    listed: HashSet<String>,
+    /// Set once `listed` reached [`MAX_LISTED_PHONES`]: from then on every phone counts as
+    /// listed, which is the behaviour from before the set existed.
+    listed_full: bool,
 }
 
 impl Roster {
+    fn note_listed(&mut self, udid: &str) {
+        if self.listed_full || self.listed.contains(udid) {
+            return;
+        }
+        if self.listed.len() >= MAX_LISTED_PHONES {
+            self.listed_full = true;
+            self.listed.clear();
+            return;
+        }
+        self.listed.insert(udid.to_owned());
+    }
+
     fn display(&self, now: Instant) -> Vec<DeviceInfo> {
         let mut devices = self.live.clone();
         devices.extend(
@@ -110,6 +131,9 @@ impl Roster {
             .iter()
             .map(|device| device.udid.clone())
             .collect::<HashSet<_>>();
+        for udid in &present {
+            self.note_listed(udid);
+        }
         // A phone that is back replaces its kept row; nothing of the old row survives.
         self.kept.retain(|kept| {
             !present.contains(&kept.row.udid)
@@ -202,6 +226,7 @@ pub struct DeviceRegistry {
     devices: Arc<RwLock<Roster>>,
     latest_scan: Arc<RwLock<Option<FleetScan>>>,
     events: EventBus,
+    started_at: Instant,
 }
 
 impl DeviceRegistry {
@@ -210,7 +235,26 @@ impl DeviceRegistry {
             devices: Arc::new(RwLock::new(Roster::default())),
             latest_scan: Arc::new(RwLock::new(None)),
             events,
+            started_at: Instant::now(),
         }
+    }
+
+    /// When this roster began, which is when this process started watching phones.
+    pub fn started_at(&self) -> Instant {
+        self.started_at
+    }
+
+    /// Whether any roster of this process listed `udid`, in any state. Never a reason to act
+    /// on the phone: it only tells a phone absent since start from one that left.
+    pub fn listed_since_start(&self, udid: &str) -> bool {
+        let roster = self.devices.read();
+        roster.listed_full || roster.listed.contains(udid)
+    }
+
+    /// Whether any roster of this process listed a phone at all.
+    pub fn listed_any_since_start(&self) -> bool {
+        let roster = self.devices.read();
+        roster.listed_full || !roster.listed.is_empty()
     }
 
     /// The live roster: phones the last scan found.
@@ -281,6 +325,7 @@ impl DeviceRegistry {
         {
             let mut guard = self.devices.write();
             guard.forget_absent(&device.udid);
+            guard.note_listed(&device.udid);
             if let Some(existing) = guard.live.iter_mut().find(|d| d.udid == device.udid) {
                 *existing = device.clone();
             } else {

@@ -579,11 +579,19 @@ pub(super) fn forget_start_owner(conn: &Connection, request: &str) -> anyhow::Re
     Ok(())
 }
 
+/// A `publish_start_requests` row whose campaign already waits for its hour. Its preparation
+/// ended when that campaign was created, and only the Start's own `preparing -> queued` write
+/// can be missing (drop audit schedule_restart#4, 16/10/2026): settling it `uncertain` kept the
+/// scheduler from ever claiming the campaign, which was then missed 30 s after its hour.
+pub(super) const START_CAMPAIGN_WAITS: &str = "EXISTS(SELECT 1 FROM publish_campaigns c
+    WHERE c.id=publish_start_requests.campaign_id AND c.run_at IS NOT NULL AND c.state='scheduled')";
+
 /// A Start still `accepted`/`preparing` whose owner is no longer alive will never be settled by
 /// it: its task ended, or its terminal write failed every retry (review R4-F1). Settle it the way
 /// a restart does, `uncertain`, which needs a person and is never claimed or posted again, and
 /// drop the owner records that no longer name a live generation. Its preparation locks are then
-/// inactive and released with the other settled locks.
+/// inactive and released with the other settled locks. One whose campaign waits for its hour
+/// ([`START_CAMPAIGN_WAITS`]) is settled `queued` instead, as its own last write would have.
 pub(super) fn reconcile_orphaned_publish_starts(conn: &Connection) -> anyhow::Result<()> {
     let active = active_preparations();
     let error = serde_json::json!({
@@ -594,6 +602,14 @@ pub(super) fn reconcile_orphaned_publish_starts(conn: &Connection) -> anyhow::Re
     let orphan = "substr(o.key,1,length(?2))=?2 AND CASE WHEN json_valid(o.value)
         THEN COALESCE(json_extract(o.value,'$.generation') NOT IN (SELECT value FROM json_each(?1)),1)
         ELSE 1 END";
+    conn.execute(
+        &format!(
+            "UPDATE publish_start_requests SET state='queued',stage='queued',error_json=NULL,
+             revision=revision+1,updated_at=?3 WHERE state='preparing' AND {START_CAMPAIGN_WAITS}
+             AND request_id IN (SELECT substr(o.key,length(?2)+1) FROM settings o WHERE {orphan})"
+        ),
+        params![active, START_OWNER_PREFIX, Utc::now().to_rfc3339()],
+    )?;
     conn.execute(
         &format!(
             "UPDATE publish_start_requests SET state='uncertain',stage='interrupted',error_json=?3,
@@ -738,6 +754,18 @@ impl Database {
             .optional()?
             .flatten();
         Ok(generation.is_some_and(|generation| !preparation_active(&generation)))
+    }
+
+    /// Whether this Start's campaign already waits for its hour ([`START_CAMPAIGN_WAITS`]).
+    pub fn publish_start_campaign_waits(&self, request: &str) -> anyhow::Result<bool> {
+        Ok(self.conn()?.query_row(
+            &format!(
+                "SELECT EXISTS(SELECT 1 FROM publish_start_requests
+                 WHERE request_id=?1 AND {START_CAMPAIGN_WAITS})"
+            ),
+            [request],
+            |row| row.get(0),
+        )?)
     }
 
     /// Settle every Start whose owner is gone and release the locks that no longer bind.

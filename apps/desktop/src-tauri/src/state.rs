@@ -2936,6 +2936,8 @@ impl AppState {
             tauri::async_runtime::spawn(async move {
                 let mut interval = tokio::time::interval(Duration::from_secs(1));
                 interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+                // Schedules whose claim was refused inside their window, logged once each.
+                let mut refused = std::collections::HashSet::new();
                 loop {
                     interval.tick().await;
                     if publish_stop.load(Ordering::Acquire) {
@@ -2952,6 +2954,7 @@ impl AppState {
                     let Ok(scheduled) = publish_db.scheduled_publish_campaigns() else {
                         continue;
                     };
+                    refused.retain(|id: &String| scheduled.iter().any(|(due, _)| due == id));
                     let now = chrono::Local::now().naive_local();
                     for (id, raw) in scheduled {
                         if publish_acceptance.active() {
@@ -3006,9 +3009,18 @@ impl AppState {
                                 Ok(Some(reason)) => publish_db
                                     .refuse_publish_for_approval(&id, &reason)
                                     .map(|()| false),
-                                Ok(None) => publish_db
-                                    .claim_publish_pipeline(&id)
-                                    .map(|run| run.is_some()),
+                                Ok(None) => publish_db.claim_publish_pipeline(&id).map(|run| {
+                                    // Otherwise only the miss 30 s later says anything, and
+                                    // its reason blames capacity (drop audit schedule_restart#4).
+                                    if run.is_none() && refused.insert(id.clone()) {
+                                        log::warn!(
+                                            "Lịch đăng {} lúc {}: đến giờ nhưng chưa nhận được đợt (lượt bắt đầu chưa chắc chắn, hoặc máy còn bài đang đăng hay chưa nhả); không đăng bù, kiểm tra lượt này",
+                                            id.get(..8).unwrap_or(&id),
+                                            raw.replace('T', " ")
+                                        );
+                                    }
+                                    run.is_some()
+                                }),
                                 Err(error) => Err(error),
                             }
                         };

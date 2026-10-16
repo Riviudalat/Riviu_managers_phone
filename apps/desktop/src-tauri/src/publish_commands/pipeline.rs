@@ -540,6 +540,48 @@ const OBSERVATION_DEADLINE: &str = "publish_observation_deadline";
 /// and past it the row fails as before and waits for **Thử lại máy này**.
 const BOX_OUTAGE_HOLD_MAX: Duration = Duration::from_secs(60 * 60);
 
+/// Whether a queued phone's box was already dark when this process started (drop audit
+/// schedule_restart#1). `mass_disconnect_since` only knows phones that left the roster; after a
+/// restart or a first launch with the box unpowered its phones were never listed, so each queued
+/// row ended `device_reconnect_timeout` two minutes in. Such a row is held like a box outage, for
+/// at most [`BOX_OUTAGE_HOLD_MAX`] from start, while no phone of its campaign has been listed
+/// since start, and, for a campaign smaller than a box (`MASS_DISCONNECT_MIN_PHONES`), while no
+/// phone at all has been. A phone gone alone while its box is up keeps the 2-minute window.
+fn box_dark_since_start(registry: &riviu_core::DeviceRegistry, phones: &[String]) -> bool {
+    registry.started_at().elapsed() < BOX_OUTAGE_HOLD_MAX
+        && (phones.len() >= riviu_core::registry::MASS_DISCONNECT_MIN_PHONES
+            || !registry.listed_any_since_start())
+        && !phones.iter().any(|udid| registry.listed_since_start(udid))
+}
+
+/// The phones of a job's campaign, read once per campaign, with the job's own among them.
+fn campaign_phones<'a>(
+    db: &Database,
+    cache: &'a mut HashMap<String, Vec<String>>,
+    job: &riviu_core::db::PublishDispatchJob,
+) -> &'a [String] {
+    cache.entry(job.run.campaign_id.clone()).or_insert_with(|| {
+        let mut phones = db
+            .publish_campaign_request(&job.run.campaign_id)
+            .ok()
+            .flatten()
+            .map(|request| request.udids)
+            .unwrap_or_default();
+        if !phones.contains(&job.udid) {
+            phones.push(job.udid.clone());
+        }
+        phones
+    })
+}
+
+/// How often startup recovery is retried at first (drop audit schedule_restart#5). The schedule
+/// clock admits nothing while it is pending, and the old 30 s retry was a schedule's whole
+/// admission window. Not measured: the StorageBusy bursts logged right after bootstrap lasted up
+/// to 22 s (15/10/2026 23:15:02-24), so every 2 s for 30 s outlasts the longest; after that the
+/// 30 s cadence resumes, since whatever still fails is not a burst.
+const STARTUP_RECOVERY_FAST_RETRY: Duration = Duration::from_secs(2);
+const STARTUP_RECOVERY_FAST_ATTEMPTS: u32 = 15;
+
 /// How many composes may run at once, and when the next may start. Only a new compose claim
 /// is paced: no running permit is revoked, and transfer, verification and cleanup keep sharing
 /// `PUBLISH_PHONE_WORK_CAP` as before. Constants and their reasons: `riviu_core::read_latency`.
@@ -733,11 +775,15 @@ pub(crate) async fn run_dispatcher(
     let mut idle_deferrals = HashMap::new();
     // What each row waiting for an earlier post on its phone waits for, logged once per change.
     let mut prior_post_waits: HashMap<String, String> = HashMap::new();
+    // For `box_dark_since_start`: phones per campaign, and campaigns already logged as held.
+    let mut phones_by_campaign: HashMap<String, Vec<String>> = HashMap::new();
+    let mut dark_since_start = std::collections::HashSet::new();
     prior_post::install_acceptance(&acceptance);
     let mut completed = DispatchCompletions::default();
     let mut interval = tokio::time::interval(Duration::from_millis(250));
     let mut roster = RosterRefresh::default();
     let mut recovery_at = tokio::time::Instant::now();
+    let mut recovery_attempts = 0u32;
     let ramp = Arc::new(parking_lot::Mutex::new(ComposeRamp::new()));
     let mut incident = AdbIncidentHold::default();
     interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
@@ -775,13 +821,22 @@ pub(crate) async fn run_dispatcher(
         }
         if db.ensure_publish_recovery_ready().is_err() {
             if tokio::time::Instant::now() >= recovery_at {
+                recovery_attempts += 1;
+                let retry = if recovery_attempts < STARTUP_RECOVERY_FAST_ATTEMPTS {
+                    STARTUP_RECOVERY_FAST_RETRY
+                } else {
+                    Duration::from_secs(30)
+                };
                 if let Err(error) = db
                     .storage_write(|db| db.recover_publish_dispatch_startup())
                     .await
                 {
-                    log::error!("publish startup recovery pending: {error:#}");
+                    log::error!(
+                        "Đăng bài: chưa đối soát xong kết quả đăng lúc khởi động (lần {recovery_attempts}, thử lại sau {} giây; lịch đến giờ chờ bước này): {error:#}",
+                        retry.as_secs()
+                    );
                 }
-                recovery_at = tokio::time::Instant::now() + Duration::from_secs(30);
+                recovery_at = tokio::time::Instant::now() + retry;
             }
             if db.ensure_publish_recovery_ready().is_err() {
                 continue;
@@ -900,7 +955,28 @@ pub(crate) async fn run_dispatcher(
                         db.hold_publish_dispatch_for_box_outage(&job)?;
                         continue;
                     }
-                    RosterPresence::Offline => false,
+                    RosterPresence::Offline => {
+                        // Or dark already when this process started: no phone left, so no
+                        // mass disconnect was recorded (`box_dark_since_start`).
+                        if registry.started_at().elapsed() < BOX_OUTAGE_HOLD_MAX
+                            && !registry.listed_since_start(&job.udid)
+                            && box_dark_since_start(
+                                &registry,
+                                campaign_phones(&db, &mut phones_by_campaign, &job),
+                            )
+                        {
+                            if dark_since_start.insert(job.run.campaign_id.clone()) {
+                                log::warn!(
+                                    "Đăng bài: chưa thấy máy nào của lượt {} từ khi mở ứng dụng (hộp/hub mất nguồn USB?); giữ hàng chờ tối đa {} phút kể từ lúc mở thay vì 2 phút mất kết nối, cắm lại là máy tự chạy tiếp, chưa đăng gì",
+                                    job.run.campaign_id.get(..8).unwrap_or(&job.run.campaign_id),
+                                    BOX_OUTAGE_HOLD_MAX.as_secs() / 60
+                                );
+                            }
+                            db.hold_publish_dispatch_for_box_outage(&job)?;
+                            continue;
+                        }
+                        false
+                    }
                 };
                 if !db.admit_publish_reconnect(
                     &job,

@@ -1083,7 +1083,12 @@ có versionCode tối thiểu 5 cho launcher; APK, manifest và NOTICE phải kh
     giây). Start còn `accepted`/`preparing` mà chủ đã mất được chuyển `uncertain`
     (`PublishStartInterrupted`), như khi khởi động lại, ở lần đọc trạng thái Start, lần ghi tài
     khoản kế tiếp hoặc lúc mở app; trạng thái đó cần người kiểm, không bao giờ được claim hay đăng
-    lại.
+    lại. Ngoại lệ: Start `preparing` mà lượt của nó đã chờ giờ hẹn (`scheduled`, có `run_at`) đã
+    xong chuẩn bị, chỉ thiếu lần ghi `preparing → queued` của chính nó (lỗi storage, hoặc app tắt
+    giữa lúc tạo lượt và lần ghi đó). Lần ghi kết quả của Start, lần đối soát chủ mất và lúc mở app
+    đều chuyển nó `queued` như lần ghi đó (`START_CAMPAIGN_WAITS`), để bộ hẹn giờ còn claim được;
+    `uncertain` ở đây chặn claim và lượt thành `missed` 30 giây sau giờ hẹn (drop audit
+    schedule_restart#4).
   - `campaign` (chủ là lượt): tạo trong transaction insert lượt có `approval`; transaction đó so
     tài khoản hiện tại của từng máy với bản duyệt và từ chối tạo lượt nếu lệch. Khóa lại khi việc
     mới quay về tập (claim, thử lại assignment, recovery xếp lại). Còn hiệu lực khi lượt chưa hủy
@@ -1607,7 +1612,13 @@ Khi adb server mất hoặc bị nghi treo thì không claim việc mới, tối
 đang chạy vẫn đi tiếp theo luật intent. Máy mất cùng cả box (mất kết nối hàng loạt của
 `DeviceRegistry`) không tiêu cửa sổ chờ kết nối lại 2 phút: dòng chờ `box_disconnected` tối đa 60
 phút, cửa sổ mở lại từ đầu khi máy về (r132 16/10/2026: box 30 máy mất USB cùng lúc, 10 dòng
-chưa đăng hết `device_reconnect_timeout` sau 2 phút). Hằng số và lý do nằm trong
+chưa đăng hết `device_reconnect_timeout` sau 2 phút). Box đã tối từ lúc mở app không có máy nào
+rời danh sách nên không có mất kết nối hàng loạt; dispatcher giữ dòng như vậy theo danh sách của
+chính tiến trình (`box_dark_since_start`, `DeviceRegistry::listed_since_start`): máy chưa từng
+được liệt kê từ lúc mở, không máy nào của lượt được liệt kê, và lượt dưới 3 máy thì chưa có máy
+nào được liệt kê; tối đa 60 phút tính từ lúc mở, log "chưa thấy máy nào của lượt … từ khi mở ứng
+dụng" một lần mỗi lượt. Máy hỏng riêng khi máy khác của lượt đã hiện vẫn chờ 2 phút (drop audit
+schedule_restart#1). Hằng số và lý do nằm trong
 `crates/core/src/read_latency.rs`; các số này chưa đo, phải đo lại trên box 20 máy.
 Một hàng album đã thấy một lần mà chưa xác nhận được trả `album_row_unconfirmed` (retryable),
 không phải `album_not_visible`. Bằng chứng ổn định qua hai lần đọc phải từ chối snapshot dùng
@@ -1664,6 +1675,18 @@ khi nhận, từng máy còn bài chờ link của lượt khác có thể chờ
 `waitMinutes`), và hàng hết chờ thành `failed_before_dispatch` / `prior_post_unsettled`, không thành
 `missed`, không đăng bù (xem "Lịch hẹn giờ trên máy còn bài chờ link").
 
+Không tạo lượt hẹn giờ đã lỡ ngay khi vừa có (drop audit schedule_restart#3): `publish_start` từ
+chối bền (`PublishScheduleTooSoon`, receipt `failed` không lượt) khi giờ hẹn cách lúc tiếp nhận
+dưới `SCHEDULED_START_MIN_LEAD_SECS` = 180 giây (đo: 39–68 giây từ lần kiểm bản duyệt của Start
+tới lúc tạo lượt 30 máy, tới 166 giây tính từ cú bấm), và `publish_create_campaign` kiểm lại giờ
+hẹn ngay trước khi insert: giờ đã qua trong lúc chuẩn bị thì không tạo lượt, Start `failed`,
+không đăng bù. Bộ lập lịch nhiều khung (`publish_schedule_create`) vốn kiểm lại từng khung trước
+khi ghi cả lô. Claim bị từ chối trong cửa sổ (Start `uncertain`, máy còn bài đang đăng hay chưa
+nhả) ghi log "đến giờ nhưng chưa nhận được đợt" một lần mỗi lượt, trước khi lượt thành `missed`.
+Trong lúc đối soát kết quả lúc khởi động còn treo, bộ hẹn giờ không nhận đợt nào; dispatcher thử
+lại đối soát mỗi 2 giây trong 30 giây đầu rồi mỗi 30 giây (`STARTUP_RECOVERY_FAST_RETRY`), không
+còn chờ 30 giây, bằng cả cửa sổ nhận đợt (drop audit schedule_restart#5).
+
 Restart không cần người vận hành cho việc chưa bấm Đăng. Lịch chưa tới giờ giữ `scheduled`
 (Start của nó giữ `queued`). Job chưa có effect intent tự chạy tiếp
 (`publish_recovery::resume_after_restart`): `queued`/`paused` giữ attempt, pha và sổ thử lại,
@@ -1681,7 +1704,14 @@ thử lại `StorageBusy` (r131 máy 38: bài đã xác minh nhưng dòng Sheet 
 lại). Start chỉ
 thành `uncertain` (`PublishStartInterrupted`) khi còn chuẩn bị: `accepted`/`preparing`, hoặc
 `queued`/`running` mà lượt chưa hẹn giờ và chưa có job; chỉ job của Start bị ngắt ở chính lần
-mở đó dừng (`start_interrupted`). Trước migration40→41 tạo và đọc lại bản sao SQLite
+mở đó dừng (`start_interrupted`). `preparing` mà lượt đã chờ giờ hẹn thì chuyển `queued` (xem
+"Khóa tài khoản theo bản duyệt"). Start đăng ngay xếp lượt vừa tạo vào hàng chờ bằng admission
+nó đã giữ từ lúc tiếp nhận, không gọi lại lệnh `publish_execute`: lệnh đó từ chối khi app đang
+đóng, sau khi lượt đã có, và Start thành `uncertain` trên các dòng không gì claim được
+(06/10/2026, c3a4d8c8: 18 dòng `queued` tới khi bị hủy). Xếp hàng chỉ ghi SQLite; lúc đóng
+dispatcher không nhận job và fence chặn mọi Post, lần mở sau chạy tiếp các dòng đó. Claim lỗi
+storage (trả về như issue `publish_phone_failed`) được thử lại 3 lần cách 1 rồi 2 giây
+(drop audit schedule_restart#0). Trước migration40→41 tạo và đọc lại bản sao SQLite
 `pre-publication-v40.db`.
 
 `publish_sheet_reset_reporting` nhận UUID `resetId`, dừng cấp claim Sheet mới và

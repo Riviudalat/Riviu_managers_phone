@@ -551,6 +551,18 @@ pub async fn publish_create_campaign(
         report_json: serde_json::to_value(&prepared.report).map_err(err)?,
     };
     let held_back: Vec<String> = not_released.into_iter().map(|(udid, _)| udid).collect();
+    // Drop audit schedule_restart#3: a schedule whose hour passed while it was being prepared
+    // would be missed the moment it exists. Refuse it here; nothing is created or posted late.
+    if let Some(at) = request.run_at.as_deref() {
+        if parse_run_at(at).is_err() {
+            let _ = fs::remove_dir_all(&staging_root);
+            return Err(err(format!(
+                "Giờ hẹn {} đã qua trong lúc chuẩn bị {} máy; chưa tạo lịch và không đăng bù. Hẹn giờ muộn hơn hoặc chọn Đăng ngay.",
+                at.replace('T', " "),
+                request.udids.len()
+            )));
+        }
+    }
     match state.db.create_publish_holding_back(
         &request,
         &managed,
@@ -4255,7 +4267,7 @@ pub(super) fn parse_run_at(raw: &str) -> Result<NaiveDateTime, String> {
         .or_else(|_| NaiveDateTime::parse_from_str(trimmed, "%Y-%m-%dT%H:%M:%S"))
         .map_err(|_| "runAt must use YYYY-MM-DDTHH:MM or YYYY-MM-DDTHH:MM:SS".to_string())?;
     if parsed < Local::now().naive_local() {
-        return Err("runAt is in the past; choose Run now or a future time".into());
+        return Err("Giờ hẹn đã qua; chọn Đăng ngay hoặc một giờ muộn hơn".into());
     }
     Ok(parsed)
 }

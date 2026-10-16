@@ -51,6 +51,11 @@ Giờ hẹn là lúc ứng dụng nhận đợt đăng vào hàng chờ. Đợt 
 chuyển media không bị ghi Lỡ lịch vì phải chờ lượt. Đợt chưa được nhận trong cửa sổ đó hoặc app mở lại sau
 giờ hẹn được ghi **Lỡ lịch**, không tự đăng bù. Bài đã gửi vẫn được xác minh.
 Lịch đông máy có thể bắt đầu thao tác ở từng máy muộn hơn giờ hẹn.
+Bắt đầu một lượt hẹn giờ cần giờ hẹn cách lúc bấm ít nhất **3 phút**, vì app đọc lại từng máy
+và chép ảnh trước khi tạo lịch (30 máy mất khoảng 40–70 giây, có lần tới gần 3 phút tính từ lúc
+bấm). Giờ gần hơn bị từ chối ngay, chưa nhận lượt. Nếu giờ hẹn vẫn qua trong lúc chuẩn bị thì
+app không tạo lịch (không có lịch nào bị Lỡ lịch ngay khi vừa tạo) và không đăng bù; chọn giờ
+muộn hơn hoặc **Đăng ngay**.
 
 Máy còn bài của lượt trước chưa lấy được link vẫn hẹn giờ được. Lưu lịch không dừng hay
 đóng gì; **Kết quả kiểm tra** ghi "Sẵn sàng" kèm điều sẽ xảy ra lúc tới giờ ở mục **Lượt
@@ -347,6 +352,9 @@ lần chạy, nhạc đã chọn được giữ để đọc lại và xác nh�
 app có thể chọn nhạc khác trong tab Hot hiện tại; nếu mất màn soạn thì dựng
 lại từ bản đã duyệt. Media còn đúng hash và MediaStore được dùng lại.
 Máy mất kết nối được chờ đúng serial tối đa **2 phút**, không giữ slot của máy khác.
+Nếu mở app khi cả hộp/hub còn tối (chưa thấy máy nào của lượt từ lúc mở), các bài chờ tối đa
+**60 phút** tính từ lúc mở thay vì 2 phút; cắm lại là máy tự chạy tiếp. Một máy hỏng riêng
+trong khi các máy khác của lượt vẫn hiện thì vẫn chỉ chờ 2 phút.
 Caption tạm thời chưa đọc được được kiểm tra lại trong thời hạn của bước, không
 bị coi ngay là đã đổi nội dung. Sau nút Tiếp bị mất phản hồi, app kiểm tra màn đã
 tới trước khi tiếp tục; không bấm lại chỉ vì chưa nhận được ACK.
@@ -377,7 +385,8 @@ bài chưa bấm Đăng; bài đang chạy dở thì chạy lại từ chuyển 
 bước đó. **Tải lại tiến độ** chỉ đọc lại màn hình theo dõi.
 Nếu máy đã làm xong nhưng lưu kết quả tạm thời lỗi, app thử lưu lại kết quả đó,
 không chạy lại điện thoại. Khi mở app mà còn kết quả chưa đối soát được, Đăng bài
-báo rõ nguyên nhân và tự kiểm tra lại sau 30 giây. Kiểm tra quyền ghi và dung lượng
+báo rõ nguyên nhân và tự kiểm tra lại mỗi 2 giây trong 30 giây đầu, sau đó mỗi 30 giây, để
+lịch đến giờ không lỡ cửa sổ 30 giây chỉ vì chờ bước này. Kiểm tra quyền ghi và dung lượng
 ổ đĩa nếu trạng thái này kéo dài; không tạo thêm lượt đăng để xử lý lỗi lưu kết quả.
 Khi quay lại từ phần nhạc, app đối chiếu lại toàn bộ caption. Khoảng trắng cuối dòng
 do TikTok thêm sau hashtag được chấp nhận; thay đổi chữ, hashtag hoặc xuống dòng vẫn
