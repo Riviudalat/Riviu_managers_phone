@@ -278,7 +278,7 @@ phone đang cắm cáp có thể chuyển sang ADB USB. Wi-Fi Internet vẫn dù
 Các máy mới cần đăng nhập TikTok, giờ hệ thống đúng và mạng truy cập được TikTok;
 chỉ có biểu tượng Wi-Fi chưa đủ để tải danh sách nhạc.
 
-Khi chọn nhạc, app chờ TikTok tải xong và danh sách ổn định, tối đa **3 phút** cho
+Khi chọn nhạc, app chờ TikTok tải xong và danh sách ổn định, tối đa **5 phút** cho
 toàn bộ bước mở bảng, chọn và xác nhận nhạc. App dùng vị trí vừa đọc lại để chọn;
 không bỏ qua nhạc khi tải chậm. Quá thời hạn hoặc mất kết nối thì dừng trước Đăng
 và hiện nguyên nhân. Bấm **Tạm dừng** sẽ kết thúc cả vòng chờ nhạc.
@@ -291,7 +291,7 @@ Trên Global 45.7.3 tiếng Anh, nếu bảng nhạc đã hiện mà OCR không 
 app chỉ chuyển sang cây giao diện khi đã xác nhận đúng bảng, tab Hot và các hàng ổn
 định. Không chứng minh được thì báo lỗi trước Đăng; không tự chạm vào một hàng bất kỳ.
 Ngược lại, nếu hai lần liền không đọc được cây giao diện của bảng nhạc, app chuyển
-sang đọc ảnh màn hình thay vì chờ hết 3 phút. Chi tiết máy ghi "chuyển sang ảnh màn
+sang đọc ảnh màn hình thay vì chờ hết thời hạn. Chi tiết máy ghi "chuyển sang ảnh màn
 hình" và cuối bước ghi nhạc được chọn bằng cây giao diện hay bằng ảnh màn hình. Tên
 nhạc vẫn được đọc lại từ cây giao diện trước khi bấm Đăng.
 Việc đếm này áp dụng cho cả lúc vừa mở bảng nhạc và các lần tự thử lại: app không
@@ -319,8 +319,8 @@ có thể mất 18–30 giây khi rơi vào khoảng 20–30 giây sau lúc TikT
 Nếu agent Android không đọc được cây UI hoặc không trả `/status`,
 lượt kế tiếp chờ ít nhất đến hết khoảng phục hồi của phiên (tối đa khoảng 65 giây),
 không tiêu hết lượt thử trong lúc instrumentation còn cooldown. Bước chọn nhạc có
-tổng thời hạn 3 phút, gồm các lần đọc lại và khoảng chờ thử lại; không cấp thêm
-3 phút sau mỗi lỗi. Hết thời hạn thì máy dừng trước Đăng và cần bấm **Thử lại**.
+tổng thời hạn 5 phút, gồm các lần đọc lại và khoảng chờ thử lại; không cấp thêm
+5 phút sau mỗi lỗi. Hết thời hạn thì máy dừng trước Đăng và cần bấm **Thử lại**.
 App ưu tiên tiếp tục bước đang lỗi, giữ bài và caption đã duyệt. Trong cùng một
 lần chạy, nhạc đã chọn được giữ để đọc lại và xác nhận. Khi cần bắt đầu lần thử mới,
 app có thể chọn nhạc khác trong tab Hot hiện tại; nếu mất màn soạn thì dựng
