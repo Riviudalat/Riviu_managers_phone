@@ -1515,7 +1515,9 @@ vì app đang đóng (không có Dừng, loại hay hủy) trả `app_closing_be
 lần mở sau chạy lại dòng đó trước Đăng thay vì chốt như lệnh Dừng của người vận hành: r131
 (16/10/2026) máy 28 trả "dừng lại trước khi bấm Đăng" khi tắt và bị chốt `legacy_terminal`. `StorageBusy` (bộ thực thi SQLite từ chối yêu cầu trước khi
 chạy) luôn là lỗi thử lại được: đợt dồn lúc khởi động của r131 làm `resolveAppBinding` của 10
-dòng lỗi rồi bị bọc thành "composer chưa đo" hoặc "không mở được phiên". Start chỉ
+dòng lỗi rồi bị bọc thành "composer chưa đo" hoặc "không mở được phiên". Outbox Sheet cũng
+thử lại `StorageBusy` (r131 máy 38: bài đã xác minh nhưng dòng Sheet `failed`, không lịch gửi
+lại). Start chỉ
 thành `uncertain` (`PublishStartInterrupted`) khi còn chuẩn bị: `accepted`/`preparing`, hoặc
 `queued`/`running` mà lượt chưa hẹn giờ và chưa có job; chỉ job của Start bị ngắt ở chính lần
 mở đó dừng (`start_interrupted`). Trước migration40→41 tạo và đọc lại bản sao SQLite

@@ -292,6 +292,10 @@ pub fn sheet_delivery_error_is_retryable(error: &anyhow::Error) -> bool {
         || error
             .downcast_ref::<reqwest::Error>()
             .is_some_and(|error| error.is_timeout() || error.is_connect() || error.is_body())
+        // The local storage executor turned a request away before it ran. r131 (16/10/2026):
+        // a controller restart's startup burst left phone 38's verified post `failed` with no
+        // next attempt, so its link never reached the Sheet.
+        || format!("{error:#}").contains("StorageBusy: ")
 }
 
 fn sheet_redirect(status: reqwest::StatusCode, location: &str) -> anyhow::Result<reqwest::Url> {
