@@ -793,10 +793,12 @@ pub(crate) async fn decline_profile_facebook_consent(
             .is_none_or(|end| chrono::Utc::now().timestamp_millis() < end),
         "profile_facebook_decline_deadline"
     );
-    anyhow::ensure!(
-        deadline.is_none_or(|end| tokio::time::Instant::now() < end),
-        "profile_facebook_decline_deadline"
-    );
+    // The caller's navigation window closed before the tap: a slow read before any Post, typed
+    // retryable like the navigation's own deadline exits. Nothing is tapped.
+    if deadline.is_some_and(|end| tokio::time::Instant::now() >= end) {
+        return Err(crate::publish_recovery::observation_deadline()
+            .context("profile_facebook_decline_deadline"));
+    }
     session.tap(button.centre()).await?;
     Ok(true)
 }

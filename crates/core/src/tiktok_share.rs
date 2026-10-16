@@ -639,15 +639,50 @@ pub async fn navigate_own_profile(
     let popup_stop = std::sync::atomic::AtomicBool::new(false);
     let mut answered_permission_window = false;
     let mut permission_settle_reads: u8 = 0;
-    let within_deadline = || tokio::time::Instant::now() < deadline
-        && session.gui_scope().and_then(|scope| scope.deadline_ms)
-            .is_none_or(|end| chrono::Utc::now().timestamp_millis() < end);
+    let scope_open = || {
+        session
+            .gui_scope()
+            .and_then(|scope| scope.deadline_ms)
+            .is_none_or(|end| chrono::Utc::now().timestamp_millis() < end)
+    };
+    let within_deadline = || tokio::time::Instant::now() < deadline && scope_open();
+    // This window closing is a slow read before any Post, never a verdict on the account: a
+    // typed retryable read deadline (`account_read_failed` on the publish proof). An expired
+    // outer run budget (rehearsal, inspection, no-public) keeps its plain refusal.
+    const RECOVERY_DEADLINE: &str = "account navigation recovery deadline exceeded";
+    let deadline_exit = |what: &'static str| -> anyhow::Error {
+        if scope_open() {
+            crate::publish_recovery::observation_deadline().context(what)
+        } else {
+            anyhow::anyhow!(what)
+        }
+    };
+    // The agent's stale-root recreate-and-replay swaps the session in place: typed retryable
+    // before Post, so the next attempt proves the account from nothing.
+    let session_check = || -> anyhow::Result<()> {
+        let current = session.gui_session_epoch();
+        if current == epoch {
+            return Ok(());
+        }
+        Err(crate::publish_recovery::observation_invalidated(
+            "account navigation session changed",
+            &epoch,
+            &current,
+        )
+        .into())
+    };
     let tab = loop {
         let read = if reopened_from_launcher {
-            anyhow::ensure!(within_deadline(), "account navigation recovery deadline exceeded");
+            if !within_deadline() {
+                return Err(deadline_exit(RECOVERY_DEADLINE));
+            }
             match tokio::time::timeout_at(deadline, session.active_app_bundle()).await {
                 Ok(read) => read,
-                Err(_) => anyhow::bail!("account navigation foreground read deadline exceeded"),
+                Err(_) => {
+                    return Err(deadline_exit(
+                        "account navigation foreground read deadline exceeded",
+                    ))
+                }
             }
         } else {
             session.active_app_bundle().await
@@ -674,7 +709,7 @@ pub async fn navigate_own_profile(
             }
             Err(error) => return Err(error),
         };
-        anyhow::ensure!(session.gui_session_epoch() == epoch, "account navigation session changed");
+        session_check()?;
         if crate::tiktok_target::foreground_is_tiktok_or_permission_window(
             session,
             labels.package(),
@@ -690,10 +725,9 @@ pub async fn navigate_own_profile(
             // Box 31-50, 10/10/2026: the measured contacts question over TikTok. The shared
             // popup step may only tick "Don't ask again" and Deny, once each per budget; a
             // spent, unknown or unproven window still fails below without a tap.
-            anyhow::ensure!(
-                within_deadline(),
-                "account navigation recovery deadline exceeded"
-            );
+            if !within_deadline() {
+                return Err(deadline_exit(RECOVERY_DEADLINE));
+            }
             match crate::app_automation::dialogs::step_before_deadline(
                 session,
                 *labels,
@@ -732,6 +766,12 @@ pub async fn navigate_own_profile(
                     );
                     continue;
                 }
+                // The step found no read in the window: unread, not a refusal.
+                crate::ui_automation::runtime::ReadWaitResult::DeadlineExceeded => {
+                    return Err(deadline_exit(
+                        "account navigation permission window read deadline exceeded",
+                    ))
+                }
                 _ => anyhow::bail!(
                     "account navigation left TikTok: {}",
                     permission_popups.says().unwrap_or(PERMISSION_WINDOW_SAYS)
@@ -753,25 +793,38 @@ pub async fn navigate_own_profile(
                 .await;
                 continue;
             }
+            // The permission question's window check ran into this deadline before it could
+            // prove the question (it then answers Other): unread, not a foreign app.
+            if active == crate::tiktok_target::RUNTIME_PERMISSION_PACKAGE
+                && tokio::time::Instant::now() >= deadline
+            {
+                return Err(deadline_exit(
+                    "account navigation permission window read deadline exceeded",
+                ));
+            }
             // Measured machine 1: Samsung Home after the owned account-navigation began.
             // This is one navigation repair, never a reset or permission to replay an action.
             anyhow::ensure!(
                 saw_tiktok && !reopened_from_launcher && active == "com.sec.android.app.launcher",
                 "account navigation left TikTok (foreground: {active})"
             );
-            anyhow::ensure!(within_deadline(), "account navigation recovery deadline exceeded");
+            if !within_deadline() {
+                return Err(deadline_exit(RECOVERY_DEADLINE));
+            }
             reopened_from_launcher = true;
             tracing::info!(package = labels.package(), "account navigation returned to Samsung launcher; reopening bound TikTok once");
             // A dispatched launch drains to its result; the original deadline is not renewed.
             session.launch_app_foreground(labels.package()).await?;
-            anyhow::ensure!(session.gui_session_epoch() == epoch, "account navigation session changed");
-            anyhow::ensure!(within_deadline(), "account navigation recovery deadline exceeded");
+            session_check()?;
+            if !within_deadline() {
+                return Err(deadline_exit(RECOVERY_DEADLINE));
+            }
             continue;
         }
         saw_tiktok = true;
         let tree = if reopened_from_launcher {
             tokio::time::timeout_at(deadline, crate::tiktok_account::account_snapshot(session, *labels)).await
-                .context("account navigation profile read deadline exceeded")??
+                .map_err(|_| deadline_exit("account navigation profile read deadline exceeded"))??
         } else { crate::tiktok_account::account_snapshot(session, *labels).await? };
         // Box 31-50, 10/10/2026 (ce051715e15b2c2e02, 21:35:02Z): the first-run "Swipe up for
         // more" layer stood over the feed and swallowed the Profile tap. A measured popup or
@@ -780,10 +833,9 @@ pub async fn navigate_own_profile(
         if crate::app_automation::dialogs::optional_decline(&tree, *labels).is_some()
             || crate::app_automation::dialogs::first_run_screen(&tree, *labels).is_some()
         {
-            anyhow::ensure!(
-                within_deadline(),
-                "account navigation recovery deadline exceeded"
-            );
+            if !within_deadline() {
+                return Err(deadline_exit(RECOVERY_DEADLINE));
+            }
             match crate::app_automation::dialogs::step_before_deadline(
                 session,
                 *labels,
@@ -873,12 +925,14 @@ pub async fn navigate_own_profile(
         }
         let profile_tab = if reopened_from_launcher {
             tokio::time::timeout_at(deadline, session.locate(profile.to_query())).await
-                .context("account navigation profile tab deadline exceeded")??
+                .map_err(|_| deadline_exit("account navigation profile tab deadline exceeded"))??
         } else { session.locate(profile.to_query()).await? };
         if let Some(tab) = profile_tab {
             break tab;
         }
-        anyhow::ensure!(tokio::time::Instant::now() < deadline, "profile tab absent");
+        if tokio::time::Instant::now() >= deadline {
+            return Err(deadline_exit("profile tab absent"));
+        }
         let step = crate::feed_ladder::step(session, *labels, &mut spend).await;
         anyhow::ensure!(
             !matches!(
@@ -892,8 +946,10 @@ pub async fn navigate_own_profile(
         tokio::time::sleep(Duration::from_millis(300)).await;
     };
     if reopened_from_launcher {
-        anyhow::ensure!(within_deadline(), "account navigation recovery deadline exceeded");
-        anyhow::ensure!(session.gui_session_epoch() == epoch, "account navigation session changed");
+        if !within_deadline() {
+            return Err(deadline_exit(RECOVERY_DEADLINE));
+        }
+        session_check()?;
     }
     session.tap(tab.centre()).await
 }
