@@ -282,6 +282,31 @@ fn install_panic_logging() {
     }));
 }
 
+/// Stack of every async worker and blocking-pool thread. The default 2 MiB overflowed on
+/// 16/10/2026 23:57 (r136, debug acceptance build of 2078a27c, box 21-50, 30 SM-G955F/N):
+/// "tokio-rt-worker has overflowed its stack" right after the first editor proof's OCR frames
+/// following the picker Next tap. The process aborted and every phone stopped. The publish
+/// composer nests deep async state machines whose debug poll frames are large. 8 MiB is 4x
+/// the size that overflowed, not a measured minimum. It is reserved address space, committed
+/// only as a thread touches it.
+const ASYNC_WORKER_STACK_BYTES: usize = 8 * 1024 * 1024;
+
+/// The runtime behind `tauri::async_runtime`. Tauri needs it alive for the whole process.
+static ASYNC_RUNTIME: std::sync::OnceLock<tokio::runtime::Runtime> = std::sync::OnceLock::new();
+
+/// Give Tauri's async runtime an explicit worker stack before anything spawns on it.
+fn install_async_runtime() -> std::io::Result<()> {
+    let runtime = tokio::runtime::Builder::new_multi_thread()
+        .enable_all()
+        .thread_stack_size(ASYNC_WORKER_STACK_BYTES)
+        .build()?;
+    tauri::async_runtime::set(runtime.handle().clone());
+    // The first call wins. A second one could only come from a re-entered run(), and that
+    // runtime is dropped here unused.
+    let _ = ASYNC_RUNTIME.set(runtime);
+    Ok(())
+}
+
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     // Fail closed before logs, process ownership, Tauri/WebView, credentials or live bootstrap.
@@ -296,6 +321,10 @@ pub fn run() {
     if !policy.is_smoke() {
         riviu_ios_driver::install_process_tree_guard()
             .expect("failed to establish process-tree ownership");
+    }
+    if let Err(error) = install_async_runtime() {
+        eprintln!("async runtime refused: {error:#}");
+        return;
     }
     let mut context = tauri::generate_context!();
     if !cfg!(debug_assertions) {
