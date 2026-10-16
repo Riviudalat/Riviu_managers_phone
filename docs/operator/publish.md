@@ -52,6 +52,18 @@ chuyển media không bị ghi Lỡ lịch vì phải chờ lượt. Đợt chư
 giờ hẹn được ghi **Lỡ lịch**, không tự đăng bù. Bài đã gửi vẫn được xác minh.
 Lịch đông máy có thể bắt đầu thao tác ở từng máy muộn hơn giờ hẹn.
 
+Máy còn bài của lượt trước chưa lấy được link vẫn hẹn giờ được. Lưu lịch không dừng hay
+đóng gì; **Kết quả kiểm tra** ghi "Sẵn sàng" kèm điều sẽ xảy ra lúc tới giờ ở mục **Lượt
+đăng trước**. Tới lượt máy đó: nếu app đã thấy bài cũ trên Hồ sơ (bài đã lên TikTok), app tạm
+dừng xác minh bài cũ trên máy này, đóng TikTok, đăng bài hẹn giờ rồi tự xác minh tiếp bài cũ,
+không đăng lại bài nào. Nếu chưa chứng minh được bài cũ đã lên TikTok, máy chờ và không thao
+tác gì, app ưu tiên kiểm tra bài cũ; Theo dõi ghi **Chờ bài trước trên máy · còn n phút**. Sau
+30 phút vẫn chưa chứng minh được, bài hẹn giờ trên máy đó dừng trước Đăng
+(`prior_post_unsettled`) để không làm mất bài cũ; khi bài cũ có link, bấm **Thử lại máy
+này**. Bài cũ cần người xử lý (lượt đã Dừng, thiếu bằng chứng, Cần kiểm tra không tự kiểm
+lại) làm bài hẹn giờ trên máy đó dừng trước Đăng ngay (`prior_post_needs_review`): xử lý bài
+cũ trong Theo dõi rồi bấm **Thử lại máy này**.
+
 Mỗi bài dự kiến trên một tài khoản có `publicationId` cố định; các lần thử có
 `attemptId` riêng. Mỗi bài chỉ chiếm một dòng Sheet. Sau khi mở đợt báo cáo mới,
 Theo dõi hiển thị **Đợt báo cáo đã đóng** cho nghĩa vụ cũ; lịch sử và xác minh bài
@@ -177,7 +189,8 @@ gửi và chờ liên kết. Hủy chặn các bài chưa bấm Đăng; bài đ�
 Trước nút Đăng, Riviu kiểm tra clipboard của Helper rồi khôi phục nội dung ban đầu.
 Phiên bản TikTok phải khớp lần kiểm tra đã duyệt. Mỗi tài khoản chỉ có một bài
 đang chờ xác minh link, kể cả khi đăng nhập trên nhiều máy; bài sau chờ bài trước
-có link. Chờ ghi Sheet không giữ tài khoản. Lượt cũ chưa qua cơ chế kiểm tra mới
+có link. Bài hẹn giờ trên cùng máy chỉ nhả bài trước khi app đã thấy bài đó trên Hồ sơ, rồi
+bài trước tự xác minh tiếp sau khi bài hẹn giờ đăng xong. Chờ ghi Sheet không giữ tài khoản. Lượt cũ chưa qua cơ chế kiểm tra mới
 cần kiểm tra và tạo lại trước khi chạy. Với bài đã gửi trong lịch sử, bấm kiểm tra
 liên kết để tiếp tục xác minh. Khi còn đủ bằng chứng tài khoản và thời điểm gửi,
 lượt kiểm tra chủ động sẽ lưu lịch kiểm tra lại mỗi 2 phút trong ngân sách hữu hạn,

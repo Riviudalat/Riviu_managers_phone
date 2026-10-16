@@ -844,7 +844,8 @@ có versionCode tối thiểu 5 cho launcher; APK, manifest và NOTICE phải kh
 ### Thay thế đã xác nhận
 
 - Đăng ngay kiểm cả assignment đang xếp hàng lẫn owner sống và guard Post/link. Tạo lịch
-  không ngắt việc đang chạy.
+  không ngắt việc đang chạy: bài cũ còn chờ link trên máy của lịch không chặn lưu lịch, mà được
+  xử lý lúc tới lượt của chính job hẹn giờ (xem "Lịch hẹn giờ trên máy còn bài chờ link").
 - Loại theo từng assignment đã chọn. Đường loại chung thu hồi composer và verifier link
   có guard của nó. Nuôi dừng theo từng máy đã chọn. Thao tác không chia được có máy ngoài
   vùng chọn bị từ chối trước khi thu hồi.
@@ -902,6 +903,66 @@ có versionCode tối thiểu 5 cho launcher; APK, manifest và NOTICE phải kh
   không bị loại hay đóng. Caller handoff thủ công cũ giữ hành vi cũ.
 - `require_current_preflight_digest` không đổi. Readiness mới được kiểm sau khi nhả;
   invalidate cache không nới duyệt nội dung nguồn hay mapping đích.
+
+### Lịch hẹn giờ trên máy còn bài chờ link
+
+- **Lưu lịch không chặn, không ngắt.** Với request có `runAt` (cả `publish_preflight` +
+  `publish_start` lẫn `publish_schedule_preflight` + `publish_schedule_create`), bài chờ link của
+  lượt khác trên máy không còn là issue `post_verification_pending`; check "Lượt đăng trước" thành
+  `unknown` với ghi chú theo lớp của bài cũ, `canExecute` không đổi vì nó, `needsRelease` vẫn rỗng,
+  không `defer_idle_work`, không loại, không marker, không đóng app. Đăng ngay giữ nguyên hành vi cũ;
+  lượt con của Điều phối vẫn bị từ chối như trước.
+- **Chính sách đã duyệt.** Request hẹn giờ thêm `{"priorPostPolicy":{"version":1,"waitMinutes":30}}`
+  vào digest, và approval đóng băng `priorPosts {version:1, waitMinutes:30}`
+  (`PRIOR_POST_WAIT_MINUTES`). Lịch tạo trước chính sách này và lượt đăng ngay không có `priorPosts`:
+  chúng chỉ chờ xác minh, không tự nhả.
+- **Lớp của bài cũ** (`classify_prior_post_hold`, đọc lại trong transaction): *Nhả được* khi bài có
+  đủ Post identity, `publish_upload_settled` (`publicationStage >= 2` cho đúng intent), không Stop
+  hay đóng đang chờ, không `posting`, không job/claim nào của chính bài đó, không marker
+  handoff-pending trên máy, verifier còn quan sát được (contract xác minh hiện hành hoặc đã resume),
+  trong scope nghiệm thu, và máy còn lưu đúng tài khoản của bài (điều kiện để bài tự xác minh tiếp
+  sau khi nhả). *Chờ* khi bài đang `posting`, đang được kiểm, máy đang nhả cho lượt khác, chưa
+  chứng minh (hoặc đã chứng minh nhưng máy lưu tài khoản khác) mà verifier vẫn tự quan sát (pending,
+  hoặc needsReview còn trong cửa sổ tự kiểm lại 24 giờ, ngoài nghiệm thu), hoặc tài khoản đã duyệt
+  đang bị giữ bởi bài trên máy khác.
+  *Cần người* khi lượt cũ bị Dừng/đang đóng, thiếu identity, bị loại mà không có proof nhả hay dấu
+  tiếp tục, thuộc contract xác minh cũ, ngoài scope nghiệm thu, hoặc needsReview không tự kiểm lại.
+- **Cổng trước khi nhận việc** (`publish_prior_post_gate`): dispatcher chạy nó cho mỗi job (cả pha
+  transfer lẫn compose) sau giãn compose, trước khi lấy permit. Không có bài cũ, hoặc mọi bài cũ
+  *Nhả được* và approval có `priorPosts`: tiếp tục. Có bài *Cần người*: kết thúc ngay
+  `failed_before_dispatch` / `prior_post_needs_review`. Còn lại: chờ, state `priorPostWaiting`,
+  `priorPostWaitSince` ghi ở lần chờ đầu, `nextRetryAt = now + 15 s`, lý do job
+  `prior_post_pending`, không tiêu ngân sách, không tạo attempt, không thao tác máy; mỗi bài *Chờ*
+  được ưu tiên đúng một lần cho cặp (bài cũ, job này) bằng CAS đặt `nextCheckAt = now` và
+  `priorPostPriority` (không khi đang có observer), và verifier liệt kê các bài này trước trong lúc job
+  còn chờ. Hết `priorPostWaitSince + waitMinutes`: `failed_before_dispatch` / `prior_post_unsettled`.
+  **Thử lại máy này** mở ngân sách chờ mới. Không có bước ưu tiên trước giờ hẹn: việc ưu tiên chỉ
+  bắt đầu khi job đã tới lượt.
+- **Nhả trong job** (`release_prior_posts`), chỉ dưới lease Script và permit của chính job:
+  trong `Runtime::transfer` sau `ensure_load_admissible`, trước `stage_publish_media`; dự phòng trong
+  `open_publish_context_until` sau `admit()`, trước khi khởi động TikTok. (1) Một transaction
+  IMMEDIATE (`request_prior_post_release`) kiểm lại attempt đang chạy, approval có `priorPosts` và
+  mọi bài cũ vẫn *Nhả được* ở revision vừa đọc, rồi loại từng bài như handoff (giữ nợ, ghi marker
+  handoff-pending, lý do nêu lượt hẹn giờ) và ghi receipt `publish.prior-post-release.{job}` state
+  `requested` (mỗi bài: assignment, campaign, revision, hash intent, `publicationStage`, package,
+  `exclusionRequestId`). Lệch bất kỳ thì không ghi gì và trả `prior_post_pending`. (2) Fence
+  `publish_handoff_fence` cho từng bài. (3) `terminate_app` từng package của intent dưới lease của
+  job. (4) Một transaction (`record_prior_post_release`) như `record_publish_handoff_release` cho từng
+  bài (kiểm lại fence, `publish.handoff-release.{bài}`, xóa reservation và marker, settle lần loại),
+  receipt `released` kèm bằng chứng đóng app, event `priorPostRelease` của lượt hẹn giờ và
+  `operation_device_events` `publishPriorPostRelease` của cả hai lượt. (5) Lỗi sau bước 1
+  (`abort_prior_post_release`): mỗi bài chưa có proof nhận dấu `verificationHandoffResume` gắn đúng lần
+  loại (status và ngân sách giữ nguyên, nên verifier quan sát tiếp như trước), xóa marker, receipt
+  `aborted`, job nhận `prior_post_pending` và xếp lại không tiêu ngân sách. Receipt còn `requested`
+  khi job không còn chạy attempt đó được dispatcher hủy mỗi tick (`stale_prior_post_releases`) và lúc
+  mở app (`interrupt_orphaned_publish_campaigns`, trước `resume_after_restart`).
+- **Sau khi đăng.** Bài đã nhả thành `link_review` qua `handoff_release_current`, nên clean-start guard
+  cho qua và `reserve_publish_account` không bị chặn. `handoff_resume_due` giữ bài cũ tới khi
+  pipeline của lượt hẹn giờ xong, rồi bài cũ tự tiếp tục xác minh bằng dấu hiện có, theo đường nợ
+  chung của máy (không restart TikTok). Không bao giờ đóng TikTok trên bài chưa chứng minh đã lên
+  TikTok; không đăng lại bài nào; Post của lượt hẹn giờ vẫn một lần.
+- **Hằng số chưa đo.** Chờ 30 phút (đóng băng theo lượt), nhìn lại 15 giây
+  (`PRIOR_POST_RECHECK_MS`), ưu tiên một lần cho mỗi cặp: đều là trần, không phải mục tiêu.
 
 ### Digest đã duyệt
 
@@ -1226,7 +1287,9 @@ thủ công với lý do thiếu bằng chứng, không đoán tuổi của bài
 Xem [hồ sơ lịch sử](../archive/README.md).
 Scope LinkAndSheet/SheetOnly không được dispatch fresh sibling trong campaign.
 Clean-start guard đọc hàng chờ dưới lease để Nuôi/Publish không đóng upload khác;
-manual viewing vẫn được, IdleSweep đứng ngoài máy đang chờ.
+manual viewing vẫn được, IdleSweep đứng ngoài máy đang chờ. Với job của pipeline Publish, guard từ
+chối là `prior_post_pending` (thử lại, không tiêu ngân sách), không phải lỗi kết thúc; job hẹn giờ qua
+được guard chỉ khi bài cũ đã được nhả (`link_review`).
 
 Sheet hỗ trợ mẫu compact qua [Apps Script](../apps-script/README.md): `postedAt` lấy từ
 intent, đối tác trải ngang, khóa idempotency nằm trong note ô Link cùng atomic update.
@@ -1556,7 +1619,10 @@ cửa sổ chỉ nhận lượt đã chạy, tức người vận hành chạy l
 không được nhận trong cửa sổ thì cả lượt CAS sang `missed`: `app_opened_after_deadline` khi
 app mở sau `run_at + 30 s`, `schedule_capacity_deadline` khi app đang chạy mà không nhận được
 đợt trong 30 giây; event của lượt ghi `runAt`, nhật ký thao tác ghi `publish.schedule.missed`
-kèm lý do; không tự đăng bù. App mở trong cửa sổ vẫn nhận đợt.
+kèm lý do; không tự đăng bù. App mở trong cửa sổ vẫn nhận đợt. Cửa sổ nhận đợt không đổi; sau
+khi nhận, từng máy còn bài chờ link của lượt khác có thể chờ (`priorPostWaiting`, tối đa
+`waitMinutes`), và hàng hết chờ thành `failed_before_dispatch` / `prior_post_unsettled`, không thành
+`missed`, không đăng bù (xem "Lịch hẹn giờ trên máy còn bài chờ link").
 
 Restart không cần người vận hành cho việc chưa bấm Đăng. Lịch chưa tới giờ giữ `scheduled`
 (Start của nó giữ `queued`). Job chưa có effect intent tự chạy tiếp

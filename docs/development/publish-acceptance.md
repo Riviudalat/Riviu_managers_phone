@@ -64,6 +64,15 @@ Không truyền lệnh IPC tùy ý. `--wait-seconds` chỉ dành observe (0–86
 giây chỉ đọc metadata, **không đổi nhịp verifier 120 giây**. Observe cần đúng danh sách
 UDID của toàn campaign; thiếu/dư assignment là scope mismatch, không báo pass.
 
+Lượt hẹn giờ (`--protocol start --run-at`) dùng scope tĩnh có trước khi mở controller:
+`campaignIds` chứa requestId đã reserve, đủ `deviceIds` và cả bốn capability `true`. Khi
+máy còn bài của lượt trước chưa có link (ví dụ lượt hẹn giờ ngay sau một lượt đăng còn
+`verifying`), `campaignIds` phải liệt kê cả ID lượt trước: job hẹn giờ chỉ nhả hay chờ bài
+mà verifier nghiệm thu được quan sát, và bài cũ chỉ tự tiếp tục xác minh trong scope ấy.
+Thiếu ID đó thì job trên máy dừng trước Đăng với `prior_post_needs_review` ("lượt đó ngoài
+phạm vi nghiệm thu đang mở"). Preflight của lượt hẹn giờ vẫn `canExecute=true`,
+`needsRelease=[]`; check `pending` là `unknown` kèm ghi chú.
+
 Lượt mới mặc định dùng giao thức Start; `--protocol legacy` không cho preflight/submit
 qua CLI. Scope dev ban đầu phải có đúng danh sách máy và `campaignIds: []`. Bộ đọc scope
 đặt `deny_unknown_fields`, nên file scope có khóa lạ thì controller từ chối nạp. Harness
