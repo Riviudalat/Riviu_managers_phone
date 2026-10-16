@@ -1474,7 +1474,10 @@ của máy vừa chạy. r130 xoay mọi máy mỗi tick giãn 8 s; máy 37 ch�
 
 Retry cả lượt chờ q90 đó hạ, tối đa 10 phút sau giờ hẹn. Máy chưa có số đo mượn q90 của fleet.
 Khi adb server mất hoặc bị nghi treo thì không claim việc mới, tối đa 10 phút mỗi sự cố; job
-đang chạy vẫn đi tiếp theo luật intent. Hằng số và lý do nằm trong
+đang chạy vẫn đi tiếp theo luật intent. Máy mất cùng cả box (mất kết nối hàng loạt của
+`DeviceRegistry`) không tiêu cửa sổ chờ kết nối lại 2 phút: dòng chờ `box_disconnected` tối đa 60
+phút, cửa sổ mở lại từ đầu khi máy về (r132 16/10/2026: box 30 máy mất USB cùng lúc, 10 dòng
+chưa đăng hết `device_reconnect_timeout` sau 2 phút). Hằng số và lý do nằm trong
 `crates/core/src/read_latency.rs`; các số này chưa đo, phải đo lại trên box 20 máy.
 Một hàng album đã thấy một lần mà chưa xác nhận được trả `album_row_unconfirmed` (retryable),
 không phải `album_not_visible`. Bằng chứng ổn định qua hai lần đọc phải từ chối snapshot dùng

@@ -299,6 +299,7 @@ function dispatchDetail(assignment: PublishAssignmentRecord): string | null {
     account_busy: "Tài khoản đang được sử dụng",
     stage_capacity: "Chờ lượt: đã đủ 10 máy làm việc với adb cùng lúc (chuyển media, soạn, kiểm tra); chưa thao tác trên máy",
     roster_pending: "Chờ quét lại danh sách máy để biết máy còn kết nối; chưa thao tác trên máy",
+    box_disconnected: "Cả box mất kết nối USB; chờ cắm lại (tối đa 60 phút), máy về là tự chạy tiếp; chưa thao tác trên máy",
     schedule_capacity_deadline: "Chưa được cấp lượt trong cửa sổ 30 giây; không tự đăng bù",
     app_opened_after_deadline: "Ứng dụng mở sau giờ hẹn; không tự đăng bù",
     app_closing: "Ứng dụng đang đóng",

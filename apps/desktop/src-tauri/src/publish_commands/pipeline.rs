@@ -530,6 +530,12 @@ impl RosterRefresh {
 /// The typed code of a read that outlived its observation window (`publish_recovery::describe`).
 const OBSERVATION_DEADLINE: &str = "publish_observation_deadline";
 
+/// Longest a queued row waits for a box that dropped all its phones at once before the usual
+/// 2-minute reconnect window applies again. Not measured as an optimum: the r125 box stayed dark
+/// 18 min (15/10/2026) until someone replugged it; an hour covers an operator who notices late,
+/// and past it the row fails as before and waits for **Thử lại máy này**.
+const BOX_OUTAGE_HOLD_MAX: Duration = Duration::from_secs(60 * 60);
+
 /// How many composes may run at once, and when the next may start. Only a new compose claim
 /// is paced: no running permit is revoked, and transfer, verification and cleanup keep sharing
 /// `PUBLISH_PHONE_WORK_CAP` as before. Constants and their reasons: `riviu_core::read_latency`.
@@ -867,6 +873,16 @@ pub(crate) async fn run_dispatcher(
                         continue;
                     }
                     RosterPresence::Online => true,
+                    // Lost with its whole box: wait for the box, not the 2-minute window
+                    // meant for one unplugged phone, for at most BOX_OUTAGE_HOLD_MAX.
+                    RosterPresence::Offline
+                        if registry
+                            .mass_disconnect_since(&job.udid)
+                            .is_some_and(|since| since.elapsed() < BOX_OUTAGE_HOLD_MAX) =>
+                    {
+                        db.hold_publish_dispatch_for_box_outage(&job)?;
+                        continue;
+                    }
                     RosterPresence::Offline => false,
                 };
                 if !db.admit_publish_reconnect(

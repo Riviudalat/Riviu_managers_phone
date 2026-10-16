@@ -501,6 +501,22 @@ impl Database {
         conn.execute("UPDATE publish_dispatch_jobs SET reason=?3 WHERE assignment_id=?1 AND revision=?2 AND state='queued'",params![job.assignment_id,job.revision,reason])?;
         Ok(())
     }
+    /// A queued row whose phone went down with its whole box (`DeviceRegistry`'s mass
+    /// disconnect) waits without spending its reconnect window: the window is dropped and opens
+    /// afresh when the phone is listed again. r132 (16/10/2026 08:54): the 30-phone box lost USB
+    /// at once and ten queued rows ended `device_reconnect_timeout` two minutes later.
+    pub fn hold_publish_dispatch_for_box_outage(
+        &self,
+        job: &PublishDispatchJob,
+    ) -> anyhow::Result<()> {
+        let connection = self.dispatch_conn()?;
+        let conn = connection.lock();
+        conn.execute("UPDATE publish_dispatch_jobs SET reason='box_disconnected' WHERE assignment_id=?1 AND revision=?2 AND state='queued'",params![job.assignment_id,job.revision])?;
+        conn.execute("UPDATE publish_recovery_state SET payload=json_set(payload,'$.reconnectDeadline',NULL)
+            WHERE assignment_id=?1 AND run_token=?2 AND json_extract(payload,'$.reconnectDeadline') IS NOT NULL",
+            params![job.assignment_id,job.run.token])?;
+        Ok(())
+    }
     fn publish_dispatch_turn(conn: &Connection, udid: &str) -> anyhow::Result<()> {
         conn.execute("INSERT INTO publish_dispatch_turns(udid,last_turn) VALUES(?1,(SELECT COALESCE(MAX(last_turn),0)+1 FROM publish_dispatch_turns))
           ON CONFLICT(udid) DO UPDATE SET last_turn=excluded.last_turn",[udid])?;

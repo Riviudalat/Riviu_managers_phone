@@ -224,6 +224,20 @@ impl DeviceRegistry {
         self.devices.read().display(Instant::now())
     }
 
+    /// When the mass disconnect that took `udid` down was recorded, while its kept row lasts
+    /// and the phone is not listed again. Never a reason to act on the phone.
+    pub fn mass_disconnect_since(&self, udid: &str) -> Option<Instant> {
+        let roster = self.devices.read();
+        if roster.live.iter().any(|device| device.udid == udid) {
+            return None;
+        }
+        roster
+            .kept
+            .iter()
+            .find(|kept| kept.row.udid == udid)
+            .map(|kept| kept.since)
+    }
+
     /// Mass disconnects since the last call, oldest first, each to be logged once.
     pub fn take_mass_disconnects(&self) -> Vec<MassDisconnect> {
         self.devices.write().pending.drain(..).collect()
