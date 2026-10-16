@@ -1804,6 +1804,30 @@ impl AppState {
                                 log::warn!("tự tiếp tục xác minh sau khi trả máy: {error:#}")
                             }
                         }
+                        // So does the 30-minute re-check of a parked posted row, after the
+                        // handoff stamps above so a handed-back park is already observable;
+                        // only the scoped campaigns are read.
+                        for id in acceptance.scoped_campaign_ids() {
+                            match db.recheck_parked_publish_verifications(&id, |campaign, udid| {
+                                acceptance.allows(
+                                    crate::dev_acceptance::AcceptanceCapability::PublishVerification,
+                                    campaign,
+                                    udid,
+                                )
+                            }) {
+                                Ok(campaigns) => {
+                                    for campaign_id in campaigns {
+                                        events.emit(riviu_core::events::AppEvent::PublishUpdated {
+                                            revision: db
+                                                .publish_campaign_revision(&campaign_id)
+                                                .unwrap_or_default(),
+                                            campaign_id,
+                                        });
+                                    }
+                                }
+                                Err(error) => log::warn!("tự kiểm tra lại bài đã gửi: {error:#}"),
+                            }
+                        }
                     }
                     let candidates = if acceptance.active() {
                         let campaign_ids = acceptance.scoped_campaign_ids();

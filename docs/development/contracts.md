@@ -434,10 +434,23 @@ campaign và serial. Nó kiểm lại khoảng 2 phút sau lượt trước; d�
 khi tìm bài (lượt TikTok còn xử lý bài theo dõi bằng hạn 60 phút riêng), và có ngân sách riêng 12 lần metadata chưa sẵn sàng của candidate đã ràng buộc.
 Lỗi công cụ `clipboardUnwritable`/`clipboardUnreadable` tính vào ngân sách riêng
 `infrastructureObservations` (trần 15, nguyên nhân `infrastructureRetryExhausted`), không
-tính vào 8 lượt không có tiến triển. Một dòng dừng do hết ngân sách, nếu lần cuối là
-`metadataUnavailable`, `clipboard*`, `readFailed` hay `staleSnapshot`, được tự mở lại
-mỗi 30 phút trong 24 giờ (`automaticRecheck`). Dòng có "bài khác", sai tài khoản, hai bài
-khớp hay metadata bị bác thì không bao giờ được tự mở lại. Truy vấn và cập nhật lượt
+tính vào 8 lượt không có tiến triển. Một dòng dừng do hết ngân sách tự động
+(`verificationNoProgress`, `metadataRetryBudgetExhausted`, `publicMetadataUnreachable`,
+`infrastructureRetryExhausted` hay `processingWaitExhausted`), nếu lần cuối là
+`metadataUnavailable`, `clipboardUnwritable`, `clipboardUnreadable`, `clipboardUnchanged`,
+`clipboardNotPostLink`, `readFailed`, `staleSnapshot`, `searchBudgetExhausted`,
+`ambiguityScanIncomplete`, `profileUnavailable`, `redirectFailed` hay `tiktokProcessing`, được
+tự mở lại mỗi 30 phút trong 24 giờ tính từ lần dừng đầu (`automaticRecheck`;
+`verificationBudget.recheckSince`, `recheckCount`). Mở lại chỉ đặt `verifying`; bộ đếm đã hết và
+hạn chờ xử lý đã hết (`processingWaitFrom`) giữ nguyên, nên lượt vẫn chưa chứng minh được dừng
+lại ngay. Lượt dừng lại với mã trong danh sách vẫn giữ lịch trong cùng 24 giờ đó. Mỗi lượt tự
+động sau lần mở lại đầu có bấm Sao chép liên kết cộng `verificationBudget.recheckCopyPasses`; tới
+8 thì dòng chờ người kiểm tra, vì TikTok có thể tính mỗi lần Copy là một lượt chia sẻ (trần chưa
+đo). Dòng có "bài khác", sai tài khoản, hai bài khớp hay metadata bị bác, và các mã
+`draftsObserved`, `composerOrUpload`, `timestampUnmeasured`, `paginationUnmeasured`,
+`copyBudgetExhausted`, mã mơ hồ, bài khác hay tài khoản, thì không bao giờ được tự mở lại.
+Expiry tắt dưới scope này, nhưng lần tự kiểm tra lại vẫn chạy cho đúng campaign và serial có
+`publishVerification` (`recheck_parked_publish_verifications`). Truy vấn và cập nhật lượt
 thiết bị giới hạn trong
 scope. Cleanup nền cần riêng `publishCleanup` và chỉ dọn bản chuyển đã có proof
 canonical qua kiểm revision/lease hiện có. Thiếu hoặc đổi scope thì không nhận
@@ -872,10 +885,16 @@ có versionCode tối thiểu 5 cho launcher; APK, manifest và NOTICE phải kh
   `expectedAccount`); nếu máy còn bài khác chưa giải quyết thì mọi pipeline liên quan phải đã
   xong, vì khi đó verifier của cả hai đi đường nợ chung của máy (`verification_restart::authorize`)
   và tiếp tục sớm chỉ làm chậm xác minh của lượt mới. Chỉ bài chưa có link, không có stop marker,
-  không needsReview, thuộc contract xác minh hiện hành (hoặc đã resume tường minh trước đó). CAS ghi
+  thuộc contract xác minh hiện hành (hoặc đã resume tường minh trước đó), và không needsReview, trừ
+  dòng dừng mà lần tự kiểm tra lại 30 phút còn giữ (`automaticRecheck` đủ điều kiện và còn ít nhất
+  một lần đến hạn trong cửa sổ 24 giờ). CAS ghi
   `verificationHandoffResume` (version 1, assignment, campaign, máy, `exclusionRequestId`, hash
-  intent, `resumedAt`, `statusBefore`), lý do "Tự tiếp tục xác minh bài đã gửi sau khi lượt mới
-  trả máy; không đăng lại" và `nextCheckAt` ngay; giữ state, intent, job, account reservation,
+  intent, `resumedAt`, `statusBefore`). Bài đang chờ nhận thêm lý do "Tự tiếp tục xác minh bài đã
+  gửi sau khi lượt mới trả máy; không đăng lại" và `nextCheckAt` ngay. Dòng dừng chỉ nhận dấu, lý
+  do "Giữ lịch tự kiểm tra lại bài đã gửi sau khi lượt mới trả máy; không đăng lại": needsReview,
+  cause, reasonCode, `checkedAt`, `automaticRecheckAt`, `recheckSince`, mọi bộ đếm và hạn giữ
+  nguyên, nên lần tự kiểm tra lại mở dòng theo nhịp 30 phút trong cửa sổ của lần dừng đầu; handoff
+  không bao giờ gia hạn cửa sổ đó. Cả hai giữ state, intent, job, account reservation,
   bộ đếm ngân sách và nghĩa vụ Sheet. Dấu chỉ gỡ đúng lần loại nó ghi; lần loại mới hơn lại chặn
   worker tới khi handoff mới trả máy. Stop sau đó vẫn thắng. Worker vẫn chờ máy rảnh và ngân sách
   điện thoại chung như mọi bài.
@@ -1148,11 +1167,16 @@ Không chạy dưới scope dev-acceptance; không mở phiên UI, không đóng
 Worker lưu `nextCheckAt` bằng thời điểm kết thúc quan sát cộng 120 giây cho bài
 còn ngân sách, kể cả lỗi đọc. Mỗi lần quan sát có deadline và lease riêng. Restart
 giữ mốc gửi, lần kiểm tiếp, fingerprint và số lượt không tiến triển; needsReview
-không được background tự mở lại. Bài bị handoff loại được worker tự tiếp tục khi handoff trả
-máy (xem "Thay thế đã xác nhận"); vì lúc bị loại bài không được quan sát, chỉ hạn chờ xử lý 60
-phút và cửa sổ 120 phút TikTok không trả lời tính lại từ lúc tiếp tục, các bộ đếm giữ nguyên.
-Nhật ký ghi "Tự tiếp tục xác minh bài đã gửi trên {máy} sau khi lượt mới trả máy (lượt …, loại
-…); không đăng lại". Nhật ký verifying chỉ nói kiểm thao tác Đăng đã có;
+chỉ được background tự mở lại qua lần tự kiểm tra lại 30 phút (`automaticRecheck`, xem phần
+nghiệm thu) hoặc khi là review hạn cũ đã bỏ. Bài bị handoff loại được worker tự tiếp tục khi
+handoff trả máy (xem "Thay thế đã xác nhận"); vì lúc bị loại bài không được quan sát, chỉ hạn chờ
+xử lý 60 phút và cửa sổ 120 phút TikTok không trả lời tính lại từ lúc tiếp tục, các bộ đếm giữ
+nguyên. Dòng đang dừng, hoặc đã vào lần tự kiểm tra lại (có `recheckSince`), không được tính lại
+hạn nào. Nhật ký ghi "Tự tiếp tục xác minh bài đã gửi trên {máy} sau khi lượt mới trả máy (lượt
+…, loại …); không đăng lại", với dòng dừng "Giữ lịch tự kiểm tra lại mỗi 30 phút của bài đã gửi
+trên {máy} sau khi lượt mới trả máy (lượt …, loại …); không đăng lại", và mỗi lần mở lại "Tự kiểm
+tra lại lần {n} bài đã gửi trên {máy} (lượt …, dừng vì {cause}/{reasonCode}); chỉ đọc, không đăng
+lại". Nhật ký verifying chỉ nói kiểm thao tác Đăng đã có;
 `checking_existing_post_link` ghi lần kiểmN, `link_pending` hiện lý do thiếu link,
 `link_needs_review` nói tự kiểm đã dừng. Không suy submitted/công khai từ thiếu link.
 Android ở trạng thái Connected sau restart vẫn được kiểm khi agent đã sẵn sàng;
@@ -1251,7 +1275,10 @@ vượt điều kiện khi trạng thái đã đổi.
 
 Resume giữ campaign cancelled, publication/effect intent, jobs và đích Sheet/epoch
 ban đầu. Cause `verificationNoProgress`, `processingWaitExhausted`, `metadataRetryBudgetExhausted` và `publicMetadataUnreachable` cho phép resume rõ ràng; các review
-khác không được nới. Transaction lưu status/budget/review-before-stop cũ trong
+khác không được nới. Các cause này, cùng `infrastructureRetryExhausted`, còn được tự kiểm tra
+lại mỗi 30 phút trong 24 giờ khi mã lần cuối nằm trong danh sách `automaticRecheck`, không cần
+thao tác; resume rõ ràng vẫn dùng được để chờ thêm ngay hoặc sau khi lần tự kiểm tra lại đã dừng.
+Transaction lưu status/budget/review-before-stop cũ trong
 `verificationBeforeResume` rồi mở budget mới; gọi lặp/ACK replay không reset.
 Worker hiện có dùng `nextCheckAt = checkedAt + 120 giây` khi còn ngân sách; 8 lượt
 không tiến triển liên tiếp ở bước tìm bài, 12 lượt metadata được trả lời mà chưa xác minh, hoặc 120 phút TikTok không trả lời kiểm tra công khai, lại needsReview.

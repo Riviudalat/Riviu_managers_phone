@@ -233,15 +233,23 @@ tra Android đầu tiên bắt đầu khi phiên đăng đã nhả máy; iOS gi�
 Bài đã gửi nhưng chưa có link, kể cả **đăng ngay**,
 được kiểm tra lại khoảng 2 phút sau lượt trước khi còn ngân sách. Với bước tìm bài trên điện thoại,
 sau **8 lần kiểm liên tiếp không có
-bằng chứng mới của đúng bài**, app chuyển **Cần kiểm tra**, bỏ lịch kiểm tiếp và
+bằng chứng mới của đúng bài**, app chuyển **Cần kiểm tra**, bỏ lịch kiểm 2 phút và
 hiển thị lý do; không coi là Đăng thất bại và không đăng lại. Lỗi đọc/kết nối
 cũng không được thử mãi.
+Nếu lý do dừng không nói gì xấu về bài (TikTok còn xử lý bài hoặc chưa trả lời, lượt tìm hết
+giờ vì máy chậm, Hồ sơ mở chậm, Sao chép liên kết chưa ra link, link rút gọn chưa mở được, hay
+lỗi đọc/clipboard), lý do ghi rõ **app tự kiểm tra lại mỗi 30 phút trong 24 giờ**: app chỉ đọc
+lại, không đăng lại, không cần thao tác. Trong 24 giờ đó app bấm Sao chép liên kết tối đa ở 8
+lượt, vì TikTok có thể tính mỗi lần là một lượt chia sẻ; hết 8 lượt thì bài chờ người kiểm tra.
+Lượt đăng mới mượn máy rồi trả máy không làm mất lịch này. Bản nháp, màn soạn bài, định dạng thời
+gian chưa nhận diện, sai tài khoản, bài khác hay hai bài cùng khớp vẫn chờ người kiểm tra.
 Lượt bấm Sao chép liên kết mà TikTok chưa trả link trong lúc bài còn đang xử lý
 (app đọc được “Post is being processed”, hoặc app chưa chứng minh được bài đã tải lên
 xong) **không tính** vào 8 lần đó. App vẫn kiểm lại mỗi khoảng 2 phút, tối đa
 **60 phút** tính từ lúc Đăng; ngày 13/10/2026 TikTok đã giữ một bài ảnh hơn 36 phút.
-Hết 60 phút mà TikTok vẫn chưa trả link thì bài chuyển **Cần kiểm tra**; chọn
-**Tiếp tục xác minh bài đã gửi** để chờ thêm, không đăng lại. Caption của bài khác, giờ kiểm mới và số
+Hết 60 phút mà TikTok vẫn chưa trả link thì bài chuyển **Cần kiểm tra** và app tự kiểm tra
+lại mỗi 30 phút như trên, không mở thêm 60 phút chờ; chọn **Tiếp tục xác minh bài đã gửi** nếu
+muốn chờ thêm ngay, không đăng lại. Caption của bài khác, giờ kiểm mới và số
 ảnh đọc tăng không tính là tiến triển. Chỉ caption đầy đủ đúng bài, rồi caption và
 thời gian cùng bài khớp lần đầu mới mở thêm ngân sách chờ; chưa thay xác minh link.
 Link ứng viên đã lưu đúng định danh có ngân sách riêng tối đa 12 lượt chờ dữ liệu
