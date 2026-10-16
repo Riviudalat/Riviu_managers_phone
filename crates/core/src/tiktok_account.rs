@@ -454,6 +454,12 @@ const DRAFT_BANNER_UNSEEN_SAYS: &str = "phần đầu trang Hồ sơ bị che gi
 const DRAFT_BANNER_NO_OCR_SAYS: &str = "phần đầu trang Hồ sơ bị che giống banner \"Continue editing this post?\" nhưng không đọc được chữ trên ảnh chụp màn hình (OCR) — Riviu không bấm gì và chưa Đăng; cần người vận hành bấm \"Save draft\" trên banner ở máy này (không bấm Edit)";
 /// One OCR answer over the banner frame; the account read has no deadline of its own.
 const DRAFT_BANNER_OCR_MS: u64 = 8_000;
+/// Where the banner's text starts. Phone 37 (SM-G955F, 1080x2220, 16/10/2026): the draft's
+/// thumbnail spans x 53-180 left of the title, and Tesseract read it into the title line
+/// ("�ee, Continue editing this post?"), so the exact title never matched and every attempt
+/// ended `draftBannerUnconfirmed` with the banner plainly up. From x 190 the same frame reads
+/// "Continue editing this post?" and "Save draft" (323,231) at 0.96.
+const DRAFT_BANNER_TEXT_LEFT: f64 = 190.0;
 /// After the Save-draft tap, before the proof reads again, like the dialog dismissal in
 /// [`restore_own_profile_header`]. The fresh reads and their generations still decide.
 const DRAFT_BANNER_SETTLE: std::time::Duration = std::time::Duration::from_millis(500);
@@ -482,8 +488,9 @@ async fn draft_banner_point(
     );
     let right = (banner.x + banner.width).min(1080.0);
     let bottom = (banner.y + banner.height).min(2220.0);
+    let left = (banner.x + DRAFT_BANNER_TEXT_LEFT).min(right);
     anyhow::ensure!(
-        right > banner.x && bottom > banner.y,
+        right > left && bottom > banner.y,
         "khung banner nháp nằm ngoài ảnh chụp"
     );
     let request = OcrRequest {
@@ -500,9 +507,9 @@ async fn draft_banner_point(
             height: 2220,
         },
         roi: Some(OcrRect {
-            x: banner.x as u32,
+            x: left as u32,
             y: banner.y as u32,
-            width: (right - banner.x) as u32,
+            width: (right - left) as u32,
             height: (bottom - banner.y) as u32,
         }),
         languages: vec!["en".into()],
