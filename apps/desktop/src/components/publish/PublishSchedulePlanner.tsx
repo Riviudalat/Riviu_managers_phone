@@ -4,7 +4,7 @@ import { publishScheduleCreate, publishSchedulePreflight } from "../../api";
 import { describeError } from "../../describeError";
 import { orderDevicesByNumber, machineNumberLabel, tileName } from "../../deviceNaming";
 import type { DeviceInfo, DeviceMeta, PublishBundle, PublishDeviceGuards, PublishScheduleReport, PublishScheduleRequest, PublishSoundPolicy } from "../../types";
-import { deviceGuardBlock, deviceGuardPending } from "./publishDeviceGuardState";
+import { deviceGuardPending, deviceGuardScheduleNote } from "./publishDeviceGuardState";
 import { PublishMedia } from "./PublishMedia";
 import { machineStatusLabel } from "../machineChoiceState";
 import { localDateTime, scheduleDateIssue } from "./publishScheduleTimes";
@@ -62,7 +62,8 @@ export function PublishSchedulePlanner(p: Props) {
   useEffect(() => { mounted.current = true; return () => { mounted.current = false; generation.current += 1; }; }, []);
   const ordered = useMemo(() => orderDevicesByNumber(p.devices, p.metas), [p.devices, p.metas]);
   const inScope = ordered.filter(d => !p.eligible || p.eligible.includes(d.udid));
-  const readyIds = inScope.filter(d => d.status === "ready" && !deviceGuardBlock(p.deviceGuards,d.udid)).map(d => d.udid);
+  // An earlier post owing its link does not take a phone out of a schedule (preflight notes it).
+  const readyIds = inScope.filter(d => d.status === "ready").map(d => d.udid);
   const label = (udid: string) => {
     const index = ordered.findIndex(d => d.udid === udid);
     return index >= 0 ? machineNumberLabel(p.metas.get(udid)?.number) : "Máy đã ngắt kết nối";
@@ -180,8 +181,6 @@ export function PublishSchedulePlanner(p: Props) {
   const rowIssue = (row: ScheduleRow) => {
     if (!p.bundles.some(b => b.id === row.bundleId)) return "Bài không còn trong nguồn";
     if (!row.udid) return "Chưa có máy";
-    const pending = deviceGuardBlock(p.deviceGuards,row.udid);
-    if (pending) return pending;
     if (!readyIds.includes(row.udid)) return "Máy chưa thể gán trong phạm vi";
     if (machineHasScheduleConflict(draft.rows, row.bundleId, row.udid, draft.commonTime)) return "Trùng máy và giờ";
     const time = scheduleTime(row, draft.commonTime);
@@ -224,7 +223,12 @@ export function PublishSchedulePlanner(p: Props) {
   const rowStatus = (row: ScheduleRow, index: number) => {
     const issue = rowIssue(row);
     if (issue === "Chọn ngày và giờ đăng") return "Chờ đặt giờ";
-    return issue || (reviewed ? reviewed.report.slots[index].canExecute ? "Sẵn sàng" : reviewed.report.slots[index].issues.map(i => i.message).join("; ") || "Cần kiểm tra lại" : "Chưa kiểm tra");
+    if (issue) return issue;
+    if (!reviewed) return "Chưa kiểm tra";
+    const slot = reviewed.report.slots[index];
+    if (!slot.canExecute) return slot.issues.map(i => i.message).join("; ") || "Cần kiểm tra lại";
+    const prior = slot.assignments.flatMap(a => a.checks ?? []).find(c => c.id === "pending" && c.status === "unknown")?.reason;
+    return prior ? `Sẵn sàng · ${prior}` : "Sẵn sàng";
   };
   const filteredMachines = inScope.filter(d => `${label(d.udid)} ${tileName(d, p.metas.get(d.udid))}`.toLocaleLowerCase().includes(machineQuery.toLocaleLowerCase()));
   type NextStep = { text: string; action: string; target?: NonNullable<typeof focusTarget>; sheet?: boolean; source?: boolean; assign?: boolean };
@@ -294,10 +298,10 @@ export function PublishSchedulePlanner(p: Props) {
             const assigned = draft.rows.filter(r => r.udid === d.udid);
             const willReceive = preview?.assigned.filter(a => a.udid === d.udid) ?? [];
             return <div key={d.udid} data-schedule-device={d.udid} className={`ps-machine ${draft.selectedMachines.includes(d.udid) ? "is-picked" : ""} ${willReceive.length ? "is-drop-target" : ""} ${assigned.some(r => r.bundleId === activePost) ? "is-linked" : ""} ${d.status !== "ready" ? "is-unavailable" : ""}`}>
-              <label><input type="checkbox" checked={draft.selectedMachines.includes(d.udid)} disabled={locked || d.status !== "ready" || (!draft.selectedMachines.includes(d.udid) && !!deviceGuardBlock(p.deviceGuards,d.udid))} aria-label={`Chọn máy hẹn giờ ${label(d.udid)}`} onChange={e => edit(current => ({ ...current, selectedMachines: e.target.checked ? [...new Set([...current.selectedMachines, d.udid])] : current.selectedMachines.filter(id => id !== d.udid) }))}/><strong>{label(d.udid)}</strong><span>{d.status === "ready" ? assigned.length ? `${assigned.length} bài` : "Trống" : machineStatusLabel(d.status, d.platform, d.wdaReady)}</span></label>
+              <label><input type="checkbox" checked={draft.selectedMachines.includes(d.udid)} disabled={locked || d.status !== "ready"} aria-label={`Chọn máy hẹn giờ ${label(d.udid)}`} onChange={e => edit(current => ({ ...current, selectedMachines: e.target.checked ? [...new Set([...current.selectedMachines, d.udid])] : current.selectedMachines.filter(id => id !== d.udid) }))}/><strong>{label(d.udid)}</strong><span>{d.status === "ready" ? assigned.length ? `${assigned.length} bài` : "Trống" : machineStatusLabel(d.status, d.platform, d.wdaReady)}</span></label>
               {assigned.length ? <p className="ps-machine-post" title={assigned.map(r => name(r.bundleId)).join(", ")}>{assigned.map(r => name(r.bundleId)).join(", ")}</p> : <p className="ps-machine-empty">{d.status === "ready" ? "Thả để gán bài" : "Không nhận bài"}</p>}
               {d.status !== "ready" && d.lastError && <p className="ps-machine-reason">{d.lastError}</p>}
-              {(deviceGuardBlock(p.deviceGuards,d.udid) || deviceGuardPending(p.deviceGuards?.[d.udid])) && <div className="publish-device-pending" role="status"><strong>{deviceGuardBlock(p.deviceGuards,d.udid) ?? "Bài cũ còn cần kiểm tra link"}</strong><span>{deviceGuardPending(p.deviceGuards?.[d.udid])?.reason}</span>{p.onPendingPublication && deviceGuardPending(p.deviceGuards?.[d.udid]) && <button type="button" onClick={()=>p.onPendingPublication?.(deviceGuardPending(p.deviceGuards?.[d.udid])!.campaignId)}>Xem bài đang chờ</button>}</div>}
+              {deviceGuardPending(p.deviceGuards?.[d.udid]) && <div className="publish-device-pending" role="status"><strong>{deviceGuardScheduleNote(p.deviceGuards,d.udid)?.title ?? "Bài cũ còn cần kiểm tra link"}</strong>{deviceGuardScheduleNote(p.deviceGuards,d.udid) && <span>{deviceGuardScheduleNote(p.deviceGuards,d.udid)?.detail}</span>}<span>{deviceGuardPending(p.deviceGuards?.[d.udid])?.reason}</span>{p.onPendingPublication && deviceGuardPending(p.deviceGuards?.[d.udid]) && <button type="button" onClick={()=>p.onPendingPublication?.(deviceGuardPending(p.deviceGuards?.[d.udid])!.campaignId)}>Xem bài đang chờ</button>}</div>}
               {willReceive.length > 0 && <p className="ps-drop-preview">Nhận {willReceive.map(a => name(a.bundleId)).join(", ")}</p>}
             </div>;
           })}{!inScope.length ? <p className="ps-empty">Chọn phạm vi máy trong Thiết lập để phân công.</p> : !filteredMachines.length && <div className="ps-empty ps-empty-machines"><p>Không có máy khớp từ khóa.</p><button type="button" onClick={() => { setMachineQuery(""); drag.root.current?.querySelector<HTMLInputElement>('[aria-label="Tìm máy hẹn giờ"]')?.focus(); }}>Xóa tìm kiếm</button></div>}</div>

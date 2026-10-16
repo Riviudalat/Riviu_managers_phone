@@ -19,7 +19,11 @@ const accountGuidance: Record<string, string> = {
  account_draft_banner_persisted: "Banner \"Continue editing this post?\" vẫn còn trên Hồ sơ sau một lần bấm Save draft. Bấm Save draft trên máy (không bấm Edit) rồi thử lại; chưa bấm Đăng.",
  account_draft_banner_unconfirmed: "Đầu trang Hồ sơ bị che nhưng chưa xác nhận được banner nháp. Xem máy, nếu có banner thì bấm Save draft (không bấm Edit) rồi thử lại; chưa bấm Đăng.",
  publish_device_not_released: "Lúc bắt đầu chưa nhả được máy này nên chưa gửi gì lên máy; các máy khác vẫn đăng. Khi máy rảnh, bấm Thử lại.",
+ prior_post_unsettled: "Bài trước trên máy này chưa được chứng minh đã lên TikTok trong thời gian chờ; app không đóng TikTok để không làm mất bài đó. Khi bài cũ có link, bấm Thử lại.",
+ prior_post_needs_review: "Bài trước trên máy này cần bạn kiểm tra; app không tự xử lý bài đó. Xử lý bài cũ trong Theo dõi (Kiểm tra liên kết hoặc Tiếp tục kiểm tra link) rồi bấm Thử lại.",
 };
+// The backend's prior-post wait (`PRIOR_POST_WAIT_MINUTES`); a cap, not a target.
+const PRIOR_POST_WAIT_MS = 30 * 60_000;
 function object(value: unknown): Record<string, unknown> {
  return value !== null && typeof value === "object" && !Array.isArray(value) ? value as Record<string, unknown> : {};
 }
@@ -109,8 +113,8 @@ export function PublishDeviceRecovery({campaignId,udid}:{campaignId:string;udid:
    const failureCode=object(evidence.recoveryFailure).code;
    const accountCode = c?.recovery?.lastErrorCode ?? (typeof failureCode === "string" ? failureCode : null) ?? a.errorCode;
    const guidance = accountCode ? accountGuidance[accountCode] : undefined;
-   const r=c?.recovery;const waiting=r&&["retryWaiting","waitingDevice"].includes(r.state)&&!a.effectIntent;
-   const text=r?.state==="waitingDevice"?`Mất kết nối · chờ máy, còn ${Math.max(0,Math.ceil(((r.reconnectDeadline??0)-now)/1000))} giây`:r?.state==="retryWaiting"?`Thử lại ${r.retriesUsed}/${r.maxRetries} · ${stepLabel[r.step]??r.step}`:r?.state==="exhausted"?`Đã hết lượt tự thử · ${stepLabel[r.step]??r.step}`:null;
+   const r=c?.recovery;const waiting=r&&["retryWaiting","waitingDevice","priorPostWaiting"].includes(r.state)&&!a.effectIntent;
+   const text=r?.state==="waitingDevice"?`Mất kết nối · chờ máy, còn ${Math.max(0,Math.ceil(((r.reconnectDeadline??0)-now)/1000))} giây`:r?.state==="priorPostWaiting"?`Chờ bài trước trên máy · còn ${Math.max(0,Math.ceil(((r.priorPostWaitSince??now)+PRIOR_POST_WAIT_MS-now)/60000))} phút`:r?.state==="retryWaiting"?`Thử lại ${r.retriesUsed}/${r.maxRetries} · ${stepLabel[r.step]??r.step}`:r?.state==="exhausted"?`Đã hết lượt tự thử · ${stepLabel[r.step]??r.step}`:null;
    const events=log.value?.entries.filter(event=>event.at&&Number.isFinite(Date.parse(event.at)))??[];
    const latest=events.at(-1);
    const step=events.filter(event=>event.action==="publishStep").at(-1);
@@ -142,8 +146,9 @@ export function PublishDeviceRecovery({campaignId,udid}:{campaignId:string;udid:
     {c&&!["succeeded","cancelled","missed"].includes(a.state)&&<button type="button" disabled={busy||!!exclusion} title="Chỉ dừng máy này trong lượt đăng; giữ nguyên bài đã gửi và nghĩa vụ xác minh" onClick={()=>void exclude(c)}>Loại khỏi lượt này</button>}
 
     {!outcome.verified&&text&&<small role="status">{text}</small>}
+    {!outcome.verified&&r?.state==="priorPostWaiting"&&r.lastError&&<small>{r.lastError}</small>}
     {!outcome.verified&&guidance&&<small role="status">{guidance}</small>}
-    {!outcome.verified&&!guidance&&r?.lastError&&["failed","exhausted","interrupted"].includes(r.state)&&<small>{describeError(r.lastError)}</small>}
+    {!outcome.verified&&(!guidance||accountCode?.startsWith("prior_post_"))&&r?.lastError&&["failed","exhausted","interrupted"].includes(r.state)&&<small>{describeError(r.lastError)}</small>}
     {!c&&<small>Chưa đọc được quyền thao tác cho máy này.</small>}
     {c&&!a.effectIntent&&(a.state==="failedBeforeDispatch"||waiting)&&<><button type="button" disabled={busy||!!exclusion||!!waiting||!online||!c.retryBeforePost.allowed} title={!online?"Máy chưa kết nối":c.retryBeforePost.allowed?"Chạy thêm đúng một lần; giữ nguyên bài và máy":c.retryBeforePost.reason??"Đang phục hồi"} onClick={()=>void act(c,"retry")}>Thử lại</button>{!online&&<small>Máy chưa kết nối</small>}</>}
     {a.effectIntent&&c?.resumeVerification.allowed&&<button type="button" disabled={busy} onClick={()=>void act(c,"resume")}>Tiếp tục kiểm tra link</button>}

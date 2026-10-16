@@ -39,15 +39,18 @@ describe("schedule assignment workspace", () => {
     expect(screen.getByLabelText("Máy nhận Bài 1")).toHaveFocus();
     expect(publishSchedulePreflight).not.toHaveBeenCalled();
   });
-  it("keeps pending publication warnings visible and skips blocked devices before preflight", async () => {
+  it("keeps pending publication warnings visible and still schedules devices whose earlier post owes its link", async () => {
     const blocked = { assignmentId: "old", campaignId: "prior-campaign", updatedAt: "now", reason: "TikTok đang xử lý bài trước" };
     const open = vi.fn();
     render(<PublishSchedulePlanner {...props} deviceGuards={{ "phone-1": { blocking: [blocked], linkReview: [] }, "phone-2": { blocking: [], linkReview: [] }, "phone-3": { blocking: [], linkReview: [blocked] } }} onPendingPublication={open} />);
     await userEvent.click(screen.getByRole("button", { name: "Chọn nhanh" }));
-    expect(screen.getByLabelText("Máy nhận Bài 1")).toHaveValue("phone-2");
-    expect(screen.getByLabelText("Máy nhận Bài 2")).toHaveValue("phone-3");
-    expect(screen.queryByLabelText("Máy nhận Bài 3")).toBeNull();
-    expect(screen.getByText("Máy còn bài chưa lấy được link")).toBeVisible();
+    // The scheduled job releases or waits for the earlier post at its own turn; preflight notes it.
+    expect(screen.getByLabelText("Máy nhận Bài 1")).toHaveValue("phone-1");
+    expect(screen.getByLabelText("Máy nhận Bài 2")).toHaveValue("phone-2");
+    expect(screen.getByLabelText("Máy nhận Bài 3")).toHaveValue("phone-3");
+    expect(screen.getByText("Máy còn bài chờ link")).toBeVisible();
+    expect(screen.getByText("Vẫn hẹn giờ được; tới giờ app tự xử lý, xem Kết quả kiểm tra")).toBeVisible();
+    expect(screen.getByRole("checkbox", { name: "Chọn máy hẹn giờ Máy 1" })).toBeEnabled();
     fireEvent.click(screen.getAllByRole("button", { name: "Xem bài đang chờ" })[0]);
     expect(open).toHaveBeenCalledExactlyOnceWith("prior-campaign");
     expect(publishSchedulePreflight).not.toHaveBeenCalled();

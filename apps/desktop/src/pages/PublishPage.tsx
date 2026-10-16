@@ -291,6 +291,12 @@ function canRetryAssignment(assignment: PublishAssignmentRecord, campaign: Publi
     && !["queued", "running"].includes(assignment.dispatch?.state ?? "");
 }
 
+// The backend's prior-post wait (`PRIOR_POST_WAIT_MINUTES`); a cap, not a target.
+const PRIOR_POST_WAIT_MS = 30 * 60_000;
+function priorPostMinutesLeft(since: number | null | undefined): number {
+  return since == null ? 30 : Math.max(0, Math.ceil((since + PRIOR_POST_WAIT_MS - Date.now()) / 60_000));
+}
+
 function dispatchDetail(assignment: PublishAssignmentRecord): string | null {
   const dispatch = assignment.dispatch;
   const reason = dispatch?.reason ?? assignment.errorCode;
@@ -300,6 +306,7 @@ function dispatchDetail(assignment: PublishAssignmentRecord): string | null {
     stage_capacity: "Chờ lượt: đã đủ 10 máy làm việc với adb cùng lúc (chuyển media, soạn, kiểm tra); chưa thao tác trên máy",
     roster_pending: "Chờ quét lại danh sách máy để biết máy còn kết nối; chưa thao tác trên máy",
     box_disconnected: "Cả box mất kết nối USB; chờ cắm lại (tối đa 60 phút), máy về là tự chạy tiếp; chưa thao tác trên máy",
+    prior_post_pending: "Chờ bài trước trên máy này lên TikTok hoặc có link; chưa thao tác trên máy",
     schedule_capacity_deadline: "Chưa được cấp lượt trong cửa sổ 30 giây; không tự đăng bù",
     app_opened_after_deadline: "Ứng dụng mở sau giờ hẹn; không tự đăng bù",
     app_closing: "Ứng dụng đang đóng",
@@ -1922,6 +1929,7 @@ function CampaignDetail({
                   return <span>
                     {capability?.recovery?.state==="waitingDevice"&&<p>Mất kết nối · chờ đúng máy kết nối lại, còn {Math.max(0,Math.ceil(((capability.recovery.reconnectDeadline??0)-Date.now())/1000))} giây</p>}
                     {capability?.recovery?.state==="retryWaiting"&&<p>Thử lại {capability.recovery.retriesUsed}/{capability.recovery.maxRetries} · {capability.recovery.step}</p>}
+                    {capability?.recovery?.state==="priorPostWaiting"&&<p>Chờ bài trước trên máy · còn {priorPostMinutesLeft(capability.recovery.priorPostWaitSince)} phút</p>}
                     {outcome.post === "notSent" || outcome.post === "sending"
                       ? <>{isComposing(assignment) ? "Đang chuẩn bị bài trên TikTok" : PUBLISH_STATE_LABELS[assignment.state] ?? "Trạng thái chưa nhận diện"}{dispatchDetail(assignment) && <p>{dispatchDetail(assignment)}</p>}</>
                       : <>
