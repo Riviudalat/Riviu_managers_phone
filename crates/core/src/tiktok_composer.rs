@@ -150,10 +150,22 @@ pub const POLL: Duration = Duration::from_millis(350);
 /// Phase maxima sum to 9.2 s and 9.7 s; 43 of the 48 failures expired in the last one
 /// or two phases. Re-measure from those log lines (now with `window_ms`) before moving it.
 const FINAL_REPROOF_FLOOR: Duration = Duration::from_secs(12);
-/// Ceiling of the same deadline. A slow session may lengthen the window, never past this:
-/// the proof must stay fresh at the Post gesture, and a stuck accessibility root (~10 s per
-/// read) still ends in the ordinary pre-Post retry.
+/// Ceiling of the preparation-sized base of the same deadline. A slow preparation lengthens the
+/// base only up to this; the phone's measured tree reads may then widen the window, at most to
+/// [`crate::read_latency::ceiling`] of that base ([`FINAL_REPROOF_READS`]). A stuck
+/// accessibility root (~10 s per read) still ends in the ordinary pre-Post retry.
 const FINAL_REPROOF_CEILING: Duration = Duration::from_secs(16);
+/// Tree reads the final reproof expects, to size its deadline by the phone's measured reads
+/// (`read_window("finalReproof", …)`): the fresh sound readback's popup profile, popup check and
+/// chip (3), the editor's Next lookup, the settle read after Next and the caption page's arrival
+/// (3), and the final caption and Post readback (2).
+///
+/// r130-r133 (15-16/10/2026, box 21-50, SM-G955F/N, Global 45.7.3/en): the window sat on the
+/// 12 s floor in 90 of 125 logged reproofs (max 15.1 s), whatever the phone's reads. The 7 that
+/// ran out (`returnToCaption` 5, `freshSoundReadback` 2) took p50 14.9 s /
+/// max 21.0 s; the ones that passed p50 7.7 s / max 13.8 s. Eight reads at a 2.4 s q90 plus the
+/// settle margin reach 21 s, and a phone reading at idle speed keeps the measured floor.
+const FINAL_REPROOF_READS: u32 = 8;
 const _: () = assert!(
     FINAL_REPROOF_FLOOR.as_millis() <= FINAL_REPROOF_CEILING.as_millis(),
     "Duration::clamp panics when its floor is above its ceiling"
@@ -3236,9 +3248,13 @@ impl<'a, P: TapPlanner> Composer<'a, P> {
         // The fresh proof below and everything after Post are never graced.
         crate::ui_automation::runtime::close_read_grace();
         // One finite deadline for every read and navigation below, set once from this
-        // session's measured preparation and never extended. Expiry stays a retryable
-        // pre-Post error: no effect intent exists yet and Post is never tapped.
-        let reproof_window = final_reproof_window(preparation_started.elapsed());
+        // session's measured preparation and tree reads and never extended. Expiry stays a
+        // retryable pre-Post error: no effect intent exists yet and Post is never tapped.
+        let reproof_window = read_window(
+            "finalReproof",
+            final_reproof_window(preparation_started.elapsed()),
+            FINAL_REPROOF_READS,
+        );
         let reproof_deadline = self
             .pending_sound_proof
             .as_ref()
@@ -3634,7 +3650,19 @@ impl<'a, P: TapPlanner> Composer<'a, P> {
         let epoch = self.session.gui_session_epoch();
         let started = Instant::now();
         let mut phase = "captionBeforeBack";
-        let editor_transition_window = read_window("editorTransition", Duration::from_secs(8), 3);
+        // Tree reads the transition expects: the caption check and the Back lookup before the
+        // tap, then the popup profile, the popup check and the editor/caption snapshot.
+        // r130-r133 (15-16/10/2026, box 21-50, SM-G955F/N, Global 45.7.3/en): counted as 3,
+        // the 8 s base never widened on phones whose q90 was at most 2 s, and 9 transitions ran
+        // out at 8.0-8.8 s (`inspectEditor` 5, `locateCaptionBack` 3, `tapCaptionBack` 1) on
+        // one 3.0-5.6 s `/source`, a 2.5-4.4 s `observe` or an `/elements` of up to 6.8 s plus
+        // 0.7-5.1 s of untraced shell reads.
+        const EDITOR_TRANSITION_READS: u32 = 5;
+        let editor_transition_window = read_window(
+            "editorTransition",
+            Duration::from_secs(8),
+            EDITOR_TRANSITION_READS,
+        );
         let result =
             crate::tiktok_sound::with_observation_budget(stop, editor_transition_window, async {
                 let back_query = sound_plan

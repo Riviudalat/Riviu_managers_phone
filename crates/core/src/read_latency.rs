@@ -20,11 +20,14 @@
 //! still in flight when it closes may be finished by the read grace
 //! ([`crate::ui_automation::runtime::READ_GRACE`]).
 //!
-//! **What it never does.** It is for reads that wait for a screen. It never sizes the fresh
-//! proof before Post (`final_reproof_window`), a gesture or an effect, and it never turns an
-//! unread screen into a tap: an expired window still ends with the same error code. After
-//! Post it sizes only the wait for the feed (`postConfirm`), which observes and never
-//! repeats Post: an expired wait is still `PostNotConfirmed`.
+//! **What it never does.** It is for reads that wait for a screen. It never sizes a gesture or
+//! an effect, and it never turns an unread screen into a tap: an expired window still ends with
+//! the same error code. Before Post it sizes the final sound reproof's one deadline
+//! (`finalReproof`, from the preparation-sized `final_reproof_window`) only as a bound on its
+//! reads: the chip, the caption page and the Post button are still each read afresh inside it,
+//! and an expired reproof is still the same retryable pre-Post error. After Post it sizes only
+//! the wait for the feed (`postConfirm`), which observes and never repeats Post: an expired
+//! wait is still `PostNotConfirmed`.
 //!
 //! **Bounded by construction.** At most [`MAX_SERIALS`] phones, [`SAMPLES_PER_SERIAL`] reads
 //! each, and reads older than [`SAMPLE_MAX_AGE`] are ignored, so a phone that was slow an
