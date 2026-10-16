@@ -2389,7 +2389,7 @@ fn the_post_fan_out_runs_only_the_unposted_participants() {
 fn the_publish_session_targets_the_device_own_tiktok_build() {
     let wrapper = code_of("pub(crate) async fn open_publish_context(");
     assert!(wrapper.iter().any(
-        |line| line.contains("open_publish_context_until(control, udid, || false, || Ok(()))")
+        |line| line.contains("open_publish_context_until(control, udid, || false, || Ok(()), None)")
     ));
     let body = code_of("async fn open_publish_context_until(");
     // Review R2-F2: the compose effect is admitted after the lease and the UI-capacity wait,
