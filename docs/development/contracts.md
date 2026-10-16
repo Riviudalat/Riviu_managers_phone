@@ -121,9 +121,15 @@ khởi động lại (mọi nguồn đều lỗi vận chuyển) tiêu một l�
 300 giây (`phase_deadline`) cho các attempt/backoff, mỗi pha bên trong tối đa 180 giây
 (`SOUND_WINDOW`); hết tổng budget không tự requeue để cấp lại cửa sổ mới.
 Lần đọc lại nhạc, caption và nút Đăng ngay trước Post dùng một deadline hữu hạn, đặt
-một lần: 1,5 lần thời gian chuẩn bị đo được của cùng phiên, tối thiểu 12 giây, tối đa
-16 giây. Thiếu dữ liệu, mơ hồ hoặc hết hạn vẫn là lỗi thử lại trước Post: chưa có intent
-và không bấm Đăng.
+một lần: 1,5 lần thời gian chuẩn bị đo được của cùng phiên, tối thiểu 20 giây, tối đa
+24 giây (12–16 giây tới gf93), rồi nới theo độ trễ đọc đo được của máy (8 lần đọc,
+`read_latency::window`) nhưng không quá trần cứng 64 giây. Lý do đo: r136/r137/r139
+(box 21–50, SM-G955F/N, Global 45.7.3) mất 16 lượt đầu ở sàn 12 giây vì một lệnh agent
+treo 5–16 giây hoặc một chuỗi lệnh 2–5 giây, trong khi lượt qua mất p90 8,6–9,0 giây.
+Hồ sơ popup (phiên bản TikTok, ngôn ngữ giao diện) mà bước chuyển về màn chỉnh sửa vừa đọc
+trên cùng epoch phiên và cùng package được dùng lại thay vì đọc lại; chip nhạc, caption và
+nút Đăng vẫn đọc mới trong deadline này. Thiếu dữ liệu, mơ hồ hoặc hết hạn vẫn là lỗi thử
+lại trước Post: chưa có intent và không bấm Đăng.
 
 Mỗi lần chờ trên đường tới màn camera (nút Create, màn camera sau khi bấm, nút chụp, lối
 vào thư viện và lần đọc lại để lối vào đứng yên) có cửa sổ 16 giây, vừa hai lần đọc p99 đo
@@ -139,10 +145,19 @@ một lần khi bắt đầu bằng `read_latency::window`:
 lần đọc cây hoàn tất (`GET /source` và lệnh tìm `POST /element`/`/elements`) của chính máy đó
 (serial) trong 10 phút gần nhất, cần ít nhất 5 lần;
 thiếu số đo thì giữ nền. Không gia hạn sau mỗi lần poll, và mọi cửa sổ vẫn bị chặn bởi ngân
-sách chung của giai đoạn (`phase_deadline`), nên không vượt ngân sách nhạc/compose. Cửa sổ
-không áp cho bằng chứng tươi trước Post (deadline đọc lại cuối 12–16 giây ở trên vẫn là trần
-của mọi lần đọc bên trong), cho bước bấm/effect hay cho chờ về feed sau Post. Hết cửa sổ vẫn
+sách chung của giai đoạn (`phase_deadline`), nên không vượt ngân sách nhạc/compose. Bằng
+chứng tươi trước Post chỉ có deadline đọc lại cuối ở trên (trần của mọi lần đọc bên trong);
+cửa sổ không áp cho bước bấm/effect hay cho chờ về feed sau Post. Hết cửa sổ vẫn
 trả cùng mã lỗi như trước; nới cửa sổ không bao giờ biến màn chưa đọc thành quyền bấm.
+Ngân sách bao cả một chặng nhiều bước sau khi chốt nhạc (điều hướng sang màn caption, nhập
+và gõ caption, chuẩn bị bàn phím, quay về màn chỉnh sửa nhạc) là cửa sổ trên cộng
+`read_latency::STALL_ROOM` = 20 giây (bằng `READ_GRACE`) cho một lệnh agent treo, đặt một lần
+khi chặng bắt đầu: r136/r137/r139 (box 21–50, SM-G955F/N, Global 45.7.3) mất 32 lượt đầu
+`sound_load_timeout` ở các ngân sách này vì một hai lệnh `/source`, `/elements` hoặc
+`/actions` treo 5–17 giây (p50 0,2–0,9 giây). q90 của 32 lần đọc không thấy một lần treo,
+và ngân sách không được ân hạn nên ngân sách sát cửa sổ bước cắt luôn ân hạn của lần đọc
+đang chạy. Mỗi bước bên trong vẫn giữ cửa sổ riêng; ngân sách rộng hơn không cấp quyền bấm:
+mọi lần bấm vẫn cần một lần đọc mới tìm thấy đúng mục tiêu.
 
 Ân hạn đọc (`READ_GRACE` = 20 giây, `ui_automation/runtime.rs`; 15 giây tới r131): trên đường Đăng thật, khi cửa
 sổ của một bước quan sát trước Post hết mà đúng một lần đọc còn đang chạy, bộ bọc đọc

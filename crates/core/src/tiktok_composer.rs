@@ -149,12 +149,24 @@ pub const POLL: Duration = Duration::from_millis(350);
 ///
 /// Phase maxima sum to 9.2 s and 9.7 s; 43 of the 48 failures expired in the last one
 /// or two phases. Re-measure from those log lines (now with `window_ms`) before moving it.
-const FINAL_REPROOF_FLOOR: Duration = Duration::from_secs(12);
+///
+/// r136/r137/r139 (16-17/10/2026, box 21-50, SM-G955F/N, Global 45.7.3/en): the 12 s floor
+/// lost 16 first attempts at 12.0-16.5 s (`freshSoundReadback` 8, `returnToCaption` 5,
+/// `finalCaptionAndPost` 3), on one agent call stalled 5-16 s (a popup `/source`, the return
+/// leg's Next tap) or a run of 2-5 s calls, and the repeated popup-profile read took 1.1-12.7 s
+/// of each. Passing reproofs took p50 7.0-7.4 s, p90 8.6-9.0 s, max 11.0 s, with the agent's
+/// single calls at p99 7.4-10.6 s: 20 s is that p90 plus one such call. The profile is no
+/// longer read twice ([`crate::tiktok_sound::reuse_popup_profile`]).
+const FINAL_REPROOF_FLOOR: Duration = Duration::from_secs(20);
 /// Ceiling of the preparation-sized base of the same deadline. A slow preparation lengthens the
 /// base only up to this; the phone's measured tree reads may then widen the window, at most to
-/// [`crate::read_latency::ceiling`] of that base ([`FINAL_REPROOF_READS`]). A stuck
-/// accessibility root (~10 s per read) still ends in the ordinary pre-Post retry.
-const FINAL_REPROOF_CEILING: Duration = Duration::from_secs(16);
+/// [`crate::read_latency::ceiling`] of that base ([`FINAL_REPROOF_READS`]) and never past
+/// [`FINAL_REPROOF_MAX`]. A stuck accessibility root (~10 s per read) still ends in the ordinary
+/// pre-Post retry. Moved with the floor (16 s until gf94), keeping its 4 s of preparation scaling.
+const FINAL_REPROOF_CEILING: Duration = Duration::from_secs(24);
+/// Hard ceiling of the read-sized final reproof window: the largest one gf93 already allowed
+/// (four times the former 16 s ceiling), kept when the floor and ceiling moved.
+const FINAL_REPROOF_MAX: Duration = Duration::from_secs(64);
 /// Tree reads the final reproof expects, to size its deadline by the phone's measured reads
 /// (`read_window("finalReproof", …)`): the fresh sound readback's popup profile, popup check and
 /// chip (3), the editor's Next lookup, the settle read after Next and the caption page's arrival
@@ -3010,9 +3022,12 @@ impl<'a, P: TapPlanner> Composer<'a, P> {
                 .publish
                 .is_some_and(|tail| matches!(tail.caption, ElementQuery::ResourceIdSuffix(_)))
         {
+            // The field tap and `type_text` drain inside this budget: r136 (box 21-50) stalled a
+            // 14.9 s focus tap here, so the stage keeps one stall's room. Before Post it is still
+            // capped by the caption stage's or the final reproof's own deadline.
             return crate::tiktok_sound::with_observation_budget(
                 stop,
-                read_window("captionTyping", COMPOSER_WINDOW, 4),
+                crate::read_latency::stage_budget("captionTyping", COMPOSER_WINDOW, 4),
                 Box::pin(self.type_caption_inner(caption, stop)),
             )
             .await;
@@ -3215,6 +3230,7 @@ impl<'a, P: TapPlanner> Composer<'a, P> {
         };
         let prepared_epoch = self.session.gui_session_epoch();
         let preparation_started = Instant::now();
+        let mut popup_profile = None;
         if let Some((sound_plan, expected_title)) = self
             .pending_sound_proof
             .clone()
@@ -3238,7 +3254,7 @@ impl<'a, P: TapPlanner> Composer<'a, P> {
             if stop.load(Ordering::Relaxed) {
                 return Ok(ComposerVerdict::Stopped);
             }
-            prepared?;
+            popup_profile = prepared?;
         }
         observation::ensure_epoch(
             self.session,
@@ -3254,7 +3270,8 @@ impl<'a, P: TapPlanner> Composer<'a, P> {
             "finalReproof",
             final_reproof_window(preparation_started.elapsed()),
             FINAL_REPROOF_READS,
-        );
+        )
+        .min(FINAL_REPROOF_MAX);
         let reproof_deadline = self
             .pending_sound_proof
             .as_ref()
@@ -3277,7 +3294,17 @@ impl<'a, P: TapPlanner> Composer<'a, P> {
                 async {
                     // Preparation never authorizes Post. Re-read the exact selected sound
                     // under this fresh deadline, including when preparation just confirmed it.
+                    // Only its popup profile (TikTok version and UI language) is the one the
+                    // editor transition read on this same session.
                     mark("freshSoundReadback");
+                    if let Some(profile) = &popup_profile {
+                        crate::tiktok_sound::reuse_popup_profile(
+                            self.session,
+                            profile,
+                            sound_plan.package(),
+                        )
+                        .await;
+                    }
                     Box::pin(confirm_sound(self.session, sound_plan, &expected_title)).await?;
                     if sound_plan.post_back_query().is_some() {
                         mark("returnToCaption");
@@ -3646,7 +3673,7 @@ impl<'a, P: TapPlanner> Composer<'a, P> {
         expected_title: &str,
         caption: &str,
         stop: &AtomicBool,
-    ) -> anyhow::Result<()> {
+    ) -> anyhow::Result<Option<crate::tiktok_sound::PopupProfile>> {
         let epoch = self.session.gui_session_epoch();
         let started = Instant::now();
         let mut phase = "captionBeforeBack";
@@ -3656,9 +3683,11 @@ impl<'a, P: TapPlanner> Composer<'a, P> {
         // the 8 s base never widened on phones whose q90 was at most 2 s, and 9 transitions ran
         // out at 8.0-8.8 s (`inspectEditor` 5, `locateCaptionBack` 3, `tapCaptionBack` 1) on
         // one 3.0-5.6 s `/source`, a 2.5-4.4 s `observe` or an `/elements` of up to 6.8 s plus
-        // 0.7-5.1 s of untraced shell reads.
+        // 0.7-5.1 s of untraced shell reads. r136/r139 (box 21-50): 5 more ran out on one
+        // stalled call (`inspectEditor` 4, `tapCaptionBack` 1), so the stage keeps one stall's
+        // room ([`crate::read_latency::stage_budget`]).
         const EDITOR_TRANSITION_READS: u32 = 5;
-        let editor_transition_window = read_window(
+        let editor_transition_window = crate::read_latency::stage_budget(
             "editorTransition",
             Duration::from_secs(8),
             EDITOR_TRANSITION_READS,
@@ -3792,7 +3821,7 @@ impl<'a, P: TapPlanner> Composer<'a, P> {
                     "sound preparation session changed"
                 );
                 phase = "editorConfirmed";
-                Ok(())
+                Ok(crate::tiktok_sound::popup_profile().await)
             })
             .await;
         tracing::info!(session = %epoch, package = self.plan.package, phase,
@@ -3813,7 +3842,10 @@ impl<'a, P: TapPlanner> Composer<'a, P> {
         caption: &str,
         stop: &AtomicBool,
     ) -> anyhow::Result<()> {
-        let window = read_window("captionKeyboard", Duration::from_secs(8), 3);
+        // r136 (box 21-50): 4 ran out at 8 s, 3 of them on one 5.6-7.0 s `/source` of the
+        // caption re-read right after Back, so the stage keeps one stall's room.
+        let window =
+            crate::read_latency::stage_budget("captionKeyboard", Duration::from_secs(8), 3);
         crate::tiktok_sound::with_observation_budget(stop, window, async {
             let epoch = self.session.gui_session_epoch();
             let started = Instant::now();
@@ -5791,12 +5823,12 @@ where
     composer.emit_progress(PublishProgress::OpeningCaption);
     let navigation_epoch = composer.session.gui_session_epoch();
     // Retain the previous attempt's three read windows (arrival probe,
-    // editor Next, destination), shared by all retries and their backoff.
-    let navigation_deadline = crate::tiktok_sound::phase_deadline(read_window(
-        "captionNavigation",
-        COMPOSER_WINDOW * 3,
-        8,
-    ));
+    // editor Next, destination), shared by all retries and their backoff, plus one stall's
+    // room: r136/r137/r139 (box 21-50) cut 10 navigations at 24-29 s after one or two 9-17 s
+    // calls (arrival probe `/elements`, Next lookup `/source`, Next tap).
+    let navigation_deadline = crate::tiktok_sound::phase_deadline(
+        crate::read_latency::stage_budget("captionNavigation", COMPOSER_WINDOW * 3, 8),
+    );
     let navigation = crate::tiktok_sound::with_deadline_budget(stop, navigation_deadline, async {
         loop {
             let attempt = async {
@@ -5882,8 +5914,15 @@ where
             .plan
             .publish
             .is_some_and(|tail| matches!(tail.caption, ElementQuery::ResourceIdSuffix(_)));
+    // One stall's room: r136/r137/r139 (box 21-50) lost 13 caption entries at this budget on
+    // a stalled caption read, field `/source`, focus tap or `type_text`, while a passing entry
+    // takes p50 3.9 s, p90 6.4 s.
     let caption_deadline = bounded_caption.then(|| {
-        crate::tiktok_sound::phase_deadline(read_window("captionStage", COMPOSER_WINDOW, 6))
+        crate::tiktok_sound::phase_deadline(crate::read_latency::stage_budget(
+            "captionStage",
+            COMPOSER_WINDOW,
+            6,
+        ))
     });
     let caption_work = async {
         loop {
@@ -9137,7 +9176,7 @@ mod tests {
             ("Sound A", false, 250),
             ("Sound B", false, 250),
             ("Sound A", true, 250),
-            ("Sound A", false, 8075),
+            ("Sound A", false, 28_075),
         ] {
             let mut caption_page = post_screen();
             caption_page
@@ -9153,9 +9192,9 @@ mod tests {
             *session.typed.lock() = Some("caption".into());
             // Live 081: editor image with a partial caption-layout tree lacking
             // both eej and so9; a later observation restores the editor title.
-            // The saved 8075 ms request lands in editor preparation and exceeds
-            // its 8-second budget; it must refuse. Shorter transitions retain
-            // success/stop coverage.
+            // The saved 8075 ms request now fits editor preparation's 8 s plus one
+            // stall's room (`STALL_ROOM`); the same request 20 s slower exceeds that
+            // budget and must refuse. Shorter transitions retain success/stop coverage.
             session
                 .sound_read_delays
                 .lock()
@@ -9181,10 +9220,15 @@ mod tests {
                     }
                 },
             );
-            let posted = usize::from(!cancel && title == "Sound A" && first_read_ms < 8000);
+            let editor_budget = Duration::from_secs(8) + crate::read_latency::STALL_ROOM;
+            let posted = usize::from(
+                !cancel
+                    && title == "Sound A"
+                    && Duration::from_millis(first_read_ms) < editor_budget,
+            );
             assert_eq!(intents, posted);
             assert_eq!(post_button_taps(&session), posted);
-            assert!(start.elapsed() <= Duration::from_secs(8));
+            assert!(start.elapsed() <= editor_budget);
             if cancel {
                 assert_eq!(result.unwrap(), ComposerVerdict::Stopped);
             } else if posted == 1 {
@@ -9259,8 +9303,8 @@ mod tests {
             FINAL_REPROOF_FLOOR
         );
         assert_eq!(
-            final_reproof_window(Duration::from_secs(10)),
-            Duration::from_secs(15)
+            final_reproof_window(Duration::from_secs(15)),
+            Duration::from_millis(22_500)
         );
         assert_eq!(
             final_reproof_window(Duration::from_secs(60)),
@@ -9277,18 +9321,19 @@ mod tests {
     /// longer one, or one past the ceiling, refuses with no intent.
     #[tokio::test(start_paused = true)]
     async fn final_sound_reproof_window_follows_measured_session_pace() {
-        // (keyboard ms, slow editor sound read ms, caption-page read delays ms, posts)
-        let cases: [(u64, Option<u64>, &[u64], bool); 5] = [
-            // About 9.5 s of reproof: past the former 8 s, inside the 12 s floor.
-            (0, None, &[6_000, 3_500], true),
-            // About 13 s with a short preparation: past the floor.
-            (0, None, &[6_000, 7_000], false),
-            // About 10 s of preparation scales the window to about 15 s; 12.5 s fits.
-            (5_000, Some(5_000), &[6_000, 6_500], true),
-            // About 12 s of preparation would scale to 18 s; the 16 s ceiling refuses 17 s.
-            (7_000, Some(5_000), &[6_000, 6_000, 5_000], false),
+        // (keyboard ms, slow editor sound reads ms, caption-page read delays ms, posts). The
+        // first editor read is the preparation's; a second one is the reproof's own chip read.
+        let cases: [(u64, &[u64], &[u64], bool); 5] = [
+            // About 9.5 s of reproof: past the former 8 s, inside the 20 s floor.
+            (0, &[], &[6_000, 3_500], true),
+            // About 21 s with a short preparation: past the floor.
+            (0, &[], &[7_000, 7_000, 7_000], false),
+            // About 16 s of preparation scales the window to 24 s; the same 21 s fits.
+            (8_000, &[8_000], &[7_000, 7_000, 7_000], true),
+            // A 6 s chip read on top: about 27 s, and the 24 s ceiling refuses it.
+            (8_000, &[8_000, 6_000], &[7_000, 7_000, 7_000], false),
             // The same slow session still posts inside the ceiling.
-            (7_000, Some(5_000), &[6_000, 6_000, 2_500], true),
+            (8_000, &[8_000, 500], &[7_000, 7_000, 7_000], true),
         ];
         for (keyboard_ms, editor_ms, return_ms, posts) in cases {
             let mut caption_page = post_screen();
@@ -9306,7 +9351,7 @@ mod tests {
             session
                 .sound_read_delays
                 .lock()
-                .extend(editor_ms.map(Duration::from_millis));
+                .extend(editor_ms.iter().copied().map(Duration::from_millis));
             session
                 .caption_return_reads
                 .lock()
@@ -9350,9 +9395,11 @@ mod tests {
             assert_eq!(post_button_taps(&session), usize::from(posts), "{case:?}");
             assert_eq!(*session.backs.lock(), 0, "{case:?}");
             assert_eq!(session.typed.lock().as_deref(), Some("caption"), "{case:?}");
-            // Preparation keeps its own two 8 s budgets; the reproof never exceeds 16 s.
+            // Preparation keeps its own two stage budgets (8 s plus one stall's room each); the
+            // reproof never exceeds its ceiling.
+            let stage = Duration::from_secs(8) + crate::read_latency::STALL_ROOM;
             assert!(
-                started.elapsed() <= Duration::from_secs(8 + 8 + 16),
+                started.elapsed() <= stage * 2 + FINAL_REPROOF_CEILING,
                 "{case:?}"
             );
         }

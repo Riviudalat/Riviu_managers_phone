@@ -76,6 +76,68 @@ tokio::task_local! { static SOUND_BUDGET: SoundBudget; }
 struct PopupTarget {
     package: Option<&'static str>,
     labels: Option<crate::tiktok_labels::TikTokControls>,
+    /// The session epoch `labels` were read on, for [`popup_profile`].
+    epoch: Option<String>,
+}
+
+/// A popup profile one budget read, carried into a later budget on the same session.
+pub(crate) struct PopupProfile {
+    package: &'static str,
+    epoch: String,
+    labels: crate::tiktok_labels::TikTokControls,
+}
+
+/// The popup profile the enclosing budget's checks read in full, if they read one.
+pub(crate) async fn popup_profile() -> Option<PopupProfile> {
+    let target = SOUND_BUDGET
+        .try_with(|budget| budget.popup_target.clone())
+        .ok()?;
+    let target = target.lock().await;
+    Some(PopupProfile {
+        package: target.package?,
+        epoch: target.epoch.clone()?,
+        labels: target.labels?,
+    })
+}
+
+/// Bind the enclosing budget, before its first popup check, to a profile read earlier on the
+/// same session epoch and package, so it does not read TikTok's version and UI language again.
+/// Neither changes within an epoch. Anything else is read as before.
+///
+/// r136/r137/r139 (16-17/10/2026, box 21-50, SM-G955F/N, Global 45.7.3/en): the final reproof
+/// read the profile the editor transition had read about 3 s before (`dumpsys package`, the
+/// locale shell reads and a whole `/source`): p50 1.4 s, p90 2.0 s, and 2.7-12.7 s in 6 of the
+/// 8 reproofs that ran out in `freshSoundReadback`.
+pub(crate) async fn reuse_popup_profile(
+    session: &dyn UiSession,
+    profile: &PopupProfile,
+    package: &'static str,
+) {
+    if profile.package != package || profile.epoch != session.gui_session_epoch() {
+        return;
+    }
+    let Ok((target, deadline)) =
+        SOUND_BUDGET.try_with(|budget| (budget.popup_target.clone(), budget.deadline))
+    else {
+        return;
+    };
+    let mut target = target.lock().await;
+    if target.labels.is_some() || target.package.is_some_and(|bound| bound != package) {
+        return;
+    }
+    target.package = Some(package);
+    target.labels = Some(profile.labels);
+    target.epoch = Some(profile.epoch.clone());
+    drop(target);
+    // Where the two reads used to be, so a round's stage diagnostics show the reuse.
+    for operation in ["soundPopupVersion", "soundPopupLanguage"] {
+        crate::tiktok_composer::StageDiagnosticOperation::start(
+            operation,
+            &profile.epoch,
+            Some(deadline),
+        )
+        .finish("reused");
+    }
 }
 
 /// What the sound stage observed about its own route. Timeline evidence only; it never
@@ -1035,7 +1097,9 @@ async fn popup_labels(
     let labels = crate::tiktok_labels::controls_for_runtime(package, &language, &version)
         .context("sound popup profile unavailable")?;
     // Only a complete profile is kept; a failed read is read again by the next check.
-    target.lock().await.labels = Some(labels);
+    let mut bound = target.lock().await;
+    bound.labels = Some(labels);
+    bound.epoch = (session.gui_session_epoch() == epoch).then_some(epoch);
     Ok(labels)
 }
 

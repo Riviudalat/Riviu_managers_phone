@@ -18,7 +18,8 @@
 //! the enclosing sound/compose budget (`phase_deadline`), so a wider step never outlives the
 //! stage it belongs to. The window is never extended while the step runs; only the one read
 //! still in flight when it closes may be finished by the read grace
-//! ([`crate::ui_automation::runtime::READ_GRACE`]).
+//! ([`crate::ui_automation::runtime::READ_GRACE`]). A stage budget around several such steps
+//! adds [`STALL_ROOM`] for one stalled call ([`stage_budget`]), so that grace is not cut.
 //!
 //! **What it never does.** It is for reads that wait for a screen. It never sizes a gesture or
 //! an effect, and it never turns an unread screen into a tap: an expired window still ends with
@@ -233,6 +234,26 @@ pub fn window_for(
         );
     }
     window
+}
+
+/// Room a pre-Post stage budget keeps past its read-sized window for one stalled agent call.
+///
+/// Measured r136/r137/r139 (16-17/10/2026, box 21-50, 30 SM-G955F/N, Android 9, TikTok Global
+/// 45.7.3/en): after the sound was confirmed, the agent's calls ran p50 0.2-0.9 s but p99
+/// 7.4-10.6 s and max 14.7-17.0 s (`/source`, `/elements`, `/actions`). 32 of the 48 first
+/// attempts that ended `sound_load_timeout` ran out of a stage budget on one or two such calls:
+/// caption navigation 10 (cut at 24-29 s; a passing one takes p50 4.9 s, p90 9.8 s), caption
+/// entry 13, keyboard preparation 4 and editor transition 5. A phone's q90 over 32 reads never
+/// shows a single stall, so [`window`] cannot size for it, and a budget never graces its own
+/// expiry: a budget no wider than its steps also cut the read grace the call in flight is owed.
+/// The room equals that grace.
+pub const STALL_ROOM: Duration = crate::ui_automation::runtime::READ_GRACE;
+
+/// [`window`] plus [`STALL_ROOM`], for a stage budget (`with_*_budget`) around several steps and
+/// gestures. Each step inside keeps its own window; set once when the stage starts, never
+/// extended, and still capped by any enclosing budget.
+pub fn stage_budget(step: &'static str, base: Duration, expected_reads: u32) -> Duration {
+    window(step, base, expected_reads).saturating_add(STALL_ROOM)
 }
 
 // Publish admission under measured load. Every constant of the dispatcher's compose ramp, its
