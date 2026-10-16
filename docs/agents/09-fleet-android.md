@@ -94,6 +94,11 @@ sở hữu inventory/hash; không nhân bản danh sách pin.
   GenFarmer) thì Riviu `am force-stop` hai gói đó một lần, chờ ≤5 s đến khi ActivityManager
   không còn ghi nhận, rồi chạy tiếp. Chủ lạ khác vẫn bị từ chối. Phiên chẩn đoán không dừng gì.
   Không bao giờ dừng TikTok, Riviu Helper hay gói hệ thống.
+- Trước hai gói đó, Riviu `kill` tiến trình shell `apkagent.cli` (agent của GenFarmer trên máy,
+  `KNOWN_CONFLICTING_SHELL_AGENTS`), vì nó bật lại UiAutomator của GenFarmer ngay trong giây
+  bị force-stop. r133 (16/10/2026, máy 31/38/45): agent này khởi động 08:55–08:57 lúc box mất USB
+  với PC (adb Wi-Fi cổng 5555 đang mở), và mọi lượt gặp "UiAutomation not connected!". Quyết định
+  của chủ sản phẩm 16/10/2026. Chỉ đúng tên tiến trình đó.
 - Mỗi phiên app TikTok, Riviu tự `pm grant --user 0` quyền ảnh/video: `READ_/WRITE_EXTERNAL_STORAGE`
   (Android ≤ 12) hoặc `READ_MEDIA_IMAGES`/`READ_MEDIA_VIDEO` (Android ≥ 13). Lý do: hộp thoại
   "Allow TikTok to access photos, media, and files" mở trên thư viện và làm hỏng bài đăng.

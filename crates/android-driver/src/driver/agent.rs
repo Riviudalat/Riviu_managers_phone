@@ -92,6 +92,13 @@ const KNOWN_CONFLICTING_AUTOMATION: [&str; 2] = [
     "com.genfarmer.uiautomator.test",
     "com.genfarmer.uiautomator",
 ];
+/// GenFarmer's on-phone agent, a shell-uid `app_process` named `apkagent.cli`. r133 (16/10/2026,
+/// phones 31/38/45, SM-G955F Android 9): started 08:55-08:57 while the box's USB to this host
+/// was down (adb over Wi-Fi was open on 5555), it relaunched
+/// `com.genfarmer.uiautomator.test` within the same second each time Riviu force-stopped it,
+/// so every attempt met "UiAutomation not connected!". Owner decision 16/10/2026: Riviu stops
+/// it when it blocks Riviu's runner. Only this exact process name; never anything else.
+const KNOWN_CONFLICTING_SHELL_AGENTS: [&str; 1] = ["apkagent.cli"];
 /// How long a force-stopped runner may take to leave ActivityManager's ledger.
 const FOREIGN_AUTOMATION_STOP_WAIT: Duration = Duration::from_secs(5);
 const FOREIGN_AUTOMATION_STOP_POLL: Duration = Duration::from_millis(500);
@@ -1490,6 +1497,23 @@ impl InstrumentationRuntime {
         serial: &str,
         mut active: Vec<String>,
     ) -> Vec<String> {
+        // The shell-uid agent goes first: it relaunches the runner a force-stop just ended.
+        for agent in KNOWN_CONFLICTING_SHELL_AGENTS {
+            match self
+                .adb
+                .shell(serial, &format!("for p in $(pidof {agent}); do kill $p; done"))
+                .await
+            {
+                Ok(_) => tracing::warn!(
+                    serial,
+                    agent,
+                    "đã dừng agent shell của GenFarmer trên máy {serial} (nó tự bật lại UiAutomator của GenFarmer)"
+                ),
+                Err(error) => {
+                    tracing::warn!(serial, agent, %error, "stopping a known conflicting shell agent failed")
+                }
+            }
+        }
         for package in KNOWN_CONFLICTING_AUTOMATION {
             if let Err(error) = self
                 .adb
