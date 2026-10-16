@@ -9237,9 +9237,19 @@ mod tests {
                     .is_submitted());
             } else {
                 let error = result.expect_err("late or mismatched proof must refuse");
+                // The stage budget sits a stall's room above the step window, so the step's own
+                // observation deadline may now end it first; either way it is a pre-Post retry.
+                let failure = crate::publish_recovery::describe(&error);
                 assert_eq!(
-                    crate::publish_recovery::describe(&error).code,
-                    "sound_load_timeout",
+                    failure.kind,
+                    crate::publish_recovery::FailureKind::Retryable,
+                    "{error:#}"
+                );
+                assert!(
+                    matches!(
+                        failure.code.as_str(),
+                        "sound_load_timeout" | "publish_observation_deadline"
+                    ),
                     "{error:#}"
                 );
             }
@@ -9330,8 +9340,10 @@ mod tests {
             (0, &[], &[7_000, 7_000, 7_000], false),
             // About 16 s of preparation scales the window to 24 s; the same 21 s fits.
             (8_000, &[8_000], &[7_000, 7_000, 7_000], true),
-            // A 6 s chip read on top: about 27 s, and the 24 s ceiling refuses it.
-            (8_000, &[8_000, 6_000], &[7_000, 7_000, 7_000], false),
+            // This session's measured 8 s reads widen the window up to its 64 s hard cap
+            // (`read_window`, `FINAL_REPROOF_MAX`); a 6 s chip read and 80 s of slow returns are
+            // past even that cap and refuse.
+            (8_000, &[8_000, 6_000], &[20_000, 20_000, 20_000, 20_000], false),
             // The same slow session still posts inside the ceiling.
             (8_000, &[8_000, 500], &[7_000, 7_000, 7_000], true),
         ];
@@ -9396,10 +9408,10 @@ mod tests {
             assert_eq!(*session.backs.lock(), 0, "{case:?}");
             assert_eq!(session.typed.lock().as_deref(), Some("caption"), "{case:?}");
             // Preparation keeps its own two stage budgets (8 s plus one stall's room each); the
-            // reproof never exceeds its ceiling.
+            // reproof never exceeds its hard cap.
             let stage = Duration::from_secs(8) + crate::read_latency::STALL_ROOM;
             assert!(
-                started.elapsed() <= stage * 2 + FINAL_REPROOF_CEILING,
+                started.elapsed() <= stage * 2 + FINAL_REPROOF_MAX,
                 "{case:?}"
             );
         }
