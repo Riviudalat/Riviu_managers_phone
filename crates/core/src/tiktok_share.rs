@@ -802,6 +802,25 @@ pub async fn navigate_own_profile(
                     "account navigation permission window read deadline exceeded",
                 ));
             }
+            // Samsung Home before TikTok ever showed, or again after the one reopen below: TikTok
+            // is not running in front (it crashed or never came up), which says nothing about the
+            // account. r136 (17/10/2026 00:55, box 21-50, ce11171beb405c2701, Global 45.7.3) ended
+            // its row as a terminal account_unreadable on this. Before Post, it is a typed
+            // retryable read: the next attempt restarts TikTok cleanly and proves the account from
+            // nothing, inside the bounded pre-Post retry budget. Any other foreground app stays a
+            // plain refusal, as does an expired outer run budget.
+            if active == "com.sec.android.app.launcher"
+                && (!saw_tiktok || reopened_from_launcher)
+                && scope_open()
+            {
+                return Err(crate::publish_recovery::retryable_error(
+                    "account_tiktok_not_foreground",
+                    "TikTok không còn ở màn hình trước khi đọc tài khoản (đang là màn hình chính); chưa bấm Đăng, lần thử sau mở lại TikTok",
+                )
+                .context(format!(
+                    "account navigation left TikTok (foreground: {active})"
+                )));
+            }
             // Measured machine 1: Samsung Home after the owned account-navigation began.
             // This is one navigation repair, never a reset or permission to replay an action.
             anyhow::ensure!(
