@@ -209,13 +209,19 @@ fn has_post_intent(intent: Option<&str>) -> bool {
 }
 
 fn may_verify(state: &str, intent: Option<&str>, evidence: Option<&str>) -> bool {
+    may_verify_in(state, intent, &RowEvidence::new(evidence))
+}
+
+fn may_verify_in(state: &str, intent: Option<&str>, evidence: &RowEvidence) -> bool {
     match state {
         "verifying" | "uncertain" => {
-            has_post_intent(intent) || has_post_intent(evidence) || needs_review(evidence)
+            has_post_intent(intent)
+                || post_intent_in(evidence.get())
+                || review_parked(evidence.get())
         }
         // Historical success was only a feed-return observation. Recover its missing link
         // without rewriting the original evidence or ever entering the Post path again.
-        "succeeded" => !evidence_has_post_link(evidence),
+        "succeeded" => !post_link_in(evidence.get()),
         _ => false,
     }
 }
@@ -679,7 +685,65 @@ fn submission_identity_complete(intent: Option<&str>) -> bool {
         })
 }
 
+/// A row's evidence, parsed on first use and at most once. Absent or unparsable evidence reads as
+/// `None`, as every helper that takes it treated it when it parsed the raw text itself.
+struct RowEvidence<'a> {
+    raw: Option<&'a str>,
+    parsed: std::cell::OnceCell<Option<serde_json::Value>>,
+}
+
+impl<'a> RowEvidence<'a> {
+    fn new(raw: Option<&'a str>) -> Self {
+        Self {
+            raw,
+            parsed: std::cell::OnceCell::new(),
+        }
+    }
+
+    fn get(&self) -> Option<&serde_json::Value> {
+        self.parsed
+            .get_or_init(|| self.raw.and_then(|raw| serde_json::from_str(raw).ok()))
+            .as_ref()
+    }
+}
+
+/// `needs_review` on parsed evidence.
+fn review_parked(evidence: Option<&serde_json::Value>) -> bool {
+    evidence.is_some_and(|value| value["verificationStatus"]["state"] == "needsReview")
+}
+
+/// `has_post_intent` on parsed evidence.
+fn post_intent_in(evidence: Option<&serde_json::Value>) -> bool {
+    evidence.is_some_and(|value| {
+        matches!(
+            value.get("effectIntent").and_then(|v| v.as_str()),
+            Some("post" | "post_carousel")
+        )
+    })
+}
+
+/// `publish_sheet::evidence_has_post_link` on parsed evidence.
+fn post_link_in(evidence: Option<&serde_json::Value>) -> bool {
+    evidence
+        .and_then(|evidence| {
+            evidence
+                .get("post")
+                .and_then(|post| post.get("postUrl"))
+                .or_else(|| evidence.get("postUrl"))
+        })
+        .and_then(serde_json::Value::as_str)
+        .map(str::trim)
+        .is_some_and(crate::tiktok_share::looks_like_a_post_link)
+}
+
 fn explicitly_resumed_verification(candidate: &PendingPublishVerification) -> bool {
+    explicitly_resumed_in(
+        candidate,
+        &RowEvidence::new(candidate.evidence_json.as_deref()),
+    )
+}
+
+fn explicitly_resumed_in(candidate: &PendingPublishVerification, evidence: &RowEvidence) -> bool {
     use sha2::Digest;
     let Some(intent) = candidate.effect_intent.as_deref() else {
         return false;
@@ -687,50 +751,44 @@ fn explicitly_resumed_verification(candidate: &PendingPublishVerification) -> bo
     if !has_post_intent(Some(intent)) || !submission_identity_complete(Some(intent)) {
         return false;
     }
-    candidate
-        .evidence_json
-        .as_deref()
-        .and_then(|raw| serde_json::from_str::<serde_json::Value>(raw).ok())
-        .is_some_and(|evidence| {
-            let marker = &evidence["verificationResume"];
-            let identity_matches = marker["assignmentId"] == candidate.assignment_id
-                && marker["intentSha256"]
-                    == format!("{:x}", sha2::Sha256::digest(intent.as_bytes()));
-            identity_matches
-                && ((marker["version"] == 1 && candidate.stop_marker.is_none())
-                    || (marker["version"] == 2
-                        && marker["campaignId"] == candidate.campaign_id
-                        && marker["stopGeneration"].as_str()
-                            == stop_generation(candidate.stop_marker.as_deref()).as_deref()
-                        && marker["authorizationId"]
-                            .as_str()
-                            .is_some_and(|s| Uuid::parse_str(s).is_ok())
-                        && marker["requestedAt"]
-                            .as_str()
-                            .is_some_and(|s| DateTime::parse_from_rfc3339(s).is_ok())))
-        })
+    evidence.get().is_some_and(|evidence| {
+        let marker = &evidence["verificationResume"];
+        let identity_matches = marker["assignmentId"] == candidate.assignment_id
+            && marker["intentSha256"] == format!("{:x}", sha2::Sha256::digest(intent.as_bytes()));
+        identity_matches
+            && ((marker["version"] == 1 && candidate.stop_marker.is_none())
+                || (marker["version"] == 2
+                    && marker["campaignId"] == candidate.campaign_id
+                    && marker["stopGeneration"].as_str()
+                        == stop_generation(candidate.stop_marker.as_deref()).as_deref()
+                    && marker["authorizationId"]
+                        .as_str()
+                        .is_some_and(|s| Uuid::parse_str(s).is_ok())
+                    && marker["requestedAt"]
+                        .as_str()
+                        .is_some_and(|s| DateTime::parse_from_rfc3339(s).is_ok())))
+    })
 }
 
 /// The automatic resume stamp of `exclusion`, bound to this assignment and its Post intent.
-fn handoff_resumed(candidate: &PendingPublishVerification, exclusion: &str) -> bool {
+fn handoff_resumed(
+    candidate: &PendingPublishVerification,
+    exclusion: &str,
+    evidence: &RowEvidence,
+) -> bool {
     use sha2::Digest;
     let Some(intent) = candidate.effect_intent.as_deref() else {
         return false;
     };
     has_post_intent(Some(intent))
         && submission_identity_complete(Some(intent))
-        && candidate
-            .evidence_json
-            .as_deref()
-            .and_then(|raw| serde_json::from_str::<serde_json::Value>(raw).ok())
-            .is_some_and(|evidence| {
-                let stamp = &evidence["verificationHandoffResume"];
-                stamp["version"] == 1
-                    && stamp["assignmentId"] == candidate.assignment_id
-                    && stamp["exclusionRequestId"] == exclusion
-                    && stamp["intentSha256"]
-                        == format!("{:x}", sha2::Sha256::digest(intent.as_bytes()))
-            })
+        && evidence.get().is_some_and(|evidence| {
+            let stamp = &evidence["verificationHandoffResume"];
+            stamp["version"] == 1
+                && stamp["assignmentId"] == candidate.assignment_id
+                && stamp["exclusionRequestId"] == exclusion
+                && stamp["intentSha256"] == format!("{:x}", sha2::Sha256::digest(intent.as_bytes()))
+        })
 }
 
 /// The latest exclusion of this posted row came from a handoff whose closer drained it and
@@ -891,16 +949,26 @@ fn observer_authorized(
     conn: &Connection,
     candidate: &PendingPublishVerification,
 ) -> anyhow::Result<bool> {
+    observer_authorized_in(
+        conn,
+        candidate,
+        &RowEvidence::new(candidate.evidence_json.as_deref()),
+    )
+}
+
+fn observer_authorized_in(
+    conn: &Connection,
+    candidate: &PendingPublishVerification,
+    evidence: &RowEvidence,
+) -> anyhow::Result<bool> {
     let excluded: Option<String> = conn.query_row(
         "SELECT MAX(updated_at) FROM publish_exclude_requests WHERE assignment_id=?1",
         [&candidate.assignment_id],
         |r| r.get(0),
     )?;
     if let Some(excluded) = excluded {
-        let resumed_at = candidate
-            .evidence_json
-            .as_deref()
-            .and_then(|raw| serde_json::from_str::<serde_json::Value>(raw).ok())
+        let resumed_at = evidence
+            .get()
             .and_then(|e| {
                 e["verificationResume"]["requestedAt"]
                     .as_str()
@@ -908,7 +976,7 @@ fn observer_authorized(
             })
             .and_then(|at| DateTime::parse_from_rfc3339(&at).ok());
         let excluded_at = DateTime::parse_from_rfc3339(&excluded)?;
-        if !explicitly_resumed_verification(candidate)
+        if !explicitly_resumed_in(candidate, evidence)
             || resumed_at.is_none_or(|at| at <= excluded_at)
         {
             // Otherwise only the automatic resume of exactly the latest exclusion, written
@@ -922,7 +990,7 @@ fn observer_authorized(
                 )
                 .optional()?;
             if candidate.stop_marker.is_some()
-                || !latest.is_some_and(|request| handoff_resumed(candidate, &request))
+                || !latest.is_some_and(|request| handoff_resumed(candidate, &request, evidence))
             {
                 return Ok(false);
             }
@@ -932,29 +1000,36 @@ fn observer_authorized(
     Ok(marker == candidate.stop_marker
         && (marker.is_none()
             || (stop_generation(marker.as_deref()).is_some()
-                && explicitly_resumed_verification(candidate))))
+                && explicitly_resumed_in(candidate, evidence))))
 }
 
 fn explicit_non_stop_review(evidence: Option<&str>) -> bool {
-    evidence
-        .and_then(|s| serde_json::from_str::<serde_json::Value>(s).ok())
-        .is_some_and(|v| {
-            let review = &v["verificationStatus"];
-            (review["state"] == "needsReview"
-                && review["cause"] != "operatorStopped"
-                && review["cause"] != "verificationDeadline"
-                && review["cause"] != VERIFICATION_NO_PROGRESS_CAUSE
-                && review["cause"] != PROCESSING_WAIT_CAUSE
-                && review["cause"] != METADATA_RETRY_CAUSE
-                && review["cause"] != METADATA_UNREACHABLE_CAUSE
-                && review["cause"] != INFRASTRUCTURE_RETRY_CAUSE)
-                || v.get("verificationReviewBeforeStop")
-                    .is_some_and(|prior| prior["cause"] != VERIFICATION_NO_PROGRESS_CAUSE
-                        && prior["cause"] != PROCESSING_WAIT_CAUSE
-                        && prior["cause"] != METADATA_RETRY_CAUSE
-                        && prior["cause"] != METADATA_UNREACHABLE_CAUSE
-                        && prior["cause"] != INFRASTRUCTURE_RETRY_CAUSE)
-        })
+    explicit_non_stop_review_in(
+        evidence
+            .and_then(|s| serde_json::from_str::<serde_json::Value>(s).ok())
+            .as_ref(),
+    )
+}
+
+fn explicit_non_stop_review_in(evidence: Option<&serde_json::Value>) -> bool {
+    evidence.is_some_and(|v| {
+        let review = &v["verificationStatus"];
+        (review["state"] == "needsReview"
+            && review["cause"] != "operatorStopped"
+            && review["cause"] != "verificationDeadline"
+            && review["cause"] != VERIFICATION_NO_PROGRESS_CAUSE
+            && review["cause"] != PROCESSING_WAIT_CAUSE
+            && review["cause"] != METADATA_RETRY_CAUSE
+            && review["cause"] != METADATA_UNREACHABLE_CAUSE
+            && review["cause"] != INFRASTRUCTURE_RETRY_CAUSE)
+            || v.get("verificationReviewBeforeStop").is_some_and(|prior| {
+                prior["cause"] != VERIFICATION_NO_PROGRESS_CAUSE
+                    && prior["cause"] != PROCESSING_WAIT_CAUSE
+                    && prior["cause"] != METADATA_RETRY_CAUSE
+                    && prior["cause"] != METADATA_UNREACHABLE_CAUSE
+                    && prior["cause"] != INFRASTRUCTURE_RETRY_CAUSE
+            })
+    })
 }
 
 fn first_scheduled_check(intent: Option<&str>) -> Option<DateTime<Utc>> {
@@ -1070,11 +1145,23 @@ fn already_pending(
     conn: &Connection,
     candidate: &PendingPublishVerification,
 ) -> anyhow::Result<bool> {
-    if needs_review(candidate.evidence_json.as_deref()) || !observer_authorized(conn, candidate)? {
+    already_pending_in(
+        conn,
+        candidate,
+        &RowEvidence::new(candidate.evidence_json.as_deref()),
+    )
+}
+
+fn already_pending_in(
+    conn: &Connection,
+    candidate: &PendingPublishVerification,
+    evidence: &RowEvidence,
+) -> anyhow::Result<bool> {
+    if review_parked(evidence.get()) || !observer_authorized_in(conn, candidate, evidence)? {
         return Ok(false);
     }
     let current: bool = conn.query_row("SELECT COALESCE(json_extract(request_json,'$.verificationContractVersion')=1,0) FROM publish_campaigns WHERE id=?1",[&candidate.campaign_id],|r|r.get(0))?;
-    Ok(explicitly_resumed_verification(candidate)
+    Ok(explicitly_resumed_in(candidate, evidence)
         || (current
             && candidate.stop_marker.is_none()
             && has_post_intent(candidate.effect_intent.as_deref())
@@ -1086,6 +1173,20 @@ fn resume_refusal(
     state: &str,
     active: bool,
 ) -> Option<&'static str> {
+    resume_refusal_in(
+        candidate,
+        state,
+        active,
+        &RowEvidence::new(candidate.evidence_json.as_deref()),
+    )
+}
+
+fn resume_refusal_in(
+    candidate: &PendingPublishVerification,
+    state: &str,
+    active: bool,
+    evidence: &RowEvidence,
+) -> Option<&'static str> {
     if active {
         Some("activePipeline")
     } else if !matches!(state, "verifying" | "uncertain" | "succeeded")
@@ -1094,7 +1195,7 @@ fn resume_refusal(
         Some("notSubmitted")
     } else if !submission_identity_complete(candidate.effect_intent.as_deref()) {
         Some("submissionIdentityMissing")
-    } else if explicit_non_stop_review(candidate.evidence_json.as_deref()) {
+    } else if explicit_non_stop_review_in(evidence.get()) {
         Some("explicitReview")
     } else {
         None
@@ -1238,23 +1339,24 @@ impl Database {
             .query_map([campaign_id], |r| r.get::<_, String>(0))?
             .collect::<rusqlite::Result<Vec<_>>>()?;
         let mut capabilities = Vec::new();
+        // The UI polls this every 2 s over rows whose evidence runs to ~200 KB (r134, 16/10/2026):
+        // each row's evidence is parsed once for every check below, and the campaign request once
+        // per call, which this one read snapshot keeps the same for every row.
+        let mut sheet_enabled = None;
         for id in ids {
             let Some((candidate, state, active_pipeline)) = recovery_row(&tx, &id)? else {
                 continue;
             };
-            let resumed = explicitly_resumed_verification(&candidate)
-                && !evidence_has_post_link(candidate.evidence_json.as_deref());
-            let check_reason = if evidence_has_post_link(candidate.evidence_json.as_deref()) {
+            let evidence = RowEvidence::new(candidate.evidence_json.as_deref());
+            let linked = post_link_in(evidence.get());
+            let resumed = explicitly_resumed_in(&candidate, &evidence) && !linked;
+            let check_reason = if linked {
                 Some("alreadyVerified")
             } else if (candidate.stop_marker.is_some() && !resumed)
-                || !observer_authorized(&tx, &candidate)?
+                || !observer_authorized_in(&tx, &candidate, &evidence)?
             {
                 Some("operatorStopped")
-            } else if !may_verify(
-                &state,
-                candidate.effect_intent.as_deref(),
-                candidate.evidence_json.as_deref(),
-            ) {
+            } else if !may_verify_in(&state, candidate.effect_intent.as_deref(), &evidence) {
                 Some("noCandidate")
             } else if !submission_identity_complete(candidate.effect_intent.as_deref()) {
                 Some("submissionIdentityMissing")
@@ -1268,18 +1370,32 @@ impl Database {
                 allowed: reason.is_none(),
                 reason: reason.map(str::to_owned),
             };
-            let resume_reason = if evidence_has_post_link(candidate.evidence_json.as_deref()) {
+            let resume_reason = if linked {
                 Some("alreadyVerified")
             } else if publish_close_pending(&tx, &candidate.campaign_id)? {
                 Some("stopInProgress")
-            } else if already_pending(&tx, &candidate)? {
+            } else if already_pending_in(&tx, &candidate, &evidence)? {
                 Some("alreadyPending")
             } else {
-                resume_refusal(&candidate, &state, active_pipeline)
+                resume_refusal_in(&candidate, &state, active_pipeline, &evidence)
+            };
+            let sheet_required = match sheet_enabled {
+                Some(enabled) => enabled,
+                None => *sheet_enabled.insert(
+                    tx.query_row(
+                        "SELECT request_json FROM publish_campaigns WHERE id=?1",
+                        [campaign_id],
+                        |r| r.get::<_, String>(0),
+                    )
+                    .map_err(anyhow::Error::from)
+                    .and_then(|raw| {
+                        Ok(serde_json::from_str::<crate::PublishCampaignRequest>(&raw)?
+                            .sheet_enabled)
+                    })?,
+                ),
             };
             capabilities.push(PublishRecoveryCapabilities {
-                sheet_required: tx.query_row("SELECT request_json FROM publish_campaigns WHERE id=?1", [campaign_id], |r| r.get::<_,String>(0))
-                    .map_err(anyhow::Error::from).and_then(|raw| Ok(serde_json::from_str::<crate::PublishCampaignRequest>(&raw)?.sheet_enabled))?,
+                sheet_required,
                 exclusion: tx.query_row("SELECT e.assignment_id,e.state,a.revision,e.reason
                     FROM publish_exclude_requests e JOIN publish_assignments a ON a.id=e.assignment_id
                     WHERE e.assignment_id=?1 ORDER BY e.updated_at DESC LIMIT 1", [&id], |r| Ok(PublishExcludeReceipt {
