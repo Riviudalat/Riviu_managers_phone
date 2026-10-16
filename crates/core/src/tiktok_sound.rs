@@ -113,6 +113,10 @@ struct SoundRouteEvidence {
     row_taps: AtomicU32,
     /// A visual observation ran out of time without a frame showing Hot selected.
     hot_unconfirmed: AtomicBool,
+    /// The XML route's own Back closed the sheet right after proving it (the target row shown
+    /// Selected, or the sheet itself on `sheetFallback`). From then on the stage observes the
+    /// editor only; see [`reconfirm_after_closed_picker`].
+    picker_closed: AtomicBool,
 }
 
 /// The stage's route evidence, kept past the end of its budget scope so the composer can say
@@ -165,6 +169,18 @@ const SOUND_BUDGET_EXHAUSTED: &str =
 fn note_hot_unconfirmed() {
     let _ =
         SOUND_BUDGET.try_with(|budget| budget.route.hot_unconfirmed.store(true, Ordering::Relaxed));
+}
+
+/// Recorded once the Back that closes a proved sheet was acknowledged.
+fn note_picker_closed() {
+    let _ =
+        SOUND_BUDGET.try_with(|budget| budget.route.picker_closed.store(true, Ordering::Relaxed));
+}
+
+fn picker_closed() -> bool {
+    SOUND_BUDGET
+        .try_with(|budget| budget.route.picker_closed.load(Ordering::Relaxed))
+        .unwrap_or(false)
 }
 const ROUTE_XML: u8 = 1;
 const ROUTE_VISUAL: u8 = 2;
@@ -2591,14 +2607,102 @@ pub async fn recover_sound_selection(
         set_selection_route(ROUTE_VISUAL);
         return hand_off_frozen_pool(session, plan, pool, index).await;
     }
+    let candidate = pool
+        .candidates
+        .get(index)
+        .context("sound selection index is outside the observed pool")?;
+    if picker_closed() {
+        return reconfirm_after_closed_picker(session, plan, candidate).await;
+    }
     // The measured hierarchy path checks the current selected index before any tap.
-    if confirm_sound(session, plan, &pool.candidates[index].title)
-        .await
-        .is_ok()
-    {
+    if confirm_sound(session, plan, &candidate.title).await.is_ok() {
         return Ok(());
     }
     choose_and_confirm_sound(session, plan, pool, index).await
+}
+
+/// Editor-chip readbacks one recovery opens after the stage's own Back closed the sheet, each
+/// in a fresh [`readback_window`].
+///
+/// Not measured as a count. r130-r133 (15-16/10/2026, box 21-50, SM-G955F/N, Global 45.7.3/en):
+/// all 8 stages that recovered from an editor readback that ran out confirmed on their first
+/// chip `observe`, and Back to chip proof took at most 70.1 s on the 150 clean stages, which the
+/// first readback plus three more windows of at least 20 s cover. Safe because each window only
+/// observes the editor (with the same popup check), the stage budget still caps every window,
+/// and a further window needs the composer's next inline retry, which spends the step's retry
+/// budget as before.
+const CLOSED_PICKER_READBACKS: u32 = 3;
+
+/// The sheet was proved and then closed by this stage's own acknowledged Back, and the editor
+/// readback after it failed. r130-r133: each of the 9 budget-exhausted stages that got this far
+/// then waited p50 204 s at `preRow` for sound rows on the sheet its Back had closed, with no chip
+/// read, until the stage budget ran out. The sound can only be proved on the editor now, so this
+/// re-reads the chip with every rule of [`confirm_sound`] and never observes, taps, closes or
+/// reopens the sheet. A window that runs out is followed by another while the stage budget lasts,
+/// at most [`CLOSED_PICKER_READBACKS`] per call; any other failure is returned at once.
+async fn reconfirm_after_closed_picker(
+    session: &dyn UiSession,
+    plan: SoundPickerPlan,
+    candidate: &SoundCandidate,
+) -> anyhow::Result<()> {
+    let serial = session.gui_scope().map(|scope| scope.device_id);
+    let epoch = session.gui_session_epoch();
+    let mut readback = 0;
+    loop {
+        readback += 1;
+        let started = Instant::now();
+        let result = confirm_sound(session, plan, &candidate.title).await;
+        let failure = result.as_ref().err().map(crate::publish_recovery::describe);
+        let remaining_global_ms = SOUND_BUDGET
+            .try_with(|budget| {
+                budget
+                    .deadline
+                    .saturating_duration_since(Instant::now())
+                    .as_millis()
+                    .min(u64::MAX as u128) as u64
+            })
+            .ok();
+        tracing::info!(serial=?serial, session=%epoch, package=plan.package, readback,
+            elapsedMs=started.elapsed().as_millis() as u64, confirmed=result.is_ok(),
+            failureCode=?failure.as_ref().map(|failure| failure.code.clone()),
+            remainingGlobalMs=?remaining_global_ms,
+            "bảng nhạc đã đóng sau khi chứng minh; chỉ đọc lại tên nhạc trên màn chỉnh sửa");
+        crate::publish_recovery::note_read(
+            "sound",
+            "closedPickerReadback",
+            readback,
+            if result.is_ok() { "confirmed" } else { "failed" },
+            Some(&match &result {
+                Ok(()) => format!(
+                    "Bảng nhạc đã đóng sau khi chứng minh hàng đã chọn; màn chỉnh sửa cho thấy nhạc '{}' của '{}' (lần đọc lại {readback}); không chờ lại bảng nhạc, không bấm lại",
+                    candidate.title, candidate.artist
+                ),
+                Err(error) => format!(
+                    "Bảng nhạc đã đóng sau khi chứng minh hàng đã chọn; lần đọc lại {readback} chưa xác nhận được tên nhạc trên màn chỉnh sửa: {error:#}; không chờ lại bảng nhạc, không bấm lại, chưa bấm Đăng"
+                ),
+            }),
+        );
+        let error = match result {
+            Ok(()) => return Ok(()),
+            Err(error) => error,
+        };
+        let again = readback < CLOSED_PICKER_READBACKS
+            && failure.is_some_and(|failure| {
+                failure.kind == crate::publish_recovery::FailureKind::Retryable
+            })
+            && !crate::publish_recovery::requires_fresh_preparation(&error)
+            && !error.is::<SoundStopped>()
+            && !error.is::<crate::driver::SessionEpochChanged>()
+            && session.gui_session_epoch() == epoch
+            // A root that went blind is not asked again: the next inline retry takes the
+            // measured visual route, which checks the frame for the sheet before the editor.
+            && !visual_handoff_due(session, plan)
+            && check_wait().is_ok();
+        if !again {
+            return Err(error.context("sound selection readback after closing the picker"));
+        }
+        tokio::time::sleep(POLL).await;
+    }
 }
 
 /// The XML pool is frozen and the sheet root stopped answering before the row tap. Hot has
@@ -3088,6 +3192,7 @@ pub async fn choose_and_confirm_sound(
             check_wait()?;
             phase = "closePicker";
             session.back().await.context("close inline sound picker")?;
+            note_picker_closed();
             if recovered {
                 phase = "editorReadback";
                 return selection_recovery::confirm_editor_or_chip(session, plan, candidate).await;
