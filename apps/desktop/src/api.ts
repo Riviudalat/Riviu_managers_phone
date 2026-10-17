@@ -923,6 +923,11 @@ export async function deploymentFrontendReady() {
   return invoke<boolean>("deployment_frontend_ready");
 }
 
+/** Zip logs, a DB snapshot, recent evidence and live fleet state to Desktop/Riviu-log; returns the operator message. */
+export async function supportBundleExport() {
+  return invoke<string>("support_bundle_export");
+}
+
 /** Log folder derived by Tauri from the identifier of the running build. */
 export async function appLogDirectory() {
   return invoke<string>("app_log_directory");

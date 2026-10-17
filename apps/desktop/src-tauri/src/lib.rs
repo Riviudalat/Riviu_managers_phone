@@ -44,6 +44,7 @@ mod publish_commands;
 mod publish_scheduler;
 mod sheet_bootstrap;
 mod state;
+mod support_bundle;
 mod tiktok_account_commands;
 mod ui_smoke;
 mod view_hub;
@@ -620,6 +621,7 @@ pub fn run() {
             commands::android_unavailable_reason,
             commands::android_tool_problems,
             commands::app_log_directory,
+            commands::support_bundle_export,
             commands::log_frontend_error,
             commands::update_check,
             commands::update_install,
@@ -1540,6 +1542,10 @@ mod tests {
         ("android_unavailable_reason", "read: health probe"),
         ("android_tool_problems", "read: boot snapshot"),
         ("app_log_directory", "read: path resolved from the active app identifier"),
+        (
+            "support_bundle_export",
+            "read: DB snapshot + logs into a zip, no device IO; a draining or wedged controller is when it is needed",
+        ),
         (
             "log_frontend_error",
             "the frontend's only path to the log; refusing it during drain would silence              exactly the errors that explain the drain",

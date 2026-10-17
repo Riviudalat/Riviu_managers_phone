@@ -156,6 +156,77 @@ pub fn app_log_directory(app: tauri::AppHandle) -> Result<String, CommandError> 
         .map_err(CommandError::operation)
 }
 
+/// Write one support zip (logs, DB snapshot, recent evidence, live fleet state) and show it in
+/// Explorer. Reads only; it touches no phone and is not gated on admission, because a
+/// draining or wedged controller is exactly when someone needs the bundle.
+#[tauri::command]
+pub async fn support_bundle_export(
+    app: tauri::AppHandle,
+    state: State<'_, AppState>,
+) -> Result<String, CommandError> {
+    let data_dir = state
+        .artifacts_dir
+        .parent()
+        .map(Path::to_path_buf)
+        .ok_or_else(|| CommandError::operation("không xác định được thư mục dữ liệu"))?;
+    let destination_dir = dirs::desktop_dir()
+        .map(|desktop| desktop.join("Riviu-log"))
+        .unwrap_or_else(|| data_dir.join("support-exports"));
+    let devices: Vec<_> = state
+        .registry
+        .list_with_absent()
+        .into_iter()
+        .map(|mut device| {
+            // The view hub URL can carry a per-session token.
+            device.stream_url = None;
+            device
+        })
+        .collect();
+    let live = serde_json::json!({
+        "devices": devices,
+        "driverMode": driver_mode(state.clone()),
+        "driverDegradedReason": driver_degraded_reason(state.clone()),
+        "androidUnavailableReason": state.android_unavailable_reason,
+        "androidToolProblems": state.android_tool_problems,
+    });
+    let package = app.package_info();
+    let inputs = crate::support_bundle::BundleInputs {
+        db: state.db.clone(),
+        data_dir,
+        artifacts_dir: state.artifacts_dir.clone(),
+        log_dir: app.path().app_log_dir().ok(),
+        destination_dir,
+        app: serde_json::json!({
+            "name": package.name,
+            "version": package.version.to_string(),
+            "identifier": app.config().identifier,
+            "debugBuild": cfg!(debug_assertions),
+        }),
+        live,
+    };
+    let receipt = tokio::task::spawn_blocking(move || crate::support_bundle::export(inputs))
+        .await
+        .map_err(CommandError::operation)?
+        .map_err(CommandError::operation)?;
+    #[cfg(windows)]
+    {
+        let _ = std::process::Command::new("explorer")
+            .arg(format!("/select,{}", receipt.path.display()))
+            .spawn();
+    }
+    let inventory = if receipt.inventory_complete {
+        ""
+    } else {
+        " Thư mục bằng chứng quá lớn nên thống kê chưa quét hết."
+    };
+    Ok(format!(
+        "Đã xuất gói log: {} ({:.1} MB, {} file bằng chứng 48 giờ gần nhất).{inventory} Gửi file này cho người hỗ trợ.",
+        receipt.path.display(),
+        receipt.bytes as f64 / 1_048_576.0,
+        receipt.artifact_files,
+    ))
+}
+
 /// How long one repeating frontend error stays quiet after it has reached the log once.
 ///
 /// A throw inside a React render, or a rejected promise inside an effect, can repeat on every

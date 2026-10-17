@@ -10,6 +10,7 @@ import { LegacyAgentSection } from "./settings/LegacyAgentSection";
 import { LocalApiSection } from "./settings/LocalApiSection";
 import { GuiServiceSection } from "./settings/GuiServiceSection";
 import { StreamQualitySection } from "./settings/StreamQualitySection";
+import { SupportBundleSection } from "./settings/SupportBundleSection";
 import { UpdateSection } from "./settings/UpdateSection";
 import { WifiAdbSection } from "./settings/WifiAdbSection";
 
@@ -79,8 +80,9 @@ export function SettingsPanel({ devices, deviceLabels, initialSection = "control
         </section>
         <section id="settings-maintenance" className="settings-category" tabIndex={-1} aria-labelledby="settings-maintenance-title">
           <h2 id="settings-maintenance-title">Bảo trì</h2>
-          <p className="settings-category-description">Kiểm tra Agent, cập nhật ứng dụng và công cụ khôi phục.</p>
+          <p className="settings-category-description">Kiểm tra Agent, trích xuất log, cập nhật ứng dụng và công cụ khôi phục.</p>
           <AgentSection connectedDevices={connectedDevices} connectedUdids={connectedUdids} deviceLabels={deviceLabels} iosRuntimeIssue={iosRuntimeIssue} />
+          <SupportBundleSection />
           <UpdateSection />
           <LegacyAgentSection />
         </section>

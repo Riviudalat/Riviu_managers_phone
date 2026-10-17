@@ -129,6 +129,57 @@ pub trait SecretStore: Send + Sync {
 /// Name under which the AI API key lives in the secret store.
 pub const SECRET_AI_API_KEY: &str = "nurture-ai-api-key";
 
+/// What a masked secret reads as in a support export.
+pub const SUPPORT_REDACTED: &str = "«đã che»";
+
+/// Key names that only ever hold a secret. Claim and run `token`s are internal fencing ids,
+/// not credentials, so the bare word is not on the list.
+fn is_secret_key(key: &str) -> bool {
+    let normalized = key
+        .chars()
+        .filter(char::is_ascii_alphanumeric)
+        .collect::<String>()
+        .to_ascii_lowercase();
+    [
+        "password",
+        "passwd",
+        "cookie",
+        "accesstoken",
+        "refreshtoken",
+        "idtoken",
+        "bearer",
+        "apikey",
+        "clientsecret",
+        "authorization",
+        "privatekey",
+        "sessionid",
+    ]
+    .iter()
+    .any(|marker| normalized.contains(marker))
+}
+
+/// Replace every value under a secret-named key. `true` when anything changed.
+fn mask_secret_json(value: &mut serde_json::Value) -> bool {
+    match value {
+        serde_json::Value::Object(map) => {
+            let mut changed = false;
+            for (key, child) in map.iter_mut() {
+                if is_secret_key(key) && !child.is_null() {
+                    *child = serde_json::Value::String(SUPPORT_REDACTED.into());
+                    changed = true;
+                } else {
+                    changed |= mask_secret_json(child);
+                }
+            }
+            changed
+        }
+        serde_json::Value::Array(items) => items
+            .iter_mut()
+            .fold(false, |changed, item| mask_secret_json(item) | changed),
+        _ => false,
+    }
+}
+
 pub struct Database {
     storage: executor::StorageExecutor,
     path: PathBuf,
@@ -172,6 +223,60 @@ impl Database {
         connection.pragma_update(None, "foreign_keys", "ON")?;
         connection.busy_timeout(std::time::Duration::from_secs(5))?;
         Ok(connection)
+    }
+
+    /// Copy the whole database, as one consistent read, into a new file for a support export,
+    /// and return its schema version.
+    ///
+    /// `VACUUM INTO` runs inside a single read transaction on its own connection, so under WAL
+    /// it neither blocks the writer lane nor catches a half-applied revision. Secrets belong in
+    /// the OS credential store, but a legacy settings blob written without one attached could
+    /// still hold a key, so every string under a secret-named JSON key (or a secret-named
+    /// setting) is masked in the copy and the copy is vacuumed again so the old pages are gone.
+    pub fn support_snapshot_into(&self, destination: &Path) -> anyhow::Result<Option<i64>> {
+        anyhow::ensure!(
+            !destination.exists(),
+            "snapshot destination already exists: {}",
+            destination.display()
+        );
+        self.conn()?
+            .execute("VACUUM INTO ?1", [destination.to_string_lossy().as_ref()])
+            .context("snapshot database for support export")?;
+        let copy = Connection::open(destination)?;
+        copy.pragma_update(None, "secure_delete", "ON")?;
+        let rows: Vec<(String, String)> = {
+            let mut statement = copy.prepare("SELECT key, value FROM settings")?;
+            let mapped = statement.query_map([], |row| {
+                Ok((row.get::<_, String>(0)?, row.get::<_, Option<String>>(1)?))
+            })?;
+            mapped
+                .filter_map(Result::ok)
+                .filter_map(|(key, value)| value.map(|value| (key, value)))
+                .collect()
+        };
+        for (key, value) in rows {
+            let masked = if is_secret_key(&key) {
+                Some(SUPPORT_REDACTED.to_string())
+            } else {
+                serde_json::from_str::<serde_json::Value>(&value)
+                    .ok()
+                    .and_then(|mut json| mask_secret_json(&mut json).then(|| json.to_string()))
+            };
+            if let Some(masked) = masked {
+                copy.execute(
+                    "UPDATE settings SET value = ?1 WHERE key = ?2",
+                    rusqlite::params![masked, key],
+                )?;
+            }
+        }
+        let version = copy
+            .query_row("SELECT MAX(version) FROM schema_migrations", [], |row| {
+                row.get::<_, Option<i64>>(0)
+            })
+            .ok()
+            .flatten();
+        copy.execute_batch("VACUUM")?;
+        Ok(version)
     }
 
     // One short-lived transaction at a time; never held across a device await.
@@ -3208,5 +3313,51 @@ mod secret_store_tests {
             .contains("sk-plain"));
         assert_eq!(db.get_nurture_settings().unwrap().api_key, "sk-plain");
         let _ = std::fs::remove_file(path);
+    }
+}
+
+#[cfg(test)]
+mod support_snapshot_tests {
+    use super::*;
+
+    #[test]
+    fn support_snapshot_masks_secret_settings_and_keeps_the_rest() {
+        let path = std::env::temp_dir().join(format!("riviu-support-{}.db", Uuid::new_v4()));
+        let copy = path.with_extension("copy.db");
+        let db = Database::open(&path).expect("open fixture database");
+        db.set_setting(
+            "legacy.blob",
+            r#"{"apiKey":"k-123","nested":[{"refresh_token":"r-456","token":"claim"}],"model":"m"}"#,
+        )
+        .expect("store blob");
+        db.set_setting("legacy.password", "p-789").expect("store secret-named key");
+
+        let version = db.support_snapshot_into(&copy).expect("snapshot");
+        assert!(version.is_some());
+        let snapshot = Database::open(&copy).expect("open snapshot");
+        let blob: serde_json::Value = serde_json::from_str(
+            &snapshot.get_setting("legacy.blob").expect("read").expect("present"),
+        )
+        .expect("still JSON");
+        assert_eq!(blob["apiKey"], SUPPORT_REDACTED);
+        assert_eq!(blob["nested"][0]["refresh_token"], SUPPORT_REDACTED);
+        assert_eq!(blob["nested"][0]["token"], "claim");
+        assert_eq!(blob["model"], "m");
+        assert_eq!(
+            snapshot.get_setting("legacy.password").expect("read").as_deref(),
+            Some(SUPPORT_REDACTED)
+        );
+        let raw = std::fs::read(&copy).expect("raw bytes");
+        for secret in ["k-123", "r-456", "p-789"] {
+            assert!(
+                !raw.windows(secret.len()).any(|w| w == secret.as_bytes()),
+                "{secret} survives in the file"
+            );
+        }
+        drop(snapshot);
+        drop(db);
+        for file in [&path, &copy] {
+            let _ = std::fs::remove_file(file);
+        }
     }
 }

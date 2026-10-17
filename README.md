@@ -120,6 +120,16 @@ và nhả thiết bị xảy ra trước khi chạy installer. MSI nhận cập 
 Đọc [chuyển máy, sao lưu và phục hồi](docs/operator/installation-and-data.md) trước
 khi sao chép dữ liệu hoặc quay về binary cũ.
 
+### Trích xuất log
+
+**Cài đặt → Bảo trì → Trích xuất log** ghi một file `riviu-log-<giờ>.zip` vào
+`Desktop\Riviu-log` rồi mở Explorer tại file đó. Gói gồm log của app (cả hai bản base và
+Full), bản chụp nhất quán của `riviu.db`, trạng thái nhỏ cạnh database, danh sách máy lúc
+xuất và file bằng chứng ghi trong 48 giờ gần nhất (tối đa 1,5 GB; video và file trên 32 MB
+chỉ được đếm trong `manifest.json`). App không đọc kho bảo mật Windows khi xuất: chuỗi giống
+mật khẩu, cookie và token trong log, cùng giá trị dưới khóa bí mật trong `settings`, bị thay
+bằng `«đã che»`. Xuất không chạm điện thoại và vẫn chạy được khi app đang đóng dở.
+
 ## Chạy từ source
 
 Đọc [chuẩn bị môi trường và kiểm thử](docs/development/testing.md) trước. Dùng
