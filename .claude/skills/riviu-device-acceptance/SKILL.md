@@ -116,6 +116,9 @@ Mỗi mục dưới đây từng làm mất 20–60 phút. Đọc trước khi m
   `page.evaluate: Target page … closed` chỉ là mất CDP, chiến dịch vẫn chạy: đọc DB
   (`publish_assignments`, `publish_sheet_outbox`, `publish_dispatch_jobs`) chỉ đọc
   (`?mode=ro`) để theo dõi, `py -3.12 -I -X utf8` để in tiếng Việt.
+- Observe trả `blockedFailed` ngay khi một dòng `uncertain` hoặc `needsReview`. Nếu dòng còn
+  `automaticRecheckAt`, đó chưa phải verdict cuối. Chờ dòng tự xác minh, rồi chạy lại
+  `run-publish.py … --observe-only` dưới controller có chiến dịch trong scope.
 - IPC tới controller có thể treo >2 phút khi 30 máy đang soạn: bọc `timeout 90`; trạng thái
   thì lấy từ DB, không từ IPC.
 - **Không chạy `run-publish.py` bên trong Monitor/watch có hạn.** Watch hết hạn (30 phút)

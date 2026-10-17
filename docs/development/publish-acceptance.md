@@ -64,6 +64,17 @@ Không truyền lệnh IPC tùy ý. `--wait-seconds` chỉ dành observe (0–86
 giây chỉ đọc metadata, **không đổi nhịp verifier 120 giây**. Observe cần đúng danh sách
 UDID của toàn campaign; thiếu/dư assignment là scope mismatch, không báo pass.
 
+Lúc `publish_start` chạy, `--run-at` phải còn ít nhất 3 phút (`SCHEDULED_START_MIN_LEAD_SECS` =
+180). Gần hơn thì Start bị từ chối bền `PublishScheduleTooSoon` và không tạo chiến dịch; giờ đã
+qua thì preflight từ chối ("Giờ hẹn đã qua"). Giờ hẹn được ghim từ lúc reserve, trước khi mở
+controller. Sau đó còn ba chặng:
+- mở controller: 1–2 phút;
+- preflight 30 máy: 3–4 phút;
+- submit: đọc lại tài khoản từng máy, lần lượt, trước `publish_start`. Với 30 máy mất khoảng 7
+  phút; r141 bắt đầu submit lúc 06:37:30 mà tới 06:44:47 mới gọi `publish_start`.
+
+Vì vậy với 30 máy, chọn giờ hẹn cách lúc reserve ít nhất 20 phút.
+
 Lượt hẹn giờ (`--protocol start --run-at`) dùng scope tĩnh có trước khi mở controller:
 `campaignIds` chứa requestId đã reserve, đủ `deviceIds` và cả bốn capability `true`. Khi
 máy còn bài của lượt trước chưa có link (ví dụ lượt hẹn giờ ngay sau một lượt đăng còn

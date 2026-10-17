@@ -170,6 +170,10 @@ Nuôi/Tương tác/Đăng bài, chụp UI thật) dùng
 Khi một lượt chạy trên máy dừng hoặc kẹt, chụp màn hình và hierarchy **trước** khi phiên
 đóng app. Ảnh chụp sau đó không còn nguyên nhân (popup, bảng, overlay đã biến mất).
 
+Khi phân loại một lượt thử hỏng từ `stageDiagnostics`, `/element` `interrupted` nằm cuối với
+`remainingBudgetMs` null là phần dọn của `leave()`, không phải lần đọc đã hết hạn. Lần đọc hết
+hạn là sự kiện đứng trước nó.
+
 Regression quan trọng cần baseline→modified→rollback trên bản sao. Compile failure
 không chứng minh assertion bắt được lỗi. Test zero cases không được ghi PASS feature.
 Không chạy cùng cache Cargo song song giữa các worktree; xem `scripts/dev_compile_cache.ps1`.

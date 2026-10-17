@@ -116,7 +116,11 @@ chứng minh. Bước camera/thư viện và bước popup coi một cây là ch
 hai đầu lần đọc khác nhau: không bấm gì, đọc lại trong cùng deadline. App khác cứ nằm
 trên thì kết thúc bằng deadline quan sát có kiểu. Lần đọc foreground hỏng vì adb server
 khởi động lại (mọi nguồn đều lỗi vận chuyển) tiêu một lần thử trước Post
-(`adb_foreground_read_failed`); "device … not found" vẫn là Disconnected. Caption Unknown
+(`adb_foreground_read_failed`); "device … not found" vẫn là Disconnected. Đọc tài khoản
+trước Post mà gặp Samsung Home (chưa từng thấy TikTok, hoặc đã mở lại từ launcher một lần) là
+`account_tiktok_not_foreground`: thử lại được, chưa bấm Đăng, lượt sau mở lại TikTok. r136
+(máy `ce11171beb405c2701`) cho lỗi này thành `account_unreadable` và dòng kết thúc; r140 bấm
+HOME hai lần vào đúng lúc đọc tài khoản trên `ce021712aaf9533405` và dòng tự thử lại. Caption Unknown
 được đọc lại; nội dung khác thật hoặc mơ hồ vẫn từ chối. Cả chặng nhạc có ngân sách chung
 300 giây (`phase_deadline`) cho các attempt/backoff, mỗi pha bên trong tối đa 180 giây
 (`SOUND_WINDOW`); hết tổng budget không tự requeue để cấp lại cửa sổ mới.
@@ -392,7 +396,9 @@ chứng minh được nhạc: phục hồi đọc lại chip trong cửa sổ m�
 (`closedPickerReadback`), không bao giờ chờ hàng của bảng. Ở r130–r133, lần chờ vô ích đó có
 p50 204 giây, trong khi một lần `observe` chip đã xác nhận ở 8/8 chặng phục hồi được.
 Nhãn popup (phiên bản TikTok, ngôn ngữ) đọc một lần cho mỗi phạm vi ngân sách nhạc, và stage
-diagnostics ghi các lần đọc shell (`soundPopupVersion`, `soundPopupLanguage`, `soundPopupStep`). Sau khi đã
+diagnostics ghi các lần đọc shell (`soundPopupVersion`, `soundPopupLanguage`, `soundPopupStep`). Mỗi phạm
+vi ngân sách nhạc gốc bắt đầu với hồ sơ popup rỗng, nên lần đọc đầu tốn một `/source` đầy đủ cộng
+`dumpsys package` và các lần đọc locale (gf94 đo p50 1,4 giây, tới 33 giây khi máy tải nặng). Sau khi đã
 dừng server cũ mà phiên mới không lên thì phiên cũ cũng bị niêm phong, mọi yêu cầu sau đó
 bị từ chối ngay trước khi ra mạng và vòng dọn composer (Back + đọc) dừng ở lỗi đầu tiên
 thay vì gõ vào server đã chết. Sau khi khởi động lại cho chủ đọc, bằng chứng sẵn sàng là
