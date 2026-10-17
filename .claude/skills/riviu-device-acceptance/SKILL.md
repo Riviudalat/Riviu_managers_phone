@@ -172,9 +172,13 @@ Mỗi mục dưới đây từng làm mất 20–60 phút. Đọc trước khi m
   quét xác minh), controller 2 nhân lúc rảnh, đỉnh 13 nhân, luồng chính 100%. Ghi CPU mỗi phút
   (`cores`, luồng chính, host) song song với đợt chạy. Đọc "chậm" trong `stageDiagnostics` có thể
   là controller bị nghẽn, không phải điện thoại.
-- **Build bản nghiệm thu có tối ưu** khi đo hiệu năng:
-  `$env:CARGO_PROFILE_DEV_OPT_LEVEL='2'` trước `build-native.py` (vẫn là dev nên chế độ nghiệm thu
-  còn hoạt động). Bản dev thường không tối ưu, luồng chính chạy kín một nhân với 20 máy.
+- **Build bản nghiệm thu có tối ưu** khi đo hiệu năng: `build-native.py <nhãn> --optimized`.
+  Profile `acceptance` kế thừa dev nên chế độ nghiệm thu vẫn mở, và build vào `target/acceptance`,
+  không ghi đè `target/debug`. Bản dev thường không tối ưu, luồng chính chạy kín một nhân với 20
+  máy. r142 (17/10): preflight của kit 43 s thay vì 3–4 phút.
+- Khi controller ngốn nhiều nhân, lấy mẫu stack trước khi đoán. r142: phần lớn CPU là SQLite parse
+  lại schema mỗi lần mở kết nối, từ vòng kiểm Dừng 250 ms của composer (sửa ở `5d9dc199`). Bản tối
+  ưu không chữa được lỗi đó.
 - So đợt bằng `publish_attempts` (mỗi lượt có kết quả và `stageDiagnostics`), không chỉ trạng
   thái cuối: số lượt hỏng/thành công và pha cuối của lượt hỏng (`opening_composer` tăng 7 → 47
   là dấu hiệu chậm toàn cục).

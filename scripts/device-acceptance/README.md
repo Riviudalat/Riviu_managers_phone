@@ -33,6 +33,8 @@ không ghi tham số IPC ra log; lỗi IPC chỉ lộ `{command, code, message}`
 npm run build --prefix apps/desktop
 py -3.12 -I scripts/device-acceptance/build-native.py r1
 #    -> target/device-acceptance/builds/native-r1.execution.json phải exitCode 0, sourceStable true
+#    --optimized: profile acceptance (kế thừa dev, opt-level 2, vào target/acceptance). Vẫn mở
+#    chế độ nghiệm thu, còn phần việc trên host nhanh gần bằng bản release. Dùng khi đo hiệu năng.
 
 # 2. Đóng controller cũ (graceful, chờ pid thoát; không bao giờ kill)
 node scripts/device-acceptance/close.mjs end-r0 <campaignId,...>

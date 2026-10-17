@@ -1,9 +1,15 @@
-"""Build the debug native controller for a device round and freeze its identity.
+"""Build the native acceptance controller (debug assertions on) for a device round and freeze it.
 
 Promoted from target/acceptance-baidang-20261007/build-main-native.py. Run `npm run build` in
 apps/desktop first: the binary embeds apps/desktop/dist.
 
-usage: py -3.12 -I scripts/device-acceptance/build-native.py <label> [--out-dir DIR] [--dry-run]
+usage: py -3.12 -I scripts/device-acceptance/build-native.py <label> [--optimized] [--out-dir DIR] [--dry-run]
+
+--optimized builds a profile `acceptance` that inherits dev at opt-level 2, into target/acceptance
+(target/debug stays untouched). Debug assertions stay on, so dev acceptance still opens; only the
+host-side work gets faster, closer to the release build operators run. Measured on r142
+(17/10/2026, 30 phones): the kit preflight took 43 s instead of 3-4 min. A fresh build takes about
+12 min, an incremental one 7-8 min.
 
 Writes <out-dir>/native-<label>.{execution.json,stdout.txt,stderr.txt} and, only when cargo
 exited 0 AND no source file changed during the build (`sourceStable`), a frozen copy
@@ -25,6 +31,9 @@ from _common import MAIN, OUT_ROOT, REPO, check_label, utc_now  # noqa: E402
 
 COMMAND = ['cargo', 'build', '--offline', '--locked', '-p', 'riviu-managers-phone',
            '--features', 'tauri/custom-protocol', '--bin', 'riviu-managers-phone']
+OPTIMIZED = ['--profile', 'acceptance', '--config', 'profile.acceptance.inherits="dev"',
+             '--config', 'profile.acceptance.opt-level=2',
+             '--config', 'profile.acceptance.debug="line-tables-only"']
 
 
 def source_files() -> list[Path]:
@@ -44,6 +53,7 @@ def main() -> int:
     parser.add_argument('label')
     parser.add_argument('--out-dir', type=Path, default=OUT_ROOT / 'builds')
     parser.add_argument('--dry-run', action='store_true', help='in kế hoạch, không build')
+    parser.add_argument('--optimized', action='store_true', help='profile acceptance (dev, opt-level 2)')
     args = parser.parse_args()
     label = check_label(args.label)
     out_dir: Path = args.out_dir.resolve()
@@ -53,7 +63,9 @@ def main() -> int:
         raise SystemExit('thiếu apps/desktop/dist; chạy npm run build trong apps/desktop trước')
     if record_path.exists():
         raise SystemExit(f'{record_path} đã có; chọn nhãn mới')
-    plan = {'command': COMMAND, 'cwd': str(REPO), 'targetDir': str(target_dir), 'record': str(record_path)}
+    command = COMMAND + (OPTIMIZED if args.optimized else [])
+    profile_dir = 'acceptance' if args.optimized else 'debug'
+    plan = {'command': command, 'cwd': str(REPO), 'targetDir': str(target_dir), 'record': str(record_path)}
     if args.dry_run:
         print(json.dumps({'dryRun': True, **plan}, ensure_ascii=False))
         return 0
@@ -68,13 +80,13 @@ def main() -> int:
     start = utc_now()
     stdout, stderr = out_dir / f'native-{label}.stdout.txt', out_dir / f'native-{label}.stderr.txt'
     with stdout.open('xb') as out, stderr.open('xb') as err:
-        proc = subprocess.run(COMMAND, cwd=REPO, env=env, stdout=out, stderr=err)
+        proc = subprocess.run(command, cwd=REPO, env=env, stdout=out, stderr=err)
     after = hashes(source_files())
     event = {**plan, 'startedAt': start, 'endedAt': utc_now(), 'exitCode': proc.returncode,
              'sourceStable': before == after, 'sourceHashes': after, 'stdout': str(stdout), 'stderr': str(stderr)}
     if proc.returncode == 0 and event['sourceStable']:
         exe = out_dir / f'riviu-{label}-acceptance.exe'
-        exe.write_bytes((target_dir / 'debug' / 'riviu-managers-phone.exe').read_bytes())
+        exe.write_bytes((target_dir / profile_dir / 'riviu-managers-phone.exe').read_bytes())
         event['binary'] = {'path': str(exe), 'sha256': hashlib.sha256(exe.read_bytes()).hexdigest()}
     with record_path.open('x', encoding='utf-8') as f:
         json.dump(event, f, indent=2)

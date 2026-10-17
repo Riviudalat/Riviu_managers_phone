@@ -82,7 +82,17 @@ sở hữu inventory/hash; không nhân bản danh sách pin.
   được thử lại.
 - **Kẹt cùng lúc trên nhiều máy (r129, 30 máy).** Lệnh agent đơn lẻ kẹt 22–29 s cùng lúc trên
   nhiều máy, trong cùng khoảng 17:35:25–17:35:55 UTC, trong khi `adb.serial_queue` p90
-  ≤ 5 ms. Nghi đường USB/host dùng chung, không phải từng máy.
+  ≤ 5 ms. Nguyên nhân nằm trên host, không ở từng máy.
+  - r139, r140 (bản debug) và r142 (bản tối ưu) cho cùng một kiểu: lần gọi ≥ 5 s và
+    `agent_request_timeout` 30 s dồn vào đúng những phút controller dùng 9–14 nhân.
+  - Lấy mẫu stack ở r142: 56–71% mẫu bận là SQLite parse lại schema trên kết nối mới, vì
+    `Database::conn()` mở kết nối cho mỗi thao tác.
+  - Nguồn chính là vòng kiểm Dừng của composer: cứ 250 ms ba lệnh đọc, chạy đồng bộ trên thread
+    async. Thread async bị chặn thì phản hồi agent của mọi máy cùng trễ.
+  - Một lần treo rơi đúng cú bấm Đăng (r142 #21): Đăng không tới máy, TikTok vẫn ở màn soạn bài,
+    và dòng phải chờ người.
+  - Sửa ở `5d9dc199`: một kết nối mỗi nhịp, nhịp 1 s, bỏ nhịp bù. Đừng đọc DB đồng bộ trong vòng
+    lặp chạy dày trên thread async.
 
 ### UiAutomator của công cụ khác và quyền TikTok
 
