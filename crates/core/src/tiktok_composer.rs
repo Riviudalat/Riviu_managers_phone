@@ -4148,15 +4148,38 @@ impl<'a, P: TapPlanner> Composer<'a, P> {
         let reconcile_stop = AtomicBool::new(false);
         let epoch = self.session.gui_session_epoch();
         let mut popup = crate::app_automation::dialogs::PopupBudget::default();
+        let mut popup_failures = 0u32;
         loop {
             // A submitted Post cannot be undone by Stop. Only reconciliation
             // reads are bounded here, and a late feed never proves submission.
-            if !self
+            match self
                 .popup_clear(&mut popup, deadline, &reconcile_stop, stop)
                 .await
-                .unwrap_or(false)
             {
-                return false;
+                Ok(true) => {}
+                Ok(false) => return false,
+                // r152 #37, r153 #34 and #44 (17/10/2026, SM-G955F/N, Global 45.7.3, carousel):
+                // one failed popup step about 3 s after the tap ended this 20 s window, the row
+                // parked as "not confirmed" with the reason dropped, and the post was live.
+                // A popup step that cannot finish is the same fact as a dropped read here.
+                Err(error) => {
+                    popup_failures += 1;
+                    crate::publish_recovery::note_read(
+                        "postConfirm",
+                        "popup",
+                        popup_failures,
+                        "failed",
+                        Some(&format!("{error:#}")),
+                    );
+                    tokio::time::sleep(
+                        POLL.min(deadline.saturating_duration_since(Instant::now())),
+                    )
+                    .await;
+                    if Instant::now() >= deadline {
+                        return false;
+                    }
+                    continue;
+                }
             }
             match read_before_deadline(
                 self.session.locate(self.plan.open),
@@ -6923,6 +6946,8 @@ mod tests {
         caption_unknown_reads: Mutex<usize>,
         lose_next_ack: bool,
         arrival_read_failure: bool,
+        /// Fail this many hierarchy reads before serving the scene.
+        failing_sources: Mutex<usize>,
         caption_return_delay: Duration,
         /// Delays for successive reads on the returned caption page (screen 2), unlike
         /// `caption_return_delay`, which slows every read there equally.
@@ -7127,6 +7152,13 @@ mod tests {
         ) -> anyhow::Result<crate::driver::HierarchySourceSnapshot> {
             self.pause_on_caption_return_read().await;
             tokio::time::sleep(self.hierarchy_delay).await;
+            {
+                let mut failing = self.failing_sources.lock();
+                if *failing > 0 {
+                    *failing -= 1;
+                    anyhow::bail!("fixture: hierarchy read dropped");
+                }
+            }
             {
                 let mut snapshots = self.snapshot_overrides.lock();
                 if let Some(xml) = if snapshots.len() > 1 {
@@ -10606,6 +10638,47 @@ Lưu list này để có lịch đi Đà Lạt gọn hơn, dễ chọn điểm t
                 .await
         );
         assert!(start.elapsed() <= POST_CONFIRM_WINDOW);
+    }
+
+    /// r152 #37, r153 #34 and #44: one dropped popup read right after the Post tap must not end
+    /// the confirmation window when the feed then comes back inside it.
+    #[tokio::test(start_paused = true)]
+    async fn a_dropped_popup_read_after_post_keeps_waiting_for_the_feed() {
+        let labels =
+            crate::tiktok_labels::controls_for("com.zhiliaoapp.musically", "en", "45.7.3").unwrap();
+        let measured = ComposerPlan::resolve(&labels).unwrap();
+        // The popup step reads the real 45.7.3 home feed; the feed locator reads the scene.
+        let feed = include_str!(
+            "../fixtures/tiktok-publish/musically-45.7.3-en/real-20261009-home-feed.xml"
+        );
+        let open = match measured.open {
+            ElementQuery::Description { value, .. }
+            | ElementQuery::Text { value, .. }
+            | ElementQuery::ClassName(value)
+            | ElementQuery::ResourceIdSuffix(value)
+            | ElementQuery::Semantic(value) => value,
+        };
+        for failing in [0, 1] {
+            let session = FakeSession {
+                modal_readback: true,
+                epoch_override: Some("post-confirm-test".into()),
+                foreground_override: Some("com.zhiliaoapp.musically".into()),
+                snapshot_overrides: Mutex::new([feed.to_owned()].into()),
+                failing_sources: Mutex::new(failing),
+                ..FakeSession::with(vec![scene(
+                    vec![(open, labelled("Create", 432.0, 1929.0, 216.0, 147.0))],
+                    Some(open),
+                )])
+            };
+            let composer = Composer::new(&session, measured, |r: &ElementBox| r.centre());
+            assert!(
+                composer
+                    .await_feed(POST_CONFIRM_WINDOW, &AtomicBool::new(false))
+                    .await,
+                "{failing} dropped popup read(s), then the feed inside the window"
+            );
+            assert!(session.taps.lock().is_empty());
+        }
     }
 
     #[tokio::test(start_paused = true)]

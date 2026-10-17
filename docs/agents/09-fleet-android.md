@@ -107,7 +107,11 @@ sở hữu inventory/hash; không nhân bản danh sách pin.
       `verificationNoProgress` để tự kiểm tra lại mỗi 30 phút.
     - 12 máy còn dòng "chưa rõ" hoặc "đã hẹn" từ đợt cũ bị loại khỏi r152. Cổng bài trước sẽ giữ
       các máy này, nên chúng chờ chủ máy xử lý.
-
+    - r153 (Đăng ngay, 12 máy vừa bị giữ): 11/12. Lúc xác nhận, app nhả các dòng cũ nhưng vẫn
+      kiểm tra link của chúng trong Theo dõi. Máy 34 và 44 lại bị đánh "chưa rõ" ngay sau Đăng.
+  - Ba lần "chưa rõ" ngay sau Đăng (r152 #37, r153 #34 và #44) đều từ `await_feed`: một bước
+    popup lỗi khoảng 3 s sau cú bấm đã kết thúc cửa sổ xác nhận 20 s mà không ghi lý do. Bản sửa
+    ghi lỗi vào nhật ký đọc (`postConfirm`/`popup`) và chờ tiếp đến hết cửa sổ.
 ### UiAutomator của công cụ khác và quyền TikTok
 
 - Số đo: campaign `6e0bfb7c` (12/10/2026 02:28, 20 máy, 0 bài đăng) có UiAutomator của
