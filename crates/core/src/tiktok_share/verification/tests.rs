@@ -1272,29 +1272,42 @@ async fn two_current_matching_posts_cannot_select_the_first_link() {
     assert_eq!(captured.diagnostic.candidates_visited, 2);
     assert_eq!(captured.diagnostic.copy_attempts, 1);
 
-    // Public metadata successes use this same production acceptance boundary.
+    // Public metadata and Copy proofs use this same production acceptance boundary: the
+    // same post proved again at a shifted tile (r140 #22, a Copy proof) is one post, and a
+    // second post never verifies.
+    const NEW_URL: &str = "https://www.tiktok.com/@fixture.account/photo/987654321";
     let mut candidate = None;
     remember_candidate(&mut candidate, (URL.into(), captured.diagnostic.clone())).unwrap();
     assert_eq!(
         remember_candidate(&mut candidate, (URL.into(), captured.diagnostic.clone())),
+        Ok(())
+    );
+    assert_eq!(
+        remember_candidate(
+            &mut candidate,
+            (NEW_URL.into(), captured.diagnostic.clone())
+        ),
         Err(VerificationReason::MultipleMatchingPosts)
     );
 
     // Same caption/time is insufficient: the first URL already belongs to a
     // prior assignment. The second tile still needs its own complete proof.
-    const NEW_URL: &str = "https://www.tiktok.com/@fixture.account/photo/987654321";
-    for (excluded, expected) in [
-        (vec![URL.to_owned()], Some(NEW_URL)),
-        (vec![NEW_URL.to_owned()], Some(URL)),
-        (vec![URL.to_owned(), NEW_URL.to_owned()], None),
+    // The last case is r140 #22: the second tile copies the first post's own link.
+    let unrelated = "https://www.tiktok.com/@fixture.account/photo/555555555";
+    for (second, excluded, expected) in [
+        (Some(NEW_URL), vec![URL.to_owned()], Some(NEW_URL)),
+        (Some(NEW_URL), vec![NEW_URL.to_owned()], Some(URL)),
         (
-            vec!["https://www.tiktok.com/@fixture.account/photo/555555555".to_owned()],
+            Some(NEW_URL),
+            vec![URL.to_owned(), NEW_URL.to_owned()],
             None,
         ),
+        (Some(NEW_URL), vec![unrelated.to_owned()], None),
+        (None, vec![unrelated.to_owned()], Some(URL)),
     ] {
         let session = Session {
             multiple_matches: true,
-            second_url: Some(NEW_URL),
+            second_url: second,
             ..Default::default()
         };
         let captured =

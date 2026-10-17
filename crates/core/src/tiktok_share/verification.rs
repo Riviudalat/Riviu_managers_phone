@@ -812,16 +812,15 @@ fn remember_candidate(
     candidate: &mut Option<(String, VerificationDiagnostic)>,
     proof: (String, VerificationDiagnostic),
 ) -> Result<(), VerificationReason> {
-    if let Some((canonical, prior_proof)) = candidate.as_ref() {
-        // A shifted grid can expose the same post twice. Coalesce only exact
-        // canonical identities after both observations passed public metadata proof.
-        if canonical == &proof.0
-            && matches!(
-                prior_proof.stage,
-                "videoPublicProof" | "expandedPhotoPublicProof"
-            )
-            && matches!(proof.1.stage, "videoPublicProof" | "expandedPhotoPublicProof")
-        {
+    if let Some((canonical, _)) = candidate.as_ref() {
+        // A shifted grid can expose the same post twice: the visited set is keyed by tile
+        // bounds. r140 (17/10/2026, ce031713b0c610ab0c, Global45.7.3/en) proved its post at
+        // [361,1084], and after the Profile header shrank 161 px it proved the same tile again
+        // at [361,923]: both proofs gave post 7697403737144413456, and the row was parked as
+        // two matching posts. Each proof's canonical identity is that post's own, either from
+        // public metadata or from a Copy whose fresh sentinel the clipboard replaced, so only
+        // exact canonical identities coalesce. Two different posts still never verify.
+        if canonical == &proof.0 {
             return Ok(());
         }
         return Err(VerificationReason::MultipleMatchingPosts);
