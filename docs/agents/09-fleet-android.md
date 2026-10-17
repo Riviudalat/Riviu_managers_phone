@@ -93,6 +93,10 @@ sở hữu inventory/hash; không nhân bản danh sách pin.
     và dòng phải chờ người.
   - Sửa ở `5d9dc199`: một kết nối mỗi nhịp, nhịp 1 s, bỏ nhịp bù. Đừng đọc DB đồng bộ trong vòng
     lặp chạy dày trên thread async.
+  - Kết quả trên cùng box 21–50, cùng bản tối ưu:
+    - r144 (hẹn giờ, có bản sửa): 29/29 đăng ngay lần đầu, 0 `agent_request_timeout`, không
+      `sound_load_timeout`, soạn 12 phút, controller ≤ 3,5 nhân.
+    - r142 (trước bản sửa): 18/30 lần đầu, 10 lần treo, 41 phút.
 
 ### UiAutomator của công cụ khác và quyền TikTok
 
