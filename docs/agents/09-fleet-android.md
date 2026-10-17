@@ -96,6 +96,8 @@ sở hữu inventory/hash; không nhân bản danh sách pin.
   - Kết quả trên cùng box 21–50, cùng bản tối ưu:
     - r144 (hẹn giờ, có bản sửa): 29/29 đăng ngay lần đầu, 0 `agent_request_timeout`, không
       `sound_load_timeout`, soạn 12 phút, controller ≤ 3,5 nhân.
+    - r145 (Đăng ngay, có bản sửa): 29/29 đăng, kit `passed`, 0 `agent_request_timeout`, soạn
+      15 phút, controller ≤ 4,2 nhân.
     - r142 (trước bản sửa): 18/30 lần đầu, 10 lần treo, 41 phút.
 
 ### UiAutomator của công cụ khác và quyền TikTok
