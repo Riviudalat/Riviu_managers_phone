@@ -99,6 +99,14 @@ sở hữu inventory/hash; không nhân bản danh sách pin.
     - r145 (Đăng ngay, có bản sửa): 29/29 đăng, kit `passed`, 0 `agent_request_timeout`, soạn
       15 phút, controller ≤ 4,2 nhân.
     - r142 (trước bản sửa): 18/30 lần đầu, 10 lần treo, 41 phút.
+  - Bản phát hành 0.2.92 (đã cài, thao tác qua UI thật, không dùng kit):
+    - r151 (Đăng ngay, máy 23/24/26): 3/3 đã đăng, xác minh và ghi Sheet trong 11 phút.
+    - r152 (hẹn giờ 00:30, 18 máy, mỗi máy một bài chưa đăng): 17/18 đã xác minh và ghi Sheet trong
+      25 phút. Máy 37 bị đánh "chưa rõ" ngay sau Đăng, rồi tự vào bước xác minh. TikTok mở đúng bài
+      nhưng không trả link qua Sao chép liên kết (`clipboardUnchanged`), nên dòng dừng ở
+      `verificationNoProgress` để tự kiểm tra lại mỗi 30 phút.
+    - 12 máy còn dòng "chưa rõ" hoặc "đã hẹn" từ đợt cũ bị loại khỏi r152. Cổng bài trước sẽ giữ
+      các máy này, nên chúng chờ chủ máy xử lý.
 
 ### UiAutomator của công cụ khác và quyền TikTok
 
