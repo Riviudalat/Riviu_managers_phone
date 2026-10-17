@@ -4728,16 +4728,22 @@ pub(super) async fn post_through_the_composer(
             }
         };
         tokio::pin!(work);
-        let mut cancellation_poll = tokio::time::interval(Duration::from_millis(250));
+        // One connection per tick, once a second, and no catch-up burst after a stall. The old
+        // poll ran three reads every 250 ms on this async worker, each opening a connection
+        // and parsing the whole schema: with 10 phones composing that was most of the
+        // controller's CPU (r142, 17/10/2026), and the starved workers delayed agent replies
+        // on every phone. A Stop still lands before Post: the Post claim refuses it in its
+        // own transaction.
+        let mut cancellation_poll = tokio::time::interval(Duration::from_secs(1));
+        cancellation_poll.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
         loop {
             tokio::select! {
                 result = &mut work => break result,
                 _ = cancellation_poll.tick() => {
                     let stopped = db.publish_shutdown_started()
-                    || db.publish_assignment_excluded(assignment_id).unwrap_or(true)
-                    || db.publish_operation_stopped(campaign_id).unwrap_or(true)
-                    || db.publish_campaign_state(campaign_id).ok().flatten()
-                        .is_none_or(|state|state == riviu_core::PublishCampaignState::Cancelled);
+                        || db
+                            .publish_compose_stop_requested(assignment_id, campaign_id)
+                            .unwrap_or(true);
                     if stopped { stop.store(true, std::sync::atomic::Ordering::Relaxed); }
                 }
             }

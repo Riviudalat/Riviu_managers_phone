@@ -1399,6 +1399,47 @@ impl Database {
         Ok(state.as_deref().map(publish_state_from_str))
     }
 
+    /// The composer's Stop check while a phone composes, in one connection.
+    ///
+    /// True when this assignment was excluded, the campaign's Stop marker is written, or the
+    /// campaign is cancelled or gone: the same three answers as `publish_assignment_excluded`,
+    /// `publish_operation_stopped` and `publish_campaign_state`. Each of those opens its own
+    /// connection, and the first statement on a new connection parses the whole schema. Called
+    /// three times per 250 ms tick on every composing phone, that parse took 56-71% of the busy
+    /// controller samples in r142 (17/10/2026, 10 phones composing, optimized build).
+    pub fn publish_compose_stop_requested(
+        &self,
+        assignment_id: &str,
+        campaign_id: &str,
+    ) -> anyhow::Result<bool> {
+        let conn = self.conn()?;
+        let excluded: bool = conn.query_row(
+            "SELECT EXISTS(SELECT 1 FROM publish_exclude_requests WHERE assignment_id=?1)",
+            params![assignment_id],
+            |row| row.get(0),
+        )?;
+        let stopped: bool = excluded
+            || conn.query_row(
+                "SELECT EXISTS(SELECT 1 FROM settings WHERE key=?1)",
+                params![format!("operation.stop.publish:{campaign_id}")],
+                |row| row.get(0),
+            )?;
+        if stopped {
+            return Ok(true);
+        }
+        let state: Option<String> = conn
+            .query_row(
+                "SELECT state FROM publish_campaigns WHERE id=?1",
+                params![campaign_id],
+                |row| row.get(0),
+            )
+            .optional()?;
+        Ok(state
+            .as_deref()
+            .map(publish_state_from_str)
+            .is_none_or(|state| state == crate::publish::PublishCampaignState::Cancelled))
+    }
+
     /// The immutable execution contract captured when the campaign was created.
     ///
     /// The scheduler reads this instead of reconstructing approval or sound selection from
